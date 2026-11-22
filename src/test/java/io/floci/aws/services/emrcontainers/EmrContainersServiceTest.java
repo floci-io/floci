@@ -52,6 +52,8 @@ class EmrContainersServiceTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private MutableClock clock;
     private EksService eks;
+    // The retries' backoffs a docker service waits for, which the test ends when it chooses.
+    private final QueuedDelays delays = new QueuedDelays();
 
     @BeforeEach
     void setUp() {
@@ -694,7 +696,7 @@ class EmrContainersServiceTest {
         when(iam.resolveCallerArn(eq(null))).thenReturn(Optional.empty());
         return new EmrContainersService(stores.get(0), stores.get(1), stores.get(2), stores.get(3), stores.get(4),
                 mapper, new RegionResolver(REGION, ACCOUNT_ID), eks, iam, null, clock, 0, runner, executor,
-                "registry.internal/emr-on-eks/spark/%s", "floci-net");
+                "registry.internal/emr-on-eks/spark/%s", "floci-net", delays);
     }
 
     private EmrContainersService dockerService(FakeRunner runner, QueuedExecutor executor) {
@@ -988,6 +990,194 @@ class EmrContainersServiceTest {
                 "the same Spark application id names both");
     }
 
+    private String startRetriedJobRun(EmrContainersService service, String clusterId, String retryPolicy) {
+        return service.startJobRun(clusterId, json("""
+                {"clientToken": "%s", "executionRoleArn": "%s", "releaseLabel": "%s",
+                 "jobDriver": {"sparkSubmitJobDriver": {"entryPoint": "s3://bucket/pi.py"}},
+                 "retryPolicyConfiguration": %s,
+                 "configurationOverrides": {"monitoringConfiguration": {
+                   "s3MonitoringConfiguration": {"logUri": "s3://logs"}}}}
+                """.formatted(UUID.randomUUID(), ROLE, RELEASE, retryPolicy))).get("id").textValue();
+    }
+
+    @Test
+    void dockerRunWhoseDriverFailsIsRetriedAfterAnExponentialBackoffUntilItsAttemptsRunOut() {
+        FakeRunner runner = new FakeRunner();
+        runner.outcome = SparkJobRunner.Outcome.exitedWith(1);
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService service = dockerService(runner, executor);
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String id = startRetriedJobRun(service, clusterId, "{\"maxAttempts\": 3}");
+
+        executor.runAll();
+
+        JsonNode waiting = jobRun(service, clusterId, id);
+        assertEquals("SUBMITTED", state(waiting), "between its attempts");
+        assertEquals(1, waiting.at("/retryPolicyExecution/currentAttemptCount").intValue());
+        assertEquals(List.of(Duration.ofSeconds(10)), delays.delays);
+
+        delays.runAll();
+        executor.runAll();
+        assertEquals(2, jobRun(service, clusterId, id).at("/retryPolicyExecution/currentAttemptCount").intValue());
+        assertEquals(List.of(Duration.ofSeconds(10), Duration.ofSeconds(20)), delays.delays);
+        delays.runAll();
+        executor.runAll();
+
+        JsonNode run = jobRun(service, clusterId, id);
+        assertEquals("FAILED", state(run));
+        assertEquals("USER_ERROR", run.get("failureReason").textValue());
+        assertEquals(3, run.at("/retryPolicyExecution/currentAttemptCount").intValue());
+        assertEquals(3, run.at("/retryPolicyConfiguration/maxAttempts").intValue());
+        assertEquals(3, runner.jobs.size(), "a driver for each attempt");
+        assertEquals(2, delays.delays.size(), "no backoff after the last");
+        List<String> folders = runner.jobs.stream().map(SparkJobRunner.Job::logFolder).toList();
+        for (String folder : folders) {
+            assertTrue(folder.matches("s3://logs/" + clusterId + "/jobs/" + id
+                    + "/containers/spark-[0-9a-f]{32}/spark-" + id + "-driver-[0-9a-z]{5}/"), folder);
+        }
+        assertEquals(3, Set.copyOf(folders).size(), "each attempt's driver pod has a suffix of its own");
+        assertEquals(1, folders.stream().map(folder -> folder.split("/")[7]).distinct().count(),
+                "a retry restarts the driver of the same Spark application");
+    }
+
+    @Test
+    void dockerRunStoredWithoutItsApplicationIdKeepsTheOneItsFirstAttemptGets() {
+        List<AccountAwareStorageBackend<ObjectNode>> stores = stores();
+        FakeRunner runner = new FakeRunner();
+        runner.outcome = SparkJobRunner.Outcome.exitedWith(1);
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService service = dockerService(runner, executor, stores);
+        String clusterId = limitedVirtualCluster(service, "{\"maxConcurrentJobRuns\": 1}");
+        startJobRun(service, clusterId);
+        String id = startRetriedJobRun(service, clusterId, "{\"maxAttempts\": 2}");
+        // Queued as a run stored before runs kept their application's id was.
+        String arn = jobRun(service, clusterId, id).get("arn").textValue();
+        ObjectNode stored = stores.get(1).get(arn).orElseThrow().deepCopy();
+        stored.remove("_sparkApplicationId");
+        stores.get(1).put(arn, stored);
+
+        executor.runAll();
+        delays.runAll();
+        executor.runAll();
+
+        List<SparkJobRunner.Job> attempts = runner.jobs.stream().filter(job -> job.runId().equals(id)).toList();
+        assertEquals(2, attempts.size());
+        assertEquals(attempts.get(0).logFolder().split("/")[7], attempts.get(1).logFolder().split("/")[7]);
+        assertEquals("FAILED", state(jobRun(service, clusterId, id)));
+    }
+
+    @Test
+    void dockerRunAnEarlierProcessLeftBetweenItsAttemptsWaitsOutItsBackoffAndRetries() {
+        List<AccountAwareStorageBackend<ObjectNode>> stores = stores();
+        FakeRunner failing = new FakeRunner();
+        failing.outcome = SparkJobRunner.Outcome.exitedWith(1);
+        QueuedExecutor earlierExecutor = new QueuedExecutor();
+        EmrContainersService earlier = dockerService(failing, earlierExecutor, stores);
+        String clusterId = virtualCluster(earlier, EKS_CLUSTER);
+        String id = startRetriedJobRun(earlier, clusterId, "{\"maxAttempts\": 2}");
+        earlierExecutor.runAll();
+        assertEquals(List.of(Duration.ofSeconds(10)), delays.delays);
+        // The earlier process stops 4 seconds into the backoff, its timer with it.
+        delays.forget();
+        clock.advance(Duration.ofSeconds(4));
+
+        FakeRunner runner = new FakeRunner();
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService restarted = dockerService(runner, executor, stores);
+        JsonNode waiting = jobRun(restarted, clusterId, id);
+
+        assertEquals("SUBMITTED", state(waiting), "not a run left running");
+        assertEquals(1, waiting.at("/retryPolicyExecution/currentAttemptCount").intValue());
+        assertEquals(List.of(Duration.ofSeconds(6)), delays.delays, "the rest of its backoff");
+        delays.runAll();
+        executor.runAll();
+        JsonNode run = jobRun(restarted, clusterId, id);
+        assertEquals("COMPLETED", state(run));
+        assertEquals(2, run.at("/retryPolicyExecution/currentAttemptCount").intValue());
+        assertEquals(1, runner.jobs.size());
+        assertTrue(runner.leftoversRemoved.isEmpty());
+        assertEquals(failing.jobs.get(0).logFolder().split("/")[7], runner.jobs.get(0).logFolder().split("/")[7],
+                "the same Spark application");
+    }
+
+    @Test
+    void dockerRunWhoseRetriedDriverSucceedsCompletes() {
+        FakeRunner runner = new FakeRunner();
+        runner.outcome = SparkJobRunner.Outcome.exitedWith(1);
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService service = dockerService(runner, executor);
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String id = startRetriedJobRun(service, clusterId, "{\"maxAttempts\": 5}");
+        executor.runAll();
+
+        runner.outcome = SparkJobRunner.Outcome.exitedWith(0);
+        delays.runAll();
+        executor.runAll();
+
+        JsonNode run = jobRun(service, clusterId, id);
+        assertEquals("COMPLETED", state(run));
+        assertEquals(2, run.at("/retryPolicyExecution/currentAttemptCount").intValue());
+    }
+
+    @Test
+    void dockerRunCancelledBetweenItsAttemptsIsCancelledAtOnce() {
+        FakeRunner runner = new FakeRunner();
+        runner.outcome = SparkJobRunner.Outcome.exitedWith(1);
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService service = dockerService(runner, executor);
+        String clusterId = limitedVirtualCluster(service, "{\"maxConcurrentJobRuns\": 1}");
+        String id = startRetriedJobRun(service, clusterId, "{\"maxAttempts\": 2}");
+        String queued = startJobRun(service, clusterId).get("id").textValue();
+        executor.runAll();
+        assertEquals("PENDING", state(jobRun(service, clusterId, queued)), "the retried run keeps its slot");
+
+        service.cancelJobRun(clusterId, id);
+
+        assertEquals("CANCELLED", state(jobRun(service, clusterId, id)));
+        assertEquals("SUBMITTED", state(jobRun(service, clusterId, queued)), "the freed slot goes to the queue");
+        delays.runAll();
+        executor.runAll();
+        assertEquals("CANCELLED", state(jobRun(service, clusterId, id)), "its backoff's end starts nothing");
+        assertEquals(1, runner.jobs.stream().filter(job -> job.runId().equals(id)).count());
+    }
+
+    @Test
+    void retryPolicyOfOneAttemptIsNotShownAndAnInvalidOneIsRefused() {
+        EmrContainersService service = service(0);
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+
+        JsonNode disabled = jobRun(service, clusterId, startRetriedJobRun(service, clusterId, "{\"maxAttempts\": 1}"));
+        JsonNode enabled = jobRun(service, clusterId, startRetriedJobRun(service, clusterId, "{\"maxAttempts\": 2}"));
+
+        assertFalse(disabled.has("retryPolicyConfiguration"), "not visible when retry policy is disabled");
+        assertFalse(disabled.has("retryPolicyExecution"));
+        assertEquals(2, enabled.at("/retryPolicyConfiguration/maxAttempts").intValue());
+        assertEquals(1, enabled.at("/retryPolicyExecution/currentAttemptCount").intValue());
+        for (String invalid : List.of("0", "-1")) {
+            AwsException refused = assertThrows(AwsException.class,
+                    () -> startRetriedJobRun(service, clusterId, "{\"maxAttempts\": " + invalid + "}"), invalid);
+            assertEquals("ValidationException", refused.getErrorCode());
+            assertEquals("Retry policy configuration's parameter value of maxAttempts is invalid",
+                    refused.getMessage());
+        }
+        // Not a 32-bit integer at all, which the model's JavaInteger refuses first.
+        for (String invalid : List.of("2147483648", "\"2\"")) {
+            AwsException refused = assertThrows(AwsException.class,
+                    () -> startRetriedJobRun(service, clusterId, "{\"maxAttempts\": " + invalid + "}"), invalid);
+            assertEquals("ValidationException", refused.getErrorCode());
+        }
+    }
+
+    @Test
+    void retryBackoffDoublesFromTenSecondsToSixMinutes() {
+        assertEquals(Duration.ofSeconds(10), EmrContainersService.retryDelay(1));
+        assertEquals(Duration.ofSeconds(20), EmrContainersService.retryDelay(2));
+        assertEquals(Duration.ofSeconds(40), EmrContainersService.retryDelay(3));
+        assertEquals(Duration.ofSeconds(320), EmrContainersService.retryDelay(6));
+        assertEquals(Duration.ofMinutes(6), EmrContainersService.retryDelay(7));
+        assertEquals(Duration.ofMinutes(6), EmrContainersService.retryDelay(Integer.MAX_VALUE));
+    }
+
     @Test
     void monitoringDestinationWithoutItsLogGroupOrUriIsRefusedFromATemplateAsFromARequest() {
         EmrContainersService service = service(0);
@@ -1026,6 +1216,30 @@ class EmrContainersServiceTest {
         String id = startJobRun(service, clusterId).get("id").textValue();
 
         assertEquals("COMPLETED", state(jobRun(service, clusterId, id)));
+    }
+
+    /** Waits each backoff until the test ends them all, on the test's thread. */
+    private static final class QueuedDelays implements EmrContainersService.Delays {
+        final List<Duration> delays = new ArrayList<>();
+        private final Deque<Runnable> tasks = new ArrayDeque<>();
+
+        @Override
+        public void after(Duration delay, Runnable task) {
+            delays.add(delay);
+            tasks.add(task);
+        }
+
+        void runAll() {
+            while (!tasks.isEmpty()) {
+                tasks.removeFirst().run();
+            }
+        }
+
+        // The backoffs waited for so far go, as a process's timer goes with it.
+        void forget() {
+            delays.clear();
+            tasks.clear();
+        }
     }
 
     /** Runs what the service hands its run threads only when the test says so, on the test's thread. */

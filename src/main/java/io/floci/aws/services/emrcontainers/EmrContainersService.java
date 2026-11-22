@@ -58,7 +58,9 @@ import java.util.UUID;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -92,6 +94,18 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
 
     private static final String CLIENT_TOKEN = "_clientToken";
     private static final String DUE_AT = "_dueAt";
+    // When a run whose driver failed starts its next attempt, while it waits for its retry's backoff.
+    private static final String RETRY_AT = "_retryAt";
+    // The id of the Spark application a run submits, the same for each of its attempts: a retry restarts the driver
+    // pod, which the guide tells apart by its suffix alone.
+    private static final String SPARK_APPLICATION_ID = "_sparkApplicationId";
+    // "an exponential retry interval of (10 seconds, 20 seconds, 40 seconds ...) which is capped at 6 minutes"
+    // (EMR on EKS Development Guide, "Using job retry policies").
+    private static final Duration FIRST_RETRY_DELAY = Duration.ofSeconds(10);
+    private static final Duration MAX_RETRY_DELAY = Duration.ofMinutes(6);
+    private static final String INVALID_MAX_ATTEMPTS =
+            "Retry policy configuration's parameter value of maxAttempts is invalid";
+    private static final int DRIVER_POD_SUFFIX_LENGTH = 5;
     // Where a job run held in its virtual cluster's queue stands in it, the first to start lowest.
     private static final String QUEUE_POSITION = "_queuePosition";
     private static final String ACCESS_ENTRY_INTEGRATED = "_eksAccessEntryIntegrated";
@@ -157,6 +171,8 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
     // image-template and docker-network, each null when not set.
     private final String imageTemplate;
     private final String dockerNetwork;
+    // Where a retry waits for its backoff in the docker runner mode; null in the immediate one.
+    private final Delays delays;
     // The ARNs of the runs whose containers a thread of this process runs; a launched run not here was left by a
     // restart.
     private final Set<String> executing = new HashSet<>();
@@ -177,7 +193,8 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
                 RUNNER_DOCKER.equalsIgnoreCase(config.services().emrcontainers().runnerMode()) ? sparkRunner : null,
                 Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-containers-run-", 0).factory()),
                 config.services().emrcontainers().imageTemplate().orElse(null),
-                config.services().emrcontainers().dockerNetwork().orElse(null));
+                config.services().emrcontainers().dockerNetwork().orElse(null),
+                RUNNER_DOCKER.equalsIgnoreCase(config.services().emrcontainers().runnerMode()) ? Delays.timer() : null);
         // Before any run of this process starts: a driver an earlier one left belongs to a run read as FAILED.
         if (this.sparkRunner != null && config.services().emrcontainers().reconcileContainersOnStartup()) {
             sparkRunner.removeLeftoverDrivers(SERVICE);
@@ -193,7 +210,8 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
                          IamService iamService, RequestContext requestContext, Clock clock,
                          int jobRunDurationSeconds) {
         this(virtualClusters, jobRuns, endpoints, jobTemplates, securityConfigurations, mapper, regionResolver,
-                eksService, iamService, requestContext, clock, jobRunDurationSeconds, null, Runnable::run, null, null);
+                eksService, iamService, requestContext, clock, jobRunDurationSeconds, null, Runnable::run, null, null,
+                null);
     }
 
     EmrContainersService(AccountAwareStorageBackend<ObjectNode> virtualClusters,
@@ -204,7 +222,7 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
                          ObjectMapper mapper, RegionResolver regionResolver, EksService eksService,
                          IamService iamService, RequestContext requestContext, Clock clock,
                          int jobRunDurationSeconds, SparkJobRunner sparkRunner, Executor runExecutor,
-                         String imageTemplate, String dockerNetwork) {
+                         String imageTemplate, String dockerNetwork, Delays delays) {
         this.virtualClusters = virtualClusters;
         this.jobRuns = jobRuns;
         this.endpoints = endpoints;
@@ -221,12 +239,42 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         this.runExecutor = runExecutor;
         this.imageTemplate = imageTemplate;
         this.dockerNetwork = dockerNetwork;
+        this.delays = delays;
     }
 
     @PreDestroy
     void shutdown() {
         if (runExecutor instanceof ExecutorService executor) {
             executor.shutdownNow();
+        }
+        if (delays != null) {
+            delays.close();
+        }
+    }
+
+    /** Runs a task once its delay has passed, as a retry waits for its backoff; a test runs them when it chooses. */
+    interface Delays {
+
+        void after(Duration delay, Runnable task);
+
+        default void close() {
+        }
+
+        /** Delays on a daemon thread of their own. */
+        static Delays timer() {
+            ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(
+                    Thread.ofPlatform().daemon().name("emr-containers-retries").factory());
+            return new Delays() {
+                @Override
+                public void after(Duration delay, Runnable task) {
+                    executor.schedule(task, delay.toMillis(), TimeUnit.MILLISECONDS);
+                }
+
+                @Override
+                public void close() {
+                    executor.shutdownNow();
+                }
+            };
         }
     }
 
@@ -400,15 +448,27 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         }
         run.put("createdAt", timestamp(now));
         run.put("createdBy", createdBy());
+        run.put(SPARK_APPLICATION_ID, sparkApplicationId());
         ObjectNode tags = tags(template.get("jobTags"));
         tags.setAll(tags(request.get("tags")));
         if (tags.size() > MAX_TAGS) {
             throw tooManyTags();
         }
         run.set("tags", tags);
-        if (request.hasNonNull("retryPolicyConfiguration")) {
-            run.set("retryPolicyConfiguration", request.get("retryPolicyConfiguration").deepCopy());
-            run.set("retryPolicyExecution", object("currentAttemptCount", 1));
+        // "The valid maxAttempts range is from 1 to 2,147,483,647", and "If maxAttempts of the
+        // retryPolicyConfiguration is set to 1, it means that no retries will be done": the policy and its execution
+        // "will not be visible when retry policy is disabled in the job" (EMR on EKS Development Guide, "Using job
+        // retry policies").
+        JsonNode retryPolicy = request.get("retryPolicyConfiguration");
+        if (retryPolicy != null && !retryPolicy.isNull()) {
+            JsonNode maxAttempts = retryPolicy.path("maxAttempts");
+            if (!maxAttempts.isIntegralNumber() || !maxAttempts.canConvertToInt() || maxAttempts.intValue() < 1) {
+                throw invalid(INVALID_MAX_ATTEMPTS);
+            }
+            if (maxAttempts.intValue() > 1) {
+                run.set("retryPolicyConfiguration", retryPolicy.deepCopy());
+                run.set("retryPolicyExecution", object("currentAttemptCount", 1));
+            }
         }
 
         // Concurrent job limits are "enforced at StartJobRun, before any pods are created": a run beyond the
@@ -470,7 +530,7 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         ObjectNode cancelled = run.deepCopy();
         if (CANCEL_PENDING.equals(state)) {
             return object("id", id).put("virtualClusterId", virtualClusterId);
-        } else if (launched(run)) {
+        } else if (launched(run) && !run.has(RETRY_AT)) {
             // "CANCEL_PENDING - A job run has been requested for cancellation. Amazon EMR on EKS is trying to cancel
             // the job on the virtual cluster", until its driver is stopped.
             cancelled.put("state", CANCEL_PENDING);
@@ -478,8 +538,10 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
             runExecutor.execute(() -> sparkRunner.stop(id));
             return object("id", id).put("virtualClusterId", virtualClusterId);
         }
+        // A queued run, or one between its attempts, whose next attempt the backoff's end then finds cancelled.
         finish(cancelled, CANCELLED, now());
         jobRuns.put(cancelled.get("arn").textValue(), cancelled);
+        executing.remove(cancelled.get("arn").textValue());
         // A running slot it frees goes to the queue's first run now.
         settledRuns(virtualClusterId);
         return object("id", id).put("virtualClusterId", virtualClusterId);
@@ -993,7 +1055,8 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
      * moment to the run first in the queue, "As running slots free up, queued job runs start automatically"; a run
      * still queued 30 minutes after it was submitted fails. A slot free now, once the limit is raised or a run is
      * cancelled, goes to the queue now. A run whose container runs holds its slot until its driver ends, and one
-     * whose container no thread of this process runs, as after a restart, has failed.
+     * whose container no thread of this process runs, as after a restart, has failed; one an earlier process left
+     * between its attempts waits out the rest of its backoff.
      */
     private List<ObjectNode> settledRuns(ObjectNode cluster) {
         String prefix = cluster.get("arn").textValue() + JOB_RUNS;
@@ -1005,7 +1068,13 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         Set<ObjectNode> changed = Collections.newSetFromMap(new IdentityHashMap<>());
         List<String> leftovers = new ArrayList<>();
         for (ObjectNode run : runs) {
-            if (launched(run) && !executing.contains(run.get("arn").textValue())) {
+            String arn = run.get("arn").textValue();
+            if (launched(run) && !executing.contains(arn) && run.has(RETRY_AT) && delays != null) {
+                // Between its attempts when an earlier process stopped, so no driver of it runs: its backoff goes on
+                // from where it was, and its next attempt starts once it has passed, at once if it already has.
+                Duration left = Duration.ofMillis(Math.max(0, run.get(RETRY_AT).longValue() - now.toEpochMilli()));
+                awaitNextAttempt(arn, left, generation);
+            } else if (launched(run) && !executing.contains(arn)) {
                 finish(run, FAILED, now);
                 run.put("stateDetails", MONITORING_FAILED);
                 run.put("failureReason", INTERNAL_ERROR);
@@ -1140,8 +1209,16 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         for (ObjectNode run : submitted) {
             String arn = run.get("arn").textValue();
             try {
+                String applicationId = run.path(SPARK_APPLICATION_ID).textValue();
+                if (applicationId == null) {
+                    // A run stored before runs kept their application's id gets one now, for its later attempts too.
+                    applicationId = sparkApplicationId();
+                    ObjectNode withId = run.deepCopy();
+                    withId.put(SPARK_APPLICATION_ID, applicationId);
+                    jobRuns.put(arn, withId);
+                }
                 SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, imageTemplate, dockerNetwork,
-                        sparkApplicationId());
+                        applicationId, driverPod(run));
                 runExecutor.execute(() -> execute(arn, job, launchedIn));
             } catch (RuntimeException e) {
                 LOG.warnv(e, "EMR on EKS job run {0} could not be handed to a thread", run.get("id").textValue());
@@ -1172,6 +1249,72 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         }
         SparkJobRunner.Outcome ended = outcome;
         RequestScopes.runAs(job.accountId(), job.region(), () -> ended(arn, ended, launchedIn));
+    }
+
+    // The attempt a run is on, 1 for its first, as its retryPolicyExecution counts them.
+    private static int attempt(ObjectNode run) {
+        return run.path("retryPolicyExecution").path("currentAttemptCount").asInt(1);
+    }
+
+    // How many attempts a run may make: its retry policy's maxAttempts, 1 where retries are disabled.
+    private static int maxAttempts(ObjectNode run) {
+        return run.path("retryPolicyConfiguration").path("maxAttempts").asInt(1);
+    }
+
+    /**
+     * Starts a run's next attempt once its backoff has passed: "Retry policies cause a job driver pod to be restarted
+     * automatically if it fails", after "an exponential retry interval of (10 seconds, 20 seconds, 40 seconds ...)
+     * which is capped at 6 minutes". Until then it is SUBMITTED, again "submitted to the virtual cluster", and keeps
+     * its slot; this process still follows it, so it is no leftover of a restart.
+     */
+    private void retry(String arn, ObjectNode run, Instant now, long launchedIn) {
+        Duration delay = retryDelay(attempt(run));
+        run.put("state", SUBMITTED);
+        run.put(RETRY_AT, now.plus(delay).toEpochMilli());
+        jobRuns.put(arn, run);
+        awaitNextAttempt(arn, delay, launchedIn);
+        LOG.infov("EMR on EKS job run {0} failed attempt {1}, retrying in {2}s", run.get("id").textValue(),
+                attempt(run), delay.toSeconds());
+    }
+
+    // A run between its attempts holds its slot, this process following it, until its next attempt starts after delay.
+    private void awaitNextAttempt(String arn, Duration delay, long launchedIn) {
+        executing.add(arn);
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        delays.after(delay, () -> RequestScopes.runAs(parsed.accountId(), parsed.region(),
+                () -> nextAttempt(arn, launchedIn)));
+    }
+
+    // The backoff after a run's attempt-th attempt failed: 10 seconds, doubling after each failure, at most 6 minutes.
+    static Duration retryDelay(int attempt) {
+        long seconds = FIRST_RETRY_DELAY.toSeconds() << Math.min(attempt - 1, 16);
+        return Duration.ofSeconds(Math.min(seconds, MAX_RETRY_DELAY.toSeconds()));
+    }
+
+    // A run's backoff has passed: its next attempt starts, its driver in a container again, unless it was cancelled.
+    private synchronized void nextAttempt(String arn, long launchedIn) {
+        if (launchedIn != generation) {
+            return;
+        }
+        jobRuns.get(arn).filter(run -> SUBMITTED.equals(run.path("state").textValue()) && run.has(RETRY_AT))
+                .ifPresent(stored -> {
+                    ObjectNode run = stored.deepCopy();
+                    run.remove(RETRY_AT);
+                    run.with("retryPolicyExecution").put("currentAttemptCount", attempt(run) + 1);
+                    jobRuns.put(arn, run);
+                    executing.remove(arn);
+                    launch(List.of(run));
+                });
+    }
+
+    /**
+     * The name a run's driver pod has, which names the folder of its logs: "Driver pod names follow the format
+     * spark-<job id>-driver-<random-suffix>", "The random-suffix is only present if the retry policy is enabled for the
+     * job", a suffix of each attempt's own.
+     */
+    static String driverPod(ObjectNode run) {
+        String pod = "spark-" + run.get("id").textValue() + "-driver";
+        return maxAttempts(run) > 1 ? pod + "-" + newId(DRIVER_POD_SUFFIX_LENGTH) : pod;
     }
 
     // A run's driver runs: "In Spark applications, this means that the Spark driver process is in the running state."
@@ -1214,6 +1357,9 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
             finish(run, CANCELLED, now);
         } else if (outcome.exitCode() != null && outcome.exitCode() == 0) {
             finish(run, COMPLETED, now);
+        } else if (outcome.exitCode() != null && attempt(run) < maxAttempts(run)) {
+            retry(arn, run, now, launchedIn);
+            return;
         } else {
             finish(run, FAILED, now);
             if (outcome.exitCode() != null) {
@@ -1245,6 +1391,7 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         run.put("finishedAt", timestamp(at));
         run.remove(DUE_AT);
         run.remove(QUEUE_POSITION);
+        run.remove(RETRY_AT);
     }
 
     /**

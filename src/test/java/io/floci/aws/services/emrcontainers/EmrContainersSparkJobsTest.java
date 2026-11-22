@@ -19,6 +19,7 @@ class EmrContainersSparkJobsTest {
             "arn:aws:emr-containers:eu-west-1:123456789012:/virtualclusters/vc1/jobruns/run1";
     private static final String ROLE = "arn:aws:iam::123456789012:role/emr-job";
     private static final String APPLICATION = "spark-0123456789abcdef0123456789abcdef";
+    private static final String DRIVER = "spark-run1-driver";
 
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -65,7 +66,7 @@ class EmrContainersSparkJobsTest {
                    {"classification": "spark-defaults", "properties": {"spark.sql.shuffle.partitions": "4"}}]}
                 """);
 
-        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, "floci-net", APPLICATION);
+        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, "floci-net", APPLICATION, DRIVER);
 
         assertEquals("emr-containers", job.service());
         assertEquals("run1", job.runId());
@@ -101,7 +102,7 @@ class EmrContainersSparkJobsTest {
                      "logStreamNamePrefix": "nightly"}}}
                 """);
 
-        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, null, APPLICATION);
+        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, null, APPLICATION, DRIVER);
 
         String driver = "vc1/jobs/run1/containers/" + APPLICATION + "/spark-run1-driver/";
         assertEquals("s3://logs/emr/" + driver, job.logFolder());
@@ -118,7 +119,7 @@ class EmrContainersSparkJobsTest {
                    "cloudWatchMonitoringConfiguration": {"logGroupName": "jobs"}}}
                 """);
 
-        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, null, APPLICATION);
+        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, null, APPLICATION, DRIVER);
 
         String driver = "vc1/jobs/run1/containers/" + APPLICATION + "/spark-run1-driver/";
         assertEquals("s3://logs/" + driver, job.logFolder());
@@ -138,7 +139,7 @@ class EmrContainersSparkJobsTest {
                   "sparkSqlParameters": "--conf spark.executor.instances=2 -hivevar table=reviews"}}
                 """, null);
 
-        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, null, APPLICATION);
+        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, null, APPLICATION, DRIVER);
 
         assertEquals(List.of("spark-sql", "--conf", "spark.executor.instances=2", "-hivevar", "table=reviews", "-f",
                 "s3://bucket/query.sql"), job.command());
@@ -157,7 +158,7 @@ class EmrContainersSparkJobsTest {
                    "properties": {"spark.kubernetes.container.image": "custom/all:1"}}]}
                 """);
 
-        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, null, APPLICATION);
+        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, null, APPLICATION, DRIVER);
 
         assertEquals("custom/driver:1", job.customImage(), "the driver's own image wins over the job's");
         assertEquals(Map.of("PYSPARK_PYTHON", "./env/bin/python"), job.environment());
@@ -166,6 +167,7 @@ class EmrContainersSparkJobsTest {
                 {"sparkSubmitJobDriver": {"entryPoint": "local:///app/job.py",
                   "sparkSubmitParameters": "--conf spark.kubernetes.container.image=custom/all:2"}}
                 """, null);
-        assertEquals("custom/all:2", EmrContainersSparkJobs.job(onlyJobImage, null, null, APPLICATION).customImage());
+        assertEquals("custom/all:2",
+                EmrContainersSparkJobs.job(onlyJobImage, null, null, APPLICATION, DRIVER).customImage());
     }
 }

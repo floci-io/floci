@@ -102,10 +102,10 @@ final class EmrContainersSparkJobs {
      * {@code spark.kubernetes.driver.container.image}, or else {@code spark.kubernetes.container.image}, names; its
      * driver's environment its {@code spark.kubernetes.driverEnv.<KEY>} properties; its {@code spark.archives} are
      * unpacked in its working directory, as they are in a pod's. Its driver's logs go to {@link #driverLogFolder} and
-     * {@link #driverCloudWatchLogs}, under {@code sparkApplicationId}.
+     * {@link #driverCloudWatchLogs}, under {@code sparkApplicationId} and its driver pod's name, {@code driverPod}.
      */
     static SparkJobRunner.Job job(ObjectNode run, String imageTemplate, String dockerNetwork,
-                                  String sparkApplicationId) {
+                                  String sparkApplicationId, String driverPod) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(run.get("arn").textValue());
         String releaseLabel = run.get("releaseLabel").textValue();
         JsonNode sparkSql = run.path("jobDriver").path("sparkSqlJobDriver");
@@ -130,8 +130,8 @@ final class EmrContainersSparkJobs {
         return new SparkJobRunner.Job(EmrContainersService.SERVICE, run.get("id").textValue(), arn.accountId(),
                 arn.region(), releaseLabel, SparkJobRunner.Engine.SPARK, image(imageTemplate, releaseLabel),
                 customImage, dockerNetwork, run.get("executionRoleArn").textValue(), sparkDefaults, application,
-                command, Duration.ZERO, driverLogFolder(run, sparkApplicationId),
-                driverCloudWatchLogs(run, sparkApplicationId),
+                command, Duration.ZERO, driverLogFolder(run, sparkApplicationId, driverPod),
+                driverCloudWatchLogs(run, sparkApplicationId, driverPod),
                 EmrServerlessJobRunService.environment(properties, DRIVER_ENV_PREFIX),
                 EmrServerlessJobRunService.archives(properties), null, Map.of(), Map.of(), Map.of(), Map.of(),
                 Map.of(), null);
@@ -142,10 +142,10 @@ final class EmrContainersSparkJobs {
      * /logUri/virtual-cluster-id/jobs/job-id/containers/spark-application-id/spark-job-id-driver/(stderr.gz/stdout.gz)"
      * (EMR on EKS Development Guide, "Configure a job run to use Amazon S3 logs").
      */
-    static String driverLogFolder(ObjectNode run, String sparkApplicationId) {
+    static String driverLogFolder(ObjectNode run, String sparkApplicationId, String driverPod) {
         String logUri = run.path("configurationOverrides").path("monitoringConfiguration")
                 .path("s3MonitoringConfiguration").path("logUri").textValue();
-        return EmrServerlessSparkRunner.logFolder(logUri, driverLogPath(run, sparkApplicationId) + "/");
+        return EmrServerlessSparkRunner.logFolder(logUri, driverLogPath(run, sparkApplicationId, driverPod) + "/");
     }
 
     /**
@@ -155,7 +155,8 @@ final class EmrContainersSparkJobs {
      * "Configure a job run to use Amazon CloudWatch Logs"). Without a {@code logStreamNamePrefix} a stream's name
      * starts at the virtual cluster's id.
      */
-    static SparkJobRunner.CloudWatchLogs driverCloudWatchLogs(ObjectNode run, String sparkApplicationId) {
+    static SparkJobRunner.CloudWatchLogs driverCloudWatchLogs(ObjectNode run, String sparkApplicationId,
+                                                              String driverPod) {
         JsonNode cloudWatch = run.path("configurationOverrides").path("monitoringConfiguration")
                 .path("cloudWatchMonitoringConfiguration");
         String logGroup = cloudWatch.path("logGroupName").textValue();
@@ -164,14 +165,14 @@ final class EmrContainersSparkJobs {
         }
         String prefix = cloudWatch.path("logStreamNamePrefix").textValue();
         String driver = (prefix != null && !prefix.isEmpty() ? prefix + "/" : "")
-                + driverLogPath(run, sparkApplicationId) + "/";
+                + driverLogPath(run, sparkApplicationId, driverPod) + "/";
         return new SparkJobRunner.CloudWatchLogs(logGroup, driver + STDOUT, driver + STDERR);
     }
 
-    // virtual-cluster-id/jobs/job-id/containers/spark-application-id/spark-job-id-driver, the driver pod's name.
-    private static String driverLogPath(ObjectNode run, String sparkApplicationId) {
-        String jobId = run.get("id").textValue();
-        return run.get("virtualClusterId").textValue() + "/jobs/" + jobId + "/containers/" + sparkApplicationId
-                + "/spark-" + jobId + "-driver";
+    // virtual-cluster-id/jobs/job-id/containers/spark-application-id/driver-pod, the driver pod's name being
+    // spark-job-id-driver, with an attempt's suffix where the run retries.
+    private static String driverLogPath(ObjectNode run, String sparkApplicationId, String driverPod) {
+        return run.get("virtualClusterId").textValue() + "/jobs/" + run.get("id").textValue() + "/containers/"
+                + sparkApplicationId + "/" + driverPod;
     }
 }
