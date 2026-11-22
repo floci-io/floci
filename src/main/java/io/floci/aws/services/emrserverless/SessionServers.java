@@ -21,29 +21,42 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
 /**
- * The Spark Connect servers a service runs for its sessions, as EMR Serverless's and EMR's do in their docker runner
- * mode: each a container the runner runs as a job's driver ({@link SparkJobRunner}), which a client reaches through
- * {@link SparkConnectProxy} with a token GetSessionEndpoint gave. It runs each server, asks it whether it answers once
- * its container runs, keeps the tokens given for its session, counts the calls it takes, and keeps one check for its
- * session's next deadline. The service, its {@link Owner}, holds each session and its state, and is told of each step
- * as the session's account and Region, never while this class holds its own lock.
+ * The servers a service runs for its sessions in its docker runner mode, which a client reaches through a proxy of
+ * Floci's with a token the service gave: EMR Serverless's and EMR's Spark Connect servers, reached through
+ * {@link SparkConnectProxy} with a token GetSessionEndpoint gave. Each is a container the runner runs as a job's driver
+ * ({@link SparkJobRunner}). It runs each server, asks it whether it answers once its container runs, keeps the tokens
+ * given for its session, counts the calls it takes, and keeps one check for its session's next deadline. The service,
+ * its {@link Owner}, holds each session and its state, and is told of each step as the session's account and Region,
+ * never while this class holds its own lock. Its {@link Kind} names what the servers are in its answers and its log.
  */
-public final class SparkConnectServers {
+public final class SessionServers {
 
-    private static final Logger LOG = Logger.getLogger(SparkConnectServers.class);
+    private static final Logger LOG = Logger.getLogger(SessionServers.class);
 
     /** How long a server may take to answer once its container runs. */
     public static final Duration START_LIMIT = Duration.ofMinutes(10);
     private static final long PROBE_INTERVAL_MILLIS = 500;
-    // No source gives AWS's wording for these; they are Floci's.
-    public static final String SERVER_EXITED = "The session's Spark Connect server exited with code %d.";
-    public static final String SERVER_NOT_STARTED = "The session's Spark Connect server could not start: %s";
-    public static final String SERVER_SILENT = "The session's Spark Connect server did not answer within "
-            + START_LIMIT.toMinutes() + " minutes: %s";
-    public static final String SERVER_ENDED = "The session's Spark Connect server ended with no exit code.";
-    public static final String TOKEN_EXPIRED =
-            "The authentication token has expired. Call GetSessionEndpoint for a new one.";
-    public static final String NO_RUNNING_SERVER = "Session %s has no Spark Connect server running.";
+
+    /**
+     * What a service's servers are, in the answers to the calls they cannot take and in Floci's log: what one is
+     * called, what each serves, and the operation that gives the tokens that reach them. No source gives AWS's
+     * wording for those answers; it is Floci's.
+     */
+    public record Kind(String server, String holder, String tokenOperation) {
+
+        /** EMR Serverless's and EMR's: a session's Spark Connect server, reached with GetSessionEndpoint's tokens. */
+        public static final Kind SPARK_CONNECT = new Kind("Spark Connect server", "Session", "GetSessionEndpoint");
+
+        /** The answer to a call whose token has expired. */
+        public String tokenExpired() {
+            return "The authentication token has expired. Call " + tokenOperation + " for a new one.";
+        }
+
+        /** The answer to a call whose session has no server running. */
+        public String noRunningServer(String sessionId) {
+            return holder + " " + sessionId + " has no " + server + " running.";
+        }
+    }
 
     /** The service whose sessions these are. Each method is called as the session's account and Region. */
     public interface Owner {
@@ -59,7 +72,7 @@ public final class SparkConnectServers {
 
         /**
          * The session's server has stopped, as {@code outcome} says; its tokens and its check go once this returns.
-         * {@link #failure} tells whether that failed the session.
+         * Whether that failed the session is the owner's to say.
          */
         void stopped(String sessionId, SparkJobRunner.Outcome outcome);
 
@@ -97,12 +110,13 @@ public final class SparkConnectServers {
         }
     }
 
-    /** Why no Spark Connect server answers at a host and port, or null once one does. */
+    /** Why no server answers at a host and port, or null once one does. */
     @FunctionalInterface
     public interface Probe {
         String unanswered(String host, int port);
     }
 
+    private final Kind kind;
     private final SparkJobRunner runner;
     private final Executor executor;
     private final ScheduledExecutorService checks;
@@ -110,17 +124,19 @@ public final class SparkConnectServers {
     private final Clock clock;
     // The sessions whose server a thread of this process runs; guarded by this.
     private final Map<String, Server> servers = new HashMap<>();
-    // The authentication tokens GetSessionEndpoint gave, until they expire or their session ends.
+    // The authentication tokens the service gave, until they expire or their session ends.
     private final Map<String, Grant> grants = new ConcurrentHashMap<>();
     // Raised by each reset, so a server's thread from before it tells its owner nothing more; guarded by this.
     private long generation;
 
     /**
-     * Servers run by {@code runner} (null where none runs, as in the immediate runner mode, where tokens are still
-     * kept) on {@code executor}'s threads, their sessions' deadlines checked on {@code checks} (null for none).
+     * Servers of {@code kind} run by {@code runner} (null where none runs, as in the immediate runner mode, where
+     * tokens are still kept) on {@code executor}'s threads, their sessions' deadlines checked on {@code checks} (null
+     * for none).
      */
-    public SparkConnectServers(SparkJobRunner runner, Executor executor, ScheduledExecutorService checks, Probe probe,
-                               Clock clock) {
+    public SessionServers(Kind kind, SparkJobRunner runner, Executor executor, ScheduledExecutorService checks,
+                          Probe probe, Clock clock) {
+        this.kind = kind;
         this.runner = runner;
         this.executor = executor;
         this.checks = checks;
@@ -136,8 +152,8 @@ public final class SparkConnectServers {
         return thread;
     }
 
-    /** {@link SparkConnectProxy#unanswered}, waited for at most ten seconds. */
-    public static Probe probe(SparkConnectProxy proxy) {
+    /** For a Spark Connect server: {@link SparkConnectProxy#unanswered}, waited for at most ten seconds. */
+    public static Probe sparkConnectProbe(SparkConnectProxy proxy) {
         return (host, port) -> {
             try {
                 return proxy.unanswered(host, port).toCompletionStage().toCompletableFuture()
@@ -150,20 +166,6 @@ public final class SparkConnectServers {
                 return e.toString();
             }
         };
-    }
-
-    /**
-     * What a session whose server stopped as {@code outcome} says ended with, where that failed it: why it could not
-     * start, or its exit code; null where it did not fail, as when it was stopped or ran out of time.
-     */
-    public static String failure(SparkJobRunner.Outcome outcome) {
-        if (outcome.timedOut() || outcome.stopped()) {
-            return null;
-        }
-        if (outcome.failure() != null) {
-            return String.format(SERVER_NOT_STARTED, outcome.failure());
-        }
-        return outcome.exitCode() != null ? String.format(SERVER_EXITED, outcome.exitCode()) : SERVER_ENDED;
     }
 
     /** Whether a thread of this process runs the session's server. */
@@ -207,7 +209,7 @@ public final class SparkConnectServers {
         }
     }
 
-    /** Keeps a token GetSessionEndpoint gave for the session, until {@code expiresAt}. */
+    /** Keeps a token the service gave for the session, until {@code expiresAt}. */
     public void grant(String token, String sessionId, String accountId, String region, Instant expiresAt) {
         Instant now = clock.instant();
         grants.values().removeIf(grant -> !now.isBefore(grant.expiresAt()));
@@ -231,7 +233,7 @@ public final class SparkConnectServers {
         }
         if (!clock.instant().isBefore(grant.expiresAt())) {
             grants.remove(token);
-            return Optional.of(Route.refused(Route.UNAUTHENTICATED, TOKEN_EXPIRED));
+            return Optional.of(Route.refused(Route.UNAUTHENTICATED, kind.tokenExpired()));
         }
         return Optional.of(RequestScopes.callAs(grant.accountId(), grant.region(), () -> callStarted(grant, owner)));
     }
@@ -263,7 +265,7 @@ public final class SparkConnectServers {
     /** A reset has begun: the servers' threads tell their owner nothing more, and every token goes. */
     public synchronized void reset() {
         generation++;
-        servers.values().forEach(SparkConnectServers::cancelCheck);
+        servers.values().forEach(SessionServers::cancelCheck);
         servers.clear();
         grants.clear();
     }
@@ -292,7 +294,7 @@ public final class SparkConnectServers {
         synchronized (this) {
             server = servers.get(sessionId);
             if (server == null) {
-                return Route.refused(Route.UNAVAILABLE, String.format(NO_RUNNING_SERVER, sessionId));
+                return Route.refused(Route.UNAVAILABLE, kind.noRunningServer(sessionId));
             }
         }
         synchronized (server.notifications) {
@@ -302,7 +304,7 @@ public final class SparkConnectServers {
             long launchedIn;
             synchronized (this) {
                 if (server.stopping || server.host == null || servers.get(sessionId) != server) {
-                    return Route.refused(Route.UNAVAILABLE, String.format(NO_RUNNING_SERVER, sessionId));
+                    return Route.refused(Route.UNAVAILABLE, kind.noRunningServer(sessionId));
                 }
                 first = server.calls++ == 0;
                 host = server.host;
@@ -343,7 +345,7 @@ public final class SparkConnectServers {
                 // An end, a reset or Floci's shutdown cut its start short.
                 outcome = SparkJobRunner.Outcome.halted();
             } else {
-                LOG.warnv(e, "The Spark Connect server of session {0} could not run", job.runId());
+                LOG.warnv(e, "The {0} of {1} {2} could not run", kind.server(), kind.holder(), job.runId());
                 outcome = SparkJobRunner.Outcome.couldNotStart(e.getMessage() != null ? e.getMessage()
                         : e.toString());
             }
@@ -351,8 +353,8 @@ public final class SparkConnectServers {
             try {
                 preparation.release();
             } catch (RuntimeException e) {
-                LOG.warnv(e, "What the Spark Connect server of session {0} took could not all be given back",
-                        job.runId());
+                LOG.warnv(e, "What the {0} of {1} {2} took could not all be given back", kind.server(),
+                        kind.holder(), job.runId());
             }
         }
         if (!current(launchedIn)) {
@@ -365,7 +367,7 @@ public final class SparkConnectServers {
             // whose server a restart left behind.
             RequestScopes.runAs(job.accountId(), job.region(), () -> owner.stopped(sessionId, ended));
         } catch (RuntimeException e) {
-            LOG.warnv(e, "Session {0} could not be told its Spark Connect server stopped", sessionId);
+            LOG.warnv(e, "{0} {1} could not be told its {2} stopped", kind.holder(), sessionId, kind.server());
         } finally {
             synchronized (this) {
                 if (launchedIn == generation) {
@@ -380,7 +382,7 @@ public final class SparkConnectServers {
         try {
             RequestScopes.runAs(job.accountId(), job.region(), () -> owner.gone(sessionId));
         } catch (RuntimeException e) {
-            LOG.warnv(e, "Session {0} could not be told its Spark Connect server has gone", sessionId);
+            LOG.warnv(e, "{0} {1} could not be told its {2} has gone", kind.holder(), sessionId, kind.server());
         }
     }
 
@@ -396,7 +398,8 @@ public final class SparkConnectServers {
                 return;
             }
             if (System.nanoTime() - giveUp >= 0) {
-                LOG.warnv("The Spark Connect server of session {0} did not answer: {1}", sessionId, unanswered);
+                LOG.warnv("The {0} of {1} {2} did not answer: {3}", kind.server(), kind.holder(), sessionId,
+                        unanswered);
                 RequestScopes.runAs(job.accountId(), job.region(), () -> owner.silent(sessionId, unanswered));
                 stop(sessionId);
                 return;
@@ -476,7 +479,7 @@ public final class SparkConnectServers {
 
         @Override
         public void listening(String host, int port) {
-            if (SparkConnectServers.this.listening(job.runId(), host, port, launchedIn)) {
+            if (SessionServers.this.listening(job.runId(), host, port, launchedIn)) {
                 executor.execute(() -> await(job, owner, host, port, launchedIn));
             }
         }

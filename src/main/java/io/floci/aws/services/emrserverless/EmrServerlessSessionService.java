@@ -116,7 +116,7 @@ public class EmrServerlessSessionService implements SparkConnectTargets, Resetta
     // The docker runner mode's runner, which runs each session's Spark Connect server; null in the immediate mode.
     private final SparkJobRunner sparkRunner;
     // The sessions' Spark Connect servers, and the tokens given for them.
-    private final SparkConnectServers servers;
+    private final SessionServers servers;
     private final SessionOwner owner = new SessionOwner();
     // The latest sequence a session was given, EmrServerlessService.nextSequence.
     private long lastSequence;
@@ -132,7 +132,7 @@ public class EmrServerlessSessionService implements SparkConnectTargets, Resetta
                 config.effectiveBaseUrl(), jobRuns.containerRunner(),
                 Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-serverless-session-", 0)
                         .factory()),
-                SparkConnectServers.checkThread("emr-serverless-session-checks"), SparkConnectServers.probe(proxy));
+                SessionServers.checkThread("emr-serverless-session-checks"), SessionServers.sparkConnectProbe(proxy));
     }
 
     EmrServerlessSessionService(AccountAwareStorageBackend<SessionRecord> store, EmrServerlessService applications,
@@ -148,9 +148,10 @@ public class EmrServerlessSessionService implements SparkConnectTargets, Resetta
                                 RegionResolver regionResolver, RequestContext requestContext,
                                 ObjectMapper objectMapper, Clock clock, String baseUrl, SparkJobRunner sparkRunner,
                                 Executor serverExecutor, ScheduledExecutorService checks,
-                                SparkConnectServers.Probe probe) {
+                                SessionServers.Probe probe) {
         this.sparkRunner = sparkRunner;
-        this.servers = new SparkConnectServers(sparkRunner, serverExecutor, checks, probe, clock);
+        this.servers = new SessionServers(SessionServers.Kind.SPARK_CONNECT, sparkRunner, serverExecutor, checks,
+                probe, clock);
         this.store = store;
         this.applications = applications;
         this.jobRuns = jobRuns;
