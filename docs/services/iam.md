@@ -904,8 +904,17 @@ is never echoed back by any of these actions, matching AWS.
 `ChangePassword` is the self-service half of `UpdateLoginProfile`. It takes no `UserName` and acts
 only on the user whose access key signed the request, which is what the API reference means by "the
 IAM user who is calling this operation", and the account root password is not affected by it. A
-caller with no IAM user behind its key, which is Floci's stand-in for account root credentials, is
-refused with `InvalidUserType`, the error the CLI reference documents for that case.
+caller with no IAM user behind its key is refused with `InvalidUserType`, the error the CLI
+reference documents for account root credentials, which is what such a key stands in for here.
+
+One of those callers is answered differently. An assumed-role session is refused `NoSuchEntity`
+404, recorded against a real account on 2026-10-29, a code this operation's model declares
+alongside `InvalidUserType`; the recording names the code and not the message, so the message is
+the one Floci already answers wherever a signing key resolves to no user, `The Access Key with id
+<id> cannot be found.` An assumed role is not root, which is what that error is published for, and
+the recording is the whole of what Floci reads into it: a session `AssumeRoot` minted acts as the
+account root and keeps root's error, and what AWS answers the remaining session kinds is not
+recorded, so they keep it as well.
 
 `OldPassword` must match the stored password, and a mismatch answers `AccessDenied` with status
 403 and "Either the new password does not conform to the account password policy or the old
