@@ -23,6 +23,9 @@ public class Subnet {
     private boolean assignIpv6AddressOnCreation = false;
     private boolean enableDns64 = false;
     private boolean mapCustomerOwnedIpOnLaunch = false;
+    private String privateDnsHostnameTypeOnLaunch = "ip-name";
+    private boolean enableResourceNameDnsARecordOnLaunch = false;
+    private boolean enableResourceNameDnsAAAARecordOnLaunch = false;
     private String ownerId;
     private String region;
     private String subnetArn;
@@ -77,6 +80,13 @@ public class Subnet {
 
     public boolean isMapCustomerOwnedIpOnLaunch() { return mapCustomerOwnedIpOnLaunch; }
     public void setMapCustomerOwnedIpOnLaunch(boolean mapCustomerOwnedIpOnLaunch) { this.mapCustomerOwnedIpOnLaunch = mapCustomerOwnedIpOnLaunch; }
+
+    public String getPrivateDnsHostnameTypeOnLaunch() { return privateDnsHostnameTypeOnLaunch; }
+    public void setPrivateDnsHostnameTypeOnLaunch(String privateDnsHostnameTypeOnLaunch) { this.privateDnsHostnameTypeOnLaunch = privateDnsHostnameTypeOnLaunch; }
+    public boolean isEnableResourceNameDnsARecordOnLaunch() { return enableResourceNameDnsARecordOnLaunch; }
+    public void setEnableResourceNameDnsARecordOnLaunch(boolean enableResourceNameDnsARecordOnLaunch) { this.enableResourceNameDnsARecordOnLaunch = enableResourceNameDnsARecordOnLaunch; }
+    public boolean isEnableResourceNameDnsAAAARecordOnLaunch() { return enableResourceNameDnsAAAARecordOnLaunch; }
+    public void setEnableResourceNameDnsAAAARecordOnLaunch(boolean enableResourceNameDnsAAAARecordOnLaunch) { this.enableResourceNameDnsAAAARecordOnLaunch = enableResourceNameDnsAAAARecordOnLaunch; }
 
     public String getOwnerId() { return ownerId; }
     public void setOwnerId(String ownerId) { this.ownerId = ownerId; }

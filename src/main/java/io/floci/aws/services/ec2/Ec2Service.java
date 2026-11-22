@@ -8400,6 +8400,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             case "assignIpv6AddressOnCreation"   -> subnet.setAssignIpv6AddressOnCreation(Boolean.parseBoolean(value));
             case "enableDns64"                   -> subnet.setEnableDns64(Boolean.parseBoolean(value));
             case "mapCustomerOwnedIpOnLaunch"    -> subnet.setMapCustomerOwnedIpOnLaunch(Boolean.parseBoolean(value));
+            case "privateDnsHostnameTypeOnLaunch" -> {
+                if (!"ip-name".equals(value) && !"resource-name".equals(value)) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Value (" + value + ") for parameter PrivateDnsHostnameTypeOnLaunch is invalid. "
+                                    + "Expected: ip-name or resource-name.", 400);
+                }
+                subnet.setPrivateDnsHostnameTypeOnLaunch(value);
+            }
+            case "enableResourceNameDnsARecordOnLaunch" ->
+                    subnet.setEnableResourceNameDnsARecordOnLaunch(Boolean.parseBoolean(value));
+            case "enableResourceNameDnsAAAARecordOnLaunch" ->
+                    subnet.setEnableResourceNameDnsAAAARecordOnLaunch(Boolean.parseBoolean(value));
         }
         subnets.put(key(region, subnetId), subnet);
     }
