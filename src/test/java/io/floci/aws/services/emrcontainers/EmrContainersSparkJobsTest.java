@@ -18,12 +18,14 @@ class EmrContainersSparkJobsTest {
     private static final String ARN =
             "arn:aws:emr-containers:eu-west-1:123456789012:/virtualclusters/vc1/jobruns/run1";
     private static final String ROLE = "arn:aws:iam::123456789012:role/emr-job";
+    private static final String APPLICATION = "spark-0123456789abcdef0123456789abcdef";
 
     private final ObjectMapper mapper = new ObjectMapper();
 
     private ObjectNode run(String jobDriver, String configurationOverrides) throws Exception {
         ObjectNode run = (ObjectNode) mapper.readTree("""
-                {"id": "run1", "arn": "%s", "releaseLabel": "emr-7.2.0-20240610", "executionRoleArn": "%s",
+                {"id": "run1", "virtualClusterId": "vc1", "arn": "%s", "releaseLabel": "emr-7.2.0-20240610",
+                 "executionRoleArn": "%s",
                  "jobDriver": %s}
                 """.formatted(ARN, ROLE, jobDriver));
         if (configurationOverrides != null) {
@@ -63,7 +65,7 @@ class EmrContainersSparkJobsTest {
                    {"classification": "spark-defaults", "properties": {"spark.sql.shuffle.partitions": "4"}}]}
                 """);
 
-        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, "floci-net");
+        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, "floci-net", APPLICATION);
 
         assertEquals("emr-containers", job.service());
         assertEquals("run1", job.runId());
@@ -84,6 +86,49 @@ class EmrContainersSparkJobsTest {
         assertEquals(List.of("s3://bucket/env.tar.gz#env"), job.archives());
         assertTrue(job.environment().isEmpty());
         assertNull(job.executors());
+        assertNull(job.logFolder(), "without an S3 monitoring configuration");
+        assertNull(job.cloudWatchLogs(), "without a CloudWatch monitoring configuration");
+    }
+
+    @Test
+    void driverLogsGoWhereTheRunsMonitoringConfigurationSendsThem() throws Exception {
+        ObjectNode run = run("""
+                {"sparkSubmitJobDriver": {"entryPoint": "s3://bucket/pi.py"}}
+                """, """
+                {"monitoringConfiguration": {
+                   "s3MonitoringConfiguration": {"logUri": "s3://logs/emr/"},
+                   "cloudWatchMonitoringConfiguration": {"logGroupName": "/emr-on-eks/jobs",
+                     "logStreamNamePrefix": "nightly"}}}
+                """);
+
+        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, null, APPLICATION);
+
+        String driver = "vc1/jobs/run1/containers/" + APPLICATION + "/spark-run1-driver/";
+        assertEquals("s3://logs/emr/" + driver, job.logFolder());
+        assertEquals(new SparkJobRunner.CloudWatchLogs("/emr-on-eks/jobs", "nightly/" + driver + "stdout",
+                "nightly/" + driver + "stderr"), job.cloudWatchLogs());
+    }
+
+    @Test
+    void driverLogStreamsStartAtTheVirtualClusterWithoutAPrefix() throws Exception {
+        ObjectNode run = run("""
+                {"sparkSubmitJobDriver": {"entryPoint": "s3://bucket/pi.py"}}
+                """, """
+                {"monitoringConfiguration": {"s3MonitoringConfiguration": {"logUri": "s3://logs"},
+                   "cloudWatchMonitoringConfiguration": {"logGroupName": "jobs"}}}
+                """);
+
+        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, null, APPLICATION);
+
+        String driver = "vc1/jobs/run1/containers/" + APPLICATION + "/spark-run1-driver/";
+        assertEquals("s3://logs/" + driver, job.logFolder());
+        assertEquals(new SparkJobRunner.CloudWatchLogs("jobs", driver + "stdout", driver + "stderr"),
+                job.cloudWatchLogs());
+    }
+
+    @Test
+    void sparkApplicationIdHasTheFormSparkOnKubernetesGivesIt() {
+        assertTrue(EmrContainersService.sparkApplicationId().matches("spark-[0-9a-f]{32}"));
     }
 
     @Test
@@ -93,7 +138,7 @@ class EmrContainersSparkJobsTest {
                   "sparkSqlParameters": "--conf spark.executor.instances=2 -hivevar table=reviews"}}
                 """, null);
 
-        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, null);
+        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, null, APPLICATION);
 
         assertEquals(List.of("spark-sql", "--conf", "spark.executor.instances=2", "-hivevar", "table=reviews", "-f",
                 "s3://bucket/query.sql"), job.command());
@@ -112,7 +157,7 @@ class EmrContainersSparkJobsTest {
                    "properties": {"spark.kubernetes.container.image": "custom/all:1"}}]}
                 """);
 
-        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, null);
+        SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, null, null, APPLICATION);
 
         assertEquals("custom/driver:1", job.customImage(), "the driver's own image wins over the job's");
         assertEquals(Map.of("PYSPARK_PYTHON", "./env/bin/python"), job.environment());
@@ -121,6 +166,6 @@ class EmrContainersSparkJobsTest {
                 {"sparkSubmitJobDriver": {"entryPoint": "local:///app/job.py",
                   "sparkSubmitParameters": "--conf spark.kubernetes.container.image=custom/all:2"}}
                 """, null);
-        assertEquals("custom/all:2", EmrContainersSparkJobs.job(onlyJobImage, null, null).customImage());
+        assertEquals("custom/all:2", EmrContainersSparkJobs.job(onlyJobImage, null, null, APPLICATION).customImage());
     }
 }

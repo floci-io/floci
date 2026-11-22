@@ -19,6 +19,8 @@ final class DockerContainerServices {
     static final String UNATTRIBUTED = "unattributed";
 
     private static final Map<String, Owner> OWNERS = new ConcurrentHashMap<>();
+    /** Each recorded container's service, by container id only, so a service's containers can be counted. */
+    private static final Map<String, String> SERVICE_BY_ID = new ConcurrentHashMap<>();
 
     private DockerContainerServices() {
     }
@@ -31,6 +33,7 @@ final class DockerContainerServices {
             return;
         }
         boolean named = containerName != null && !containerName.isBlank();
+        SERVICE_BY_ID.put(containerId, service);
         OWNERS.put(containerId, new Owner(service, named ? containerName : null));
         if (named) {
             Owner previous = OWNERS.put(containerName, new Owner(service, containerId));
@@ -49,9 +52,26 @@ final class DockerContainerServices {
         return owner == null ? UNATTRIBUTED : owner.service();
     }
 
+    /** How many recorded containers of {@code service} have not been seen removed. */
+    static int liveContainers(String service) {
+        int count = 0;
+        for (String owner : SERVICE_BY_ID.values()) {
+            if (owner.equals(service)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     /** Forgets a removed container, given by its id or its name. */
     static void forget(String container) {
-        Owner owner = OWNERS.remove(container);
+        if (container != null && SERVICE_BY_ID.remove(container) == null) {
+            Owner byName = OWNERS.get(container);
+            if (byName != null && byName.alias() != null) {
+                SERVICE_BY_ID.remove(byName.alias());
+            }
+        }
+        Owner owner = container == null ? null : OWNERS.remove(container);
         if (owner != null && owner.alias() != null) {
             // Only while the other key still points back here: a newer container may hold the name now.
             OWNERS.remove(owner.alias(), new Owner(owner.service(), container));

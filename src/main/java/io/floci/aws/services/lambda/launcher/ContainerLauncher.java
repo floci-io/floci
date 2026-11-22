@@ -12,6 +12,7 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
+import io.floci.aws.core.common.docker.DockerCapacityExceededException;
 import io.floci.aws.core.common.docker.DockerExitEvents;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.common.docker.DockerPlatforms;
@@ -528,8 +529,13 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             // leaks one per attempt and exhausts the pool) and reap any half-built container (leaked
             // "Created" containers bog the daemon and starve reuse). containerId is null when we
             // failed before the container was created (e.g. an ensureCodeVolume populate failure).
-            LOG.errorv("Container launch failed for function {0}; cleaning up: {1}",
-                    fn.getFunctionName(), e.getMessage());
+            if (e instanceof DockerCapacityExceededException) {
+                // A full Docker budget is a throttle the caller sees, not a failed launch.
+                LOG.warnv("Not launching a container for function {0}: {1}", fn.getFunctionName(), e.getMessage());
+            } else {
+                LOG.errorv("Container launch failed for function {0}; cleaning up: {1}",
+                        fn.getFunctionName(), e.getMessage());
+            }
             if (containerId != null) {
                 try {
                     lifecycleManager.stopAndRemoveStrict(containerId, null);

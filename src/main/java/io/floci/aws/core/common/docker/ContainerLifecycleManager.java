@@ -396,18 +396,39 @@ public class ContainerLifecycleManager {
         labels.put(CREATE_ATTEMPT_LABEL, createAttemptId);
         createCmd.withLabels(labels);
 
+        String budgetedService = serviceBudget(labels);
+        if (budgetedService != null) {
+            DockerServiceBudget.reserve(budgetedService, config.docker().serviceMaxContainers().get(budgetedService));
+        }
         String containerId;
         try {
             containerId = createWithConflictRecovery(createCmd, spec, createAttemptId);
+            DockerContainerServices.record(containerId, spec.name(), labels);
         } catch (DockerException e) {
             if (ContainerRejectedException.isRejection(e)) {
                 throw new ContainerRejectedException(e);
             }
             throw e;
+        } finally {
+            if (budgetedService != null) {
+                DockerServiceBudget.release(budgetedService);
+            }
         }
-        DockerContainerServices.record(containerId, spec.name(), labels);
         LOG.infov("Created container {0} (name={1}, not yet started)", containerId, spec.name());
         return containerId;
+    }
+
+    /** The service of a container to create when {@code floci.docker.service-max-containers} gives it a budget. */
+    private String serviceBudget(Map<String, String> labels) {
+        if (config == null || config.docker() == null) {
+            return null;
+        }
+        Map<String, Integer> budgets = config.docker().serviceMaxContainers();
+        if (budgets == null || budgets.isEmpty()) {
+            return null;
+        }
+        String service = ContainerStorageHelper.labelValue(labels, ContainerStorageHelper.SERVICE_LABEL);
+        return service != null && budgets.containsKey(service) ? service : null;
     }
 
     /**

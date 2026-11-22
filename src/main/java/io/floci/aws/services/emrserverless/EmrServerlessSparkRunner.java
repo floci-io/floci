@@ -35,12 +35,14 @@ import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
+import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
@@ -1902,8 +1904,11 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         if (job.logFolder() == null || containerId == null) {
             return;
         }
-        // Closed however the read ends, which ends Docker's stream and the compressors.
-        try (DriverOutput output = new DriverOutput()) {
+        // Closed however the read ends, which ends Docker's stream and the compressors, and its files deleted after:
+        // Docker closes the callback as its stream completes, before the files are read.
+        DriverOutput output = null;
+        try {
+            output = new DriverOutput();
             killInterruptible(job, containerId);
             lifecycleManager.stop(containerId, STOP_TIMEOUT_SECONDS);
             lifecycleManager.getDockerClient().logContainerCmd(containerId)
@@ -1915,14 +1920,20 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             if (!output.awaitCompletion(LOG_READ_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)) {
                 throw new IOException("reading the driver's output took longer than " + LOG_READ_TIMEOUT);
             }
-            putLogs(s3Service, job.accountId(), job.region(), job.logFolder(), output.gzipped(StreamType.STDOUT),
-                    output.gzipped(StreamType.STDERR));
+            try (InputStream stdout = output.gzipped(StreamType.STDOUT);
+                 InputStream stderr = output.gzipped(StreamType.STDERR)) {
+                putLogs(s3Service, job.accountId(), job.region(), job.logFolder(), stdout, stderr);
+            }
         } catch (InterruptedException e) {
             // Floci is shutting down: the run ends as its driver did, without its logs.
             Thread.currentThread().interrupt();
         } catch (IOException | RuntimeException e) {
             LOG.warnv("Could not write the logs of Spark run {0} of {1} to {2}: {3}", job.runId(), job.service(),
                     job.logFolder(), e.getMessage());
+        } finally {
+            if (output != null) {
+                output.discard();
+            }
         }
     }
 
@@ -1933,16 +1944,35 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
      * the compressors, and a frame that still comes after is dropped.
      */
     private static final class DriverOutput extends ResultCallback.Adapter<Frame> {
-        private final ByteArrayOutputStream stdout = new ByteArrayOutputStream();
-        private final ByteArrayOutputStream stderr = new ByteArrayOutputStream();
+        // Each stream gzipped into a file of its own, which a long run's output never holds in memory.
+        private final Path stdout;
+        private final Path stderr;
         private final GZIPOutputStream stdoutGzip;
         private final GZIPOutputStream stderrGzip;
         // Guarded by this.
         private boolean compressorsClosed;
 
         DriverOutput() throws IOException {
-            stdoutGzip = new GZIPOutputStream(stdout);
-            stderrGzip = new GZIPOutputStream(stderr);
+            Path out = Files.createTempFile("floci-driver-", ".stdout.gz");
+            try {
+                stderr = Files.createTempFile("floci-driver-", ".stderr.gz");
+            } catch (IOException e) {
+                Files.deleteIfExists(out);
+                throw e;
+            }
+            stdout = out;
+            GZIPOutputStream stdoutCompressor = null;
+            try {
+                stdoutCompressor = new GZIPOutputStream(new BufferedOutputStream(Files.newOutputStream(stdout)));
+                stderrGzip = new GZIPOutputStream(new BufferedOutputStream(Files.newOutputStream(stderr)));
+            } catch (IOException e) {
+                if (stdoutCompressor != null) {
+                    stdoutCompressor.close();
+                }
+                deleteFiles();
+                throw e;
+            }
+            stdoutGzip = stdoutCompressor;
         }
 
         @Override
@@ -1957,10 +1987,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             }
         }
 
-        // A stream's whole gzipped output, once Docker has sent everything.
-        synchronized byte[] gzipped(StreamType stream) throws IOException {
+        // A stream's whole gzipped output, once Docker has sent everything, read from its file.
+        synchronized InputStream gzipped(StreamType stream) throws IOException {
             closeCompressors();
-            return (stream == StreamType.STDERR ? stderr : stdout).toByteArray();
+            return Files.newInputStream(stream == StreamType.STDERR ? stderr : stdout);
         }
 
         @Override
@@ -1970,6 +2000,27 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             } finally {
                 synchronized (this) {
                     closeCompressors();
+                }
+            }
+        }
+
+        // Closes it, if Docker has not, and deletes its files, once they have been read or the read has failed.
+        void discard() {
+            try {
+                close();
+            } catch (IOException e) {
+                LOG.debugv("Could not close the driver's output: {0}", e.getMessage());
+            } finally {
+                deleteFiles();
+            }
+        }
+
+        private void deleteFiles() {
+            for (Path file : List.of(stdout, stderr)) {
+                try {
+                    Files.deleteIfExists(file);
+                } catch (IOException e) {
+                    LOG.warnv("Could not delete the driver output file {0}: {1}", file, e.getMessage());
                 }
             }
         }

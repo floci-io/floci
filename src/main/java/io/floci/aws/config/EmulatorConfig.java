@@ -4592,6 +4592,14 @@ public interface EmulatorConfig {
         boolean eventsExitDetection();
 
         /**
+         * Most containers a service may run at once, keyed by its {@code io.floci.service} label
+         * ({@code lambda}, {@code rds}, {@code elasticache}, ...). A create past it fails at once with the
+         * capacity or limit error that service's API declares (Lambda's {@code TooManyRequestsException},
+         * RDS's {@code InsufficientDBInstanceCapacity}). A service not listed is not limited; none is by default.
+         */
+        Map<String, Integer> serviceMaxContainers();
+
+        /**
          * Milliseconds between the reads of a long-lived service container's log (a database, a broker, a
          * registry), which Floci reads on a timer instead of holding a follow stream open for the
          * container's life. A line reaches the console and CloudWatch Logs up to this long after the
