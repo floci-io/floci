@@ -10,7 +10,6 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.fail;
 
 @QuarkusTest
 class PipesSqsTargetIntegrationTest {
@@ -19,7 +18,7 @@ class PipesSqsTargetIntegrationTest {
     private static final String ROLE = "arn:aws:iam::000000000000:role/pipe-role";
 
     @Test
-    void fifoTargetReceivesTheGroupAndDeduplicationIdsReadOffTheEvent() throws Exception {
+    void fifoTargetReceivesTheGroupAndDeduplicationIdsReadOffTheEvent() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String sourceName = "pipe-sqs-src-" + suffix;
         String targetName = "pipe-sqs-fifo-" + suffix + ".fifo";
@@ -59,9 +58,6 @@ class PipesSqsTargetIntegrationTest {
                 .statusCode(200);
 
             XmlPath message = receive(targetUrl);
-            if (message == null) {
-                fail("The FIFO target queue never received the message");
-            }
             assertEquals("{\"t\": \"grp\"}",
                     message.getString("ReceiveMessageResponse.ReceiveMessageResult.Message.Body"));
             assertEquals("grp", attribute(message, "MessageGroupId"));
@@ -121,25 +117,19 @@ class PipesSqsTargetIntegrationTest {
                 .getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
     }
 
-    private static XmlPath receive(String queueUrl) throws InterruptedException {
-        for (int i = 0; i < 20; i++) {
-            Thread.sleep(500);
-            XmlPath result = given()
-                    .contentType(SQS_CONTENT_TYPE)
-                    .formParam("Action", "ReceiveMessage")
-                    .formParam("QueueUrl", queueUrl)
-                    .formParam("MaxNumberOfMessages", "1")
-                    .formParam("AttributeName.1", "All")
-                .when()
-                    .post("/")
-                .then()
-                    .statusCode(200)
-                    .extract().xmlPath();
-            if (!result.getList("ReceiveMessageResponse.ReceiveMessageResult.Message").isEmpty()) {
-                return result;
-            }
-        }
-        return null;
+    private static XmlPath receive(String queueUrl) {
+        return PipesTargetWaits.awaitTarget("a message in " + queueUrl, () -> given()
+                .contentType(SQS_CONTENT_TYPE)
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("MaxNumberOfMessages", "1")
+                .formParam("AttributeName.1", "All")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().xmlPath(),
+            result -> !result.getList("ReceiveMessageResponse.ReceiveMessageResult.Message").isEmpty());
     }
 
     private static String attribute(XmlPath message, String name) {
