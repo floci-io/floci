@@ -11,6 +11,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.stream.Stream;
 
+import static io.floci.aws.services.ses.SesV1Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -22,8 +23,6 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 class SesV1TemplateArnIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     private static final String UNVERIFIED = "sender@unverified-v1-template-arn.floci.test";
     private static final String NAME = "v1-arn-ghost";
     private static final String TEMPLATE_REQUIRED =

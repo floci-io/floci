@@ -12,8 +12,6 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 class SesSendAddressLengthIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     private static final String DOMAIN = "example.com";
     private static final String TOO_LONG = "a".repeat(321 - DOMAIN.length() - 1) + "@" + DOMAIN;
     private static final String EXPECTED_MESSAGE =
@@ -23,7 +21,7 @@ class SesSendAddressLengthIntegrationTest {
     void v1SendEmail_sourceOverLimit_returnsInvalidParameterValue() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendEmail")
             .formParam("Source", TOO_LONG)
             .formParam("Destination.ToAddresses.member.1", "success@simulator.amazonses.com")
@@ -41,7 +39,7 @@ class SesSendAddressLengthIntegrationTest {
     void v2SendEmail_fromOverLimit_returnsBadRequestException() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "%s",
@@ -61,7 +59,7 @@ class SesSendAddressLengthIntegrationTest {
     void v1SendRawEmail_destinationOverLimit_returnsInvalidParameterValue() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendRawEmail")
             .formParam("Source", "sender@example.com")
             .formParam("Destinations.member.1", TOO_LONG)
@@ -79,7 +77,7 @@ class SesSendAddressLengthIntegrationTest {
     void v2SendEmail_feedbackForwardingOverLimit_returnsBadRequestException() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",
@@ -103,7 +101,7 @@ class SesSendAddressLengthIntegrationTest {
                         .getBytes(StandardCharsets.UTF_8));
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .body("""
                 {
                     "Destination": {"ToAddresses": ["success@simulator.amazonses.com"], "CcAddresses": ["%s"]},
@@ -122,7 +120,7 @@ class SesSendAddressLengthIntegrationTest {
     void v2SendBulkEmail_fromOverLimit_returnsInvalidEmailAddress() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "%s",
@@ -144,7 +142,7 @@ class SesSendAddressLengthIntegrationTest {
     void v1SendBulkTemplatedEmail_sourceOverLimit_returnsInvalidEmailAddress() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", TOO_LONG)
             .formParam("Template", "address-length-missing")

@@ -163,7 +163,7 @@ class SesIdentityCertificateV2IntegrationTest {
 
     private static Response v1Delete(String action, String member, String identity) {
         return given().contentType("application/x-www-form-urlencoded")
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+                .header("Authorization", SesV1Requests.AUTH)
                 .formParam("Action", action)
                 .formParam(member, identity)
                 .when().post("/");

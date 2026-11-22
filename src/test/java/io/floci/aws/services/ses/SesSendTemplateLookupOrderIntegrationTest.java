@@ -26,8 +26,6 @@ import static org.hamcrest.Matchers.nullValue;
 @QuarkusTest
 class SesSendTemplateLookupOrderIntegrationTest {
 
-    private static final String AUTH_V1 =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     private static final String UNVERIFIED = "sender@unverified-template-order.floci.test";
     private static final String VERIFIED = "sender@template-order.floci.test";
     private static final String GHOST_CONFIG_SET = "template-order-ghost-config-set";
@@ -44,7 +42,7 @@ class SesSendTemplateLookupOrderIntegrationTest {
     void verifySender() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH_V1)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "VerifyEmailIdentity")
             .formParam("EmailAddress", VERIFIED)
         .when()
@@ -66,7 +64,7 @@ class SesSendTemplateLookupOrderIntegrationTest {
     private static ValidatableResponse templated(String source, String... params) {
         return v1(given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH_V1)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendTemplatedEmail")
             .formParam("Source", source)
             .formParam("Destination.ToAddresses.member.1", TO)
@@ -77,7 +75,7 @@ class SesSendTemplateLookupOrderIntegrationTest {
     private static ValidatableResponse bulkTemplated(String source, int destinations, String... params) {
         RequestSpecification spec = given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH_V1)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", source)
             .formParam("Template", V1_GHOST_TEMPLATE)

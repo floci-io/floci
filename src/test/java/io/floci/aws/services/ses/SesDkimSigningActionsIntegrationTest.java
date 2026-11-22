@@ -35,12 +35,9 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 @QuarkusTest
 class SesDkimSigningActionsIntegrationTest {
 
-    private static final String V1_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
-
     private RequestSpecification v1(String action) {
         return given().contentType("application/x-www-form-urlencoded")
-                .header("Authorization", V1_AUTH).formParam("Action", action);
+                .header("Authorization", SesV1Requests.AUTH).formParam("Action", action);
     }
 
     @Test

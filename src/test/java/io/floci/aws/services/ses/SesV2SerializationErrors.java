@@ -37,7 +37,7 @@ final class SesV2SerializationErrors {
 
     /** An Authorization header signed for {@code region}, for a test that needs its own region state. */
     static String authFor(String region) {
-        return "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + region + "/email/aws4_request";
+        return SesV1Requests.authFor(region);
     }
 
     static void assertError(String method, String path, String body, String type, String message) {

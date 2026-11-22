@@ -17,8 +17,6 @@ import static org.hamcrest.Matchers.nullValue;
 @QuarkusTest
 class SesSendNullAddressIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     // A verified sender of its own: an identity under example.com would outlive this class and
     // reach the other SES classes that share the application.
     private static final String SENDER = "null-address-sender@floci.test";
@@ -33,7 +31,7 @@ class SesSendNullAddressIntegrationTest {
     private static ValidatableResponse post(String path, String body) {
         return given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .body(body)
         .when()
             .post(path)
@@ -57,7 +55,7 @@ class SesSendNullAddressIntegrationTest {
     void verifySender() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "VerifyEmailIdentity")
             .formParam("EmailAddress", SENDER)
         .when()

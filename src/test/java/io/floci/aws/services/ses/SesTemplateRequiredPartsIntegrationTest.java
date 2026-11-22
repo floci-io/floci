@@ -20,8 +20,6 @@ import static org.hamcrest.Matchers.nullValue;
 @QuarkusTest
 class SesTemplateRequiredPartsIntegrationTest {
 
-    private static final String V1_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     private static final String NO_SUBJECT = "The subject must be specified.";
     private static final String NO_PART = "Template must specify at least one of the parts.";
 
@@ -99,7 +97,7 @@ class SesTemplateRequiredPartsIntegrationTest {
     void v1Create_requiresASubject() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "CreateTemplate")
             .formParam("Template.TemplateName", "required-parts-v1")
             .formParam("Template.TextPart", "t")
@@ -115,7 +113,7 @@ class SesTemplateRequiredPartsIntegrationTest {
     void v1Create_requiresAPart() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "CreateTemplate")
             .formParam("Template.TemplateName", "required-parts-v1")
             .formParam("Template.SubjectPart", "S")
@@ -132,7 +130,7 @@ class SesTemplateRequiredPartsIntegrationTest {
     void v1Update_requiresAPartBeforeTheTemplateIsLookedUp() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "UpdateTemplate")
             .formParam("Template.TemplateName", "required-parts-ghost")
             .formParam("Template.SubjectPart", "S")
