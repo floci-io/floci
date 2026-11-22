@@ -1,4 +1,4 @@
-package io.floci.aws.services.firehose;
+package io.floci.aws.services.redshift;
 
 import org.junit.jupiter.api.Test;
 
