@@ -65,6 +65,8 @@ final class SesServiceTestBuilder {
     private SesCvetService cvetService;
     private SesSentEmailService sentEmailService;
     private SesIdentityCertificateService certificateService;
+    private final SesAccountService accountService =
+            new SesAccountService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
 
     static SesServiceTestBuilder create() {
         return new SesServiceTestBuilder();
@@ -166,6 +168,10 @@ final class SesServiceTestBuilder {
         return identityService;
     }
 
+    SesAccountService accountService() {
+        return accountService;
+    }
+
     SesIdentityCertificateService certificateService() {
         if (certificateService == null) {
             throw new IllegalStateException("call build() first");
@@ -196,6 +202,7 @@ final class SesServiceTestBuilder {
                 cvetService,
                 new SesTenantService(tenantStore, tenantAssociationStore, clock, new SecureRandom()),
                 certificateService,
+                accountService,
                 smtpRelay);
     }
 }

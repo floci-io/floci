@@ -222,6 +222,7 @@ class SesBulkV1IntegrationTest {
                 .formParam("Action", "SendBulkTemplatedEmail")
                 .formParam("Source", SENDER)
                 .formParam("Template", "v1-bulk-welcome")
+                .formParam("DefaultTemplateData", "{}")
                 .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com")
             .when()
                 .post("/")
