@@ -10,6 +10,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.ServiceRegistry;
 import io.floci.aws.services.eventbridge.EventBridgeService;
+import io.floci.aws.services.kinesis.KinesisService;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
@@ -48,6 +49,7 @@ public class PipesTargetInvoker {
     private final LambdaService lambdaService;
     private final SqsService sqsService;
     private final SnsService snsService;
+    private final KinesisService kinesisService;
     private final EventBridgeService eventBridgeService;
     private final StepFunctionsService stepFunctionsService;
     private final RedshiftDataTargetSubmitter redshiftSubmitter;
@@ -60,6 +62,7 @@ public class PipesTargetInvoker {
     public PipesTargetInvoker(LambdaService lambdaService,
                               SqsService sqsService,
                               SnsService snsService,
+                              KinesisService kinesisService,
                               EventBridgeService eventBridgeService,
                               StepFunctionsService stepFunctionsService,
                               RedshiftDataTargetSubmitter redshiftSubmitter,
@@ -70,6 +73,7 @@ public class PipesTargetInvoker {
         this.lambdaService = lambdaService;
         this.sqsService = sqsService;
         this.snsService = snsService;
+        this.kinesisService = kinesisService;
         this.eventBridgeService = eventBridgeService;
         this.stepFunctionsService = stepFunctionsService;
         this.redshiftSubmitter = redshiftSubmitter;
@@ -107,6 +111,8 @@ public class PipesTargetInvoker {
             invokeSqs(targetArn, payload, region, tp, event);
         } else if (targetArn.contains(":sns:")) {
             invokeSns(targetArn, payload, region);
+        } else if (AwsArnUtils.isArnFor(targetArn, "kinesis")) {
+            invokeKinesis(targetArn, payload, region, tp, event);
         } else if (targetArn.contains(":events:")) {
             invokeEventBridge(targetArn, payload, region, tp, event);
         } else if (targetArn.contains(":states:")) {
@@ -213,6 +219,16 @@ public class PipesTargetInvoker {
         String topicRegion = extractRegionFromArn(arn, region);
         snsService.publish(arn, null, payload, "Pipes", topicRegion);
         LOG.debugv("Pipe delivered to SNS: {0}", arn);
+    }
+
+    private void invokeKinesis(String arn, String payload, String region, JsonNode tp, String event) {
+        JsonNode kinesisParams = tp == null ? MissingNode.getInstance() : tp.path("KinesisStreamParameters");
+        String partitionKey = resolveDynamicParameter(text(kinesisParams, "PartitionKey"), event,
+                "target parameter PartitionKey");
+        AwsArnUtils.Arn stream = AwsArnUtils.parse(arn);
+        kinesisService.putRecordForAccount(stream.accountId(), PipesPoller.kinesisStreamName(arn),
+                payload.getBytes(StandardCharsets.UTF_8), partitionKey, extractRegionFromArn(arn, region));
+        LOG.debugv("Pipe delivered to Kinesis: {0}", arn);
     }
 
     private void invokeEventBridge(String arn, String payload, String region, JsonNode tp, String event) {

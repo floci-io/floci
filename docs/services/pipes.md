@@ -223,6 +223,12 @@ target input.
   `SqsQueueParameters` or no `MessageGroupId`. They refuse a `MessageDeduplicationId` on a standard
   queue. They refuse a `MessageGroupId` or `MessageDeduplicationId` that starts with `$.` but is not a
   valid JSON path. The errors are reported together in `fieldList`.
+- A Kinesis stream target writes one record per event, with the event JSON, or the rendered
+  `InputTemplate`, as its data. `KinesisStreamParameters` `PartitionKey` is a literal or a JSON path read
+  off the event before the `InputTemplate` renders. A number becomes its text. A path that names
+  nothing fails the delivery.
+- CreatePipe and UpdatePipe refuse a Kinesis target that has no `KinesisStreamParameters`, and a
+  `PartitionKey` that starts with `$.` but is not a valid JSON path. An empty `PartitionKey` is accepted.
 - An `InputTemplate` that is exactly one placeholder, such as `<$.Detail>`, renders a string as its
   own text with no quotes added, so a serialized object reaches an event bus as that object. A
   placeholder inside a larger template renders a string with quotes where the template gives none:

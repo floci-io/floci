@@ -33,6 +33,7 @@ class PipesServiceTest {
     private static final String SQS_SOURCE = "arn:aws:sqs:us-east-1:000000000000:source";
     private static final String STANDARD_TARGET = "arn:aws:sqs:us-east-1:000000000000:target";
     private static final String FIFO_TARGET = "arn:aws:sqs:us-east-1:000000000000:target.fifo";
+    private static final String KINESIS_TARGET = "arn:aws:kinesis:us-east-1:000000000000:stream/target-stream";
     private static final String PIPE_ROLE = "arn:aws:iam::000000000000:role/role";
 
     private AccountAwareStorageBackend<Pipe> storage;
@@ -170,6 +171,60 @@ class PipesServiceTest {
         AwsException ex = assertThrows(AwsException.class, () -> pipesService.updatePipe("sqs-pipe", FIFO_TARGET,
                 null, null, null, null, null, null, null, "us-east-1"));
         assertFields(ex, "TargetParameters.SqsQueueParameters", "Missing required target parameter.");
+    }
+
+    private static JsonNode kinesisParameters(String partitionKey) {
+        ObjectNode tp = MAPPER.createObjectNode();
+        tp.putObject("KinesisStreamParameters").put("PartitionKey", partitionKey);
+        return tp;
+    }
+
+    private Pipe createKinesisPipe(JsonNode targetParameters) {
+        return pipesService.createPipe("kinesis-pipe", SQS_SOURCE, KINESIS_TARGET, PIPE_ROLE,
+                null, null, null, null, targetParameters, null, null, "us-east-1");
+    }
+
+    @Test
+    void kinesisTargetWithoutKinesisStreamParametersIsRefused() throws Exception {
+        AwsException ex = assertThrows(AwsException.class, () -> createKinesisPipe(null));
+        assertFields(ex, "TargetParameters.KinesisStreamParameters", "Missing required target parameter.");
+
+        ex = assertThrows(AwsException.class,
+                () -> createKinesisPipe(MAPPER.createObjectNode().put("InputTemplate", "x")));
+        assertFields(ex, "TargetParameters.KinesisStreamParameters", "Missing required target parameter.");
+
+        ObjectNode nullBlock = MAPPER.createObjectNode();
+        nullBlock.putNull("KinesisStreamParameters");
+        ex = assertThrows(AwsException.class, () -> createKinesisPipe(nullBlock));
+        assertFields(ex, "TargetParameters.KinesisStreamParameters", "Missing required target parameter.");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"$.body[", "$.a b", "$.", "$..a", "$.a.*", "$.a[-1]"})
+    void kinesisPartitionKeyThatStartsWithADollarDotButIsNotAPathIsRefused(String value) throws Exception {
+        AwsException ex = assertThrows(AwsException.class, () -> createKinesisPipe(kinesisParameters(value)));
+        assertFields(ex, "PartitionKey",
+                "Invalid JSON path " + value + " provided in the service target parameters.");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"x", "", "$.a[0]", "$.a[*]", "$.a-b", "$.a/b", "$", "$x", "$[0]", "$['a']", "a$.b"})
+    void kinesisPartitionKeyThatIsAPathOrNotPathLikeIsAccepted(String value) {
+        assertNotNull(createKinesisPipe(kinesisParameters(value)));
+    }
+
+    @Test
+    void kinesisUpdateWithOnlyTargetParametersIsCheckedAgainstTheStoredTarget() throws Exception {
+        createKinesisPipe(kinesisParameters("k"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> pipesService.updatePipe("kinesis-pipe", null, null,
+                null, null, null, null, kinesisParameters("$.a["), null, "us-east-1"));
+        assertFields(ex, "PartitionKey", "Invalid JSON path $.a[ provided in the service target parameters.");
+
+        AwsException missing = assertThrows(AwsException.class, () -> pipesService.updatePipe("kinesis-pipe", null,
+                null, null, null, null, null, MAPPER.createObjectNode().put("InputTemplate", "x"), null,
+                "us-east-1"));
+        assertFields(missing, "TargetParameters.KinesisStreamParameters", "Missing required target parameter.");
     }
 
     @Test

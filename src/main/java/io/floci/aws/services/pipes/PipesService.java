@@ -365,6 +365,8 @@ public class PipesService implements TagHandler, ResourceProvider {
     private void validateTargetConfiguration(String target, JsonNode targetParameters) {
         if (AwsArnUtils.isArnFor(target, "sqs")) {
             validateSqsTarget(target, targetParameters);
+        } else if (AwsArnUtils.isArnFor(target, "kinesis")) {
+            validateKinesisTarget(targetParameters);
         } else if (PipesTargetInvoker.isRedshiftTarget(target)) {
             validateRedshiftTarget(targetParameters);
         }
@@ -427,6 +429,19 @@ public class PipesService implements TagHandler, ResourceProvider {
         }
         if (!errors.isEmpty()) {
             throw validationFields(errors);
+        }
+    }
+
+    private void validateKinesisTarget(JsonNode targetParameters) {
+        JsonNode kinesisParameters = targetParameters == null
+                ? MissingNode.getInstance() : targetParameters.path("KinesisStreamParameters");
+        if (kinesisParameters.isMissingNode() || kinesisParameters.isNull()) {
+            throw validationFields(List.of(new ValidationField(
+                    "TargetParameters.KinesisStreamParameters", "Missing required target parameter.")));
+        }
+        String partitionKey = PipesTargetInvoker.text(kinesisParameters, "PartitionKey");
+        if (partitionKey != null && isInvalidDynamicPath(partitionKey)) {
+            throw validationFields(List.of(new ValidationField("PartitionKey", invalidPathMessage(partitionKey))));
         }
     }
 
