@@ -53,11 +53,9 @@ final class BedrockAgentCoreTagValidation {
     }
 
     private static void validateKey(String key) {
-        if (key == null) {
-            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("tags.key"));
-        }
-        if (!BedrockTagKeyValueRules.validKey(key)) {
-            throw tagStringError("tags.key", key, 1, BedrockTagKeyValueRules.KEY_MAX);
+        String violation = BedrockTagKeyValueRules.keyViolation(key);
+        if (violation != null) {
+            throw SmithyValidationErrors.validationException(violation);
         }
     }
 
@@ -65,8 +63,9 @@ final class BedrockAgentCoreTagValidation {
         if (value == null) {
             throw new AwsException("ValidationException", "tag value must be a string", 400);
         }
-        if (!BedrockTagKeyValueRules.validValue(value)) {
-            throw tagStringError("tags.value", value, 0, BedrockTagKeyValueRules.VALUE_MAX);
+        String violation = BedrockTagKeyValueRules.valueViolation(value);
+        if (violation != null) {
+            throw SmithyValidationErrors.validationException(violation);
         }
     }
 
@@ -77,9 +76,4 @@ final class BedrockAgentCoreTagValidation {
         }
     }
 
-    private static AwsException tagStringError(String path, String value, int minLength, int maxLength) {
-        String violation = SmithyValidationErrors.lengthOutOfRange(path, value, minLength, maxLength);
-        return SmithyValidationErrors.validationException(violation != null ? violation
-                : SmithyValidationErrors.pattern(path, value, BedrockTagKeyValueRules.TAG_PATTERN));
-    }
 }

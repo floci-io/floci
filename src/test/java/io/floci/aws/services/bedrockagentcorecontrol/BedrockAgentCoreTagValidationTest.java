@@ -37,23 +37,7 @@ class BedrockAgentCoreTagValidationTest {
     }
 
     @Test
-    void keepsAgentCoreKeyAndValueErrors() {
-        String prefix = "1 validation error detected: ";
-        assertInvalid(MAPPER.createObjectNode().put("", "value"), prefix
-                + "Value '' at 'tags.key' failed to satisfy constraint: "
-                + "Member must have length greater than or equal to 1");
-        assertInvalid(MAPPER.createObjectNode().put("k".repeat(129), "value"), prefix
-                + "Value '" + "k".repeat(129) + "' at 'tags.key' failed to satisfy constraint: "
-                + "Member must have length less than or equal to 128");
-        assertInvalid(MAPPER.createObjectNode().put("bad?key", "value"), prefix
-                + "Value 'bad?key' at 'tags.key' failed to satisfy constraint: "
-                + "Member must satisfy regular expression pattern: [a-zA-Z0-9\\s._:/=+@-]*");
-        assertInvalid(MAPPER.createObjectNode().put("key", "v".repeat(257)), prefix
-                + "Value '" + "v".repeat(257) + "' at 'tags.value' failed to satisfy constraint: "
-                + "Member must have length less than or equal to 256");
-        assertInvalid(MAPPER.createObjectNode().put("key", "bad?value"), prefix
-                + "Value 'bad?value' at 'tags.value' failed to satisfy constraint: "
-                + "Member must satisfy regular expression pattern: [a-zA-Z0-9\\s._:/=+@-]*");
+    void keepsMalformedTagTypeErrors() {
         assertInvalid(MAPPER.createObjectNode().put("key", 123), "tag value must be a string");
         assertInvalid(MAPPER.createArrayNode(), "tags must be an object with at most 50 entries");
     }
@@ -91,7 +75,7 @@ class BedrockAgentCoreTagValidationTest {
 
     private static Stream<Arguments> modeledTagFailures() {
         String prefix = "1 validation error detected: ";
-        String keyPattern = "Member must satisfy regular expression pattern: [a-zA-Z0-9\\s._:/=+@-]*";
+        String keyPattern = "Member must satisfy regular expression pattern: " + BedrockAgentCoreTagFixtures.EXPECTED_TAG_PATTERN;
         Map<String, String> tooMany = new LinkedHashMap<>();
         for (int i = 0; i < 51; i++) {
             tooMany.put("key-" + i, "value");
