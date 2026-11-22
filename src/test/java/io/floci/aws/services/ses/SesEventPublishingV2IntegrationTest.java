@@ -1246,8 +1246,7 @@ class SesEventPublishingV2IntegrationTest {
                 "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + region + "/sqs/aws4_request";
         String eventsAuth =
                 "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + region + "/events/aws4_request";
-        String sesAuth =
-                "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + region + "/ses/aws4_request";
+        String sesAuth = SesV2Requests.authFor(region);
 
         String euQueueUrl = given()
                 .contentType(SQS_CONTENT_TYPE)

@@ -505,8 +505,7 @@ class SesTemplateV2IntegrationTest {
 
     // ──────────────── Cross-region isolation ────────────────
 
-    private static final String AUTH_EU_WEST_1 =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-west-1/ses/aws4_request";
+    private static final String AUTH_EU_WEST_1 = SesV2Requests.authFor("eu-west-1");
 
     @Test
     @Order(20)

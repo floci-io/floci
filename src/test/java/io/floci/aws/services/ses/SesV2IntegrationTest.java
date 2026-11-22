@@ -1267,8 +1267,7 @@ class SesV2IntegrationTest {
         // Send from ap-northeast-1
         given()
             .contentType("application/json")
-            .header("Authorization",
-                    "AWS4-HMAC-SHA256 Credential=AKID/20260101/ap-northeast-1/ses/aws4_request")
+            .header("Authorization", SesV2Requests.authFor("ap-northeast-1"))
             .body("""
                 {
                     "FromEmailAddress": "multi@example.com",

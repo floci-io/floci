@@ -22,10 +22,8 @@ import static org.hamcrest.Matchers.nullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesDedicatedIpPagingIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/ap-northeast-3/ses/aws4_request";
-    private static final String OTHER_REGION_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-north-1/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("ap-northeast-3");
+    private static final String OTHER_REGION_AUTH = SesV2Requests.authFor("eu-north-1");
     private static final String POOLS = "/v2/email/dedicated-ip-pools";
     private static final String IPS = "/v2/email/dedicated-ips";
 
