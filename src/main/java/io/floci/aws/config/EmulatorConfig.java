@@ -1742,6 +1742,16 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean transactionConflictsEnabled();
 
+        /**
+         * Whether the operations that AWS answers in a new order on each call do the same: the
+         * ReturnValues of PutItem, UpdateItem and DeleteItem, the Item of a failed condition check,
+         * TransactGetItems and the Item of a TransactWriteItems cancellation reason. Map keys and
+         * top-level attributes come back shuffled. False keeps the stored order.
+         * Env: FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER
+         */
+        @WithDefault("true")
+        boolean randomizeAttributeOrder();
+
         /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
         @WithDefault("native")
         String backend();
