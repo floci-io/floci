@@ -86,6 +86,7 @@ public class MskStreamingViews {
     private final ServiceRoleAuthorizer authorizer;
     private final Clock clock;
     private final Map<String, Object> topicLocks = new ConcurrentHashMap<>();
+    private final Map<String, Object> schemaLocks = new ConcurrentHashMap<>();
 
     @Inject
     public MskStreamingViews(MskViewRegistry registry, MskService msk, KarapaceManager karapace,
@@ -173,6 +174,26 @@ public class MskStreamingViews {
      */
     public void create(ExternalStatement.CreateStreamingView statement, String topicName, MskSchemaBinding schema,
                        SpectrumSession session, BackendSql backend) {
+        // the schema lock keeps a DROP SCHEMA of the topic's schema from running between the view's creation and its
+        // binding, which would leave a binding over a staging table that is gone
+        synchronized (schemaLock(session.accountId(), session.clusterKey(), session.databaseName(),
+                schema.schemaName())) {
+            createLocked(statement, topicName, schema, session, backend);
+        }
+    }
+
+    /**
+     * Runs {@code action} while no view is created in the schema: a DROP SCHEMA reads the schema's views, drops
+     * them and unbinds them as one step.
+     */
+    public void exclusivelyOnSchema(SpectrumSession session, String schemaName, Runnable action) {
+        synchronized (schemaLock(session.accountId(), session.clusterKey(), session.databaseName(), schemaName)) {
+            action.run();
+        }
+    }
+
+    private void createLocked(ExternalStatement.CreateStreamingView statement, String topicName,
+                              MskSchemaBinding schema, SpectrumSession session, BackendSql backend) {
         String viewSchema = schemaOrDefault(statement.viewSchema());
         synchronized (topicLock(session.accountId(), session.clusterKey(), session.databaseName(),
                 schema.schemaName(), topicName)) {
@@ -180,14 +201,16 @@ public class MskStreamingViews {
                 throw new SpectrumSqlException("42P07", "relation \"" + viewSchema + "." + statement.viewName()
                         + "\" already exists");
             }
+            MskViewBinding candidate = new MskViewBinding(session.accountId(), session.clusterKey(),
+                    session.databaseName(), viewSchema, statement.viewName(), schema.schemaName(), topicName,
+                    statement.select(), Map.of());
+            // before any broker lookup, so a role that may not read the topic cannot tell whether it exists
+            requireAuthorized(candidate, schema, groupOf(candidate));
             URI restBaseUri = restBaseUri(session.accountId(), schema);
             try {
                 restClient.listPartitions(restBaseUri, topicName);
-            } catch (KafkaTopicNotFoundException e) {
-                throw new SpectrumSqlException("42P01", "topic \"" + topicName + "\" does not exist in MSK cluster "
-                        + schema.clusterArn());
-            } catch (KafkaRestClientException | UncheckedIOException e) {
-                throw brokerUnavailable(topicName, schema, e);
+            } catch (KafkaTopicNotFoundException | KafkaRestClientException | UncheckedIOException e) {
+                throw readFailure(topicName, schema, e);
             }
             backend.execute("CREATE TABLE IF NOT EXISTS " + table(schema.schemaName(), topicName)
                     + " (kafka_partition bigint, kafka_offset bigint, kafka_timestamp_type char(1), "
@@ -209,6 +232,12 @@ public class MskStreamingViews {
             MskViewBinding latest = registry.find(view.accountId(), view.clusterKey(), view.databaseName(),
                     view.bindingName()).orElseThrow(() -> new SpectrumSqlException("42P01",
                             "relation \"" + view.viewSchema() + "." + view.viewName() + "\" does not exist"));
+            if (!readsSameTopic(latest, view)) {
+                // dropped and created again over another topic while this refresh waited: that view has its own
+                // topic's lock, and this call holds another one
+                throw new SpectrumSqlException("42P01", "materialized view \"" + view.viewSchema() + "."
+                        + view.viewName() + "\" was replaced by a view over another topic; retry the statement");
+            }
             return refreshLocked(latest, schema, backend);
         }
     }
@@ -225,6 +254,11 @@ public class MskStreamingViews {
                 topicName), key -> new Object());
     }
 
+    private Object schemaLock(String accountId, String clusterKey, String database, String schemaName) {
+        return schemaLocks.computeIfAbsent(String.join("\u001f", accountId, clusterKey, database, schemaName),
+                key -> new Object());
+    }
+
     private long refreshLocked(MskViewBinding view, MskSchemaBinding schema, BackendSql backend) {
         String group = groupOf(view);
         requireAuthorized(view, schema, group);
@@ -239,6 +273,14 @@ public class MskStreamingViews {
             for (int partition : restClient.listPartitions(restBaseUri, topic)) {
                 KafkaPartitionOffsets offsets = restClient.partitionOffsets(restBaseUri, topic, partition);
                 Long lastLoaded = view.checkpoints().get(Integer.toString(partition));
+                if (lastLoaded != null && lastLoaded + 1 > offsets.endOffset()) {
+                    // the partition ends before its checkpoint, so the topic was deleted and created again: its
+                    // offsets started over, and waiting for them to pass the old checkpoint would skip its records
+                    LOG.warnv("Partition {0} of topic {1} ends at offset {2}, before the checkpoint {3} of view {4}.{5}; "
+                            + "reading it from the beginning", partition, topic, offsets.endOffset(), lastLoaded,
+                            view.viewSchema(), view.viewName());
+                    lastLoaded = null;
+                }
                 long next = lastLoaded == null ? offsets.beginningOffset()
                         : Math.max(lastLoaded + 1, offsets.beginningOffset());
                 if (next >= offsets.endOffset()) {
@@ -266,11 +308,8 @@ public class MskStreamingViews {
             } finally {
                 closeQuietly(consumer);
             }
-        } catch (KafkaTopicNotFoundException e) {
-            throw new SpectrumSqlException("42P01", "topic \"" + topic + "\" does not exist in MSK cluster "
-                    + schema.clusterArn());
-        } catch (KafkaRestClientException | UncheckedIOException e) {
-            throw brokerUnavailable(topic, schema, e);
+        } catch (KafkaTopicNotFoundException | KafkaRestClientException | UncheckedIOException e) {
+            throw readFailure(topic, schema, e);
         }
     }
 
@@ -306,6 +345,13 @@ public class MskStreamingViews {
                 }
             }
         }
+        if (!pending.isEmpty()) {
+            // the offsets left may hold no record (transaction markers, compaction), or the proxy may be slow; either
+            // way the next refresh continues from the checkpoints
+            LOG.warnv("Refresh of {0}.{1} stopped after {2} polls with no records, before partitions {3} reached the "
+                    + "offsets they ended at ({4}); the next refresh continues from the checkpoints",
+                    view.viewSchema(), view.viewName(), MAX_IDLE_POLLS, pending.keySet(), pending);
+        }
         return loaded;
     }
 
@@ -315,7 +361,9 @@ public class MskStreamingViews {
         List<KafkaRecordDto> records = new ArrayList<>();
         for (KafkaRecordDto record : polled) {
             Long loaded = checkpoints.get(record.partition());
-            if (ends.containsKey(record.partition()) && (loaded == null || record.offset() > loaded)) {
+            Long end = ends.get(record.partition());
+            // a record at or past the end the refresh started with belongs to the next one
+            if (end != null && record.offset() < end && (loaded == null || record.offset() > loaded)) {
                 records.add(record);
             }
         }
@@ -323,8 +371,8 @@ public class MskStreamingViews {
     }
 
     private URI restBaseUri(String accountId, MskSchemaBinding schema) {
-        MskCluster cluster = msk.getClusterForAccount(accountId, schema.clusterArn()).orElseThrow(
-                () -> new SpectrumSqlException("42704", "MSK cluster " + schema.clusterArn() + " does not exist"));
+        MskCluster cluster = msk.getClusterForAccount(accountId, schema.clusterArn())
+                .orElseThrow(() -> clusterNotFound(schema, null));
         String bootstrapBrokers = cluster.getBootstrapBrokers();
         if (cluster.getState() != ClusterState.ACTIVE || bootstrapBrokers == null || bootstrapBrokers.isBlank()) {
             throw new SpectrumSqlException(BROKER_UNAVAILABLE, "MSK cluster " + schema.clusterArn()
@@ -338,7 +386,12 @@ public class MskStreamingViews {
         }
     }
 
-    private static SpectrumSqlException brokerUnavailable(String topic, MskSchemaBinding schema, RuntimeException cause) {
+    /** What a failed read of the topic is reported as, by CREATE and REFRESH alike. */
+    private static SpectrumSqlException readFailure(String topic, MskSchemaBinding schema, RuntimeException cause) {
+        if (cause instanceof KafkaTopicNotFoundException) {
+            return new SpectrumSqlException("42P01", "topic \"" + topic + "\" does not exist in MSK cluster "
+                    + schema.clusterArn());
+        }
         return new SpectrumSqlException(BROKER_UNAVAILABLE, "Cannot read topic \"" + topic + "\" from MSK cluster "
                 + schema.clusterArn() + ": " + cause.getMessage());
     }
@@ -347,8 +400,9 @@ public class MskStreamingViews {
         try {
             restClient.close(consumer);
         } catch (RuntimeException e) {
-            // the refresh outcome is already decided; an unreachable proxy takes its idle consumers down anyway
-            LOG.debugv(e, "Could not close the Kafka REST consumer {0}: {1}", consumer.baseUri(), e.getMessage());
+            // the refresh outcome is already decided, so this must not replace it; the instance stays on the proxy
+            // until its idle timeout, which is worth a trace
+            LOG.warnv(e, "Could not close the Kafka REST consumer {0}: {1}", consumer.baseUri(), e.getMessage());
         }
     }
 
@@ -360,7 +414,7 @@ public class MskStreamingViews {
         List<Permission> permissions = new ArrayList<>();
         permissions.add(new Permission("kafka:GetBootstrapBrokers", schema.clusterArn()));
         if ("IAM".equals(schema.authentication())) {
-            AwsArnUtils.Arn cluster = AwsArnUtils.parse(schema.clusterArn());
+            AwsArnUtils.Arn cluster = clusterArn(schema);
             // cluster/<name>/<uuid>, whose topics and groups are topic/<name>/<uuid>/<topic> and group/...
             String clusterPath = cluster.resource().substring(cluster.resource().indexOf('/') + 1);
             String topicArn = AwsArnUtils.Arn.of("kafka", cluster.region(), cluster.accountId(),
@@ -378,6 +432,34 @@ public class MskStreamingViews {
         if (refusal.isPresent()) {
             throw new SpectrumSqlException("42501", refusal.get());
         }
+    }
+
+    /**
+     * The schema's cluster ARN, which CREATE EXTERNAL SCHEMA keeps as written. One that is not the ARN of a
+     * cluster names no cluster, so it is the same error as a cluster that is gone.
+     */
+    private static AwsArnUtils.Arn clusterArn(MskSchemaBinding schema) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(schema.clusterArn());
+        } catch (IllegalArgumentException e) {
+            throw clusterNotFound(schema, e);
+        }
+        String resource = arn.resource();
+        boolean namedCluster = resource.startsWith("cluster/") && resource.indexOf('/') != resource.lastIndexOf('/');
+        if (!"kafka".equals(arn.service()) || arn.region().isBlank() || !namedCluster) {
+            throw clusterNotFound(schema, null);
+        }
+        return arn;
+    }
+
+    private static SpectrumSqlException clusterNotFound(MskSchemaBinding schema, RuntimeException cause) {
+        SpectrumSqlException error = new SpectrumSqlException("42704",
+                "MSK cluster " + schema.clusterArn() + " does not exist");
+        if (cause != null) {
+            error.addSuppressed(cause);
+        }
+        return error;
     }
 
     /** Splits a poll so no statement carries more than about {@value #BATCH_BYTES} bytes of record data. */
@@ -425,19 +507,24 @@ public class MskStreamingViews {
 
     /**
      * The headers as a JSON object of header name to value, the value as UTF-8 text or null for a header without
-     * one. A name that repeats keeps its last value: a JSON object holds a name once.
+     * one. A name that repeats keeps its last value: a JSON object holds a name once. Bytes that are not UTF-8 text,
+     * and a NUL, which jsonb refuses, become U+FFFD, so one binary header cannot fail every refresh of the view.
      */
     static String headersJson(List<KafkaHeaderDto> headers) {
         ObjectNode object = JSON.createObjectNode();
         Map<String, String> values = new LinkedHashMap<>();
         if (headers != null) {
             for (KafkaHeaderDto header : headers) {
-                values.put(header.key(), header.value() == null ? null
-                        : new String(header.value(), StandardCharsets.UTF_8));
+                values.put(jsonbText(header.key()), header.value() == null ? null
+                        : jsonbText(new String(header.value(), StandardCharsets.UTF_8)));
             }
         }
         values.forEach(object::put);
         return object.toString();
+    }
+
+    private static String jsonbText(String text) {
+        return text == null ? null : text.replace('\u0000', '�');
     }
 
     private static String varbyte(byte[] bytes) {

@@ -271,10 +271,13 @@ public class SpectrumQueryPreparation {
         if (statement.orElse(null) instanceof ExternalStatement.DropSchema schema
                 && msk.containsKey(schema.schemaName())) {
             rejectTransaction(session);
-            List<MskViewBinding> dependents = mskViews.overSchema(session, schema.schemaName());
-            dropStreamingSchema(schema, msk.get(schema.schemaName()), mskSchemas,
-                    dependents.stream().map(dependent -> MskStreamingViews.dropSql(dependent, true, true)).toList(),
-                    () -> dependents.forEach(mskViews::unbindIfCurrent), session, backend);
+            // no view may be created between reading the schema's views and dropping it, or its binding would outlive it
+            mskViews.exclusivelyOnSchema(session, schema.schemaName(), () -> {
+                List<MskViewBinding> dependents = mskViews.overSchema(session, schema.schemaName());
+                dropStreamingSchema(schema, msk.get(schema.schemaName()), mskSchemas,
+                        dependents.stream().map(dependent -> MskStreamingViews.dropSql(dependent, true, true)).toList(),
+                        () -> dependents.forEach(mskViews::unbindIfCurrent), session, backend);
+            });
             return true;
         }
         if (statement.orElse(null) instanceof ExternalStatement.CreateStreamingView view) {

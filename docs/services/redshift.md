@@ -1157,21 +1157,30 @@ Redpanda container through the Kafka REST Proxy sidecar that EventBridge Pipes u
 - **Refresh:** every partition is assigned and positioned by Floci itself, never by a group rebalance. The first
   refresh reads each partition from its earliest offset. Every later one starts at the offset after the last
   record that a refresh loaded, kept per partition. A refresh reads each partition up to the offset it ends at
-  when the refresh starts. A batch is loaded, run through the view's `SELECT` and committed as one statement,
+  when the refresh starts; a record at or past that offset waits for the next refresh. A batch is loaded, run through the view's `SELECT` and committed as one statement,
   and the partition's offset is saved only after that commit, so it never runs ahead of the data. A crash between
   the commit and the save re-reads that last batch. `TRUNCATE` or `DELETE` on the view does not move the offsets.
+  A partition that ends before its saved offset means the topic was deleted and created again, so that partition is
+  read from its beginning. A recreated topic that has already grown past the old offset cannot be told apart from
+  the old one, and its earlier records are skipped.
+- **Stopping early:** a refresh also stops after three polls of one second that return no records, because the offsets
+  left may hold none (transaction markers, compaction). It logs a warning naming the partitions that fell short, and
+  the next refresh continues from the saved offsets.
 - **Consumer groups:** each view reads through its own group, named `floci-redshift-msk-` and a hash of the view,
   so it never shares a group with EventBridge Pipes or Lambda. The consumer instance is closed when the refresh
   ends, and refreshes of the views over one topic run one at a time.
 - **Broker failures:** `CREATE MATERIALIZED VIEW` and `REFRESH` fail with SQLSTATE `58030` when the cluster has
   no running broker, the Kafka REST bridge cannot start, or the broker cannot be reached, so an unavailable
   broker never looks like an empty topic. A refresh that fails leaves the offsets where they were.
-  A cluster that does not exist fails with `42704`, and a topic that does not exist with `42P01`.
+  A cluster that does not exist, or a `CLUSTER_ARN` that is not a cluster ARN, fails with `42704`, and a topic that does
+  not exist with `42P01`.
 - **Columns:** `kafka_timestamp_type` is `C` when the record has a timestamp and `U` otherwise. Floci cannot tell
   `LogAppendTime` from `CreateTime`, because the Kafka REST Proxy does not report it. `kafka_headers` is a JSON
   object of header name to value as UTF-8 text, or null for a header without a value; a name that repeats keeps
-  its last value. `kafka_key` and `kafka_headers` values of a record that has none are null and `{}`.
-- **IAM:** each refresh checks the schema's role against `kafka:GetBootstrapBrokers` on the cluster, with trust
+  its last value. Bytes that are not UTF-8 text, and a NUL, which `jsonb` refuses, become U+FFFD, so one binary
+  header cannot fail every refresh. `kafka_key` and `kafka_headers` values of a record that has none are null and `{}`.
+- **IAM:** `CREATE MATERIALIZED VIEW`, before it looks at the broker, and each refresh check the schema's role
+  against `kafka:GetBootstrapBrokers` on the cluster, with trust
   for `redshift.amazonaws.com`, when IAM enforcement is on. With `AUTHENTICATION iam` it also checks
   `kafka-cluster:Connect` on the cluster, `kafka-cluster:DescribeTopic` and `kafka-cluster:ReadData` on the topic,
   and `kafka-cluster:AlterGroup` and `kafka-cluster:DescribeGroup` on the view's consumer group.

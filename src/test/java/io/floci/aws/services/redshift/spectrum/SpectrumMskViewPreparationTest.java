@@ -10,8 +10,6 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.glue.GlueService;
 import io.floci.aws.services.iam.ServiceRoleAuthorizer;
 import io.floci.aws.services.msk.MskService;
-import io.floci.aws.services.msk.model.ClusterState;
-import io.floci.aws.services.msk.model.MskCluster;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -60,12 +58,10 @@ class SpectrumMskViewPreparationTest {
         mskSchemas = new MskSchemaRegistry(AccountAwareStorageBackend.<MskSchemaBinding>inMemory(ACCOUNT));
         mskSchemas.bind(new MskSchemaBinding(ACCOUNT, SESSION.clusterKey(), "dev", "msk", ROLE, "IAM", CLUSTER_ARN));
         MskService msk = mock(MskService.class);
-        MskCluster cluster = new MskCluster(CLUSTER_ARN, "orders", "3.6.0");
-        cluster.setState(ClusterState.ACTIVE);
-        cluster.setBootstrapBrokers("localhost:19092");
-        when(msk.getClusterForAccount(ACCOUNT, CLUSTER_ARN)).thenReturn(Optional.of(cluster));
+        when(msk.getClusterForAccount(ACCOUNT, CLUSTER_ARN))
+                .thenReturn(Optional.of(MskTestFixtures.activeCluster(CLUSTER_ARN, "localhost:19092")));
         KarapaceManager karapace = mock(KarapaceManager.class);
-        when(karapace.ensureStarted("localhost:19092")).thenReturn(REST);
+        MskTestFixtures.bridgeAt(karapace, "localhost:19092", REST);
         restClient = mock(KafkaRestClient.class);
         when(restClient.listPartitions(REST, "orders")).thenReturn(List.of(0));
         when(restClient.partitionOffsets(REST, "orders", 0)).thenReturn(new KafkaPartitionOffsets(0, 1));

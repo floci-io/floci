@@ -31,6 +31,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -47,9 +48,11 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -82,12 +85,10 @@ class MskStreamingViewsTest {
     void setUp() {
         registry = new MskViewRegistry(AccountAwareStorageBackend.<MskViewBinding>inMemory(ACCOUNT));
         msk = mock(MskService.class);
-        cluster = new MskCluster(CLUSTER_ARN, "orders", "3.6.0");
-        cluster.setState(ClusterState.ACTIVE);
-        cluster.setBootstrapBrokers(BOOTSTRAP);
+        cluster = MskTestFixtures.activeCluster(CLUSTER_ARN, BOOTSTRAP);
         when(msk.getClusterForAccount(ACCOUNT, CLUSTER_ARN)).thenReturn(Optional.of(cluster));
         karapace = mock(KarapaceManager.class);
-        when(karapace.ensureStarted(BOOTSTRAP)).thenReturn(REST);
+        MskTestFixtures.bridgeAt(karapace, BOOTSTRAP, REST);
         restClient = mock(KafkaRestClient.class);
         when(restClient.createConsumer(eq(REST), anyString(), anyString())).thenReturn(CONSUMER);
         authorizer = mock(ServiceRoleAuthorizer.class);
@@ -254,7 +255,7 @@ class MskStreamingViewsTest {
         views.refresh(stored(), SCHEMA, backend);
 
         ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
-        verify(backend, org.mockito.Mockito.times(2)).execute(sql.capture());
+        verify(backend, times(2)).execute(sql.capture());
         String load = sql.getAllValues().get(1);
         assertThat(load, startsWith("INSERT INTO \"msk\".\"orders\" VALUES (0, 0, E'C', "
                 + "TIMESTAMP '2023-11-14 22:13:20.000000', decode('6b65792d30', 'hex')::pg_catalog.varbyte, "
@@ -286,7 +287,7 @@ class MskStreamingViewsTest {
         partitionEnds(1);
         when(restClient.poll(eq(CONSUMER), any())).thenReturn(List.of(record(0, 0, "a")), List.of());
         views.refresh(stored(), SCHEMA, backend);
-        org.mockito.Mockito.clearInvocations(restClient, backend);
+        clearInvocations(restClient, backend);
 
         long loaded = views.refresh(stored(), SCHEMA, backend);
 
@@ -367,7 +368,7 @@ class MskStreamingViewsTest {
 
         assertThat(views.refresh(stored(), SCHEMA, backend), equalTo(1L));
 
-        verify(restClient, org.mockito.Mockito.times(1 + MskStreamingViews.MAX_IDLE_POLLS)).poll(eq(CONSUMER), any());
+        verify(restClient, times(1 + MskStreamingViews.MAX_IDLE_POLLS)).poll(eq(CONSUMER), any());
         assertThat(stored().checkpoints(), equalTo(Map.of("0", 0L)));
     }
 
@@ -398,7 +399,7 @@ class MskStreamingViewsTest {
 
         assertThat(views.refresh(stored(), SCHEMA, backend), equalTo(3L));
 
-        verify(backend, org.mockito.Mockito.times(4)).execute(anyString());
+        verify(backend, times(4)).execute(anyString());
         assertThat(stored().checkpoints(), equalTo(Map.of("0", 2L)));
     }
 
@@ -447,10 +448,123 @@ class MskStreamingViewsTest {
     }
 
     @Test
+    void aRecordAtOrPastTheEndTheRefreshStartedWithBelongsToTheNextRefresh() {
+        createView();
+        partitionEnds(2);
+        when(restClient.poll(eq(CONSUMER), any())).thenReturn(
+                List.of(record(0, 0, "a"), record(0, 1, "b"), record(0, 2, "late"), record(0, 3, "later")), List.of());
+
+        assertThat(views.refresh(stored(), SCHEMA, backend), equalTo(2L));
+
+        assertThat(stored().checkpoints(), equalTo(Map.of("0", 1L)));
+        verify(backend, never()).execute(argThat(sql -> sql.contains("decode('6c61746572'")));
+    }
+
+    @Test
+    void aRefreshQueuedBehindAReplacementOverAnotherTopicIsRefusedInsteadOfReadingTheNewTopic() {
+        MskViewBinding captured = createView();
+        views.unbind(captured);
+        registry.bind(new MskViewBinding(ACCOUNT, SESSION.clusterKey(), "dev", "public", "orders_mv", "msk",
+                "payments", SELECT, Map.of()));
+        clearInvocations(restClient, karapace, backend);
+
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> views.refresh(captured, SCHEMA, backend));
+
+        assertThat(error.sqlState(), equalTo("42P01"));
+        assertThat(error.getMessage(), containsString("replaced by a view over another topic"));
+        verifyNoInteractions(restClient, karapace, backend);
+    }
+
+    @Test
+    void aTopicCreatedAgainWithLowerOffsetsIsReadFromItsBeginning() {
+        createView();
+        partitionEnds(5);
+        when(restClient.poll(eq(CONSUMER), any())).thenReturn(
+                List.of(record(0, 0, "a"), record(0, 1, "b"), record(0, 2, "c"), record(0, 3, "d"), record(0, 4, "e")),
+                List.of());
+        views.refresh(stored(), SCHEMA, backend);
+        clearInvocations(restClient);
+        partitionEnds(2);
+        when(restClient.createConsumer(eq(REST), anyString(), anyString())).thenReturn(CONSUMER);
+        when(restClient.poll(eq(CONSUMER), any())).thenReturn(List.of(record(0, 0, "x"), record(0, 1, "y")), List.of());
+
+        assertThat(views.refresh(stored(), SCHEMA, backend), equalTo(2L));
+
+        verify(restClient).seekToBeginning(CONSUMER, List.of(new KafkaTopicPartition("orders", 0)));
+        assertThat(stored().checkpoints(), equalTo(Map.of("0", 1L)));
+    }
+
+    @Test
+    void aRefusedRoleCannotCreateAViewOrTellWhetherTheTopicExists() {
+        when(authorizer.refusal(anyString(), anyString(), anyString(), any(), anyList()))
+                .thenReturn(Optional.of("role is not authorized to kafka-cluster:DescribeTopic"));
+
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> views.create(createStatement(), "orders", SCHEMA, SESSION, backend));
+
+        assertThat(error.sqlState(), equalTo("42501"));
+        assertThat(registry.list(ACCOUNT, SESSION.clusterKey(), "dev"), hasSize(0));
+        verifyNoInteractions(backend, restClient, karapace);
+    }
+
+    @Test
+    void aClusterArnThatIsNotAClusterArnIsAMissingClusterNotAnInternalError() {
+        for (String arn : new String[] {"not-an-arn", "arn:aws:kafka::000000000000:cluster/orders/abc-123",
+                "arn:aws:kafka:us-east-1:000000000000:topic/orders/abc-123/t", "arn:aws:kafka:us-east-1:000000000000:cluster/orders"}) {
+            MskSchemaBinding malformed = new MskSchemaBinding(ACCOUNT, SESSION.clusterKey(), "dev", "msk", ROLE, "IAM", arn);
+
+            SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                    () -> views.create(createStatement(), "orders", malformed, SESSION, backend));
+
+            assertThat(arn, error.sqlState(), equalTo("42704"));
+            assertThat(arn, error.getMessage(), containsString("does not exist"));
+        }
+        verifyNoInteractions(backend, restClient);
+    }
+
+    @Test
+    void aBinaryHeaderValueCannotFailTheRefresh() {
+        String json = MskStreamingViews.headersJson(List.of(
+                new KafkaHeaderDto("trace", new byte[] {'a', 0, 'b'}),
+                new KafkaHeaderDto("bad\u0000name", new byte[] {(byte) 0xff})));
+
+        assertThat(json, equalTo("{\"trace\":\"a\uFFFDb\",\"bad\uFFFDname\":\"\uFFFD\"}"));
+        assertThat(json, not(containsString("\\u0000")));
+    }
+
+    @Test
+    void aViewIsNeverCreatedWhileTheSchemaIsBeingDropped() throws Exception {
+        when(restClient.listPartitions(REST, "orders")).thenReturn(List.of(0));
+        CountDownLatch dropping = new CountDownLatch(1);
+        CountDownLatch finishDrop = new CountDownLatch(1);
+        Thread drop = Thread.ofVirtual().start(() -> views.exclusivelyOnSchema(SESSION, "msk", () -> {
+            dropping.countDown();
+            try {
+                finishDrop.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }));
+        dropping.await();
+        Thread create = Thread.ofVirtual().start(() -> views.create(createStatement(), "orders", SCHEMA, SESSION, backend));
+
+        create.join(300);
+
+        assertThat(create.isAlive(), is(true));
+        assertThat(registry.list(ACCOUNT, SESSION.clusterKey(), "dev"), hasSize(0));
+        finishDrop.countDown();
+        create.join(5_000);
+        drop.join(5_000);
+        assertThat(registry.list(ACCOUNT, SESSION.clusterKey(), "dev"), hasSize(1));
+    }
+
+    @Test
     void iamAuthenticationChecksTheKafkaActionsOnTheClusterTopicAndConsumerGroup() {
         MskViewBinding view = createView();
         partitionEnds(1);
         when(restClient.poll(eq(CONSUMER), any())).thenReturn(List.of(record(0, 0, "a")), List.of());
+        clearInvocations(authorizer);
 
         views.refresh(view, SCHEMA, backend);
 
@@ -477,6 +591,7 @@ class MskStreamingViewsTest {
         MskViewBinding view = createView();
         partitionEnds(1);
         when(restClient.poll(eq(CONSUMER), any())).thenReturn(List.of(record(0, 0, "a")), List.of());
+        clearInvocations(authorizer);
 
         views.refresh(view, open, backend);
 
@@ -489,7 +604,7 @@ class MskStreamingViewsTest {
     @Test
     void aRefusedRoleFailsTheRefreshBeforeAnyBrokerOrBackendCall() {
         MskViewBinding view = createView();
-        org.mockito.Mockito.clearInvocations(backend, restClient, karapace);
+        clearInvocations(backend, restClient, karapace);
         when(authorizer.refusal(anyString(), anyString(), anyString(), any(), anyList()))
                 .thenReturn(Optional.of("role is not authorized to kafka-cluster:ReadData"));
 
@@ -514,7 +629,7 @@ class MskStreamingViewsTest {
     @Test
     void dropRemovesTheViewTableAndTheStagingTableOnceNoOtherViewReadsTheTopic() {
         MskViewBinding view = createView();
-        org.mockito.Mockito.clearInvocations(backend);
+        clearInvocations(backend);
 
         views.drop(view, false, false, backend);
 
@@ -527,7 +642,7 @@ class MskStreamingViewsTest {
         MskViewBinding view = createView();
         registry.bind(new MskViewBinding(ACCOUNT, SESSION.clusterKey(), "dev", "public", "other_mv", "msk", "orders",
                 SELECT, Map.of()));
-        org.mockito.Mockito.clearInvocations(backend);
+        clearInvocations(backend);
 
         views.drop(view, false, true, backend);
 
@@ -539,7 +654,7 @@ class MskStreamingViewsTest {
     void dropOfAMissingViewIsAnErrorUnlessIfExistsIsGiven() {
         MskViewBinding view = createView();
         views.unbind(view);
-        org.mockito.Mockito.clearInvocations(backend);
+        clearInvocations(backend);
 
         SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
                 () -> views.drop(view, false, false, backend));
