@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudtrail.CloudTrailClient;
 import software.amazon.awssdk.services.cloudtrail.model.Event;
+import software.amazon.awssdk.services.cloudtrail.model.EventCategory;
 import software.amazon.awssdk.services.cloudtrail.model.InvalidLookupAttributesException;
 import software.amazon.awssdk.services.cloudtrail.model.InvalidNextTokenException;
 import software.amazon.awssdk.services.cloudtrail.model.LookupAttributeKey;
@@ -102,6 +103,19 @@ class CloudTrailLookupEventsIntegrationTest {
             assertEquals(1, second.events().size());
             assertNull(second.nextToken());
             assertTrue(!first.events().get(1).eventTime().isBefore(second.events().getFirst().eventTime()));
+        }
+    }
+
+    @Test
+    void theInsightCategoryHoldsNoManagementEvents() {
+        String account = newAccount();
+        putSecretValues(account, 1);
+
+        try (CloudTrailClient cloudTrail = cloudTrail(account)) {
+            assertEquals(1, cloudTrail.lookupEvents(r -> r.maxResults(50)).events().size());
+            LookupEventsResponse insights = cloudTrail.lookupEvents(r -> r.eventCategory(EventCategory.INSIGHT));
+            assertEquals(0, insights.events().size());
+            assertNull(insights.nextToken());
         }
     }
 

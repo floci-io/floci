@@ -260,11 +260,13 @@ public class CloudTrailJsonHandler {
         if (startTime != null && endTime != null && startTime.isAfter(endTime)) {
             throw new AwsException("InvalidTimeRangeException", "The start time precedes the end time.", 400);
         }
+        boolean insights = insightCategory(req.path("EventCategory"));
+        // Floci records no Insights events, so the insight category always holds none.
         PaginatedResult<CloudTrailEventHistory.HistoryEvent> page = Pagination.paginate(
-                service.lookupEvents(region, attribute, startTime, endTime),
+                insights ? List.of() : service.lookupEvents(region, attribute, startTime, endTime),
                 event -> String.format("%019d", Long.MAX_VALUE - event.sequence()),
                 maxResults == null ? MAX_LOOKUP_EVENTS : Math.min(maxResults, MAX_LOOKUP_EVENTS),
-                textOrNull(req, "NextToken"), lookupNamespace(region, attribute, startTime, endTime),
+                textOrNull(req, "NextToken"), lookupNamespace(region, attribute, startTime, endTime, insights),
                 token -> new AwsException("InvalidNextTokenException", "Can't decrypt marker", 400));
         ObjectNode resp = mapper.createObjectNode();
         ArrayNode events = resp.putArray("Events");
@@ -293,8 +295,22 @@ public class CloudTrailJsonHandler {
      * position in a different list.
      */
     private static String lookupNamespace(String region, CloudTrailEventHistory.LookupAttribute attribute,
-                                          Instant startTime, Instant endTime) {
-        return "lookup-events:" + Integer.toHexString(Objects.hash(region, attribute, startTime, endTime));
+                                          Instant startTime, Instant endTime, boolean insights) {
+        return "lookup-events:" + Integer.toHexString(Objects.hash(region, attribute, startTime, endTime, insights));
+    }
+
+    /** {@code EventCategory} has one value, {@code insight}; omitted, the lookup reads management events. */
+    private static boolean insightCategory(JsonNode category) {
+        if (category.isMissingNode() || category.isNull()) {
+            return false;
+        }
+        if (!category.isTextual()) {
+            throw notConvertible(category, "a String");
+        }
+        if (!"insight".equals(category.asText())) {
+            throw new AwsException("InvalidEventCategoryException", "Invalid event category specified.", 400);
+        }
+        return true;
     }
 
     /** AWS takes at most one lookup attribute, keyed by one of the documented names. */

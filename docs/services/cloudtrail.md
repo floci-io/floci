@@ -96,7 +96,8 @@ with a `NextToken` for the rest (as on AWS, the token is accepted only with the 
 
 The history keeps 90 days and at most 10,000 events per account and region, in memory: it does not
 survive a restart, and an emulator reset empties it. Records name no resources, so `Resources` is empty and a `ResourceType` or
-`ResourceName` attribute matches nothing.
+`ResourceName` attribute matches nothing. Floci records no Insights events, so `EventCategory: insight`
+returns an empty page; any other category is refused with `InvalidEventCategoryException`.
 
 ## Configuration
 

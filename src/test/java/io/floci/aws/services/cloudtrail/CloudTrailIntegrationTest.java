@@ -222,6 +222,10 @@ class CloudTrailIntegrationTest {
             .then().statusCode(400)
                 .body("__type", containsString("InvalidNextTokenException"))
                 .body("message", equalTo("Can't decrypt marker"));
+        invokeCloudTrail("LookupEvents", "{\"EventCategory\":\"not-a-category\"}")
+            .then().statusCode(400)
+                .body("__type", containsString("InvalidEventCategoryException"))
+                .body("message", equalTo("Invalid event category specified."));
         invokeCloudTrail("LookupEvents",
                 "{\"LookupAttributes\":[{\"AttributeKey\":\"NotARealAttributeKey\",\"AttributeValue\":\"x\"}]}")
             .then().statusCode(400)
