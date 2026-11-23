@@ -59,7 +59,7 @@ import static org.junit.jupiter.api.Assertions.fail;
  * JupyterLab notebook" does through {@code JUPYTER_GATEWAY_URL}, then changes its Spark session's settings with
  * {@code %%configure}, as "Modifying PySpark session parameters" does, and runs code on Floci's S3 in the "Apache
  * Spark with Scala" kernel too. An endpoint whose {@code jeg-config} sets a short idle timeout culls a kernel left
- * idle.
+ * idle, and one whose {@code jupyter-kernel-overrides} gives its kernels an image runs each in a container of its own.
  *
  * <p>A nightly check: the release's notebook image is about 6 GB.
  */
@@ -234,6 +234,58 @@ class EmrContainersGatewayNightlyIntegrationTest {
                 .DELETE().build(), HttpResponse.BodyHandlers.discarding()).statusCode(), url);
     }
 
+    // The endpoint's gateway answers within its five minutes; each kernel's container starts, and its WebSocket
+    // opens, within its two, and each of the four cells answers within its two: seventeen minutes, and one for the
+    // requests between. The Nightly checks' docker-runner group counts it.
+    @Test
+    @Timeout(value = 18, unit = TimeUnit.MINUTES)
+    void kernelsTheOverridesGiveAnImageRunInContainersOfTheirOwn() throws Exception {
+        S3Client s3 = AwsTestClients.create(S3Client.builder().forcePathStyle(true), ACCOUNT, Region.US_EAST_1);
+        cleanup.register(s3::close);
+        String bucket = "emr-eks-kernel-" + UUID.randomUUID().toString().substring(0, 8);
+        s3.createBucket(request -> request.bucket(bucket));
+        cleanup.register(() -> S3TestClients.deleteBucket(s3, bucket));
+        s3.putObject(request -> request.bucket(bucket).key("lines.txt"), RequestBody.fromString("a\nb\nc\n"));
+        String virtualClusterId = virtualCluster();
+        // As "Custom kernel image with interactive endpoint" overrides them, with the release's own image.
+        String endpointId = endpoint(virtualClusterId, """
+                {"applicationConfiguration": [{"classification": "jupyter-kernel-overrides", "configurations": [
+                  {"classification": "python3", "properties": {"container-image": "%s"}},
+                  {"classification": "spark-python-kubernetes", "properties": {"container-image": "%s"}}]}]}"""
+                .formatted(NOTEBOOK_IMAGE, NOTEBOOK_IMAGE));
+        String gateway = gateway(virtualClusterId, endpointId);
+        String token = sessionToken(virtualClusterId, endpointId);
+        HttpClient http = HttpClient.newHttpClient();
+        String session = UUID.randomUUID().toString();
+
+        String python = startKernel(http, gateway, token, "{\"name\": \"python3\"}");
+        assertEquals(1, docker.listContainersCmd().withNameFilter(List.of(python)).exec().size(),
+                "the kernel's own container");
+        Messages pythonMessages = new Messages();
+        WebSocket pythonSocket = connect(http, gateway, token, python, pythonMessages);
+        // Jupyter Enterprise Gateway's launcher gives the kernel its gateway's address.
+        assertEquals("True", execute(pythonSocket, pythonMessages, session,
+                "import os; os.environ.get('ENDPOINT_IP') is not None"));
+        pythonSocket.sendClose(WebSocket.NORMAL_CLOSURE, "done").get(10, TimeUnit.SECONDS);
+        delete(http, gateway + "/api/kernels/" + python, token);
+        await("the kernel's container gone").atMost(Duration.ofMinutes(1)).pollInterval(Duration.ofSeconds(1))
+                .until(() -> docker.listContainersCmd().withNameFilter(List.of(python)).exec().isEmpty());
+
+        String pyspark = startKernel(http, gateway, token, "{\"name\": \"spark-python-kubernetes\"}");
+        Messages messages = new Messages();
+        WebSocket socket = connect(http, gateway, token, pyspark, messages);
+        assertEquals("3", execute(socket, messages, session,
+                "spark.read.text(\"s3://" + bucket + "/lines.txt\").count()"));
+        // Its %%configure restarts it in a new container, under the same id, the client staying connected.
+        assertEquals("ok", run(socket, messages, session, """
+                %%configure -f
+                {"conf": {"spark.app.name": "from-configure"}}""", "execute_reply", "/content/status"));
+        assertEquals("'from-configure'", execute(socket, messages, session, "spark.conf.get(\"spark.app.name\")"));
+        assertEquals(List.of(pyspark), ids(http, gateway + "/api/kernels", token));
+        socket.sendClose(WebSocket.NORMAL_CLOSURE, "done").get(10, TimeUnit.SECONDS);
+        delete(http, gateway + "/api/kernels/" + pyspark, token);
+    }
+
     // An endpoint of the virtual cluster with configurationOverrides, once it is ACTIVE.
     private String endpoint(String virtualClusterId, String configurationOverrides) {
         String endpointId = emr().body("""
@@ -245,9 +297,12 @@ class EmrContainersGatewayNightlyIntegrationTest {
                 .extract().path("id");
         cleanup.register(() -> emr().delete("/virtualclusters/" + virtualClusterId + "/endpoints/" + endpointId)
                 .then().statusCode(200));
-        await().atMost(ACTIVE_TIMEOUT).pollInterval(Duration.ofSeconds(1)).until(() -> "ACTIVE".equals(
-                emr().get("/virtualclusters/" + virtualClusterId + "/endpoints/" + endpointId)
-                        .then().statusCode(200).extract().path("endpoint.state")));
+        // ACTIVE once its gateway answers, or ended with errors where it cannot start, which stateDetails says.
+        JsonNode endpoint = await().atMost(ACTIVE_TIMEOUT).pollInterval(Duration.ofSeconds(1))
+                .until(() -> JSON.readTree(emr().get("/virtualclusters/" + virtualClusterId + "/endpoints/"
+                        + endpointId).then().statusCode(200).extract().asString()).path("endpoint"),
+                        settled -> !"CREATING".equals(settled.path("state").textValue()));
+        assertEquals("ACTIVE", endpoint.path("state").textValue(), endpoint.toString());
         return endpointId;
     }
 

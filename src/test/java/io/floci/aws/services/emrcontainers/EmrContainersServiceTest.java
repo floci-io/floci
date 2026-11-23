@@ -42,6 +42,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -1297,6 +1298,7 @@ class EmrContainersServiceTest {
         return new EmrContainersService(stores.get(0), stores.get(1), stores.get(2), stores.get(3), stores.get(4),
                 mapper, new RegionResolver(REGION, ACCOUNT_ID), eks, iam, null, clock, 0, runner, Runnable::run,
                 null, "floci-net", delays, new EmrContainersService.EndpointGateways(servers,
+                        new EmrContainersKernelContainers(runner, task -> Thread.ofPlatform().daemon().start(task)),
                         "registry.internal/emr-on-eks/notebook-spark/%s", "http://floci.test:4566/"));
     }
 
@@ -1416,6 +1418,117 @@ class EmrContainersServiceTest {
         assertEquals(GatewayRunner.PORT, route.port());
         route.ended().run();
         assertTrue(service.gatewayPreflightRoute("ep0000000000000").isEmpty(), "no gateway runs for it");
+        runner.stop(endpointId);
+    }
+
+    private static final String KERNEL = "0b9e3c4e-6a1f-4c2d-9b8e-1f2a3b4c5d6e";
+
+    // An endpoint whose jupyter-kernel-overrides gives both kernels the guide's example names an image, and the
+    // Scala kernel one, which it cannot override.
+    private String overriddenEndpoint(EmrContainersService service, String clusterId) {
+        return service.createManagedEndpoint(clusterId, json("""
+                {"name": "custom", "type": "JUPYTER_ENTERPRISE_GATEWAY", "releaseLabel": "%s",
+                 "executionRoleArn": "%s", "clientToken": "%s",
+                 "configurationOverrides": {"applicationConfiguration": [{
+                   "classification": "jupyter-kernel-overrides", "configurations": [
+                     {"classification": "python3",
+                      "properties": {"container-image": "registry.internal/custom-notebook-python:latest"}},
+                     {"classification": "spark-python-kubernetes",
+                      "properties": {"container-image": "registry.internal/custom-notebook-spark:latest"}},
+                     {"classification": "spark-scala-kubernetes",
+                      "properties": {"container-image": "registry.internal/custom-notebook-scala:latest"}}]}]}}
+                """.formatted(RELEASE, ROLE, UUID.randomUUID()))).get("id").textValue();
+    }
+
+    // What the gateway sends to start a kernel's container.
+    private ObjectNode kernelStart(String kernel, String responseAddress) {
+        return json("""
+                {"kernel": "%s", "responseAddress": "%s", "publicKey": "cHVibGljLWtleQ==",
+                 "env": {"KERNEL_EXTRA_SPARK_OPTS": "--conf spark.app.name=custom", "PATH": "/opt/elsewhere"}}
+                """.formatted(kernel, responseAddress));
+    }
+
+    @Test
+    void kernelTheOverridesGiveAnImageRunsInAContainerOfItAsItsGatewayAsks() {
+        GatewayRunner runner = new GatewayRunner();
+        EmrContainersService service = gatewayService(runner, stores());
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String endpointId = overriddenEndpoint(service, clusterId);
+        awaitEndpoint(service, clusterId, endpointId, "ACTIVE");
+        Map<String, String> gateway = runner.awaitJob(endpointId).environment();
+        // "You can't add new kernel image types": the Scala kernel's goes unnamed.
+        assertEquals("python3,spark-python-kubernetes", gateway.get(EmrContainersGateways.OVERRIDES_VARIABLE));
+        assertEquals(EmrContainersKernelContainersRoute.PATH + endpointId + "/",
+                gateway.get(EmrContainersGateways.KERNEL_CONTAINERS_VARIABLE));
+        String secret = gateway.get(EmrContainersGateways.SECRET_VARIABLE);
+
+        assertNull(service.startKernelContainer(endpointId, KERNEL, secret,
+                kernelStart("spark-python-kubernetes", "10.0.0.5:40000")));
+        SparkJobRunner.Job pyspark = runner.awaitJob(endpointId + "-" + KERNEL + "-1");
+        assertEquals("registry.internal/custom-notebook-spark:latest", pyspark.customImage());
+        assertTrue(pyspark.command().get(2).startsWith("exec \"$SPARK_HOME/bin/spark-submit\" $KERNEL_EXTRA_SPARK_OPTS "
+                + EmrContainersGateways.LAUNCHER), pyspark.command().get(2));
+        assertEquals(List.of("kernel", KERNEL, "10.0.0.5:40000", "cHVibGljLWtleQ==",
+                        "eyJjb25maWd1cmVfbWFnaWNfZW5hYmxlZCI6ICJ0cnVlIn0="),
+                pyspark.command().subList(3, pyspark.command().size()), "its launcher loads the %%configure magic");
+        assertEquals("--conf spark.app.name=custom", pyspark.environment().get("KERNEL_EXTRA_SPARK_OPTS"));
+        assertFalse(pyspark.environment().containsKey("PATH"), "a kernel's KERNEL_ variables alone");
+        assertFalse(pyspark.environment().containsKey(EmrContainersGateways.SECRET_VARIABLE));
+        assertEquals("false", pyspark.sparkDefaults().get(EmrContainersGateways.PYSPARK_VIRTUALENV));
+        assertEquals(ROLE, pyspark.executionRole());
+        assertEquals("floci-net", pyspark.dockerNetwork());
+
+        String python = "1b9e3c4e-6a1f-4c2d-9b8e-1f2a3b4c5d6e";
+        assertNull(service.startKernelContainer(endpointId, python, secret, kernelStart("python3", "10.0.0.5:40001")));
+        SparkJobRunner.Job python3 = runner.awaitJob(endpointId + "-" + python + "-2");
+        assertEquals("registry.internal/custom-notebook-python:latest", python3.customImage());
+        assertTrue(python3.command().get(2).startsWith("exec python3 " + EmrContainersGateways.LAUNCHER),
+                python3.command().get(2));
+
+        assertNull(service.stopKernelContainer(endpointId, KERNEL, secret));
+        assertTrue(runner.stopped.contains(pyspark.runId()));
+        runner.stop(endpointId);
+        // A kernel's container goes with its gateway, and the gateway's secret too.
+        await("the kernel's container stopped").atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(10))
+                .until(() -> runner.stopped.contains(python3.runId()));
+        assertEquals(403, service.startKernelContainer(endpointId, python, secret,
+                kernelStart("python3", "10.0.0.5:40001")).status());
+    }
+
+    @Test
+    void kernelContainerIsRefusedWithoutItsGatewaysSecretOrAKernelTheOverridesGiveAnImage() {
+        GatewayRunner runner = new GatewayRunner();
+        EmrContainersService service = gatewayService(runner, stores());
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String endpointId = overriddenEndpoint(service, clusterId);
+        awaitEndpoint(service, clusterId, endpointId, "ACTIVE");
+        String secret = runner.awaitJob(endpointId).environment().get(EmrContainersGateways.SECRET_VARIABLE);
+        ObjectNode start = kernelStart("python3", "10.0.0.5:40000");
+
+        assertEquals(403, service.startKernelContainer(endpointId, KERNEL, "not-the-secret", start).status());
+        assertEquals(403, service.startKernelContainer(endpointId, KERNEL, null, start).status());
+        assertEquals(403, service.stopKernelContainer(endpointId, KERNEL, "not-the-secret").status());
+        assertEquals(400, service.startKernelContainer(endpointId, KERNEL, secret,
+                kernelStart("spark-scala-kubernetes", "10.0.0.5:40000")).status(), "no image for it");
+        assertEquals(400, service.startKernelContainer(endpointId, KERNEL, secret,
+                kernelStart("python3", "10.0.0.5:40000 --kernel-id other")).status());
+        assertEquals(400, service.startKernelContainer(endpointId, "not-a-kernel", secret, start).status());
+        assertEquals(List.of(endpointId), runner.jobs.stream().map(SparkJobRunner.Job::runId).toList(),
+                "the gateway's alone");
+        runner.stop(endpointId);
+    }
+
+    @Test
+    void endpointWithoutOverridesGivesItsGatewayNoSecret() {
+        GatewayRunner runner = new GatewayRunner();
+        EmrContainersService service = gatewayService(runner, stores());
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String endpointId = gatewayEndpoint(service, clusterId);
+        awaitEndpoint(service, clusterId, endpointId, "ACTIVE");
+
+        Map<String, String> gateway = runner.awaitJob(endpointId).environment();
+        assertFalse(gateway.containsKey(EmrContainersGateways.OVERRIDES_VARIABLE));
+        assertFalse(gateway.containsKey(EmrContainersGateways.SECRET_VARIABLE));
         runner.stop(endpointId);
     }
 

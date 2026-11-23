@@ -1,5 +1,6 @@
 package io.floci.aws.services.emrcontainers;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.services.emrserverless.EmrServerlessJobRunService;
@@ -11,8 +12,10 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +54,13 @@ import java.util.Map;
  * the restarted kernel answers, ends the cell with the replies the magic prepared, as the restart takes the kernel
  * down before it can; a kernel that dies first, or does not answer in jupyter_server's time for a restart, ends it
  * with an error. A kernel's requests take their turn.
+ *
+ * <p>A kernel the endpoint's {@code jupyter-kernel-overrides} gives an image of its own runs in a container of that
+ * image, as on EMR on EKS each kernel is a pod of its image: the program's provisioner asks Floci for it
+ * ({@link EmrContainersKernelContainersRoute}), and the image's Jupyter Enterprise Gateway launcher sends back where
+ * the kernel listens, encrypted for the provisioner's key, and takes its signals on its comm port. Its
+ * {@code %%configure} magic posts to the program's port 9547 over TLS, as its {@code ENDPOINT_IP} says; the restart
+ * gives the kernel new ports and a new key, which the program moves the kernel's clients onto.
  */
 final class EmrContainersGateways {
 
@@ -79,6 +89,25 @@ final class EmrContainersGateways {
     static final String JEG_CONFIG = "jeg-config";
     static final List<String> JEG_PROPERTIES = List.of("RemoteMappingKernelManager.cull_idle_timeout",
             "RemoteMappingKernelManager.cull_interval");
+    // The classification that gives a kernel an image of its own, a configuration per kernel naming it, its
+    // container-image property the image ("Custom kernel image with interactive endpoint"); the kernels its example
+    // names, as "You can't add new kernel image types".
+    static final String KERNEL_OVERRIDES = "jupyter-kernel-overrides";
+    static final String CONTAINER_IMAGE = "container-image";
+    static final String PYTHON_KERNEL = "python3";
+    static final String PYSPARK_KERNEL = "spark-python-kubernetes";
+    static final List<String> OVERRIDABLE_KERNELS = List.of(PYTHON_KERNEL, PYSPARK_KERNEL);
+    // Where the program learns which kernels run in containers of their own, and the secret it asks Floci for them
+    // with, in SECRET_HEADER.
+    static final String OVERRIDES_VARIABLE = "FLOCI_KERNEL_OVERRIDES";
+    static final String SECRET_VARIABLE = "FLOCI_KERNEL_CONTAINERS_SECRET";
+    static final String KERNEL_CONTAINERS_VARIABLE = "FLOCI_KERNEL_CONTAINERS_PATH";
+    static final String SECRET_HEADER = "X-Floci-Kernel-Containers-Secret";
+    // Jupyter Enterprise Gateway's Python kernel launcher, in the image, which a kernel's own container runs.
+    static final String LAUNCHER = "/usr/local/bin/kernel-launchers/python/scripts/launch_ipykernel.py";
+    // What the launcher's additional-info says to load the %%configure magic.
+    private static final String CONFIGURE_MAGIC_ENABLED = Base64.getEncoder()
+            .encodeToString("{\"configure_magic_enabled\": \"true\"}".getBytes(StandardCharsets.UTF_8));
 
     /** The servers' kind, in the answers to the calls they cannot take. */
     static final SessionServers.Kind KIND = new SessionServers.Kind("Jupyter Enterprise Gateway", "Endpoint",
@@ -94,13 +123,21 @@ final class EmrContainersGateways {
             import json
             import os
             import secrets
+            import signal
+            import socket
+            import ssl
+            import subprocess
             import sys
             import uuid
+            from importlib.metadata import EntryPoint
 
-            from Cryptodome.Cipher import AES
+            from Cryptodome.Cipher import AES, PKCS1_v1_5
             from Cryptodome.Hash import SHA256
+            from Cryptodome.PublicKey import RSA
             from Cryptodome.Util.Padding import unpad
             from jupyter_client.jsonutil import json_default
+            from jupyter_client.kernelspec import KernelSpecManager
+            from jupyter_client.provisioning import KernelProvisionerBase, KernelProvisionerFactory
             from jupyter_core.utils import ensure_async
             from jupyter_server.auth.decorator import authorized
             from jupyter_server.serverapp import ServerApp
@@ -111,9 +148,13 @@ final class EmrContainersGateways {
             from jupyter_server.services.sessions import handlers as session_handlers
             from jupyter_server.utils import url_escape, url_path_join
             from tornado import httpserver, web
+            from tornado.httpclient import AsyncHTTPClient, HTTPRequest
             from tornado.websocket import WebSocketClosedError
+            from traitlets import Unicode
 
             HOME = "@HOME@"
+            # The program's kernel specs come first, for the server and for the overrides' lookups alike.
+            os.environ["JUPYTER_PATH"] = HOME
             SESSION_HEADER = "@SESSION_HEADER@"
             # The image's %%configure magic, beside Jupyter Enterprise Gateway's kernel launchers.
             MAGICS = "/usr/local/bin/kernel-launchers/python/scripts"
@@ -130,6 +171,19 @@ final class EmrContainersGateways {
             STARTED_WITH = {}
             # Each running kernel's launch.
             LAUNCHED = {}
+            # The kernels the endpoint's jupyter-kernel-overrides gives images of their own, each in a container Floci
+            # runs, where and with what secret the program asks Floci for those, and how long it waits for one: what
+            # KERNEL_LAUNCH_TIMEOUT says, at most its maximum, 400 seconds.
+            OVERRIDDEN = [kernel for kernel in os.environ.get("@OVERRIDES_VARIABLE@", "").split(",") if kernel]
+            KERNEL_CONTAINERS = (os.environ.get("AWS_ENDPOINT_URL", "").rstrip("/")
+                                 + os.environ.get("@KERNEL_CONTAINERS_VARIABLE@", ""))
+            KERNEL_CONTAINERS_SECRET = os.environ.pop("@SECRET_VARIABLE@", None)
+            SECRET_HEADER = "@SECRET_HEADER@"
+            LAUNCH_TIMEOUT = 400
+            # Where the magic of a kernel in a container of its own posts its cell's settings: its ENDPOINT_IP, the
+            # program's address, on this port, over TLS.
+            CONFIGURE_TLS_PORT = 9547
+            CONTAINER_PROVISIONER = "floci-kernel-container"
 
             PYSPARK_KERNEL = '''
             import sys
@@ -168,6 +222,12 @@ final class EmrContainersGateways {
                          + TOREE + ' --profile "$0"',
                          "{connection_file}"],
             }))
+            # A kernel the overrides give an image of its own runs in a container Floci starts, through the provisioner.
+            for kernel in OVERRIDDEN:
+                spec = KernelSpecManager().get_kernel_spec(kernel).to_dict()
+                spec["metadata"] = dict(spec.get("metadata") or {}, kernel_provisioner={
+                    "provisioner_name": CONTAINER_PROVISIONER, "config": {"kernel": kernel}})
+                write(HOME + "/kernels/" + kernel + "/kernel.json", json.dumps(spec))
 
 
             # Whether the request being served carries the session token the kernel was started with.
@@ -212,6 +272,130 @@ final class EmrContainersGateways {
                 return [message for message in (error, reply, idle) if message]
 
 
+            # Asks Floci for a kernel's container, or for its end.
+            async def kernel_container(method, kernel_id, body=None):
+                await AsyncHTTPClient().fetch(HTTPRequest(
+                    KERNEL_CONTAINERS + kernel_id, method=method, body=None if body is None else json.dumps(body),
+                    headers={SECRET_HEADER: KERNEL_CONTAINERS_SECRET, "Content-Type": "application/json"},
+                    allow_nonstandard_methods=True, request_timeout=60))
+
+
+            # A kernel in a container of its own, of the image the overrides give it, which Floci starts at the
+            # program's request, running Jupyter Enterprise Gateway's launcher: the launcher sends where the kernel
+            # listens, encrypted for the program's key, and takes the program's signals on its comm port.
+            class ContainerProvisioner(KernelProvisionerBase):
+
+                kernel = Unicode(config=True)
+
+                def __init__(self, **kwargs):
+                    super().__init__(**kwargs)
+                    self.comm = None
+                    self.aes_key = None
+
+                @property
+                def has_process(self):
+                    return self.comm is not None
+
+                async def pre_launch(self, **kwargs):
+                    kwargs = await super().pre_launch(**kwargs)
+                    kwargs["cmd"] = []
+                    return kwargs
+
+                async def launch_kernel(self, cmd, **kwargs):
+                    env = kwargs.get("env") or {}
+                    key = RSA.generate(2048)
+                    response = asyncio.get_running_loop().create_future()
+
+                    async def respond(reader, writer):
+                        data = await reader.read()
+                        writer.close()
+                        if not response.done():
+                            response.set_result((data, writer.get_extra_info("peername")[0]))
+
+                    server = await asyncio.start_server(respond, "0.0.0.0", 0)
+                    try:
+                        await kernel_container("POST", self.kernel_id, {
+                            "kernel": self.kernel,
+                            "responseAddress": socket.gethostbyname(socket.gethostname()) + ":"
+                                               + str(server.sockets[0].getsockname()[1]),
+                            "publicKey": base64.b64encode(key.publickey().export_key("DER")).decode(),
+                            "env": {name: value for name, value in env.items() if name.startswith("KERNEL_")}})
+                        timeout = min(int(env.get("KERNEL_LAUNCH_TIMEOUT") or LAUNCH_TIMEOUT), LAUNCH_TIMEOUT)
+                        data, host = await asyncio.wait_for(response, timeout)
+                        payload = json.loads(base64.b64decode(data))
+                        aes_key = PKCS1_v1_5.new(key).decrypt(base64.b64decode(payload["key"]), None)
+                        cipher = AES.new(aes_key, AES.MODE_GCM, nonce=base64.b64decode(payload["nonce"]))
+                        info = json.loads(unpad(cipher.decrypt_and_verify(base64.b64decode(payload["conn_info"]),
+                                                                          base64.b64decode(payload["tag"])), 16))
+                        connection_info = {
+                            "ip": host, "transport": info.get("transport", "tcp"), "key": info["key"].encode(),
+                            "signature_scheme": info["signature_scheme"], "kernel_name": self.kernel,
+                            **{name: int(info[name]) for name in ("shell_port", "iopub_port", "stdin_port",
+                                                                  "hb_port", "control_port")}}
+                        comm = (host, int(info["comm_port"]))
+                    except BaseException:
+                        # A launch that fails after Floci was asked for the container stops it.
+                        await self.cleanup()
+                        raise
+                    finally:
+                        server.close()
+                    self.aes_key = aes_key.hex()
+                    self.comm = comm
+                    self.connection_info = connection_info
+                    # Each launch's launcher, a restart's too, gives its magic a key of its own.
+                    launch = LAUNCHED.get(self.kernel_id)
+                    if launch is not None:
+                        launch.key = self.aes_key
+                    return self.connection_info
+
+                # Sends the launcher a request on its comm port; false where it takes none.
+                async def tell(self, request):
+                    if self.comm is None:
+                        return False
+                    try:
+                        reader, writer = await asyncio.wait_for(asyncio.open_connection(*self.comm), 5)
+                        writer.write(json.dumps(request).encode())
+                        await writer.drain()
+                        writer.close()
+                        await writer.wait_closed()
+                        return True
+                    except (OSError, asyncio.TimeoutError):
+                        return False
+
+                async def poll(self):
+                    return None if await self.tell({"signum": 0}) else 1
+
+                async def wait(self):
+                    for _ in range(50):
+                        if await self.poll() is not None:
+                            return 1
+                        await asyncio.sleep(0.2)
+                    return None
+
+                async def send_signal(self, signum):
+                    await self.tell({"signum": signum})
+
+                async def kill(self, restart=False):
+                    await self.tell({"signum": signal.SIGKILL})
+                    await self.cleanup(restart)
+
+                async def terminate(self, restart=False):
+                    await self.tell({"signum": signal.SIGTERM})
+
+                # Best effort, as jupyter_client's shutdown and restart go on whatever a provisioner's cleanup
+                # meets: a container Floci fails to stop here still stops with the endpoint's gateway.
+                async def cleanup(self, restart=False):
+                    self.comm = None
+                    try:
+                        await kernel_container("DELETE", self.kernel_id)
+                    except Exception:
+                        self.log.exception("Kernel %s's container could not be stopped", self.kernel_id)
+
+
+            KernelProvisionerFactory.instance().provisioners[CONTAINER_PROVISIONER] = EntryPoint(
+                CONTAINER_PROVISIONER, "__main__:ContainerProvisioner", KernelProvisionerFactory.GROUP_NAME)
+
+
             # A kernel's AES key, which only it and the program hold, its launch environment, and the lock its
             # %%configure requests take in turn.
             class Launch:
@@ -240,8 +424,37 @@ final class EmrContainersGateways {
                     env.update({"KERNEL_ID": kernel_id, "ADDITIONAL_INFO": json.dumps({"AES_KEY": key})})
                     kernel_id = await super().start_kernel(kernel_id=kernel_id, env=env, **kwargs)
                     STARTED_WITH[kernel_id] = SESSION.get()
-                    LAUNCHED[kernel_id] = Launch(key, env)
+                    # A launcher in a container of its own gives its magic a key of its own, and its restarts, the
+                    # auto-restarter's too, give the kernel new ports and a new key.
+                    provisioner = self.get_kernel(kernel_id).provisioner
+                    LAUNCHED[kernel_id] = Launch(getattr(provisioner, "aes_key", None) or key, env)
+                    if isinstance(provisioner, ContainerProvisioner):
+                        self.add_restart_callback(kernel_id, lambda: self.rebind(kernel_id), "restart")
                     return kernel_id
+
+                async def restart_kernel(self, kernel_id, now=False):
+                    restarted = await super().restart_kernel(kernel_id, now=now)
+                    self.rebind(kernel_id)
+                    return restarted
+
+                # A kernel back on new ports, with a new key, as one in a container of its own after a restart: its
+                # clients move onto them, as jupyter_server moves a client that connects again, and so does its
+                # activity watch.
+                def rebind(self, kernel_id):
+                    if kernel_id not in self or not self.ports_changed(kernel_id):
+                        return
+                    self.stop_watching_activity(kernel_id)
+                    self.start_watching_activity(kernel_id)
+                    kernel = self.get_kernel(kernel_id)
+                    for connection in list(ZMQChannelsWebsocketConnection._open_sockets):
+                        if connection.kernel_id == kernel_id:
+                            for stream in connection.channels.values():
+                                if not stream.closed():
+                                    stream.close()
+                            connection.session.key = kernel.session.key
+                            connection.create_stream()
+                            for stream in connection.channels.values():
+                                stream.on_recv_stream(connection.handle_outgoing_message)
 
                 def remove_kernel(self, kernel_id):
                     STARTED_WITH.pop(kernel_id, None)
@@ -261,6 +474,7 @@ final class EmrContainersGateways {
                         await client.wait_for_ready(timeout=self.kernel_info_timeout)
                     finally:
                         client.stop_channels()
+                    self.rebind(kernel_id)
 
 
             class WithSession:
@@ -343,9 +557,17 @@ final class EmrContainersGateways {
 
                 def init_webapp(self):
                     super().init_webapp()
-                    httpserver.HTTPServer(web.Application([(r"/api/kernels/configure/([^/]+)", ConfigureHandler,
-                                                            {"kernel_manager": self.kernel_manager})])
-                                          ).listen(CONFIGURE_PORT, "127.0.0.1")
+                    configure = web.Application([(r"/api/kernels/configure/([^/]+)", ConfigureHandler,
+                                                  {"kernel_manager": self.kernel_manager})])
+                    httpserver.HTTPServer(configure).listen(CONFIGURE_PORT, "127.0.0.1")
+                    if OVERRIDDEN:
+                        # The magic does not check the certificate; the image's openssl makes one.
+                        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3650",
+                                        "-subj", "/CN=floci-gateway", "-keyout", HOME + "/configure.key",
+                                        "-out", HOME + "/configure.crt"], check=True, capture_output=True)
+                        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                        tls.load_cert_chain(HOME + "/configure.crt", HOME + "/configure.key")
+                        httpserver.HTTPServer(configure, ssl_options=tls).listen(CONFIGURE_TLS_PORT, "0.0.0.0")
 
 
             REPLACED = {kernel_handlers.MainKernelHandler: MainKernelHandler,
@@ -354,7 +576,6 @@ final class EmrContainersGateways {
             for module in (kernel_handlers, session_handlers):
                 module.default_handlers = [(path, REPLACED.get(handler, handler))
                                            for path, handler in module.default_handlers]
-            os.environ["JUPYTER_PATH"] = HOME
             sys.exit(GatewayApp.launch_instance(argv=[
                 "--ServerApp.ip=0.0.0.0", "--ServerApp.port=@PORT@", "--ServerApp.port_retries=0",
                 "--ServerApp.open_browser=False", "--ServerApp.allow_origin=*", "--ServerApp.root_dir=/home/hadoop",
@@ -365,7 +586,10 @@ final class EmrContainersGateways {
                 "--KernelSpecManager.allowed_kernelspecs=spark-scala-kubernetes",
             ] + sys.argv[1:], kernel_manager_class=RemoteMappingKernelManager))
             """.replace("@HOME@", HOME).replace("@PORT@", String.valueOf(PORT))
-            .replace("@PROGRAM_VARIABLE@", PROGRAM_VARIABLE).replace("@SESSION_HEADER@", SESSION_HEADER);
+            .replace("@PROGRAM_VARIABLE@", PROGRAM_VARIABLE).replace("@SESSION_HEADER@", SESSION_HEADER)
+            .replace("@OVERRIDES_VARIABLE@", OVERRIDES_VARIABLE)
+            .replace("@KERNEL_CONTAINERS_VARIABLE@", KERNEL_CONTAINERS_VARIABLE)
+            .replace("@SECRET_VARIABLE@", SECRET_VARIABLE).replace("@SECRET_HEADER@", SECRET_HEADER);
 
     private EmrContainersGateways() {
     }
@@ -384,21 +608,24 @@ final class EmrContainersGateways {
      * driver does, on the image's Python: the virtualenv the image gives a PySpark driver is made on YARN and
      * Kubernetes alone. Their class path gains the AWS SDK that S3A runs on, which the image's own leaves out. The
      * allow-listed properties of the endpoint's {@code jeg-config} classification go to the program as its arguments,
-     * other ones nowhere. As a Spark Connect server does, it checks no token itself: Floci reaches it on the Docker
+     * other ones nowhere. Where its {@code jupyter-kernel-overrides} gives kernels images of their own, the program
+     * learns their names, and where and with {@code secret} it asks Floci for their containers
+     * ({@link #kernelJob}). As a Spark Connect server does, it checks no token itself: Floci reaches it on the Docker
      * host's loopback interface alone, and checks the session token first.
      */
-    static SparkJobRunner.Job job(ObjectNode endpoint, String imageTemplate, String dockerNetwork) {
+    static SparkJobRunner.Job job(ObjectNode endpoint, String imageTemplate, String dockerNetwork, String secret) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(endpoint.get("arn").textValue());
         String releaseLabel = endpoint.get("releaseLabel").textValue();
-        Map<String, String> sparkDefaults =
-                new LinkedHashMap<>(EmrContainersSparkJobs.sparkDefaults(endpoint.get("configurationOverrides")));
-        sparkDefaults.remove(MASTER);
-        sparkDefaults.put(EmrContainersSparkJobs.DEPLOY_MODE, EmrContainersSparkJobs.CLIENT);
-        sparkDefaults.put(PYSPARK_VIRTUALENV, "false");
-        Map<String, String> environment = new LinkedHashMap<>(EmrServerlessJobRunService.environment(sparkDefaults,
-                "spark.kubernetes.driverEnv."));
-        environment.merge(CLASS_PATH_VARIABLE, AWS_SDK, (endpointClassPath, sdk) -> endpointClassPath + ":" + sdk);
+        Map<String, String> sparkDefaults = sparkDefaults(endpoint);
+        Map<String, String> environment = environment(sparkDefaults);
         environment.put(PROGRAM_VARIABLE, PROGRAM);
+        Map<String, String> kernelImages = kernelImages(endpoint);
+        if (!kernelImages.isEmpty()) {
+            environment.put(OVERRIDES_VARIABLE, String.join(",", kernelImages.keySet()));
+            environment.put(KERNEL_CONTAINERS_VARIABLE,
+                    EmrContainersKernelContainersRoute.PATH + endpoint.get("id").textValue() + "/");
+            environment.put(SECRET_VARIABLE, secret);
+        }
         List<String> command = new ArrayList<>(List.of("/bin/bash", "-c", "mkdir -p " + HOME + " && printf '%s' \"$"
                 + PROGRAM_VARIABLE + "\" > " + HOME + "/gateway.py && exec python3 " + HOME + "/gateway.py \"$@\"",
                 "gateway"));
@@ -414,6 +641,84 @@ final class EmrContainersGateways {
                 dockerNetwork, endpoint.get("executionRoleArn").textValue(), sparkDefaults, List.of(), command,
                 Duration.ZERO, null, null, environment, List.of(), null, Map.of(), Map.of(), Map.of(), Map.of(),
                 Map.of(), null).listeningOn(PORT);
+    }
+
+    /**
+     * What runs kernel {@code kernelId} of an endpoint's gateway in a container of its own, run {@code runId}: the
+     * image its {@code jupyter-kernel-overrides} gives the kernel, running Jupyter Enterprise Gateway's launcher there,
+     * which sends where the kernel listens to {@code responseAddress}, encrypted for {@code publicKey}, as it does for
+     * Jupyter Enterprise Gateway. It has the gateway's settings and environment, with the {@code KERNEL_} variables of
+     * {@code kernelEnvironment}; a PySpark kernel's launcher runs under {@code spark-submit}, after
+     * {@code KERNEL_EXTRA_SPARK_OPTS}, and loads the {@code %%configure} magic.
+     */
+    static SparkJobRunner.Job kernelJob(ObjectNode endpoint, String runId, String kernelName, String kernelId,
+                                        String responseAddress, String publicKey,
+                                        Map<String, String> kernelEnvironment, String imageTemplate,
+                                        String dockerNetwork) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(endpoint.get("arn").textValue());
+        String releaseLabel = endpoint.get("releaseLabel").textValue();
+        Map<String, String> sparkDefaults = sparkDefaults(endpoint);
+        Map<String, String> environment = environment(sparkDefaults);
+        kernelEnvironment.forEach((name, value) -> {
+            if (name.startsWith("KERNEL_")) {
+                environment.put(name, value);
+            }
+        });
+        String launch = " " + LAUNCHER + " --kernel-id \"$1\" --response-address \"$2\" --public-key \"$3\""
+                + " --port-range 0..0";
+        List<String> command = PYSPARK_KERNEL.equals(kernelName)
+                ? List.of("/bin/bash", "-c", "exec \"$SPARK_HOME/bin/spark-submit\" $KERNEL_EXTRA_SPARK_OPTS" + launch
+                        + " --spark-context-initialization-mode lazy --cluster-type spark"
+                        + " --RemoteProcessProxy.additional-info \"$4\"",
+                        "kernel", kernelId, responseAddress, publicKey, CONFIGURE_MAGIC_ENABLED)
+                : List.of("/bin/bash", "-c", "exec python3" + launch
+                        + " --spark-context-initialization-mode none --cluster-type none",
+                        "kernel", kernelId, responseAddress, publicKey);
+        return new SparkJobRunner.Job(EmrContainersService.SERVICE, runId, arn.accountId(), arn.region(),
+                releaseLabel, SparkJobRunner.Engine.SPARK, image(imageTemplate, releaseLabel),
+                kernelImages(endpoint).get(kernelName), dockerNetwork, endpoint.get("executionRoleArn").textValue(),
+                sparkDefaults, List.of(), command, Duration.ZERO, null, null, environment, List.of(), null, Map.of(),
+                Map.of(), Map.of(), Map.of(), Map.of(), null);
+    }
+
+    /**
+     * The images an endpoint's {@code jupyter-kernel-overrides} gives its kernels, by kernel name, a later one's
+     * winning; a kernel other than those it may override goes unnamed.
+     */
+    static Map<String, String> kernelImages(ObjectNode endpoint) {
+        Map<String, String> images = new LinkedHashMap<>();
+        for (JsonNode configuration : endpoint.path("configurationOverrides").path("applicationConfiguration")) {
+            if (!KERNEL_OVERRIDES.equals(configuration.path("classification").textValue())) {
+                continue;
+            }
+            for (JsonNode kernel : configuration.path("configurations")) {
+                String name = kernel.path("classification").textValue();
+                JsonNode image = kernel.path("properties").path(CONTAINER_IMAGE);
+                if (OVERRIDABLE_KERNELS.contains(name) && image.isTextual()) {
+                    images.put(name, image.textValue());
+                }
+            }
+        }
+        return images;
+    }
+
+    // The endpoint's spark-defaults as its kernels' spark-submit gets them: in Spark's local mode and client deploy
+    // mode, with no virtualenv.
+    private static Map<String, String> sparkDefaults(ObjectNode endpoint) {
+        Map<String, String> sparkDefaults =
+                new LinkedHashMap<>(EmrContainersSparkJobs.sparkDefaults(endpoint.get("configurationOverrides")));
+        sparkDefaults.remove(MASTER);
+        sparkDefaults.put(EmrContainersSparkJobs.DEPLOY_MODE, EmrContainersSparkJobs.CLIENT);
+        sparkDefaults.put(PYSPARK_VIRTUALENV, "false");
+        return sparkDefaults;
+    }
+
+    // The environment of the endpoint's driver, with the AWS SDK that S3A runs on on its class path.
+    private static Map<String, String> environment(Map<String, String> sparkDefaults) {
+        Map<String, String> environment = new LinkedHashMap<>(EmrServerlessJobRunService.environment(sparkDefaults,
+                "spark.kubernetes.driverEnv."));
+        environment.merge(CLASS_PATH_VARIABLE, AWS_SDK, (endpointClassPath, sdk) -> endpointClassPath + ":" + sdk);
+        return environment;
     }
 
     /**

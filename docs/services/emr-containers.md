@@ -263,5 +263,12 @@ remote kernel lifecycle management capability that interactive clients need" (EM
   `RemoteMappingKernelManager.cull_interval`, "The interval in seconds (integer) on which to check for idle kernels
   that exceed the cull timeout value." As jupyter_server's culler does by default, a kernel with a client connected
   is not culled. Other `jeg-config` properties go nowhere.
-* **Not emulated yet**: `jupyter-kernel-overrides` images. `certificateArn` is kept, and the `serverUrl` is plain HTTP
-  on Floci's port.
+* **`jupyter-kernel-overrides`**: a kernel the overrides give a `container-image`, `python3` or
+  `spark-python-kubernetes` (the kernels the guide's example names, as "You can't add new kernel image types"), runs
+  in a container of that image of its own, as on EMR on EKS each kernel is a pod of its image. The gateway asks Floci
+  for the container, with a secret Floci gives that gateway alone, and the image's Jupyter Enterprise Gateway launcher
+  there sends back where the kernel listens, encrypted for the gateway, which signals it through the launcher. A
+  PySpark kernel's `%%configure` posts to the gateway's port 9547 over TLS, as its `ENDPOINT_IP` says, and the
+  restart gives the kernel a new container, its clients moved onto it. The gateway waits for a kernel's container
+  `KERNEL_LAUNCH_TIMEOUT` seconds, at most the guide's maximum of 400, or 400 when the client gives none.
+* **Not emulated yet**: `certificateArn` is kept, and the `serverUrl` is plain HTTP on Floci's port.
