@@ -471,6 +471,16 @@ public class KmsService implements ResourceProvider {
     public KmsGrant createGrant(String keyId, String granteePrincipal, List<String> operations,
                                 String retiringPrincipal, String name, Map<String, Object> constraints,
                                 String region) {
+        return createGrant(keyId, granteePrincipal, operations, retiringPrincipal, name, constraints, region, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the request passes every check the grant's creation makes, and is
+     * then answered with DryRunOperationException, no grant created.
+     */
+    public KmsGrant createGrant(String keyId, String granteePrincipal, List<String> operations,
+                                String retiringPrincipal, String name, Map<String, Object> constraints,
+                                String region, boolean dryRun) {
         if (keyId == null || keyId.isBlank()) {
             throw new AwsException("ValidationException", "KeyId is required", 400);
         }
@@ -513,6 +523,9 @@ public class KmsService implements ResourceProvider {
         // it (a kms:ViaService condition), never to the account directly.
         requireCustomerManaged(key, "kms:CreateGrant");
         requireNotPendingDeletion(key);
+        if (dryRun) {
+            throw dryRunOperation();
+        }
         String grantId = UUID.randomUUID().toString();
         byte[] tokenBytes = new byte[32];
         secureRandom.nextBytes(tokenBytes);
@@ -531,6 +544,16 @@ public class KmsService implements ResourceProvider {
         grantStore.put(region + "::" + grantId, grant);
         LOG.infov("Created KMS grant: {0} for key {1} in {2}", grantId, key.getKeyId(), region);
         return grant;
+    }
+
+    /**
+     * What KMS answers a dry run with once the request has passed every check the call makes:
+     * DryRunOperationException, with the message KMS answers it with, HTTP 400 as every KMS
+     * client error is; nothing changed and no result returned.
+     */
+    static AwsException dryRunOperation() {
+        return new AwsException("DryRunOperationException",
+                "The request would have succeeded, but the DryRun option is set.", 400);
     }
 
     private static final int DEFAULT_GRANT_LIMIT = 50;
@@ -576,6 +599,15 @@ public class KmsService implements ResourceProvider {
     }
 
     public void revokeGrant(String keyId, String grantId, String region) {
+        revokeGrant(keyId, grantId, region, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the key must exist, and the request is then answered with
+     * DryRunOperationException before the grant is looked up, as AWS answers a dry run naming a grant id
+     * that doesn't exist or that is another key's (measured); no grant is revoked.
+     */
+    public void revokeGrant(String keyId, String grantId, String region, boolean dryRun) {
         if (keyId == null || keyId.isBlank()) {
             throw new AwsException("ValidationException", "KeyId is required", 400);
         }
@@ -585,6 +617,9 @@ public class KmsService implements ResourceProvider {
 
         // Resolve the key to validate it exists
         resolveKey(keyId, region);
+        if (dryRun) {
+            throw dryRunOperation();
+        }
 
         String storageKey = region + "::" + grantId;
         if (grantStore.get(storageKey).isEmpty()) {
@@ -596,6 +631,14 @@ public class KmsService implements ResourceProvider {
     }
 
     public void retireGrant(String grantToken, String keyId, String grantId, String region) {
+        retireGrant(grantToken, keyId, grantId, region, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the grant must be found as the retirement finds it, and the request is
+     * then answered with DryRunOperationException, the grant kept.
+     */
+    public void retireGrant(String grantToken, String keyId, String grantId, String region, boolean dryRun) {
         boolean hasToken = grantToken != null && !grantToken.isBlank();
         boolean hasKeyAndGrant = keyId != null && !keyId.isBlank() && grantId != null && !grantId.isBlank();
 
@@ -623,6 +666,9 @@ public class KmsService implements ResourceProvider {
                             "Grant not found for the given key", 400);
                 }
             }
+            if (dryRun) {
+                throw dryRunOperation();
+            }
 
             grantStore.delete(region + "::" + found.getGrantId());
             LOG.infov("Retired KMS grant: {0} by token in {1}", found.getGrantId(), region);
@@ -634,6 +680,9 @@ public class KmsService implements ResourceProvider {
         String storageKey = region + "::" + grantId;
         if (grantStore.get(storageKey).isEmpty()) {
             throw new AwsException("NotFoundException", "Grant not found: " + grantId, 400);
+        }
+        if (dryRun) {
+            throw dryRunOperation();
         }
         grantStore.delete(storageKey);
         LOG.infov("Retired KMS grant: {0} for key {1} in {2}", grantId, keyId, region);

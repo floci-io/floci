@@ -329,6 +329,39 @@ class KmsKeyArnEnforcementIntegrationTest {
                 .then().statusCode(200).body("Grants.size()", equalTo(0));
     }
 
+    /**
+     * A dry run needs the permission the call does: the key the policy allows answers
+     * DryRunOperationException, and another key AccessDeniedException, and neither dry run creates a grant.
+     */
+    @Test
+    void aDryRunIsAuthorizedAsTheCallIs() {
+        String allowedArn = createKey();
+        String otherArn = createKey();
+        Session session = assumeRoleWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["kms:Encrypt","kms:CreateGrant"],"Resource":"%s"}]}"""
+                .formatted(allowedArn));
+
+        keyCall(session, "Encrypt", dryRun(encryptBody(allowedArn)))
+                .then().statusCode(400).body("__type", equalTo("DryRunOperationException"));
+        keyCall(session, "Encrypt", dryRun(encryptBody(otherArn)))
+                .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
+        keyCall(session, "CreateGrant", dryRun(grantBody(allowedArn)))
+                .then().statusCode(400).body("__type", equalTo("DryRunOperationException"));
+        keyCall(session, "CreateGrant", dryRun(grantBody(otherArn)))
+                .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
+
+        accountCall("ListGrants", "{\"KeyId\": \"" + allowedArn + "\"}")
+                .then().statusCode(200).body("Grants.size()", equalTo(0));
+        accountCall("ListGrants", "{\"KeyId\": \"" + otherArn + "\"}")
+                .then().statusCode(200).body("Grants.size()", equalTo(0));
+    }
+
+    /** {@code body} with {@code "DryRun": true} added. */
+    private static String dryRun(String body) {
+        return RestAssuredJsonUtils.withMember(body, "DryRun", "true");
+    }
+
     private static String decryptOn(String keyArn) {
         return """
                 {"Version":"2012-10-17","Statement":[
@@ -352,13 +385,17 @@ class KmsKeyArnEnforcementIntegrationTest {
                 .then().statusCode(200).extract().path("KeyMetadata.Arn");
     }
 
+    /** A CreateGrant request giving a user of the account Encrypt on {@code keyArn}. */
+    private static String grantBody(String keyArn) {
+        return "{\"KeyId\": \"" + keyArn + "\", \"GranteePrincipal\": \"arn:aws:iam::" + ACCOUNT
+                + ":user/grantee\", \"Operations\": [\"Encrypt\"]}";
+    }
+
     /** The id and the token of a grant the account itself creates on {@code keyArn}. */
     private record Grant(String id, String token) {}
 
     private Grant createGrantOn(String keyArn) {
-        Response created = accountCall("CreateGrant",
-                "{\"KeyId\": \"" + keyArn + "\", \"GranteePrincipal\": \"arn:aws:iam::" + ACCOUNT
-                        + ":user/grantee\", \"Operations\": [\"Encrypt\"]}");
+        Response created = accountCall("CreateGrant", grantBody(keyArn));
         created.then().statusCode(200);
         return new Grant(created.jsonPath().getString("GrantId"),
                 created.jsonPath().getString("GrantToken"));

@@ -248,6 +248,10 @@ there.
 
 Grant lifecycle operations (`CreateGrant`, `ListGrants`, `ListRetirableGrants`, `RevokeGrant`, `RetireGrant`) are supported. However, grant lifecycle support **does not** imply grant-based authorization enforcement on cryptographic operations (`Encrypt`, `Decrypt`, `Sign`, `Verify`, `GenerateDataKey`, etc.). Grants are stored and queryable but are not evaluated during crypto operations.
 
+## DryRun
+
+`CreateGrant`, `RetireGrant`, `RevokeGrant`, `Encrypt`, `Decrypt`, `ReEncrypt`, the four `GenerateDataKey` actions, `Sign`, `Verify`, `GenerateMac` and `VerifyMac` take `DryRun`. A dry run is checked as the call is, so a request the call would refuse keeps its error. One the call would accept is answered with `DryRunOperationException` (HTTP 400) and changes nothing: no grant is created or removed, and no result is returned. `DryRun` is read as AWS reads it: a boolean, or a string naming one in any case (`true`, `yes`, `y`, `t`, `1`, `false`, `no`, `n`, `f`, `0`), with any other value refused with `SerializationException`. `DryRunModifiers` is not read, so a `Decrypt` or `ReEncrypt` dry run always checks its ciphertext.
+
 ## IAM Enforcement
 
 With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, a KMS request is checked as AWS checks it, read from the generated tables like other services' requests. An operation that names a key is evaluated against that key's ARN. A `KeyId` given as a key id, an alias name, an alias ARN or a key ARN resolves to the key it names, whatever the key's state, so a policy scoped to one key ARN allows that key and no other, and a `Deny` scoped to one fires for that key. A key KMS holds none of is checked on its id in the request's partition. A `Decrypt` that names no `KeyId` is evaluated against the key that encrypted its `CiphertextBlob`, as the [API reference](https://docs.aws.amazon.com/kms/latest/APIReference/API_Decrypt.html) says KMS reads it from the ciphertext's metadata. A request whose ciphertext names no key KMS holds is checked on `*`.

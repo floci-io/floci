@@ -70,6 +70,14 @@ public class RestAssuredJsonUtils {
         return OBJECT_MAPPER.readTree(response);
     }
 
+    /**
+     * {@code jsonObject}, a request body written as one JSON object, with {@code member} added holding
+     * {@code rawValue}, written as it goes into the body.
+     */
+    public static String withMember(String jsonObject, String member, String rawValue) {
+        return jsonObject.substring(0, jsonObject.lastIndexOf('}')) + ", \"" + member + "\": " + rawValue + "}";
+    }
+
 }
 
 /**

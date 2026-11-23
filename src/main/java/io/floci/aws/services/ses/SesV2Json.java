@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
+import io.floci.aws.core.common.JsonBooleanCoercion;
 import io.floci.aws.core.common.JsonNumberCoercion;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.services.ses.model.Tag;
@@ -15,7 +16,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.function.Predicate;
 
@@ -165,12 +165,7 @@ final class SesV2Json {
             return node.booleanValue();
         }
         if (node.isTextual()) {
-            return switch (node.textValue().toLowerCase(Locale.ROOT)) {
-                case "true", "yes", "y", "t", "1" -> true;
-                case "false", "no", "n", "f", "0" -> false;
-                default -> throw new AwsException(SERIALIZATION_EXCEPTION,
-                        "STRING_VALUE can not be converted to an Boolean", 400);
-            };
+            return JsonBooleanCoercion.fromString(node.textValue());
         }
         if (node.isNull()) {
             throw new AwsException(SERIALIZATION_EXCEPTION, null, 400);
