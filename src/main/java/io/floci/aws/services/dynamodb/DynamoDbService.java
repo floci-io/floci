@@ -2406,28 +2406,43 @@ public class DynamoDbService {
         return new TransactParticipant(storageKey, itemKey, tableName);
     }
 
-    // AWS checks every member's key against the table schema, in order, before it looks for
-    // duplicate items or evaluates a condition. The first mismatch cancels with that member's
-    // reason alone. An empty key value still fails the whole request.
-    void cancelOnKeySchemaMismatch(List<JsonNode> transactItems, String region) {
+    // AWS looks up every member's table first, in order. Then it walks the members in order.
+    // A Put checks its item size, then its key. Any other member checks its key, then an Update
+    // checks its statement size. A key mismatch cancels with that member's reason alone. An
+    // oversized item or statement fails the whole request. All of this runs before the duplicate
+    // item check and before any condition. An empty key value still fails the whole request.
+    void validateTransactMemberKeysAndSizes(List<JsonNode> transactItems, String region) {
+        for (JsonNode transactItem : transactItems) {
+            JsonNode target = transactTarget(transactItem);
+            if (target != null) {
+                requireActiveTable(regionKey(region, canonicalTableName(region, target.path("TableName").asText())));
+            }
+        }
         for (int i = 0; i < transactItems.size(); i++) {
             try {
-                validateTransactMemberKey(transactItems.get(i), region);
+                validateTransactMember(transactItems.get(i), region);
             } catch (KeySchemaMismatchException e) {
                 throw cancelledByMember(transactItems.size(), i, e.getMessage());
             }
         }
     }
 
-    private void validateTransactMemberKey(JsonNode transactItem, String region) {
-        boolean isPut = transactItem.has("Put");
-        JsonNode target = isPut ? transactItem.get("Put")
+    private static JsonNode transactTarget(JsonNode transactItem) {
+        return transactItem.has("Put") ? transactItem.get("Put")
                 : transactItem.has("Update") ? transactItem.get("Update")
                 : transactItem.has("Delete") ? transactItem.get("Delete")
                 : transactItem.get("ConditionCheck");
+    }
+
+    private void validateTransactMember(JsonNode transactItem, String region) {
+        boolean isPut = transactItem.has("Put");
+        JsonNode target = transactTarget(transactItem);
         JsonNode key = target == null ? null : target.get(isPut ? "Item" : "Key");
         if (key == null) {
             return;
+        }
+        if (isPut) {
+            DynamoDbItemSize.validateSize(DynamoDbNumberUtils.normalizeNumbersInItem(key));
         }
         String tableName = canonicalTableName(region, target.path("TableName").asText());
         TableDefinition table = requireActiveTable(regionKey(region, tableName));
@@ -2444,6 +2459,11 @@ public class DynamoDbService {
         buildItemKey(table, key, isPut ? KeySurface.ITEM_BODY : KeySurface.KEY_ARGUMENT);
         if (isPut) {
             validateIndexKeyTypes(table, key, false);
+        } else if (transactItem.has("Update") && target.has("UpdateExpression")) {
+            JsonNode names = target.get("ExpressionAttributeNames");
+            DynamoDbItemSize.updateStatementSize(target.get("UpdateExpression").asText(),
+                    path -> parsePath(path, names), target.get("ExpressionAttributeValues"))
+                    .ifPresent(DynamoDbService::requireUpdateStatementWithinSizeLimit);
         }
     }
 
