@@ -768,6 +768,31 @@ does not enable it; omitted or false values keep the simulated behavior.
 | `FLOCI_SERVICES_EKS_IMDS` | `false` | Enable link-local IMDS (`169.254.169.254`) proxy in cluster containers |
 | `FLOCI_SERVICES_EKS_EMBEDDED_DNS` | `true` | Inject Floci's embedded DNS server into cluster containers for Route 53 private hosted zones and internal name resolution |
 | `FLOCI_SERVICES_EKS_VPC_ROUTE_PROGRAMMING` | `true` | Program emulated VPC route table entries into k3s cluster containers |
+| `FLOCI_SERVICES_EKS_VPC_POD_NETWORK` | `false` | Lease IPv4 `/28` prefixes of the node's subnet onto its network interface, as the VPC CNI's prefix delegation does (see [VPC pod prefixes](#vpc-pod-prefixes)) |
+| `FLOCI_SERVICES_EKS_VPC_POD_PREFIXES` | `2` | How many `/28` prefixes a node holds with `FLOCI_SERVICES_EKS_VPC_POD_NETWORK` |
+
+### VPC pod prefixes
+
+With `FLOCI_SERVICES_EKS_VPC_POD_NETWORK=true`, a node holding an address in a Docker-backed subnet also leases IPv4 `/28`
+prefixes of that subnet, as the Amazon VPC CNI plugin's prefix delegation assigns them to a node's network interface.
+The node's interface lists them in `ipv4PrefixSet`, on `DescribeInstances` and `DescribeNetworkInterfaces`, where the AWS
+Load Balancer Controller looks for the interface behind a pod address.
+
+- **Count**: `FLOCI_SERVICES_EKS_VPC_POD_PREFIXES`, two by default: under the VPC CNI's default `WARM_PREFIX_TARGET` of
+  one, which keeps one prefix wholly free, a node running pods holds two. With the setting on, Floci refuses to start
+  unless the count is between 1 and 16. A subnet without enough free `/28` blocks leaves the node the ones it could
+  lease, with a warning.
+- **Placement**: prefixes are taken from the top of the subnet down, clear of the subnet's last address, which AWS
+  reserves, and of every address an instance, interface, gateway, endpoint or container already holds. A container
+  Floci joins to the VPC's network without an address of its own, Floci itself or a node holding no subnet address, takes the
+  lowest address of the VPC's range that nothing leases or holds, so it never lands in a prefix. When Docker cannot say
+  which addresses its containers hold, no prefix is leased or re-reserved, with a warning.
+- **Held addresses**: a prefix's sixteen addresses count as held, so no instance or interface gets one, and
+  `DescribeSubnets` leaves them out of `AvailableIpAddressCount`.
+- **Lifecycle**: the node keeps its prefixes across a restart, re-reserving them as it re-reserves its address, and leases
+  new ones only for those another holder took meanwhile. An adopted node keeps the prefixes it was started with and
+  leases no others; a container that replaces it later leases the ones it lacks. Deleting the cluster, or a first start that falls back to the bridge network, gives them back.
+- Pods keep their addresses from the cluster's pod CIDR (`10.42.0.0/16`).
 
 ### Kubernetes versions and network configuration
 

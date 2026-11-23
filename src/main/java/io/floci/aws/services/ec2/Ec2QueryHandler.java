@@ -5526,6 +5526,7 @@ public class Ec2QueryHandler {
             xml.elem("ipv6Address", ni.getIpv6Addresses().getFirst());
         }
         xml.raw(ipv6AddressesSetXml(ni.getIpv6Addresses()));
+        xml.raw(ipv4PrefixSetXml(ni.getIpv4Prefixes()));
         return xml.build();
     }
 
@@ -5539,6 +5540,18 @@ public class Ec2QueryHandler {
             xml.start("item").elem("ipv6Address", address).elem("isPrimaryIpv6", "false").end("item");
         }
         return xml.end("ipv6AddressesSet").build();
+    }
+
+    /** The IPv4 prefixes delegated to an interface, as {@code ipv4PrefixSet}; nothing for an interface with none. */
+    private static String ipv4PrefixSetXml(List<String> prefixes) {
+        if (prefixes == null || prefixes.isEmpty()) {
+            return "";
+        }
+        XmlBuilder xml = new XmlBuilder().start("ipv4PrefixSet");
+        for (String prefix : prefixes) {
+            xml.start("item").elem("ipv4Prefix", prefix).end("item");
+        }
+        return xml.end("ipv4PrefixSet").build();
     }
 
     private static String networkInterfaceAssociationXml(NetworkInterfaceAssociation association) {
@@ -5843,6 +5856,7 @@ public class Ec2QueryHandler {
                     .end("item")
                     .end("privateIpAddressesSet")
                     .raw(ipv6AddressesSetXml(eni.getIpv6Addresses()))
+                    .raw(ipv4PrefixSetXml(eni.getIpv4Prefixes()))
                     .end("item");
         }
         xml.end("networkInterfaceSet");

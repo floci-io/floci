@@ -226,6 +226,8 @@ public class EksClusterManager
     private record VpcLease(String accountId, String region, String vpcId, String subnetId, String address) {}
     private record ClusterVpcSubnet(String vpcId, String subnetId) {}
     private final Map<String, VpcLease> clusterVpcLeases = new ConcurrentHashMap<>();
+    /** The IPv4 /28 prefixes leased for each cluster node's pods, by cluster resource name. */
+    private final Map<String, List<String>> clusterPodPrefixes = new ConcurrentHashMap<>();
     /**
      * The k3s containers whose guest setup waits for their API server to answer, by container ID. On a cgroup v2
      * host, k3s moves the root cgroup's processes into {@code /init} and then enables the cgroup controllers, which
@@ -319,6 +321,47 @@ public class EksClusterManager
 
     private VpcLease acquireClusterVpcLease(Cluster cluster, String accountId, String region,
                                             boolean allocateWhenUnreserved) {
+        VpcLease lease = acquireNodeAddressLease(cluster, accountId, region, allocateWhenUnreserved);
+        if (lease != null) {
+            leasePodPrefixes(cluster, lease, allocateWhenUnreserved);
+        }
+        return lease;
+    }
+
+    /**
+     * With {@code vpc-pod-network}, leases the node's IPv4 /28 prefixes in its subnet: those it held before a restart,
+     * when they are still free, and new ones up to {@code vpc-pod-prefixes} when {@code allocate}. An adopted container
+     * does not allocate, as it keeps handing out the prefixes it was started with; a container started later on the
+     * same lease, one replacing it among them, tops the list up. Without the setting the node holds none.
+     */
+    private void leasePodPrefixes(Cluster cluster, VpcLease lease, boolean allocate) {
+        String resourceName = clusterResourceName(cluster);
+        Ec2Service ec2 = ec2Service();
+        if (!config.services().eks().vpcPodNetwork() || ec2 == null) {
+            cluster.setNodePodPrefixes(null);
+            return;
+        }
+        List<String> prefixes = clusterPodPrefixes.get(resourceName);
+        if (prefixes == null) {
+            List<String> held = cluster.getNodePodPrefixes();
+            prefixes = new ArrayList<>(held == null || held.isEmpty() ? List.of()
+                    : ec2.reserveVpcPrefixes(lease.accountId(), lease.region(), lease.subnetId(), held));
+            clusterPodPrefixes.put(resourceName, prefixes);
+        }
+        int wanted = config.services().eks().vpcPodPrefixes();
+        if (allocate && prefixes.size() < wanted) {
+            prefixes.addAll(ec2.allocateVpcPrefixes(lease.accountId(), lease.region(), lease.subnetId(),
+                    wanted - prefixes.size()));
+            if (prefixes.size() < wanted) {
+                LOG.warnv("EKS cluster {0} holds {1} of its {2} pod prefixes: subnet {3} has no other free /28",
+                        cluster.getName(), prefixes.size(), wanted, lease.subnetId());
+            }
+        }
+        cluster.setNodePodPrefixes(prefixes.isEmpty() ? null : new ArrayList<>(prefixes));
+    }
+
+    private VpcLease acquireNodeAddressLease(Cluster cluster, String accountId, String region,
+                                             boolean allocateWhenUnreserved) {
         ClusterVpcSubnet subnet = resolveClusterSubnet(cluster);
         if (subnet == null) {
             return null;
@@ -366,9 +409,14 @@ public class EksClusterManager
 
     private void releaseClusterVpcLease(Cluster cluster, String resourceName) {
         VpcLease lease = clusterVpcLeases.remove(resourceName);
+        List<String> prefixes = clusterPodPrefixes.remove(resourceName);
         Ec2Service ec2 = ec2Service();
         if (lease != null && ec2 != null) {
             ec2.releaseVpcPrivateIp(lease.accountId(), lease.region(), lease.subnetId(), lease.address());
+            if (prefixes != null) {
+                prefixes.forEach(prefix -> ec2.releaseVpcPrefix(lease.accountId(), lease.region(), lease.subnetId(),
+                        prefix));
+            }
         }
     }
 
@@ -708,6 +756,7 @@ public class EksClusterManager
         String resourceName = clusterResourceName(cluster);
         boolean hadLeaseBeforeLaunch = clusterVpcLeases.containsKey(resourceName);
         String previousNodeIp = cluster != null ? cluster.getNodePrivateIp() : null;
+        List<String> previousPodPrefixes = cluster != null ? cluster.getNodePodPrefixes() : null;
         VpcLease vpcLease = acquireClusterVpcLease(cluster, labelAccountId, clusterRegion);
         String nodeIp = vpcLease != null ? vpcLease.address() : null;
         String restoredNodeIp = (previousNodeIp != null && !previousNodeIp.isBlank()
@@ -884,6 +933,7 @@ public class EksClusterManager
                 releaseClusterVpcLease(cluster, resourceName);
                 if (cluster != null) {
                     cluster.setNodePrivateIp(restoredNodeIp);
+                    cluster.setNodePodPrefixes(restoredNodeIp != null ? previousPodPrefixes : null);
                 }
             }
             throw e;
@@ -908,6 +958,7 @@ public class EksClusterManager
                 releaseClusterVpcLease(cluster, resourceName);
                 if (cluster != null) {
                     cluster.setNodePrivateIp(null);
+                    cluster.setNodePodPrefixes(null);
                 }
                 vpcLease = null;
                 lifecycleManager.removeIfExistsStrict(containerName, true);
@@ -961,6 +1012,7 @@ public class EksClusterManager
                 releaseClusterVpcLease(cluster, resourceName);
                 if (cluster != null) {
                     cluster.setNodePrivateIp(restoredNodeIp);
+                    cluster.setNodePodPrefixes(restoredNodeIp != null ? previousPodPrefixes : null);
                 }
             }
             throw e;
@@ -3574,6 +3626,9 @@ public class EksClusterManager
         eni.setPrivateIpAddress(inst.getPrivateIpAddress());
         eni.setPrivateDnsName(inst.getPrivateDnsName());
         eni.setGroups(new ArrayList<>(groups));
+        if (cluster.getNodePodPrefixes() != null) {
+            eni.setIpv4Prefixes(new ArrayList<>(cluster.getNodePodPrefixes()));
+        }
         eni.setAttachmentId(deriveClusterNodeInterfaceAttachmentId(cluster, region, accountId));
         eni.setDeviceIndex(0);
         inst.getNetworkInterfaces().add(eni);

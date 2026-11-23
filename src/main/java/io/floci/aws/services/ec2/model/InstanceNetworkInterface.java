@@ -22,6 +22,7 @@ public class InstanceNetworkInterface {
     private boolean sourceDestCheck = true;
     private List<GroupIdentifier> groups = new ArrayList<>();
     private List<String> ipv6Addresses = new ArrayList<>();
+    private List<String> ipv4Prefixes = new ArrayList<>();
     private String attachmentId;
     private int deviceIndex;
     private String attachTime;
@@ -77,6 +78,9 @@ public class InstanceNetworkInterface {
     public List<String> getIpv6Addresses() { return ipv6Addresses; }
     public void setIpv6Addresses(List<String> ipv6Addresses) { this.ipv6Addresses = ipv6Addresses; }
 
+    public List<String> getIpv4Prefixes() { return ipv4Prefixes; }
+    public void setIpv4Prefixes(List<String> ipv4Prefixes) { this.ipv4Prefixes = ipv4Prefixes; }
+
     /** A copy with lists of its own, so a change to the copy does not reach this interface. */
     public InstanceNetworkInterface copy() {
         InstanceNetworkInterface copy = new InstanceNetworkInterface();
@@ -92,6 +96,7 @@ public class InstanceNetworkInterface {
         copy.sourceDestCheck = sourceDestCheck;
         copy.groups = new ArrayList<>(groups);
         copy.ipv6Addresses = new ArrayList<>(ipv6Addresses);
+        copy.ipv4Prefixes = new ArrayList<>(ipv4Prefixes);
         copy.attachmentId = attachmentId;
         copy.deviceIndex = deviceIndex;
         copy.attachTime = attachTime;

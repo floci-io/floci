@@ -507,6 +507,95 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         });
     }
 
+    /**
+     * Leases up to {@code count} IPv4 /28 prefixes of a Docker-backed subnet none of whose addresses anything else holds,
+     * the way a network interface is delegated them, for a container that hands their addresses out itself (an EKS
+     * cluster node's pods). Their addresses count as held from then on, so no instance, interface or other prefix gets
+     * one. Docker is asked which addresses its containers hold once, before {@link #privateIpAllocationLock} is taken,
+     * and nothing is leased when it cannot say.
+     *
+     * @return the prefixes leased: fewer when the subnet has no other free one, none when it is not Docker-backed
+     */
+    public List<String> allocateVpcPrefixes(String accountId, String region, String subnetId, int count) {
+        if (vpcNetworkManager == null || count <= 0) {
+            return List.of();
+        }
+        return RequestScopes.callAs(accountId, region, () -> {
+            Optional<Set<String>> attached = vpcNetworkManager.networkEndpointAddresses(callerAccountId(), region,
+                    subnetId);
+            if (attached.isEmpty()) {
+                return List.<String>of();
+            }
+            synchronized (privateIpAllocationLock) {
+                Set<String> held = new HashSet<>(privateIpsHeldOnVpcNetwork(region, subnetId));
+                held.addAll(attached.get());
+                List<String> leased = new ArrayList<>();
+                for (Cidr4 prefix : vpcNetworkManager.allocatePrefixes(callerAccountId(), region, subnetId, count, held)) {
+                    holdPrefixAddresses(region, subnetId, prefix);
+                    leased.add(prefix.toString());
+                }
+                return leased;
+            }
+        });
+    }
+
+    /**
+     * Re-claims prefixes a persisted container holder leased before a restart, as {@link #reserveVpcPrivateIp} does an
+     * address, skipping one an instance, interface or container holds an address of now. Docker is asked as
+     * {@link #allocateVpcPrefixes} asks it, and nothing is reserved when it cannot say.
+     *
+     * @return the prefixes reserved
+     */
+    public List<String> reserveVpcPrefixes(String accountId, String region, String subnetId, List<String> prefixes) {
+        if (vpcNetworkManager == null || subnetId == null || prefixes == null || prefixes.isEmpty()) {
+            return List.of();
+        }
+        return RequestScopes.callAs(accountId, region, () -> {
+            Optional<Set<String>> attached = vpcNetworkManager.networkEndpointAddresses(callerAccountId(), region,
+                    subnetId);
+            if (attached.isEmpty()) {
+                return List.<String>of();
+            }
+            synchronized (privateIpAllocationLock) {
+                Set<String> held = new HashSet<>(privateIpsHeldOnVpcNetwork(region, subnetId));
+                held.addAll(attached.get());
+                List<String> reserved = new ArrayList<>();
+                for (String prefix : prefixes) {
+                    Optional<Cidr4> parsed = Cidr4.parse(prefix);
+                    if (parsed.isPresent()
+                            && vpcNetworkManager.reservePrefix(callerAccountId(), region, subnetId, parsed.get(), held)) {
+                        holdPrefixAddresses(region, subnetId, parsed.get());
+                        reserved.add(prefix);
+                    }
+                }
+                return reserved;
+            }
+        });
+    }
+
+    public void releaseVpcPrefix(String accountId, String region, String subnetId, String prefix) {
+        Optional<Cidr4> parsed = prefix == null ? Optional.empty() : Cidr4.parse(prefix);
+        if (parsed.isEmpty()) {
+            return;
+        }
+        List<String> addresses = VpcNetworkManager.prefixAddresses(parsed.get().network());
+        RequestScopes.runAs(accountId, region, () -> {
+            synchronized (privateIpAllocationLock) {
+                containerPrivateIps.computeIfPresent(containerKey(region, subnetId), (ignored, held) -> {
+                    held.removeAll(addresses);
+                    return held.isEmpty() ? null : held;
+                });
+                releasePrivateIps(region, subnetId, addresses);
+            }
+        });
+    }
+
+    /** Counts a leased prefix's addresses as a container's. The caller holds {@link #privateIpAllocationLock}. */
+    private void holdPrefixAddresses(String region, String subnetId, Cidr4 prefix) {
+        containerPrivateIps.computeIfAbsent(containerKey(region, subnetId), ignored -> new HashSet<>())
+                .addAll(VpcNetworkManager.prefixAddresses(prefix.network()));
+    }
+
     public void detachContainerFromVpc(String accountId, String region, String vpcId, String containerId) {
         if (vpcNetworkManager != null) {
             RequestScopes.runAs(accountId, region,
@@ -16911,6 +17000,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         ni.setSourceDestCheck(eni.isSourceDestCheck());
         ni.setGroups(new ArrayList<>(eni.getGroups()));
         ni.setIpv6Addresses(new ArrayList<>(eni.getIpv6Addresses()));
+        ni.setIpv4Prefixes(new ArrayList<>(eni.getIpv4Prefixes()));
         if (inst.getPlacement() != null) {
             ni.setAvailabilityZone(inst.getPlacement().getAvailabilityZone());
         }

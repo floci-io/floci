@@ -64,6 +64,7 @@ import io.floci.aws.services.ec2.model.Vpc;
 import io.floci.aws.services.ec2.model.VpcCidrBlockAssociation;
 import io.floci.aws.services.ec2.model.VpcEndpoint;
 import io.floci.aws.services.ec2.model.VpcEndpointSubnetConfiguration;
+import io.floci.aws.services.ec2.net.Cidr4;
 import io.floci.aws.services.ec2.net.VpcNetworkManager;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.testing.ParkingStore;
@@ -144,6 +145,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -2988,6 +2990,57 @@ class Ec2ServiceTest {
         assertEquals("InsufficientFreeAddressesInSubnet", e.getErrorCode());
         verify(fixture.vpcNetworks()).releasePrivateIp("000000000000", "us-east-1", fixture.subnetId(), "10.60.0.5");
         assertTrue(fixture.service().describeNatGateways("us-east-1", List.of(), Map.of()).isEmpty());
+    }
+
+    /** Prefixes leased for a container's own addresses hold all their addresses until they are released. */
+    @Test
+    void leasedPrefixesHoldTheirAddressesUntilReleased() {
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.60.0.0/24");
+        Ec2Service service = fixture.service();
+        when(fixture.vpcNetworks().networkEndpointAddresses("000000000000", "us-east-1", fixture.subnetId()))
+                .thenReturn(Optional.of(Set.of("10.60.0.250")));
+        when(fixture.vpcNetworks().allocatePrefixes(eq("000000000000"), eq("us-east-1"), eq(fixture.subnetId()),
+                eq(2), any())).thenReturn(List.of(Cidr4.parse("10.60.0.224/28").orElseThrow(),
+                Cidr4.parse("10.60.0.208/28").orElseThrow()));
+        when(fixture.vpcNetworks().reservePrefix(eq("000000000000"), eq("us-east-1"), eq(fixture.subnetId()),
+                eq(Cidr4.parse("10.60.0.192/28").orElseThrow()), any())).thenReturn(true);
+        int before = service.describeSubnets("us-east-1", List.of(fixture.subnetId()), Map.of()).getFirst()
+                .getAvailableIpAddressCount();
+
+        assertEquals(List.of("10.60.0.224/28", "10.60.0.208/28"),
+                service.allocateVpcPrefixes("000000000000", "us-east-1", fixture.subnetId(), 2));
+        assertEquals(List.of("10.60.0.192/28"), service.reserveVpcPrefixes("000000000000", "us-east-1",
+                fixture.subnetId(), List.of("10.60.0.192/28")));
+
+        assertEquals(before - 48, service.describeSubnets("us-east-1", List.of(fixture.subnetId()), Map.of())
+                .getFirst().getAvailableIpAddressCount());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Set<String>> held = ArgumentCaptor.forClass(Set.class);
+        verify(fixture.vpcNetworks()).reservePrefix(eq("000000000000"), eq("us-east-1"), eq(fixture.subnetId()),
+                any(), held.capture());
+        assertTrue(held.getValue().containsAll(List.of("10.60.0.250", "10.60.0.224", "10.60.0.239")),
+                "the reservation sees the container's address and the prefixes leased before it as held");
+
+        for (String prefix : List.of("10.60.0.224/28", "10.60.0.208/28", "10.60.0.192/28")) {
+            service.releaseVpcPrefix("000000000000", "us-east-1", fixture.subnetId(), prefix);
+        }
+        assertEquals(before, service.describeSubnets("us-east-1", List.of(fixture.subnetId()), Map.of()).getFirst()
+                .getAvailableIpAddressCount());
+        verify(fixture.vpcNetworks()).releasePrivateIp("000000000000", "us-east-1", fixture.subnetId(), "10.60.0.230");
+    }
+
+    /** Without knowing which addresses Docker's containers hold, no prefix is leased or reserved. */
+    @Test
+    void noPrefixIsLeasedOrReservedWhenDockerCannotSayWhichAddressesItsContainersHold() {
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.60.0.0/24");
+        when(fixture.vpcNetworks().networkEndpointAddresses("000000000000", "us-east-1", fixture.subnetId()))
+                .thenReturn(Optional.empty());
+
+        assertTrue(fixture.service().allocateVpcPrefixes("000000000000", "us-east-1", fixture.subnetId(), 1).isEmpty());
+        assertTrue(fixture.service().reserveVpcPrefixes("000000000000", "us-east-1", fixture.subnetId(),
+                List.of("10.60.0.224/28")).isEmpty());
+        verify(fixture.vpcNetworks(), never()).allocatePrefixes(any(), any(), any(), anyInt(), any());
+        verify(fixture.vpcNetworks(), never()).reservePrefix(any(), any(), any(), any(), any());
     }
 
     /** The same on a secondary-address update, which also leaves the gateway as it was. */
