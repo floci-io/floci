@@ -377,6 +377,13 @@ public class EksController {
                                     + " through UpdateClusterConfig yet", 400);
                 }
             }
+            for (String member : (Iterable<String>) network.path("elasticLoadBalancing")::fieldNames) {
+                if (!"enabled".equals(member)) {
+                    throw new AwsException("InvalidParameterException",
+                            "Floci does not support updating kubernetesNetworkConfig.elasticLoadBalancing." + member
+                                    + " through UpdateClusterConfig yet", 400);
+                }
+            }
             long families = UPDATE_CONFIG_FAMILIES.stream().filter(body::has).count()
                     + (AUTO_MODE_MEMBERS.stream().anyMatch(body::has) ? 1 : 0);
             if (families > 1) {

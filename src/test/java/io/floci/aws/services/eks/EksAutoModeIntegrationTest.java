@@ -11,6 +11,7 @@ import java.util.UUID;
 import static io.floci.aws.testing.EksRequests.eks;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
@@ -148,6 +149,79 @@ class EksAutoModeIntegrationTest {
                     .body("__type", equalTo("InvalidParameterException"))
                     .body("message", equalTo("Only one type of update can be allowed."));
             assertAutoModeEnabled(eks(ACCOUNT, REGION).get("/clusters/" + name).then());
+        } finally {
+            eks(ACCOUNT, REGION).delete("/clusters/" + name).then().statusCode(200);
+        }
+    }
+
+    @Test
+    void turningOffTheBuiltInNodePoolsWithoutANodeRoleKeepsTheRole() {
+        String name = "auto-pools-" + UUID.randomUUID().toString().substring(0, 8);
+        eks(ACCOUNT, REGION).body(cluster(name, true, true, true)).post("/clusters").then().statusCode(200);
+        try {
+            // AWS's own example (set-builtin-node-pools) turns both built-in pools off with no node role.
+            eks(ACCOUNT, REGION).body("""
+                    {"computeConfig":{"enabled":true,"nodePools":[]},
+                     "kubernetesNetworkConfig":{"elasticLoadBalancing":{"enabled":true}},
+                     "storageConfig":{"blockStorage":{"enabled":true}}}""")
+                    .post("/clusters/" + name + "/update-config").then().statusCode(200)
+                    .body("update.type", equalTo("AutoModeUpdate"));
+            eks(ACCOUNT, REGION).get("/clusters/" + name).then().statusCode(200)
+                    .body("cluster.computeConfig.enabled", equalTo(true))
+                    .body("cluster.computeConfig.nodePools", empty())
+                    .body("cluster.computeConfig.nodeRoleArn", equalTo(NODE_ROLE));
+        } finally {
+            eks(ACCOUNT, REGION).delete("/clusters/" + name).then().statusCode(200);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            // turning compute off alone would leave block storage and load balancing on
+            "{\"computeConfig\":{\"enabled\":false}}|For EKS Auto Mode, please ensure that all required configs, "
+                    + "including computeConfig, kubernetesNetworkConfig, and blockStorage are all either fully "
+                    + "enabled or fully disabled.",
+            // a load balancing member Floci does not apply
+            "{\"kubernetesNetworkConfig\":{\"elasticLoadBalancing\":{\"enabled\":true,\"gatewayApi\":{}}}}"
+                    + "|Floci does not support updating kubernetesNetworkConfig.elasticLoadBalancing.gatewayApi "
+                    + "through UpdateClusterConfig yet",
+            // a node pool that is null
+            "{\"computeConfig\":{\"enabled\":true,\"nodePools\":[null],\"nodeRoleArn\":\""
+                    + "arn:aws:iam::864208642086:role/eks-auto-node\"},"
+                    + "\"storageConfig\":{\"blockStorage\":{\"enabled\":true}},"
+                    + "\"kubernetesNetworkConfig\":{\"elasticLoadBalancing\":{\"enabled\":true}}}"
+                    + "|nodePools must not contain null"
+    })
+    void anAutoModeUpdateFlociCannotApplyWholeIsRefusedAndChangesNothing(String body, String message) {
+        String name = "auto-whole-" + UUID.randomUUID().toString().substring(0, 8);
+        eks(ACCOUNT, REGION).body(cluster(name, true, true, true)).post("/clusters").then().statusCode(200);
+        try {
+            eks(ACCOUNT, REGION).body(body).post("/clusters/" + name + "/update-config").then().statusCode(400)
+                    .body("__type", equalTo("InvalidParameterException"))
+                    .body("message", equalTo(message));
+            assertAutoModeEnabled(eks(ACCOUNT, REGION).get("/clusters/" + name).then());
+        } finally {
+            eks(ACCOUNT, REGION).delete("/clusters/" + name).then().statusCode(200);
+        }
+    }
+
+    @Test
+    void omittedAndEmptyNodePoolsAreTheSameConfiguration() {
+        String name = "auto-nopools-" + UUID.randomUUID().toString().substring(0, 8);
+        eks(ACCOUNT, REGION).body("""
+                {"name":"%s","roleArn":"arn:aws:iam::%s:role/eks-auto-cluster",
+                 "computeConfig":{"enabled":true},
+                 "storageConfig":{"blockStorage":{"enabled":true}},
+                 "kubernetesNetworkConfig":{"elasticLoadBalancing":{"enabled":true}}}""".formatted(name, ACCOUNT))
+                .post("/clusters").then().statusCode(200);
+        try {
+            eks(ACCOUNT, REGION).body("""
+                    {"computeConfig":{"enabled":true,"nodePools":[]},
+                     "storageConfig":{"blockStorage":{"enabled":true}},
+                     "kubernetesNetworkConfig":{"elasticLoadBalancing":{"enabled":true}}}""")
+                    .post("/clusters/" + name + "/update-config").then().statusCode(400)
+                    .body("__type", equalTo("InvalidRequestException"))
+                    .body("message", equalTo("No changes needed for EKS Auto Mode configuration provided"));
         } finally {
             eks(ACCOUNT, REGION).delete("/clusters/" + name).then().statusCode(200);
         }

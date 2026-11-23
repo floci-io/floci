@@ -777,18 +777,31 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
      */
     private static void validateAutoMode(ComputeConfig compute, StorageConfig storage,
                                          KubernetesNetworkConfig network) {
+        requireCapabilitiesTogether(compute, storage, elasticLoadBalancing(network));
+        requireNodePoolsWithRole(compute);
+    }
+
+    /** The compute, block storage and load balancing capabilities are on together or off together. */
+    private static void requireCapabilitiesTogether(ComputeConfig compute, StorageConfig storage,
+                                                    ElasticLoadBalancing loadBalancing) {
         boolean computeEnabled = compute != null && Boolean.TRUE.equals(compute.enabled());
         boolean blockStorageEnabled = storage != null && storage.blockStorage() != null
                 && Boolean.TRUE.equals(storage.blockStorage().enabled());
-        boolean loadBalancingEnabled = network != null && network.getElasticLoadBalancing() != null
-                && Boolean.TRUE.equals(network.getElasticLoadBalancing().enabled());
+        boolean loadBalancingEnabled = loadBalancing != null && Boolean.TRUE.equals(loadBalancing.enabled());
         if (computeEnabled != blockStorageEnabled || computeEnabled != loadBalancingEnabled) {
             throw new AwsException("InvalidParameterException", "For EKS Auto Mode, please ensure that all "
                     + "required configs, including computeConfig, kubernetesNetworkConfig, and blockStorage are "
                     + "all either fully enabled or fully disabled.", 400);
         }
+    }
+
+    /** Node pools launch their nodes with the node role, so a compute configuration naming pools names it. */
+    private static void requireNodePoolsWithRole(ComputeConfig compute) {
         if (compute == null) {
             return;
+        }
+        if (compute.nodePools() != null && compute.nodePools().stream().anyMatch(Objects::isNull)) {
+            throw new AwsException("InvalidParameterException", "nodePools must not contain null", 400);
         }
         boolean hasNodePools = compute.nodePools() != null && !compute.nodePools().isEmpty();
         boolean hasNodeRole = compute.nodeRoleArn() != null && !compute.nodeRoleArn().isEmpty();
@@ -1124,9 +1137,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     + "\" is not in standard support. Please update the cluster to a version in standard support to "
                     + "change the supportType", 400);
         }
-        if (request.changesAutoMode()) {
-            requireAutoModeChange(cluster, request);
-        }
+        AutoMode nextAutoMode = request.changesAutoMode() ? requireAutoModeChange(cluster, request) : null;
 
         Boolean finalPublicAccess = publicAccess;
         Boolean finalPrivateAccess = privateAccess;
@@ -1169,8 +1180,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                         List.of(new UpdateParam("UpgradePolicy", json(policy))), null,
                         updates.isEmpty() ? request : null));
             }
-            if (request.changesAutoMode()) {
-                updates.add(addons.recordUpdate(current, "AutoModeUpdate", applyAutoMode(current, request), null,
+            if (nextAutoMode != null) {
+                updates.add(addons.recordUpdate(current, "AutoModeUpdate", applyAutoMode(current, nextAutoMode, request), null,
                         updates.isEmpty() ? request : null));
             }
         });
@@ -1212,58 +1223,85 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         return network == null ? null : network.getElasticLoadBalancing();
     }
 
-    /**
-     * Refuses the EKS Auto Mode changes AWS refuses: the capabilities enabled apart, node pools without a node
-     * role, a different node role while the compute capability is on (botocore's ComputeConfigRequest: "This value
-     * cannot be changed after the compute capability of EKS Auto Mode is enabled"), and a request that changes
-     * nothing, with the error EKS answers it.
-     */
-    private static void requireAutoModeChange(Cluster cluster, UpdateClusterConfigRequest request) {
-        validateAutoMode(request.computeConfig(), request.storageConfig(), request.kubernetesNetworkConfig());
-        ComputeConfig current = cluster.getComputeConfig();
-        ComputeConfig requested = request.computeConfig();
-        boolean computeOn = current != null && Boolean.TRUE.equals(current.enabled());
-        if (computeOn && requested != null && Boolean.TRUE.equals(requested.enabled())
-                && !Objects.equals(current.nodeRoleArn(), requested.nodeRoleArn())) {
-            throw new AwsException("InvalidParameterException",
-                    "nodeRoleArn cannot be changed after the compute capability of EKS Auto Mode is enabled", 400);
+    /** The cluster's EKS Auto Mode configuration: its compute, block storage and load balancing capabilities. */
+    private record AutoMode(ComputeConfig compute, StorageConfig storage, ElasticLoadBalancing loadBalancing) {
+
+        boolean computeOn() {
+            return compute != null && Boolean.TRUE.equals(compute.enabled());
         }
-        if (autoModeState(cluster.getComputeConfig(), cluster.getStorageConfig(),
-                elasticLoadBalancing(cluster.getKubernetesNetworkConfig()))
-                .equals(autoModeState(request.computeConfig(), request.storageConfig(),
-                        elasticLoadBalancing(request.kubernetesNetworkConfig())))) {
+
+        /** What it turns on, for telling whether a request changes it: off, or on with its pools and role. */
+        List<Object> state() {
+            if (!computeOn()) {
+                return List.of(false);
+            }
+            return List.of(true, compute.nodePools() == null ? Set.of() : Set.copyOf(compute.nodePools()),
+                    String.valueOf(compute.nodeRoleArn()),
+                    storage != null && storage.blockStorage() != null
+                            && Boolean.TRUE.equals(storage.blockStorage().enabled()),
+                    loadBalancing != null && Boolean.TRUE.equals(loadBalancing.enabled()));
+        }
+    }
+
+    private static AutoMode autoMode(Cluster cluster) {
+        return new AutoMode(cluster.getComputeConfig(), cluster.getStorageConfig(),
+                elasticLoadBalancing(cluster.getKubernetesNetworkConfig()));
+    }
+
+    /**
+     * The cluster's EKS Auto Mode configuration once {@code request} applies, refusing the changes AWS refuses. A
+     * member the request omits keeps its stored value, so the three capabilities are checked together as they will
+     * be stored. Node pools and the node role are checked as the request names them, as {@code CreateCluster}
+     * checks them: AWS's own example turns off the built-in pools with {@code "nodePools": []} and no role. The
+     * node role can't change while the compute capability is on (botocore's ComputeConfigRequest: "This value
+     * cannot be changed after the compute capability of EKS Auto Mode is enabled"), so a request that omits it
+     * keeps it. A request that changes nothing is refused with the error EKS answers it.
+     */
+    private static AutoMode requireAutoModeChange(Cluster cluster, UpdateClusterConfigRequest request) {
+        AutoMode current = autoMode(cluster);
+        ComputeConfig requested = request.computeConfig();
+        ComputeConfig compute = current.compute();
+        if (requested != null) {
+            requireNodePoolsWithRole(requested);
+            boolean staysOn = current.computeOn() && Boolean.TRUE.equals(requested.enabled());
+            String role = requested.nodeRoleArn();
+            if (staysOn && role != null && !role.isEmpty() && !role.equals(current.compute().nodeRoleArn())) {
+                throw new AwsException("InvalidParameterException",
+                        "nodeRoleArn cannot be changed after the compute capability of EKS Auto Mode is enabled", 400);
+            }
+            compute = staysOn && (role == null || role.isEmpty())
+                    ? new ComputeConfig(requested.enabled(), requested.nodePools(), current.compute().nodeRoleArn())
+                    : requested;
+        }
+        ElasticLoadBalancing requestedLoadBalancing = elasticLoadBalancing(request.kubernetesNetworkConfig());
+        AutoMode next = new AutoMode(compute,
+                request.storageConfig() != null ? request.storageConfig() : current.storage(),
+                requestedLoadBalancing != null ? requestedLoadBalancing : current.loadBalancing());
+        requireCapabilitiesTogether(next.compute(), next.storage(), next.loadBalancing());
+        if (current.state().equals(next.state())) {
             throw new AwsException("InvalidRequestException",
                     "No changes needed for EKS Auto Mode configuration provided", 400);
         }
+        return next;
     }
 
-    /** What an Auto Mode configuration turns on: off, or on with its node pools and node role. */
-    private static List<Object> autoModeState(ComputeConfig compute, StorageConfig storage,
-                                              ElasticLoadBalancing loadBalancing) {
-        boolean on = compute != null && Boolean.TRUE.equals(compute.enabled());
-        return on ? List.of(true, compute.nodePools() == null ? List.of() : Set.copyOf(compute.nodePools()),
-                String.valueOf(compute.nodeRoleArn()),
-                storage != null && storage.blockStorage() != null && Boolean.TRUE.equals(storage.blockStorage().enabled()),
-                loadBalancing != null && Boolean.TRUE.equals(loadBalancing.enabled()))
-                : List.of(false);
-    }
-
-    /** Stores the Auto Mode members the request names, and returns them as the update's parameters. */
-    private static List<UpdateParam> applyAutoMode(Cluster cluster, UpdateClusterConfigRequest request) {
+    /** Stores {@code next}, and returns the Auto Mode members the request names as the update's parameters. */
+    private static List<UpdateParam> applyAutoMode(Cluster cluster, AutoMode next, UpdateClusterConfigRequest request) {
+        cluster.setComputeConfig(next.compute());
+        cluster.setStorageConfig(next.storage());
+        if (cluster.getKubernetesNetworkConfig() != null) {
+            cluster.getKubernetesNetworkConfig().setElasticLoadBalancing(next.loadBalancing());
+        }
         List<UpdateParam> params = new ArrayList<>();
         if (request.computeConfig() != null) {
-            cluster.setComputeConfig(request.computeConfig());
             params.add(new UpdateParam("ComputeConfig", json(request.computeConfig())));
         }
         if (request.storageConfig() != null) {
-            cluster.setStorageConfig(request.storageConfig());
             params.add(new UpdateParam("StorageConfig", json(request.storageConfig())));
         }
         ElasticLoadBalancing loadBalancing = elasticLoadBalancing(request.kubernetesNetworkConfig());
-        if (loadBalancing != null && cluster.getKubernetesNetworkConfig() != null) {
-            cluster.getKubernetesNetworkConfig().setElasticLoadBalancing(loadBalancing);
-            params.add(new UpdateParam("KubernetesNetworkConfig",
-                    json(Map.of("elasticLoadBalancing", loadBalancing))));
+        if (loadBalancing != null) {
+            params.add(new UpdateParam("KubernetesNetworkConfig", json(Map.of("elasticLoadBalancing", loadBalancing))));
         }
         return params;
     }
