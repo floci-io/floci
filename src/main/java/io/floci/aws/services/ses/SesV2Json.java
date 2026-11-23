@@ -240,9 +240,8 @@ final class SesV2Json {
                     + "[Member must satisfy enum value set: [" + String.join(", ", keys) + "]]");
         }
         if (filter.values().stream().anyMatch(v -> v != null && invalidValue.test(v))) {
-            throw SmithyValidationErrors.badRequest( "Value at 'filter' "
-                    + "failed to satisfy constraint: Map value must satisfy constraint: "
-                    + "[" + valueConstraint + "]");
+            throw SmithyValidationErrors.badRequest(SmithyValidationErrors.Violations.WITHOUT_VALUES
+                    .mapValues("filter", null, List.of(valueConstraint)));
         }
         Map<String, String> values = new LinkedHashMap<>();
         filter.forEach((key, value) -> {

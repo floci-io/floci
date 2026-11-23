@@ -232,8 +232,8 @@ public final class S3DestinationValidator {
                     "Map keys must satisfy constraint: " + constraintSet(NO_WHITESPACE_PATTERN)));
         }
         if (valueViolation) {
-            violations.add(violation(shapeName, member,
-                    "Map value must satisfy constraint: " + constraintSet(NOT_BLANK_PATTERN)));
+            violations.add(SmithyValidationErrors.Violations.WITHOUT_VALUES.mapValues(shapeName + "." + member,
+                    null, SmithyValidationErrors.constraintSet(1, MAPPING_MAX_LENGTH, NOT_BLANK_PATTERN, null)));
         }
     }
 
