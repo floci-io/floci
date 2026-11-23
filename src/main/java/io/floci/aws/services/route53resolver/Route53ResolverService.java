@@ -32,6 +32,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.BiConsumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
 
 /**
@@ -571,48 +573,7 @@ public class Route53ResolverService {
      * ({@code CREATOR_REQUEST_ID}); a name the operation does not list filters nothing.
      */
     public List<ObjectNode> listResolverRules(JsonNode filters, String region) {
-        List<ObjectNode> rules = recordsIn(ruleStore, region);
-        if (filters == null || filters.isNull()) {
-            return rules;
-        }
-        if (!filters.isArray()) {
-            throw new AwsException(INVALID_PARAMETER, "Filters must be a list of filters.", 400);
-        }
-        for (JsonNode filter : filters) {
-            if (!filter.isObject()) {
-                throw new AwsException(INVALID_PARAMETER, "Filters must be a list of filters.", 400);
-            }
-            String name = filter.path("Name").asText("");
-            if (name.isEmpty() || name.length() > 64) {
-                throw new AwsException(INVALID_PARAMETER, "Filter Name must be 1 to 64 characters long.", 400);
-            }
-            JsonNode filterValues = filter.path("Values");
-            if (!filterValues.isMissingNode() && !filterValues.isNull() && !filterValues.isArray()) {
-                throw new AwsException(INVALID_PARAMETER, "Filter Values must be a list of strings.", 400);
-            }
-            List<String> values = new ArrayList<>();
-            for (JsonNode value : filterValues) {
-                if (!value.isTextual()) {
-                    throw new AwsException(INVALID_PARAMETER, "Filter Values must be a list of strings.", 400);
-                }
-                if (value.asText().isEmpty() || value.asText().length() > 600) {
-                    throw new AwsException(INVALID_PARAMETER, "Filter Values must be 1 to 600 characters long.", 400);
-                }
-                values.add(value.asText());
-            }
-            String field = RULE_FILTER_FIELDS.get(name.replace("_", "").toLowerCase(Locale.ROOT));
-            if (field == null) {
-                continue;
-            }
-            boolean domain = "DomainName".equals(field);
-            rules = rules.stream()
-                    .filter(rule -> values.stream().anyMatch(value -> domain
-                            ? DnsLookupHelper.normalizeTarget(value)
-                                    .equalsIgnoreCase(DnsLookupHelper.normalizeTarget(text(rule, field)))
-                            : value.equals(text(rule, field))))
-                    .toList();
-        }
-        return rules;
+        return filtered(recordsIn(ruleStore, region), filters, RULE_FILTER_FIELDS, "DomainName"::equals);
     }
 
     public ObjectNode updateResolverRule(String id, JsonNode config, String region) {
@@ -704,73 +665,19 @@ public class Route53ResolverService {
     }
 
     /**
-     * One page of the region's DNSSEC validation configurations, matching every filter of
-     * {@code filters} the way {@link #listResolverRules} does: a config matches a filter when its
-     * field equals any of the filter's values, filter names are read case-insensitively without
-     * underscores, and a name the operation does not list filters nothing. {@code MaxResults}
-     * defaults to the modeled 100 and is type-checked as the JSON integer it is; the page cursor
-     * is the config id, and an invalid token is the modeled {@code InvalidNextTokenException}.
+     * One page of the region's DNSSEC validation configurations, filtered as {@link #listResolverRules}
+     * filters rules. A disabled configuration is left out, as the model says the response "doesn't contain
+     * disabled DNSSEC configurations": that covers a VPC only ever read through
+     * {@link #getResolverDnssecConfig} and one updated to {@code DISABLE}. The page cursor is the config id.
      */
     public synchronized ObjectNode listResolverDnssecConfigs(JsonNode filters, JsonNode maxResults,
                                                              String nextToken, String region) {
         List<ObjectNode> configs = dnssecConfigStore.scan(key -> key.startsWith(region + "::")).stream()
+                .filter(config -> !"DISABLED".equals(text(config, "ValidationStatus")))
                 .map(ObjectNode::deepCopy).toList();
-        if (filters != null && !filters.isNull()) {
-            if (!filters.isArray()) {
-                throw new AwsException(INVALID_PARAMETER, "Filters must be a list of filters.", 400);
-            }
-            for (JsonNode filter : filters) {
-                configs = filterDnssecConfigs(configs, filter);
-            }
-        }
-        boolean absent = maxResults == null || maxResults.isNull();
-        if (!absent && (!maxResults.isIntegralNumber() || !maxResults.canConvertToInt()
-                || maxResults.intValue() < 1 || maxResults.intValue() > 100)) {
-            throw new AwsException(INVALID_PARAMETER, "MaxResults must be an integer between 1 and 100", 400);
-        }
-        PaginatedResult<ObjectNode> paged = Pagination.paginate(configs, config -> text(config, "Id"),
-                absent ? 100 : maxResults.intValue(), nextToken, "dnssec-configs",
-                token -> new AwsException("InvalidNextTokenException", "Invalid NextToken: " + token, 400));
-        ObjectNode result = objectMapper.createObjectNode();
-        ArrayNode page = result.putArray("ResolverDnssecConfigs");
-        for (ObjectNode config : paged.items()) {
-            page.add(config);
-        }
-        if (paged.nextToken() != null) {
-            result.put("NextToken", paged.nextToken());
-        }
-        return result;
-    }
-
-    private List<ObjectNode> filterDnssecConfigs(List<ObjectNode> configs, JsonNode filter) {
-        if (!filter.isObject()) {
-            throw new AwsException(INVALID_PARAMETER, "Filters must be a list of filters.", 400);
-        }
-        String name = filter.path("Name").asText("");
-        if (name.isEmpty() || name.length() > 64) {
-            throw new AwsException(INVALID_PARAMETER, "Filter Name must be 1 to 64 characters long.", 400);
-        }
-        JsonNode filterValues = filter.path("Values");
-        if (!filterValues.isMissingNode() && !filterValues.isNull() && !filterValues.isArray()) {
-            throw new AwsException(INVALID_PARAMETER, "Filter Values must be a list of strings.", 400);
-        }
-        List<String> values = new ArrayList<>();
-        for (JsonNode value : filterValues) {
-            if (!value.isTextual()) {
-                throw new AwsException(INVALID_PARAMETER, "Filter Values must be a list of strings.", 400);
-            }
-            if (value.asText().isEmpty() || value.asText().length() > 600) {
-                throw new AwsException(INVALID_PARAMETER, "Filter Values must be 1 to 600 characters long.", 400);
-            }
-            values.add(value.asText());
-        }
-        String field = DNSSEC_FILTER_FIELDS.get(name.replace("_", "").toLowerCase(Locale.ROOT));
-        if (field == null) {
-            return configs;
-        }
-        return configs.stream()
-                .filter(config -> values.stream().anyMatch(value -> value.equals(text(config, field))))
-                .toList();
+        List<ObjectNode> matching = filtered(configs, filters, DNSSEC_FILTER_FIELDS, field -> false);
+        return page(matching, config -> text(config, "Id"), pageSize(maxResults), nextToken, "dnssec-configs",
+                "ResolverDnssecConfigs", ArrayNode::add);
     }
 
     private Vpc requireDnssecVpc(String resourceId, String region) {
@@ -890,10 +797,8 @@ public class Route53ResolverService {
     }
 
     /**
-     * One page of a resource's tags as modeled {@code Tag} entries, paged by
-     * {@link Pagination#paginate} on the tag key; {@code MaxResults} defaults to the modeled 100.
-     * {@code MaxResults} arrives as a JSON value, so it is type-checked here rather than parsed
-     * from a string: {@code 1.5}, {@code true} and {@code "1"} are not the modeled integer.
+     * One page of a resource's tags as modeled {@code Tag} entries, paged on the tag key, with
+     * {@code MaxResults} read by {@link #pageSize}.
      *
      * <p>The stored tag node is copied under the monitor {@link #tagResource} and
      * {@link #untagResource} mutate it under, so a concurrent tag change can neither break the
@@ -901,11 +806,7 @@ public class Route53ResolverService {
      */
     public ObjectNode listTagsForResource(String arn, JsonNode maxResults, String nextToken,
                                           String region, String accountId) {
-        boolean absent = maxResults == null || maxResults.isNull();
-        if (!absent && (!maxResults.isIntegralNumber() || !maxResults.canConvertToInt()
-                || maxResults.intValue() < 1 || maxResults.intValue() > 100)) {
-            throw new AwsException(INVALID_PARAMETER, "MaxResults must be an integer between 1 and 100", 400);
-        }
+        int pageSize = pageSize(maxResults);
         ObjectNode snapshot;
         synchronized (this) {
             requireTaggable(arn, region, accountId);
@@ -915,18 +816,8 @@ public class Route53ResolverService {
         if (snapshot != null) {
             snapshot.fields().forEachRemaining(all::add);
         }
-        PaginatedResult<Map.Entry<String, JsonNode>> paged = Pagination.paginate(all, Map.Entry::getKey,
-                absent ? 100 : maxResults.intValue(), nextToken, "tags",
-                token -> new AwsException("InvalidNextTokenException", "Invalid NextToken: " + token, 400));
-        ObjectNode result = objectMapper.createObjectNode();
-        ArrayNode page = result.putArray("Tags");
-        for (Map.Entry<String, JsonNode> tag : paged.items()) {
-            page.addObject().put("Key", tag.getKey()).set("Value", tag.getValue());
-        }
-        if (paged.nextToken() != null) {
-            result.put("NextToken", paged.nextToken());
-        }
-        return result;
+        return page(all, Map.Entry::getKey, pageSize, nextToken, "tags", "Tags",
+                (tags, tag) -> tags.addObject().put("Key", tag.getKey()).set("Value", tag.getValue()));
     }
 
     /**
@@ -1208,6 +1099,94 @@ public class Route53ResolverService {
     private List<ObjectNode> recordsIn(StorageBackend<String, ObjectNode> store, String region) {
         return store.scan(key -> true).stream().filter(record -> inRegion(record, region))
                 .map(ObjectNode::deepCopy).toList();
+    }
+
+    /**
+     * The records matching every filter of {@code filters}, a record matching a filter when its field equals any of
+     * the filter's values. A filter name is read case-insensitively and without underscores, so the legacy
+     * upper-case form ({@code CREATOR_REQUEST_ID}) works too, and a name {@code fields} does not list filters
+     * nothing. A field {@code domainField} accepts compares as a domain name.
+     */
+    private List<ObjectNode> filtered(List<ObjectNode> records, JsonNode filters, Map<String, String> fields,
+                                      Predicate<String> domainField) {
+        if (filters == null || filters.isNull()) {
+            return records;
+        }
+        if (!filters.isArray()) {
+            throw new AwsException(INVALID_PARAMETER, "Filters must be a list of filters.", 400);
+        }
+        List<ObjectNode> matching = records;
+        for (JsonNode filter : filters) {
+            if (!filter.isObject()) {
+                throw new AwsException(INVALID_PARAMETER, "Filters must be a list of filters.", 400);
+            }
+            String name = filter.path("Name").asText("");
+            if (name.isEmpty() || name.length() > 64) {
+                throw new AwsException(INVALID_PARAMETER, "Filter Name must be 1 to 64 characters long.", 400);
+            }
+            JsonNode filterValues = filter.path("Values");
+            if (!filterValues.isMissingNode() && !filterValues.isNull() && !filterValues.isArray()) {
+                throw new AwsException(INVALID_PARAMETER, "Filter Values must be a list of strings.", 400);
+            }
+            List<String> values = new ArrayList<>();
+            for (JsonNode value : filterValues) {
+                if (!value.isTextual()) {
+                    throw new AwsException(INVALID_PARAMETER, "Filter Values must be a list of strings.", 400);
+                }
+                if (value.asText().isEmpty() || value.asText().length() > 600) {
+                    throw new AwsException(INVALID_PARAMETER, "Filter Values must be 1 to 600 characters long.", 400);
+                }
+                values.add(value.asText());
+            }
+            String field = fields.get(name.replace("_", "").toLowerCase(Locale.ROOT));
+            if (field == null) {
+                continue;
+            }
+            boolean domain = domainField.test(field);
+            matching = matching.stream()
+                    .filter(record -> values.stream().anyMatch(value -> domain
+                            ? DnsLookupHelper.normalizeTarget(value)
+                                    .equalsIgnoreCase(DnsLookupHelper.normalizeTarget(text(record, field)))
+                            : value.equals(text(record, field))))
+                    .toList();
+        }
+        return matching;
+    }
+
+    /**
+     * {@code MaxResults} as a page size: the modeled 100 when absent. It arrives as a JSON value, so it is
+     * type-checked rather than parsed from a string: {@code 1.5}, {@code true} and {@code "1"} are not the modeled
+     * integer.
+     */
+    private static int pageSize(JsonNode maxResults) {
+        if (maxResults == null || maxResults.isNull()) {
+            return 100;
+        }
+        if (!maxResults.isIntegralNumber() || !maxResults.canConvertToInt()
+                || maxResults.intValue() < 1 || maxResults.intValue() > 100) {
+            throw new AwsException(INVALID_PARAMETER, "MaxResults must be an integer between 1 and 100", 400);
+        }
+        return maxResults.intValue();
+    }
+
+    /**
+     * One page of {@code items} under {@code member}, cursored by {@code cursor} through {@link Pagination#paginate},
+     * with a {@code NextToken} only when another page remains. An invalid token is the modeled
+     * {@code InvalidNextTokenException}.
+     */
+    private <T> ObjectNode page(List<T> items, Function<T, String> cursor, int pageSize, String nextToken,
+                                String namespace, String member, BiConsumer<ArrayNode, T> write) {
+        PaginatedResult<T> paged = Pagination.paginate(items, cursor, pageSize, nextToken, namespace,
+                token -> new AwsException("InvalidNextTokenException", "Invalid NextToken: " + token, 400));
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode page = result.putArray(member);
+        for (T item : paged.items()) {
+            write.accept(page, item);
+        }
+        if (paged.nextToken() != null) {
+            result.put("NextToken", paged.nextToken());
+        }
+        return result;
     }
 
     /**

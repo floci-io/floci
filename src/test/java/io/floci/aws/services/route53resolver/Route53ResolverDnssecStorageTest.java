@@ -7,13 +7,18 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.InMemoryStorage;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class Route53ResolverDnssecStorageTest {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final String ACCOUNT_ID = "000000000000";
 
     @Test
     void failedUpdatePreservesStoredValidationStatus() {
@@ -50,21 +55,15 @@ class Route53ResolverDnssecStorageTest {
 
     @Test
     void listResolverDnssecConfigs_returnsOnlyTheRegionsConfigs() {
-        ObjectMapper objectMapper = new ObjectMapper();
-        Route53ResolverService service = new Route53ResolverService(new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), objectMapper);
-        String accountId = "000000000000";
-        service.updateResolverDnssecConfig(objectMapper.createObjectNode()
-                .put("ResourceId", "vpc-east").put("Validation", "ENABLE"), "us-east-1", accountId);
-        service.updateResolverDnssecConfig(objectMapper.createObjectNode()
-                .put("ResourceId", "vpc-west").put("Validation", "ENABLE"), "us-west-2", accountId);
+        Route53ResolverService service = service();
+        validate(service, "vpc-east", "ENABLE", "us-east-1");
+        validate(service, "vpc-west", "ENABLE", "us-west-2");
 
         ObjectNode result = service.listResolverDnssecConfigs(null, null, null, "us-east-1");
         JsonNode east = result.path("ResolverDnssecConfigs");
         assertEquals(1, east.size());
         assertEquals("vpc-east", east.get(0).path("ResourceId").asText());
-        assertEquals(accountId, east.get(0).path("OwnerId").asText());
+        assertEquals(ACCOUNT_ID, east.get(0).path("OwnerId").asText());
         assertEquals("ENABLED", east.get(0).path("ValidationStatus").asText());
         assertTrue(east.get(0).path("Id").asText().startsWith("rdsc-"));
         assertTrue(service.listResolverDnssecConfigs(null, null, null, "eu-west-1")
@@ -73,21 +72,15 @@ class Route53ResolverDnssecStorageTest {
 
     @Test
     void listResolverDnssecConfigs_filtersByResourceId() {
-        ObjectMapper objectMapper = new ObjectMapper();
-        Route53ResolverService service = new Route53ResolverService(new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), objectMapper);
-        String accountId = "000000000000";
-        service.updateResolverDnssecConfig(objectMapper.createObjectNode()
-                .put("ResourceId", "vpc-a").put("Validation", "ENABLE"), "us-east-1", accountId);
-        service.updateResolverDnssecConfig(objectMapper.createObjectNode()
-                .put("ResourceId", "vpc-b").put("Validation", "ENABLE"), "us-east-1", accountId);
+        Route53ResolverService service = service();
+        validate(service, "vpc-a", "ENABLE", "us-east-1");
+        validate(service, "vpc-b", "ENABLE", "us-east-1");
 
-        ObjectNode filter = objectMapper.createObjectNode();
+        ObjectNode filter = MAPPER.createObjectNode();
         filter.put("Name", "ResourceId");
-        filter.set("Values", objectMapper.createArrayNode().add("vpc-b"));
+        filter.set("Values", MAPPER.createArrayNode().add("vpc-b"));
         ObjectNode result = service.listResolverDnssecConfigs(
-                objectMapper.createArrayNode().add(filter), null, null, "us-east-1");
+                MAPPER.createArrayNode().add(filter), null, null, "us-east-1");
         JsonNode matched = result.path("ResolverDnssecConfigs");
         assertEquals(1, matched.size());
         assertEquals("vpc-b", matched.get(0).path("ResourceId").asText());
@@ -96,18 +89,13 @@ class Route53ResolverDnssecStorageTest {
 
     @Test
     void listResolverDnssecConfigs_pagesByMaxResultsWithNextToken() {
-        ObjectMapper objectMapper = new ObjectMapper();
-        Route53ResolverService service = new Route53ResolverService(new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), objectMapper);
-        String accountId = "000000000000";
+        Route53ResolverService service = service();
         for (String vpc : List.of("vpc-a", "vpc-b", "vpc-c")) {
-            service.updateResolverDnssecConfig(objectMapper.createObjectNode()
-                    .put("ResourceId", vpc).put("Validation", "ENABLE"), "us-east-1", accountId);
+            validate(service, vpc, "ENABLE", "us-east-1");
         }
 
         ObjectNode firstPage = service.listResolverDnssecConfigs(null,
-                objectMapper.getNodeFactory().numberNode(2), null, "us-east-1");
+                MAPPER.getNodeFactory().numberNode(2), null, "us-east-1");
         assertEquals(2, firstPage.path("ResolverDnssecConfigs").size());
         String token = firstPage.path("NextToken").asText(null);
         assertTrue(token != null && !token.isBlank());
@@ -117,6 +105,41 @@ class Route53ResolverDnssecStorageTest {
         assertTrue(secondPage.path("NextToken").isMissingNode());
 
         assertThrows(AwsException.class, () -> service.listResolverDnssecConfigs(null,
-                objectMapper.getNodeFactory().numberNode(101), null, "us-east-1"));
+                MAPPER.getNodeFactory().numberNode(101), null, "us-east-1"));
+    }
+
+    // The model: the response "doesn't contain disabled DNSSEC configurations". A disabled config still answers Get.
+    @Test
+    void listResolverDnssecConfigs_leavesOutDisabledConfigs() {
+        Route53ResolverService service = service();
+        validate(service, "vpc-on", "ENABLE", "us-east-1");
+        validate(service, "vpc-local", "USE_LOCAL_RESOURCE_SETTING", "us-east-1");
+        validate(service, "vpc-off", "ENABLE", "us-east-1");
+        validate(service, "vpc-off", "DISABLE", "us-east-1");
+        validate(service, "vpc-never", "DISABLE", "us-east-1");
+
+        ObjectNode result = service.listResolverDnssecConfigs(null,
+                MAPPER.getNodeFactory().numberNode(2), null, "us-east-1");
+        assertEquals(Set.of("vpc-on", "vpc-local"), resourceIds(result.path("ResolverDnssecConfigs")));
+        assertTrue(result.path("NextToken").isMissingNode(), "a disabled config takes no place on a page");
+        assertEquals("DISABLED", service.getResolverDnssecConfig("vpc-off", "us-east-1")
+                .path("ValidationStatus").asText());
+    }
+
+    private static Route53ResolverService service() {
+        return new Route53ResolverService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                MAPPER);
+    }
+
+    private static void validate(Route53ResolverService service, String vpc, String validation, String region) {
+        service.updateResolverDnssecConfig(MAPPER.createObjectNode().put("ResourceId", vpc)
+                .put("Validation", validation), region, ACCOUNT_ID);
+    }
+
+    private static Set<String> resourceIds(JsonNode configs) {
+        Set<String> ids = new HashSet<>();
+        configs.forEach(config -> ids.add(config.path("ResourceId").asText()));
+        return ids;
     }
 }

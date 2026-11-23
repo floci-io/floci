@@ -161,9 +161,7 @@ class Route53ResolverIntegrationTest {
                 .body("ResolverDnssecConfigs.findAll { it.ResourceId == '%s' }"
                         .formatted(vpc) + "[0].ValidationStatus", equalTo("ENABLED"));
 
-            dnssec("ListResolverDnssecConfigs", "{\"Filters\":[{\"Name\":\"ResourceId\","
-                    + "\"Values\":[\"" + vpc + "\"]}]}")
-                .statusCode(200)
+            dnssecConfigsOf(vpc)
                 .body("ResolverDnssecConfigs.size()", equalTo(1))
                 .body("ResolverDnssecConfigs[0].ResourceId", equalTo(vpc));
 
@@ -180,6 +178,32 @@ class Route53ResolverIntegrationTest {
         } finally {
             ec2Ok("DeleteVpc", "VpcId", vpc);
         }
+    }
+
+    @Test
+    void listResolverDnssecConfigs_leavesOutDisabledConfigs() {
+        String vpc = ec2Ok("CreateVpc", "CidrBlock", "10.83.0.0/16")
+                .extract().path("CreateVpcResponse.vpc.vpcId");
+        try {
+            dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}")
+                    .statusCode(200).body("ResolverDNSSECConfig.ValidationStatus", equalTo("DISABLED"));
+            dnssecConfigsOf(vpc).body("ResolverDnssecConfigs.size()", equalTo(0));
+
+            dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"" + vpc
+                    + "\",\"Validation\":\"ENABLE\"}").statusCode(200);
+            dnssecConfigsOf(vpc).body("ResolverDnssecConfigs.size()", equalTo(1));
+
+            dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"" + vpc
+                    + "\",\"Validation\":\"DISABLE\"}").statusCode(200);
+            dnssecConfigsOf(vpc).body("ResolverDnssecConfigs.size()", equalTo(0));
+        } finally {
+            ec2Ok("DeleteVpc", "VpcId", vpc);
+        }
+    }
+
+    private static ValidatableResponse dnssecConfigsOf(String vpc) {
+        return dnssec("ListResolverDnssecConfigs", "{\"Filters\":[{\"Name\":\"ResourceId\","
+                + "\"Values\":[\"" + vpc + "\"]}]}").statusCode(200);
     }
 
     private static ValidatableResponse dnssec(String action, String body) {
