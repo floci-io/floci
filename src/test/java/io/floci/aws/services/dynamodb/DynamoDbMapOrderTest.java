@@ -113,4 +113,24 @@ class DynamoDbMapOrderTest {
         assertSame(nested, map.get("z"));
         assertEquals("y,x", order(map.get("z").get("M")));
     }
+
+    @Test
+    void withSortedMemberSortsTheMemberAndKeepsTheRest() throws Exception {
+        JsonNode request = json("""
+                {"Put":{"Item":{"m":{"M":{"z":{"S":"1"},"b":{"S":"2"}}}},"TableName":"t"},"Other":1}""");
+
+        JsonNode result = DynamoDbMapOrder.withSortedMember(request, "Put", "Item");
+
+        assertEquals("b,z", order(result.get("Put").get("Item").get("m").get("M")));
+        assertEquals("t", result.get("Put").get("TableName").asText());
+        assertEquals(1, result.get("Other").asInt());
+        assertEquals("z,b", order(request.get("Put").get("Item").get("m").get("M")));
+    }
+
+    @Test
+    void withSortedMemberReturnsTheRequestWhenTheOperationIsAbsent() throws Exception {
+        JsonNode request = json("{\"Delete\":{\"Key\":{\"id\":{\"S\":\"k\"}}}}");
+
+        assertSame(request, DynamoDbMapOrder.withSortedMember(request, "Put", "Item"));
+    }
 }

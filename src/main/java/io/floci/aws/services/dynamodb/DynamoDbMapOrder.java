@@ -48,8 +48,22 @@ final class DynamoDbMapOrder {
         return sorted;
     }
 
+    /** Returns a copy of {@code request} whose {@code operation.member} value has every nested map sorted. */
+    static JsonNode withSortedMember(JsonNode request, String operation, String member) {
+        JsonNode op = request.get(operation);
+        if (op == null || !op.isObject()) {
+            return request;
+        }
+        JsonNode value = op.get(member);
+        JsonNode sorted = sortedItem(value);
+        if (sorted == value) {
+            return request;
+        }
+        return withMember(request, operation, withMember(op, member, sorted));
+    }
+
     /** Returns a shallow copy of {@code node} with {@code name} set to {@code value}. */
-    static ObjectNode withMember(JsonNode node, String name, JsonNode value) {
+    private static ObjectNode withMember(JsonNode node, String name, JsonNode value) {
         ObjectNode copy = FACTORY.objectNode();
         copy.setAll((ObjectNode) node);
         copy.set(name, value);
@@ -66,7 +80,7 @@ final class DynamoDbMapOrder {
         if (sorted.equals(names)) {
             return;
         }
-        Map<String, JsonNode> fields = new LinkedHashMap<>((int) (names.size() / 0.75f) + 1);
+        Map<String, JsonNode> fields = LinkedHashMap.newLinkedHashMap(names.size());
         for (Map.Entry<String, JsonNode> entry : map.properties()) {
             fields.put(entry.getKey(), entry.getValue());
         }
@@ -104,7 +118,7 @@ final class DynamoDbMapOrder {
 
     private static ObjectNode copyFields(ObjectNode node, boolean sortKeys) {
         List<String> names = names(node);
-        Map<String, JsonNode> map = new LinkedHashMap<>((int) (names.size() / 0.75f) + 1);
+        Map<String, JsonNode> map = LinkedHashMap.newLinkedHashMap(names.size());
         for (String name : sortKeys ? DynamoDbSetOrder.byCodePoint(names) : names) {
             map.put(name, copyValue(node.get(name)));
         }

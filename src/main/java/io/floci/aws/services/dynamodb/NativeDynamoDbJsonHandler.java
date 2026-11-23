@@ -1848,24 +1848,11 @@ public class NativeDynamoDbJsonHandler {
         for (Map.Entry<String, List<JsonNode>> entry : items.entrySet()) {
             List<JsonNode> writes = new ArrayList<>(entry.getValue().size());
             for (JsonNode writeReq : entry.getValue()) {
-                writes.add(withSortedPutItem(writeReq));
+                writes.add(DynamoDbMapOrder.withSortedMember(writeReq, "PutRequest", "Item"));
             }
             sorted.put(entry.getKey(), writes);
         }
         return sorted;
-    }
-
-    private static JsonNode withSortedPutItem(JsonNode write) {
-        JsonNode put = write.get("PutRequest");
-        if (put == null || !put.isObject()) {
-            return write;
-        }
-        JsonNode item = put.get("Item");
-        JsonNode sortedItem = DynamoDbMapOrder.sortedItem(item);
-        if (sortedItem == item) {
-            return write;
-        }
-        return DynamoDbMapOrder.withMember(write, "PutRequest", DynamoDbMapOrder.withMember(put, "Item", sortedItem));
     }
 
     private Response handleBatchGetItem(JsonNode request, String region) {
@@ -3016,23 +3003,11 @@ public class NativeDynamoDbJsonHandler {
     private static List<JsonNode> withSortedMaps(List<JsonNode> transactItems) {
         List<JsonNode> sorted = new ArrayList<>(transactItems.size());
         for (JsonNode txItem : transactItems) {
-            sorted.add(withSortedMaps(withSortedMaps(txItem, "Put", "Item"),
+            sorted.add(DynamoDbMapOrder.withSortedMember(
+                    DynamoDbMapOrder.withSortedMember(txItem, "Put", "Item"),
                     "Update", "ExpressionAttributeValues"));
         }
         return sorted;
-    }
-
-    private static JsonNode withSortedMaps(JsonNode txItem, String operation, String member) {
-        JsonNode op = txItem.get(operation);
-        if (op == null || !op.isObject()) {
-            return txItem;
-        }
-        JsonNode values = op.get(member);
-        JsonNode sortedValues = DynamoDbMapOrder.sortedItem(values);
-        if (sortedValues == values) {
-            return txItem;
-        }
-        return DynamoDbMapOrder.withMember(txItem, operation, DynamoDbMapOrder.withMember(op, member, sortedValues));
     }
 
     // DynamoDB reads an action with more than one operation as the first one in this order.
