@@ -98,6 +98,14 @@ trade-in token, and the model is what is in hand, so the blank is read as the va
 
 SAML role sessions reject `DurationSeconds` above the target role maximum. Accepted requests retain the shorter assertion expiration.
 
+A SAML role session is named after the assertion's `https://aws.amazon.com/SAML/Attributes/RoleSessionName`
+attribute, which is also the `sts:RoleSessionName` the role's trust policy reads. A value outside
+`[a-zA-Z_0-9+=,.@-]{2,64}` is refused with `InvalidIdentityToken` and the message
+`RoleSessionName in AuthnResponse must match [a-zA-Z_0-9+=,.@-]{2,64}`. AWS refuses an assertion
+without the attribute; Floci accepts it, names the session after the assertion's subject, and leaves
+`sts:RoleSessionName` out of the request context, so a trust policy that requires a session name
+refuses it.
+
 ## Privileged Root Sessions
 
 `AssumeRoot` returns "short term credentials you can use to perform privileged tasks on a member
@@ -115,7 +123,7 @@ with `RootSessions` on. The target has to be a member account other than the man
 privileged tasks being what the management account performs on members. `DurationSeconds` is 0 to
 900 and defaults to 900, "the maximum session duration of 900 seconds (15 minutes)".
 
-Four things are deviations rather than readings, since the operation models only
+Three things are deviations rather than readings, since the operation models only
 `RegionDisabledException` and `ExpiredTokenException`:
 
 - Every caller, target and feature refusal is `AccessDenied` 403, and a task policy outside the
@@ -129,14 +137,20 @@ Four things are deviations rather than readings, since the operation models only
 - "The global endpoint is not supported for AssumeRoot" is refused when the request arrives on the
   partition's global STS host. A request to a local host carries no such name, and the signing
   region cannot tell the two apart, so there is nothing to refuse there.
-- `SessionTokenSize` is answered as the length of the token issued, and `MinimumSessionTokenSize`
-  pads it to at least the size asked for, held to the 0 to 4096 the model declares, "The value must
-  not exceed 4,096 bytes", since the size asked for is the size materialized. This was the first
-  operation to materialize it and is no longer the only one, the five others that model the member
-  reading it through the same writer. Out of that range is
-  a `ValidationError` and a value that is no integer an `InvalidParameterValue`, the pair
-  `DurationSeconds` already answers. `SessionTokenUtilization` is not answered: the model documents
-  neither member, so only the one with an obvious meaning is filled.
+
+`MinimumSessionTokenSize` pads the token to at least the size asked for, held to the 0 to 4096 the
+model declares, "The value must not exceed 4,096 bytes", since the size asked for is the size
+materialized. Out of that range is a `ValidationError` and a value that is no integer an
+`InvalidParameterValue`, the pair `DurationSeconds` already answers. This was the first operation to
+materialize the member and is no longer the only one, the five others that model it reading it
+through the same writer.
+
+What the session cost is published as the two members this response declares, `SessionTokenSize`
+carrying the token's size in bytes and `SessionTokenUtilization` that size as the percentage of the
+4,096-byte limit it consumes, which is what the reference defines each as. The
+[IAM service doc](iam.md#what-a-sessions-token-costs-and-when-it-is-refused) carries the measure
+behind both, this operation carrying no state into its token, and the deprecated member the pair
+replaces is not declared here at all.
 
 The audit reads the `IAMAuditRootUserCredentials` task policy allows name the member account's root
 user when they are called with no `UserName`, which is what that policy's own `arn:aws:iam::*:root`
@@ -459,7 +473,7 @@ When the token's `iss` names a known Floci issuer, all of the following are enfo
 - `iss` matches that issuer exactly
 - `aud` contains `sts.amazonaws.com`
 - `exp` / `nbf`, with 60s of clock-skew tolerance
-- the role's trust policy: `Principal.Federated` plus the `Condition` block, comparing `<oidcProvider>:sub` and `<oidcProvider>:aud` with exact, **case-sensitive** equality (`StringEquals`, `StringNotEquals`, `StringLike`, and `StringNotLike` are supported)
+- the role's trust policy: `Principal.Federated` plus the `Condition` block, comparing `<oidcProvider>:sub`, `<oidcProvider>:aud` and `sts:RoleSessionName` (the request's `RoleSessionName`) with exact, **case-sensitive** equality (`StringEquals`, `StringNotEquals`, `StringLike`, and `StringNotLike` are supported)
 
 The response carries the token's real claims in `SubjectFromWebIdentityToken`, `Provider`, and `Audience`. A bad token returns `InvalidIdentityToken` (400), an expired one returns `ExpiredTokenException` (400), and a role that does not exist or a trust policy that does not permit the subject returns `AccessDenied` (403).
 

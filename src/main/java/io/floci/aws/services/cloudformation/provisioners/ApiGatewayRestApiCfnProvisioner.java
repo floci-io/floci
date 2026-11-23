@@ -233,10 +233,8 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
      */
     @Override
     public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
-        String snapshot = attempted.getAttributes().get(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR);
-        if (REST_API.equals(previous.getResourceType()) && snapshot != null
-                && attempted.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR)) {
-            previous.getAttributes().put(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR, snapshot);
+        if (REST_API.equals(previous.getResourceType())) {
+            CfnRollback.carryFailedUndoSnapshot(previous, attempted, CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR);
         }
     }
 

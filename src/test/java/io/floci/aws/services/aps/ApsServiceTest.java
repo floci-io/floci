@@ -391,4 +391,27 @@ class ApsServiceTest {
         service.untagResource(US_EAST_1, arn, List.of("env"));
         assertEquals(Map.of("team", "devops"), service.listTags(US_EAST_1, arn));
     }
+
+    /**
+     * IAM's tag lookup reads the tags of the workspace or the rule groups namespace whose ARN it is given, as tag calls
+     * leave them; nothing for an ARN of another account or Region, of no such resource, or of another service.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheWorkspaceOrTheNamespaceTheArnNames() {
+        PrometheusWorkspace workspace = service.createWorkspace(US_EAST_1, "tagged", Map.of("env", "test"), null);
+        String namespace = service.createRuleGroupsNamespace(US_EAST_1, workspace.getWorkspaceId(), "alerts", RULES,
+                Map.of("env", "test")).getArn();
+        for (String arn : List.of(workspace.getArn(), namespace)) {
+            service.tagResource(US_EAST_1, arn, Map.of("team", "metrics"));
+            service.untagResource(US_EAST_1, arn, List.of("env"));
+
+            assertEquals("aps", service.namespace());
+            assertEquals(Map.of("team", "metrics"), service.storedTags(arn));
+            assertEquals(Map.of(), service.storedTags(arn.replace(":000000000000:", ":111122223333:")));
+            assertEquals(Map.of(), service.storedTags(arn.replace(":" + US_EAST_1 + ":", ":" + EU_WEST_1 + ":")));
+            assertEquals(Map.of(), service.storedTags(arn + "0"));
+            assertEquals(Map.of(), service.storedTags(arn.replace(":aps:", ":ecs:")));
+        }
+        assertEquals(Map.of(), service.storedTags("arn:aws:aps:us-east-1:000000000000:scraper/s-1"));
+    }
 }

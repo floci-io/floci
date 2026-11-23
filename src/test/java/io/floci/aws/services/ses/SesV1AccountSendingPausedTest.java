@@ -15,9 +15,6 @@ import static org.hamcrest.Matchers.containsString;
 @QuarkusTest
 class SesV1AccountSendingPausedTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
-
     @BeforeEach
     void disableSending() {
         given()
@@ -44,7 +41,7 @@ class SesV1AccountSendingPausedTest {
     void sendEmail_paused_returnsAccountSendingPausedException() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendEmail")
             .formParam("Source", "sender@example.com")
             .formParam("Destination.ToAddresses.member.1", "recipient@example.com")
@@ -61,7 +58,7 @@ class SesV1AccountSendingPausedTest {
     void sendRawEmail_paused_returnsAccountSendingPausedException() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendRawEmail")
             .formParam("Source", "sender@example.com")
             .formParam("Destinations.member.1", "recipient@example.com")
@@ -77,7 +74,7 @@ class SesV1AccountSendingPausedTest {
     void sendTemplatedEmail_paused_returnsAccountSendingPausedException() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendTemplatedEmail")
             .formParam("Source", "sender@example.com")
             .formParam("Destination.ToAddresses.member.1", "recipient@example.com")

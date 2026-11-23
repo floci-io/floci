@@ -199,7 +199,7 @@ class DocDbContainerManagerTest {
 
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
-        lenient().when(logStreamer.attach(anyString(), anyString(), anyString(), anyString(), anyString()))
+        lenient().when(logStreamer.attachPolled(anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenAnswer(call -> mock(Closeable.class));
 
         EmulatorConfig config = mock(EmulatorConfig.class);

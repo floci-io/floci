@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -58,6 +59,12 @@ class SesCvetServiceTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> service.getCustomVerificationEmailTemplate("ghost", REGION));
         assertEquals("CustomVerificationEmailTemplateDoesNotExist", e.getErrorCode());
+        assertEquals("Provided custom verification email template name does not exist.", e.getMessage());
+    }
+
+    @Test
+    void delete_unknown_reportsAbsenceWithoutThrowing() {
+        assertFalse(service.deleteCustomVerificationEmailTemplate("ghost", REGION));
     }
 
     @Test
@@ -65,7 +72,7 @@ class SesCvetServiceTest {
         service.createCustomVerificationEmailTemplate(template("t1"), REGION);
         assertTrue(service.find("t1", REGION).isPresent());
 
-        service.deleteCustomVerificationEmailTemplate("t1", REGION);
+        assertTrue(service.deleteCustomVerificationEmailTemplate("t1", REGION));
         assertTrue(service.find("t1", REGION).isEmpty());
     }
 
@@ -97,5 +104,6 @@ class SesCvetServiceTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> service.updateCustomVerificationEmailTemplate(template("ghost"), REGION));
         assertEquals("CustomVerificationEmailTemplateDoesNotExist", e.getErrorCode());
+        assertEquals("Provided custom verification email template name does not exist.", e.getMessage());
     }
 }

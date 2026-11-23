@@ -29,6 +29,7 @@ import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
+import io.floci.aws.core.common.docker.DockerExitEvents;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
@@ -258,7 +259,8 @@ class ContainerLauncherTest {
                 new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer),
                 lifecycleManager, streamingDockerClient, logStreamer, imageResolver, runtimeApiServerFactory,
                 dockerHostResolver, config, regionResolver, ecrRegistryManager, layers,
-                new LaunchedContainerAwsEnv(endpoint), executionRoleCredentials, ec2Service);
+                new LaunchedContainerAwsEnv(endpoint), executionRoleCredentials, ec2Service,
+                mock(DockerExitEvents.class));
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("background-layer");
         fn.setFunctionArn("arn:aws:lambda:" + region + ":" + account + ":function:background-layer");
@@ -512,7 +514,7 @@ class ContainerLauncherTest {
         return new ContainerLauncher(builder, lifecycleManager, streamingDockerClient, logStreamer, selectedResolver,
                 runtimeApiServerFactory, dockerHostResolver, config, regionResolver, ecrRegistryManager,
                 layerService, new LaunchedContainerAwsEnv(endpoint),
-                executionRoleCredentials, ec2Service);
+                executionRoleCredentials, ec2Service, mock(DockerExitEvents.class));
     }
 
     @ParameterizedTest
@@ -2557,7 +2559,7 @@ class ContainerLauncherTest {
                 ecrRegistryManager,
                 mock(LambdaLayerService.class),
                 new LaunchedContainerAwsEnv(reachableEndpoint),
-                executionRoleCredentials, ec2Service);
+                executionRoleCredentials, ec2Service, mock(DockerExitEvents.class));
 
         stubExtensionDiscovery("otel-collector");
         // Feed a real stdout frame through whatever callback the launcher hands to execStartCmd.

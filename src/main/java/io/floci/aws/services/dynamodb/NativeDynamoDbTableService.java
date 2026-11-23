@@ -3,6 +3,10 @@ package io.floci.aws.services.dynamodb;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess.CapacityUnits;
+import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess.ThroughputChange;
+import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess.ThroughputSpec;
+import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess.WarmUnits;
 import io.floci.aws.services.dynamodb.model.AttributeDefinition;
 import io.floci.aws.services.dynamodb.model.GlobalSecondaryIndex;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
@@ -144,14 +148,13 @@ public class NativeDynamoDbTableService {
                     + "disabled, UpdateViewType should not be specified", 400);
         }
 
-        requireCreateWarmThroughput(request, "PAY_PER_REQUEST".equals(billingMode));
-
         TableDefinition table = dynamoDbService.createTable(tableName, request.keySchema(),
                 request.attributeDefinitions(),
                 throughput != null ? throughput.readCapacityUnits() : null,
                 throughput != null ? throughput.writeCapacityUnits() : null,
                 request.globalSecondaryIndexes(), request.localSecondaryIndexes(), request.vectorIndexes(),
-                billingMode, region);
+                billingMode, region,
+                () -> requireCreateWarmThroughput(request, "PAY_PER_REQUEST".equals(billingMode), region));
         table.setTableStatus(initialStatus);
 
         table.setDeletionProtectionEnabled(Boolean.TRUE.equals(settings.deletionProtectionEnabled()));
@@ -409,6 +412,37 @@ public class NativeDynamoDbTableService {
         return new AwsException("ValidationException", "Invalid Request: " + message, 400);
     }
 
+    /** The CreateTable a template's declared throughput asks for, with the checks of the API. */
+    public TableDefinition createTable(String tableName, List<KeySchemaElement> keySchema,
+                                       List<AttributeDefinition> attributeDefinitions, boolean onDemand,
+                                       ThroughputSpec throughput, List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                       List<LocalSecondaryIndex> localSecondaryIndexes, String region) {
+        TableSettings settings = new TableSettings(onDemand ? "PAY_PER_REQUEST" : null, null, null, null, null,
+                null, null, null, null);
+        return createTable(new CreateTableRequest(tableName, keySchema, attributeDefinitions,
+                throughput(throughput.capacity()), globalSecondaryIndexes, localSecondaryIndexes, List.of(),
+                Map.of(), settings, warm(throughput.warm())), "ACTIVE", region);
+    }
+
+    /** The one UpdateTable a template's declared throughput asks for, with the checks of the API. */
+    public TableDefinition updateThroughput(String tableName, ThroughputChange change, String region) {
+        List<GsiThroughputUpdate> indexUpdates = new ArrayList<>();
+        change.indexes().forEach((indexName, spec) -> indexUpdates.add(new GsiThroughputUpdate(indexName,
+                throughput(spec.capacity()), null, warm(spec.warm()))));
+        TableSettings settings = new TableSettings(null, null, null, null, null, null, null, null, null);
+        return updateTable(new UpdateTableRequest(tableName, throughput(change.table().capacity()), List.of(),
+                List.of(), List.of(), indexUpdates, List.of(), List.of(), List.of(), List.of(), List.of(), settings,
+                warm(change.table().warm())), region);
+    }
+
+    private static Throughput throughput(CapacityUnits capacity) {
+        return capacity == null ? null : new Throughput(capacity.readCapacityUnits(), capacity.writeCapacityUnits());
+    }
+
+    private static WarmThroughput warm(WarmUnits warm) {
+        return warm == null ? null : new WarmThroughput(warm.readUnitsPerSecond(), warm.writeUnitsPerSecond());
+    }
+
     /**
      * Updates the table, applies the request's settings and replica changes to it and persists
      * the result.
@@ -459,6 +493,9 @@ public class NativeDynamoDbTableService {
             GlobalSecondaryIndex gsi = table.findGsi(update.indexName()).orElseThrow();
             Throughput gsiThroughput = update.provisionedThroughput();
             if (gsiThroughput != null) {
+                // A capacity cut leaves the index's warm throughput where it was.
+                gsi.setWarmReadUnitsPerSecond(table.gsiWarmReadUnits(gsi));
+                gsi.setWarmWriteUnitsPerSecond(table.gsiWarmWriteUnits(gsi));
                 if (gsiThroughput.readCapacityUnits() != null) {
                     gsi.getProvisionedThroughput().setReadCapacityUnits(gsiThroughput.readCapacityUnits());
                 }
@@ -539,6 +576,13 @@ public class NativeDynamoDbTableService {
      */
     public KinesisDestination enableKinesisStreamingDestination(String tableName, String streamArn, String precision,
                                                                 String region) {
+        synchronized (dynamoDbService.tableControlLock(tableName, region)) {
+            return enableKinesisStreamingDestinationLocked(tableName, streamArn, precision, region);
+        }
+    }
+
+    private KinesisDestination enableKinesisStreamingDestinationLocked(String tableName, String streamArn,
+                                                                       String precision, String region) {
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
         String resolvedTableName = table.getTableName();
 
@@ -558,9 +602,6 @@ public class NativeDynamoDbTableService {
         KinesisStreamingDestination destination;
         if (existing.isPresent()) {
             destination = existing.get();
-            // The precision goes in before the status. A concurrent Disable gets past its
-            // already-disabled check only once the status reads ACTIVE, so writing the status last
-            // means that call can no longer read the precision this one is replacing.
             destination.setApproximateCreationDateTimePrecision(precision);
             destination.setDestinationStatusDescription("Kinesis streaming is enabled for this table");
             destination.setDestinationStatus("ACTIVE");
@@ -582,6 +623,12 @@ public class NativeDynamoDbTableService {
      * @return a snapshot of what this call left on the destination, with the canonical table name
      */
     public KinesisDestination disableKinesisStreamingDestination(String tableName, String streamArn, String region) {
+        synchronized (dynamoDbService.tableControlLock(tableName, region)) {
+            return disableKinesisStreamingDestinationLocked(tableName, streamArn, region);
+        }
+    }
+
+    private KinesisDestination disableKinesisStreamingDestinationLocked(String tableName, String streamArn, String region) {
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
         String resolvedTableName = table.getTableName();
 
@@ -613,12 +660,22 @@ public class NativeDynamoDbTableService {
      * does. Forwarding never stops: records already captured are still delivered, and the forwarder
      * stamps each later write with the new precision.
      *
-     * @param precision an already validated ApproximateCreationDateTimePrecision
+     * @param precision an already validated ApproximateCreationDateTimePrecision, or null to retain it
      * @return a snapshot of what this call left on the destination, with the canonical table name
      */
     public KinesisDestination updateKinesisStreamingDestination(String tableName, String streamArn, String precision,
                                                                 String region) {
+        synchronized (dynamoDbService.tableControlLock(tableName, region)) {
+            return updateKinesisStreamingDestinationLocked(tableName, streamArn, precision, region);
+        }
+    }
+
+    private KinesisDestination updateKinesisStreamingDestinationLocked(String tableName, String streamArn,
+                                                                       String precision, String region) {
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
+        if (AwsArnUtils.looksLikeArn(tableName) && !tableName.equals(table.getTableArn())) {
+            throw DynamoDbService.resourceNotFoundException(table.getTableName());
+        }
         String resolvedTableName = table.getTableName();
 
         Optional<KinesisStreamingDestination> existing = table.findKinesisStreamingDestination(streamArn);
@@ -631,8 +688,10 @@ public class NativeDynamoDbTableService {
                     "Kinesis streaming destination is not active for stream: " + streamArn, 400);
         }
 
-        existing.get().setApproximateCreationDateTimePrecision(precision);
-        KinesisDestination updated = new KinesisDestination(resolvedTableName, streamArn, "ACTIVE", precision);
+        KinesisStreamingDestination destination = existing.get();
+        String effectivePrecision = precision != null ? precision : destination.getApproximateCreationDateTimePrecision();
+        destination.setApproximateCreationDateTimePrecision(effectivePrecision);
+        KinesisDestination updated = new KinesisDestination(resolvedTableName, streamArn, "ACTIVE", effectivePrecision);
         dynamoDbService.persistTable(resolvedTableName, table, region);
         return updated;
     }
@@ -651,31 +710,39 @@ public class NativeDynamoDbTableService {
         table.setStreamViewType(viewType);
     }
 
-    private static void requireCreateWarmThroughput(CreateTableRequest request, boolean onDemand) {
+    private static void requireCreateWarmThroughput(CreateTableRequest request, boolean onDemand, String region) {
         Throughput provisioned = request.provisionedThroughput();
         WarmThroughput tableWarm = request.warmThroughput();
         if (tableWarm != null) {
             requireCreateWarmThroughput("table", tableWarm.readUnitsPerSecond(), tableWarm.writeUnitsPerSecond(),
                     onDemand, provisioned != null ? provisioned.readCapacityUnits() : null,
-                    provisioned != null ? provisioned.writeCapacityUnits() : null);
+                    provisioned != null ? provisioned.writeCapacityUnits() : null, region);
         }
-        for (GlobalSecondaryIndex gsi : request.globalSecondaryIndexes()) {
+        requireNewIndexWarmThroughput(request.globalSecondaryIndexes(), onDemand, region);
+    }
+
+    private static void requireNewIndexWarmThroughput(List<GlobalSecondaryIndex> indexes, boolean onDemand,
+                                                      String region) {
+        for (GlobalSecondaryIndex gsi : indexes) {
             requireCreateWarmThroughput("index " + gsi.getIndexName(), gsi.getWarmReadUnitsPerSecond(),
                     gsi.getWarmWriteUnitsPerSecond(), onDemand, gsi.getProvisionedThroughput().getReadCapacityUnits(),
-                    gsi.getProvisionedThroughput().getWriteCapacityUnits());
+                    gsi.getProvisionedThroughput().getWriteCapacityUnits(), region);
         }
     }
 
     private static void requireCreateWarmThroughput(String target, Long read, Long write, boolean onDemand,
-                                                    Long readCapacity, Long writeCapacity) {
+                                                    Long readCapacity, Long writeCapacity, String region) {
         if (onDemand) {
             String reason = "initial throughput for OnDemand. See: https://docs.aws.amazon.com/amazondynamodb/"
                     + "latest/developerguide/on-demand-capacity-mode.html#on-demand-capacity-mode-initial";
-            requireWarmThroughputAtLeast(target, read, write, TableDefinition.defaultWarmReadUnits("PAY_PER_REQUEST", null),
-                    TableDefinition.defaultWarmWriteUnits("PAY_PER_REQUEST", null), reason, reason);
-        } else if (readCapacity != null && writeCapacity != null) {
-            requireWarmThroughputAtLeast(target, read, write, readCapacity, writeCapacity,
-                    "ReadCapacityUnits of ProvisionedThroughput", "WriteCapacityUnits of ProvisionedThroughput");
+            requireWarmThroughputInRange(target, read, write, TableDefinition.defaultWarmReadUnits("PAY_PER_REQUEST", null),
+                    TableDefinition.defaultWarmWriteUnits("PAY_PER_REQUEST", null), reason, reason, region);
+        } else {
+            requireWarmThroughputInRange(target, read, write,
+                    readCapacity != null && writeCapacity != null ? readCapacity : Long.MIN_VALUE,
+                    readCapacity != null && writeCapacity != null ? writeCapacity : Long.MIN_VALUE,
+                    "ReadCapacityUnits of ProvisionedThroughput", "WriteCapacityUnits of ProvisionedThroughput",
+                    region);
         }
     }
 
@@ -693,9 +760,9 @@ public class NativeDynamoDbTableService {
                 // AWS answers an empty table WarmThroughput with InternalFailure.
                 throw new AwsException("InternalFailure", null, 500);
             }
-            requireWarmThroughputAtLeast("table", tableWarm.readUnitsPerSecond(), tableWarm.writeUnitsPerSecond(),
+            requireWarmThroughputInRange("table", tableWarm.readUnitsPerSecond(), tableWarm.writeUnitsPerSecond(),
                     table.getWarmReadUnitsPerSecond(), table.getWarmWriteUnitsPerSecond(),
-                    CURRENT_WARM_REASON, CURRENT_WARM_REASON);
+                    CURRENT_WARM_REASON, CURRENT_WARM_REASON, region);
         }
         for (GsiThroughputUpdate update : request.gsiUpdates()) {
             WarmThroughput warm = update.warmThroughput();
@@ -708,25 +775,32 @@ public class NativeDynamoDbTableService {
                         + "ReadUnitsPerSecond or WriteUnitsPerSecond specified for index: " + update.indexName(), 400);
             }
             GlobalSecondaryIndex gsi = table.findGsi(update.indexName()).orElseThrow();
-            requireWarmThroughputAtLeast("index " + update.indexName(), warm.readUnitsPerSecond(),
+            requireWarmThroughputInRange("index " + update.indexName(), warm.readUnitsPerSecond(),
                     warm.writeUnitsPerSecond(), table.gsiWarmReadUnits(gsi), table.gsiWarmWriteUnits(gsi),
-                    CURRENT_WARM_REASON, CURRENT_WARM_REASON);
+                    CURRENT_WARM_REASON, CURRENT_WARM_REASON, region);
         }
-        boolean onDemand = "PAY_PER_REQUEST".equals(table.getBillingMode());
-        for (GlobalSecondaryIndex gsi : request.gsiCreates()) {
-            requireCreateWarmThroughput("index " + gsi.getIndexName(), gsi.getWarmReadUnitsPerSecond(),
-                    gsi.getWarmWriteUnitsPerSecond(), onDemand, gsi.getProvisionedThroughput().getReadCapacityUnits(),
-                    gsi.getProvisionedThroughput().getWriteCapacityUnits());
-        }
+        requireNewIndexWarmThroughput(request.gsiCreates(), "PAY_PER_REQUEST".equals(table.getBillingMode()),
+                region);
     }
 
-    private static void requireWarmThroughputAtLeast(String target, Long read, Long write, long minimumRead,
-                                                     long minimumWrite, String readReason, String writeReason) {
+    private static void requireWarmThroughputInRange(String target, Long read, Long write, long minimumRead,
+                                                     long minimumWrite, String readReason, String writeReason,
+                                                     String region) {
         if (read != null && read < minimumRead) {
             throw lowWarmThroughput("ReadUnitsPerSecond", target, readReason);
         }
+        requireWarmThroughputWithinQuota("Read", target, read, region);
         if (write != null && write < minimumWrite) {
             throw lowWarmThroughput("WriteUnitsPerSecond", target, writeReason);
+        }
+        requireWarmThroughputWithinQuota("Write", target, write, region);
+    }
+
+    private static void requireWarmThroughputWithinQuota(String kind, String target, Long units, String region) {
+        if (units != null && units > DynamoDbCapacityQuotas.TABLE_MAX_CAPACITY_UNITS) {
+            throw new AwsException("LimitExceededException", "Subscriber limit exceeded: Requested " + kind
+                    + "UnitsPerSecond for WarmThroughput for " + target + " exceeds TableMax" + kind
+                    + "CapacityUnits of the account in region " + region, 400);
         }
     }
 

@@ -149,6 +149,25 @@ part in authorizing calls to the function:
   authorized against the function as its name gives it, as the Service Reference lists the function
   alone for those actions.
 - A statement conditioned on `InvokedViaFunctionUrl` does not admit a direct `Invoke`.
+- An API Gateway REST API whose `AWS_PROXY` or `AWS` integration names the function invokes it on
+  its own behalf. The function policy has to allow `lambda:InvokeFunction` to
+  `apigateway.amazonaws.com`, as `AddPermission --principal apigateway.amazonaws.com` writes it,
+  and a function with no policy refuses the call. `aws:SourceArn` is the request's execute-api ARN,
+  `arn:aws:execute-api:<region>:<account>:<api-id>/<stage>/<METHOD>/<path>`, where `<path>` is the
+  concrete request path such as `items/42` rather than the resource path template `items/{id}`, so
+  a grant for `.../GET/items/*` covers it. `<region>` is the function's Region, not the API's, when
+  the two differ, as Lambda's guide for API Gateway specifies; a function named without a Region is
+  taken to be in the API's. `aws:SourceAccount` is the API's account.
+  For an `ANY` method, `<METHOD>` is the request's verb, as in a Lambda authorizer's `methodArn`;
+  this was not measured on AWS. A refused call is answered with `500` and
+  `{"message": "Internal server error"}`; see [API Gateway](api-gateway.md#integration-settings).
+  A call to a function that does not exist is refused the same way, since Lambda authorizes a call
+  before it looks the function up (not measured through API Gateway); with enforcement off it is
+  still answered with `404` and `Function not found`. An integration that names `credentials`
+  invokes the function as that role, so the function policy does not decide it; Floci does not
+  check that role's trust policy or identity policies either, so the call always goes through.
+  Other services that invoke a function, such as EventBridge rules and Scheduler, event source
+  mappings and Pipes, are not checked against the function policy.
 - `aws:PrincipalOrgID` is in the request context for a caller whose account is in an organization,
   so a grant added with `PrincipalOrgID` admits the callers of that organization and no others. A
   caller in no organization carries no value for the key, and such a grant then admits none.
@@ -177,11 +196,18 @@ pool. If the invocation fails, it is retried up to `MaximumRetryAttempts` (defau
 unless the event age exceeds `MaximumEventAgeInSeconds` (default: 21600 seconds, 6 hours). As in AWS, the
 first retry waits one minute and the second two. `FLOCI_SERVICES_LAMBDA_ASYNC_RETRY_DELAY_SECONDS` sets the
 first wait (the second is twice it), and `0` retries back to back for fast local test runs. A wait never runs
-past `MaximumEventAgeInSeconds`, so an event that expires while waiting is reported then. A retry that finds the
-function's concurrency in use tries again every second until the event expires, where AWS backs off for up to
-five minutes. Deleting the function drops its pending retries without delivering a record, as AWS does.
+past `MaximumEventAgeInSeconds`, so an event that expires while waiting is reported then. Deleting the function
+drops its pending retries without delivering a record, as AWS does.
 
-When retries are exhausted or event age is exceeded:
+An event invoked while the function's concurrency is in use is still accepted with `202` and queued, as AWS
+does. An attempt that finds the concurrency in use waits for a permit without spending an attempt: it asks again
+after 1 second, and each further wait doubles, up to 30 seconds, until the event expires. The waits start over at
+1 second once an attempt runs. AWS backs off the same way up to 5 minutes; the lower cap notices a freed permit
+sooner locally. Under a reserved concurrency of `0`, an event is sent to the `OnFailure` destination or the
+dead-letter queue at once, without an attempt, as AWS does. Its failure record carries status `429` and a
+`TooManyRequestsException` response payload, which is Floci's own: AWS documents no content for it.
+
+When retries are exhausted, event age is exceeded, or the reserved concurrency is `0`:
 
 - If an `OnFailure` destination is configured, the failure record is delivered to the destination.
 - Otherwise, if a `DeadLetterConfig` (`TargetArn`) is configured on the function, the original request payload
@@ -482,8 +508,11 @@ disabled fails with Lambda's error as the resource status reason.
 !!! note "Concurrency enforcement"
     Reserved concurrency is enforced function-wide: invocations of every
     version and alias count against the function's reservation, and
-    invocations beyond the reserved value return `TooManyRequestsException`
-    (HTTP 429). Functions without a reserved value share a **per-region**
+    synchronous invocations beyond the reserved value return
+    `TooManyRequestsException` (HTTP 429). Asynchronous invocations beyond it
+    are accepted and queued until a permit frees; under a reservation of zero
+    they go to the failure destination without an attempt (see above).
+    Functions without a reserved value share a **per-region**
     pool. AWS Lambda's "account-level" limit is in fact a
     per-account-per-region quota, and Floci mirrors that by partitioning
     counters on the ARN's region segment. The pool size (default 1000) is
@@ -638,8 +667,8 @@ unsupported weighted routing.
 This implementation supports the non-ephemeral Docker executor with immutable published
 versions and simple aliases. It refuses `$LATEST`, weighted aliases, hot reload, durable
 functions and other executors. Allocations share the configured `warm-pool-max-per-function`
-ceiling across a function's qualifiers, and the optional `warm-pool-max-total` ceiling across
-provisioned allocations. A function's reserved concurrency is also a ceiling. These local
+ceiling across a function's qualifiers; `warm-pool-max-total`, which bounds idle warm
+containers, does not apply to them. A function's reserved concurrency is also a ceiling. These local
 resource bounds do not implement AWS's complete regional provisioned-concurrency quota
 accounting, automatic scaling, or weighted-alias allocation. Provisioned runtimes receive
 their numeric `AWS_LAMBDA_FUNCTION_VERSION` and
@@ -713,7 +742,7 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS` | `300` | Idle container shutdown timeout (seconds) |
 | `FLOCI_SERVICES_LAMBDA_INIT_TIMEOUT_SECONDS` | `10` | Time a newly started runtime has to finish its init and request its first invocation (seconds). A function whose `Timeout` plus 2 seconds is longer waits that long instead. See [Slow cold starts](#slow-cold-starts) |
 | `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_PER_FUNCTION` | `max(4, cpus)` | Maximum idle (warm) containers kept per function |
-| `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL` | `0` | Maximum idle (warm) containers kept across all functions, LRU-evicted beyond it. `0` = unbounded. See the note below |
+| `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL` | `128` | Maximum idle (warm) containers kept across all functions, LRU-evicted beyond it. `0` = unbounded. See the note below |
 | `FLOCI_SERVICES_LAMBDA_REGION_CONCURRENCY_LIMIT` | `1000` | Maximum concurrent executions per region |
 | `FLOCI_SERVICES_LAMBDA_UNRESERVED_CONCURRENCY_MIN` | `100` | Minimum unreserved capacity `PutFunctionConcurrency` must leave |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED` | `false` | Enable bind-mount hot-reload via `S3Bucket=hot-reload` |
@@ -788,15 +817,16 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
 !!! note "Bounding warm containers"
     After an invocation the container stays warm so the next call skips the cold start, and is
     reaped only after `container-idle-timeout-seconds` of inactivity. Each function keeps up to
-    `warm-pool-max-per-function` idle containers, but nothing limits the sum: a stack of many
-    functions that fan out through streams and triggers can accumulate one warm container per
-    function touched, and each runtime container holds its own memory. On a Docker Desktop with
-    a modest memory allocation that is enough to have Floci OOM-killed. `ephemeral: true` avoids
-    it by cold-starting every invocation, at a large latency cost.
+    `warm-pool-max-per-function` idle containers, and a stack of many functions that fan out
+    through streams and triggers can accumulate one warm container per function touched, each
+    holding its own memory. On a Docker Desktop with a modest memory allocation that is enough to
+    have Floci OOM-killed. `ephemeral: true` avoids it by cold-starting every invocation, at a
+    large latency cost.
 
-    `warm-pool-max-total` bounds the idle containers across all functions. When a release
-    would exceed it, the least-recently-used idle container of any function is stopped first,
-    so the function that just ran (the most likely to run again) keeps its container:
+    `warm-pool-max-total` bounds the idle containers across all functions, 128 by default. When a
+    release would exceed it, the least-recently-used idle container of any function is stopped
+    first, so the function that just ran (the most likely to run again) keeps its container. Lower
+    it on a small Docker host:
 
     ```bash
     FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL=24
@@ -807,7 +837,7 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
     peak container count is `warm-pool-max-total` plus the in-flight invocations across every
     active region. A cap that is smaller than the number of functions invoked in a tight loop
     trades some warm hits for the memory bound. A negative value is ignored with a warning and
-    leaves the total unbounded, like `0`.
+    leaves the total unbounded, like `0`, which turns the bound off.
 
 ### Slow cold starts
 

@@ -180,6 +180,25 @@ class AlarmEvaluatorTest {
     }
 
     @Test
+    void skipsAlarmsConfiguredWithExtendedStatisticOnly() {
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName("p99-only-alarm");
+        alarm.setRegion(REGION);
+        alarm.setNamespace("AWS/ApplicationELB");
+        alarm.setMetricName("TargetResponseTime");
+        alarm.setExtendedStatistic("p99");
+        alarm.setPeriod(300);
+        alarm.setEvaluationPeriods(1);
+        alarm.setThreshold(1.0);
+        alarm.setComparisonOperator("GreaterThanThreshold");
+
+        assertDoesNotThrow(() -> evaluator.evaluate(alarm));
+
+        verify(metricsService, never()).getMetricStatistics(
+                any(), any(), any(), any(), any(), anyInt(), any(), any(), anyString());
+    }
+
+    @Test
     void evaluateAllSurvivesAllAlarmsThrowing() {
         when(metricsService.allAlarms()).thenThrow(new RuntimeException("storage hiccup"));
 

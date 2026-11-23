@@ -19,4 +19,14 @@ public final class BedrockTagKeyValueRules {
     public static boolean validValue(String value) {
         return value.length() <= VALUE_MAX && TAG_PATTERN.matcher(value).matches();
     }
+
+    public static String keyViolation(String key) {
+        return validKey(key) ? null : SmithyValidationErrors.Violations.WITHOUT_VALUES.mapKeys("tags", key,
+                SmithyValidationErrors.constraintSet(1, KEY_MAX, TAG_PATTERN.pattern(), null));
+    }
+
+    public static String valueViolation(String value) {
+        return validValue(value) ? null : SmithyValidationErrors.Violations.WITHOUT_VALUES.mapValues("tags", value,
+                SmithyValidationErrors.constraintSet(0, VALUE_MAX, TAG_PATTERN.pattern(), null));
+    }
 }

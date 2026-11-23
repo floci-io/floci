@@ -1110,6 +1110,80 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void updateTableKeepsIndexWarmThroughputThroughACapacityCut() throws Exception {
+        createWarmTable("warm-index-cut", false, null, null);
+        String capacityUpdate = """
+                {"TableName": "warm-index-cut", "GlobalSecondaryIndexUpdates": [{"Update": {"IndexName": "gsi1",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": %d, "WriteCapacityUnits": %d}}}]}
+                """;
+        updateWarm(capacityUpdate.formatted(20, 30));
+        updateWarm(capacityUpdate.formatted(7, 8));
+
+        assertWarm(warmThroughputOf(describedGsi("warm-index-cut", "gsi1")), 20, 30, "ACTIVE");
+        AwsException ex = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-index-cut", "GlobalSecondaryIndexUpdates": [
+                    {"Update": {"IndexName": "gsi1", "WarmThroughput": {"ReadUnitsPerSecond": 19}}}]}
+                """));
+        assertEquals("One or more parameter values were invalid: Requested ReadUnitsPerSecond for WarmThroughput "
+                + "for index gsi1 is lower than " + CURRENT_REASON, ex.getMessage());
+    }
+
+    @Test
+    void createTableReportsAnExistingTableBeforeAnyWarmThroughputCheck() throws Exception {
+        createWarmTable("warm-create-order", true, null, null);
+
+        AwsException ex = warmFailure("CreateTable",
+                warmTableRequest("warm-create-order", true, "{\"ReadUnitsPerSecond\": 1}", null));
+
+        assertEquals("ResourceInUseException", ex.getErrorCode());
+    }
+
+    @Test
+    void createTableRejectsWarmThroughputAboveThePerTableQuota() {
+        AwsException tableEx = warmFailure("CreateTable",
+                warmTableRequest("warm-quota-create", true, "{\"ReadUnitsPerSecond\": 40001}", null));
+        assertEquals("LimitExceededException", tableEx.getErrorCode());
+        assertEquals("Subscriber limit exceeded: Requested ReadUnitsPerSecond for WarmThroughput for table exceeds "
+                + "TableMaxReadCapacityUnits of the account in region eu-west-1", tableEx.getMessage());
+
+        AwsException indexEx = warmFailure("CreateTable",
+                warmTableRequest("warm-quota-create", false, null, "{\"WriteUnitsPerSecond\": 40001}"));
+        assertEquals("Subscriber limit exceeded: Requested WriteUnitsPerSecond for WarmThroughput for index gsi1 "
+                + "exceeds TableMaxWriteCapacityUnits of the account in region eu-west-1", indexEx.getMessage());
+
+        AwsException lowFirst = warmFailure("CreateTable", warmTableRequest("warm-quota-create", true,
+                "{\"ReadUnitsPerSecond\": 1, \"WriteUnitsPerSecond\": 40001}", null));
+        assertEquals("ValidationException", lowFirst.getErrorCode());
+        assertThrows(AwsException.class, () -> describedTable("warm-quota-create"));
+    }
+
+    @Test
+    void updateTableRejectsWarmThroughputAboveThePerTableQuota() throws Exception {
+        createWarmTable("warm-quota-update", true, null, null);
+
+        AwsException tableEx = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-quota-update", "WarmThroughput": {"ReadUnitsPerSecond": 40001,
+                    "WriteUnitsPerSecond": 1}}
+                """));
+        assertEquals("Subscriber limit exceeded: Requested ReadUnitsPerSecond for WarmThroughput for table exceeds "
+                + "TableMaxReadCapacityUnits of the account in region eu-west-1", tableEx.getMessage());
+
+        AwsException indexEx = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-quota-update", "GlobalSecondaryIndexUpdates": [
+                    {"Update": {"IndexName": "gsi1", "WarmThroughput": {"WriteUnitsPerSecond": 40001}}}]}
+                """));
+        assertEquals("Subscriber limit exceeded: Requested WriteUnitsPerSecond for WarmThroughput for index gsi1 "
+                + "exceeds TableMaxWriteCapacityUnits of the account in region eu-west-1", indexEx.getMessage());
+
+        assertWarm(warmThroughputOf(describedTable("warm-quota-update")), 12000, 4000, "ACTIVE");
+        updateWarm("""
+                {"TableName": "warm-quota-update", "WarmThroughput": {"ReadUnitsPerSecond": 40000,
+                    "WriteUnitsPerSecond": 40000}}
+                """);
+        assertWarm(warmThroughputOf(describedTable("warm-quota-update")), 40000, 40000, "ACTIVE");
+    }
+
+    @Test
     void updateTableRejectsEmptyTableWarmThroughputWithInternalFailure() throws Exception {
         createWarmTable("warm-empty-table", true, null, null);
 
@@ -4485,6 +4559,150 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals("One or more parameter values are not valid. The AttributeValue for a key attribute "
                 + "cannot contain an empty string value. Key: userId", ex.getMessage());
+    }
+
+    private static final String UPDATE_SIZE_MESSAGE = "Item size to update has exceeded the maximum allowed size";
+    private static final String PUT_SIZE_MESSAGE = "Item size has exceeded the maximum allowed size";
+    private static final int ITEM_LIMIT = 400 * 1024;
+
+    private ObjectNode transactStatementUpdate(String table, String userId, int valueLength) {
+        ObjectNode member = transactMember("Update", table, "Key", item("userId", userId));
+        ObjectNode update = (ObjectNode) member.get("Update");
+        update.put("UpdateExpression", "SET c = if_not_exists(c, :v)");
+        update.set("ExpressionAttributeValues",
+                mapper.createObjectNode().set(":v", attributeValue("S", "v".repeat(valueLength))));
+        return member;
+    }
+
+    private ObjectNode transactOversizedPut(String userId) {
+        return transactMember("Put", "Users", "Item", item("userId", userId, "b", "b".repeat(ITEM_LIMIT)));
+    }
+
+    private ObjectNode transactWrongTypeDelete() {
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("N", "5"));
+        return transactMember("Delete", "Users", "Key", key);
+    }
+
+    private void seedUserWithC(String userId) {
+        service.putItem("Users", item("userId", userId, "c", "x"), "eu-west-1");
+    }
+
+    private void assertTransactWriteRefused(String code, String message, ObjectNode... members) {
+        ObjectNode request = transactWriteOf(members);
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
+        assertEquals(code, ex.getErrorCode());
+        assertEquals(message, ex.getMessage());
+    }
+
+    @Test
+    void transactWriteItemsRefusesAnOversizedStatementBeforeAFailingConditionAndLeavesItemsAlone() {
+        createUsersTable("eu-west-1");
+        seedUserWithC("u1");
+        ObjectNode check = transactMember("ConditionCheck", "Users", "Key", item("userId", "u9"));
+        ((ObjectNode) check.get("ConditionCheck")).put("ConditionExpression", "attribute_exists(userId)");
+
+        assertTransactWriteRefused("ValidationException", UPDATE_SIZE_MESSAGE,
+                check, transactStatementUpdate("Users", "u1", ITEM_LIMIT));
+        assertEquals(item("userId", "u1", "c", "x"), service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @Test
+    void transactWriteItemsAcceptsAStatementOfExactlyTheLimit() throws Exception {
+        createUsersTable("eu-west-1");
+        seedUserWithC("u1");
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactStatementUpdate("Users", "u1", ITEM_LIMIT - 1)), "eu-west-1");
+
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void transactWriteItemsAnswersResourceNotFoundForALaterMissingTableBeforeAnOversizedStatement() {
+        createUsersTable("eu-west-1");
+        seedUserWithC("u1");
+
+        assertTransactWriteRefused("ResourceNotFoundException", "Requested resource not found",
+                transactStatementUpdate("Users", "u1", ITEM_LIMIT), transactStatementUpdate("Nope", "u1", 1));
+    }
+
+    @Test
+    void transactWriteItemsAnswersResourceNotFoundForALaterMissingTableBeforeAKeyMismatch() {
+        createUsersTable("eu-west-1");
+
+        assertTransactWriteRefused("ResourceNotFoundException", "Requested resource not found",
+                transactWrongTypeDelete(), transactStatementUpdate("Nope", "u1", 1));
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAKeyMismatchBeforeALaterOversizedStatement() throws Exception {
+        createUsersTable("eu-west-1");
+        seedUserWithC("u1");
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactWrongTypeDelete(), transactStatementUpdate("Users", "u1", ITEM_LIMIT)),
+                "eu-west-1");
+
+        assertEquals(400, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals("Transaction cancelled, please refer cancellation reasons for specific reasons "
+                + "[ValidationError, None]", body.get("message").asText());
+    }
+
+    @Test
+    void transactWriteItemsRefusesAnOversizedStatementBeforeALaterKeyMismatch() {
+        createUsersTable("eu-west-1");
+        seedUserWithC("u1");
+
+        assertTransactWriteRefused("ValidationException", UPDATE_SIZE_MESSAGE,
+                transactStatementUpdate("Users", "u1", ITEM_LIMIT), transactWrongTypeDelete());
+    }
+
+    @Test
+    void transactWriteItemsReportsTheFirstOversizedMemberWhenAPutAndAnUpdateBothOverflow() {
+        createUsersTable("eu-west-1");
+        seedUserWithC("u1");
+
+        assertTransactWriteRefused("ValidationException", PUT_SIZE_MESSAGE,
+                transactOversizedPut("u2"), transactStatementUpdate("Users", "u1", ITEM_LIMIT));
+        assertTransactWriteRefused("ValidationException", UPDATE_SIZE_MESSAGE,
+                transactStatementUpdate("Users", "u1", ITEM_LIMIT), transactOversizedPut("u2"));
+    }
+
+    @Test
+    void transactWriteItemsRefusesAnOversizedPutBeforeItsFailingCondition() {
+        createUsersTable("eu-west-1");
+        ObjectNode put = transactOversizedPut("u1");
+        ((ObjectNode) put.get("Put")).put("ConditionExpression", "attribute_exists(userId)");
+
+        assertTransactWriteRefused("ValidationException", PUT_SIZE_MESSAGE, put);
+    }
+
+    @Test
+    void transactWriteItemsRefusesAnOversizedPutBeforeItsMissingKey() {
+        createUsersTable("eu-west-1");
+
+        assertTransactWriteRefused("ValidationException", PUT_SIZE_MESSAGE,
+                transactMember("Put", "Users", "Item", item("b", "b".repeat(ITEM_LIMIT))));
+    }
+
+    @Test
+    void transactWriteItemsRefusesAnOversizedMemberBeforeTheDuplicateItemCheck() {
+        createUsersTable("eu-west-1");
+        seedUserWithC("u1");
+        ObjectNode check = transactMember("ConditionCheck", "Users", "Key", item("userId", "u1"));
+        ((ObjectNode) check.get("ConditionCheck")).put("ConditionExpression", "attribute_exists(userId)");
+        ObjectNode update = transactMember("Update", "Users", "Key", item("userId", "u1"));
+        ((ObjectNode) update.get("Update")).put("UpdateExpression", "SET c = :v");
+        ((ObjectNode) update.get("Update")).set("ExpressionAttributeValues",
+                mapper.createObjectNode().set(":v", attributeValue("S", "v")));
+
+        assertTransactWriteRefused("ValidationException", PUT_SIZE_MESSAGE,
+                transactOversizedPut("u1"), update, check);
+        assertTransactWriteRefused("ValidationException", UPDATE_SIZE_MESSAGE,
+                transactStatementUpdate("Users", "u1", ITEM_LIMIT), check);
     }
 
     @Test

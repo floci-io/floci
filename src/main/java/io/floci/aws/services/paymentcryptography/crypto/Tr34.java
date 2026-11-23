@@ -680,8 +680,13 @@ public final class Tr34 {
         return new Recovered(HEX_UPPER.formatHex(key), header);
     }
 
-    /** The SHA-256 digest of the given bytes. */
-    private static byte[] digest(byte[] data) {
+    /**
+     * The SHA-256 digest of the given bytes.
+     *
+     * <p>The digest is not private, so the vector test can check the samples it reads
+     * against the digests the standard published with them.
+     */
+    static byte[] digest(byte[] data) {
         try {
             return MessageDigest.getInstance("SHA-256").digest(data);
         } catch (GeneralSecurityException e) {

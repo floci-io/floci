@@ -412,6 +412,12 @@ class NativeDynamoDbTableServiceTest {
         assertEquals("ACTIVE", persisted.getDestinationStatus());
         assertEquals(KinesisStreamingDestination.PRECISION_MICROSECOND,
                 persisted.getApproximateCreationDateTimePrecision());
+        NativeDynamoDbTableService.KinesisDestination unchanged = tableService.updateKinesisStreamingDestination(
+                TABLE, STREAM_ARN, null, REGION);
+        assertEquals(KinesisStreamingDestination.PRECISION_MICROSECOND, unchanged.approximateCreationDateTimePrecision());
+        assertEquals(KinesisStreamingDestination.PRECISION_MICROSECOND,
+                reloadFromDisk().findKinesisStreamingDestination(STREAM_ARN).orElseThrow()
+                        .getApproximateCreationDateTimePrecision());
         verify(forwarder, never()).onDestinationDisabled(ACCOUNT, REGION, TABLE, STREAM_ARN);
     }
 

@@ -481,6 +481,10 @@ public class CloudFormationTemplateEngine {
         return resolved;
     }
 
+    boolean hasUnresolvedIntrinsics() {
+        return !unresolvedIntrinsics.isEmpty();
+    }
+
     private String resolveRef(String name) {
         // Pseudo-parameters
         return switch (name) {

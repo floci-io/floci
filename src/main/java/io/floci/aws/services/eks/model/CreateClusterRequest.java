@@ -46,6 +46,12 @@ public class CreateClusterRequest {
     @JsonProperty("storageConfig")
     private StorageConfig storageConfig;
 
+    @JsonProperty("upgradePolicy")
+    private UpgradePolicy upgradePolicy;
+
+    public UpgradePolicy getUpgradePolicy() { return upgradePolicy; }
+    public void setUpgradePolicy(UpgradePolicy upgradePolicy) { this.upgradePolicy = upgradePolicy; }
+
     public AccessConfig getAccessConfig() { return accessConfig; }
     public void setAccessConfig(AccessConfig accessConfig) { this.accessConfig = accessConfig; }
 

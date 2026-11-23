@@ -154,6 +154,12 @@ AWS::ECS::Service	NetworkConfiguration	keep:the update leaves a missing network 
 AWS::ECS::Service	ServiceName	keep:the prior name is reused
 AWS::ECS::Service	ServiceRegistries	keep:AWS removes registries only through a declared empty list
 AWS::ECS::Service	TaskDefinition	keep:required for the ECS controller
+AWS::Events::Connection	AuthParameters	keep:refused with a ValidationError, EventBridge keeps the value it has; a real AWS account fails the update too
+AWS::Events::Connection	AuthorizationType	keep:refused with a ValidationError, EventBridge keeps the value it has; a real AWS account fails the update too
+AWS::Events::Connection	Description	keep:a real AWS account leaves a dropped Description as it is; an empty one clears it
+AWS::Events::Connection	InvocationConnectivityParameters	clear	a real AWS account clears it
+AWS::Events::Connection	KmsKeyIdentifier	clear	a real AWS account clears it
+AWS::Events::Connection	Name	keep:refused with a ValidationError, a different name is a replacement, which a real AWS account performs and Floci does not
 AWS::KMS::Key	Description	clear	cleared to the empty description, KMS's own empty state; the CloudFormation page lists no default
 AWS::KMS::Key	EnableKeyRotation	default:false	the CloudFormation page: EnableKeyRotation defaults to false
 AWS::KMS::Key	Enabled	default:true	the CloudFormation page: Enabled defaults to true

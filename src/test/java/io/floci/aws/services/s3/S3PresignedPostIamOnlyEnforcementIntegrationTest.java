@@ -82,7 +82,10 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
                 .post("/" + bucket)
         .then()
                 .statusCode(403)
-                .body("Error.Code", equalTo("AccessDenied"));
+                .body("Error.Code", equalTo("AccessDenied"))
+                .body("Error.Message", equalTo("User: arn:aws:iam::000000000000:user/" + userName
+                        + " is not authorized to perform: s3:PutObject on resource: \"arn:aws:s3:::" + bucket
+                        + "/denied.txt\" with an explicit deny in an identity-based policy"));
     }
 
     @Test

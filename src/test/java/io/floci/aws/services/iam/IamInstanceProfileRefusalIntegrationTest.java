@@ -13,8 +13,8 @@ import static org.hamcrest.Matchers.is;
 
 /**
  * What the instance profile pair refuses, in the sentences AWS was recorded answering: a second
- * role names the quota that fired, and removing a role the profile never held is a 404 rather than
- * a quiet success.
+ * role names the quota that fired, removing a role the profile never held is a 404 rather than a
+ * quiet success, and the role a profile holds goes only after the pairing does.
  *
  * <p>{@code docs/services/iam.md} carries the recordings.
  */
@@ -97,14 +97,16 @@ class IamInstanceProfileRefusalIntegrationTest {
     }
 
     /**
-     * A role deleted while the profile still lists it stays removable, which is the case the
-     * tolerance was there for and is not the one AWS refuses. The role goes first and the pairing
-     * after it, so the removal is the one that reaches a profile listing a role that is not there.
+     * The pairing goes before the role does, which is what puts the state the removal tolerates
+     * (a profile listing a role that is no longer there) out of reach of anything served: the
+     * delete is refused while the profile holds the role, and succeeds once it does not. The
+     * tolerance stays for state reached another way, and the sentence the refusal carries is
+     * covered with the other three in {@link IamDeleteConflictDependencyIntegrationTest}.
      */
     @Test
-    void aRoleDeletedWhileStillListedStaysRemovable() {
+    void theRoleAProfileHoldsGoesOnlyAfterThePairing() {
         String profileName = createProfile();
-        String roleName = unique("profile-ghost-role");
+        String roleName = unique("profile-paired-role");
         iam("CreateRole").formParam("RoleName", roleName)
                 .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
                 .when().post("/").then().statusCode(200);
@@ -116,9 +118,11 @@ class IamInstanceProfileRefusalIntegrationTest {
                 .formParam("InstanceProfileName", profileName)
                 .formParam("RoleName", roleName)
                 .when().post("/").then().statusCode(anyOf(is(200), is(404))));
-        iam("DeleteRole").formParam("RoleName", roleName).when().post("/").then().statusCode(200);
+        iam("DeleteRole").formParam("RoleName", roleName).when().post("/").then().statusCode(409)
+                .body(CODE, equalTo("DeleteConflict"));
         iam("RemoveRoleFromInstanceProfile").formParam("InstanceProfileName", profileName)
                 .formParam("RoleName", roleName).when().post("/").then().statusCode(200);
+        iam("DeleteRole").formParam("RoleName", roleName).when().post("/").then().statusCode(200);
     }
 
     /** The control: the first role still attaches, and removing it still succeeds. */

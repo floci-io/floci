@@ -328,11 +328,14 @@ class EmrTest {
     @Order(22)
     void releaseCatalogue() {
         assertThat(emr.listReleaseLabels(r -> r.filters(f -> f.prefix("emr-7"))).releaseLabels())
-                .containsExactly("emr-7.5.0", "emr-7.4.0");
+                .startsWith("emr-7.14.0", "emr-7.13.0")
+                .hasSize(15);
+        assertThat(emr.listReleaseLabels(r -> r.filters(f -> f.prefix("emr-spark"))).releaseLabels())
+                .containsExactly("emr-spark-8.0.0", "emr-spark-8.1.0", "emr-spark-8.2.0");
         DescribeReleaseLabelResponse release = emr.describeReleaseLabel(r -> r.releaseLabel("emr-6.15.0"));
         assertThat(release.applications())
                 .anySatisfy(a -> {
-                    assertThat(a.name()).isEqualTo("spark");
+                    assertThat(a.name()).isEqualTo("Spark");
                     assertThat(a.version()).isEqualTo("3.4.1");
                 });
         assertThat(release.availableOSReleases()).isNotEmpty();

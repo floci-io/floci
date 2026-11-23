@@ -698,8 +698,12 @@ public class EcrJsonHandler {
                             d.path("region").asText(null), d.path("registryId").asText(null)));
                 }
             }
+            RegistrySettings.DeleteReplication deletion = rule.has("deleteReplication")
+                    ? new RegistrySettings.DeleteReplication(rule.path("deleteReplication").path("enabled").asBoolean())
+                    : null;
             rules.add(new RegistrySettings.ReplicationRule(destinations,
-                    rule.has("repositoryFilters") ? parseRepositoryFilters(rule.path("repositoryFilters")) : null));
+                    rule.has("repositoryFilters") ? parseRepositoryFilters(rule.path("repositoryFilters")) : null,
+                    deletion));
         }
         ObjectNode response = objectMapper.createObjectNode();
         response.set("replicationConfiguration",
@@ -774,6 +778,9 @@ public class EcrJsonHandler {
             }
             if (rule.repositoryFilters() != null) {
                 n.set("repositoryFilters", buildRepositoryFilters(rule.repositoryFilters()));
+            }
+            if (rule.deleteReplication() != null) {
+                n.putObject("deleteReplication").put("enabled", rule.deleteReplication().enabled());
             }
         }
         return config;

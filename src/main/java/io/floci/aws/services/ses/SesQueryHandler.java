@@ -496,10 +496,6 @@ public class SesQueryHandler {
     private Response handleSetIdentityMailFromDomain(MultivaluedMap<String, String> params, String region) {
         String identityValue = getParam(params, "Identity");
         String mailFromDomain = getParam(params, "MailFromDomain");
-        if (mailFromDomain == null) {
-            throw new AwsException("InvalidParameterValue",
-                    "MailFromDomain is required (use an empty string to clear the existing setting).", 400);
-        }
         String behaviorOnMxFailure = getParam(params, "BehaviorOnMXFailure");
         identityService.setMailFromDomain(identityValue, mailFromDomain, behaviorOnMxFailure,
                 region);
@@ -517,20 +513,26 @@ public class SesQueryHandler {
         return raw != null && AwsQueryBooleans.parse(raw);
     }
 
+    /**
+     * Probed: an identity the account does not hold gets no entry, and one without a MAIL FROM
+     * domain reports {@code BehaviorOnMXFailure} alone, although the model requires all three.
+     */
     private Response handleGetIdentityMailFromDomainAttributes(MultivaluedMap<String, String> params, String region) {
         List<String> identities = extractMembers(params, "Identities");
         XmlBuilder xml = new XmlBuilder().start("MailFromDomainAttributes");
         for (String identityValue : identities) {
             Identity identity = identityService.getMailFromAttributes(identityValue, region);
+            if (identity == null) {
+                continue;
+            }
             xml.start("entry");
             xml.elem("key", identityValue);
             xml.start("value");
-            xml.elem("MailFromDomain", identity != null && identity.getMailFromDomain() != null
-                    ? identity.getMailFromDomain() : "");
-            xml.elem("MailFromDomainStatus", identity != null
-                    ? identity.getMailFromDomainStatus() : "Pending");
-            xml.elem("BehaviorOnMXFailure", identity != null
-                    ? identity.getBehaviorOnMxFailure() : "UseDefaultValue");
+            xml.elem("BehaviorOnMXFailure", identity.getBehaviorOnMxFailure());
+            if (identity.getMailFromDomain() != null) {
+                xml.elem("MailFromDomain", identity.getMailFromDomain());
+                xml.elem("MailFromDomainStatus", identity.getMailFromDomainStatus());
+            }
             xml.end("value");
             xml.end("entry");
         }
@@ -646,13 +648,10 @@ public class SesQueryHandler {
         String templateArn = getParam(params, "TemplateArn");
         String templateDataRaw = getParam(params, "TemplateData");
 
-        boolean hasName = templateName != null && !templateName.isBlank();
-        boolean hasArn = templateArn != null && !templateArn.isBlank();
-        if (!hasName && !hasArn) {
-            throw new AwsException("InvalidParameterValue",
-                    "Template or TemplateArn is required.", 400);
+        if (templateName == null) {
+            throw SmithyValidationErrors.validationError(SmithyValidationErrors.notNullWithoutValue("template"));
         }
-        String resolvedName = hasName ? templateName : SesTemplateService.templateNameFromArn(templateArn);
+        String resolvedName = sendTemplateName(templateName.isEmpty(), templateName, templateArn, region);
 
         JsonNode templateData = parseTemplateData(templateDataRaw);
         String configurationSetName = getParam(params, "ConfigurationSetName");
@@ -784,7 +783,7 @@ public class SesQueryHandler {
         // top-level members before the nested ones ('template' ahead of 'defaultTags.1.member.name'),
         // each group in the model's member order (probe-confirmed).
         List<String> violations = new ArrayList<>();
-        if (templateName == null && templateArn == null) {
+        if (templateName == null) {
             violations.add(SmithyValidationErrors.notNullWithoutValue("template"));
         }
         if (!params.containsKey("Destinations") && !hasParamWithPrefix(params, "Destinations.")) {
@@ -810,13 +809,7 @@ public class SesQueryHandler {
         List<String> replyToAddresses = extractMembers(params, "ReplyToAddresses");
         String defaultDataRaw = getParam(params, "DefaultTemplateData");
 
-        boolean hasName = templateName != null && !templateName.isBlank();
-        boolean hasArn = templateArn != null && !templateArn.isBlank();
-        if (!hasName && !hasArn) {
-            throw new AwsException("InvalidParameterValue",
-                    "Template or TemplateArn is required.", 400);
-        }
-        String resolvedName = hasName ? templateName : SesTemplateService.templateNameFromArn(templateArn);
+        String resolvedName = sendTemplateName(templateName.isBlank(), templateName, templateArn, region);
 
         int lastIndex = destinations.last();
         if (lastIndex == 0) {
@@ -1734,6 +1727,19 @@ public class SesQueryHandler {
             }
             tags.add(new MessageTag(name, value));
         }
+    }
+
+    // The templated sends require Template whatever TemplateArn holds, word an empty one ahead of
+    // the ARN checks, and take a TemplateArn only beside the Template it names (probe-confirmed).
+    // SendBulkTemplatedEmail counts a whitespace-only Template as empty; SendTemplatedEmail does not.
+    private static String sendTemplateName(boolean empty, String templateName, String templateArn, String region) {
+        if (empty) {
+            throw new AwsException("InvalidParameterValue", "Template cannot be empty", 400);
+        }
+        if (templateArn != null && !templateArn.isBlank()) {
+            SesTemplateService.requireNameAlignsWithArn(templateName, templateArn, region);
+        }
+        return templateName;
     }
 
     private String getParam(MultivaluedMap<String, String> params, String name) {

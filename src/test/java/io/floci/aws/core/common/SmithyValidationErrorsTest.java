@@ -122,4 +122,26 @@ class SmithyValidationErrorsTest {
         assertNull(without.lengthOutOfRange("userName", "abc", 3, 10));
         assertNull(without.outOfRange("maxItems", 1000, 1, 1000));
     }
+
+    @Test
+    void mapValuesPreserveEachServicesValueFormAndRuleOrder() {
+        List<String> rules = List.of("Member must have length less than or equal to 3",
+                "Member must have length greater than or equal to 0",
+                "Member must satisfy regular expression pattern: [a-z]*");
+        String suffix = "Map value must satisfy constraint: [Member must have length less than or equal to 3, "
+                + "Member must have length greater than or equal to 0, "
+                + "Member must satisfy regular expression pattern: [a-z]*]";
+        assertEquals("Value '{key=BAD}' at 'tags' failed to satisfy constraint: " + suffix,
+                SmithyValidationErrors.Violations.QUOTED.mapValues("tags", "{key=BAD}", rules));
+        assertEquals("Value at 'tags' failed to satisfy constraint: " + suffix,
+                SmithyValidationErrors.Violations.WITHOUT_VALUES.mapValues("tags", "secret", rules));
+    }
+
+    @Test
+    void mapValuesRetainAnEmptyRuleSetAndNullQuotedValue() {
+        assertEquals("Value 'null' at 'filter' failed to satisfy constraint: Map value must satisfy constraint: []",
+                SmithyValidationErrors.Violations.QUOTED.mapValues("filter", null, List.of()));
+        assertEquals("Value at 'filter' failed to satisfy constraint: Map value must satisfy constraint: []",
+                SmithyValidationErrors.Violations.WITHOUT_VALUES.mapValues("filter", null, List.of()));
+    }
 }

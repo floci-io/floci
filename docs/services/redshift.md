@@ -1067,8 +1067,27 @@ kept, as in Redshift.
 - `CREATE EXTERNAL SCHEMA` inside an explicit transaction fails with SQLSTATE `0A000`, and `DROP SCHEMA`
   with `25001`, because the schema registration is not part of the PostgreSQL transaction.
 - `DROP EXTERNAL DATABASE` and dropping several schemas in one statement are outside this implementation.
-- Schemas over Amazon MSK or Kafka are not supported.
 - `DROP SCHEMA ... CASCADE` also drops the streaming views that read the schema.
+
+### External schemas over Amazon MSK
+
+An external schema over an Amazon MSK cluster maps a local schema to the cluster for streaming ingestion.
+
+```sql
+CREATE EXTERNAL SCHEMA [IF NOT EXISTS] msk
+FROM MSK
+IAM_ROLE 'arn:aws:iam::123456789012:role/StreamRole'
+AUTHENTICATION iam
+CLUSTER_ARN 'arn:aws:kafka:us-east-1:123456789012:cluster/my-cluster/00000000-0000-0000-0000-000000000000-1';
+```
+
+`CREATE EXTERNAL SCHEMA` creates a local PostgreSQL schema, remembers the role, authentication mode and cluster ARN, and lists the schema in `svv_external_schemas` with `eskind` 10 and those options in `esoptions`. `DROP SCHEMA [IF EXISTS] msk [CASCADE | RESTRICT]` removes the local schema, its metadata row and its registration; `RESTRICT` is the default, as in Redshift.
+
+- `AUTHENTICATION` accepts `iam` or `none`. `AUTHENTICATION mtls`, `AUTHENTICATION_ARN`, `SECRET_ARN`, `URI`, `IAM_ROLE DEFAULT` and `FROM KAFKA` schemas are refused with SQLSTATE `0A000`.
+- The role and cluster ARN are not checked when the schema is created.
+- A statement that names a relation of the schema (`SELECT * FROM msk.my_topic`, `INSERT INTO msk.t`, `UPDATE msk.t`, `CREATE TABLE msk.t (...)`) is refused with SQLSTATE `0A000`. Streaming materialized views over MSK topics are not yet wired.
+- `CREATE EXTERNAL SCHEMA` inside an explicit transaction fails with SQLSTATE `0A000`, and `DROP SCHEMA` with `25001`, because the schema registration is not part of the PostgreSQL transaction.
+- `DROP EXTERNAL DATABASE` and dropping several schemas in one statement are outside this implementation.
 
 ### Streaming materialized views
 
@@ -1112,6 +1131,43 @@ service, never through Firehose or S3.
 - Floci keeps a staging table named after the stream in the external schema. Do not query it. It is dropped with
   the last view that reads the stream, so `DROP SCHEMA` without `CASCADE` works once every view is dropped.
 - Refreshes of the views over one stream run one at a time.
+
+### Scalar Lambda UDFs
+
+`CREATE EXTERNAL FUNCTION` registers a scalar Lambda UDF, and `DROP FUNCTION` removes it.
+
+```sql
+CREATE [OR REPLACE] EXTERNAL FUNCTION exfunc_sum(INT, INT)
+RETURNS INT
+{ VOLATILE | STABLE }
+LAMBDA 'lambda_sum'
+IAM_ROLE 'arn:aws:iam::123456789012:role/LambdaUdfRole'
+[RETRY_TIMEOUT 20000] [MAX_BATCH_ROWS 1000] [MAX_BATCH_SIZE 5 MB];
+
+DROP FUNCTION exfunc_sum(INT, INT) [CASCADE | RESTRICT];
+```
+
+The statement creates a stub function of the same signature in the local database and remembers the Lambda function,
+role, volatility and batch options. `CREATE OR REPLACE` replaces only a function that `CREATE EXTERNAL FUNCTION` made, with the same signature and return type; an ordinary function of that signature is refused with `42723`. An overload of
+the same name with other argument types is a separate function. `DROP FUNCTION` removes both the stub and the
+registration; a `DROP FUNCTION` of any function Floci does not track is left to PostgreSQL.
+
+- **Calling the function is not supported yet.** The stub refuses every call with SQLSTATE `0A000`; invoking Lambda
+  from SQL is a later change. Creating and dropping the function work today.
+- Argument and return types are `SMALLINT`, `INTEGER`, `BIGINT`, `DECIMAL`, `REAL`, `DOUBLE PRECISION`, `CHAR`,
+  `VARCHAR`, `BOOLEAN`, `DATE` and `TIMESTAMP`, with their aliases. Any other type is refused with `0A000`.
+- `VOLATILE` or `STABLE` is required, and `IMMUTABLE` is refused with `0A000`, as Redshift does not support it for
+  Lambda UDFs. `IAM_ROLE DEFAULT` is refused with `0A000`.
+- `MAX_BATCH_SIZE` takes `KB` or `MB` (`KB` when omitted) between 1 KB and 5 MB, and `MAX_BATCH_ROWS` is at least 1.
+  The defaults are the documented 20000 ms, 2147483647 rows and 5 MB. The options are stored, and not applied yet.
+- An unqualified name is created in the session's current schema (`search_path`), failing with `3F000` if no schema is
+  selected, and unqualified `DROP FUNCTION` resolves through `search_path`. The role and the Lambda function are not
+  checked at creation.
+- `CREATE EXTERNAL FUNCTION` and `DROP FUNCTION` of such a function inside an explicit transaction fail with SQLSTATE
+  `25001`, because the registration is not part of the PostgreSQL transaction.
+- Privileges on `LANGUAGE exfunc` are not modeled: any user the backend lets create a function can create one.
+- `DROP SCHEMA ... CASCADE` of a schema holding such a function removes the stub. The registration is cleared by the
+  next `DROP FUNCTION` of it, or replaced by a new `CREATE`.
 
 ### COPY from S3
 

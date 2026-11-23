@@ -52,7 +52,7 @@ final class CfnPropertyTypes {
     private static final Pattern SIGNED_WHOLE_NUMBER = Pattern.compile("[+-]?\\d+");
     private static final Set<String> TRUE_TEXT = Set.of("true", "True", "TRUE");
     private static final Set<String> FALSE_TEXT = Set.of("false", "False", "FALSE");
-    private static final String INTEGER_RANGE_HINT = ". This may occur when a numeric value exceeds 32-bit"
+    static final String INTEGER_RANGE_HINT = ". This may occur when a numeric value exceeds 32-bit"
             + " integer max (2147483647). Consider using 'number' type or ensure value fits in integer range.";
 
     private static final class Holder {
@@ -494,7 +494,9 @@ final class CfnPropertyTypes {
                 record(new Violation(path, "expected maxLength: " + shape.maxLength() + ", actual: " + length,
                         true), true);
             }
-            if (shape.pattern() != null && !Pattern.compile(shape.pattern()).matcher(value).matches()) {
+            // A schema pattern is not anchored: the validator CloudFormation runs looks for it in the value, as the
+            // Studio schema's Name pattern [a-zA-Z0-9_-]+ takes "notebooks for etl".
+            if (shape.pattern() != null && !Pattern.compile(shape.pattern()).matcher(value).find()) {
                 record(new Violation(path, "failed validation constraint for keyword [pattern]", true), true);
             }
         }
@@ -605,11 +607,11 @@ final class CfnPropertyTypes {
     }
 
     /** The resource handler's model validation failure; {@code violations} ends with its closing parenthesis. */
-    private static AwsException modelValidation(String violations) {
+    static AwsException modelValidation(String violations) {
         return new AwsException("InvalidRequest", "Model validation failed (" + violations, 400);
     }
 
-    private static AwsException templateMismatch(String property, String expected, String found) {
+    static AwsException templateMismatch(String property, String expected, String found) {
         return new AwsException("ValidationError", "Property [" + property + "] expected type: "
                 + expected + ", found: " + found, 400);
     }

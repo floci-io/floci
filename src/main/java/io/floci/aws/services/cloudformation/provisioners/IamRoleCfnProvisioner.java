@@ -418,6 +418,10 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
             LOG.debugv("IAM role already gone, treating as deleted: {0}", physicalId);
             return;
         }
+        // Asked before anything is cleared: the delete can be refused for an instance profile
+        // this stack does not own, and nothing takes a role out of one on the caller's behalf, so
+        // detaching first would leave a role that is still there and no longer has its policies.
+        iamService.requireNotHeldByAnInstanceProfile(physicalId);
         for (String policyArn : new ArrayList<>(role.getAttachedPolicyArns())) {
             iamService.detachRolePolicy(physicalId, policyArn);
         }

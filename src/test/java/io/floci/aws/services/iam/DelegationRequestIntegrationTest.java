@@ -445,8 +445,11 @@ class DelegationRequestIntegrationTest {
         exchanged.body(prefix + "Credentials.AccessKeyId", startsWith("ASIA"))
                 .body(prefix + "Credentials.SessionToken", not(equalTo(null)))
                 .body(prefix + "AssumedPrincipal", equalTo("arn:aws:iam::" + CUSTOMER + ":root"));
-        assertFalse(exchanged.extract().asString().contains("PackedPolicySize"),
+        String body = exchanged.extract().asString();
+        assertFalse(body.contains("PackedPolicySize"),
                 "the model deprecates it and states it is not populated for this operation");
+        assertFalse(body.contains("SessionTokenSize") || body.contains("SessionTokenUtilization"),
+                "and this operation declares neither of the two members that replace it");
     }
 
     /**

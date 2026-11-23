@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
@@ -40,5 +41,23 @@ public final class ProvisionContexts {
                                    String priorPhysicalId, String priorProperties) throws Exception {
         return new ProvisionContext(passthroughEngine(), region, accountId, stackName, priorPhysicalId,
                 event -> {}, MAPPER.readTree(priorProperties));
+    }
+
+    /**
+     * A context over a real standalone engine in us-east-1 for stack {@code my-stack}: a create when
+     * {@code priorPhysicalId} is null, otherwise an update from {@code priorProperties}, which may be null.
+     */
+    public static ProvisionContext standalone(String priorPhysicalId, JsonNode priorProperties) {
+        return new ProvisionContext(CloudFormationTemplateEngine.standalone("000000000000", "us-east-1", "my-stack",
+                MAPPER, null), "us-east-1", "000000000000", "my-stack", priorPhysicalId, event -> {}, priorProperties);
+    }
+
+    /** {@code text} parsed as JSON, for template properties written into a test. */
+    public static JsonNode json(String text) {
+        try {
+            return MAPPER.readTree(text);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException(text, e);
+        }
     }
 }

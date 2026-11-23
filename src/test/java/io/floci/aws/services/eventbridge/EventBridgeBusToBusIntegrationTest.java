@@ -14,6 +14,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 
 /**
@@ -146,7 +147,7 @@ class EventBridgeBusToBusIntegrationTest {
                 // Detail must be unwrapped, not the whole envelope re-wrapped.
                 .body("Messages[0].Body", containsString("\"detail\":{\"orderId\":\"o-1\"}"))
                 .body("Messages[0].Body", containsString("\"resources\":[\"arn:aws:s3:::b2b-bucket\"]"))
-                .body("Messages[0].Body", containsString("\"event-bus-name\":\"" + TARGET_BUS + "\""));
+                .body("Messages[0].Body", not(containsString("event-bus-name")));
     }
 
     @Test
@@ -229,7 +230,7 @@ class EventBridgeBusToBusIntegrationTest {
                 .then().statusCode(200)
                 .body("Messages", hasSize(1))
                 .body("Messages[0].Body", containsString("\"detail\":{\"orderId\":\"xa-1\"}"))
-                .body("Messages[0].Body", containsString("\"event-bus-name\":\"" + XA_TARGET_BUS + "\""))
+                .body("Messages[0].Body", not(containsString("event-bus-name")))
                 // The envelope keeps the originating account, not the target bus's.
                 .body("Messages[0].Body", containsString("\"account\":\"000000000001\""));
     }

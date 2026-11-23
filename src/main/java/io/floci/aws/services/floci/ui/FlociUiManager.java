@@ -812,8 +812,8 @@ public class FlociUiManager {
         String logStreamName = logStreamer.generateLogStreamName(shortId);
         String region = regionResolver.getDefaultRegion();
         this.logStream = adopted
-                ? logStreamer.attachFromNow(containerId, logGroup, logStreamName, region, "floci:ui")
-                : logStreamer.attach(containerId, logGroup, logStreamName, region, "floci:ui");
+                ? logStreamer.attachPolledFromNow(containerId, logGroup, logStreamName, region, "floci:ui")
+                : logStreamer.attachPolled(containerId, logGroup, logStreamName, region, "floci:ui");
     }
 
     /** Releases the previous follower, so a restarted sidecar does not leave one behind. */

@@ -452,21 +452,21 @@ public class ElastiCacheService implements ResourceProvider {
             // derived from configuration and need no Docker, so the group is created and reaches
             // 'available' even when no daemon is reachable. Only connecting to the cache needs
             // the container.
-            // With the shell-less backend the snapshot is placed in the data directory before the
-            // server starts; otherwise it is loaded into the running server below.
-            String startupSeed = seed != null && containerManager.isShellLessBackend() ? seed.rdbBase64() : null;
+            // A snapshot is placed in the data directory before the server starts, so the server
+            // loads it itself and no server version needs DEBUG.
             try {
-                handle = startupSeed == null
+                handle = seed == null
                         ? containerManager.tryStart(groupId, image, request.region())
-                        : containerManager.tryStart(groupId, image, request.region(), startupSeed);
+                        : containerManager.tryStart(groupId, image, request.region(), seed.rdbBase64());
             } catch (ElastiCacheContainerManager.SnapshotRestoreException e) {
                 LOG.warnv(e, "Failed to restore snapshot {0} into replication group {1}",
                         seed.snapshotName(), groupId);
                 throw new AwsException("InvalidSnapshotState", "Failed to restore snapshot " + seed.snapshotName()
                         + " into replication group " + groupId + ": " + e.getMessage(), 400);
             }
-            if (seed != null && (startupSeed == null || handle == null)) {
-                loadSnapshot(groupId, handle, seed);
+            if (seed != null && handle == null) {
+                throw new AwsException("InvalidReplicationGroupState", "Replication group " + groupId
+                        + " has no running backend to restore snapshot " + seed.snapshotName() + " into.", 400);
             }
 
             String endpointHost = resolveEndpointHost();
@@ -1589,20 +1589,6 @@ public class ElastiCacheService implements ResourceProvider {
                     + " group " + request.replicationGroupId() + ".", 400);
         }
         return createReplicationGroup(request, new SnapshotSeed(snapshotName, archive));
-    }
-
-    private void loadSnapshot(String groupId, ElastiCacheContainerHandle handle, SnapshotSeed seed) {
-        if (handle == null) {
-            throw new AwsException("InvalidReplicationGroupState", "Replication group " + groupId
-                    + " has no running backend to restore snapshot " + seed.snapshotName() + " into.", 400);
-        }
-        try {
-            containerManager.restore(handle.getContainerId(), seed.rdbBase64());
-        } catch (RuntimeException e) {
-            LOG.warnv(e, "Failed to restore snapshot {0} into replication group {1}", seed.snapshotName(), groupId);
-            throw new AwsException("InvalidSnapshotState", "Failed to restore snapshot " + seed.snapshotName()
-                    + " into replication group " + groupId + ": " + e.getMessage(), 400);
-        }
     }
 
     // ── Cache Clusters (single-node Redis/Valkey) ─────────────────────────────

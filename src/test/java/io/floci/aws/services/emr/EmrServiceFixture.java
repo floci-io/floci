@@ -8,7 +8,7 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrStep;
-import io.floci.aws.services.emrserverless.SparkConnectServers;
+import io.floci.aws.services.emrserverless.SessionServers;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.iam.IamService;
@@ -299,7 +299,7 @@ final class EmrServiceFixture {
     private final IamService iam;
     private final int[] durations;
     // How the docker runner mode's session servers are asked whether they answer; null for no session servers.
-    private final SparkConnectServers.Probe sessionProbe;
+    private final SessionServers.Probe sessionProbe;
 
     /** The service as configured by default, every duration 0. */
     EmrServiceFixture() {
@@ -331,7 +331,7 @@ final class EmrServiceFixture {
      * As {@link #docker(SparkJobRunner, IamService)}, its sessions' Spark Connect servers run by {@code runner} too,
      * each on a thread of its own, and asked whether they answer by {@code probe}.
      */
-    static EmrServiceFixture dockerSessions(SparkJobRunner runner, IamService iam, SparkConnectServers.Probe probe) {
+    static EmrServiceFixture dockerSessions(SparkJobRunner runner, IamService iam, SessionServers.Probe probe) {
         return new EmrServiceFixture(new InMemoryStorageFactory(ACCOUNT), new MutableClock(), runner, null,
                 new RecordingStorage(), new RecordingReleaseImages(), iam, probe, 0, 0, 0);
     }
@@ -339,7 +339,7 @@ final class EmrServiceFixture {
     private EmrServiceFixture(InMemoryStorageFactory storage, MutableClock clock, SparkJobRunner runner,
                               BootstrapRunner bootstrap, RecordingStorage clusterStorage,
                               RecordingReleaseImages releaseImages, IamService iam,
-                              SparkConnectServers.Probe sessionProbe, int... durations) {
+                              SessionServers.Probe sessionProbe, int... durations) {
         this.sessionProbe = sessionProbe;
         this.storage = storage;
         this.clock = clock;
@@ -379,8 +379,8 @@ final class EmrServiceFixture {
                         clusterStorage, releaseImages, this::handToThread, iam)
                 : new EmrService(storage, config(false), regionResolver, publisher, clock, recorded, runner, bootstrap,
                         clusterStorage, releaseImages, this::handToThread, iam,
-                        new SparkConnectServers(runner, task -> Thread.ofPlatform().daemon().start(task), null,
-                                sessionProbe, clock));
+                        new SessionServers(SessionServers.Kind.SPARK_CONNECT, runner,
+                                task -> Thread.ofPlatform().daemon().start(task), null, sessionProbe, clock));
     }
 
     /** A new service on the same storage and clock, as after a restart of Floci with persistent storage. */
@@ -422,6 +422,15 @@ final class EmrServiceFixture {
     EmrService withPig() {
         EmulatorConfig config = config(false);
         when(config.services().emr().pig().enabled()).thenReturn(true);
+        return new EmrService(storage, config, new RegionResolver(REGION, ACCOUNT), publisher, clock,
+                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, this::handToThread,
+                iam);
+    }
+
+    /** A new service on the same storage and clock, as {@link #restart} builds, with this default release label. */
+    EmrService withDefaultReleaseLabel(String label) {
+        EmulatorConfig config = config(false);
+        when(config.services().emr().defaultReleaseLabel()).thenReturn(label);
         return new EmrService(storage, config, new RegionResolver(REGION, ACCOUNT), publisher, clock,
                 mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, this::handToThread,
                 iam);

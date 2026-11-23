@@ -14,42 +14,68 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.SparkConnectTargets;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.eks.model.AccessConfig;
 import io.floci.aws.services.eks.model.Cluster;
+import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
+import io.floci.aws.services.emrserverless.SessionServers;
+import io.floci.aws.services.emrserverless.SparkJobRunner;
 import io.floci.aws.services.iam.IamService;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
+import java.net.http.HttpClient;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.PriorityQueue;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.function.Predicate;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * EMR on EKS ({@code emr-containers}): virtual clusters, job runs, job templates, managed endpoints
- * and security configurations, as control-plane records. A job run follows the job run states
- * without running Spark on Kubernetes: it completes as soon as it is submitted, or after
- * {@code floci.services.emrcontainers.job-run-duration-seconds}, and fails as AWS documents when
- * Floci's EKS has no cluster of the virtual cluster's name.
+ * and security configurations, as control-plane records. In the {@code immediate} runner mode a job run
+ * follows the job run states without running anything: it completes as soon as it is submitted, or after
+ * {@code floci.services.emrcontainers.job-run-duration-seconds}. In the {@code docker} one it runs its Spark
+ * job in a container ({@link EmrContainersSparkJobs}): SUBMITTED while the container starts, RUNNING once its
+ * driver runs, and COMPLETED or FAILED as its driver exits. Either way it fails as AWS documents when
+ * Floci's EKS has no cluster of the virtual cluster's name. A virtual cluster's concurrent job
+ * limits hold a run beyond its running limit in a queue, and refuse one beyond its queue depth.
  *
  * <p>Every resource is stored as the JSON AWS answers for it, under its ARN. Members whose name
  * starts with {@code _} are Floci's own and never leave the service.
@@ -58,6 +84,7 @@ import java.util.regex.Pattern;
 public class EmrContainersService implements Resettable, StoredResourceArns {
 
     static final String SERVICE = "emr-containers";
+    private static final Logger LOG = Logger.getLogger(EmrContainersService.class);
     static final String VIRTUAL_CLUSTERS = "/virtualclusters/";
     static final String JOB_RUNS = "/jobruns/";
     static final String ENDPOINTS = "/endpoints/";
@@ -70,17 +97,65 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
 
     private static final String CLIENT_TOKEN = "_clientToken";
     private static final String DUE_AT = "_dueAt";
+    // When a run whose driver failed starts its next attempt, while it waits for its retry's backoff.
+    private static final String RETRY_AT = "_retryAt";
+    // The id of the Spark application a run submits, the same for each of its attempts: a retry restarts the driver
+    // pod, which the guide tells apart by its suffix alone.
+    private static final String SPARK_APPLICATION_ID = "_sparkApplicationId";
+    // "an exponential retry interval of (10 seconds, 20 seconds, 40 seconds ...) which is capped at 6 minutes"
+    // (EMR on EKS Development Guide, "Using job retry policies").
+    private static final Duration FIRST_RETRY_DELAY = Duration.ofSeconds(10);
+    private static final Duration MAX_RETRY_DELAY = Duration.ofMinutes(6);
+    private static final String INVALID_MAX_ATTEMPTS =
+            "Retry policy configuration's parameter value of maxAttempts is invalid";
+    private static final int DRIVER_POD_SUFFIX_LENGTH = 5;
+    // Where a job run held in its virtual cluster's queue stands in it, the first to start lowest.
+    private static final String QUEUE_POSITION = "_queuePosition";
     private static final String ACCESS_ENTRY_INTEGRATED = "_eksAccessEntryIntegrated";
     private static final Set<String> ACCESS_ENTRY_MODES = Set.of("API", "API_AND_CONFIG_MAP");
     private static final String RUNNING = "RUNNING";
+    private static final String PENDING = "PENDING";
+    private static final String SUBMITTED = "SUBMITTED";
+    private static final String CANCEL_PENDING = "CANCEL_PENDING";
     private static final String TERMINATED = "TERMINATED";
     private static final String COMPLETED = "COMPLETED";
     private static final String CANCELLED = "CANCELLED";
     private static final String FAILED = "FAILED";
     private static final String ACTIVE = "ACTIVE";
     private static final Set<String> FINISHED_JOB_RUN_STATES = Set.of(COMPLETED, CANCELLED, FAILED);
-    private static final Set<String> QUEUED_JOB_RUN_STATES = Set.of("PENDING", "SUBMITTED");
-    private static final Set<String> FINISHED_ENDPOINT_STATES = Set.of(TERMINATED, "TERMINATED_WITH_ERRORS");
+    private static final Set<String> QUEUED_JOB_RUN_STATES = Set.of(PENDING, SUBMITTED);
+    // The states of a run whose container runs, or is about to, in the docker runner mode: each holds a running slot.
+    private static final Set<String> LAUNCHED_JOB_RUN_STATES = Set.of(SUBMITTED, RUNNING, CANCEL_PENDING);
+    private static final String RUNNER_DOCKER = "docker";
+    // AWS's answer for a run whose Spark driver exits with an error, as DescribeJobRun gave it (apache/iceberg#4804).
+    private static final String DRIVER_FAILED = "Jobrun failed. Main Spark container terminated with errors. Please "
+            + "refer logs uploaded to S3/CloudWatch based on your monitoring configuration.";
+    // AWS's "Common errors when running jobs": a submission that failed for an internal error, and a run whose
+    // monitoring an internal error ended, as a Floci restart ends a running driver's.
+    private static final String SUBMISSION_FAILED = "JobRun submission failed due to an internal error.";
+    private static final String MONITORING_FAILED = "Trouble monitoring your JobRun due to an internal error";
+    // The same page's answer for a run whose StartJobRun parameters are not valid.
+    private static final String INVALID_SUBMISSION = "JobRun submission failed.";
+    private static final String USER_ERROR = "USER_ERROR";
+    private static final String INTERNAL_ERROR = "INTERNAL_ERROR";
+    private static final String VALIDATION_ERROR = "VALIDATION_ERROR";
+    // The development guide's concurrent job limits: "By default, the per-virtual-cluster concurrency limit is set
+    // to 1000 concurrent job runs", and "buffered jobs fail after 30 minutes if no slot frees up".
+    private static final int DEFAULT_MAX_CONCURRENT_JOB_RUNS = 1000;
+    private static final Duration QUEUE_TIMEOUT = Duration.ofMinutes(30);
+    private static final String CREATING = "CREATING";
+    private static final String TERMINATING = "TERMINATING";
+    private static final String TERMINATED_WITH_ERRORS = "TERMINATED_WITH_ERRORS";
+    private static final Set<String> FINISHED_ENDPOINT_STATES = Set.of(TERMINATED, TERMINATED_WITH_ERRORS);
+    /** The path under Floci's base URL that an endpoint's serverUrl is, its id after it. */
+    static final String GATEWAY_PATH = "/_aws/emr-containers/endpoints/";
+    // No source gives AWS's wording for an endpoint whose gateway failed; these are Floci's.
+    static final String GATEWAY_NOT_STARTED = "The endpoint's Jupyter Enterprise Gateway could not start: %s";
+    static final String GATEWAY_EXITED = "The endpoint's Jupyter Enterprise Gateway exited with code %d.";
+    static final String GATEWAY_ENDED = "The endpoint's Jupyter Enterprise Gateway ended with no exit code.";
+    static final String GATEWAY_SILENT = "The endpoint's Jupyter Enterprise Gateway did not answer within "
+            + SessionServers.START_LIMIT.toMinutes() + " minutes: %s";
+    static final String GATEWAY_LOST = "The endpoint's Jupyter Enterprise Gateway stopped with Floci.";
     private static final String TOKEN_CREDENTIAL = "TOKEN";
     private static final int DEFAULT_SESSION_SECONDS = 15 * 60;
     private static final int MAX_SESSION_SECONDS = 12 * 60 * 60;
@@ -105,18 +180,48 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
     private final RequestContext requestContext;
     private final Clock clock;
     private final int jobRunDurationSeconds;
+    // The runner of the docker runner mode, or null in the immediate one.
+    private final SparkJobRunner sparkRunner;
+    private final Executor runExecutor;
+    // image-template and docker-network, each null when not set.
+    private final String imageTemplate;
+    private final String dockerNetwork;
+    // Where a retry waits for its backoff in the docker runner mode; null in the immediate one.
+    private final Delays delays;
+    // The managed endpoints' gateways in the docker runner mode; null in the immediate one.
+    private final EndpointGateways gateways;
+    private final GatewayOwner gatewayOwner = new GatewayOwner();
+    // The ARNs of the runs whose containers a thread of this process runs; a launched run not here was left by a
+    // restart.
+    private final Set<String> executing = new HashSet<>();
+    // Raised by each reset, so a run's thread from before it writes nothing back after the wipe.
+    private long generation;
 
     @Inject
     public EmrContainersService(StorageFactory storageFactory, ObjectMapper mapper, RegionResolver regionResolver,
                                 EksService eksService, IamService iamService, RequestContext requestContext,
-                                Clock clock, EmulatorConfig config) {
+                                Clock clock, EmulatorConfig config, EmrServerlessSparkRunner sparkRunner) {
         this(storage(storageFactory, "emr-containers-virtual-clusters.json"),
                 storage(storageFactory, "emr-containers-job-runs.json"),
                 storage(storageFactory, "emr-containers-endpoints.json"),
                 storage(storageFactory, "emr-containers-job-templates.json"),
                 storage(storageFactory, "emr-containers-security-configurations.json"),
                 mapper, regionResolver, eksService, iamService, requestContext, clock,
-                config.services().emrcontainers().jobRunDurationSeconds());
+                config.services().emrcontainers().jobRunDurationSeconds(),
+                RUNNER_DOCKER.equalsIgnoreCase(config.services().emrcontainers().runnerMode()) ? sparkRunner : null,
+                Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-containers-run-", 0).factory()),
+                config.services().emrcontainers().imageTemplate().orElse(null),
+                config.services().emrcontainers().dockerNetwork().orElse(null),
+                RUNNER_DOCKER.equalsIgnoreCase(config.services().emrcontainers().runnerMode()) ? Delays.timer() : null,
+                RUNNER_DOCKER.equalsIgnoreCase(config.services().emrcontainers().runnerMode())
+                        ? EndpointGateways.of(sparkRunner, clock,
+                                config.services().emrcontainers().gatewayImageTemplate().orElse(null),
+                                config.effectiveBaseUrl())
+                        : null);
+        // Before any run of this process starts: a driver an earlier one left belongs to a run read as FAILED.
+        if (this.sparkRunner != null && config.services().emrcontainers().reconcileContainersOnStartup()) {
+            sparkRunner.removeLeftoverDrivers(SERVICE);
+        }
     }
 
     EmrContainersService(AccountAwareStorageBackend<ObjectNode> virtualClusters,
@@ -127,6 +232,20 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
                          ObjectMapper mapper, RegionResolver regionResolver, EksService eksService,
                          IamService iamService, RequestContext requestContext, Clock clock,
                          int jobRunDurationSeconds) {
+        this(virtualClusters, jobRuns, endpoints, jobTemplates, securityConfigurations, mapper, regionResolver,
+                eksService, iamService, requestContext, clock, jobRunDurationSeconds, null, Runnable::run, null, null,
+                null, null);
+    }
+
+    EmrContainersService(AccountAwareStorageBackend<ObjectNode> virtualClusters,
+                         AccountAwareStorageBackend<ObjectNode> jobRuns,
+                         AccountAwareStorageBackend<ObjectNode> endpoints,
+                         AccountAwareStorageBackend<ObjectNode> jobTemplates,
+                         AccountAwareStorageBackend<ObjectNode> securityConfigurations,
+                         ObjectMapper mapper, RegionResolver regionResolver, EksService eksService,
+                         IamService iamService, RequestContext requestContext, Clock clock,
+                         int jobRunDurationSeconds, SparkJobRunner sparkRunner, Executor runExecutor,
+                         String imageTemplate, String dockerNetwork, Delays delays, EndpointGateways gateways) {
         this.virtualClusters = virtualClusters;
         this.jobRuns = jobRuns;
         this.endpoints = endpoints;
@@ -139,6 +258,68 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         this.requestContext = requestContext;
         this.clock = clock;
         this.jobRunDurationSeconds = jobRunDurationSeconds;
+        this.sparkRunner = sparkRunner;
+        this.runExecutor = runExecutor;
+        this.imageTemplate = imageTemplate;
+        this.dockerNetwork = dockerNetwork;
+        this.delays = delays;
+        this.gateways = gateways;
+    }
+
+    @PreDestroy
+    void shutdown() {
+        if (runExecutor instanceof ExecutorService executor) {
+            executor.shutdownNow();
+        }
+        if (delays != null) {
+            delays.close();
+        }
+        if (gateways != null) {
+            gateways.servers().shutdown();
+        }
+    }
+
+    /**
+     * The managed endpoints' gateways of the docker runner mode: the servers that run them, the image they run in
+     * ({@code gateway-image-template}, null when not set), and Floci's base URL, which their {@code serverUrl} is
+     * under.
+     */
+    record EndpointGateways(SessionServers servers, String imageTemplate, String baseUrl) {
+
+        static EndpointGateways of(SparkJobRunner runner, Clock clock, String imageTemplate, String baseUrl) {
+            HttpClient probes = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+            return new EndpointGateways(new SessionServers(EmrContainersGateways.KIND, runner,
+                    Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-containers-gateway-", 0)
+                            .factory()),
+                    null, (host, port) -> EmrContainersGateways.unanswered(probes, host, port), clock),
+                    imageTemplate, baseUrl);
+        }
+    }
+
+    /** Runs a task once its delay has passed, as a retry waits for its backoff; a test runs them when it chooses. */
+    interface Delays {
+
+        void after(Duration delay, Runnable task);
+
+        default void close() {
+        }
+
+        /** Delays on a daemon thread of their own. */
+        static Delays timer() {
+            ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(
+                    Thread.ofPlatform().daemon().name("emr-containers-retries").factory());
+            return new Delays() {
+                @Override
+                public void after(Duration delay, Runnable task) {
+                    executor.schedule(task, delay.toMillis(), TimeUnit.MILLISECONDS);
+                }
+
+                @Override
+                public void close() {
+                    executor.shutdownNow();
+                }
+            };
+        }
     }
 
     private static AccountAwareStorageBackend<ObjectNode> storage(StorageFactory storageFactory, String file) {
@@ -224,6 +405,8 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         EmrContainersRequestShapes.check("UpdateVirtualCluster", request);
         ObjectNode cluster = virtualCluster(id).orElseThrow(() -> notFound(virtualClusterMissing(id)));
         requireState(cluster, RUNNING, "VirtualCluster", "update");
+        // The runs stand as the limits they had until now left them; the new ones hold from now on.
+        settledRuns(cluster);
         ObjectNode updated = cluster.deepCopy();
         JsonNode scheduler = request.get("schedulerConfiguration");
         if (scheduler != null && !scheduler.isNull()) {
@@ -235,6 +418,8 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
             }
         }
         virtualClusters.put(updated.get("arn").textValue(), updated);
+        // A higher running limit, or none, starts queued runs now.
+        settledRuns(updated);
         return wrap("virtualCluster", withSchedulerStatus(updated));
     }
 
@@ -284,6 +469,11 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         if (!missing.isEmpty()) {
             throw SmithyValidationErrors.validationException(missing);
         }
+        // A template's configurationOverrides follow its parametric model, whose monitoring destinations need not name
+        // their log group or log URI; the run they make follows StartJobRun's, which a request's own already met.
+        if (!request.hasNonNull("configurationOverrides") && template.hasNonNull("configurationOverrides")) {
+            EmrContainersRequestShapes.checkShape("ConfigurationOverrides", template.get("configurationOverrides"));
+        }
 
         String id = newId(JOB_RUN_ID_LENGTH);
         String arn = clusterArn + JOB_RUNS + id;
@@ -302,17 +492,41 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         }
         run.put("createdAt", timestamp(now));
         run.put("createdBy", createdBy());
+        run.put(SPARK_APPLICATION_ID, sparkApplicationId());
         ObjectNode tags = tags(template.get("jobTags"));
         tags.setAll(tags(request.get("tags")));
         if (tags.size() > MAX_TAGS) {
             throw tooManyTags();
         }
         run.set("tags", tags);
-        if (request.hasNonNull("retryPolicyConfiguration")) {
-            run.set("retryPolicyConfiguration", request.get("retryPolicyConfiguration").deepCopy());
-            run.set("retryPolicyExecution", object("currentAttemptCount", 1));
+        // "The valid maxAttempts range is from 1 to 2,147,483,647", and "If maxAttempts of the
+        // retryPolicyConfiguration is set to 1, it means that no retries will be done": the policy and its execution
+        // "will not be visible when retry policy is disabled in the job" (EMR on EKS Development Guide, "Using job
+        // retry policies").
+        JsonNode retryPolicy = request.get("retryPolicyConfiguration");
+        if (retryPolicy != null && !retryPolicy.isNull()) {
+            JsonNode maxAttempts = retryPolicy.path("maxAttempts");
+            if (!maxAttempts.isIntegralNumber() || !maxAttempts.canConvertToInt() || maxAttempts.intValue() < 1) {
+                throw invalid(INVALID_MAX_ATTEMPTS);
+            }
+            if (maxAttempts.intValue() > 1) {
+                run.set("retryPolicyConfiguration", retryPolicy.deepCopy());
+                run.set("retryPolicyExecution", object("currentAttemptCount", 1));
+            }
         }
 
+        // Concurrent job limits are "enforced at StartJobRun, before any pods are created": a run beyond the
+        // running limit waits in the queue, and "once the queue is full, StartJobRun rejects further submissions".
+        List<ObjectNode> runs = settledRuns(cluster);
+        boolean slotFree = runs.stream().filter(EmrContainersService::holdsSlot).count()
+                < maxConcurrentJobRuns(cluster);
+        long queued = runs.stream().filter(EmrContainersService::waitsForSlot).count();
+        JsonNode maxInQueue = cluster.path("schedulerConfiguration").path("maxInQueueJobRuns");
+        if (!slotFree && maxInQueue.isIntegralNumber() && queued >= maxInQueue.longValue()) {
+            // The guide gives ValidationException, not its message; the wording is Floci's.
+            throw invalid("Virtual cluster " + virtualClusterId + " has " + queued + " job runs in its queue, its "
+                    + "maxInQueueJobRuns, and accepts no more until one of them starts.");
+        }
         String eksCluster = cluster.path("containerProvider").path("id").textValue();
         if (eksService.findAuthenticationCluster(regionResolver.getAccountId(), regionResolver.getRegion(), eksCluster)
                 .isEmpty()) {
@@ -320,13 +534,16 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
             finish(run, FAILED, now);
             run.put("stateDetails", "Cluster " + eksCluster + " does not exist.");
             run.put("failureReason", "CLUSTER_UNAVAILABLE");
-        } else if (jobRunDurationSeconds <= 0) {
-            finish(run, COMPLETED, now);
+        } else if (!slotFree) {
+            // Held before it is submitted to the virtual cluster: "waiting to be submitted to the virtual cluster".
+            run.put("state", PENDING);
+            run.put(QUEUE_POSITION, runs.stream().mapToLong(held -> held.path(QUEUE_POSITION).asLong()).max()
+                    .orElse(0) + 1);
         } else {
-            run.put("state", RUNNING);
-            run.put(DUE_AT, now.plusSeconds(jobRunDurationSeconds).toEpochMilli());
+            start(run, now);
         }
         jobRuns.put(arn, run);
+        launch(List.of(run));
         return pick(run, "id", "name", "arn", "virtualClusterId");
     }
 
@@ -340,9 +557,7 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         ObjectNode shape = query.shape().put("virtualClusterId", virtualClusterId);
         putText(shape, "name", name);
         EmrContainersRequestShapes.check("ListJobRuns", shape);
-        String prefix = arn(VIRTUAL_CLUSTERS + virtualClusterId + JOB_RUNS);
-        List<ObjectNode> matching = jobRuns.scan(key -> key.startsWith(prefix)).stream()
-                .map(this::advance)
+        List<ObjectNode> matching = settledRuns(virtualClusterId).stream()
                 .filter(query::matches)
                 .filter(run -> name == null || name.equals(run.path("name").textValue()))
                 .toList();
@@ -357,8 +572,22 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
             throw invalid("Job run " + id + " is " + state + " and can't be cancelled.");
         }
         ObjectNode cancelled = run.deepCopy();
+        if (CANCEL_PENDING.equals(state)) {
+            return object("id", id).put("virtualClusterId", virtualClusterId);
+        } else if (launched(run) && !run.has(RETRY_AT)) {
+            // "CANCEL_PENDING - A job run has been requested for cancellation. Amazon EMR on EKS is trying to cancel
+            // the job on the virtual cluster", until its driver is stopped.
+            cancelled.put("state", CANCEL_PENDING);
+            jobRuns.put(cancelled.get("arn").textValue(), cancelled);
+            runExecutor.execute(() -> sparkRunner.stop(id));
+            return object("id", id).put("virtualClusterId", virtualClusterId);
+        }
+        // A queued run, or one between its attempts, whose next attempt the backoff's end then finds cancelled.
         finish(cancelled, CANCELLED, now());
         jobRuns.put(cancelled.get("arn").textValue(), cancelled);
+        executing.remove(cancelled.get("arn").textValue());
+        // A running slot it frees goes to the queue's first run now.
+        settledRuns(virtualClusterId);
         return object("id", id).put("virtualClusterId", virtualClusterId);
     }
 
@@ -434,7 +663,9 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         endpoint.put("arn", arn);
         endpoint.put("virtualClusterId", virtualClusterId);
         endpoint.set("type", request.get("type"));
-        endpoint.put("state", ACTIVE);
+        // "Initially, your endpoint is in the CREATING state. After a few minutes, it transitions to the ACTIVE state"
+        // (EMR on EKS Development Guide, "Create an interactive endpoint"), once its gateway answers.
+        endpoint.put("state", gateways != null ? CREATING : ACTIVE);
         endpoint.set("releaseLabel", request.get("releaseLabel"));
         endpoint.set("executionRoleArn", request.get("executionRoleArn"));
         copy(request, endpoint, "certificateArn", "configurationOverrides");
@@ -442,13 +673,18 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         endpoint.set("tags", tags(request.get("tags")));
         endpoint.put(CLIENT_TOKEN, clientToken);
         endpoints.put(arn, endpoint);
+        if (gateways != null) {
+            gateways.servers().launch(EmrContainersGateways.job(endpoint, gateways.imageTemplate(), dockerNetwork),
+                    gatewayOwner);
+        }
         return pick(endpoint, "id", "name", "arn", "virtualClusterId");
     }
 
     public synchronized ObjectNode describeManagedEndpoint(String virtualClusterId, String id) {
         EmrContainersRequestShapes.check("DescribeManagedEndpoint",
                 object("id", id).put("virtualClusterId", virtualClusterId));
-        ObjectNode endpoint = endpoint(virtualClusterId, id).orElseThrow(() -> notFound(endpointMissing(id)));
+        ObjectNode endpoint = endpoint(virtualClusterId, id).map(this::settledEndpoint)
+                .orElseThrow(() -> notFound(endpointMissing(id)));
         return wrap("endpoint", endpoint);
     }
 
@@ -458,6 +694,7 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         EmrContainersRequestShapes.check("ListManagedEndpoints", shape);
         String prefix = arn(VIRTUAL_CLUSTERS + virtualClusterId + ENDPOINTS);
         List<ObjectNode> matching = endpoints.scan(key -> key.startsWith(prefix)).stream()
+                .map(this::settledEndpoint)
                 .filter(query::matches)
                 .filter(endpoint -> types == null || types.isEmpty()
                         || types.contains(endpoint.path("type").textValue()))
@@ -468,11 +705,19 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
     public synchronized ObjectNode deleteManagedEndpoint(String virtualClusterId, String id) {
         EmrContainersRequestShapes.check("DeleteManagedEndpoint",
                 object("id", id).put("virtualClusterId", virtualClusterId));
-        ObjectNode endpoint = endpoint(virtualClusterId, id).orElseThrow(() -> invalid(endpointMissing(id)));
-        if (!FINISHED_ENDPOINT_STATES.contains(endpoint.path("state").textValue())) {
+        ObjectNode endpoint = endpoint(virtualClusterId, id).map(this::settledEndpoint)
+                .orElseThrow(() -> invalid(endpointMissing(id)));
+        String state = endpoint.path("state").textValue();
+        if (!FINISHED_ENDPOINT_STATES.contains(state) && !TERMINATING.equals(state)) {
             ObjectNode terminated = endpoint.deepCopy();
-            terminated.put("state", TERMINATED);
+            boolean gatewayRuns = gateways != null && gateways.servers().runs(id);
+            // TERMINATING until its gateway has stopped.
+            terminated.put("state", gatewayRuns ? TERMINATING : TERMINATED);
             endpoints.put(terminated.get("arn").textValue(), terminated);
+            if (gatewayRuns) {
+                // Off the request's thread, as stopping a container waits for Docker.
+                runExecutor.execute(() -> gateways.servers().stop(id));
+            }
         }
         return object("id", id).put("virtualClusterId", virtualClusterId);
     }
@@ -482,7 +727,7 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         request.put("virtualClusterIdentifier", virtualClusterId);
         request.put("endpointIdentifier", endpointId);
         EmrContainersRequestShapes.check("GetManagedEndpointSessionCredentials", request);
-        ObjectNode endpoint = endpoint(virtualClusterId, endpointId)
+        ObjectNode endpoint = endpoint(virtualClusterId, endpointId).map(this::settledEndpoint)
                 .orElseThrow(() -> notFound(endpointMissing(endpointId)));
         if (!ACTIVE.equals(endpoint.path("state").textValue())) {
             throw invalid("Endpoint " + endpointId + " is " + endpoint.path("state").textValue()
@@ -498,12 +743,183 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         if (seconds < 1 || seconds > MAX_SESSION_SECONDS) {
             throw invalid("durationInSeconds must be between 1 and " + MAX_SESSION_SECONDS + ".");
         }
-        ObjectNode credentials = object("token", sessionToken());
+        String token = sessionToken();
+        Instant expiresAt = now().plusSeconds(seconds);
+        // "The token acts as proof of authentication to connect to the interactive endpoint server" ("Retrieve an auth
+        // token to connect to the interactive endpoint").
+        if (gateways != null) {
+            gateways.servers().grant(token, endpointId, regionResolver.getAccountId(), regionResolver.getRegion(),
+                    expiresAt);
+        }
+        ObjectNode credentials = object("token", token);
         ObjectNode response = object("id", newId(JOB_RUN_ID_LENGTH));
         response.set("credentials", credentials);
         response.set("endpointCredentials", credentials.deepCopy());
-        response.put("expiresAt", timestamp(now().plusSeconds(seconds)));
+        response.put("expiresAt", timestamp(expiresAt));
         return response;
+    }
+
+    /**
+     * Where a call to endpoint {@code endpointId}'s gateway carrying {@code token} goes: empty for a token not given
+     * for that endpoint, as in the immediate runner mode, where no gateway runs; refused for an expired one, or while
+     * the endpoint is not ACTIVE; else its gateway. Called off the event loop, as the account and Region of none.
+     */
+    public Optional<SparkConnectTargets.Route> gatewayRoute(String endpointId, String token) {
+        return gateways == null || token == null ? Optional.empty()
+                : gateways.servers().route(token, endpointId, gatewayOwner);
+    }
+
+    /**
+     * Where a CORS preflight to endpoint {@code endpointId}'s gateway goes, which Jupyter Enterprise Gateway 2.6.0's
+     * TokenAuthorizationMixin takes without a token: empty where no gateway of this process runs, refused while the
+     * endpoint is not ACTIVE, else its gateway. Called off the event loop, as the account and Region of none.
+     */
+    public Optional<SparkConnectTargets.Route> gatewayPreflightRoute(String endpointId) {
+        return gateways == null ? Optional.empty() : gateways.servers().routeWithoutToken(endpointId, gatewayOwner);
+    }
+
+    /**
+     * The endpoint as it stands, stored: in the docker runner mode, one whose gateway no thread of this process runs,
+     * as after a restart, has ended, TERMINATED_WITH_ERRORS, or TERMINATED where it was being deleted.
+     */
+    private ObjectNode settledEndpoint(ObjectNode endpoint) {
+        String state = endpoint.path("state").textValue();
+        if (gateways == null || FINISHED_ENDPOINT_STATES.contains(state)
+                || gateways.servers().runs(endpoint.get("id").textValue())) {
+            return endpoint;
+        }
+        ObjectNode ended = endpoint.deepCopy();
+        if (TERMINATING.equals(state)) {
+            ended.put("state", TERMINATED);
+        } else {
+            endWithErrors(ended, GATEWAY_LOST);
+        }
+        endpoints.put(ended.get("arn").textValue(), ended);
+        return ended;
+    }
+
+    private static void endWithErrors(ObjectNode endpoint, String details) {
+        endpoint.put("state", TERMINATED_WITH_ERRORS);
+        endpoint.put("stateDetails", details);
+        endpoint.put("failureReason", INTERNAL_ERROR);
+        endpoint.remove("serverUrl");
+    }
+
+    // The stored endpoint of that id, in the account and Region the call runs as.
+    private Optional<ObjectNode> endpointById(String id) {
+        return endpoints.scan(key -> key.endsWith(ENDPOINTS + id)).stream().findFirst();
+    }
+
+    /**
+     * The endpoints as their gateways' owner: CREATING until the gateway answers, then ACTIVE with its
+     * {@code serverUrl} and AWS's "Endpoint created successfully. It took 3 Minutes 15 Seconds" for the time it took
+     * ("Retrieve the gateway server URL of your interactive endpoint"); TERMINATED once a deleted endpoint's gateway
+     * has stopped, and TERMINATED_WITH_ERRORS, with INTERNAL_ERROR, when it stops otherwise or never answers. Each
+     * step is taken under the service's lock.
+     */
+    private final class GatewayOwner implements SessionServers.Owner {
+
+        @Override
+        public void running(String endpointId) {
+        }
+
+        @Override
+        public void answering(String endpointId) {
+            synchronized (EmrContainersService.this) {
+                endpointById(endpointId).filter(stored -> CREATING.equals(stored.path("state").textValue()))
+                        .ifPresent(stored -> {
+                            ObjectNode active = stored.deepCopy();
+                            Duration took = Duration.between(Instant.parse(stored.get("createdAt").textValue()),
+                                    now());
+                            active.put("state", ACTIVE);
+                            active.put("serverUrl", serverUrl(endpointId));
+                            active.put("stateDetails", "Endpoint created successfully. It took "
+                                    + took.toMinutes() + " Minutes " + took.toSecondsPart() + " Seconds");
+                            endpoints.put(active.get("arn").textValue(), active);
+                            LOG.infov("EMR on EKS endpoint {0} is ACTIVE", endpointId);
+                        });
+            }
+        }
+
+        @Override
+        public void silent(String endpointId, String why) {
+            synchronized (EmrContainersService.this) {
+                endpointById(endpointId).filter(stored -> CREATING.equals(stored.path("state").textValue()))
+                        .ifPresent(stored -> {
+                            ObjectNode failed = stored.deepCopy();
+                            endWithErrors(failed, String.format(GATEWAY_SILENT, why));
+                            endpoints.put(failed.get("arn").textValue(), failed);
+                        });
+            }
+        }
+
+        @Override
+        public void stopped(String endpointId, SparkJobRunner.Outcome outcome) {
+            synchronized (EmrContainersService.this) {
+                endpointById(endpointId)
+                        .filter(stored -> !FINISHED_ENDPOINT_STATES.contains(stored.path("state").textValue()))
+                        .ifPresent(stored -> {
+                            ObjectNode ended = stored.deepCopy();
+                            if (TERMINATING.equals(stored.path("state").textValue())) {
+                                ended.put("state", TERMINATED);
+                                ended.remove("serverUrl");
+                            } else if (outcome.stopped()) {
+                                // Stopped with no delete asking for it: Floci is shutting down, its kernels going
+                                // with the gateway, as they do when a restart leaves one behind.
+                                endWithErrors(ended, GATEWAY_LOST);
+                            } else {
+                                endWithErrors(ended, outcome.failure() != null
+                                        ? String.format(GATEWAY_NOT_STARTED, outcome.failure())
+                                        : outcome.exitCode() != null
+                                        ? String.format(GATEWAY_EXITED, outcome.exitCode()) : GATEWAY_ENDED);
+                            }
+                            endpoints.put(ended.get("arn").textValue(), ended);
+                            LOG.infov("EMR on EKS endpoint {0} is {1}", endpointId,
+                                    ended.get("state").textValue());
+                        });
+            }
+        }
+
+        @Override
+        public boolean starting(String endpointId) {
+            return inState(endpointId, CREATING);
+        }
+
+        @Override
+        public boolean going(String endpointId) {
+            return inState(endpointId, CREATING) || inState(endpointId, ACTIVE);
+        }
+
+        @Override
+        public String refusal(String endpointId) {
+            synchronized (EmrContainersService.this) {
+                String state = endpointById(endpointId).map(stored -> stored.path("state").textValue())
+                        .orElse(TERMINATED);
+                return ACTIVE.equals(state) ? null : "Endpoint " + endpointId + " is " + state + ".";
+            }
+        }
+
+        @Override
+        public void busy(String endpointId) {
+        }
+
+        @Override
+        public void idle(String endpointId) {
+        }
+
+        private boolean inState(String endpointId, String state) {
+            synchronized (EmrContainersService.this) {
+                return endpointById(endpointId).filter(stored -> state.equals(stored.path("state").textValue()))
+                        .isPresent();
+            }
+        }
+    }
+
+    // An endpoint's serverUrl: its path under Floci's base URL, which Floci's proxy serves.
+    private String serverUrl(String endpointId) {
+        String base = gateways.baseUrl() == null ? "" : gateways.baseUrl().endsWith("/")
+                ? gateways.baseUrl().substring(0, gateways.baseUrl().length() - 1) : gateways.baseUrl();
+        return base + GATEWAY_PATH + endpointId;
     }
 
     // ── Security configurations ──────────────────────────────────────────────────
@@ -642,8 +1058,26 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         return resource.startsWith(SECURITY_CONFIGURATIONS) ? securityConfigurations : null;
     }
 
+    /**
+     * A reset has begun: the runs' threads from before it write nothing more, so the storage wipe that follows leaves
+     * none of their runs behind. Its teardown stops their drivers.
+     */
+    @Override
+    public synchronized void beforeReset() {
+        generation++;
+        executing.clear();
+        if (gateways != null) {
+            gateways.servers().reset();
+        }
+    }
+
     @Override
     public synchronized void clear() {
+        generation++;
+        executing.clear();
+        if (gateways != null) {
+            gateways.servers().reset();
+        }
         virtualClusters.clear();
         jobRuns.clear();
         endpoints.clear();
@@ -725,7 +1159,8 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
     }
 
     private Optional<ObjectNode> jobRun(String virtualClusterId, String id) {
-        return jobRuns.get(arn(VIRTUAL_CLUSTERS + virtualClusterId + JOB_RUNS + id)).map(this::advance);
+        settledRuns(virtualClusterId);
+        return jobRuns.get(arn(VIRTUAL_CLUSTERS + virtualClusterId + JOB_RUNS + id));
     }
 
     private Optional<ObjectNode> endpoint(String virtualClusterId, String id) {
@@ -763,8 +1198,8 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         }
         Matcher nested = NESTED_ARN.matcher(resource);
         if (nested.matches() && "jobruns".equals(nested.group(2))) {
-            ObjectNode run = jobRuns.get(resourceArn).map(this::advance)
-                    .orElseThrow(() -> resourceMissing(resourceArn));
+            settledRuns(nested.group(1));
+            ObjectNode run = jobRuns.get(resourceArn).orElseThrow(() -> resourceMissing(resourceArn));
             return new Taggable(jobRuns, run, !FINISHED_JOB_RUN_STATES.contains(run.path("state").textValue()));
         }
         if (nested.matches()) {
@@ -847,25 +1282,353 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
 
     // ── States ───────────────────────────────────────────────────────────────────
 
-    /** Completes a RUNNING job run whose duration has passed, and stores the change. */
-    private ObjectNode advance(ObjectNode run) {
-        if (!RUNNING.equals(run.path("state").textValue()) || !run.has(DUE_AT)) {
-            return run;
+    private List<ObjectNode> settledRuns(String virtualClusterId) {
+        return virtualCluster(virtualClusterId).map(this::settledRuns).orElseGet(List::of);
+    }
+
+    /**
+     * The virtual cluster's job runs as they stand now, each change stored. They are replayed in the order things
+     * happened: a RUNNING run completes once its duration has passed, and the running slot it frees goes at that
+     * moment to the run first in the queue, "As running slots free up, queued job runs start automatically"; a run
+     * still queued 30 minutes after it was submitted fails. A slot free now, once the limit is raised or a run is
+     * cancelled, goes to the queue now. A run whose container runs holds its slot until its driver ends, and one
+     * whose container no thread of this process runs, as after a restart, has failed; one an earlier process left
+     * between its attempts waits out the rest of its backoff.
+     */
+    private List<ObjectNode> settledRuns(ObjectNode cluster) {
+        String prefix = cluster.get("arn").textValue() + JOB_RUNS;
+        List<ObjectNode> runs = jobRuns.scan(key -> key.startsWith(prefix)).stream()
+                .map(ObjectNode::deepCopy)
+                .toList();
+        Instant now = now();
+        // By identity: a node's equality is its content, which changes here.
+        Set<ObjectNode> changed = Collections.newSetFromMap(new IdentityHashMap<>());
+        List<String> leftovers = new ArrayList<>();
+        for (ObjectNode run : runs) {
+            String arn = run.get("arn").textValue();
+            if (launched(run) && !executing.contains(arn) && run.has(RETRY_AT) && delays != null) {
+                // Between its attempts when an earlier process stopped, so no driver of it runs: its backoff goes on
+                // from where it was, and its next attempt starts once it has passed, at once if it already has.
+                Duration left = Duration.ofMillis(Math.max(0, run.get(RETRY_AT).longValue() - now.toEpochMilli()));
+                awaitNextAttempt(arn, left, generation);
+            } else if (launched(run) && !executing.contains(arn)) {
+                finish(run, FAILED, now);
+                run.put("stateDetails", MONITORING_FAILED);
+                run.put("failureReason", INTERNAL_ERROR);
+                changed.add(run);
+                leftovers.add(run.get("id").textValue());
+            }
         }
-        Instant dueAt = Instant.ofEpochMilli(run.get(DUE_AT).longValue());
-        if (now().isBefore(dueAt)) {
-            return run;
+        int held = (int) runs.stream().filter(EmrContainersService::launched).count();
+        // The running runs by when they complete, and the queue in order: a run's DUE_AT never changes in there.
+        PriorityQueue<ObjectNode> running = new PriorityQueue<>(Comparator.comparing(EmrContainersService::dueAt));
+        runs.stream()
+                .filter(run -> RUNNING.equals(run.path("state").textValue()) && run.has(DUE_AT))
+                .forEach(running::add);
+        Deque<ObjectNode> queue = new ArrayDeque<>(runs.stream()
+                .filter(run -> PENDING.equals(run.path("state").textValue()) && run.has(QUEUE_POSITION))
+                .sorted(Comparator.comparingLong(run -> run.get(QUEUE_POSITION).longValue()))
+                .toList());
+        int limit = maxConcurrentJobRuns(cluster);
+        while (true) {
+            ObjectNode ending = running.peek();
+            Instant endsAt = ending != null && !dueAt(ending).isAfter(now) ? dueAt(ending) : null;
+            ObjectNode first = queue.peekFirst();
+            Instant timesOutAt = first != null ? Instant.parse(first.get("createdAt").textValue()).plus(QUEUE_TIMEOUT)
+                    : null;
+            if (timesOutAt != null && !timesOutAt.isAfter(now) && (endsAt == null || timesOutAt.isBefore(endsAt))) {
+                queue.pollFirst();
+                finish(first, FAILED, timesOutAt);
+                // No source gives AWS's stateDetails for it; the wording is Floci's.
+                first.put("stateDetails", "Job run waited " + QUEUE_TIMEOUT.toMinutes() + " minutes in the queue "
+                        + "of virtual cluster " + cluster.get("id").textValue() + " without starting.");
+                changed.add(first);
+            } else if (endsAt != null) {
+                running.poll();
+                finish(ending, COMPLETED, endsAt);
+                changed.add(ending);
+                held += startQueued(running, queue, limit - held, endsAt, changed);
+            } else {
+                break;
+            }
         }
-        ObjectNode completed = run.deepCopy();
-        finish(completed, COMPLETED, dueAt);
-        jobRuns.put(completed.get("arn").textValue(), completed);
-        return completed;
+        startQueued(running, queue, limit - held, now, changed);
+        // In one write: a persistent store rewrites its file on each.
+        if (!changed.isEmpty()) {
+            Map<String, ObjectNode> writes = new LinkedHashMap<>();
+            changed.forEach(run -> writes.put(run.get("arn").textValue(), run));
+            jobRuns.putAll(writes);
+        }
+        // A driver of theirs the startup's cleanup left goes, off the request's thread.
+        if (sparkRunner != null) {
+            leftovers.forEach(id -> runExecutor.execute(() -> sparkRunner.removeLeftoverDriver(SERVICE, id)));
+        }
+        // Once stored: a run's thread reads it.
+        launch(changed);
+        return runs;
+    }
+
+    /**
+     * Starts the queue's first runs at the moment {@code at} while the running limit, less the slots launched runs
+     * hold, leaves a slot. Answers how many of them were launched, each holding a slot until its driver ends.
+     */
+    private int startQueued(PriorityQueue<ObjectNode> running, Deque<ObjectNode> queue, int limit, Instant at,
+                            Set<ObjectNode> changed) {
+        int launched = 0;
+        while (running.size() + launched < limit && !queue.isEmpty()) {
+            ObjectNode run = queue.pollFirst();
+            start(run, at);
+            changed.add(run);
+            if (run.has(DUE_AT)) {
+                running.add(run);
+            } else if (launched(run)) {
+                launched++;
+            }
+        }
+        return launched;
+    }
+
+    /**
+     * A run starts. In the docker runner mode it is SUBMITTED, "successfully submitted to the virtual cluster", until
+     * its driver runs, or FAILED where its job driver names no entry point to run; in the immediate one it is RUNNING
+     * for the configured duration, or completed at once without one.
+     */
+    private void start(ObjectNode run, Instant at) {
+        run.remove(QUEUE_POSITION);
+        if (sparkRunner != null && EmrContainersSparkJobs.entryPoint(run) == null) {
+            // Kept, not refused: AWS's "Common errors when running jobs" gives a run whose StartJobRun parameters "are
+            // not valid" as one DescribeJobRun answers FAILED, "JobRun submission failed." with VALIDATION_ERROR.
+            finish(run, FAILED, at);
+            run.put("stateDetails", INVALID_SUBMISSION);
+            run.put("failureReason", VALIDATION_ERROR);
+        } else if (sparkRunner != null) {
+            run.put("state", SUBMITTED);
+        } else if (jobRunDurationSeconds <= 0) {
+            finish(run, COMPLETED, at);
+        } else {
+            run.put("state", RUNNING);
+            run.put(DUE_AT, at.plusSeconds(jobRunDurationSeconds).toEpochMilli());
+        }
+    }
+
+    // Whether a run's container runs, or is about to: it has no set end, unlike a RUNNING run of the immediate mode.
+    private static boolean launched(ObjectNode run) {
+        return LAUNCHED_JOB_RUN_STATES.contains(run.path("state").textValue()) && !run.has(DUE_AT);
+    }
+
+    // Whether a run holds one of its virtual cluster's running slots: it runs, or its container is about to.
+    private static boolean holdsSlot(ObjectNode run) {
+        return RUNNING.equals(run.path("state").textValue()) || launched(run);
+    }
+
+    // Whether a run waits in its virtual cluster's queue: queued, and holding no running slot.
+    private static boolean waitsForSlot(ObjectNode run) {
+        return QUEUED_JOB_RUN_STATES.contains(run.path("state").textValue()) && !holdsSlot(run);
+    }
+
+    /**
+     * Hands each of {@code runs} that was just submitted in the docker runner mode to a thread of its own, which runs
+     * its Spark job to its end. Each is counted as running before any starts: a thread that runs at once reads the
+     * others. One that cannot be handed off, its thread refused as Floci shuts down, fails, and its slot goes to the
+     * queue.
+     */
+    private void launch(Collection<ObjectNode> runs) {
+        if (sparkRunner == null) {
+            return;
+        }
+        List<ObjectNode> submitted = runs.stream()
+                .filter(run -> SUBMITTED.equals(run.path("state").textValue()))
+                .filter(run -> !executing.contains(run.get("arn").textValue()))
+                .toList();
+        submitted.forEach(run -> executing.add(run.get("arn").textValue()));
+        long launchedIn = generation;
+        Set<String> freed = new LinkedHashSet<>();
+        for (ObjectNode run : submitted) {
+            String arn = run.get("arn").textValue();
+            try {
+                String applicationId = run.path(SPARK_APPLICATION_ID).textValue();
+                if (applicationId == null) {
+                    // A run stored before runs kept their application's id gets one now, for its later attempts too.
+                    applicationId = sparkApplicationId();
+                    ObjectNode withId = run.deepCopy();
+                    withId.put(SPARK_APPLICATION_ID, applicationId);
+                    jobRuns.put(arn, withId);
+                }
+                SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, imageTemplate, dockerNetwork,
+                        applicationId, driverPod(run));
+                runExecutor.execute(() -> execute(arn, job, launchedIn));
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "EMR on EKS job run {0} could not be handed to a thread", run.get("id").textValue());
+                executing.remove(arn);
+                ObjectNode failed = run.deepCopy();
+                finish(failed, FAILED, now());
+                failed.put("stateDetails", submissionFailed(e.getMessage()));
+                failed.put("failureReason", INTERNAL_ERROR);
+                jobRuns.put(arn, failed);
+                freed.add(run.get("virtualClusterId").textValue());
+            }
+        }
+        freed.forEach(this::settledRuns);
+    }
+
+    // AWS's sentence, then what kept Floci from starting the run's driver, which is Floci's own.
+    private static String submissionFailed(String reason) {
+        return SUBMISSION_FAILED + " Floci could not start its driver: " + reason;
+    }
+
+    private void execute(String arn, SparkJobRunner.Job job, long launchedIn) {
+        SparkJobRunner.Outcome outcome;
+        try {
+            outcome = sparkRunner.run(job, new RunProgress(arn, job, launchedIn));
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "EMR on EKS job run {0} could not run", job.runId());
+            outcome = SparkJobRunner.Outcome.couldNotStart(e.getMessage());
+        }
+        SparkJobRunner.Outcome ended = outcome;
+        RequestScopes.runAs(job.accountId(), job.region(), () -> ended(arn, ended, launchedIn));
+    }
+
+    // The attempt a run is on, 1 for its first, as its retryPolicyExecution counts them.
+    private static int attempt(ObjectNode run) {
+        return run.path("retryPolicyExecution").path("currentAttemptCount").asInt(1);
+    }
+
+    // How many attempts a run may make: its retry policy's maxAttempts, 1 where retries are disabled.
+    private static int maxAttempts(ObjectNode run) {
+        return run.path("retryPolicyConfiguration").path("maxAttempts").asInt(1);
+    }
+
+    /**
+     * Starts a run's next attempt once its backoff has passed: "Retry policies cause a job driver pod to be restarted
+     * automatically if it fails", after "an exponential retry interval of (10 seconds, 20 seconds, 40 seconds ...)
+     * which is capped at 6 minutes". Until then it is SUBMITTED, again "submitted to the virtual cluster", and keeps
+     * its slot; this process still follows it, so it is no leftover of a restart.
+     */
+    private void retry(String arn, ObjectNode run, Instant now, long launchedIn) {
+        Duration delay = retryDelay(attempt(run));
+        run.put("state", SUBMITTED);
+        run.put(RETRY_AT, now.plus(delay).toEpochMilli());
+        jobRuns.put(arn, run);
+        awaitNextAttempt(arn, delay, launchedIn);
+        LOG.infov("EMR on EKS job run {0} failed attempt {1}, retrying in {2}s", run.get("id").textValue(),
+                attempt(run), delay.toSeconds());
+    }
+
+    // A run between its attempts holds its slot, this process following it, until its next attempt starts after delay.
+    private void awaitNextAttempt(String arn, Duration delay, long launchedIn) {
+        executing.add(arn);
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        delays.after(delay, () -> RequestScopes.runAs(parsed.accountId(), parsed.region(),
+                () -> nextAttempt(arn, launchedIn)));
+    }
+
+    // The backoff after a run's attempt-th attempt failed: 10 seconds, doubling after each failure, at most 6 minutes.
+    static Duration retryDelay(int attempt) {
+        long seconds = FIRST_RETRY_DELAY.toSeconds() << Math.min(attempt - 1, 16);
+        return Duration.ofSeconds(Math.min(seconds, MAX_RETRY_DELAY.toSeconds()));
+    }
+
+    // A run's backoff has passed: its next attempt starts, its driver in a container again, unless it was cancelled.
+    private synchronized void nextAttempt(String arn, long launchedIn) {
+        if (launchedIn != generation) {
+            return;
+        }
+        jobRuns.get(arn).filter(run -> SUBMITTED.equals(run.path("state").textValue()) && run.has(RETRY_AT))
+                .ifPresent(stored -> {
+                    ObjectNode run = stored.deepCopy();
+                    run.remove(RETRY_AT);
+                    run.with("retryPolicyExecution").put("currentAttemptCount", attempt(run) + 1);
+                    jobRuns.put(arn, run);
+                    executing.remove(arn);
+                    launch(List.of(run));
+                });
+    }
+
+    /**
+     * The name a run's driver pod has, which names the folder of its logs: "Driver pod names follow the format
+     * spark-<job id>-driver-<random-suffix>", "The random-suffix is only present if the retry policy is enabled for the
+     * job", a suffix of each attempt's own.
+     */
+    static String driverPod(ObjectNode run) {
+        String pod = "spark-" + run.get("id").textValue() + "-driver";
+        return maxAttempts(run) > 1 ? pod + "-" + newId(DRIVER_POD_SUFFIX_LENGTH) : pod;
+    }
+
+    // A run's driver runs: "In Spark applications, this means that the Spark driver process is in the running state."
+    private synchronized void driverStarted(String arn, long launchedIn) {
+        if (launchedIn != generation) {
+            return;
+        }
+        jobRuns.get(arn).filter(run -> SUBMITTED.equals(run.path("state").textValue())).ifPresent(run -> {
+            ObjectNode running = run.deepCopy();
+            running.put("state", RUNNING);
+            jobRuns.put(arn, running);
+        });
+    }
+
+    // Whether a run's driver may still start, or go on: a cancelled run is past it, and so is one a reset removed.
+    private synchronized boolean stillGoing(String arn, long launchedIn) {
+        return launchedIn == generation && jobRuns.get(arn)
+                .map(run -> SUBMITTED.equals(run.path("state").textValue())
+                        || RUNNING.equals(run.path("state").textValue()))
+                .orElse(false);
+    }
+
+    /**
+     * Ends a run as its driver did: COMPLETED when it "succeeds (exits with code 0)", FAILED when it "fails (exits
+     * with a non-zero code)", or could not start, and CANCELLED when it was cancelled. A driver stopped otherwise was
+     * stopped by Floci's shutdown. The running slot it frees goes to the queue's first run.
+     */
+    private synchronized void ended(String arn, SparkJobRunner.Outcome outcome, long launchedIn) {
+        if (launchedIn != generation) {
+            return;
+        }
+        executing.remove(arn);
+        ObjectNode stored = jobRuns.get(arn).orElse(null);
+        if (stored == null || FINISHED_JOB_RUN_STATES.contains(stored.path("state").textValue())) {
+            return;
+        }
+        ObjectNode run = stored.deepCopy();
+        Instant now = now();
+        if (CANCEL_PENDING.equals(run.path("state").textValue())) {
+            finish(run, CANCELLED, now);
+        } else if (outcome.exitCode() != null && outcome.exitCode() == 0) {
+            finish(run, COMPLETED, now);
+        } else if (outcome.exitCode() != null && attempt(run) < maxAttempts(run)) {
+            retry(arn, run, now, launchedIn);
+            return;
+        } else {
+            finish(run, FAILED, now);
+            if (outcome.exitCode() != null) {
+                run.put("stateDetails", DRIVER_FAILED);
+                run.put("failureReason", USER_ERROR);
+            } else {
+                run.put("stateDetails", outcome.failure() != null ? submissionFailed(outcome.failure())
+                        : MONITORING_FAILED);
+                run.put("failureReason", INTERNAL_ERROR);
+            }
+        }
+        jobRuns.put(arn, run);
+        LOG.infov("EMR on EKS job run {0} ended {1}", run.get("id").textValue(), run.get("state").textValue());
+        settledRuns(run.get("virtualClusterId").textValue());
+    }
+
+    private static Instant dueAt(ObjectNode run) {
+        return Instant.ofEpochMilli(run.get(DUE_AT).longValue());
+    }
+
+    // How many of the virtual cluster's runs may be RUNNING at once: its maxConcurrentJobRuns, or AWS's default.
+    private static int maxConcurrentJobRuns(ObjectNode cluster) {
+        JsonNode limit = cluster.path("schedulerConfiguration").path("maxConcurrentJobRuns");
+        return limit.isIntegralNumber() ? limit.intValue() : DEFAULT_MAX_CONCURRENT_JOB_RUNS;
     }
 
     private void finish(ObjectNode run, String state, Instant at) {
         run.put("state", state);
         run.put("finishedAt", timestamp(at));
         run.remove(DUE_AT);
+        run.remove(QUEUE_POSITION);
+        run.remove(RETRY_AT);
     }
 
     /**
@@ -885,18 +1648,13 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         if (scheduler == null || scheduler.isEmpty()) {
             return cluster;
         }
-        String prefix = cluster.get("arn").textValue() + JOB_RUNS;
-        List<ObjectNode> runs = jobRuns.scan(key -> key.startsWith(prefix)).stream().map(this::advance).toList();
+        List<ObjectNode> runs = settledRuns(cluster);
         ObjectNode status = mapper.createObjectNode();
-        status.put("currentInQueueJobRuns", count(runs, QUEUED_JOB_RUN_STATES::contains));
-        status.put("currentConcurrentJobRuns", count(runs, RUNNING::equals));
+        status.put("currentInQueueJobRuns", runs.stream().filter(EmrContainersService::waitsForSlot).count());
+        status.put("currentConcurrentJobRuns", runs.stream().filter(EmrContainersService::holdsSlot).count());
         ObjectNode withStatus = cluster.deepCopy();
         withStatus.set("schedulerStatus", status);
         return withStatus;
-    }
-
-    private static long count(Collection<ObjectNode> runs, Predicate<String> state) {
-        return runs.stream().filter(run -> state.test(run.path("state").textValue())).count();
     }
 
     // ── JSON helpers ─────────────────────────────────────────────────────────────
@@ -996,6 +1754,14 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         return id.toString();
     }
 
+    /**
+     * An id of the form a Spark application on Kubernetes gets, {@code spark-} and 32 hexadecimal digits, which names
+     * a run's driver logs as its Spark application's id names them on EMR on EKS.
+     */
+    static String sparkApplicationId() {
+        return "spark-" + UUID.randomUUID().toString().replace("-", "");
+    }
+
     private static String sessionToken() {
         byte[] bytes = new byte[48];
         ThreadLocalRandom.current().nextBytes(bytes);
@@ -1038,5 +1804,34 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
 
     private static AwsException invalid(String message) {
         return new AwsException("ValidationException", message, 400);
+    }
+
+    /** What a run's thread tells the service, and asks it, while its Spark job runs. */
+    private final class RunProgress implements SparkJobRunner.Progress {
+
+        private final String arn;
+        private final SparkJobRunner.Job job;
+        private final long launchedIn;
+
+        RunProgress(String arn, SparkJobRunner.Job job, long launchedIn) {
+            this.arn = arn;
+            this.job = job;
+            this.launchedIn = launchedIn;
+        }
+
+        @Override
+        public void started() {
+            RequestScopes.runAs(job.accountId(), job.region(), () -> driverStarted(arn, launchedIn));
+        }
+
+        // A run of EMR on EKS has no timeout of its own.
+        @Override
+        public void timedOut() {
+        }
+
+        @Override
+        public boolean cancelled() {
+            return !RequestScopes.callAs(job.accountId(), job.region(), () -> stillGoing(arn, launchedIn));
+        }
     }
 }

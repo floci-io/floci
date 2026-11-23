@@ -6,7 +6,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.notNullValue;
@@ -22,14 +22,12 @@ import static org.hamcrest.Matchers.startsWith;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesTenantV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String TENANT = "floci-it-tenant";
 
     @Test
     @Order(1)
     void createTenant_returnsGeneratedIdArnAndEnabledStatus() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"TenantName\":\"" + TENANT + "\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"floci\"}]}")
         .when().post("/v2/email/tenants").then().statusCode(200)
                 .body("TenantName", equalTo(TENANT))
@@ -43,7 +41,7 @@ class SesTenantV2IntegrationTest {
     @Test
     @Order(2)
     void getTenant_returnsTenant() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"TenantName\":\"" + TENANT + "\"}")
         .when().post("/v2/email/tenants/get").then().statusCode(200)
                 .body("Tenant.TenantName", equalTo(TENANT))
@@ -54,7 +52,7 @@ class SesTenantV2IntegrationTest {
     @Test
     @Order(3)
     void listTenants_includesTenantInfoSubset() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
         .when().post("/v2/email/tenants/list").then().statusCode(200)
                 .body("Tenants.find { it.TenantName == '" + TENANT + "' }.TenantId", startsWith("tn-"))
                 .body("Tenants.find { it.TenantName == '" + TENANT + "' }.SendingStatus", equalTo(null));
@@ -63,7 +61,7 @@ class SesTenantV2IntegrationTest {
     @Test
     @Order(4)
     void createTenant_duplicate_returnsAlreadyExists() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"TenantName\":\"" + TENANT + "\"}")
         .when().post("/v2/email/tenants").then().statusCode(400)
                 .body("__type", equalTo("AlreadyExistsException"))
@@ -73,11 +71,11 @@ class SesTenantV2IntegrationTest {
     @Test
     @Order(5)
     void deleteTenant_removesIt() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"TenantName\":\"" + TENANT + "\"}")
         .when().post("/v2/email/tenants/delete").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"TenantName\":\"" + TENANT + "\"}")
         .when().post("/v2/email/tenants/get").then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"))
@@ -87,7 +85,7 @@ class SesTenantV2IntegrationTest {
     @Test
     @Order(6)
     void deleteTenant_missing_returnsNotFound() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"TenantName\":\"ghost-tenant\"}")
         .when().post("/v2/email/tenants/delete").then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"));
@@ -96,7 +94,7 @@ class SesTenantV2IntegrationTest {
     @Test
     @Order(7)
     void createTenant_invalidName_returnsBadRequest() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"TenantName\":\"bad name!\"}")
         .when().post("/v2/email/tenants").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
@@ -107,7 +105,7 @@ class SesTenantV2IntegrationTest {
     @Order(8)
     void createTenant_tooLongName_returnsBadRequest() {
         String longName = "x".repeat(65);
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"TenantName\":\"" + longName + "\"}")
         .when().post("/v2/email/tenants").then().statusCode(400)
                 .body("message", equalTo("TenantName cannot exceed 64 characters."));
@@ -116,7 +114,7 @@ class SesTenantV2IntegrationTest {
     @Test
     @Order(9)
     void createTenant_invalidTag_returnsBadRequest() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"TenantName\":\"tag-tenant\",\"Tags\":[{\"Key\":\"\",\"Value\":\"v\"}]}")
         .when().post("/v2/email/tenants").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"));
@@ -125,7 +123,7 @@ class SesTenantV2IntegrationTest {
     @Test
     @Order(10)
     void getTenant_emptyName_returnsBadRequest() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"TenantName\":\"\"}")
         .when().post("/v2/email/tenants/get").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"));
@@ -134,7 +132,7 @@ class SesTenantV2IntegrationTest {
     @Test
     @Order(11)
     void listTenants_malformedBody_returnsSerializationException() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{ not json")
         .when().post("/v2/email/tenants/list").then().statusCode(400)
                 .body("__type", equalTo("SerializationException"));
@@ -143,7 +141,7 @@ class SesTenantV2IntegrationTest {
     @Test
     @Order(12)
     void createTenant_nonStringTagMember_returnsSerializationException() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"TenantName\":\"nonstring-tag\",\"Tags\":[{\"Key\":123,\"Value\":true}]}")
         .when().post("/v2/email/tenants").then().statusCode(400)
                 .body("__type", equalTo("SerializationException"));

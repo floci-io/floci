@@ -54,6 +54,7 @@ import java.util.function.Predicate;
 
 import static io.floci.aws.services.iam.InlinePolicyTestHelper.policyWithNonWhitespaceLength;
 import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
+import static io.floci.aws.testing.IamTestPolicies.TRUST_POLICY;
 import static io.floci.aws.testing.IamTestPolicies.policyDocument;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -1806,7 +1807,7 @@ class IamServiceTest {
     @Test
     void updateAssumeRolePolicyWithMatchingExpectedIdApplies() {
         IamRole role = iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
-        String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+        String newDoc = TRUST_POLICY;
 
         iamService.updateAssumeRolePolicy("LambdaExec", newDoc, role.getRoleId());
 
@@ -1816,7 +1817,7 @@ class IamServiceTest {
     @Test
     void updateAssumeRolePolicyWithNullExpectedIdSkipsCheck() {
         iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
-        String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+        String newDoc = TRUST_POLICY;
 
         iamService.updateAssumeRolePolicy("LambdaExec", newDoc, null);
 
@@ -1831,7 +1832,7 @@ class IamServiceTest {
         // silently applied to a role the caller never actually verified owning.
         IamRole role = iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         String originalDoc = role.getAssumeRolePolicyDocument();
-        String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+        String newDoc = TRUST_POLICY;
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> iamService.updateAssumeRolePolicy("LambdaExec", newDoc, "AROAWRONGID"));
@@ -2211,6 +2212,81 @@ class IamServiceTest {
         source.put("k2", "v2");
         assertFalse(profile.getTags().containsKey("k2"),
                 "setTags should defensively copy, not alias the caller's map");
+    }
+
+    @Test
+    void deletePolicyWithAVersionBesideItsDefaultNamesTheVersions() {
+        IamPolicy policy = iamService.createPolicy("P", "/", null, policyDocument("one"), null);
+        iamService.createPolicyVersion(policy.getArn(), policyDocument("two"), false);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.deletePolicy(policy.getArn()));
+        assertEquals("DeleteConflict", ex.getErrorCode());
+        assertEquals("This policy has more than one version. Before you delete a policy, you must"
+                + " delete the policy's versions. The default version is deleted with the policy.",
+                ex.getMessage());
+    }
+
+    /**
+     * What a stack's own cleanup does before it deletes a policy it owns: the default survives
+     * with its document, every other version is gone, and the delete goes through.
+     */
+    @Test
+    void clearingTheOtherVersionsKeepsTheDefaultAndFreesTheDelete() {
+        String current = policyDocument("current");
+        IamPolicy policy = iamService.createPolicy("P", "/", null, policyDocument("first"), null);
+        String policyArn = policy.getArn();
+        iamService.createPolicyVersion(policyArn, policyDocument("second"), false);
+        iamService.createPolicyVersion(policyArn, current, true);
+
+        iamService.clearNonDefaultPolicyVersions(policyArn);
+
+        List<PolicyVersion> left = iamService.listPolicyVersions(policyArn);
+        assertEquals(1, left.size());
+        assertEquals("v3", left.getFirst().getVersionId());
+        assertEquals(current, left.getFirst().getDocument());
+        iamService.deletePolicy(policyArn);
+        AwsException gone = assertThrows(AwsException.class, () -> iamService.getPolicy(policyArn));
+        assertEquals("NoSuchEntity", gone.getErrorCode());
+    }
+
+    /**
+     * The clearing is on the way to a delete that an attachment refuses, so it asks about the
+     * attachment first: a stack whose policy some principal it never recorded still holds keeps
+     * every version it had, and hears the same sentence the delete would have given it.
+     */
+    @Test
+    void clearingIsRefusedWhileThePolicyIsAttachedAndKeepsEveryVersion() {
+        iamService.createUser("outsider", "/");
+        IamPolicy policy = iamService.createPolicy("P", "/", null, policyDocument("one"), null);
+        String policyArn = policy.getArn();
+        iamService.createPolicyVersion(policyArn, policyDocument("two"), false);
+        iamService.attachUserPolicy("outsider", policyArn);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.clearNonDefaultPolicyVersions(policyArn));
+        assertEquals("DeleteConflict", ex.getErrorCode());
+        assertEquals("Cannot delete a policy attached to entities. Detach it first.",
+                ex.getMessage());
+        assertEquals(2, iamService.listPolicyVersions(policyArn).size());
+    }
+
+    /** The version a SetDefaultPolicyVersion just chose is the one the clearing keeps. */
+    @Test
+    void clearingKeepsTheVersionJustMadeDefault() {
+        String second = policyDocument("second");
+        IamPolicy policy = iamService.createPolicy("P", "/", null, policyDocument("first"), null);
+        String policyArn = policy.getArn();
+        iamService.createPolicyVersion(policyArn, second, false);
+        iamService.setDefaultPolicyVersion(policyArn, "v2");
+
+        iamService.clearNonDefaultPolicyVersions(policyArn);
+
+        List<PolicyVersion> left = iamService.listPolicyVersions(policyArn);
+        assertEquals(1, left.size());
+        assertEquals("v2", left.getFirst().getVersionId());
+        assertEquals(second, left.getFirst().getDocument());
+        assertEquals("v2", iamService.getPolicy(policyArn).getDefaultVersionId());
     }
 
     @Test
@@ -2769,6 +2845,23 @@ class IamServiceTest {
     }
 
     @Test
+    void anExecutionRoleSessionWithAnInlinePolicyIsScopedByItAsAnAssumedRolesIs() {
+        String accountId = "222233334444";
+        String accessKeyId = "ASIAEXECUTIONSCOPED";
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+
+        service.registerLambdaExecutionRoleSession(accountId, accessKeyId, "secret", "token",
+                "arn:aws:iam::222233334444:role/JobRole", "run-1", null, policy);
+
+        assertEquals(policy, sessions.getForAccount(accountId, accessKeyId).orElseThrow().getSessionPolicyDocument());
+        assertEquals(policy, service.resolveCallerContext(accessKeyId).sessionPolicyDocument());
+    }
+
+    @Test
     void temporarySessionUsesExplicitAccountNamespace() {
         String accountId = "222233334444";
         String accessKeyId = "ASIASIGNINEXPLICIT";
@@ -2919,6 +3012,59 @@ class IamServiceTest {
         List<InstanceProfile> profiles = iamService.listInstanceProfilesForRole("R");
         assertEquals(1, profiles.size());
         assertEquals("P1", profiles.getFirst().getInstanceProfileName());
+    }
+
+    /**
+     * A role delete asks which profiles hold the role rather than reading every profile in the
+     * account, so clearing out many roles while many profiles are about costs one lookup each and
+     * still refuses exactly the role that is paired.
+     */
+    @Test
+    void deletingManyRolesWithManyProfilesRefusesOnlyThePairedOne() {
+        for (int i = 0; i < 40; i++) {
+            iamService.createInstanceProfile("BulkProfile" + i, "/");
+            iamService.createRole("BulkRole" + i, "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
+        }
+        iamService.addRoleToInstanceProfile("BulkProfile7", "BulkRole7");
+
+        for (int i = 0; i < 40; i++) {
+            if (i != 7) {
+                iamService.deleteRole("BulkRole" + i);
+            }
+        }
+        assertEquals("DeleteConflict", assertThrows(AwsException.class,
+                () -> iamService.deleteRole("BulkRole7")).getErrorCode());
+
+        iamService.removeRoleFromInstanceProfile("BulkProfile7", "BulkRole7");
+        iamService.deleteRole("BulkRole7");
+    }
+
+    /**
+     * A pairing the store already carried is seen by a service that did not write it: the lookup
+     * is filled from the profiles it finds, so a restart does not make a held role deletable.
+     */
+    @Test
+    void aPairingAlreadyInStorageStillBlocksTheDelete() {
+        StorageBackend<String, IamRole> roles = new InMemoryStorage<>();
+        StorageBackend<String, InstanceProfile> profiles = new InMemoryStorage<>();
+        IamService before = iamServiceOn(roles, profiles);
+        before.createRole("CarriedRole", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
+        before.createInstanceProfile("CarriedProfile", "/");
+        before.addRoleToInstanceProfile("CarriedProfile", "CarriedRole");
+
+        IamService after = iamServiceOn(roles, profiles);
+
+        assertEquals("DeleteConflict", assertThrows(AwsException.class,
+                () -> after.deleteRole("CarriedRole")).getErrorCode());
+        after.removeRoleFromInstanceProfile("CarriedProfile", "CarriedRole");
+        after.deleteRole("CarriedRole");
+    }
+
+    private static IamService iamServiceOn(StorageBackend<String, IamRole> roles,
+                                           StorageBackend<String, InstanceProfile> instanceProfiles) {
+        return new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), roles, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), instanceProfiles, new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), false);
     }
 
     // =========================================================================

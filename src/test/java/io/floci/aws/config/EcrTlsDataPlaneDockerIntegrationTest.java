@@ -1,6 +1,7 @@
 package io.floci.aws.config;
 
 import io.floci.aws.core.common.Digests;
+import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -37,6 +38,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestProfile(SelfSignedTlsProfile.class)
 class EcrTlsDataPlaneDockerIntegrationTest {
 
+    private static final String ECR = "AmazonEC2ContainerRegistry_V20150921";
+
     @ConfigProperty(name = "quarkus.http.test-ssl-port", defaultValue = "0")
     int sslPort;
 
@@ -49,6 +52,7 @@ class EcrTlsDataPlaneDockerIntegrationTest {
     @BeforeAll
     static void requireDocker() {
         SidecarContainersProfile.requireDockerAndImage("floci.services.ecr.registry-image");
+        RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
     @Test
@@ -68,7 +72,10 @@ class EcrTlsDataPlaneDockerIntegrationTest {
             assertEquals(200, pingResponse.statusCode());
             assertEquals("registry/2.0", pingResponse.header("Docker-Distribution-Api-Version"));
 
-            // 2. Upload layer blob over TLS
+            // 2. Create the repository, as ECR answers a push to one nobody created with NAME_UNKNOWN, then
+            // upload the layer blob over TLS
+            RestAssuredJsonUtils.awsAction(ECR, "CreateRepository", "{\"repositoryName\":\"tls-repo\"}")
+                    .then().statusCode(200);
             byte[] layerBytes = "floci-ecr-tls-layer-content-v1".getBytes(StandardCharsets.UTF_8);
             String layerDigest = "sha256:" + Digests.sha256Hex(layerBytes);
 
@@ -169,6 +176,8 @@ class EcrTlsDataPlaneDockerIntegrationTest {
             SimpleResponse deleteManifest = execute(tlsClient, HttpMethod.DELETE, sslPort, tlsHost,
                     "/v2/tls-repo/manifests/" + manifestDigest, null, null, null);
             assertEquals(202, deleteManifest.statusCode());
+            RestAssuredJsonUtils.awsAction(ECR, "DeleteRepository", "{\"repositoryName\":\"tls-repo\",\"force\":true}")
+                    .then().statusCode(200);
         } finally {
             tlsClient.close();
         }

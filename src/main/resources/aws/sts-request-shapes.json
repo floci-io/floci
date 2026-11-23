@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_sts_shapes.py",
-    "botocore": "botocore 1.43.118 (local/aws/botocore)"
+    "botocore": "botocore 1.44.9 (local/aws/botocore)"
   },
   "operations": {
     "GetAccessKeyInfo": "GetAccessKeyInfoRequest",
@@ -146,6 +146,8 @@
         "Audience": "webIdentityTokenAudienceListType",
         "DurationSeconds": "webIdentityTokenDurationSecondsType",
         "SigningAlgorithm": "jwtAlgorithmType",
+        "Scope": "webIdentityTokenScopeType",
+        "SubjectMode": "webIdentityTokenSubjectModeType",
         "Tags": "tagListType"
       }
     },
@@ -214,7 +216,7 @@
     "contextAssertionType": {
       "type": "string",
       "min": 4,
-      "max": 2048
+      "max": 3072
     },
     "durationSecondsType": {
       "type": "integer",
@@ -272,7 +274,7 @@
     "sourceIdentityType": {
       "type": "string",
       "min": 2,
-      "max": 64,
+      "max": 256,
       "pattern": "[\\w+=,.@-]*"
     },
     "tagKeyListType": {
@@ -337,6 +339,19 @@
       "type": "integer",
       "min": 60,
       "max": 3600
+    },
+    "webIdentityTokenScopeType": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": "[\\x21\\x23-\\x2B\\x2D-\\x5B\\x5D-\\x7E]+( [\\x21\\x23-\\x2B\\x2D-\\x5B\\x5D-\\x7E]+)*"
+    },
+    "webIdentityTokenSubjectModeType": {
+      "type": "string",
+      "enum": [
+        "AWSIdentity",
+        "OriginIdentity"
+      ]
     }
   }
 }

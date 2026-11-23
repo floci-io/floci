@@ -220,4 +220,72 @@ class ApplicationDefaultsTest {
         assertEquals("60", fallback.value(),
                 "the @WithDefault must match application.yml, which wins over it");
     }
+
+    // Catches: the Docker circuit breaker keys missing from the shipped application.yml, or a yml value
+    // that silently disagrees with its @WithDefault fallback.
+    @Test
+    void productionConfigDeclaresTheDockerBreakerAtItsDefaults() throws IOException, NoSuchMethodException {
+        JsonNode docker = productionConfig().path("floci").path("docker");
+
+        assertEquals(3, docker.path("breaker-failure-threshold").asInt(-1));
+        assertEquals(5, docker.path("breaker-probe-interval-seconds").asInt(-1));
+        assertEquals("3", EmulatorConfig.DockerConfig.class.getMethod("breakerFailureThreshold")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+        assertEquals("5", EmulatorConfig.DockerConfig.class.getMethod("breakerProbeIntervalSeconds")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+    }
+
+    // Catches: max-concurrent-launches missing from the shipped application.yml, or a yml value that
+    // silently disagrees with its @WithDefault fallback.
+    @Test
+    void productionConfigDeclaresTheContainerLaunchBoundAtItsDefault() throws IOException, NoSuchMethodException {
+        JsonNode launches = productionConfig().path("floci").path("docker").path("max-concurrent-launches");
+
+        assertFalse(launches.isMissingNode(), "max-concurrent-launches should be declared in application.yml");
+        assertEquals(0, launches.asInt(-1));
+        assertEquals("0", EmulatorConfig.DockerConfig.class.getMethod("maxConcurrentLaunches")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+    }
+
+    // Catches: events-based exit detection switched on by default before it has proven itself, or the
+    // yml and the @WithDefault disagreeing.
+    @Test
+    void productionConfigKeepsEventsBasedExitDetectionOff() throws IOException, NoSuchMethodException {
+        JsonNode flag = productionConfig().path("floci").path("docker").path("events-exit-detection");
+
+        assertFalse(flag.isMissingNode(), "events-exit-detection should be declared in application.yml");
+        assertFalse(flag.asBoolean(true));
+        assertEquals("false", EmulatorConfig.DockerConfig.class.getMethod("eventsExitDetection")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+    }
+
+    // Catches: log-poll-interval-millis missing from the shipped application.yml, or a yml value that
+    // silently disagrees with its @WithDefault fallback.
+    @Test
+    void productionConfigDeclaresTheContainerLogPollIntervalAtItsDefault() throws IOException, NoSuchMethodException {
+        JsonNode interval = productionConfig().path("floci").path("docker").path("log-poll-interval-millis");
+
+        assertFalse(interval.isMissingNode(), "log-poll-interval-millis should be declared in application.yml");
+        assertEquals(1000, interval.asInt());
+        assertEquals("1000", EmulatorConfig.DockerConfig.class.getMethod("logPollIntervalMillis")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+    }
+
+    // Catches: warm-pool-max-total shipped unbounded again, so a stack of many functions keeps one
+    // warm container per function touched, or a yml value that disagrees with the @WithDefault.
+    @Test
+    void productionConfigBoundsTheLambdaWarmPoolTotalByDefault() throws IOException, NoSuchMethodException {
+        JsonNode maxTotal = productionConfig()
+                .path("floci").path("services").path("lambda").path("warm-pool-max-total");
+
+        assertFalse(maxTotal.isMissingNode(), "warm-pool-max-total should be declared in application.yml");
+        assertEquals(128, maxTotal.asInt());
+
+        WithDefault fallback = EmulatorConfig.LambdaServiceConfig.class
+                .getMethod("warmPoolMaxTotal")
+                .getAnnotation(WithDefault.class);
+        assertNotNull(fallback, "warmPoolMaxTotal should declare a fallback default");
+        assertEquals("128", fallback.value(),
+                "the @WithDefault must match application.yml, which wins over it");
+    }
 }

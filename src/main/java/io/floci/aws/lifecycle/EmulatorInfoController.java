@@ -22,13 +22,11 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
-import java.nio.file.Files;
 import java.security.GeneralSecurityException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.TreeMap;
 
 @Path("{prefix:(_floci|_localstack)}")
@@ -205,20 +203,7 @@ public class EmulatorInfoController {
     }
 
     private String trustBundle() throws IOException, GeneralSecurityException {
-        String localCa = certificateAuthority.caPem();
-        Optional<String> userCertificate = userCertificatePath();
-        if (userCertificate.isEmpty()) {
-            return localCa;
-        }
-        return ContainerCaBundle.certificatePem(Files.readString(java.nio.file.Path.of(userCertificate.get()))) + localCa;
-    }
-
-    /** Set when TLS serves a user-provided certificate, the same condition {@code TlsConfigSource} applies. */
-    private Optional<String> userCertificatePath() {
-        if (!config.tls().enabled() || config.tls().keyPath().filter(p -> !p.isBlank()).isEmpty()) {
-            return Optional.empty();
-        }
-        return config.tls().certPath().filter(p -> !p.isBlank());
+        return ContainerCaBundle.endpointTrustPem(config, certificateAuthority.caPem());
     }
 
     @POST

@@ -32,6 +32,17 @@ public class DbCluster {
     private String parameterGroupName;
     private String dbSubnetGroupName;
     private String vpcId;
+    private List<String> vpcSecurityGroupIds = new ArrayList<>();
+    // Null until a request names them; the emitted XML then falls back to the defaults.
+    private String preferredBackupWindow;
+    private String preferredMaintenanceWindow;
+    /** MonitoringInterval documents 0 as its default. */
+    private int monitoringInterval;
+    private String monitoringRoleArn;
+    private boolean performanceInsightsEnabled;
+    private Integer performanceInsightsRetentionPeriod;
+    // Null on a cluster stored before it was kept; the response then leaves it out.
+    private String databaseInsightsMode;
     private String availabilityZone;
     private boolean multiAz;
     private Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
@@ -163,6 +174,19 @@ public class DbCluster {
     public boolean isMultiAz() { return multiAz; }
     public void setMultiAz(boolean multiAz) { this.multiAz = multiAz; }
 
+    public List<String> getVpcSecurityGroupIds() { return vpcSecurityGroupIds; }
+    public void setVpcSecurityGroupIds(List<String> vpcSecurityGroupIds) {
+        this.vpcSecurityGroupIds = vpcSecurityGroupIds != null ? new ArrayList<>(vpcSecurityGroupIds) : new ArrayList<>();
+    }
+
+    public String getPreferredBackupWindow() { return preferredBackupWindow; }
+    public void setPreferredBackupWindow(String preferredBackupWindow) { this.preferredBackupWindow = preferredBackupWindow; }
+
+    public String getPreferredMaintenanceWindow() { return preferredMaintenanceWindow; }
+    public void setPreferredMaintenanceWindow(String preferredMaintenanceWindow) {
+        this.preferredMaintenanceWindow = preferredMaintenanceWindow;
+    }
+
     public Map<String, String> getSubnetAvailabilityZones() { return subnetAvailabilityZones; }
     public void setSubnetAvailabilityZones(Map<String, String> subnetAvailabilityZones) {
         this.subnetAvailabilityZones = subnetAvailabilityZones != null
@@ -266,4 +290,22 @@ public class DbCluster {
         enabledCloudwatchLogsExports = value == null ? new ArrayList<>() : new ArrayList<>(value);
     }
 
+    public int getMonitoringInterval() { return monitoringInterval; }
+    public void setMonitoringInterval(int monitoringInterval) { this.monitoringInterval = monitoringInterval; }
+
+    public String getMonitoringRoleArn() { return monitoringRoleArn; }
+    public void setMonitoringRoleArn(String monitoringRoleArn) { this.monitoringRoleArn = monitoringRoleArn; }
+
+    public boolean isPerformanceInsightsEnabled() { return performanceInsightsEnabled; }
+    public void setPerformanceInsightsEnabled(boolean performanceInsightsEnabled) {
+        this.performanceInsightsEnabled = performanceInsightsEnabled;
+    }
+
+    public Integer getPerformanceInsightsRetentionPeriod() { return performanceInsightsRetentionPeriod; }
+    public void setPerformanceInsightsRetentionPeriod(Integer performanceInsightsRetentionPeriod) {
+        this.performanceInsightsRetentionPeriod = performanceInsightsRetentionPeriod;
+    }
+
+    public String getDatabaseInsightsMode() { return databaseInsightsMode; }
+    public void setDatabaseInsightsMode(String databaseInsightsMode) { this.databaseInsightsMode = databaseInsightsMode; }
 }

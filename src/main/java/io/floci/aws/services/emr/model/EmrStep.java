@@ -25,9 +25,14 @@ public class EmrStep {
     private String state;
     private String stateChangeReason;
     private String executionRoleArn;
+    // Its StepMonitoringConfiguration's S3MonitoringConfiguration, null where it gives none.
+    private String logUri;
+    private String encryptionKeyArn;
     private boolean runInContainer;
     private String failureReason;
     private String failureMessage;
+    // Whether its cancel is pending after SEND_INTERRUPT, its process sent SIGTERM and free to finish on its own.
+    private boolean interrupted;
     private Instant creationDateTime;
     private Instant startDateTime;
     private Instant endDateTime;
@@ -64,11 +69,20 @@ public class EmrStep {
     public String getExecutionRoleArn() { return executionRoleArn; }
     public void setExecutionRoleArn(String executionRoleArn) { this.executionRoleArn = executionRoleArn; }
 
+    public String getLogUri() { return logUri; }
+    public void setLogUri(String logUri) { this.logUri = logUri; }
+
+    public String getEncryptionKeyArn() { return encryptionKeyArn; }
+    public void setEncryptionKeyArn(String encryptionKeyArn) { this.encryptionKeyArn = encryptionKeyArn; }
+
     public boolean isRunInContainer() { return runInContainer; }
     public void setRunInContainer(boolean runInContainer) { this.runInContainer = runInContainer; }
 
     public String getFailureReason() { return failureReason; }
     public void setFailureReason(String failureReason) { this.failureReason = failureReason; }
+
+    public boolean isInterrupted() { return interrupted; }
+    public void setInterrupted(boolean interrupted) { this.interrupted = interrupted; }
 
     public String getFailureMessage() { return failureMessage; }
     public void setFailureMessage(String failureMessage) { this.failureMessage = failureMessage; }

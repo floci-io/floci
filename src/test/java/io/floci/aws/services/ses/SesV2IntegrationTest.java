@@ -8,6 +8,8 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.List;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -18,15 +20,10 @@ import static org.hamcrest.Matchers.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesV2IntegrationTest {
 
-    private static final String AUTH_HEADER =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
-
     @Test
     @Order(1)
     void createEmailIdentity_email() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"EmailIdentity": "v2sender@example.com"}
                 """)
@@ -41,9 +38,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(2)
     void createEmailIdentity_domain() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"EmailIdentity": "v2example.com"}
                 """)
@@ -59,9 +54,7 @@ class SesV2IntegrationTest {
             .body("DkimAttributes.Tokens", not(empty()));
 
         // A subsequent GetEmailIdentity transitions the DKIM status to PENDING, matching AWS.
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/identities/v2example.com")
         .then()
@@ -72,9 +65,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(3)
     void createEmailIdentity_missingField() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("{}")
         .when()
             .post("/v2/email/identities")
@@ -87,9 +78,7 @@ class SesV2IntegrationTest {
     @Order(4)
     void listEmailIdentities() {
         // Other classes share this region, so ask for a page large enough to hold every identity.
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .queryParam("PageSize", 1000)
         .when()
             .get("/v2/email/identities")
@@ -115,9 +104,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(5)
     void getEmailIdentity() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/identities/v2sender@example.com")
         .then()
@@ -130,9 +117,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(61)
     void getEmailIdentity_domainTransitionsToSuccessWhenDkimRecordsExist() {
-        List<String> tokens = given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        List<String> tokens = v2()
             .body("""
                 {"EmailIdentity": "v2dkim-success.floci.test"}
                 """)
@@ -147,9 +132,7 @@ class SesV2IntegrationTest {
 
         SesDomainIdentityTestHelper.publishDkimRecords("v2dkim-success.floci.test", tokens);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/identities/v2dkim-success.floci.test")
         .then()
@@ -163,9 +146,7 @@ class SesV2IntegrationTest {
 
         // DKIM verification status tracks DNS detection independently of the signing flag: disabling
         // DKIM keeps Status=SUCCESS while the CNAMEs remain published.
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"SigningEnabled": false}
                 """)
@@ -174,9 +155,7 @@ class SesV2IntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/identities/v2dkim-success.floci.test")
         .then()
@@ -185,9 +164,7 @@ class SesV2IntegrationTest {
             .body("DkimAttributes.Status", equalTo("SUCCESS"));
 
         // Re-enable so the key-rotation assertion below starts from the signing-enabled state.
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"SigningEnabled": true}
                 """)
@@ -198,9 +175,7 @@ class SesV2IntegrationTest {
 
         // Rotating the DKIM key must not revoke the identity's sending verification (matching AWS):
         // VerificationStatus stays SUCCESS, but DKIM re-pends until the new tokens' records are detected.
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"SigningAttributesOrigin":"AWS_SES","SigningAttributes":{"NextSigningKeyLength":"RSA_1024_BIT"}}
                 """)
@@ -209,9 +184,7 @@ class SesV2IntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/identities/v2dkim-success.floci.test")
         .then()
@@ -223,9 +196,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(6)
     void getEmailIdentity_notFound() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/identities/nonexistent@example.com")
         .then()
@@ -236,9 +207,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(7)
     void sendEmail_simple() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "FromEmailAddress": "v2sender@example.com",
@@ -265,9 +234,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(8)
     void sendEmail_html() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "FromEmailAddress": "v2sender@example.com",
@@ -295,9 +262,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(9)
     void sendEmail_raw() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "FromEmailAddress": "v2sender@example.com",
@@ -321,9 +286,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(10)
     void sendEmail_missingContent() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "FromEmailAddress": "v2sender@example.com",
@@ -346,9 +309,7 @@ class SesV2IntegrationTest {
         // SuppressionAttributes defaults to BOUNCE + COMPLAINT on a fresh region,
         // matching real SES account behaviour. Later @Order(58+) tests overwrite
         // the stored value, so this assertion only holds before those run.
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/account")
         .then()
@@ -365,9 +326,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(12)
     void deleteEmailIdentity() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .delete("/v2/email/identities/v2sender@example.com")
         .then()
@@ -376,9 +335,7 @@ class SesV2IntegrationTest {
             .body("size()", equalTo(0)); // empty JSON object {}
 
         // Verify it's gone
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/identities/v2sender@example.com")
         .then()
@@ -388,9 +345,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(13)
     void sendEmail_template() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"EmailIdentity": "template-sender@example.com"}
                 """)
@@ -399,9 +354,7 @@ class SesV2IntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "TemplateName": "MyTemplate",
@@ -416,9 +369,7 @@ class SesV2IntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "FromEmailAddress": "template-sender@example.com",
@@ -443,9 +394,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(14)
     void createEmailIdentity_rejectsLeadingTrailingWhitespace() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"EmailIdentity": " padded@example.com "}
                 """)
@@ -462,9 +411,7 @@ class SesV2IntegrationTest {
     void createEmailIdentity_withTags_visibleViaGetAndListTags() {
         // Tags supplied to CreateEmailIdentity must round-trip through GetEmailIdentity
         // and ListTagsForResource (template/configuration-set behaviour parallel).
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "EmailIdentity": "v2-tag-roundtrip.floci.test",
@@ -480,7 +427,7 @@ class SesV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/identities/v2-tag-roundtrip.floci.test")
         .then()
@@ -491,7 +438,7 @@ class SesV2IntegrationTest {
 
         String arn = "arn:aws:ses:us-east-1:000000000000:identity/v2-tag-roundtrip.floci.test";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -506,9 +453,7 @@ class SesV2IntegrationTest {
     @Order(20)
     void putDkimAttributes_enable() {
         // Create identity first
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"EmailIdentity": "dkim-test@example.com"}
                 """)
@@ -518,9 +463,7 @@ class SesV2IntegrationTest {
             .statusCode(200);
 
         // Enable DKIM
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"SigningEnabled": true}
                 """)
@@ -530,9 +473,7 @@ class SesV2IntegrationTest {
             .statusCode(200);
 
         // Verify DKIM is enabled on the identity
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/identities/dkim-test@example.com")
         .then()
@@ -546,9 +487,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(21)
     void putDkimAttributes_disable() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"SigningEnabled": false}
                 """)
@@ -557,9 +496,7 @@ class SesV2IntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/identities/dkim-test@example.com")
         .then()
@@ -573,9 +510,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(40)
     void putFeedbackAttributes_disable() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"EmailForwardingEnabled": false}
                 """)
@@ -584,9 +519,7 @@ class SesV2IntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/identities/dkim-test@example.com")
         .then()
@@ -597,9 +530,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(41)
     void putFeedbackAttributes_enable() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"EmailForwardingEnabled": true}
                 """)
@@ -608,9 +539,7 @@ class SesV2IntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/identities/dkim-test@example.com")
         .then()
@@ -625,9 +554,7 @@ class SesV2IntegrationTest {
         // identity on this endpoint, with the "Identity X is invalid..."
         // message inherited from the v1 SetIdentityFeedbackForwardingEnabled
         // wire shape via remapV1Exception.
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"EmailForwardingEnabled": false}
                 """)
@@ -643,9 +570,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(50)
     void putAccountSendingAttributes_disable() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"SendingEnabled": false}
                 """)
@@ -654,9 +579,7 @@ class SesV2IntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/account")
         .then()
@@ -667,9 +590,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(51)
     void putAccountSendingAttributes_enable() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"SendingEnabled": true}
                 """)
@@ -678,9 +599,7 @@ class SesV2IntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/account")
         .then()
@@ -691,9 +610,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(58)
     void putAccountSuppressionAttributes_storesReasons_visibleViaGetAccount() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"SuppressedReasons": ["BOUNCE", "COMPLAINT"]}
                 """)
@@ -703,7 +620,7 @@ class SesV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/account")
         .then()
@@ -714,9 +631,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(59)
     void putAccountSuppressionAttributes_emptyArray_clearsReasons() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"SuppressedReasons": []}
                 """)
@@ -726,7 +641,7 @@ class SesV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/account")
         .then()
@@ -737,9 +652,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(61)
     void putAccountSuppressionAttributes_missingField_succeedsWithEmptyList() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("{}")
         .when()
             .put("/v2/email/account/suppression")
@@ -747,7 +660,7 @@ class SesV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/account")
         .then()
@@ -758,9 +671,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(62)
     void putAccountSuppressionAttributes_invalidReason_returns400() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"SuppressedReasons": ["BOUNCE", "OTHER"]}
                 """)
@@ -777,9 +688,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(64)
     void putAccountSuppressionAttributes_nullMember_returns400() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"SuppressedReasons": [null]}
                 """)
@@ -795,9 +704,7 @@ class SesV2IntegrationTest {
     void putAccountSuppressionAttributes_acceptsValidationAttributes() {
         // The optional ValidationAttributes object is accepted but not parsed —
         // verifying the request shape does not regress to a 400.
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "SuppressedReasons": ["BOUNCE"],
@@ -817,7 +724,7 @@ class SesV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/account")
         .then()
@@ -829,9 +736,7 @@ class SesV2IntegrationTest {
     @Order(57)
     void sendEmail_ccOnly_noToAddresses() {
         // Re-create identity
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"EmailIdentity": "cc-only-sender@example.com"}
                 """)
@@ -841,9 +746,7 @@ class SesV2IntegrationTest {
             .statusCode(200);
 
         // Send with only CcAddresses (no ToAddresses)
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "FromEmailAddress": "cc-only-sender@example.com",
@@ -870,9 +773,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(55)
     void sendEmail_raw_missingData() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "FromEmailAddress": "v2sender@example.com",
@@ -890,9 +791,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(56)
     void sendEmail_raw_missingFrom() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "Destination": {"ToAddresses": ["r@example.com"]},
@@ -914,9 +813,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(67)
     void sendEmail_raw_noFromAddress_usesMimeFrom() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"EmailIdentity": "raw-from@floci.test"}
                 """)
@@ -925,9 +822,7 @@ class SesV2IntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "Destination": {"ToAddresses": ["r@example.com"]},
@@ -944,9 +839,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(68)
     void sendEmail_simple_missingFrom() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "Destination": {"ToAddresses": ["r@example.com"]},
@@ -966,9 +859,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(69)
     void sendEmail_template_missingFrom() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "Destination": {"ToAddresses": ["r@example.com"]},
@@ -989,9 +880,7 @@ class SesV2IntegrationTest {
     @Order(70)
     void inspectionEndpoint_textAndHtmlAreStoredSeparately() {
         // Create identity
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"EmailIdentity": "inspect-sender@example.com"}
                 """)
@@ -1004,9 +893,7 @@ class SesV2IntegrationTest {
         given().delete("/_aws/ses").then().statusCode(200);
 
         // Send with distinct Text and Html bodies
-        String messageId = given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        String messageId = v2()
             .body("""
                 {
                     "FromEmailAddress": "inspect-sender@example.com",
@@ -1046,9 +933,7 @@ class SesV2IntegrationTest {
     void inspectionEndpoint_textOnlyEmail() {
         given().delete("/_aws/ses").then().statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "FromEmailAddress": "inspect-sender@example.com",
@@ -1084,9 +969,7 @@ class SesV2IntegrationTest {
     void inspectionEndpoint_htmlOnlyEmail() {
         given().delete("/_aws/ses").then().statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "FromEmailAddress": "inspect-sender@example.com",
@@ -1122,9 +1005,7 @@ class SesV2IntegrationTest {
     void inspectionEndpoint_replyToAddressesAreStored() {
         given().delete("/_aws/ses").then().statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "FromEmailAddress": "inspect-sender@example.com",
@@ -1158,9 +1039,7 @@ class SesV2IntegrationTest {
     void inspectionEndpoint_noReplyToOmitsField() {
         given().delete("/_aws/ses").then().statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "FromEmailAddress": "inspect-sender@example.com",
@@ -1193,9 +1072,7 @@ class SesV2IntegrationTest {
     void inspectionEndpoint_rawEmailReturnsRawData() {
         given().delete("/_aws/ses").then().statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                     "FromEmailAddress": "inspect-sender@example.com",
@@ -1235,8 +1112,7 @@ class SesV2IntegrationTest {
         for (String region : List.of("us-east-1", "ap-northeast-1")) {
             given()
                 .contentType("application/x-www-form-urlencoded")
-                .header("Authorization",
-                        "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + region + "/email/aws4_request")
+                .header("Authorization", SesV1Requests.authFor(region))
                 .formParam("Action", "VerifyEmailIdentity")
                 .formParam("EmailAddress", "multi@example.com")
             .when()
@@ -1246,10 +1122,7 @@ class SesV2IntegrationTest {
         }
 
         // Send from us-east-1
-        given()
-            .contentType("application/json")
-            .header("Authorization",
-                    "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request")
+        v2()
             .body("""
                 {
                     "FromEmailAddress": "multi@example.com",
@@ -1270,8 +1143,7 @@ class SesV2IntegrationTest {
         // Send from ap-northeast-1
         given()
             .contentType("application/json")
-            .header("Authorization",
-                    "AWS4-HMAC-SHA256 Credential=AKID/20260101/ap-northeast-1/ses/aws4_request")
+            .header("Authorization", SesV2Requests.authFor("ap-northeast-1"))
             .body("""
                 {
                     "FromEmailAddress": "multi@example.com",
@@ -1305,9 +1177,7 @@ class SesV2IntegrationTest {
     @Test
     @Order(60)
     void getEmailIdentity_fullResponse() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/identities/dkim-test@example.com")
         .then()

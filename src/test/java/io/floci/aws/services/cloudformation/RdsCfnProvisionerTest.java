@@ -293,6 +293,40 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void dbClusterPassesTemplateGroupsProtectionAndWindowsToTheRequestSettings() {
+        DbCluster cluster = mock(DbCluster.class);
+        when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean(), any(), anyBoolean()))
+                .thenReturn(cluster);
+
+        provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "VpcSecurityGroupIds":["sg-a","sg-b"],"DeletionProtection":true,
+                 "PreferredBackupWindow":"03:00-04:00","PreferredMaintenanceWindow":"Mon:05:00-Mon:06:00"}
+                """);
+        verify(rdsService).setDbClusterRequestSettings("mycluster", "us-east-1", List.of("sg-a", "sg-b"),
+                "03:00-04:00", "Mon:05:00-Mon:06:00");
+    }
+
+    @Test
+    void dbClusterWithoutTemplateGroupsLeavesGroupsToTheServiceDefault() {
+        DbCluster cluster = mock(DbCluster.class);
+        when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean(), any(), anyBoolean()))
+                .thenReturn(cluster);
+
+        provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql"}
+                """);
+        verify(rdsService).setDbClusterRequestSettings(eq("mycluster"), eq("us-east-1"), isNull(),
+                nullable(String.class), nullable(String.class));
+    }
+
+    @Test
     void dbClusterEnableHttpEndpointIsAppliedOnCreateAndUpdate() {
         createDbClusterEchoesRequestedId();
         DbCluster enabled = mock(DbCluster.class);
@@ -334,6 +368,25 @@ class RdsCfnProvisionerTest {
         assertTrue(r.getStatusReason().contains("EnableHttpEndpoint must be true or false"), r.getStatusReason());
         verify(rdsService, never()).setHttpEndpoint(any(), any(), anyBoolean());
         verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void anUpdateWindowOverlappingTheStoredOneFailsBeforeTheClusterIsModified() {
+        DbCluster existing = mock(DbCluster.class);
+        when(existing.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(existing.getPreferredMaintenanceWindow()).thenReturn("mon:05:00-mon:06:00");
+        when(rdsService.getDbCluster("mycluster")).thenReturn(existing);
+        when(rdsService.modifyDbCluster(eq("mycluster"), any(), any(), any(), any(), any(), any())).thenReturn(existing);
+
+        StackResource r = provisionExisting("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql","MasterUserPassword":"changed",
+                 "PreferredBackupWindow":"05:00-06:00"}
+                """, "us-east-1", "mycluster", Map.of("DBClusterIdentifier", "mycluster"));
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("must not overlap"), r.getStatusReason());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).setDbClusterRequestSettings(any(), any(), any(), any(), any());
     }
 
     @Test

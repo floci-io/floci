@@ -38,6 +38,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -90,9 +91,13 @@ class GlueWorkflowServiceTest {
     }
 
     private void useDurations(int jobSeconds, int crawlSeconds) {
+        useDurations(jobSeconds, crawlSeconds, CrawlRunner.NO_DATA_STORE);
+    }
+
+    private void useDurations(int jobSeconds, int crawlSeconds, CrawlRunner crawlRunner) {
         jobRuns = new GlueJobRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, jobSeconds, clock);
         crawls = new GlueCrawlerRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, crawlSeconds,
-                clock);
+                clock, crawlRunner);
         workflows = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 glueService, jobRuns, crawls, GlueTriggerService.MAX_TRACKED_CHAINS, clock);
     }
@@ -388,9 +393,7 @@ class GlueWorkflowServiceTest {
 
     @SuppressWarnings("unchecked")
     private static List<String> jobRunIdsOnNode(WorkflowRun run, String jobName) {
-        Map<String, Object> node = ((List<Map<String, Object>>) run.getGraph().get("Nodes")).stream()
-                .filter(n -> "JOB".equals(n.get("Type")) && jobName.equals(n.get("Name")))
-                .findFirst().orElseThrow();
+        Map<String, Object> node = graphNode(run.getGraph(), "JOB", jobName);
         return ((List<JobRun>) ((Map<String, Object>) node.get("JobDetails")).get("JobRuns")).stream()
                 .map(JobRun::getId).toList();
     }
@@ -617,11 +620,39 @@ class GlueWorkflowServiceTest {
         assertEquals("COMPLETED", workflows.getWorkflowRun("etl", runId, false).getStatus());
     }
 
+    @Test
+    void workflowGraphCrawlEntryReportsErrorMessageOnlyWhenTheCrawlFailed() {
+        List<CrawlOutcome> outcomes = List.of(CrawlOutcome.failed("Connection missing not found."), CrawlOutcome.succeeded());
+        int[] next = {0};
+        useDurations(0, 0, name -> outcomes.get(next[0]++));
+        createWorkflow("etl", null, null);
+        onDemand("start", "etl", startCrawler("raw"));
+
+        String failedRunId = workflows.startWorkflowRun("etl", null);
+        Map<String, Object> failedCrawl = crawlsOnNode(workflows.getWorkflowRun("etl", failedRunId, true), "raw").getFirst();
+        assertEquals("FAILED", failedCrawl.get("State"));
+        assertEquals("Connection missing not found.", failedCrawl.get("ErrorMessage"));
+
+        String succeededRunId = workflows.startWorkflowRun("etl", null);
+        Map<String, Object> succeededCrawl = crawlsOnNode(workflows.getWorkflowRun("etl", succeededRunId, true), "raw").getFirst();
+        assertEquals("SUCCEEDED", succeededCrawl.get("State"));
+        assertFalse(succeededCrawl.containsKey("ErrorMessage"));
+    }
+
     @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> crawlsOnNode(WorkflowRun run, String crawlerName) {
+        Map<String, Object> node = graphNode(run.getGraph(), "CRAWLER", crawlerName);
+        return (List<Map<String, Object>>) ((Map<String, Object>) node.get("CrawlerDetails")).get("Crawls");
+    }
+
     private static String nodeId(Map<String, Object> graph, String type, String name) {
+        return (String) graphNode(graph, type, name).get("UniqueId");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> graphNode(Map<String, Object> graph, String type, String name) {
         return ((List<Map<String, Object>>) graph.get("Nodes")).stream()
                 .filter(node -> type.equals(node.get("Type")) && name.equals(node.get("Name")))
-                .map(node -> (String) node.get("UniqueId"))
                 .findFirst().orElseThrow();
     }
 }

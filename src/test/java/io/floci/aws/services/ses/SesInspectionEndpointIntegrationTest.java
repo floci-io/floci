@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 
+import static io.floci.aws.services.ses.SesV1Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
@@ -23,8 +24,6 @@ import static org.hamcrest.Matchers.hasSize;
 @QuarkusTest
 class SesInspectionEndpointIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     private static final String SENDER = "inspection-a@floci.test";
     private static final String OTHER_SENDER = "inspection-b@floci.test";
 

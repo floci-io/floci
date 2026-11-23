@@ -10,7 +10,6 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
@@ -28,8 +27,6 @@ import static org.hamcrest.Matchers.nullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesReputationEntityV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String PREFIX = "arn:aws:ses:us-east-1:000000000000:tenant/floci-rep-it-";
     private static final String POLICY_PREFIX = "arn:aws:ses:us-east-1:aws:reputation-policy/";
     private static final String INVALID_IDENTIFIER = "Provided resource identifier is invalid";
@@ -39,7 +36,7 @@ class SesReputationEntityV2IntegrationTest {
 
     // The reference is sent percent-encoded as the SDKs send it, so RestAssured must not encode it again.
     private static RequestSpecification v2() {
-        return given().urlEncodingEnabled(false).contentType("application/json").header("Authorization", AUTH);
+        return SesV2Requests.v2().urlEncodingEnabled(false);
     }
 
     private static String entityPath(String type, String reference) {

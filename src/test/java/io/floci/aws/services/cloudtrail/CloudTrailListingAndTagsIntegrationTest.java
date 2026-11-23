@@ -2,12 +2,12 @@ package io.floci.aws.services.cloudtrail;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
 
+import static io.floci.aws.testing.CloudTrailRequests.invokeCloudTrail;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -18,9 +18,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @QuarkusTest
 class CloudTrailListingAndTagsIntegrationTest {
-
-    private static final String CT_TARGET = "CloudTrail_20131101.";
-    private static final String JSON11 = "application/x-amz-json-1.1";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -154,14 +151,6 @@ class CloudTrailListingAndTagsIntegrationTest {
     }
 
     // --- Helpers ---
-
-    private static Response invokeCloudTrail(String action, String body) {
-        return given()
-                .header("X-Amz-Target", CT_TARGET + action)
-                .contentType(JSON11)
-                .body(body)
-                .when().post("/");
-    }
 
     private static void createBucket(String name) {
         given().when().put("/" + name).then().statusCode(200);

@@ -6,9 +6,10 @@ import java.util.List;
 import java.util.Map;
 
 public sealed interface ExternalStatement permits ExternalStatement.CreateSchema, ExternalStatement.CreateKinesisSchema,
-        ExternalStatement.CreateTable, ExternalStatement.AddPartitions, ExternalStatement.DropSchema,
-        ExternalStatement.DropTable, ExternalStatement.CreateStreamingView, ExternalStatement.RefreshView,
-        ExternalStatement.DropView {
+        ExternalStatement.CreateMskSchema, ExternalStatement.CreateTable, ExternalStatement.AddPartitions,
+        ExternalStatement.DropSchema, ExternalStatement.DropTable, ExternalStatement.CreateStreamingView,
+        ExternalStatement.RefreshView, ExternalStatement.DropView, ExternalStatement.CreateFunction,
+        ExternalStatement.DropFunction {
     /** Read-only copy that keeps statement order, so Glue payloads are stable across runs. */
     private static <V> Map<String, V> ordered(Map<String, V> source) {
         return Collections.unmodifiableMap(new LinkedHashMap<>(source));
@@ -24,6 +25,8 @@ public sealed interface ExternalStatement permits ExternalStatement.CreateSchema
     /** {@code region} is null when the statement names none, which leaves the cluster's own Region. */
     record CreateKinesisSchema(String schemaName, String region, String iamRoleArn,
                                boolean ifNotExists) implements ExternalStatement { }
+    record CreateMskSchema(String schemaName, String iamRoleArn, String authentication,
+                           String clusterArn, boolean ifNotExists) implements ExternalStatement { }
     record CreateTable(String schemaName, String tableName, List<ColumnDefinition> columns,
                        List<ColumnDefinition> partitionColumns, TableFormat format, String location,
                        String delimiter, String serde, Map<String, String> properties,
@@ -56,4 +59,18 @@ public sealed interface ExternalStatement permits ExternalStatement.CreateSchema
                                String select) implements ExternalStatement { }
     record RefreshView(String viewSchema, String viewName) implements ExternalStatement { }
     record DropView(String viewSchema, String viewName, boolean ifExists, boolean cascade) implements ExternalStatement { }
+    /**
+     * {@code CREATE [OR REPLACE] EXTERNAL FUNCTION}. {@code schemaName} is null when the name is unqualified, and
+     * {@code argumentTypes} are the canonical base type names, which is what identifies an overload.
+     * {@code returnType} keeps its length or precision, and {@code volatility} is {@code STABLE} or {@code VOLATILE}.
+     */
+    record CreateFunction(String schemaName, String functionName, List<String> argumentTypes, String returnType,
+                          String volatility, String lambdaFunction, String iamRoleArn, long retryTimeoutMillis,
+                          int maxBatchRows, long maxBatchSizeBytes, boolean orReplace) implements ExternalStatement {
+        public CreateFunction { argumentTypes = List.copyOf(argumentTypes); }
+    }
+    record DropFunction(String schemaName, String functionName, List<String> argumentTypes, boolean ifExists,
+                        boolean cascade) implements ExternalStatement {
+        public DropFunction { argumentTypes = List.copyOf(argumentTypes); }
+    }
 }

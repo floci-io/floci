@@ -31,12 +31,15 @@ import java.util.Map;
  *   <li>{@code floci.services.eks.imds=true} and {@code floci.services.eks.imds-pod-network=true}
  *   program the link-local IMDS endpoint into a cluster's container, for the node and for its pods.
  *   {@code EksImdsDockerIntegrationTest} relies on them.</li>
- *   <li>{@code floci.services.emr.runner-mode=docker} and
- *   {@code floci.services.emrserverless.runner-mode=docker} run a cluster's steps and an EMR
- *   Serverless application's job runs in containers of the release's image, and
+ *   <li>{@code floci.services.emr.runner-mode=docker},
+ *   {@code floci.services.emrserverless.runner-mode=docker} and
+ *   {@code floci.services.emrcontainers.runner-mode=docker} run a cluster's steps, an EMR
+ *   Serverless application's job runs and an EMR on EKS virtual cluster's job runs in containers of the
+ *   release's image, and
  *   {@code floci.services.emrserverless.executor-containers=2} a Spark job run's executors each in a
  *   container of its own. {@code EmrDockerRunnerNightlyIntegrationTest},
- *   {@code EmrServerlessHiveDockerIntegrationTest} and the EMR nightly checks rely on them.</li>
+ *   {@code EmrServerlessHiveDockerIntegrationTest}, {@code EmrContainersSparkNightlyIntegrationTest} and the
+ *   EMR nightly checks rely on them.</li>
  *   <li>{@code floci.services.cloudfront.enabled=false} turns CloudFront off.
  *   {@code CloudFrontDisabledServingTest} relies on it.</li>
  *   <li>{@code floci.storage.services.dynamodb.mode=persistent}, with its items in the
@@ -61,8 +64,8 @@ import java.util.Map;
  * </ul>
  *
  * <p>Each override is inert for the other classes: each is read by a single service, CloudFormation,
- * the Timestream for InfluxDB data plane, an EKS cluster's container start, the EMR and EMR
- * Serverless runners, CloudFront, DynamoDB, SageMaker training, ECS, Kinesis and RDS, and no other
+ * the Timestream for InfluxDB data plane, an EKS cluster's container start, the EMR, EMR
+ * Serverless and EMR on EKS runners, CloudFront, DynamoDB, SageMaker training, ECS, Kinesis and RDS, and no other
  * class here calls that service. Boot-time reconciliation only acts on containers a previous run
  * left, which this application never adopts. The persistent path is the one setting every class sees: it moves where this
  * application writes what services keep on disk whatever their storage mode, Timestream backups and
@@ -98,6 +101,7 @@ public class CloudFormationSettingsProfile implements QuarkusTestProfile {
                 Map.entry("floci.services.emr.runner-mode", "docker"),
                 Map.entry("floci.services.emrserverless.runner-mode", "docker"),
                 Map.entry("floci.services.emrserverless.executor-containers", "2"),
+                Map.entry("floci.services.emrcontainers.runner-mode", "docker"),
                 Map.entry("floci.services.cloudfront.enabled", "false"),
                 Map.entry("floci.storage.services.dynamodb.mode", "persistent"),
                 Map.entry("floci.storage.services.dynamodb.item-layout", "per-table"),
