@@ -969,7 +969,7 @@ floci:
       default-storage-class: false # start k3s without its bundled local-path provisioner to match EKS
       imds: false                  # expose link-local IMDS (169.254.169.254) inside the cluster container
       imds-pod-network: false      # route link-local IMDS traffic from ordinary pod network namespaces (requires imds: true)
-      vpc-pod-network: false       # lease /28 prefixes of the node's subnet onto its network interface, as VPC CNI prefix delegation does
+      vpc-pod-network: false       # give pods addresses from /28 prefixes of the node's subnet, as VPC CNI prefix delegation does
       vpc-pod-prefixes: 2          # how many /28 prefixes a node holds with vpc-pod-network (1 to 16)
       irsa-signing-key: true       # sign k3s service account tokens with the cluster OIDC key
       pod-identity-webhook: true   # register a mutating webhook that injects pod identity credentials (needs floci.tls.enabled)
