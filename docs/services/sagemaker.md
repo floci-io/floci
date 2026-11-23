@@ -13,6 +13,14 @@ Floci emulates SageMaker control-plane APIs and runs real Docker containers for 
 | Tags | `AddTags`, `ListTags`, `DeleteTags` |
 | Runtime | `POST /endpoints/{EndpointName}/invocations` |
 
+With IAM enforcement on, each action is checked on the resources the AWS Service Authorization
+Reference lists for it, read from the request: a model, an endpoint configuration, an endpoint or a
+training job by its name, as `arn:aws:sagemaker:<region>:<account>:<type>/<name>`, the ARN Floci
+mints, and a tag call on its `ResourceArn`. `CreateEndpoint` and `UpdateEndpoint` are checked on the
+endpoint their `EndpointName` names and the configuration their `EndpointConfigName` names, and
+`ListTags` on the resource its `ResourceArn` names; the other list actions name no resource and are
+checked on `*`. A create carrying `Tags` also needs `sagemaker:AddTags`.
+
 ## Supported Actions
 
 <!-- floci:actions:start -->
