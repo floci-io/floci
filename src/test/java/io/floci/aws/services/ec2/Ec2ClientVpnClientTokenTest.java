@@ -1,5 +1,6 @@
 package io.floci.aws.services.ec2;
 
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.acm.AcmService;
 import io.floci.aws.services.ec2.model.ClientVpnEndpoint;
@@ -15,7 +16,9 @@ import static io.floci.aws.testing.Ec2ServiceFixtures.ACCOUNT;
 import static io.floci.aws.testing.Ec2ServiceFixtures.mockModeService;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 /**
  * CreateClientVpnEndpoint's ClientToken: a retry with the token returns the endpoint the first call
@@ -26,8 +29,9 @@ class Ec2ClientVpnClientTokenTest {
 
     private static final String REGION = "us-east-1";
 
+    private final AcmService acm = mock(AcmService.class);
     private final Ec2ClientVpnService vpn = new Ec2ClientVpnService(
-            AccountAwareStorageBackend.<ClientVpnEndpoint>inMemory(ACCOUNT), mockModeService(), mock(AcmService.class));
+            AccountAwareStorageBackend.<ClientVpnEndpoint>inMemory(ACCOUNT), mockModeService(), acm);
 
     @Test
     void aRetryWithTheSameTokenReturnsTheFirstEndpoint() {
@@ -46,6 +50,17 @@ class Ec2ClientVpnClientTokenTest {
 
         assertNotEquals(first, second);
         assertEquals(Stream.of(first, second).sorted().toList(), endpointIds());
+    }
+
+    /** The ACM lookup settles and stores a pending certificate, which a DryRun must not cause. */
+    @Test
+    void anExportDryRunLeavesTheServerCertificateUntouched() {
+        String id = createEndpoint(null);
+
+        AwsException answer = assertThrows(AwsException.class, () -> vpn.exportClientConfiguration(REGION, id, true));
+
+        assertEquals("DryRunOperation", answer.getErrorCode());
+        verifyNoInteractions(acm);
     }
 
     /** A certificate-authenticated endpoint with every optional member left to AWS's default. */

@@ -483,10 +483,11 @@ public class Ec2ClientVpnService implements VpcDependencyProvider {
      */
     public String exportClientConfiguration(String region, String id, boolean dryRun) {
         ClientVpnEndpoint endpoint = require(region, id);
-        Optional<Certificate> certificate = serverCertificate(endpoint, region);
         if (dryRun) {
+            // Ahead of the ACM lookup, which settles and stores a pending certificate.
             throw Ec2Service.dryRunOperation();
         }
+        Optional<Certificate> certificate = serverCertificate(endpoint, region);
         StringBuilder config = new StringBuilder()
                 .append("client\n")
                 .append("dev tun\n")
