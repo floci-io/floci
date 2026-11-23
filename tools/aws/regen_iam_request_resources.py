@@ -353,7 +353,7 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs", "cloudwatch",
-              "comprehend", "config", "dms",
+              "comprehend", "config", "dms", "elasticache",
               "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms", "dynamodb", "iam")
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -599,7 +599,6 @@ NOT_COVERED: dict[str, str] = {
     "connect": _REST,
     "detective": _REST,
     "dlm": _REST,
-    "elasticache": _LATER,
     "elasticbeanstalk": "not read yet: an environment's ARN carries its application's name, "
                         "`environment/<application>/<name>`, while most of its requests name it by EnvironmentName "
                         "or EnvironmentId alone, so reading it needs the stored environment those find",
@@ -1948,6 +1947,29 @@ def with_account(resources: list[dict], formats: dict[str, str], accounts: list[
             and "${Account}" in formats.get(resource["type"], "")
             and accounts[0] not in resource["fill"].values()
             and resource.get("when", {}).get(accounts[0]) != [None] else resource for resource in resources]
+
+
+CHANGE_LIST_RE = re.compile(r"^(?P<base>.+?)(?:ToAdd|ToRemove)$")
+
+
+def with_change_lists(resources: list[dict], types: list[str], formats: dict[str, str],
+                      members: dict[str, str]) -> list[dict]:
+    """The resources and, for each type the action acts on that no resource names yet and whose format has one
+    variable of its own, one read from each list of the request named after the type with `ToAdd` or `ToRemove`
+    (ElastiCache's ModifyUserGroup `UserIdsToAdd` and `UserIdsToRemove`), the resources the request adds or removes."""
+    named = {kind for resource in resources for kind in _kinds(resource)}
+    added = []
+    for kind in types:
+        if kind in named or kind not in formats:
+            continue
+        variables = [variable for variable in VARIABLE_RE.findall(formats[kind]) if variable not in KNOWN_VARIABLES]
+        if len(variables) != 1:
+            continue
+        for member, path in sorted(members.items()):
+            change = CHANGE_LIST_RE.match(member)
+            if change and path.endswith("[]") and related(stem(change.group("base")), stem(kind)):
+                added.append({"type": kind, "fill": {variables[0]: path}})
+    return resources + added
 
 
 def structure_name_fields(models: dict[str, dict], operation: str, types: list[str]) -> dict[str, str]:
@@ -3559,6 +3581,7 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
     resources = with_account(resources, formats, account_members(models, name))
     resources = with_structure_account(resources, formats, structure_account_members(models, name, types))
     resources = with_structure_names(resources, formats, structure_name_fields(models, name, types))
+    resources = with_change_lists(resources, types, formats, members)
     resources = with_arn_of(resources, formats, name_or_arn_members(models, name),
                             documented_name_or_arn_members(models, name))
     resources = with_default_pairs(resources, formats, optional)

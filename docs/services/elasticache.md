@@ -350,6 +350,18 @@ replication group is gone. The reference counts from the moment `CreateReplicati
 the name, not from when the group is stored, so a delete that lands while that create is still
 provisioning its container is refused too.
 
+### IAM enforcement
+
+With IAM enforcement on, each action is checked on the resources the AWS Service Authorization
+Reference lists for it, read from the request: a cache cluster by its `CacheClusterId`, a
+replication group by its `ReplicationGroupId`, a parameter group by its `CacheParameterGroupName`, a
+subnet group by its `CacheSubnetGroupName`, a snapshot by its `SnapshotName`, a user by its `UserId`,
+a user group by its `UserGroupId` (and, for `ModifyUserGroup`, each user its `UserIdsToAdd` and
+`UserIdsToRemove` name) and a serverless cache by its `ServerlessCacheName`, each as
+`arn:aws:elasticache:<region>:<account>:<type>:<name>`, the ARN ElastiCache mints. The tagging
+calls name their resource in `ResourceName`, which is not read, so they are checked on `*`, as is a
+Describe action naming no resource.
+
 ## Replicas and failover
 
 The members of a cluster-mode-disabled replication group share one backend, so a replica is a

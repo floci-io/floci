@@ -1940,6 +1940,40 @@ class ResourceArnBuilderTest {
                 builder.buildResources("dms", "dms:DescribeEndpoints", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
+    // ── ElastiCache ─────────────────────────────────────────────────────────────
+
+    /**
+     * An ElastiCache request is checked on the cluster, replication group or parameter group its identifier names, as
+     * {@code <type>:<name>} in the request's Region, the ARN ElastiCache mints; a tag call names its resource in
+     * {@code ResourceName}, which the table does not read, so it is checked on {@code *}.
+     */
+    @Test
+    void elastiCacheChecksTheResourceItsIdentifierNames() {
+        setFormBody("Action=DescribeCacheClusters&Version=2015-02-02&CacheClusterId=cache-1");
+        assertEquals(List.of("arn:aws:elasticache:us-west-2:000000000000:cluster:cache-1"),
+                builder.buildResources("elasticache", "elasticache:DescribeCacheClusters", ctx, "us-west-2", ACCOUNT,
+                        "aws"));
+        setFormBody("Action=CreateCacheParameterGroup&Version=2015-02-02&CacheParameterGroupName=tuned"
+                + "&CacheParameterGroupFamily=redis7&Description=d");
+        assertEquals(List.of("arn:aws:elasticache:us-west-2:000000000000:parametergroup:tuned"),
+                builder.buildResources("elasticache", "elasticache:CreateCacheParameterGroup", ctx, "us-west-2",
+                        ACCOUNT, "aws"));
+        setFormBody("Action=ListTagsForResource&Version=2015-02-02"
+                + "&ResourceName=arn%3Aaws%3Aelasticache%3Aus-west-2%3A000000000000%3Acluster%3Acache-1");
+        assertEquals(List.of("*"), builder.buildResources("elasticache", "elasticache:ListTagsForResource", ctx,
+                "us-west-2", ACCOUNT, "aws"));
+        setFormBody("Action=DescribeCacheClusters&Version=2015-02-02");
+        assertEquals(List.of("*"), builder.buildResources("elasticache", "elasticache:DescribeCacheClusters", ctx,
+                "us-west-2", ACCOUNT, "aws"));
+        // A user group's change is checked on the group and on each user it adds or removes.
+        setFormBody("Action=ModifyUserGroup&Version=2015-02-02&UserGroupId=admins&UserIdsToAdd.member.1=alice"
+                + "&UserIdsToRemove.member.1=bob");
+        assertEquals(List.of("arn:aws:elasticache:us-west-2:000000000000:usergroup:admins",
+                        "arn:aws:elasticache:us-west-2:000000000000:user:alice",
+                        "arn:aws:elasticache:us-west-2:000000000000:user:bob"),
+                builder.buildResources("elasticache", "elasticache:ModifyUserGroup", ctx, "us-west-2", ACCOUNT, "aws"));
+    }
+
     // ── S3 and S3 Control ───────────────────────────────────────────────────────
 
     /** The resources an S3 or S3 Control request names, read from the generated table on the route it matches. */
