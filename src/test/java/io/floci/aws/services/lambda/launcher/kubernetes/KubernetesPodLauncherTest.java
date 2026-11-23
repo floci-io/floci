@@ -302,9 +302,7 @@ class KubernetesPodLauncherTest {
 
         launcher.launch(fn);
 
-        Pod pod = client.pods().inNamespace("default").list().getItems().stream()
-                .filter(p -> p.getMetadata().getName().startsWith("floci-lambda-my-fn-"))
-                .findFirst().orElseThrow();
+        Pod pod = flociLambdaPod();
         List<EnvVar> envVars = pod.getSpec().getContainers().getFirst().getEnv();
         assertThat(envVars).extracting(EnvVar::getName, EnvVar::getValue)
                 .contains(tuple("AWS_ACCESS_KEY_ID", "000000000000"))
@@ -439,15 +437,25 @@ class KubernetesPodLauncherTest {
         verify(runtimeApiServerFactory).release(runtimeApiServer);
     }
 
+    @Test
+    void aStalePodScheduledTransitionDoesNotExhaustTheGraceBeforeTheReasonFlipIsObserved() {
+        // PodScheduled.lastTransitionTime records status transitions only, so a
+        // SchedulingGated to Unschedulable flip keeps the gating's old timestamp; the grace
+        // is measured from when the launcher first observes the reason instead, and a pod
+        // reported Unschedulable with a ten minute old timestamp still reaches Running.
+        lenient().when(kubernetes.unschedulableGraceSeconds()).thenReturn(30);
+        markUnschedulableThenRunningInBackground(Instant.now().minusSeconds(600));
+
+        ContainerHandle handle = launcher.launch(function());
+
+        assertThat(handle.getContainerId()).startsWith("floci-lambda-");
+    }
+
     /** Reports the pod Unschedulable since {@code since}, the shape Karpenter's cluster leaves. */
     private void markUnschedulableInBackground(Instant since) {
         CompletableFuture.runAsync(() -> {
-            Awaitility.await().atMost(Duration.ofSeconds(5)).until(
-                    () -> client.pods().inNamespace("default").list().getItems().stream()
-                            .anyMatch(p -> p.getMetadata().getName().startsWith("floci-lambda-my-fn-")));
-            Pod pod = client.pods().inNamespace("default").list().getItems().stream()
-                    .filter(p -> p.getMetadata().getName().startsWith("floci-lambda-my-fn-"))
-                    .findFirst().orElseThrow();
+            awaitFlociLambdaPod();
+            Pod pod = flociLambdaPod();
             pod.setStatus(new PodStatusBuilder()
                     .withPhase("Pending")
                     .withConditions(new PodConditionBuilder()
@@ -466,16 +474,24 @@ class KubernetesPodLauncherTest {
         CompletableFuture.runAsync(() -> {
             markUnschedulableInBackground(since);
             Awaitility.await().pollDelay(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(10)).until(
-                    () -> !client.pods().inNamespace("default").list().getItems().stream()
-                            .filter(p -> p.getMetadata().getName().startsWith("floci-lambda-my-fn-"))
-                            .findFirst().orElseThrow()
-                            .getStatus().getConditions().isEmpty());
-            Pod pod = client.pods().inNamespace("default").list().getItems().stream()
-                    .filter(p -> p.getMetadata().getName().startsWith("floci-lambda-my-fn-"))
-                    .findFirst().orElseThrow();
+                    () -> !flociLambdaPod().getStatus().getConditions().isEmpty());
+            Pod pod = flociLambdaPod();
             pod.setStatus(new PodStatusBuilder().withPhase("Running").build());
             client.pods().inNamespace("default").resource(pod).updateStatus();
         });
+    }
+
+    /** The pod this launcher created for {@code my-fn}, by its managed name prefix. */
+    private Pod flociLambdaPod() {
+        return client.pods().inNamespace("default").list().getItems().stream()
+                .filter(p -> p.getMetadata().getName().startsWith("floci-lambda-my-fn-"))
+                .findFirst().orElseThrow();
+    }
+
+    private void awaitFlociLambdaPod() {
+        Awaitility.await().atMost(Duration.ofSeconds(5)).until(
+                () -> client.pods().inNamespace("default").list().getItems().stream()
+                        .anyMatch(p -> p.getMetadata().getName().startsWith("floci-lambda-my-fn-")));
     }
 
     @Test

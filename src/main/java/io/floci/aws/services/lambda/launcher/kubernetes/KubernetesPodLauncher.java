@@ -34,7 +34,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -107,6 +106,12 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     private volatile boolean orphansSwept = false;
     /** Names of pods created by this process, so a retried orphan sweep never deletes them. */
     private final Set<String> ownPodNames = ConcurrentHashMap.newKeySet();
+    /**
+     * When each pod was first observed Unschedulable, keyed by pod name, so the grace period is
+     * measured from an observation this process can vouch for; cleared when the pod's cold-start
+     * wait ends.
+     */
+    private final ConcurrentHashMap<String, Instant> unschedulableObservedAt = new ConcurrentHashMap<>();
     private final AtomicBoolean caConfigMapApplied = new AtomicBoolean(false);
     private final AtomicBoolean awsConfigPathWarned = new AtomicBoolean(false);
 
@@ -429,6 +434,8 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
         } catch (Exception e) {
             throw new RuntimeException("Pod " + podName + " for function '" + functionName
                     + "' did not reach Running within " + timeoutSeconds + "s: " + e.getMessage(), e);
+        } finally {
+            unschedulableObservedAt.remove(podName);
         }
         if (pod == null || !isRunning(pod)) {
             throw new RuntimeException("Pod " + podName + " for function '" + functionName
@@ -466,10 +473,14 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     /**
      * Why a cold start must fail because the pod is Unschedulable, or null while the pod may
      * still wait. With {@code unschedulable-grace-seconds} set, a pod the scheduler could not
-     * place gets that long for a cluster autoscaler to add a node, measured from the
-     * PodScheduled condition's lastTransitionTime; once the grace is out, the pod is terminal
-     * as before. A condition without a readable transition time cannot be measured and fails
-     * the cold start, matching the no-grace behavior.
+     * place gets that long for a cluster autoscaler to add a node, measured from when this
+     * launcher first observes the reason. The PodScheduled condition's lastTransitionTime is
+     * not usable as that anchor: per the Kubernetes API it records status transitions only,
+     * so a reason flip from SchedulingGated to Unschedulable keeps the gating's older
+     * timestamp, which can exhaust the grace before the autoscaler has had its configured
+     * time. A pod already Unschedulable when the invocation arrives gets the grace from its
+     * first poll, and the startup timeout still bounds the wait. Once the grace is out, the
+     * pod is terminal as before.
      */
     private String unschedulableFailure(JsonNode pod) {
         String reason = unschedulableReason(pod);
@@ -480,30 +491,12 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
         if (grace <= 0) {
             return reason;
         }
-        Instant becameUnschedulable = podScheduledTransition(pod);
-        return becameUnschedulable == null
-                || Duration.between(becameUnschedulable, Instant.now()).getSeconds() >= grace
-                ? reason : null;
+        Instant firstObserved = unschedulableObservedAt.computeIfAbsent(podName(pod), ignored -> Instant.now());
+        return Duration.between(firstObserved, Instant.now()).getSeconds() >= grace ? reason : null;
     }
 
-    private Instant podScheduledTransition(JsonNode pod) {
-        for (JsonNode condition : pod.path("status").path("conditions")) {
-            if ("PodScheduled".equals(condition.path("type").asText(null))
-                    && "False".equals(condition.path("status").asText(null))
-                    && "Unschedulable".equals(condition.path("reason").asText(null))) {
-                String time = condition.path("lastTransitionTime").asText(null);
-                if (time == null) {
-                    return null;
-                }
-                try {
-                    return Instant.parse(time);
-                } catch (DateTimeParseException expected) {
-                    LOG.debugv("PodScheduled lastTransitionTime {0} is not a timestamp; failing the cold start", time);
-                    return null;
-                }
-            }
-        }
-        return null;
+    private static String podName(JsonNode pod) {
+        return pod.path("metadata").path("name").asText();
     }
 
     private static String describeTerminalReason(JsonNode pod) {
