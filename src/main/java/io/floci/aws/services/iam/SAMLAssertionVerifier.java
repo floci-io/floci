@@ -23,7 +23,9 @@ import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -35,6 +37,11 @@ final class SAMLAssertionVerifier {
     static final String ASSERTION_INVALID = "The SAML assertion is invalid.";
     static final String SIGNATURE_INVALID = "Response signature invalid";
     private static final String ROLE_SESSION_NAME = "https://aws.amazon.com/SAML/Attributes/RoleSessionName";
+    /** What an attribute carrying a session tag is named, the tag's key following the colon. */
+    private static final String PRINCIPAL_TAG = "https://aws.amazon.com/SAML/Attributes/PrincipalTag:";
+    /** What a session tag attribute naming no key is refused with, this package's own wording. */
+    static final String TAG_KEY_MISSING =
+            "A PrincipalTag attribute must name the tag key after the colon.";
     // The pattern AWS names in its error for a RoleSessionName attribute outside it.
     static final String ROLE_SESSION_NAME_INVALID = "RoleSessionName in AuthnResponse must match [a-zA-Z_0-9+=,.@-]{2,64}";
     private static final Pattern ROLE_SESSION_NAME_PATTERN = Pattern.compile("[a-zA-Z_0-9+=,.@-]{2,64}");
@@ -44,9 +51,13 @@ final class SAMLAssertionVerifier {
 
     private SAMLAssertionVerifier() {}
 
-    /** {@code roleSessionName} is null when the assertion carries no RoleSessionName attribute. */
+    /**
+     * {@code roleSessionName} is null when the assertion carries no RoleSessionName attribute, and
+     * {@code principalTags} is empty when it carries no session tags.
+     */
     record Verified(String issuer, String subject, String subjectType, String nameQualifier,
-                    Instant expiration, List<RolePair> roles, String roleSessionName) {}
+                    Instant expiration, List<RolePair> roles, String roleSessionName,
+                    Map<String, String> principalTags) {}
     record RolePair(String roleArn, String principalArn) {}
 
     static Verified verify(String encoded, SAMLProvider provider, Instant now) throws InvalidAssertionException {
@@ -178,7 +189,8 @@ final class SAMLAssertionVerifier {
             String roleSessionName = roleSessionName(attributes);
             String nameQualifier = Base64.getEncoder().encodeToString(
                     Digests.sha1((issuer + provider.getArn()).getBytes(StandardCharsets.UTF_8)));
-            return new Verified(issuer, name, subjectType, nameQualifier, notOnOrAfter, roles, roleSessionName);
+            return new Verified(issuer, name, subjectType, nameQualifier, notOnOrAfter, roles,
+                    roleSessionName, principalTags(attributes));
         } catch (InvalidAssertionException e) {
             throw e;
         } catch (Exception e) {
@@ -204,6 +216,49 @@ final class SAMLAssertionVerifier {
             return sessionName;
         }
         return null;
+    }
+
+    /**
+     * The session tags the assertion passes: "to pass SAML attributes as session tags, include the
+     * Attribute element with the Name attribute set to
+     * https://aws.amazon.com/SAML/Attributes/PrincipalTag:{TagKey}. Use the AttributeValue element
+     * to specify the value of the tag. Include a separate Attribute element for each session tag."
+     *
+     * <p>An attribute carries exactly one value, since "you must pass a single value for each
+     * session tag" and STS "does not support multi-valued session tags", and an attribute carrying
+     * none or several is refused rather than read as the first of them or dropped: a tag a policy
+     * would have been evaluated with cannot go missing quietly. An attribute whose name ends at
+     * the colon names no key and is refused the same way. The value is taken as the assertion
+     * signed it, spaces included, tag values being allowed them, where trimming it would hand a
+     * policy a value the provider never asserted. Two attributes naming one key leave the later,
+     * which is how a tag key already on an identity resolves, a second tag replacing the first
+     * rather than being added beside it.
+     */
+    private static Map<String, String> principalTags(NodeList attributes) throws InvalidAssertionException {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (int i = 0; i < attributes.getLength(); i++) {
+            Element attribute = (Element) attributes.item(i);
+            String name = attribute.getAttribute("Name");
+            if (name == null || !name.startsWith(PRINCIPAL_TAG)) {
+                continue;
+            }
+            String key = name.substring(PRINCIPAL_TAG.length());
+            if (key.isEmpty()) {
+                throw new InvalidAssertionException("principal tag key", TAG_KEY_MISSING);
+            }
+            NodeList values = attribute.getElementsByTagNameNS(SAML, "AttributeValue");
+            if (values.getLength() != 1) {
+                throw new InvalidAssertionException("principal tag values", singleValueRequired(key));
+            }
+            tags.put(key, values.item(0).getTextContent());
+        }
+        return tags;
+    }
+
+    /** What an attribute carrying no single value for its tag is refused with, Floci's wording. */
+    static String singleValueRequired(String key) {
+        return "Session tag " + key + " must carry exactly one AttributeValue:"
+                + " a session tag takes a single value.";
     }
 
     private static X509Certificate certificate(String encoded) throws Exception {

@@ -448,20 +448,97 @@ request context holds `sts:RoleSessionName`, `sts:ExternalId` when the caller pa
 guard, refuses a call that omits it or passes another value, and a conditional `Deny` applies only
 when its condition matches.
 
-`aws:PrincipalTag/<key>` contains the stored tags of the calling IAM user or assumed role.
-The target role's tags do not supply the caller's principal tags. A chained request reads the
-current caller role's tags; tags on the user that originally assumed it are not inherited.
+`aws:PrincipalTag/<key>` contains the stored tags of the calling IAM user or assumed role, with
+the session tags its credentials were minted with over them, as [Session Tags](#session-tags)
+below describes. The target role's tags do not supply the caller's principal tags. A chained
+request reads the current caller role's tags and its own session tags; tags on the user that
+originally assumed it are not inherited, and neither are the transitive session tags AWS carries
+into a chained session.
 
 A trust policy with a statement whose `Effect` is not exactly `Allow` or `Deny`, or whose
 `Condition` is not an object of non-empty operator objects, lets no one assume the role, the same
 on `AssumeRole`, `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML`. IAM refuses such a document
 when it is written; Floci stores it as given, so the whole document is refused when it is read.
 
+### Session Tags
+
+A session carries tags of its own, and its requests publish them as `aws:PrincipalTag/<key>`:
+"when you request a session, you can specify principal tags as the session tags. The tags apply to
+requests that you make using the session's credentials." Each operation takes them where AWS
+publishes them for it, which the model says the same way, three of the six declaring no `Tags`
+member at all:
+
+| Operation | Where a session tag comes from |
+|-----------|-------------------------------|
+| `AssumeRole` | the request's `Tags` member |
+| `AssumeRoleWithSAML` | the assertion's `https://aws.amazon.com/SAML/Attributes/PrincipalTag:<key>` attributes |
+| `AssumeRoleWithWebIdentity` | the token's `https://aws.amazon.com/tags` claims, in either published format |
+| `GetFederationToken` | the request's `Tags` member |
+| `GetSessionToken`, `AssumeRoot` | nothing: neither declares a way to pass one |
+
+A role's trust policy has to permit the tagging as well as the assume: "when using session tags,
+trust policies for all roles connected to the identity provider passing tags must have the
+sts:TagSession permission. For roles without this permission in the trust policy, the AssumeRole
+operation fails." All three assume operations read their trust policy for `sts:TagSession` when the
+request, the assertion or the token carries a tag, with the same principals and conditions as the
+assume itself, and answer `AccessDenied` naming that action when it is not allowed. An untagged
+request is not held to it. `AssumeRole` reads its trust policy under the enforcement this section
+describes, so the permission is read there too; the assertion and the token are read against their
+trust policy on every call, as they always have been.
+
+The caller's own policy is read for it as well, and that half was already here: the generated
+tagging table has `sts:AssumeRole` and `sts:GetFederationToken` requiring `sts:TagSession` of a
+request that carries `Tags`, which [enforcement](iam.md#iam-enforcement-mode) reads before the
+operation runs, answering `User is not authorized to perform: sts:TagSession`. So a tagged
+`AssumeRole` is held to both permissions, the caller's and the role's, and a tagged
+`GetFederationToken` to the caller's alone, having no trust policy to read. The two operations that
+take their tags from an assertion or a token carry no `Tags` member, so nothing asks their caller's
+policy for the action and the trust policy is the whole of it.
+
+The session's tags sit over the tags of the identity it acts as. For a role session that is the
+role's own tags, for a federated user the tags of the user whose key minted it, "the session
+principal tags include the user tags and the passed session tags", and a session tag "overrides the
+role" tag of the same key. The key is matched without case, as IAM matches a tag key on a user or a
+role, so a session passing `Department` replaces a `department` the role carries and the session's
+own spelling is the one published. Two tags in one request whose keys differ only in case are one
+tag, the later winning, for the same reason: "you cannot have separate Department and department
+tag keys", and a second such tag "replaces the first tag".
+
+A tag carries exactly one value, since "you must pass a single value for each session tag" and AWS
+STS "does not support multi-valued session tags". The token's nested format writes that value as an
+array holding one string and its flattened format as a plain claim, and both are read. Anything
+else is refused rather than read as the first value or dropped: a `PrincipalTag:` attribute with
+several `AttributeValue` elements or none answers `InvalidIdentityToken` with
+`Session tag <key> must carry exactly one AttributeValue: a session tag takes a single value.`, one
+whose name ends at the colon answers
+`A PrincipalTag attribute must name the tag key after the colon.`, and a token whose tag claim is
+neither a string nor a one-element array is refused the same way. Those three sentences are Floci's
+own: nothing published says what AWS answers a malformed session tag, and a tag a policy would have
+been evaluated with cannot go missing quietly. An assertion's value is stored as it was signed,
+spaces included, tag values being allowed them.
+
+Session tags are state the token carries, so they count against the
+[4,096-byte limit](iam.md#what-a-sessions-token-costs-and-when-it-is-refused) and are reported in
+`SessionTokenSize` and `SessionTokenUtilization`. For the two operations that take them from a
+message rather than from a request member, that is measured once the assertion or the token has
+been verified, which is the first point the tags exist, rather than before the operation runs where
+the declared members are read.
+
+Two published pieces of this are not here yet. The transitive tag keys an assertion or a token
+carries beside the tags are not read, so a tag never passes into a chained session: that is AWS's
+default, "by default, AWS STS does not pass tags to subsequent role sessions", and the opt-in is
+missing. And the plaintext limits a session tag is held to, 50 tags with keys of 128 characters and
+values of 256, are read where the model declares the members that carry them, which leaves the
+number and the length of the tags inside an assertion or a token unchecked, nothing published
+saying what AWS answers when those break; what does hold them is the token size above.
+
 ### Known limitations
 
-- **Session tags and source identity are not modelled.** `aws:RequestTag/*`, `aws:TagKeys`,
-  `sts:TransitiveTagKeys` and `sts:SourceIdentity` are not in the request context, so a condition
-  on them does not match, and `sts:TagSession` and `sts:SetSourceIdentity` are not checked.
+- **The tag and source-identity condition keys are not in the request context.**
+  `aws:RequestTag/*`, `aws:TagKeys`, `sts:TransitiveTagKeys` and `sts:SourceIdentity` are not
+  populated, so a condition on them does not match. A trust policy keyed on one of them therefore
+  reads as unsatisfied, including on the `sts:TagSession` permission a tagged assume needs, and
+  `sts:SetSourceIdentity` is not checked at all.
 
 ## Web Identity Validation (IRSA)
 
