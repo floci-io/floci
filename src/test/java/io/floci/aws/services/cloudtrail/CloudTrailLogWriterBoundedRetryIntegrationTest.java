@@ -21,7 +21,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 
-import static io.floci.aws.services.cloudtrail.CloudTrailRequests.invokeCloudTrail;
+import static io.floci.aws.testing.CloudTrailRequests.invokeCloudTrail;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;

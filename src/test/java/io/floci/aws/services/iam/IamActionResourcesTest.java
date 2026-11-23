@@ -88,6 +88,26 @@ class IamActionResourcesTest {
     }
 
     @Test
+    void theReadAndListActionsAreReadOnly() {
+        assertTrue(IamActionResources.isReadOnly("GetUser"));
+        assertTrue(IamActionResources.isReadOnly("ListAccessKeys"));
+        assertTrue(IamActionResources.isReadOnly("GenerateCredentialReport"));
+        assertTrue(IamActionResources.isReadOnly("SimulatePrincipalPolicy"));
+        assertFalse(IamActionResources.isReadOnly("CreateUser"));
+        assertFalse(IamActionResources.isReadOnly("PutRolePolicy"));
+        assertFalse(IamActionResources.isReadOnly("TagUser"));
+        assertFalse(IamActionResources.isReadOnly("NotAnAction"));
+    }
+
+    @Test
+    void aReadOnlyActionTheFileDoesNotCarryIsABuildDefect() {
+        assertThrows(IllegalStateException.class, () -> parse("""
+                {"actionResources":{"GetUser":["user"]},
+                 "resourceArnFormats":{"user":["arn:${Partition}:iam::${Account}:user/${Name}"]},
+                 "readOnlyActions":["ListUsers"]}"""));
+    }
+
+    @Test
     void aBlankEntryIsABuildDefect() {
         assertThrows(IllegalStateException.class, () -> parse("""
                 {"actionResources":{"GetUser":[""]},

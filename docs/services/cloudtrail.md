@@ -3,7 +3,7 @@
 **Protocol:** JSON 1.1 (`X-Amz-Target: com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.*`)
 **Endpoint:** `POST http://localhost:4566/`
 
-Floci emulates a CloudTrail trail's full life cycle and emits S3 data events
+Floci emulates a CloudTrail trail's full life cycle and emits S3 data events, IAM API calls
 and selected Secrets Manager management writes to the trail's destination bucket as gzipped JSON log files at the
 AWS-shaped key path:
 
@@ -90,15 +90,51 @@ refused for a permission it needs besides its own, such as
 operation. A browser `POST` upload, whose credential is in its form fields, is
 recorded as `PostObject` when IAM refuses it.
 
+## IAM Coverage
+
+Every IAM API call is recorded as a management event, as CloudTrail
+["logs all authenticated API requests to IAM"](https://docs.aws.amazon.com/IAM/latest/UserGuide/cloudtrail-integration.html):
+one IAM ran, one IAM answered with an error, and, with `floci.services.iam.enforcement-enabled`, one IAM enforcement
+refused.
+
+- `eventSource` is `iam.amazonaws.com` and `awsRegion` the Region IAM signs for in the request's partition
+  (`us-east-1` in `aws`). IAM is a global service, so only a trail with `IncludeGlobalServiceEvents` (the default)
+  records its calls, and only a multi-Region trail or one whose home Region is that Region.
+- `readOnly` is `true` for the actions AWS's service reference
+  ([`iam.json`](https://servicereference.us-east-1.amazonaws.com/v1/iam/iam.json)) gives the Read or List access
+  level, vendored as `readOnlyActions` in `iam-action-resources.json` by `make iam-action-resources-sync`.
+- `requestParameters` holds the request's members, named with a lower first letter (`userName`, `policyArn`,
+  `tags: [{"key": ..., "value": ...}]`), numbers and booleans typed as botocore's IAM model types them. A member the
+  model marks sensitive (a password, a private key) is left out, and a request whose only members are sensitive
+  (`ChangePassword`) has `"requestParameters": null`.
+- `responseElements` is `null` for a failed call and for a read-only one, as CloudTrail
+  "redacts the responseElements information" of a read-only event. Otherwise it holds the call's result
+  (`{"accessKey": {...}}` for `CreateAccessKey`), numbers, booleans and timestamps typed as the model types them,
+  timestamps written as CloudTrail writes them (`Oct 29, 2024 2:43:20 PM`), and without the members the model marks
+  sensitive (`secretAccessKey`, a service-specific credential's password or secret, a virtual MFA device's seed).
+- An error IAM models is recorded under its error shape's name: `NoSuchEntity` as `NoSuchEntityException`,
+  `DeleteConflict` as `DeleteConflictException`, with IAM's message. A call IAM enforcement refuses, on its
+  policies or because a `GetSessionToken` session without MFA cannot make it, is recorded as
+  `errorCode: "AccessDenied"` and `"requestParameters": null`, with the message and the request ID the refusal
+  answered with.
+- `sourceIPAddress` is the address the request came from and `userAgent` its `User-Agent`; `requestID` is the one
+  IAM answered with. `userIdentity` is the caller as it was before the call ran, so a key that deletes itself is
+  still recorded as its user's.
+- Like every management event, an IAM call also reaches the account's event history, which `LookupEvents` reads,
+  whether or not a trail records it.
+
+How each member is typed, which members are sensitive and each error's shape name are read from
+`iam-cloudtrail-shapes.json`, which `make aws-data-sync` generates from the pinned botocore.
+
 ## Management Write Coverage
 
 Successful Secrets Manager `PutSecretValue` and `UpdateSecret` API calls produce management
 records when a logging trail selects them. New trails include management events by default.
-Basic selectors honor `IncludeManagementEvents`, `ReadWriteType`, and source exclusions.
+Basic selectors honor `IncludeManagementEvents`, `ReadWriteType` (against each event's `readOnly`), and source exclusions.
 Advanced selectors evaluate `eventCategory`, `eventSource`, `eventName`, `readOnly`, `eventType`,
 and `userIdentity.arn`; unsupported fields do not match these records.
 
-Records have `eventCategory: Management`, `managementEvent: true`, and `readOnly: false`.
+Records have `eventCategory: Management` and `managementEvent: true`; the Secrets Manager writes have `readOnly: false`.
 Sensitive secret values are omitted. Buffers and background S3 delivery retain the originating
 account, including when different accounts use the same trail name. Multi-region trails cover
 regions within their own partition.

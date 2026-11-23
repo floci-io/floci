@@ -10,7 +10,7 @@ import java.io.ByteArrayInputStream;
 import java.util.UUID;
 import java.util.zip.GZIPInputStream;
 
-import static io.floci.aws.services.cloudtrail.CloudTrailRequests.invokeCloudTrail;
+import static io.floci.aws.testing.CloudTrailRequests.invokeCloudTrail;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertFalse;

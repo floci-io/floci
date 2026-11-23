@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudtrail;
 
+import io.floci.aws.testing.CloudTrailLogFiles;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -9,7 +10,7 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.util.UUID;
 
-import static io.floci.aws.services.cloudtrail.CloudTrailRequests.invokeCloudTrail;
+import static io.floci.aws.testing.CloudTrailRequests.invokeCloudTrail;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;

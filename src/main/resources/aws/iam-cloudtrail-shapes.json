@@ -1,0 +1,4076 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_iam_cloudtrail_shapes.py",
+    "botocore": "botocore 1.44.9 (installed package)"
+  },
+  "operations": {
+    "AcceptDelegationRequest": "AcceptDelegationRequestRequest",
+    "AcquireRole": "AcquireRoleRequest",
+    "AddClientIDToOpenIDConnectProvider": "AddClientIDToOpenIDConnectProviderRequest",
+    "AddRoleToInstanceProfile": "AddRoleToInstanceProfileRequest",
+    "AddUserToGroup": "AddUserToGroupRequest",
+    "AssociateDelegationRequest": "AssociateDelegationRequestRequest",
+    "AttachGroupPolicy": "AttachGroupPolicyRequest",
+    "AttachRolePolicy": "AttachRolePolicyRequest",
+    "AttachUserPolicy": "AttachUserPolicyRequest",
+    "ChangePassword": "ChangePasswordRequest",
+    "CreateAccessKey": "CreateAccessKeyRequest",
+    "CreateAccountAlias": "CreateAccountAliasRequest",
+    "CreateDelegationRequest": "CreateDelegationRequestRequest",
+    "CreateGroup": "CreateGroupRequest",
+    "CreateInstanceProfile": "CreateInstanceProfileRequest",
+    "CreateLoginProfile": "CreateLoginProfileRequest",
+    "CreateOpenIDConnectProvider": "CreateOpenIDConnectProviderRequest",
+    "CreatePolicy": "CreatePolicyRequest",
+    "CreatePolicyVersion": "CreatePolicyVersionRequest",
+    "CreateRole": "CreateRoleRequest",
+    "CreateSAMLProvider": "CreateSAMLProviderRequest",
+    "CreateServiceLinkedRole": "CreateServiceLinkedRoleRequest",
+    "CreateServiceSpecificCredential": "CreateServiceSpecificCredentialRequest",
+    "CreateUser": "CreateUserRequest",
+    "CreateVirtualMFADevice": "CreateVirtualMFADeviceRequest",
+    "DeactivateMFADevice": "DeactivateMFADeviceRequest",
+    "DeleteAccessKey": "DeleteAccessKeyRequest",
+    "DeleteAccountAlias": "DeleteAccountAliasRequest",
+    "DeleteGroup": "DeleteGroupRequest",
+    "DeleteGroupPolicy": "DeleteGroupPolicyRequest",
+    "DeleteInstanceProfile": "DeleteInstanceProfileRequest",
+    "DeleteLoginProfile": "DeleteLoginProfileRequest",
+    "DeleteOpenIDConnectProvider": "DeleteOpenIDConnectProviderRequest",
+    "DeletePolicy": "DeletePolicyRequest",
+    "DeletePolicyVersion": "DeletePolicyVersionRequest",
+    "DeleteRole": "DeleteRoleRequest",
+    "DeleteRolePermissionsBoundary": "DeleteRolePermissionsBoundaryRequest",
+    "DeleteRolePolicy": "DeleteRolePolicyRequest",
+    "DeleteSAMLProvider": "DeleteSAMLProviderRequest",
+    "DeleteSSHPublicKey": "DeleteSSHPublicKeyRequest",
+    "DeleteServerCertificate": "DeleteServerCertificateRequest",
+    "DeleteServiceLinkedRole": "DeleteServiceLinkedRoleRequest",
+    "DeleteServiceSpecificCredential": "DeleteServiceSpecificCredentialRequest",
+    "DeleteSigningCertificate": "DeleteSigningCertificateRequest",
+    "DeleteUser": "DeleteUserRequest",
+    "DeleteUserPermissionsBoundary": "DeleteUserPermissionsBoundaryRequest",
+    "DeleteUserPolicy": "DeleteUserPolicyRequest",
+    "DeleteVirtualMFADevice": "DeleteVirtualMFADeviceRequest",
+    "DetachGroupPolicy": "DetachGroupPolicyRequest",
+    "DetachRolePolicy": "DetachRolePolicyRequest",
+    "DetachUserPolicy": "DetachUserPolicyRequest",
+    "DisableOrganizationsRootCredentialsManagement": "DisableOrganizationsRootCredentialsManagementRequest",
+    "DisableOrganizationsRootSessions": "DisableOrganizationsRootSessionsRequest",
+    "EnableMFADevice": "EnableMFADeviceRequest",
+    "EnableOrganizationsRootCredentialsManagement": "EnableOrganizationsRootCredentialsManagementRequest",
+    "EnableOrganizationsRootSessions": "EnableOrganizationsRootSessionsRequest",
+    "GenerateOrganizationsAccessReport": "GenerateOrganizationsAccessReportRequest",
+    "GenerateServiceLastAccessedDetails": "GenerateServiceLastAccessedDetailsRequest",
+    "GetAccessKeyLastUsed": "GetAccessKeyLastUsedRequest",
+    "GetAccountAuthorizationDetails": "GetAccountAuthorizationDetailsRequest",
+    "GetAccountProperties": "GetAccountPropertiesRequest",
+    "GetContextKeysForCustomPolicy": "GetContextKeysForCustomPolicyRequest",
+    "GetContextKeysForPrincipalPolicy": "GetContextKeysForPrincipalPolicyRequest",
+    "GetDelegationRequest": "GetDelegationRequestRequest",
+    "GetGroup": "GetGroupRequest",
+    "GetGroupPolicy": "GetGroupPolicyRequest",
+    "GetHumanReadableSummary": "GetHumanReadableSummaryRequest",
+    "GetInstanceProfile": "GetInstanceProfileRequest",
+    "GetLoginProfile": "GetLoginProfileRequest",
+    "GetMFADevice": "GetMFADeviceRequest",
+    "GetOpenIDConnectProvider": "GetOpenIDConnectProviderRequest",
+    "GetOrganizationsAccessReport": "GetOrganizationsAccessReportRequest",
+    "GetPolicy": "GetPolicyRequest",
+    "GetPolicyVersion": "GetPolicyVersionRequest",
+    "GetRole": "GetRoleRequest",
+    "GetRolePolicy": "GetRolePolicyRequest",
+    "GetRoleTemplateVersion": "GetRoleTemplateVersionRequest",
+    "GetSAMLProvider": "GetSAMLProviderRequest",
+    "GetSSHPublicKey": "GetSSHPublicKeyRequest",
+    "GetServerCertificate": "GetServerCertificateRequest",
+    "GetServiceLastAccessedDetails": "GetServiceLastAccessedDetailsRequest",
+    "GetServiceLastAccessedDetailsWithEntities": "GetServiceLastAccessedDetailsWithEntitiesRequest",
+    "GetServiceLinkedRoleDeletionStatus": "GetServiceLinkedRoleDeletionStatusRequest",
+    "GetUser": "GetUserRequest",
+    "GetUserPolicy": "GetUserPolicyRequest",
+    "ListAccessKeys": "ListAccessKeysRequest",
+    "ListAccountAliases": "ListAccountAliasesRequest",
+    "ListAttachedGroupPolicies": "ListAttachedGroupPoliciesRequest",
+    "ListAttachedRolePolicies": "ListAttachedRolePoliciesRequest",
+    "ListAttachedUserPolicies": "ListAttachedUserPoliciesRequest",
+    "ListDelegationRequests": "ListDelegationRequestsRequest",
+    "ListEntitiesForPolicy": "ListEntitiesForPolicyRequest",
+    "ListGroupPolicies": "ListGroupPoliciesRequest",
+    "ListGroups": "ListGroupsRequest",
+    "ListGroupsForUser": "ListGroupsForUserRequest",
+    "ListInstanceProfileTags": "ListInstanceProfileTagsRequest",
+    "ListInstanceProfiles": "ListInstanceProfilesRequest",
+    "ListInstanceProfilesForRole": "ListInstanceProfilesForRoleRequest",
+    "ListMFADeviceTags": "ListMFADeviceTagsRequest",
+    "ListMFADevices": "ListMFADevicesRequest",
+    "ListOpenIDConnectProviderTags": "ListOpenIDConnectProviderTagsRequest",
+    "ListOpenIDConnectProviders": "ListOpenIDConnectProvidersRequest",
+    "ListOrganizationsFeatures": "ListOrganizationsFeaturesRequest",
+    "ListPolicies": "ListPoliciesRequest",
+    "ListPoliciesGrantingServiceAccess": "ListPoliciesGrantingServiceAccessRequest",
+    "ListPolicyTags": "ListPolicyTagsRequest",
+    "ListPolicyVersions": "ListPolicyVersionsRequest",
+    "ListRolePolicies": "ListRolePoliciesRequest",
+    "ListRoleTags": "ListRoleTagsRequest",
+    "ListRoles": "ListRolesRequest",
+    "ListSAMLProviderTags": "ListSAMLProviderTagsRequest",
+    "ListSAMLProviders": "ListSAMLProvidersRequest",
+    "ListSSHPublicKeys": "ListSSHPublicKeysRequest",
+    "ListServerCertificateTags": "ListServerCertificateTagsRequest",
+    "ListServerCertificates": "ListServerCertificatesRequest",
+    "ListServiceSpecificCredentials": "ListServiceSpecificCredentialsRequest",
+    "ListSigningCertificates": "ListSigningCertificatesRequest",
+    "ListUserPolicies": "ListUserPoliciesRequest",
+    "ListUserTags": "ListUserTagsRequest",
+    "ListUsers": "ListUsersRequest",
+    "ListVirtualMFADevices": "ListVirtualMFADevicesRequest",
+    "PutAccountProperties": "PutAccountPropertiesRequest",
+    "PutGroupPolicy": "PutGroupPolicyRequest",
+    "PutRolePermissionsBoundary": "PutRolePermissionsBoundaryRequest",
+    "PutRolePolicy": "PutRolePolicyRequest",
+    "PutUserPermissionsBoundary": "PutUserPermissionsBoundaryRequest",
+    "PutUserPolicy": "PutUserPolicyRequest",
+    "RejectDelegationRequest": "RejectDelegationRequestRequest",
+    "RemoveClientIDFromOpenIDConnectProvider": "RemoveClientIDFromOpenIDConnectProviderRequest",
+    "RemoveRoleFromInstanceProfile": "RemoveRoleFromInstanceProfileRequest",
+    "RemoveUserFromGroup": "RemoveUserFromGroupRequest",
+    "ResetServiceSpecificCredential": "ResetServiceSpecificCredentialRequest",
+    "ResyncMFADevice": "ResyncMFADeviceRequest",
+    "SendDelegationToken": "SendDelegationTokenRequest",
+    "SetDefaultPolicyVersion": "SetDefaultPolicyVersionRequest",
+    "SetSecurityTokenServicePreferences": "SetSecurityTokenServicePreferencesRequest",
+    "SimulateCustomPolicy": "SimulateCustomPolicyRequest",
+    "SimulatePrincipalPolicy": "SimulatePrincipalPolicyRequest",
+    "TagInstanceProfile": "TagInstanceProfileRequest",
+    "TagMFADevice": "TagMFADeviceRequest",
+    "TagOpenIDConnectProvider": "TagOpenIDConnectProviderRequest",
+    "TagPolicy": "TagPolicyRequest",
+    "TagRole": "TagRoleRequest",
+    "TagSAMLProvider": "TagSAMLProviderRequest",
+    "TagServerCertificate": "TagServerCertificateRequest",
+    "TagUser": "TagUserRequest",
+    "UntagInstanceProfile": "UntagInstanceProfileRequest",
+    "UntagMFADevice": "UntagMFADeviceRequest",
+    "UntagOpenIDConnectProvider": "UntagOpenIDConnectProviderRequest",
+    "UntagPolicy": "UntagPolicyRequest",
+    "UntagRole": "UntagRoleRequest",
+    "UntagSAMLProvider": "UntagSAMLProviderRequest",
+    "UntagServerCertificate": "UntagServerCertificateRequest",
+    "UntagUser": "UntagUserRequest",
+    "UpdateAccessKey": "UpdateAccessKeyRequest",
+    "UpdateAccountPasswordPolicy": "UpdateAccountPasswordPolicyRequest",
+    "UpdateAssumeRolePolicy": "UpdateAssumeRolePolicyRequest",
+    "UpdateDelegationRequest": "UpdateDelegationRequestRequest",
+    "UpdateGroup": "UpdateGroupRequest",
+    "UpdateLoginProfile": "UpdateLoginProfileRequest",
+    "UpdateOpenIDConnectProvider": "UpdateOpenIDConnectProviderRequest",
+    "UpdateOpenIDConnectProviderThumbprint": "UpdateOpenIDConnectProviderThumbprintRequest",
+    "UpdateRole": "UpdateRoleRequest",
+    "UpdateRoleDescription": "UpdateRoleDescriptionRequest",
+    "UpdateSAMLProvider": "UpdateSAMLProviderRequest",
+    "UpdateSSHPublicKey": "UpdateSSHPublicKeyRequest",
+    "UpdateServerCertificate": "UpdateServerCertificateRequest",
+    "UpdateServiceSpecificCredential": "UpdateServiceSpecificCredentialRequest",
+    "UpdateSigningCertificate": "UpdateSigningCertificateRequest",
+    "UpdateUser": "UpdateUserRequest",
+    "UploadSSHPublicKey": "UploadSSHPublicKeyRequest",
+    "UploadServerCertificate": "UploadServerCertificateRequest",
+    "UploadSigningCertificate": "UploadSigningCertificateRequest"
+  },
+  "results": {
+    "AcquireRole": {
+      "shape": "AcquireRoleResponse",
+      "resultWrapper": "AcquireRoleResult"
+    },
+    "CreateAccessKey": {
+      "shape": "CreateAccessKeyResponse",
+      "resultWrapper": "CreateAccessKeyResult"
+    },
+    "CreateDelegationRequest": {
+      "shape": "CreateDelegationRequestResponse",
+      "resultWrapper": "CreateDelegationRequestResult"
+    },
+    "CreateGroup": {
+      "shape": "CreateGroupResponse",
+      "resultWrapper": "CreateGroupResult"
+    },
+    "CreateInstanceProfile": {
+      "shape": "CreateInstanceProfileResponse",
+      "resultWrapper": "CreateInstanceProfileResult"
+    },
+    "CreateLoginProfile": {
+      "shape": "CreateLoginProfileResponse",
+      "resultWrapper": "CreateLoginProfileResult"
+    },
+    "CreateOpenIDConnectProvider": {
+      "shape": "CreateOpenIDConnectProviderResponse",
+      "resultWrapper": "CreateOpenIDConnectProviderResult"
+    },
+    "CreatePolicy": {
+      "shape": "CreatePolicyResponse",
+      "resultWrapper": "CreatePolicyResult"
+    },
+    "CreatePolicyVersion": {
+      "shape": "CreatePolicyVersionResponse",
+      "resultWrapper": "CreatePolicyVersionResult"
+    },
+    "CreateRole": {
+      "shape": "CreateRoleResponse",
+      "resultWrapper": "CreateRoleResult"
+    },
+    "CreateSAMLProvider": {
+      "shape": "CreateSAMLProviderResponse",
+      "resultWrapper": "CreateSAMLProviderResult"
+    },
+    "CreateServiceLinkedRole": {
+      "shape": "CreateServiceLinkedRoleResponse",
+      "resultWrapper": "CreateServiceLinkedRoleResult"
+    },
+    "CreateServiceSpecificCredential": {
+      "shape": "CreateServiceSpecificCredentialResponse",
+      "resultWrapper": "CreateServiceSpecificCredentialResult"
+    },
+    "CreateUser": {
+      "shape": "CreateUserResponse",
+      "resultWrapper": "CreateUserResult"
+    },
+    "CreateVirtualMFADevice": {
+      "shape": "CreateVirtualMFADeviceResponse",
+      "resultWrapper": "CreateVirtualMFADeviceResult"
+    },
+    "DeleteServiceLinkedRole": {
+      "shape": "DeleteServiceLinkedRoleResponse",
+      "resultWrapper": "DeleteServiceLinkedRoleResult"
+    },
+    "DisableOrganizationsRootCredentialsManagement": {
+      "shape": "DisableOrganizationsRootCredentialsManagementResponse",
+      "resultWrapper": "DisableOrganizationsRootCredentialsManagementResult"
+    },
+    "DisableOrganizationsRootSessions": {
+      "shape": "DisableOrganizationsRootSessionsResponse",
+      "resultWrapper": "DisableOrganizationsRootSessionsResult"
+    },
+    "EnableOrganizationsRootCredentialsManagement": {
+      "shape": "EnableOrganizationsRootCredentialsManagementResponse",
+      "resultWrapper": "EnableOrganizationsRootCredentialsManagementResult"
+    },
+    "EnableOrganizationsRootSessions": {
+      "shape": "EnableOrganizationsRootSessionsResponse",
+      "resultWrapper": "EnableOrganizationsRootSessionsResult"
+    },
+    "EnableOutboundWebIdentityFederation": {
+      "shape": "EnableOutboundWebIdentityFederationResponse",
+      "resultWrapper": "EnableOutboundWebIdentityFederationResult"
+    },
+    "GenerateCredentialReport": {
+      "shape": "GenerateCredentialReportResponse",
+      "resultWrapper": "GenerateCredentialReportResult"
+    },
+    "GenerateOrganizationsAccessReport": {
+      "shape": "GenerateOrganizationsAccessReportResponse",
+      "resultWrapper": "GenerateOrganizationsAccessReportResult"
+    },
+    "GenerateServiceLastAccessedDetails": {
+      "shape": "GenerateServiceLastAccessedDetailsResponse",
+      "resultWrapper": "GenerateServiceLastAccessedDetailsResult"
+    },
+    "GetAccessKeyLastUsed": {
+      "shape": "GetAccessKeyLastUsedResponse",
+      "resultWrapper": "GetAccessKeyLastUsedResult"
+    },
+    "GetAccountAuthorizationDetails": {
+      "shape": "GetAccountAuthorizationDetailsResponse",
+      "resultWrapper": "GetAccountAuthorizationDetailsResult"
+    },
+    "GetAccountPasswordPolicy": {
+      "shape": "GetAccountPasswordPolicyResponse",
+      "resultWrapper": "GetAccountPasswordPolicyResult"
+    },
+    "GetAccountProperties": {
+      "shape": "GetAccountPropertiesResponse",
+      "resultWrapper": "GetAccountPropertiesResult"
+    },
+    "GetAccountSummary": {
+      "shape": "GetAccountSummaryResponse",
+      "resultWrapper": "GetAccountSummaryResult"
+    },
+    "GetContextKeysForCustomPolicy": {
+      "shape": "GetContextKeysForPolicyResponse",
+      "resultWrapper": "GetContextKeysForCustomPolicyResult"
+    },
+    "GetContextKeysForPrincipalPolicy": {
+      "shape": "GetContextKeysForPolicyResponse",
+      "resultWrapper": "GetContextKeysForPrincipalPolicyResult"
+    },
+    "GetCredentialReport": {
+      "shape": "GetCredentialReportResponse",
+      "resultWrapper": "GetCredentialReportResult"
+    },
+    "GetDelegationRequest": {
+      "shape": "GetDelegationRequestResponse",
+      "resultWrapper": "GetDelegationRequestResult"
+    },
+    "GetGroup": {
+      "shape": "GetGroupResponse",
+      "resultWrapper": "GetGroupResult"
+    },
+    "GetGroupPolicy": {
+      "shape": "GetGroupPolicyResponse",
+      "resultWrapper": "GetGroupPolicyResult"
+    },
+    "GetHumanReadableSummary": {
+      "shape": "GetHumanReadableSummaryResponse",
+      "resultWrapper": "GetHumanReadableSummaryResult"
+    },
+    "GetInstanceProfile": {
+      "shape": "GetInstanceProfileResponse",
+      "resultWrapper": "GetInstanceProfileResult"
+    },
+    "GetLoginProfile": {
+      "shape": "GetLoginProfileResponse",
+      "resultWrapper": "GetLoginProfileResult"
+    },
+    "GetMFADevice": {
+      "shape": "GetMFADeviceResponse",
+      "resultWrapper": "GetMFADeviceResult"
+    },
+    "GetOpenIDConnectProvider": {
+      "shape": "GetOpenIDConnectProviderResponse",
+      "resultWrapper": "GetOpenIDConnectProviderResult"
+    },
+    "GetOrganizationsAccessReport": {
+      "shape": "GetOrganizationsAccessReportResponse",
+      "resultWrapper": "GetOrganizationsAccessReportResult"
+    },
+    "GetOutboundWebIdentityFederationInfo": {
+      "shape": "GetOutboundWebIdentityFederationInfoResponse",
+      "resultWrapper": "GetOutboundWebIdentityFederationInfoResult"
+    },
+    "GetPolicy": {
+      "shape": "GetPolicyResponse",
+      "resultWrapper": "GetPolicyResult"
+    },
+    "GetPolicyVersion": {
+      "shape": "GetPolicyVersionResponse",
+      "resultWrapper": "GetPolicyVersionResult"
+    },
+    "GetRole": {
+      "shape": "GetRoleResponse",
+      "resultWrapper": "GetRoleResult"
+    },
+    "GetRolePolicy": {
+      "shape": "GetRolePolicyResponse",
+      "resultWrapper": "GetRolePolicyResult"
+    },
+    "GetRoleTemplateVersion": {
+      "shape": "GetRoleTemplateVersionResponse",
+      "resultWrapper": "GetRoleTemplateVersionResult"
+    },
+    "GetSAMLProvider": {
+      "shape": "GetSAMLProviderResponse",
+      "resultWrapper": "GetSAMLProviderResult"
+    },
+    "GetSSHPublicKey": {
+      "shape": "GetSSHPublicKeyResponse",
+      "resultWrapper": "GetSSHPublicKeyResult"
+    },
+    "GetServerCertificate": {
+      "shape": "GetServerCertificateResponse",
+      "resultWrapper": "GetServerCertificateResult"
+    },
+    "GetServiceLastAccessedDetails": {
+      "shape": "GetServiceLastAccessedDetailsResponse",
+      "resultWrapper": "GetServiceLastAccessedDetailsResult"
+    },
+    "GetServiceLastAccessedDetailsWithEntities": {
+      "shape": "GetServiceLastAccessedDetailsWithEntitiesResponse",
+      "resultWrapper": "GetServiceLastAccessedDetailsWithEntitiesResult"
+    },
+    "GetServiceLinkedRoleDeletionStatus": {
+      "shape": "GetServiceLinkedRoleDeletionStatusResponse",
+      "resultWrapper": "GetServiceLinkedRoleDeletionStatusResult"
+    },
+    "GetUser": {
+      "shape": "GetUserResponse",
+      "resultWrapper": "GetUserResult"
+    },
+    "GetUserPolicy": {
+      "shape": "GetUserPolicyResponse",
+      "resultWrapper": "GetUserPolicyResult"
+    },
+    "ListAccessKeys": {
+      "shape": "ListAccessKeysResponse",
+      "resultWrapper": "ListAccessKeysResult"
+    },
+    "ListAccountAliases": {
+      "shape": "ListAccountAliasesResponse",
+      "resultWrapper": "ListAccountAliasesResult"
+    },
+    "ListAttachedGroupPolicies": {
+      "shape": "ListAttachedGroupPoliciesResponse",
+      "resultWrapper": "ListAttachedGroupPoliciesResult"
+    },
+    "ListAttachedRolePolicies": {
+      "shape": "ListAttachedRolePoliciesResponse",
+      "resultWrapper": "ListAttachedRolePoliciesResult"
+    },
+    "ListAttachedUserPolicies": {
+      "shape": "ListAttachedUserPoliciesResponse",
+      "resultWrapper": "ListAttachedUserPoliciesResult"
+    },
+    "ListDelegationRequests": {
+      "shape": "ListDelegationRequestsResponse",
+      "resultWrapper": "ListDelegationRequestsResult"
+    },
+    "ListEntitiesForPolicy": {
+      "shape": "ListEntitiesForPolicyResponse",
+      "resultWrapper": "ListEntitiesForPolicyResult"
+    },
+    "ListGroupPolicies": {
+      "shape": "ListGroupPoliciesResponse",
+      "resultWrapper": "ListGroupPoliciesResult"
+    },
+    "ListGroups": {
+      "shape": "ListGroupsResponse",
+      "resultWrapper": "ListGroupsResult"
+    },
+    "ListGroupsForUser": {
+      "shape": "ListGroupsForUserResponse",
+      "resultWrapper": "ListGroupsForUserResult"
+    },
+    "ListInstanceProfileTags": {
+      "shape": "ListInstanceProfileTagsResponse",
+      "resultWrapper": "ListInstanceProfileTagsResult"
+    },
+    "ListInstanceProfiles": {
+      "shape": "ListInstanceProfilesResponse",
+      "resultWrapper": "ListInstanceProfilesResult"
+    },
+    "ListInstanceProfilesForRole": {
+      "shape": "ListInstanceProfilesForRoleResponse",
+      "resultWrapper": "ListInstanceProfilesForRoleResult"
+    },
+    "ListMFADeviceTags": {
+      "shape": "ListMFADeviceTagsResponse",
+      "resultWrapper": "ListMFADeviceTagsResult"
+    },
+    "ListMFADevices": {
+      "shape": "ListMFADevicesResponse",
+      "resultWrapper": "ListMFADevicesResult"
+    },
+    "ListOpenIDConnectProviderTags": {
+      "shape": "ListOpenIDConnectProviderTagsResponse",
+      "resultWrapper": "ListOpenIDConnectProviderTagsResult"
+    },
+    "ListOpenIDConnectProviders": {
+      "shape": "ListOpenIDConnectProvidersResponse",
+      "resultWrapper": "ListOpenIDConnectProvidersResult"
+    },
+    "ListOrganizationsFeatures": {
+      "shape": "ListOrganizationsFeaturesResponse",
+      "resultWrapper": "ListOrganizationsFeaturesResult"
+    },
+    "ListPolicies": {
+      "shape": "ListPoliciesResponse",
+      "resultWrapper": "ListPoliciesResult"
+    },
+    "ListPoliciesGrantingServiceAccess": {
+      "shape": "ListPoliciesGrantingServiceAccessResponse",
+      "resultWrapper": "ListPoliciesGrantingServiceAccessResult"
+    },
+    "ListPolicyTags": {
+      "shape": "ListPolicyTagsResponse",
+      "resultWrapper": "ListPolicyTagsResult"
+    },
+    "ListPolicyVersions": {
+      "shape": "ListPolicyVersionsResponse",
+      "resultWrapper": "ListPolicyVersionsResult"
+    },
+    "ListRolePolicies": {
+      "shape": "ListRolePoliciesResponse",
+      "resultWrapper": "ListRolePoliciesResult"
+    },
+    "ListRoleTags": {
+      "shape": "ListRoleTagsResponse",
+      "resultWrapper": "ListRoleTagsResult"
+    },
+    "ListRoles": {
+      "shape": "ListRolesResponse",
+      "resultWrapper": "ListRolesResult"
+    },
+    "ListSAMLProviderTags": {
+      "shape": "ListSAMLProviderTagsResponse",
+      "resultWrapper": "ListSAMLProviderTagsResult"
+    },
+    "ListSAMLProviders": {
+      "shape": "ListSAMLProvidersResponse",
+      "resultWrapper": "ListSAMLProvidersResult"
+    },
+    "ListSSHPublicKeys": {
+      "shape": "ListSSHPublicKeysResponse",
+      "resultWrapper": "ListSSHPublicKeysResult"
+    },
+    "ListServerCertificateTags": {
+      "shape": "ListServerCertificateTagsResponse",
+      "resultWrapper": "ListServerCertificateTagsResult"
+    },
+    "ListServerCertificates": {
+      "shape": "ListServerCertificatesResponse",
+      "resultWrapper": "ListServerCertificatesResult"
+    },
+    "ListServiceSpecificCredentials": {
+      "shape": "ListServiceSpecificCredentialsResponse",
+      "resultWrapper": "ListServiceSpecificCredentialsResult"
+    },
+    "ListSigningCertificates": {
+      "shape": "ListSigningCertificatesResponse",
+      "resultWrapper": "ListSigningCertificatesResult"
+    },
+    "ListUserPolicies": {
+      "shape": "ListUserPoliciesResponse",
+      "resultWrapper": "ListUserPoliciesResult"
+    },
+    "ListUserTags": {
+      "shape": "ListUserTagsResponse",
+      "resultWrapper": "ListUserTagsResult"
+    },
+    "ListUsers": {
+      "shape": "ListUsersResponse",
+      "resultWrapper": "ListUsersResult"
+    },
+    "ListVirtualMFADevices": {
+      "shape": "ListVirtualMFADevicesResponse",
+      "resultWrapper": "ListVirtualMFADevicesResult"
+    },
+    "PutAccountProperties": {
+      "shape": "PutAccountPropertiesResponse",
+      "resultWrapper": "PutAccountPropertiesResult"
+    },
+    "ResetServiceSpecificCredential": {
+      "shape": "ResetServiceSpecificCredentialResponse",
+      "resultWrapper": "ResetServiceSpecificCredentialResult"
+    },
+    "SimulateCustomPolicy": {
+      "shape": "SimulatePolicyResponse",
+      "resultWrapper": "SimulateCustomPolicyResult"
+    },
+    "SimulatePrincipalPolicy": {
+      "shape": "SimulatePolicyResponse",
+      "resultWrapper": "SimulatePrincipalPolicyResult"
+    },
+    "UpdateRole": {
+      "shape": "UpdateRoleResponse",
+      "resultWrapper": "UpdateRoleResult"
+    },
+    "UpdateRoleDescription": {
+      "shape": "UpdateRoleDescriptionResponse",
+      "resultWrapper": "UpdateRoleDescriptionResult"
+    },
+    "UpdateSAMLProvider": {
+      "shape": "UpdateSAMLProviderResponse",
+      "resultWrapper": "UpdateSAMLProviderResult"
+    },
+    "UploadSSHPublicKey": {
+      "shape": "UploadSSHPublicKeyResponse",
+      "resultWrapper": "UploadSSHPublicKeyResult"
+    },
+    "UploadServerCertificate": {
+      "shape": "UploadServerCertificateResponse",
+      "resultWrapper": "UploadServerCertificateResult"
+    },
+    "UploadSigningCertificate": {
+      "shape": "UploadSigningCertificateResponse",
+      "resultWrapper": "UploadSigningCertificateResult"
+    }
+  },
+  "shapes": {
+    "AcceptDelegationRequestRequest": {
+      "type": "structure",
+      "members": {
+        "DelegationRequestId": "delegationRequestIdType"
+      }
+    },
+    "AccessAdvisorUsageGranularityType": {
+      "type": "string"
+    },
+    "AccessDetail": {
+      "type": "structure",
+      "members": {
+        "ServiceName": "serviceNameType",
+        "ServiceNamespace": "serviceNamespaceType",
+        "Region": "stringType",
+        "EntityPath": "organizationsEntityPathType",
+        "LastAuthenticatedTime": "dateType",
+        "TotalAuthenticatedEntities": "integerType"
+      }
+    },
+    "AccessDetails": {
+      "type": "list",
+      "member": "AccessDetail"
+    },
+    "AccessKey": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "AccessKeyId": "accessKeyIdType",
+        "Status": "statusType",
+        "SecretAccessKey": "accessKeySecretType",
+        "CreateDate": "dateType"
+      }
+    },
+    "AccessKeyLastUsed": {
+      "type": "structure",
+      "members": {
+        "LastUsedDate": "dateType",
+        "ServiceName": "stringType",
+        "Region": "stringType"
+      }
+    },
+    "AccessKeyMetadata": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "AccessKeyId": "accessKeyIdType",
+        "Status": "statusType",
+        "CreateDate": "dateType"
+      }
+    },
+    "AcquireRoleRequest": {
+      "type": "structure",
+      "members": {
+        "TemplateArn": "arnType",
+        "TemplateMinorVersion": "integerType",
+        "ReplacementValues": "mapStringReplacementValueEntry"
+      }
+    },
+    "AcquireRoleResponse": {
+      "type": "structure",
+      "members": {
+        "Role": "Role"
+      }
+    },
+    "ActionNameListType": {
+      "type": "list",
+      "member": "ActionNameType"
+    },
+    "ActionNameType": {
+      "type": "string"
+    },
+    "AddClientIDToOpenIDConnectProviderRequest": {
+      "type": "structure",
+      "members": {
+        "OpenIDConnectProviderArn": "arnType",
+        "ClientID": "clientIDType"
+      }
+    },
+    "AddRoleToInstanceProfileRequest": {
+      "type": "structure",
+      "members": {
+        "InstanceProfileName": "instanceProfileNameType",
+        "RoleName": "roleNameType"
+      }
+    },
+    "AddUserToGroupRequest": {
+      "type": "structure",
+      "members": {
+        "GroupName": "groupNameType",
+        "UserName": "existingUserNameType"
+      }
+    },
+    "ArnListType": {
+      "type": "list",
+      "member": "arnType"
+    },
+    "AssociateDelegationRequestRequest": {
+      "type": "structure",
+      "members": {
+        "DelegationRequestId": "delegationRequestIdType"
+      }
+    },
+    "AttachGroupPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "GroupName": "groupNameType",
+        "PolicyArn": "arnType"
+      }
+    },
+    "AttachRolePolicyRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "PolicyArn": "arnType"
+      }
+    },
+    "AttachUserPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "PolicyArn": "arnType"
+      }
+    },
+    "AttachedPermissionsBoundary": {
+      "type": "structure",
+      "members": {
+        "PermissionsBoundaryType": "PermissionsBoundaryAttachmentType",
+        "PermissionsBoundaryArn": "arnType"
+      }
+    },
+    "AttachedPolicy": {
+      "type": "structure",
+      "members": {
+        "PolicyName": "policyNameType",
+        "PolicyArn": "arnType"
+      }
+    },
+    "AttachmentName": {
+      "type": "string"
+    },
+    "AttachmentType": {
+      "type": "string"
+    },
+    "BootstrapDatum": {
+      "type": "blob",
+      "sensitive": true
+    },
+    "CertificationMapType": {
+      "type": "map",
+      "value": "CertificationValueType"
+    },
+    "CertificationValueType": {
+      "type": "string"
+    },
+    "ChangePasswordRequest": {
+      "type": "structure",
+      "members": {
+        "OldPassword": "passwordType",
+        "NewPassword": "passwordType"
+      }
+    },
+    "ColumnNumber": {
+      "type": "integer"
+    },
+    "ContextEntry": {
+      "type": "structure",
+      "members": {
+        "ContextKeyName": "ContextKeyNameType",
+        "ContextKeyValues": "ContextKeyValueListType",
+        "ContextKeyType": "ContextKeyTypeEnum"
+      }
+    },
+    "ContextEntryListType": {
+      "type": "list",
+      "member": "ContextEntry"
+    },
+    "ContextKeyNameType": {
+      "type": "string"
+    },
+    "ContextKeyNamesResultListType": {
+      "type": "list",
+      "member": "ContextKeyNameType"
+    },
+    "ContextKeyTypeEnum": {
+      "type": "string"
+    },
+    "ContextKeyValueListType": {
+      "type": "list",
+      "member": "ContextKeyValueType"
+    },
+    "ContextKeyValueType": {
+      "type": "string"
+    },
+    "ContextProvider": {
+      "type": "structure",
+      "members": {
+        "KeyDefinitionList": "keyDefinitionListType",
+        "SubjectSourceKey": "contextProviderSourceKeyType",
+        "SubjectTypeValue": "subjectTypeValueType",
+        "SubjectTypeSourceKey": "contextProviderSourceKeyType"
+      }
+    },
+    "ContextProviderKeyDefinition": {
+      "type": "structure",
+      "members": {
+        "SourceKey": "contextProviderSourceKeyType",
+        "TargetKey": "contextProviderTargetKeyType"
+      }
+    },
+    "CreateAccessKeyRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType"
+      }
+    },
+    "CreateAccessKeyResponse": {
+      "type": "structure",
+      "members": {
+        "AccessKey": "AccessKey"
+      }
+    },
+    "CreateAccountAliasRequest": {
+      "type": "structure",
+      "members": {
+        "AccountAlias": "accountAliasType"
+      }
+    },
+    "CreateDelegationRequestRequest": {
+      "type": "structure",
+      "members": {
+        "OwnerAccountId": "accountIdType",
+        "Description": "delegationRequestDescriptionType",
+        "Permissions": "DelegationPermission",
+        "RequestMessage": "requestMessageType",
+        "RequestorWorkflowId": "requestorWorkflowIdType",
+        "RedirectUrl": "redirectUrlType",
+        "NotificationChannel": "notificationChannelType",
+        "SessionDuration": "sessionDurationType",
+        "OnlySendByOwner": "booleanType"
+      }
+    },
+    "CreateDelegationRequestResponse": {
+      "type": "structure",
+      "members": {
+        "ConsoleDeepLink": "consoleDeepLinkType",
+        "DelegationRequestId": "delegationRequestIdType"
+      }
+    },
+    "CreateGroupRequest": {
+      "type": "structure",
+      "members": {
+        "Path": "pathType",
+        "GroupName": "groupNameType"
+      }
+    },
+    "CreateGroupResponse": {
+      "type": "structure",
+      "members": {
+        "Group": "Group"
+      }
+    },
+    "CreateInstanceProfileRequest": {
+      "type": "structure",
+      "members": {
+        "InstanceProfileName": "instanceProfileNameType",
+        "Path": "pathType",
+        "Tags": "tagListType"
+      }
+    },
+    "CreateInstanceProfileResponse": {
+      "type": "structure",
+      "members": {
+        "InstanceProfile": "InstanceProfile"
+      }
+    },
+    "CreateLoginProfileRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "Password": "passwordType",
+        "PasswordResetRequired": "booleanType",
+        "MaxSigninSessionDuration": "maxSigninSessionDurationType"
+      }
+    },
+    "CreateLoginProfileResponse": {
+      "type": "structure",
+      "members": {
+        "LoginProfile": "LoginProfile"
+      }
+    },
+    "CreateOpenIDConnectProviderRequest": {
+      "type": "structure",
+      "members": {
+        "Url": "OpenIDConnectProviderUrlType",
+        "ClientIDList": "clientIDListType",
+        "ThumbprintList": "thumbprintListType",
+        "Tags": "tagListType",
+        "ContextProvider": "ContextProvider",
+        "IdentityCenterInstanceArn": "identityCenterInstanceArnType"
+      }
+    },
+    "CreateOpenIDConnectProviderResponse": {
+      "type": "structure",
+      "members": {
+        "OpenIDConnectProviderArn": "arnType",
+        "Tags": "tagListType"
+      }
+    },
+    "CreatePolicyRequest": {
+      "type": "structure",
+      "members": {
+        "PolicyName": "policyNameType",
+        "Path": "policyPathType",
+        "PolicyDocument": "policyDocumentType",
+        "Description": "policyDescriptionType",
+        "Tags": "tagListType"
+      }
+    },
+    "CreatePolicyResponse": {
+      "type": "structure",
+      "members": {
+        "Policy": "Policy"
+      }
+    },
+    "CreatePolicyVersionRequest": {
+      "type": "structure",
+      "members": {
+        "PolicyArn": "arnType",
+        "PolicyDocument": "policyDocumentType",
+        "SetAsDefault": "booleanType"
+      }
+    },
+    "CreatePolicyVersionResponse": {
+      "type": "structure",
+      "members": {
+        "PolicyVersion": "PolicyVersion"
+      }
+    },
+    "CreateRoleRequest": {
+      "type": "structure",
+      "members": {
+        "Path": "pathType",
+        "RoleName": "roleNameType",
+        "AssumeRolePolicyDocument": "policyDocumentType",
+        "Description": "roleDescriptionType",
+        "MaxSessionDuration": "roleMaxSessionDurationType",
+        "MaxSigninSessionDuration": "maxSigninSessionDurationType",
+        "PermissionsBoundary": "arnType",
+        "Tags": "tagListType"
+      }
+    },
+    "CreateRoleResponse": {
+      "type": "structure",
+      "members": {
+        "Role": "Role"
+      }
+    },
+    "CreateSAMLProviderRequest": {
+      "type": "structure",
+      "members": {
+        "SAMLMetadataDocument": "SAMLMetadataDocumentType",
+        "Name": "SAMLProviderNameType",
+        "Tags": "tagListType",
+        "AssertionEncryptionMode": "assertionEncryptionModeType",
+        "AddPrivateKey": "privateKeyType",
+        "ContextProvider": "ContextProvider",
+        "IdentityCenterInstanceArn": "identityCenterInstanceArnType"
+      }
+    },
+    "CreateSAMLProviderResponse": {
+      "type": "structure",
+      "members": {
+        "SAMLProviderArn": "arnType",
+        "Tags": "tagListType"
+      }
+    },
+    "CreateServiceLinkedRoleRequest": {
+      "type": "structure",
+      "members": {
+        "AWSServiceName": "groupNameType",
+        "Description": "roleDescriptionType",
+        "CustomSuffix": "customSuffixType"
+      }
+    },
+    "CreateServiceLinkedRoleResponse": {
+      "type": "structure",
+      "members": {
+        "Role": "Role"
+      }
+    },
+    "CreateServiceSpecificCredentialRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "ServiceName": "serviceName",
+        "CredentialAgeDays": "credentialAgeDays"
+      }
+    },
+    "CreateServiceSpecificCredentialResponse": {
+      "type": "structure",
+      "members": {
+        "ServiceSpecificCredential": "ServiceSpecificCredential"
+      }
+    },
+    "CreateUserRequest": {
+      "type": "structure",
+      "members": {
+        "Path": "pathType",
+        "UserName": "userNameType",
+        "PermissionsBoundary": "arnType",
+        "Tags": "tagListType"
+      }
+    },
+    "CreateUserResponse": {
+      "type": "structure",
+      "members": {
+        "User": "User"
+      }
+    },
+    "CreateVirtualMFADeviceRequest": {
+      "type": "structure",
+      "members": {
+        "Path": "pathType",
+        "VirtualMFADeviceName": "virtualMFADeviceName",
+        "Tags": "tagListType"
+      }
+    },
+    "CreateVirtualMFADeviceResponse": {
+      "type": "structure",
+      "members": {
+        "VirtualMFADevice": "VirtualMFADevice"
+      }
+    },
+    "DeactivateMFADeviceRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "SerialNumber": "serialNumberType"
+      }
+    },
+    "DelegationPermission": {
+      "type": "structure",
+      "members": {
+        "PolicyTemplateArn": "arnType",
+        "Parameters": "policyParameterListType"
+      }
+    },
+    "DelegationRequest": {
+      "type": "structure",
+      "members": {
+        "DelegationRequestId": "delegationRequestIdType",
+        "OwnerAccountId": "accountIdType",
+        "Description": "delegationRequestDescriptionType",
+        "RequestMessage": "requestMessageType",
+        "Permissions": "DelegationPermission",
+        "PermissionPolicy": "permissionType",
+        "RolePermissionRestrictionArns": "rolePermissionRestrictionArnListType",
+        "OwnerId": "ownerIdType",
+        "ApproverId": "arnType",
+        "State": "stateType",
+        "ExpirationTime": "dateType",
+        "RequestorId": "accountIdType",
+        "RequestorName": "requestorNameType",
+        "CreateDate": "dateType",
+        "SessionDuration": "sessionDurationType",
+        "RedirectUrl": "redirectUrlType",
+        "Notes": "notesType",
+        "RejectionReason": "notesType",
+        "OnlySendByOwner": "booleanType",
+        "UpdatedTime": "dateType"
+      }
+    },
+    "DeleteAccessKeyRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "AccessKeyId": "accessKeyIdType"
+      }
+    },
+    "DeleteAccountAliasRequest": {
+      "type": "structure",
+      "members": {
+        "AccountAlias": "accountAliasType"
+      }
+    },
+    "DeleteGroupPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "GroupName": "groupNameType",
+        "PolicyName": "policyNameType"
+      }
+    },
+    "DeleteGroupRequest": {
+      "type": "structure",
+      "members": {
+        "GroupName": "groupNameType"
+      }
+    },
+    "DeleteInstanceProfileRequest": {
+      "type": "structure",
+      "members": {
+        "InstanceProfileName": "instanceProfileNameType"
+      }
+    },
+    "DeleteLoginProfileRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType"
+      }
+    },
+    "DeleteOpenIDConnectProviderRequest": {
+      "type": "structure",
+      "members": {
+        "OpenIDConnectProviderArn": "arnType"
+      }
+    },
+    "DeletePolicyRequest": {
+      "type": "structure",
+      "members": {
+        "PolicyArn": "arnType"
+      }
+    },
+    "DeletePolicyVersionRequest": {
+      "type": "structure",
+      "members": {
+        "PolicyArn": "arnType",
+        "VersionId": "policyVersionIdType"
+      }
+    },
+    "DeleteRolePermissionsBoundaryRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType"
+      }
+    },
+    "DeleteRolePolicyRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "PolicyName": "policyNameType"
+      }
+    },
+    "DeleteRoleRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType"
+      }
+    },
+    "DeleteSAMLProviderRequest": {
+      "type": "structure",
+      "members": {
+        "SAMLProviderArn": "arnType"
+      }
+    },
+    "DeleteSSHPublicKeyRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "SSHPublicKeyId": "publicKeyIdType"
+      }
+    },
+    "DeleteServerCertificateRequest": {
+      "type": "structure",
+      "members": {
+        "ServerCertificateName": "serverCertificateNameType"
+      }
+    },
+    "DeleteServiceLinkedRoleRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType"
+      }
+    },
+    "DeleteServiceLinkedRoleResponse": {
+      "type": "structure",
+      "members": {
+        "DeletionTaskId": "DeletionTaskIdType"
+      }
+    },
+    "DeleteServiceSpecificCredentialRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "ServiceSpecificCredentialId": "serviceSpecificCredentialId"
+      }
+    },
+    "DeleteSigningCertificateRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "CertificateId": "certificateIdType"
+      }
+    },
+    "DeleteUserPermissionsBoundaryRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType"
+      }
+    },
+    "DeleteUserPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "PolicyName": "policyNameType"
+      }
+    },
+    "DeleteUserRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType"
+      }
+    },
+    "DeleteVirtualMFADeviceRequest": {
+      "type": "structure",
+      "members": {
+        "SerialNumber": "serialNumberType"
+      }
+    },
+    "DeletionTaskFailureReasonType": {
+      "type": "structure",
+      "members": {
+        "Reason": "ReasonType",
+        "RoleUsageList": "RoleUsageListType"
+      }
+    },
+    "DeletionTaskIdType": {
+      "type": "string"
+    },
+    "DeletionTaskStatusType": {
+      "type": "string"
+    },
+    "DetachGroupPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "GroupName": "groupNameType",
+        "PolicyArn": "arnType"
+      }
+    },
+    "DetachRolePolicyRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "PolicyArn": "arnType"
+      }
+    },
+    "DetachUserPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "PolicyArn": "arnType"
+      }
+    },
+    "DisableOrganizationsRootCredentialsManagementRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DisableOrganizationsRootCredentialsManagementResponse": {
+      "type": "structure",
+      "members": {
+        "OrganizationId": "OrganizationIdType",
+        "EnabledFeatures": "FeaturesListType"
+      }
+    },
+    "DisableOrganizationsRootSessionsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DisableOrganizationsRootSessionsResponse": {
+      "type": "structure",
+      "members": {
+        "OrganizationId": "OrganizationIdType",
+        "EnabledFeatures": "FeaturesListType"
+      }
+    },
+    "EnableMFADeviceRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "SerialNumber": "serialNumberType",
+        "AuthenticationCode1": "authenticationCodeType",
+        "AuthenticationCode2": "authenticationCodeType"
+      }
+    },
+    "EnableOrganizationsRootCredentialsManagementRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "EnableOrganizationsRootCredentialsManagementResponse": {
+      "type": "structure",
+      "members": {
+        "OrganizationId": "OrganizationIdType",
+        "EnabledFeatures": "FeaturesListType"
+      }
+    },
+    "EnableOrganizationsRootSessionsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "EnableOrganizationsRootSessionsResponse": {
+      "type": "structure",
+      "members": {
+        "OrganizationId": "OrganizationIdType",
+        "EnabledFeatures": "FeaturesListType"
+      }
+    },
+    "EnableOutboundWebIdentityFederationResponse": {
+      "type": "structure",
+      "members": {
+        "IssuerIdentifier": "stringType"
+      }
+    },
+    "EntityDetails": {
+      "type": "structure",
+      "members": {
+        "EntityInfo": "EntityInfo",
+        "LastAuthenticated": "dateType"
+      }
+    },
+    "EntityInfo": {
+      "type": "structure",
+      "members": {
+        "Arn": "arnType",
+        "Name": "userNameType",
+        "Type": "policyOwnerEntityType",
+        "Id": "idType",
+        "Path": "pathType"
+      }
+    },
+    "EntityType": {
+      "type": "string"
+    },
+    "ErrorDetails": {
+      "type": "structure",
+      "members": {
+        "Message": "stringType",
+        "Code": "stringType"
+      }
+    },
+    "EvalDecisionDetailsType": {
+      "type": "map",
+      "value": "PolicyEvaluationDecisionType"
+    },
+    "EvaluationResult": {
+      "type": "structure",
+      "members": {
+        "EvalActionName": "ActionNameType",
+        "EvalResourceName": "ResourceNameType",
+        "EvalDecision": "PolicyEvaluationDecisionType",
+        "MatchedStatements": "StatementListType",
+        "MissingContextValues": "ContextKeyNamesResultListType",
+        "OrganizationsDecisionDetail": "OrganizationsDecisionDetail",
+        "PermissionsBoundaryDecisionDetail": "PermissionsBoundaryDecisionDetail",
+        "EvalDecisionDetails": "EvalDecisionDetailsType",
+        "ResourceSpecificResults": "ResourceSpecificResultListType"
+      }
+    },
+    "EvaluationResultsListType": {
+      "type": "list",
+      "member": "EvaluationResult"
+    },
+    "FeatureType": {
+      "type": "string"
+    },
+    "FeaturesListType": {
+      "type": "list",
+      "member": "FeatureType"
+    },
+    "GenerateCredentialReportResponse": {
+      "type": "structure",
+      "members": {
+        "State": "ReportStateType",
+        "Description": "ReportStateDescriptionType"
+      }
+    },
+    "GenerateOrganizationsAccessReportRequest": {
+      "type": "structure",
+      "members": {
+        "EntityPath": "organizationsEntityPathType",
+        "OrganizationsPolicyId": "organizationsPolicyIdType"
+      }
+    },
+    "GenerateOrganizationsAccessReportResponse": {
+      "type": "structure",
+      "members": {
+        "JobId": "jobIDType"
+      }
+    },
+    "GenerateServiceLastAccessedDetailsRequest": {
+      "type": "structure",
+      "members": {
+        "Arn": "arnType",
+        "Granularity": "AccessAdvisorUsageGranularityType"
+      }
+    },
+    "GenerateServiceLastAccessedDetailsResponse": {
+      "type": "structure",
+      "members": {
+        "JobId": "jobIDType"
+      }
+    },
+    "GetAccessKeyLastUsedRequest": {
+      "type": "structure",
+      "members": {
+        "AccessKeyId": "accessKeyIdType"
+      }
+    },
+    "GetAccessKeyLastUsedResponse": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "AccessKeyLastUsed": "AccessKeyLastUsed"
+      }
+    },
+    "GetAccountAuthorizationDetailsRequest": {
+      "type": "structure",
+      "members": {
+        "Filter": "entityListType",
+        "MaxItems": "maxItemsType",
+        "Marker": "markerType"
+      }
+    },
+    "GetAccountAuthorizationDetailsResponse": {
+      "type": "structure",
+      "members": {
+        "UserDetailList": "userDetailListType",
+        "GroupDetailList": "groupDetailListType",
+        "RoleDetailList": "roleDetailListType",
+        "Policies": "ManagedPolicyDetailListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "GetAccountPasswordPolicyResponse": {
+      "type": "structure",
+      "members": {
+        "PasswordPolicy": "PasswordPolicy"
+      }
+    },
+    "GetAccountPropertiesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetAccountPropertiesResponse": {
+      "type": "structure",
+      "members": {
+        "Properties": "accountPropertiesMapType"
+      }
+    },
+    "GetAccountSummaryResponse": {
+      "type": "structure",
+      "members": {
+        "SummaryMap": "summaryMapType"
+      }
+    },
+    "GetContextKeysForCustomPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "PolicyInputList": "SimulationPolicyListType"
+      }
+    },
+    "GetContextKeysForPolicyResponse": {
+      "type": "structure",
+      "members": {
+        "ContextKeyNames": "ContextKeyNamesResultListType"
+      }
+    },
+    "GetContextKeysForPrincipalPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "PolicySourceArn": "arnType",
+        "PolicyInputList": "SimulationPolicyListType"
+      }
+    },
+    "GetCredentialReportResponse": {
+      "type": "structure",
+      "members": {
+        "Content": "ReportContentType",
+        "ReportFormat": "ReportFormatType",
+        "GeneratedTime": "dateType"
+      }
+    },
+    "GetDelegationRequestRequest": {
+      "type": "structure",
+      "members": {
+        "DelegationRequestId": "delegationRequestIdType",
+        "DelegationPermissionCheck": "booleanType"
+      }
+    },
+    "GetDelegationRequestResponse": {
+      "type": "structure",
+      "members": {
+        "DelegationRequest": "DelegationRequest",
+        "PermissionCheckStatus": "permissionCheckStatusType",
+        "PermissionCheckResult": "permissionCheckResultType"
+      }
+    },
+    "GetGroupPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "GroupName": "groupNameType",
+        "PolicyName": "policyNameType"
+      }
+    },
+    "GetGroupPolicyResponse": {
+      "type": "structure",
+      "members": {
+        "GroupName": "groupNameType",
+        "PolicyName": "policyNameType",
+        "PolicyDocument": "policyDocumentType"
+      }
+    },
+    "GetGroupRequest": {
+      "type": "structure",
+      "members": {
+        "GroupName": "groupNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "GetGroupResponse": {
+      "type": "structure",
+      "members": {
+        "Group": "Group",
+        "Users": "userListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "GetHumanReadableSummaryRequest": {
+      "type": "structure",
+      "members": {
+        "EntityArn": "arnType",
+        "Locale": "localeType"
+      }
+    },
+    "GetHumanReadableSummaryResponse": {
+      "type": "structure",
+      "members": {
+        "SummaryContent": "summaryContentType",
+        "Locale": "localeType",
+        "SummaryState": "summaryStateType"
+      }
+    },
+    "GetInstanceProfileRequest": {
+      "type": "structure",
+      "members": {
+        "InstanceProfileName": "instanceProfileNameType"
+      }
+    },
+    "GetInstanceProfileResponse": {
+      "type": "structure",
+      "members": {
+        "InstanceProfile": "InstanceProfile"
+      }
+    },
+    "GetLoginProfileRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType"
+      }
+    },
+    "GetLoginProfileResponse": {
+      "type": "structure",
+      "members": {
+        "LoginProfile": "LoginProfile"
+      }
+    },
+    "GetMFADeviceRequest": {
+      "type": "structure",
+      "members": {
+        "SerialNumber": "serialNumberType",
+        "UserName": "userNameType"
+      }
+    },
+    "GetMFADeviceResponse": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "SerialNumber": "serialNumberType",
+        "EnableDate": "dateType",
+        "Certifications": "CertificationMapType"
+      }
+    },
+    "GetOpenIDConnectProviderRequest": {
+      "type": "structure",
+      "members": {
+        "OpenIDConnectProviderArn": "arnType"
+      }
+    },
+    "GetOpenIDConnectProviderResponse": {
+      "type": "structure",
+      "members": {
+        "Url": "OpenIDConnectProviderUrlType",
+        "ClientIDList": "clientIDListType",
+        "ThumbprintList": "thumbprintListType",
+        "CreateDate": "dateType",
+        "Tags": "tagListType",
+        "ContextProvider": "ContextProvider",
+        "IdentityCenterInstanceArn": "identityCenterInstanceArnType",
+        "IdentityStoreArn": "arnType"
+      }
+    },
+    "GetOrganizationsAccessReportRequest": {
+      "type": "structure",
+      "members": {
+        "JobId": "jobIDType",
+        "MaxItems": "maxItemsType",
+        "Marker": "markerType",
+        "SortKey": "sortKeyType"
+      }
+    },
+    "GetOrganizationsAccessReportResponse": {
+      "type": "structure",
+      "members": {
+        "JobStatus": "jobStatusType",
+        "JobCreationDate": "dateType",
+        "JobCompletionDate": "dateType",
+        "NumberOfServicesAccessible": "integerType",
+        "NumberOfServicesNotAccessed": "integerType",
+        "AccessDetails": "AccessDetails",
+        "IsTruncated": "booleanType",
+        "Marker": "markerType",
+        "ErrorDetails": "ErrorDetails"
+      }
+    },
+    "GetOutboundWebIdentityFederationInfoResponse": {
+      "type": "structure",
+      "members": {
+        "IssuerIdentifier": "stringType",
+        "JwtVendingEnabled": "booleanType"
+      }
+    },
+    "GetPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "PolicyArn": "arnType"
+      }
+    },
+    "GetPolicyResponse": {
+      "type": "structure",
+      "members": {
+        "Policy": "Policy"
+      }
+    },
+    "GetPolicyVersionRequest": {
+      "type": "structure",
+      "members": {
+        "PolicyArn": "arnType",
+        "VersionId": "policyVersionIdType"
+      }
+    },
+    "GetPolicyVersionResponse": {
+      "type": "structure",
+      "members": {
+        "PolicyVersion": "PolicyVersion"
+      }
+    },
+    "GetRolePolicyRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "PolicyName": "policyNameType"
+      }
+    },
+    "GetRolePolicyResponse": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "PolicyName": "policyNameType",
+        "PolicyDocument": "policyDocumentType"
+      }
+    },
+    "GetRoleRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType"
+      }
+    },
+    "GetRoleResponse": {
+      "type": "structure",
+      "members": {
+        "Role": "Role"
+      }
+    },
+    "GetRoleTemplateVersionRequest": {
+      "type": "structure",
+      "members": {
+        "TemplateArn": "arnType",
+        "MinorVersion": "minorVersionType"
+      }
+    },
+    "GetRoleTemplateVersionResponse": {
+      "type": "structure",
+      "members": {
+        "RoleTemplateVersion": "RoleTemplateVersion"
+      }
+    },
+    "GetSAMLProviderRequest": {
+      "type": "structure",
+      "members": {
+        "SAMLProviderArn": "arnType"
+      }
+    },
+    "GetSAMLProviderResponse": {
+      "type": "structure",
+      "members": {
+        "SAMLProviderUUID": "privateKeyIdType",
+        "SAMLMetadataDocument": "SAMLMetadataDocumentType",
+        "ContextProvider": "ContextProvider",
+        "SAMLKeyHashes": "SAMLKeyHashListType",
+        "CreateDate": "dateType",
+        "ValidUntil": "dateType",
+        "Tags": "tagListType",
+        "AssertionEncryptionMode": "assertionEncryptionModeType",
+        "PrivateKeyList": "privateKeyList",
+        "IdentityCenterInstanceArn": "identityCenterInstanceArnType",
+        "IdentityStoreArn": "arnType"
+      }
+    },
+    "GetSSHPublicKeyRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "SSHPublicKeyId": "publicKeyIdType",
+        "Encoding": "encodingType"
+      }
+    },
+    "GetSSHPublicKeyResponse": {
+      "type": "structure",
+      "members": {
+        "SSHPublicKey": "SSHPublicKey"
+      }
+    },
+    "GetServerCertificateRequest": {
+      "type": "structure",
+      "members": {
+        "ServerCertificateName": "serverCertificateNameType"
+      }
+    },
+    "GetServerCertificateResponse": {
+      "type": "structure",
+      "members": {
+        "ServerCertificate": "ServerCertificate"
+      }
+    },
+    "GetServiceLastAccessedDetailsRequest": {
+      "type": "structure",
+      "members": {
+        "JobId": "jobIDType",
+        "MaxItems": "maxItemsType",
+        "Marker": "markerType"
+      }
+    },
+    "GetServiceLastAccessedDetailsResponse": {
+      "type": "structure",
+      "members": {
+        "JobStatus": "jobStatusType",
+        "JobType": "AccessAdvisorUsageGranularityType",
+        "JobCreationDate": "dateType",
+        "ServicesLastAccessed": "ServicesLastAccessed",
+        "JobCompletionDate": "dateType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType",
+        "Error": "ErrorDetails"
+      }
+    },
+    "GetServiceLastAccessedDetailsWithEntitiesRequest": {
+      "type": "structure",
+      "members": {
+        "JobId": "jobIDType",
+        "ServiceNamespace": "serviceNamespaceType",
+        "MaxItems": "maxItemsType",
+        "Marker": "markerType"
+      }
+    },
+    "GetServiceLastAccessedDetailsWithEntitiesResponse": {
+      "type": "structure",
+      "members": {
+        "JobStatus": "jobStatusType",
+        "JobCreationDate": "dateType",
+        "JobCompletionDate": "dateType",
+        "EntityDetailsList": "entityDetailsListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType",
+        "Error": "ErrorDetails"
+      }
+    },
+    "GetServiceLinkedRoleDeletionStatusRequest": {
+      "type": "structure",
+      "members": {
+        "DeletionTaskId": "DeletionTaskIdType"
+      }
+    },
+    "GetServiceLinkedRoleDeletionStatusResponse": {
+      "type": "structure",
+      "members": {
+        "Status": "DeletionTaskStatusType",
+        "Reason": "DeletionTaskFailureReasonType"
+      }
+    },
+    "GetUserPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "PolicyName": "policyNameType"
+      }
+    },
+    "GetUserPolicyResponse": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "PolicyName": "policyNameType",
+        "PolicyDocument": "policyDocumentType"
+      }
+    },
+    "GetUserRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType"
+      }
+    },
+    "GetUserResponse": {
+      "type": "structure",
+      "members": {
+        "User": "User"
+      }
+    },
+    "Group": {
+      "type": "structure",
+      "members": {
+        "Path": "pathType",
+        "GroupName": "groupNameType",
+        "GroupId": "idType",
+        "Arn": "arnType",
+        "CreateDate": "dateType"
+      }
+    },
+    "GroupDetail": {
+      "type": "structure",
+      "members": {
+        "Path": "pathType",
+        "GroupName": "groupNameType",
+        "GroupId": "idType",
+        "Arn": "arnType",
+        "CreateDate": "dateType",
+        "GroupPolicyList": "policyDetailListType",
+        "AttachedManagedPolicies": "attachedPoliciesListType"
+      }
+    },
+    "InlinePolicy": {
+      "type": "structure",
+      "members": {
+        "PolicyName": "policyNameType",
+        "PolicyDocument": "policyDocumentType"
+      }
+    },
+    "InlinePolicyIdentifierType": {
+      "type": "structure",
+      "members": {
+        "PolicyName": "policyNameType",
+        "AttachmentType": "AttachmentType",
+        "AttachmentName": "AttachmentName"
+      }
+    },
+    "InstanceProfile": {
+      "type": "structure",
+      "members": {
+        "Path": "pathType",
+        "InstanceProfileName": "instanceProfileNameType",
+        "InstanceProfileId": "idType",
+        "Arn": "arnType",
+        "CreateDate": "dateType",
+        "Roles": "roleListType",
+        "Tags": "tagListType"
+      }
+    },
+    "KeyHashListType": {
+      "type": "list",
+      "member": "stringType"
+    },
+    "LineNumber": {
+      "type": "integer"
+    },
+    "ListAccessKeysRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListAccessKeysResponse": {
+      "type": "structure",
+      "members": {
+        "AccessKeyMetadata": "accessKeyMetadataListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListAccountAliasesRequest": {
+      "type": "structure",
+      "members": {
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListAccountAliasesResponse": {
+      "type": "structure",
+      "members": {
+        "AccountAliases": "accountAliasListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListAttachedGroupPoliciesRequest": {
+      "type": "structure",
+      "members": {
+        "GroupName": "groupNameType",
+        "PathPrefix": "policyPathType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListAttachedGroupPoliciesResponse": {
+      "type": "structure",
+      "members": {
+        "AttachedPolicies": "attachedPoliciesListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListAttachedRolePoliciesRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "PathPrefix": "policyPathType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListAttachedRolePoliciesResponse": {
+      "type": "structure",
+      "members": {
+        "AttachedPolicies": "attachedPoliciesListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListAttachedUserPoliciesRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "PathPrefix": "policyPathType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListAttachedUserPoliciesResponse": {
+      "type": "structure",
+      "members": {
+        "AttachedPolicies": "attachedPoliciesListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListDelegationRequestsRequest": {
+      "type": "structure",
+      "members": {
+        "OwnerId": "ownerIdType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListDelegationRequestsResponse": {
+      "type": "structure",
+      "members": {
+        "DelegationRequests": "delegationRequestsListType",
+        "Marker": "markerType",
+        "isTruncated": "booleanType"
+      }
+    },
+    "ListEntitiesForPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "PolicyArn": "arnType",
+        "EntityFilter": "EntityType",
+        "PathPrefix": "pathType",
+        "PolicyUsageFilter": "PolicyUsageType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListEntitiesForPolicyResponse": {
+      "type": "structure",
+      "members": {
+        "PolicyGroups": "PolicyGroupListType",
+        "PolicyUsers": "PolicyUserListType",
+        "PolicyRoles": "PolicyRoleListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListGroupPoliciesRequest": {
+      "type": "structure",
+      "members": {
+        "GroupName": "groupNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListGroupPoliciesResponse": {
+      "type": "structure",
+      "members": {
+        "PolicyNames": "policyNameListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListGroupsForUserRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListGroupsForUserResponse": {
+      "type": "structure",
+      "members": {
+        "Groups": "groupListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListGroupsRequest": {
+      "type": "structure",
+      "members": {
+        "PathPrefix": "pathPrefixType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListGroupsResponse": {
+      "type": "structure",
+      "members": {
+        "Groups": "groupListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListInstanceProfileTagsRequest": {
+      "type": "structure",
+      "members": {
+        "InstanceProfileName": "instanceProfileNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListInstanceProfileTagsResponse": {
+      "type": "structure",
+      "members": {
+        "Tags": "tagListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListInstanceProfilesForRoleRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListInstanceProfilesForRoleResponse": {
+      "type": "structure",
+      "members": {
+        "InstanceProfiles": "instanceProfileListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListInstanceProfilesRequest": {
+      "type": "structure",
+      "members": {
+        "PathPrefix": "pathPrefixType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListInstanceProfilesResponse": {
+      "type": "structure",
+      "members": {
+        "InstanceProfiles": "instanceProfileListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListMFADeviceTagsRequest": {
+      "type": "structure",
+      "members": {
+        "SerialNumber": "serialNumberType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListMFADeviceTagsResponse": {
+      "type": "structure",
+      "members": {
+        "Tags": "tagListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListMFADevicesRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListMFADevicesResponse": {
+      "type": "structure",
+      "members": {
+        "MFADevices": "mfaDeviceListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListOpenIDConnectProviderTagsRequest": {
+      "type": "structure",
+      "members": {
+        "OpenIDConnectProviderArn": "arnType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListOpenIDConnectProviderTagsResponse": {
+      "type": "structure",
+      "members": {
+        "Tags": "tagListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListOpenIDConnectProvidersRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListOpenIDConnectProvidersResponse": {
+      "type": "structure",
+      "members": {
+        "OpenIDConnectProviderList": "OpenIDConnectProviderListType"
+      }
+    },
+    "ListOrganizationsFeaturesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListOrganizationsFeaturesResponse": {
+      "type": "structure",
+      "members": {
+        "OrganizationId": "OrganizationIdType",
+        "EnabledFeatures": "FeaturesListType"
+      }
+    },
+    "ListPoliciesGrantingServiceAccessEntry": {
+      "type": "structure",
+      "members": {
+        "ServiceNamespace": "serviceNamespaceType",
+        "Policies": "policyGrantingServiceAccessListType"
+      }
+    },
+    "ListPoliciesGrantingServiceAccessRequest": {
+      "type": "structure",
+      "members": {
+        "Marker": "markerType",
+        "Arn": "arnType",
+        "ServiceNamespaces": "serviceNamespaceListType"
+      }
+    },
+    "ListPoliciesGrantingServiceAccessResponse": {
+      "type": "structure",
+      "members": {
+        "PoliciesGrantingServiceAccess": "listPolicyGrantingServiceAccessResponseListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListPoliciesRequest": {
+      "type": "structure",
+      "members": {
+        "Scope": "policyScopeType",
+        "OnlyAttached": "booleanType",
+        "PathPrefix": "policyPathType",
+        "PolicyUsageFilter": "PolicyUsageType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListPoliciesResponse": {
+      "type": "structure",
+      "members": {
+        "Policies": "policyListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListPolicyTagsRequest": {
+      "type": "structure",
+      "members": {
+        "PolicyArn": "arnType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListPolicyTagsResponse": {
+      "type": "structure",
+      "members": {
+        "Tags": "tagListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListPolicyVersionsRequest": {
+      "type": "structure",
+      "members": {
+        "PolicyArn": "arnType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListPolicyVersionsResponse": {
+      "type": "structure",
+      "members": {
+        "Versions": "policyDocumentVersionListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListRolePoliciesRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListRolePoliciesResponse": {
+      "type": "structure",
+      "members": {
+        "PolicyNames": "policyNameListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListRoleTagsRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListRoleTagsResponse": {
+      "type": "structure",
+      "members": {
+        "Tags": "tagListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListRolesRequest": {
+      "type": "structure",
+      "members": {
+        "PathPrefix": "pathPrefixType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListRolesResponse": {
+      "type": "structure",
+      "members": {
+        "Roles": "roleListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListSAMLProviderTagsRequest": {
+      "type": "structure",
+      "members": {
+        "SAMLProviderArn": "arnType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListSAMLProviderTagsResponse": {
+      "type": "structure",
+      "members": {
+        "Tags": "tagListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListSAMLProvidersRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListSAMLProvidersResponse": {
+      "type": "structure",
+      "members": {
+        "SAMLProviderList": "SAMLProviderListType"
+      }
+    },
+    "ListSSHPublicKeysRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListSSHPublicKeysResponse": {
+      "type": "structure",
+      "members": {
+        "SSHPublicKeys": "SSHPublicKeyListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListServerCertificateTagsRequest": {
+      "type": "structure",
+      "members": {
+        "ServerCertificateName": "serverCertificateNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListServerCertificateTagsResponse": {
+      "type": "structure",
+      "members": {
+        "Tags": "tagListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListServerCertificatesRequest": {
+      "type": "structure",
+      "members": {
+        "PathPrefix": "pathPrefixType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListServerCertificatesResponse": {
+      "type": "structure",
+      "members": {
+        "ServerCertificateMetadataList": "serverCertificateMetadataListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListServiceSpecificCredentialsRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "ServiceName": "serviceName",
+        "AllUsers": "allUsers",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListServiceSpecificCredentialsResponse": {
+      "type": "structure",
+      "members": {
+        "ServiceSpecificCredentials": "ServiceSpecificCredentialsListType",
+        "Marker": "responseMarkerType",
+        "IsTruncated": "booleanType"
+      }
+    },
+    "ListSigningCertificatesRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListSigningCertificatesResponse": {
+      "type": "structure",
+      "members": {
+        "Certificates": "certificateListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListUserPoliciesRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListUserPoliciesResponse": {
+      "type": "structure",
+      "members": {
+        "PolicyNames": "policyNameListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListUserTagsRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListUserTagsResponse": {
+      "type": "structure",
+      "members": {
+        "Tags": "tagListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListUsersRequest": {
+      "type": "structure",
+      "members": {
+        "PathPrefix": "pathPrefixType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListUsersResponse": {
+      "type": "structure",
+      "members": {
+        "Users": "userListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "ListVirtualMFADevicesRequest": {
+      "type": "structure",
+      "members": {
+        "AssignmentStatus": "assignmentStatusType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListVirtualMFADevicesResponse": {
+      "type": "structure",
+      "members": {
+        "VirtualMFADevices": "virtualMFADeviceListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "LoginProfile": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "CreateDate": "dateType",
+        "PasswordResetRequired": "booleanType",
+        "MaxSigninSessionDuration": "maxSigninSessionDurationType"
+      }
+    },
+    "MFADevice": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "SerialNumber": "serialNumberType",
+        "EnableDate": "dateType"
+      }
+    },
+    "ManagedPolicyDetail": {
+      "type": "structure",
+      "members": {
+        "PolicyName": "policyNameType",
+        "PolicyId": "idType",
+        "Arn": "arnType",
+        "Path": "policyPathType",
+        "DefaultVersionId": "policyVersionIdType",
+        "AttachmentCount": "attachmentCountType",
+        "PermissionsBoundaryUsageCount": "attachmentCountType",
+        "IsAttachable": "booleanType",
+        "Description": "policyDescriptionType",
+        "CreateDate": "dateType",
+        "UpdateDate": "dateType",
+        "PolicyVersionList": "policyDocumentVersionListType"
+      }
+    },
+    "ManagedPolicyDetailListType": {
+      "type": "list",
+      "member": "ManagedPolicyDetail"
+    },
+    "OpenIDConnectProviderListEntry": {
+      "type": "structure",
+      "members": {
+        "Arn": "arnType",
+        "IsTrustedIdentityPropagationEnabled": "booleanType"
+      }
+    },
+    "OpenIDConnectProviderListType": {
+      "type": "list",
+      "member": "OpenIDConnectProviderListEntry"
+    },
+    "OpenIDConnectProviderUrlType": {
+      "type": "string"
+    },
+    "OrderedOrganizationPolicyType": {
+      "type": "structure",
+      "members": {
+        "ServiceControlPolicyInputList": "SimulationPolicyListType"
+      }
+    },
+    "OrganizationIdType": {
+      "type": "string"
+    },
+    "OrganizationPolicyListType": {
+      "type": "list",
+      "member": "OrderedOrganizationPolicyType"
+    },
+    "OrganizationsDecisionDetail": {
+      "type": "structure",
+      "members": {
+        "AllowedByOrganizations": "booleanType"
+      }
+    },
+    "ParameterDefinition": {
+      "type": "structure",
+      "members": {
+        "Name": "parameterNameType",
+        "Type": "parameterTypeType",
+        "SubType": "parameterSubTypeType",
+        "Description": "parameterDescriptionType",
+        "IsRequired": "booleanType",
+        "DefaultValue": "parameterDefaultValueType",
+        "Immutable": "booleanType"
+      }
+    },
+    "PasswordPolicy": {
+      "type": "structure",
+      "members": {
+        "MinimumPasswordLength": "minimumPasswordLengthType",
+        "RequireSymbols": "booleanType",
+        "RequireNumbers": "booleanType",
+        "RequireUppercaseCharacters": "booleanType",
+        "RequireLowercaseCharacters": "booleanType",
+        "AllowUsersToChangePassword": "booleanType",
+        "ExpirePasswords": "booleanType",
+        "MaxPasswordAge": "maxPasswordAgeType",
+        "PasswordReusePrevention": "passwordReusePreventionType",
+        "HardExpiry": "booleanObjectType"
+      }
+    },
+    "PermissionsBoundaryAttachmentType": {
+      "type": "string"
+    },
+    "PermissionsBoundaryDecisionDetail": {
+      "type": "structure",
+      "members": {
+        "AllowedByPermissionsBoundary": "booleanType"
+      }
+    },
+    "Policy": {
+      "type": "structure",
+      "members": {
+        "PolicyName": "policyNameType",
+        "PolicyId": "idType",
+        "Arn": "arnType",
+        "Path": "policyPathType",
+        "DefaultVersionId": "policyVersionIdType",
+        "AttachmentCount": "attachmentCountType",
+        "PermissionsBoundaryUsageCount": "attachmentCountType",
+        "IsAttachable": "booleanType",
+        "Description": "policyDescriptionType",
+        "CreateDate": "dateType",
+        "UpdateDate": "dateType",
+        "Tags": "tagListType"
+      }
+    },
+    "PolicyDetail": {
+      "type": "structure",
+      "members": {
+        "PolicyName": "policyNameType",
+        "PolicyDocument": "policyDocumentType"
+      }
+    },
+    "PolicyEvaluationDecisionType": {
+      "type": "string"
+    },
+    "PolicyExclusionsListType": {
+      "type": "list",
+      "member": "PolicyIdentifier"
+    },
+    "PolicyGrantingServiceAccess": {
+      "type": "structure",
+      "members": {
+        "PolicyName": "policyNameType",
+        "PolicyType": "policyType",
+        "PolicyArn": "arnType",
+        "EntityType": "policyOwnerEntityType",
+        "EntityName": "entityNameType"
+      }
+    },
+    "PolicyGroup": {
+      "type": "structure",
+      "members": {
+        "GroupName": "groupNameType",
+        "GroupId": "idType"
+      }
+    },
+    "PolicyGroupListType": {
+      "type": "list",
+      "member": "PolicyGroup"
+    },
+    "PolicyIdentifier": {
+      "type": "structure",
+      "members": {
+        "PolicyType": "PolicyIdentifierPolicyType",
+        "PolicyArn": "arnType",
+        "InlinePolicyIdentifier": "InlinePolicyIdentifierType"
+      }
+    },
+    "PolicyIdentifierPolicyType": {
+      "type": "string"
+    },
+    "PolicyIdentifierType": {
+      "type": "string"
+    },
+    "PolicyParameter": {
+      "type": "structure",
+      "members": {
+        "Name": "policyParameterNameType",
+        "Values": "policyParameterValuesListType",
+        "Type": "PolicyParameterTypeEnum"
+      }
+    },
+    "PolicyParameterTypeEnum": {
+      "type": "string"
+    },
+    "PolicyRole": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "RoleId": "idType"
+      }
+    },
+    "PolicyRoleListType": {
+      "type": "list",
+      "member": "PolicyRole"
+    },
+    "PolicySourceType": {
+      "type": "string"
+    },
+    "PolicyUsageType": {
+      "type": "string"
+    },
+    "PolicyUser": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "UserId": "idType"
+      }
+    },
+    "PolicyUserListType": {
+      "type": "list",
+      "member": "PolicyUser"
+    },
+    "PolicyVersion": {
+      "type": "structure",
+      "members": {
+        "Document": "policyDocumentType",
+        "VersionId": "policyVersionIdType",
+        "IsDefaultVersion": "booleanType",
+        "CreateDate": "dateType"
+      }
+    },
+    "Position": {
+      "type": "structure",
+      "members": {
+        "Line": "LineNumber",
+        "Column": "ColumnNumber"
+      }
+    },
+    "PutAccountPropertiesRequest": {
+      "type": "structure",
+      "members": {
+        "Properties": "accountPropertiesMapType"
+      }
+    },
+    "PutAccountPropertiesResponse": {
+      "type": "structure",
+      "members": {}
+    },
+    "PutGroupPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "GroupName": "groupNameType",
+        "PolicyName": "policyNameType",
+        "PolicyDocument": "policyDocumentType"
+      }
+    },
+    "PutRolePermissionsBoundaryRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "PermissionsBoundary": "arnType"
+      }
+    },
+    "PutRolePolicyRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "PolicyName": "policyNameType",
+        "PolicyDocument": "policyDocumentType"
+      }
+    },
+    "PutUserPermissionsBoundaryRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "PermissionsBoundary": "arnType"
+      }
+    },
+    "PutUserPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "PolicyName": "policyNameType",
+        "PolicyDocument": "policyDocumentType"
+      }
+    },
+    "ReasonType": {
+      "type": "string"
+    },
+    "RegionNameType": {
+      "type": "string"
+    },
+    "RejectDelegationRequestRequest": {
+      "type": "structure",
+      "members": {
+        "DelegationRequestId": "delegationRequestIdType",
+        "Notes": "notesType"
+      }
+    },
+    "RemoveClientIDFromOpenIDConnectProviderRequest": {
+      "type": "structure",
+      "members": {
+        "OpenIDConnectProviderArn": "arnType",
+        "ClientID": "clientIDType"
+      }
+    },
+    "RemoveRoleFromInstanceProfileRequest": {
+      "type": "structure",
+      "members": {
+        "InstanceProfileName": "instanceProfileNameType",
+        "RoleName": "roleNameType"
+      }
+    },
+    "RemoveUserFromGroupRequest": {
+      "type": "structure",
+      "members": {
+        "GroupName": "groupNameType",
+        "UserName": "existingUserNameType"
+      }
+    },
+    "ReplacementValueEntry": {
+      "type": "structure",
+      "members": {
+        "Values": "replacementValueListType"
+      }
+    },
+    "ReportContentType": {
+      "type": "blob"
+    },
+    "ReportFormatType": {
+      "type": "string"
+    },
+    "ReportStateDescriptionType": {
+      "type": "string"
+    },
+    "ReportStateType": {
+      "type": "string"
+    },
+    "ResetServiceSpecificCredentialRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "ServiceSpecificCredentialId": "serviceSpecificCredentialId"
+      }
+    },
+    "ResetServiceSpecificCredentialResponse": {
+      "type": "structure",
+      "members": {
+        "ServiceSpecificCredential": "ServiceSpecificCredential"
+      }
+    },
+    "ResourceHandlingOptionType": {
+      "type": "string"
+    },
+    "ResourceNameListType": {
+      "type": "list",
+      "member": "ResourceNameType"
+    },
+    "ResourceNameType": {
+      "type": "string"
+    },
+    "ResourceSpecificResult": {
+      "type": "structure",
+      "members": {
+        "EvalResourceName": "ResourceNameType",
+        "EvalResourceDecision": "PolicyEvaluationDecisionType",
+        "MatchedStatements": "StatementListType",
+        "MissingContextValues": "ContextKeyNamesResultListType",
+        "EvalDecisionDetails": "EvalDecisionDetailsType",
+        "PermissionsBoundaryDecisionDetail": "PermissionsBoundaryDecisionDetail"
+      }
+    },
+    "ResourceSpecificResultListType": {
+      "type": "list",
+      "member": "ResourceSpecificResult"
+    },
+    "ResyncMFADeviceRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "SerialNumber": "serialNumberType",
+        "AuthenticationCode1": "authenticationCodeType",
+        "AuthenticationCode2": "authenticationCodeType"
+      }
+    },
+    "Role": {
+      "type": "structure",
+      "members": {
+        "Path": "pathType",
+        "RoleName": "roleNameType",
+        "RoleId": "idType",
+        "Arn": "arnType",
+        "CreateDate": "dateType",
+        "AssumeRolePolicyDocument": "policyDocumentType",
+        "Description": "roleDescriptionType",
+        "MaxSessionDuration": "roleMaxSessionDurationType",
+        "MaxSigninSessionDuration": "maxSigninSessionDurationType",
+        "PermissionsBoundary": "AttachedPermissionsBoundary",
+        "Tags": "tagListType",
+        "RoleLastUsed": "RoleLastUsed",
+        "SourceRoleTemplate": "SourceRoleTemplate"
+      }
+    },
+    "RoleDetail": {
+      "type": "structure",
+      "members": {
+        "Path": "pathType",
+        "RoleName": "roleNameType",
+        "RoleId": "idType",
+        "Arn": "arnType",
+        "CreateDate": "dateType",
+        "AssumeRolePolicyDocument": "policyDocumentType",
+        "InstanceProfileList": "instanceProfileListType",
+        "RolePolicyList": "policyDetailListType",
+        "AttachedManagedPolicies": "attachedPoliciesListType",
+        "PermissionsBoundary": "AttachedPermissionsBoundary",
+        "Tags": "tagListType",
+        "RoleLastUsed": "RoleLastUsed"
+      }
+    },
+    "RoleLastUsed": {
+      "type": "structure",
+      "members": {
+        "LastUsedDate": "dateType",
+        "Region": "stringType"
+      }
+    },
+    "RoleTemplateVersion": {
+      "type": "structure",
+      "members": {
+        "TemplateArn": "arnType",
+        "TemplateName": "roleTemplateNameType",
+        "TemplateVersionId": "idType",
+        "Description": "roleTemplateDescriptionType",
+        "MajorVersion": "integerType",
+        "DefaultMinorVersion": "minorVersionType",
+        "ManagedByType": "managedByTypeType",
+        "ManagedByValue": "managedByValueType",
+        "Enabled": "booleanType",
+        "MinorVersion": "minorVersionType",
+        "RoleNamePattern": "roleNamePatternType",
+        "RolePathPattern": "rolePathPatternType",
+        "RoleDescriptionPattern": "roleDescriptionPatternType",
+        "AssumeRolePolicyDocumentTemplate": "policyDocumentType",
+        "InlinePolicyTemplates": "inlinePolicyTemplateListType",
+        "ManagedPolicyArns": "managedPolicyArnListType",
+        "PermissionBoundaryArn": "arnType",
+        "ParametersDefinition": "parametersDefinitionListType",
+        "RoleTagsTemplate": "tagTemplateListType",
+        "MaxSessionDuration": "roleMaxSessionDurationType",
+        "VersionEnabled": "booleanType",
+        "CreateTimestamp": "dateType",
+        "UpdateTimestamp": "dateType"
+      }
+    },
+    "RoleUsageListType": {
+      "type": "list",
+      "member": "RoleUsageType"
+    },
+    "RoleUsageType": {
+      "type": "structure",
+      "members": {
+        "Region": "RegionNameType",
+        "Resources": "ArnListType"
+      }
+    },
+    "SAMLIssuerURLType": {
+      "type": "string"
+    },
+    "SAMLKeyHashEntry": {
+      "type": "structure",
+      "members": {
+        "IssuerURL": "SAMLIssuerURLType",
+        "KeyHashes": "KeyHashListType"
+      }
+    },
+    "SAMLKeyHashListType": {
+      "type": "list",
+      "member": "SAMLKeyHashEntry"
+    },
+    "SAMLMetadataDocumentType": {
+      "type": "string"
+    },
+    "SAMLPrivateKey": {
+      "type": "structure",
+      "members": {
+        "KeyId": "privateKeyIdType",
+        "Timestamp": "dateType"
+      }
+    },
+    "SAMLProviderListEntry": {
+      "type": "structure",
+      "members": {
+        "Arn": "arnType",
+        "ValidUntil": "dateType",
+        "CreateDate": "dateType",
+        "IsTrustedIdentityPropagationEnabled": "booleanType"
+      }
+    },
+    "SAMLProviderListType": {
+      "type": "list",
+      "member": "SAMLProviderListEntry"
+    },
+    "SAMLProviderNameType": {
+      "type": "string"
+    },
+    "SSHPublicKey": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "SSHPublicKeyId": "publicKeyIdType",
+        "Fingerprint": "publicKeyFingerprintType",
+        "SSHPublicKeyBody": "publicKeyMaterialType",
+        "Status": "statusType",
+        "UploadDate": "dateType"
+      }
+    },
+    "SSHPublicKeyListType": {
+      "type": "list",
+      "member": "SSHPublicKeyMetadata"
+    },
+    "SSHPublicKeyMetadata": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "SSHPublicKeyId": "publicKeyIdType",
+        "Status": "statusType",
+        "UploadDate": "dateType"
+      }
+    },
+    "SendDelegationTokenRequest": {
+      "type": "structure",
+      "members": {
+        "DelegationRequestId": "delegationRequestIdType"
+      }
+    },
+    "ServerCertificate": {
+      "type": "structure",
+      "members": {
+        "ServerCertificateMetadata": "ServerCertificateMetadata",
+        "CertificateBody": "certificateBodyType",
+        "CertificateChain": "certificateChainType",
+        "Tags": "tagListType"
+      }
+    },
+    "ServerCertificateMetadata": {
+      "type": "structure",
+      "members": {
+        "Path": "pathType",
+        "ServerCertificateName": "serverCertificateNameType",
+        "ServerCertificateId": "idType",
+        "Arn": "arnType",
+        "UploadDate": "dateType",
+        "Expiration": "dateType"
+      }
+    },
+    "ServiceLastAccessed": {
+      "type": "structure",
+      "members": {
+        "ServiceName": "serviceNameType",
+        "LastAuthenticated": "dateType",
+        "ServiceNamespace": "serviceNamespaceType",
+        "LastAuthenticatedEntity": "arnType",
+        "LastAuthenticatedRegion": "stringType",
+        "TotalAuthenticatedEntities": "integerType",
+        "TrackedActionsLastAccessed": "TrackedActionsLastAccessed"
+      }
+    },
+    "ServiceSpecificCredential": {
+      "type": "structure",
+      "members": {
+        "CreateDate": "dateType",
+        "ExpirationDate": "dateType",
+        "ServiceName": "serviceName",
+        "ServiceUserName": "serviceUserName",
+        "ServicePassword": "servicePassword",
+        "ServiceCredentialAlias": "serviceCredentialAlias",
+        "ServiceCredentialSecret": "serviceCredentialSecret",
+        "ServiceSpecificCredentialId": "serviceSpecificCredentialId",
+        "UserName": "userNameType",
+        "Status": "statusType"
+      }
+    },
+    "ServiceSpecificCredentialMetadata": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "Status": "statusType",
+        "ServiceUserName": "serviceUserName",
+        "ServiceCredentialAlias": "serviceCredentialAlias",
+        "CreateDate": "dateType",
+        "ExpirationDate": "dateType",
+        "ServiceSpecificCredentialId": "serviceSpecificCredentialId",
+        "ServiceName": "serviceName"
+      }
+    },
+    "ServiceSpecificCredentialsListType": {
+      "type": "list",
+      "member": "ServiceSpecificCredentialMetadata"
+    },
+    "ServicesLastAccessed": {
+      "type": "list",
+      "member": "ServiceLastAccessed"
+    },
+    "SetDefaultPolicyVersionRequest": {
+      "type": "structure",
+      "members": {
+        "PolicyArn": "arnType",
+        "VersionId": "policyVersionIdType"
+      }
+    },
+    "SetSecurityTokenServicePreferencesRequest": {
+      "type": "structure",
+      "members": {
+        "GlobalEndpointTokenVersion": "globalEndpointTokenVersion"
+      }
+    },
+    "SigningCertificate": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "CertificateId": "certificateIdType",
+        "CertificateBody": "certificateBodyType",
+        "Status": "statusType",
+        "UploadDate": "dateType"
+      }
+    },
+    "SimulateCustomPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "PolicyInputList": "SimulationPolicyListType",
+        "PermissionsBoundaryPolicyInputList": "SimulationPolicyListType",
+        "OrderedOrganizationPolicyInputList": "OrganizationPolicyListType",
+        "ActionNames": "ActionNameListType",
+        "ResourceArns": "ResourceNameListType",
+        "ResourcePolicy": "policyDocumentType",
+        "ResourceOwner": "ResourceNameType",
+        "CallerArn": "ResourceNameType",
+        "ContextEntries": "ContextEntryListType",
+        "ResourceHandlingOption": "ResourceHandlingOptionType",
+        "MaxItems": "maxItemsType",
+        "Marker": "markerType"
+      }
+    },
+    "SimulatePolicyResponse": {
+      "type": "structure",
+      "members": {
+        "EvaluationResults": "EvaluationResultsListType",
+        "IsTruncated": "booleanType",
+        "Marker": "responseMarkerType"
+      }
+    },
+    "SimulatePrincipalPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "PolicySourceArn": "arnType",
+        "PolicyInputList": "SimulationPolicyListType",
+        "PermissionsBoundaryPolicyInputList": "SimulationPolicyListType",
+        "PolicyExclusionList": "PolicyExclusionsListType",
+        "ActionNames": "ActionNameListType",
+        "ResourceArns": "ResourceNameListType",
+        "ResourcePolicy": "policyDocumentType",
+        "ResourceOwner": "ResourceNameType",
+        "CallerArn": "ResourceNameType",
+        "ContextEntries": "ContextEntryListType",
+        "ResourceHandlingOption": "ResourceHandlingOptionType",
+        "MaxItems": "maxItemsType",
+        "Marker": "markerType"
+      }
+    },
+    "SimulationPolicyListType": {
+      "type": "list",
+      "member": "policyDocumentType"
+    },
+    "SourceRoleTemplate": {
+      "type": "structure",
+      "members": {
+        "TemplateArn": "arnType",
+        "TemplateMinorVersion": "integerType"
+      }
+    },
+    "Statement": {
+      "type": "structure",
+      "members": {
+        "SourcePolicyId": "PolicyIdentifierType",
+        "SourcePolicyType": "PolicySourceType",
+        "StartPosition": "Position",
+        "EndPosition": "Position"
+      }
+    },
+    "StatementListType": {
+      "type": "list",
+      "member": "Statement"
+    },
+    "Tag": {
+      "type": "structure",
+      "members": {
+        "Key": "tagKeyType",
+        "Value": "tagValueType"
+      }
+    },
+    "TagInstanceProfileRequest": {
+      "type": "structure",
+      "members": {
+        "InstanceProfileName": "instanceProfileNameType",
+        "Tags": "tagListType"
+      }
+    },
+    "TagMFADeviceRequest": {
+      "type": "structure",
+      "members": {
+        "SerialNumber": "serialNumberType",
+        "Tags": "tagListType"
+      }
+    },
+    "TagOpenIDConnectProviderRequest": {
+      "type": "structure",
+      "members": {
+        "OpenIDConnectProviderArn": "arnType",
+        "Tags": "tagListType"
+      }
+    },
+    "TagPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "PolicyArn": "arnType",
+        "Tags": "tagListType"
+      }
+    },
+    "TagRoleRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "Tags": "tagListType"
+      }
+    },
+    "TagSAMLProviderRequest": {
+      "type": "structure",
+      "members": {
+        "SAMLProviderArn": "arnType",
+        "Tags": "tagListType"
+      }
+    },
+    "TagServerCertificateRequest": {
+      "type": "structure",
+      "members": {
+        "ServerCertificateName": "serverCertificateNameType",
+        "Tags": "tagListType"
+      }
+    },
+    "TagTemplate": {
+      "type": "structure",
+      "members": {
+        "Key": "tagTemplateKeyType",
+        "Value": "tagTemplateValueType"
+      }
+    },
+    "TagUserRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "Tags": "tagListType"
+      }
+    },
+    "TrackedActionLastAccessed": {
+      "type": "structure",
+      "members": {
+        "ActionName": "stringType",
+        "LastAccessedEntity": "arnType",
+        "LastAccessedTime": "dateType",
+        "LastAccessedRegion": "stringType"
+      }
+    },
+    "TrackedActionsLastAccessed": {
+      "type": "list",
+      "member": "TrackedActionLastAccessed"
+    },
+    "UntagInstanceProfileRequest": {
+      "type": "structure",
+      "members": {
+        "InstanceProfileName": "instanceProfileNameType",
+        "TagKeys": "tagKeyListType"
+      }
+    },
+    "UntagMFADeviceRequest": {
+      "type": "structure",
+      "members": {
+        "SerialNumber": "serialNumberType",
+        "TagKeys": "tagKeyListType"
+      }
+    },
+    "UntagOpenIDConnectProviderRequest": {
+      "type": "structure",
+      "members": {
+        "OpenIDConnectProviderArn": "arnType",
+        "TagKeys": "tagKeyListType"
+      }
+    },
+    "UntagPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "PolicyArn": "arnType",
+        "TagKeys": "tagKeyListType"
+      }
+    },
+    "UntagRoleRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "TagKeys": "tagKeyListType"
+      }
+    },
+    "UntagSAMLProviderRequest": {
+      "type": "structure",
+      "members": {
+        "SAMLProviderArn": "arnType",
+        "TagKeys": "tagKeyListType"
+      }
+    },
+    "UntagServerCertificateRequest": {
+      "type": "structure",
+      "members": {
+        "ServerCertificateName": "serverCertificateNameType",
+        "TagKeys": "tagKeyListType"
+      }
+    },
+    "UntagUserRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "TagKeys": "tagKeyListType"
+      }
+    },
+    "UpdateAccessKeyRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "AccessKeyId": "accessKeyIdType",
+        "Status": "statusType"
+      }
+    },
+    "UpdateAccountPasswordPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "MinimumPasswordLength": "minimumPasswordLengthType",
+        "RequireSymbols": "booleanType",
+        "RequireNumbers": "booleanType",
+        "RequireUppercaseCharacters": "booleanType",
+        "RequireLowercaseCharacters": "booleanType",
+        "AllowUsersToChangePassword": "booleanType",
+        "MaxPasswordAge": "maxPasswordAgeType",
+        "PasswordReusePrevention": "passwordReusePreventionType",
+        "HardExpiry": "booleanObjectType"
+      }
+    },
+    "UpdateAssumeRolePolicyRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "PolicyDocument": "policyDocumentType"
+      }
+    },
+    "UpdateDelegationRequestRequest": {
+      "type": "structure",
+      "members": {
+        "DelegationRequestId": "delegationRequestIdType",
+        "Notes": "notesType"
+      }
+    },
+    "UpdateGroupRequest": {
+      "type": "structure",
+      "members": {
+        "GroupName": "groupNameType",
+        "NewPath": "pathType",
+        "NewGroupName": "groupNameType"
+      }
+    },
+    "UpdateLoginProfileRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "Password": "passwordType",
+        "PasswordResetRequired": "booleanObjectType",
+        "MaxSigninSessionDuration": "maxSigninSessionDurationType",
+        "ResetMaxSigninSessionDuration": "booleanObjectType"
+      }
+    },
+    "UpdateOpenIDConnectProviderRequest": {
+      "type": "structure",
+      "members": {
+        "OpenIDConnectProviderArn": "arnType",
+        "ContextProvider": "ContextProvider",
+        "IdentityCenterInstanceArn": "identityCenterInstanceArnType",
+        "RemoveContextProvider": "booleanType",
+        "RemoveIdentityCenterInstance": "booleanType"
+      }
+    },
+    "UpdateOpenIDConnectProviderThumbprintRequest": {
+      "type": "structure",
+      "members": {
+        "OpenIDConnectProviderArn": "arnType",
+        "ThumbprintList": "thumbprintListType"
+      }
+    },
+    "UpdateRoleDescriptionRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "Description": "roleDescriptionType"
+      }
+    },
+    "UpdateRoleDescriptionResponse": {
+      "type": "structure",
+      "members": {
+        "Role": "Role"
+      }
+    },
+    "UpdateRoleRequest": {
+      "type": "structure",
+      "members": {
+        "RoleName": "roleNameType",
+        "Description": "roleDescriptionType",
+        "MaxSessionDuration": "roleMaxSessionDurationType",
+        "MaxSigninSessionDuration": "maxSigninSessionDurationType",
+        "ResetMaxSigninSessionDuration": "booleanObjectType"
+      }
+    },
+    "UpdateRoleResponse": {
+      "type": "structure",
+      "members": {}
+    },
+    "UpdateSAMLProviderRequest": {
+      "type": "structure",
+      "members": {
+        "SAMLMetadataDocument": "SAMLMetadataDocumentType",
+        "SAMLProviderArn": "arnType",
+        "AssertionEncryptionMode": "assertionEncryptionModeType",
+        "AddPrivateKey": "privateKeyType",
+        "RemovePrivateKey": "privateKeyIdType",
+        "ContextProvider": "ContextProvider",
+        "IdentityCenterInstanceArn": "identityCenterInstanceArnType",
+        "RemoveContextProvider": "booleanType",
+        "RemoveIdentityCenterInstance": "booleanType"
+      }
+    },
+    "UpdateSAMLProviderResponse": {
+      "type": "structure",
+      "members": {
+        "SAMLProviderArn": "arnType"
+      }
+    },
+    "UpdateSSHPublicKeyRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "SSHPublicKeyId": "publicKeyIdType",
+        "Status": "statusType"
+      }
+    },
+    "UpdateServerCertificateRequest": {
+      "type": "structure",
+      "members": {
+        "ServerCertificateName": "serverCertificateNameType",
+        "NewPath": "pathType",
+        "NewServerCertificateName": "serverCertificateNameType"
+      }
+    },
+    "UpdateServiceSpecificCredentialRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "ServiceSpecificCredentialId": "serviceSpecificCredentialId",
+        "Status": "statusType"
+      }
+    },
+    "UpdateSigningCertificateRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "CertificateId": "certificateIdType",
+        "Status": "statusType"
+      }
+    },
+    "UpdateUserRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "NewPath": "pathType",
+        "NewUserName": "userNameType"
+      }
+    },
+    "UploadSSHPublicKeyRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "SSHPublicKeyBody": "publicKeyMaterialType"
+      }
+    },
+    "UploadSSHPublicKeyResponse": {
+      "type": "structure",
+      "members": {
+        "SSHPublicKey": "SSHPublicKey"
+      }
+    },
+    "UploadServerCertificateRequest": {
+      "type": "structure",
+      "members": {
+        "Path": "pathType",
+        "ServerCertificateName": "serverCertificateNameType",
+        "CertificateBody": "certificateBodyType",
+        "PrivateKey": "privateKeyType",
+        "CertificateChain": "certificateChainType",
+        "Tags": "tagListType"
+      }
+    },
+    "UploadServerCertificateResponse": {
+      "type": "structure",
+      "members": {
+        "ServerCertificateMetadata": "ServerCertificateMetadata",
+        "Tags": "tagListType"
+      }
+    },
+    "UploadSigningCertificateRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "CertificateBody": "certificateBodyType"
+      }
+    },
+    "UploadSigningCertificateResponse": {
+      "type": "structure",
+      "members": {
+        "Certificate": "SigningCertificate"
+      }
+    },
+    "User": {
+      "type": "structure",
+      "members": {
+        "Path": "pathType",
+        "UserName": "userNameType",
+        "UserId": "idType",
+        "Arn": "arnType",
+        "CreateDate": "dateType",
+        "PasswordLastUsed": "dateType",
+        "PermissionsBoundary": "AttachedPermissionsBoundary",
+        "Tags": "tagListType"
+      }
+    },
+    "UserDetail": {
+      "type": "structure",
+      "members": {
+        "Path": "pathType",
+        "UserName": "userNameType",
+        "UserId": "idType",
+        "Arn": "arnType",
+        "CreateDate": "dateType",
+        "UserPolicyList": "policyDetailListType",
+        "GroupList": "groupNameListType",
+        "AttachedManagedPolicies": "attachedPoliciesListType",
+        "PermissionsBoundary": "AttachedPermissionsBoundary",
+        "Tags": "tagListType"
+      }
+    },
+    "VirtualMFADevice": {
+      "type": "structure",
+      "members": {
+        "SerialNumber": "serialNumberType",
+        "Base32StringSeed": "BootstrapDatum",
+        "QRCodePNG": "BootstrapDatum",
+        "User": "User",
+        "EnableDate": "dateType",
+        "Tags": "tagListType"
+      }
+    },
+    "accessKeyIdType": {
+      "type": "string"
+    },
+    "accessKeyMetadataListType": {
+      "type": "list",
+      "member": "AccessKeyMetadata"
+    },
+    "accessKeySecretType": {
+      "type": "string",
+      "sensitive": true
+    },
+    "accountAliasListType": {
+      "type": "list",
+      "member": "accountAliasType"
+    },
+    "accountAliasType": {
+      "type": "string"
+    },
+    "accountIdType": {
+      "type": "string"
+    },
+    "accountPropertiesMapType": {
+      "type": "map",
+      "value": "accountPropertyValueType"
+    },
+    "accountPropertyValueType": {
+      "type": "string"
+    },
+    "allUsers": {
+      "type": "boolean"
+    },
+    "arnType": {
+      "type": "string"
+    },
+    "assertionEncryptionModeType": {
+      "type": "string"
+    },
+    "assignmentStatusType": {
+      "type": "string"
+    },
+    "attachedPoliciesListType": {
+      "type": "list",
+      "member": "AttachedPolicy"
+    },
+    "attachmentCountType": {
+      "type": "integer"
+    },
+    "authenticationCodeType": {
+      "type": "string"
+    },
+    "booleanObjectType": {
+      "type": "boolean"
+    },
+    "booleanType": {
+      "type": "boolean"
+    },
+    "certificateBodyType": {
+      "type": "string"
+    },
+    "certificateChainType": {
+      "type": "string"
+    },
+    "certificateIdType": {
+      "type": "string"
+    },
+    "certificateListType": {
+      "type": "list",
+      "member": "SigningCertificate"
+    },
+    "clientIDListType": {
+      "type": "list",
+      "member": "clientIDType"
+    },
+    "clientIDType": {
+      "type": "string"
+    },
+    "consoleDeepLinkType": {
+      "type": "string"
+    },
+    "contextProviderSourceKeyType": {
+      "type": "string"
+    },
+    "contextProviderTargetKeyType": {
+      "type": "string"
+    },
+    "credentialAgeDays": {
+      "type": "integer"
+    },
+    "customSuffixType": {
+      "type": "string"
+    },
+    "dateType": {
+      "type": "timestamp"
+    },
+    "delegationRequestDescriptionType": {
+      "type": "string"
+    },
+    "delegationRequestIdType": {
+      "type": "string"
+    },
+    "delegationRequestsListType": {
+      "type": "list",
+      "member": "DelegationRequest"
+    },
+    "encodingType": {
+      "type": "string"
+    },
+    "entityDetailsListType": {
+      "type": "list",
+      "member": "EntityDetails"
+    },
+    "entityListType": {
+      "type": "list",
+      "member": "EntityType"
+    },
+    "entityNameType": {
+      "type": "string"
+    },
+    "existingUserNameType": {
+      "type": "string"
+    },
+    "globalEndpointTokenVersion": {
+      "type": "string"
+    },
+    "groupDetailListType": {
+      "type": "list",
+      "member": "GroupDetail"
+    },
+    "groupListType": {
+      "type": "list",
+      "member": "Group"
+    },
+    "groupNameListType": {
+      "type": "list",
+      "member": "groupNameType"
+    },
+    "groupNameType": {
+      "type": "string"
+    },
+    "idType": {
+      "type": "string"
+    },
+    "identityCenterInstanceArnType": {
+      "type": "string"
+    },
+    "inlinePolicyTemplateListType": {
+      "type": "list",
+      "member": "InlinePolicy"
+    },
+    "instanceProfileListType": {
+      "type": "list",
+      "member": "InstanceProfile"
+    },
+    "instanceProfileNameType": {
+      "type": "string"
+    },
+    "integerType": {
+      "type": "integer"
+    },
+    "jobIDType": {
+      "type": "string"
+    },
+    "jobStatusType": {
+      "type": "string"
+    },
+    "keyDefinitionListType": {
+      "type": "list",
+      "member": "ContextProviderKeyDefinition"
+    },
+    "listPolicyGrantingServiceAccessResponseListType": {
+      "type": "list",
+      "member": "ListPoliciesGrantingServiceAccessEntry"
+    },
+    "localeType": {
+      "type": "string"
+    },
+    "managedByTypeType": {
+      "type": "string"
+    },
+    "managedByValueType": {
+      "type": "string"
+    },
+    "managedPolicyArnListType": {
+      "type": "list",
+      "member": "arnType"
+    },
+    "mapStringReplacementValueEntry": {
+      "type": "map",
+      "value": "ReplacementValueEntry"
+    },
+    "markerType": {
+      "type": "string"
+    },
+    "maxItemsType": {
+      "type": "integer"
+    },
+    "maxPasswordAgeType": {
+      "type": "integer"
+    },
+    "maxSigninSessionDurationType": {
+      "type": "integer"
+    },
+    "mfaDeviceListType": {
+      "type": "list",
+      "member": "MFADevice"
+    },
+    "minimumPasswordLengthType": {
+      "type": "integer"
+    },
+    "minorVersionType": {
+      "type": "integer"
+    },
+    "notesType": {
+      "type": "string"
+    },
+    "notificationChannelType": {
+      "type": "string"
+    },
+    "organizationsEntityPathType": {
+      "type": "string"
+    },
+    "organizationsPolicyIdType": {
+      "type": "string"
+    },
+    "ownerIdType": {
+      "type": "string"
+    },
+    "parameterDefaultValueType": {
+      "type": "string"
+    },
+    "parameterDescriptionType": {
+      "type": "string"
+    },
+    "parameterNameType": {
+      "type": "string"
+    },
+    "parameterSubTypeType": {
+      "type": "string"
+    },
+    "parameterTypeType": {
+      "type": "string"
+    },
+    "parametersDefinitionListType": {
+      "type": "list",
+      "member": "ParameterDefinition"
+    },
+    "passwordReusePreventionType": {
+      "type": "integer"
+    },
+    "passwordType": {
+      "type": "string",
+      "sensitive": true
+    },
+    "pathPrefixType": {
+      "type": "string"
+    },
+    "pathType": {
+      "type": "string"
+    },
+    "permissionCheckResultType": {
+      "type": "string"
+    },
+    "permissionCheckStatusType": {
+      "type": "string"
+    },
+    "permissionType": {
+      "type": "string"
+    },
+    "policyDescriptionType": {
+      "type": "string"
+    },
+    "policyDetailListType": {
+      "type": "list",
+      "member": "PolicyDetail"
+    },
+    "policyDocumentType": {
+      "type": "string"
+    },
+    "policyDocumentVersionListType": {
+      "type": "list",
+      "member": "PolicyVersion"
+    },
+    "policyGrantingServiceAccessListType": {
+      "type": "list",
+      "member": "PolicyGrantingServiceAccess"
+    },
+    "policyListType": {
+      "type": "list",
+      "member": "Policy"
+    },
+    "policyNameListType": {
+      "type": "list",
+      "member": "policyNameType"
+    },
+    "policyNameType": {
+      "type": "string"
+    },
+    "policyOwnerEntityType": {
+      "type": "string"
+    },
+    "policyParameterListType": {
+      "type": "list",
+      "member": "PolicyParameter"
+    },
+    "policyParameterNameType": {
+      "type": "string"
+    },
+    "policyParameterValueType": {
+      "type": "string"
+    },
+    "policyParameterValuesListType": {
+      "type": "list",
+      "member": "policyParameterValueType"
+    },
+    "policyPathType": {
+      "type": "string"
+    },
+    "policyScopeType": {
+      "type": "string"
+    },
+    "policyType": {
+      "type": "string"
+    },
+    "policyVersionIdType": {
+      "type": "string"
+    },
+    "privateKeyIdType": {
+      "type": "string"
+    },
+    "privateKeyList": {
+      "type": "list",
+      "member": "SAMLPrivateKey"
+    },
+    "privateKeyType": {
+      "type": "string",
+      "sensitive": true
+    },
+    "publicKeyFingerprintType": {
+      "type": "string"
+    },
+    "publicKeyIdType": {
+      "type": "string"
+    },
+    "publicKeyMaterialType": {
+      "type": "string"
+    },
+    "redirectUrlType": {
+      "type": "string"
+    },
+    "replacementValueListType": {
+      "type": "list",
+      "member": "stringType"
+    },
+    "requestMessageType": {
+      "type": "string"
+    },
+    "requestorNameType": {
+      "type": "string"
+    },
+    "requestorWorkflowIdType": {
+      "type": "string"
+    },
+    "responseMarkerType": {
+      "type": "string"
+    },
+    "roleDescriptionPatternType": {
+      "type": "string"
+    },
+    "roleDescriptionType": {
+      "type": "string"
+    },
+    "roleDetailListType": {
+      "type": "list",
+      "member": "RoleDetail"
+    },
+    "roleListType": {
+      "type": "list",
+      "member": "Role"
+    },
+    "roleMaxSessionDurationType": {
+      "type": "integer"
+    },
+    "roleNamePatternType": {
+      "type": "string"
+    },
+    "roleNameType": {
+      "type": "string"
+    },
+    "rolePathPatternType": {
+      "type": "string"
+    },
+    "rolePermissionRestrictionArnListType": {
+      "type": "list",
+      "member": "arnType"
+    },
+    "roleTemplateDescriptionType": {
+      "type": "string"
+    },
+    "roleTemplateNameType": {
+      "type": "string"
+    },
+    "serialNumberType": {
+      "type": "string"
+    },
+    "serverCertificateMetadataListType": {
+      "type": "list",
+      "member": "ServerCertificateMetadata"
+    },
+    "serverCertificateNameType": {
+      "type": "string"
+    },
+    "serviceCredentialAlias": {
+      "type": "string"
+    },
+    "serviceCredentialSecret": {
+      "type": "string",
+      "sensitive": true
+    },
+    "serviceName": {
+      "type": "string"
+    },
+    "serviceNameType": {
+      "type": "string"
+    },
+    "serviceNamespaceListType": {
+      "type": "list",
+      "member": "serviceNamespaceType"
+    },
+    "serviceNamespaceType": {
+      "type": "string"
+    },
+    "servicePassword": {
+      "type": "string",
+      "sensitive": true
+    },
+    "serviceSpecificCredentialId": {
+      "type": "string"
+    },
+    "serviceUserName": {
+      "type": "string"
+    },
+    "sessionDurationType": {
+      "type": "integer"
+    },
+    "sortKeyType": {
+      "type": "string"
+    },
+    "stateType": {
+      "type": "string"
+    },
+    "statusType": {
+      "type": "string"
+    },
+    "stringType": {
+      "type": "string"
+    },
+    "subjectTypeValueType": {
+      "type": "string"
+    },
+    "summaryContentType": {
+      "type": "string"
+    },
+    "summaryMapType": {
+      "type": "map",
+      "value": "summaryValueType"
+    },
+    "summaryStateType": {
+      "type": "string"
+    },
+    "summaryValueType": {
+      "type": "integer"
+    },
+    "tagKeyListType": {
+      "type": "list",
+      "member": "tagKeyType"
+    },
+    "tagKeyType": {
+      "type": "string"
+    },
+    "tagListType": {
+      "type": "list",
+      "member": "Tag"
+    },
+    "tagTemplateKeyType": {
+      "type": "string"
+    },
+    "tagTemplateListType": {
+      "type": "list",
+      "member": "TagTemplate"
+    },
+    "tagTemplateValueType": {
+      "type": "string"
+    },
+    "tagValueType": {
+      "type": "string"
+    },
+    "thumbprintListType": {
+      "type": "list",
+      "member": "thumbprintType"
+    },
+    "thumbprintType": {
+      "type": "string"
+    },
+    "userDetailListType": {
+      "type": "list",
+      "member": "UserDetail"
+    },
+    "userListType": {
+      "type": "list",
+      "member": "User"
+    },
+    "userNameType": {
+      "type": "string"
+    },
+    "virtualMFADeviceListType": {
+      "type": "list",
+      "member": "VirtualMFADevice"
+    },
+    "virtualMFADeviceName": {
+      "type": "string"
+    }
+  },
+  "errors": {
+    "AccountNotManagementOrDelegatedAdministratorException": "AccountNotManagementOrDelegatedAdministratorException",
+    "CallerIsNotManagementAccountException": "CallerIsNotManagementAccountException",
+    "ConcurrentModification": "ConcurrentModificationException",
+    "DeleteConflict": "DeleteConflictException",
+    "DuplicateCertificate": "DuplicateCertificateException",
+    "DuplicateSSHPublicKey": "DuplicateSSHPublicKeyException",
+    "EntityAlreadyExists": "EntityAlreadyExistsException",
+    "EntityTemporarilyUnmodifiable": "EntityTemporarilyUnmodifiableException",
+    "FeatureDisabled": "FeatureDisabledException",
+    "FeatureEnabled": "FeatureEnabledException",
+    "InvalidAuthenticationCode": "InvalidAuthenticationCodeException",
+    "InvalidCertificate": "InvalidCertificateException",
+    "InvalidInput": "InvalidInputException",
+    "InvalidPublicKey": "InvalidPublicKeyException",
+    "InvalidUserType": "InvalidUserTypeException",
+    "KeyPairMismatch": "KeyPairMismatchException",
+    "LimitExceeded": "LimitExceededException",
+    "MalformedCertificate": "MalformedCertificateException",
+    "MalformedPolicyDocument": "MalformedPolicyDocumentException",
+    "NameConflict": "NameConflictException",
+    "NoSuchEntity": "NoSuchEntityException",
+    "NotSupportedService": "ServiceNotSupportedException",
+    "OpenIdIdpCommunicationError": "OpenIdIdpCommunicationErrorException",
+    "OrganizationNotFoundException": "OrganizationNotFoundException",
+    "OrganizationNotInAllFeaturesModeException": "OrganizationNotInAllFeaturesModeException",
+    "PasswordPolicyViolation": "PasswordPolicyViolationException",
+    "PolicyEvaluation": "PolicyEvaluationException",
+    "PolicyNotAttachable": "PolicyNotAttachableException",
+    "ReportExpired": "CredentialReportExpiredException",
+    "ReportGenerationLimitExceeded": "ReportGenerationLimitExceededException",
+    "ReportInProgress": "CredentialReportNotReadyException",
+    "ReportNotPresent": "CredentialReportNotPresentException",
+    "RoleModified": "RoleModifiedException",
+    "RoleTemplateDisabled": "RoleTemplateDisabledException",
+    "ServiceAccessNotEnabledException": "ServiceAccessNotEnabledException",
+    "ServiceFailure": "ServiceFailureException",
+    "UnmodifiableEntity": "UnmodifiableEntityException",
+    "UnrecognizedPublicKeyEncoding": "UnrecognizedPublicKeyEncodingException"
+  }
+}

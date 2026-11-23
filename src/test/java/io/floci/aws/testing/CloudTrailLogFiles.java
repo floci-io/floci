@@ -1,4 +1,4 @@
-package io.floci.aws.services.cloudtrail;
+package io.floci.aws.testing;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -14,7 +14,7 @@ import java.util.zip.GZIPInputStream;
 import static io.restassured.RestAssured.given;
 
 /** Reads the records a trail delivered to its S3 bucket, through the S3 API, as a client of the trail would. */
-final class CloudTrailLogFiles {
+public final class CloudTrailLogFiles {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -22,10 +22,22 @@ final class CloudTrailLogFiles {
     }
 
     /** Every record of every log file in {@code bucket}, in key order, across every page of the listing. */
-    static List<JsonNode> records(String bucket) throws IOException {
+    public static List<JsonNode> records(String bucket) throws IOException {
+        return records(bucket, null);
+    }
+
+    /**
+     * As {@link #records(String)}, with each S3 request signed with {@code authorization} when it is not
+     * null, as a test under IAM enforcement needs.
+     */
+    public static List<JsonNode> records(String bucket, String authorization) throws IOException {
         List<JsonNode> records = new ArrayList<>();
-        for (String key : keys(bucket)) {
-            byte[] gz = given().when().get("/" + bucket + "/" + key).then().statusCode(200).extract().asByteArray();
+        for (String key : keys(bucket, authorization)) {
+            if (!key.endsWith(".json.gz")) {
+                continue;
+            }
+            byte[] gz = request(authorization).when().get("/" + bucket + "/" + key)
+                    .then().statusCode(200).extract().asByteArray();
             try (GZIPInputStream in = new GZIPInputStream(new ByteArrayInputStream(gz))) {
                 MAPPER.readTree(in).path("Records").forEach(records::add);
             }
@@ -33,11 +45,11 @@ final class CloudTrailLogFiles {
         return records;
     }
 
-    private static List<String> keys(String bucket) {
+    private static List<String> keys(String bucket, String authorization) {
         List<String> keys = new ArrayList<>();
         String token = null;
         do {
-            RequestSpecification listing = given().queryParam("list-type", "2");
+            RequestSpecification listing = request(authorization).queryParam("list-type", "2");
             if (token != null) {
                 listing = listing.queryParam("continuation-token", token);
             }
@@ -47,5 +59,10 @@ final class CloudTrailLogFiles {
                     ? page.getString("ListBucketResult.NextContinuationToken") : null;
         } while (token != null);
         return keys;
+    }
+
+    private static RequestSpecification request(String authorization) {
+        RequestSpecification request = given();
+        return authorization == null ? request : request.header("Authorization", authorization);
     }
 }
