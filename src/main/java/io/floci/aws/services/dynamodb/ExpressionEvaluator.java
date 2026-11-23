@@ -14,6 +14,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.regex.Pattern;
 
@@ -23,6 +24,9 @@ import java.util.regex.Pattern;
  * {@code (#f0 = :v0)AND(#f1 BETWEEN :v1 AND :v2)}.
  */
 final class ExpressionEvaluator {
+
+    static final Set<String> CONDITION_FUNCTIONS = Set.of(
+            "attribute_exists", "attribute_not_exists", "attribute_type", "begins_with", "contains", "size");
 
     private ExpressionEvaluator() {}
 
@@ -45,8 +49,6 @@ final class ExpressionEvaluator {
         // Punctuation
         LPAREN, RPAREN, COMMA, DOT, LBRACKET, RBRACKET,
         NUMBER,          // list index digits
-        // Functions
-        FUNCTION,        // attribute_exists, attribute_not_exists, begins_with, contains, size
         UNKNOWN,         // any other character
         // End
         EOF
@@ -136,13 +138,8 @@ final class ExpressionEvaluator {
             if (isNameStartChar(c)) {
                 int start = i;
                 while (i < len && isNameChar(expression.charAt(i))) i++;
-                // Check for function names that contain underscores (attribute_exists, etc.)
-                // and multi-word function names
                 String word = expression.substring(start, i);
 
-                // Handle "attribute_exists", "attribute_not_exists" — need to consume underscores and following parts
-                // Actually the loop above already handles underscores via isNameChar.
-                // Check for known functions
                 String wordLower = word.toLowerCase();
                 switch (wordLower) {
                     case "and" -> tokens.add(new Token(TokenType.AND, word, start));
@@ -150,9 +147,6 @@ final class ExpressionEvaluator {
                     case "not" -> tokens.add(new Token(TokenType.NOT, word, start));
                     case "in" -> tokens.add(new Token(TokenType.IN, word, start));
                     case "between" -> tokens.add(new Token(TokenType.BETWEEN, word, start));
-                    case "attribute_exists", "attribute_not_exists", "begins_with", "contains", "size",
-                         "attribute_type" ->
-                        tokens.add(new Token(TokenType.FUNCTION, word, start));
                     default -> tokens.add(new Token(TokenType.IDENTIFIER, word, start));
                 }
                 continue;
@@ -268,25 +262,17 @@ final class ExpressionEvaluator {
                 return inner;
             }
 
-            // Function call as condition (attribute_exists, attribute_not_exists, begins_with, contains, size)
-            if (current.type() == TokenType.FUNCTION) {
-                String funcName = advance().value();
-                expect(TokenType.LPAREN);
-                List<Operand> args = parseOperandList();
-                expect(TokenType.RPAREN);
-
-                // If followed by a comparator, this is "size(path) = :val" — treat as comparison
-                if (isComparator(peek().type())) {
-                    TokenType op = advance().type();
-                    Operand right = parseOperand();
-                    return new CompareExpr(new FunctionOperand(funcName, args), op, right);
+            Operand left;
+            if (atCall()) {
+                FunctionOperand call = parseCall();
+                TokenType following = peek().type();
+                if (!isComparator(following) && following != TokenType.IN && following != TokenType.BETWEEN) {
+                    return new FunctionCallExpr(call.functionName(), call.args());
                 }
-
-                return new FunctionCallExpr(funcName, args);
+                left = call;
+            } else {
+                left = parseOperand();
             }
-
-            // Operand followed by comparator, IN, or BETWEEN
-            Operand left = parseOperand();
 
             Token next = peek();
             if (next.type() == TokenType.IN) {
@@ -315,13 +301,8 @@ final class ExpressionEvaluator {
         private Operand parseOperand() {
             Token current = peek();
 
-            // Function as operand (e.g. size(path))
-            if (current.type() == TokenType.FUNCTION) {
-                String funcName = advance().value();
-                expect(TokenType.LPAREN);
-                List<Operand> args = parseOperandList();
-                expect(TokenType.RPAREN);
-                return new FunctionOperand(funcName, args);
+            if (atCall()) {
+                return parseCall();
             }
 
             // Placeholder :value
@@ -354,6 +335,18 @@ final class ExpressionEvaluator {
             }
 
             throw syntaxError();
+        }
+
+        private boolean atCall() {
+            return peek().type() == TokenType.IDENTIFIER && tokens.get(pos + 1).type() == TokenType.LPAREN;
+        }
+
+        private FunctionOperand parseCall() {
+            String name = advance().value();
+            expect(TokenType.LPAREN);
+            List<Operand> args = parseOperandList();
+            expect(TokenType.RPAREN);
+            return new FunctionOperand(name, args);
         }
 
         private String parseListIndex() {
@@ -498,9 +491,7 @@ final class ExpressionEvaluator {
     private static void validateSemantics(Expr expr, String exprType, JsonNode names, JsonNode values,
                                           boolean requireDefined) {
         if (expr == null) return;
-        if (requireDefined) {
-            conditionOperands(expr).forEach(operand -> requireDefined(operand, exprType, names, values));
-        }
+        conditionOperands(expr).forEach(operand -> checkOperand(operand, exprType, names, values, requireDefined));
         switch (expr) {
             case AndExpr a -> a.operands().forEach(o -> validateSemantics(o, exprType, names, values, requireDefined));
             case OrExpr o -> o.operands().forEach(x -> validateSemantics(x, exprType, names, values, requireDefined));
@@ -531,9 +522,10 @@ final class ExpressionEvaluator {
         };
     }
 
-    private static void requireDefined(Operand operand, String exprType, JsonNode names, JsonNode values) {
+    private static void checkOperand(Operand operand, String exprType, JsonNode names, JsonNode values,
+                                     boolean requireDefined) {
         switch (operand) {
-            case PathOperand path -> {
+            case PathOperand path when requireDefined -> {
                 for (String segment : path.segments()) {
                     if (segment.startsWith("#") && (names == null || !names.has(segment))) {
                         throw undefinedName(exprType, segment);
@@ -543,13 +535,22 @@ final class ExpressionEvaluator {
                     }
                 }
             }
-            case PlaceholderOperand placeholder -> {
+            case PlaceholderOperand placeholder when requireDefined -> {
                 if (values == null || !values.has(placeholder.name())) {
                     throw undefinedValue(exprType, placeholder.name());
                 }
             }
-            case FunctionOperand function ->
-                    function.args().forEach(arg -> requireDefined(arg, exprType, names, values));
+            case FunctionOperand function -> {
+                function.args().forEach(arg -> checkOperand(arg, exprType, names, values, requireDefined));
+                requireKnownFunction(function.functionName(), exprType);
+            }
+            default -> {}
+        }
+    }
+
+    private static void requireKnownFunction(String name, String exprType) {
+        if (!CONDITION_FUNCTIONS.contains(name)) {
+            throw invalidExpression(exprType, DynamoDbPartiQLParser.invalidFunctionName(name));
         }
     }
 
@@ -634,6 +635,7 @@ final class ExpressionEvaluator {
 
     private static void validateFunction(FunctionCallExpr f, String exprType,
                                          JsonNode names, JsonNode values) {
+        requireKnownFunction(f.functionName(), exprType);
         String name = f.functionName().toLowerCase();
         if (name.equals("attribute_exists") || name.equals("attribute_not_exists")) {
             if (f.args().size() != 1) {

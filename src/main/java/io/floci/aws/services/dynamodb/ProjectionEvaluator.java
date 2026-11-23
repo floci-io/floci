@@ -172,7 +172,7 @@ final class ProjectionEvaluator {
     // Function names are plain names here: DynamoDB projects an attribute called size.
     private static int readName(String expression, List<Token> tokens, int pos, List<Token> path) {
         TokenType type = tokens.get(pos).type();
-        if (type != TokenType.IDENTIFIER && type != TokenType.NAME_REF && type != TokenType.FUNCTION) {
+        if (type != TokenType.IDENTIFIER && type != TokenType.NAME_REF) {
             throw syntaxError(expression, tokens, pos);
         }
         path.add(tokens.get(pos));

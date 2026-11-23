@@ -1138,6 +1138,13 @@ class DynamoDbVectorSearchIntegrationTest {
                 + "function; operator or function: " + function + ", number of operands: 2";
     }
 
+    private static String invalidFunction(String name) {
+        return "Invalid SearchConditionExpression: Invalid function name; function: " + name;
+    }
+
+    private static final String RESERVED_NAME = "Invalid SearchConditionExpression: Attribute name is a "
+            + "reserved keyword; reserved keyword: name";
+
     private static String operandType(String op, String type) {
         return "Invalid SearchConditionExpression: Incorrect operand type for operator or function; "
                 + "operator or function: " + op + ", operand type: " + type;
@@ -1270,6 +1277,26 @@ class DynamoDbVectorSearchIntegrationTest {
                         operandType("<", "BOOL")),
                 Arguments.of("full", "tenant = :t AND attribute_exists(:p)", EXISTS_NEEDS_PATH),
                 Arguments.of("full", "tenant = :t AND attribute_exists(size(price))", EXISTS_NEEDS_PATH),
+                Arguments.of("full", "tenant = :t AND nope(category)", invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND ATTRIBUTE_EXISTS(price)", invalidFunction("ATTRIBUTE_EXISTS")),
+                Arguments.of("full", "tenant = :t AND SIZE(category) = :p", invalidFunction("SIZE")),
+                Arguments.of("full", "tenant = :t AND name(category)", invalidFunction("name")),
+                Arguments.of("full", "tenant = :t AND nope(:c)", invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND category = nope(price)", invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND nope(category) IN (:c)", invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND nope(price) BETWEEN :n2 AND :n4", invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND attribute_exists(nope(category))", invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND nope(category) = :missing", invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND size(nope(:missing)) = :p",
+                        "Invalid SearchConditionExpression: An expression attribute value used in "
+                        + "expression is not defined; attribute value: :missing"),
+                Arguments.of("full", "tenant = :t AND nope(name)", RESERVED_NAME),
+                Arguments.of("full", "tenant = :t AND begins_with(category, :a) AND nope(category)",
+                        invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND category < :bool AND nope(category)", operandType("<", "BOOL")),
+                Arguments.of("full", "tenant = :t AND nope(category) AND category < :bool", invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND nope()",
+                        "Invalid SearchConditionExpression: Syntax error; token: \")\", near: \"()\""),
                 Arguments.of("full", "tenant = :t AND tenant = :u AND zz = :z", HASH_ONCE),
                 Arguments.of("full", "zz = :z AND tenant = :t AND tenant = :u", HASH_ONCE),
                 Arguments.of("full", "tenant = :t AND tenant = :p", HASH_ONCE),
@@ -1322,6 +1349,104 @@ class DynamoDbVectorSearchIntegrationTest {
             "SearchConditionExpression": "%s",
             "ExpressionAttributeValues": %s
             """.formatted(expression, valuesFor(expression))), message);
+    }
+
+    private static final String UNUSED_VALUE_X = "Value provided in ExpressionAttributeValues unused in "
+            + "expressions: keys: {:x}";
+    private static final String UNUSED_NAME_X = "Value provided in ExpressionAttributeNames unused in "
+            + "expressions: keys: {#x}";
+    private static final String EMPTY_NAMES = "ExpressionAttributeNames must not be empty";
+    private static final String EMPTY_VALUES = "ExpressionAttributeValues must not be empty";
+    private static final String VALUES_NEED_EXPRESSION = "ExpressionAttributeValues can only be "
+            + "specified when using expressions";
+    private static final String NAMES_NEED_EXPRESSION = "ExpressionAttributeNames can only be "
+            + "specified when using expressions";
+    private static final String UNDEFINED_ZZ = "Invalid ProjectionExpression: An expression attribute "
+            + "name used in the document path is not defined; attribute name: #zz";
+    private static final String MISSING_TABLE = "VectorNoSuchFilterTable";
+    private static final String TENANT_EQUALS = "\"tenant = :t\"";
+    private static final String T_VALUES = "{\":t\": {\"S\": \"t1\"}}";
+    private static final String TX_VALUES = "{\":t\": {\"S\": \"t1\"}, \":x\": {\"S\": \"x\"}}";
+    private static final String X_VALUES = "{\":x\": {\"S\": \"x\"}}";
+    private static final String X_NAMES = "{\"#x\": \"x\"}";
+    private static final String CX_NAMES = "{\"#c\": \"category\", \"#x\": \"x\"}";
+    private static final String C_NAMES = "{\"#c\": \"category\"}";
+
+    private static String members(String condition, String values, String names, String projection) {
+        StringBuilder members = new StringBuilder();
+        if (condition != null) {
+            members.append(",\n\"SearchConditionExpression\": ").append(condition);
+        }
+        if (values != null) {
+            members.append(",\n\"ExpressionAttributeValues\": ").append(values);
+        }
+        if (names != null) {
+            members.append(",\n\"ExpressionAttributeNames\": ").append(names);
+        }
+        if (projection != null) {
+            members.append(",\n\"ProjectionExpression\": ").append(projection);
+        }
+        return members.toString();
+    }
+
+    static Stream<Arguments> searchChecksBeforeTheTableLookup() {
+        return Stream.of(
+                Arguments.of(FILTERS, members(TENANT_EQUALS, TX_VALUES, null, null), UNUSED_VALUE_X),
+                Arguments.of(FILTERS, members(TENANT_EQUALS, T_VALUES, X_NAMES, null), UNUSED_NAME_X),
+                Arguments.of(FILTERS, members(TENANT_EQUALS, TX_VALUES, X_NAMES, null), UNUSED_NAME_X),
+                Arguments.of(FILTERS, members("\"tenant = :t AND attribute_exists(category.x)\"", TX_VALUES,
+                        null, null), NESTED),
+                Arguments.of(FILTERS, members("\"attribute_exists(price)\"", X_VALUES, null, null),
+                        UNUSED_VALUE_X),
+                Arguments.of(FILTERS, members(TENANT_EQUALS, T_VALUES, CX_NAMES, "\"#c\""), UNUSED_NAME_X),
+                Arguments.of(FILTERS, members(TENANT_EQUALS, null, "{}", null), EMPTY_NAMES),
+                Arguments.of(FILTERS, members("\"tenant = :t AND\"", "{}", null, null), EMPTY_VALUES),
+                Arguments.of(FILTERS, members("\"attribute_exists(price)\"", "{}", "{}", null), EMPTY_NAMES),
+                Arguments.of(FILTERS, members("\"attribute_exists(price)\"", "{}", null, "\"#zz\""),
+                        EMPTY_VALUES),
+                Arguments.of(FILTERS, members("\"tenant = :t AND attribute_exists(category.x)\"", T_VALUES,
+                        null, "\"#zz\""), UNDEFINED_ZZ),
+                Arguments.of(FILTERS, members("\"tenant = :t AND\"", null, null, "\"a,,b\""),
+                        "Invalid ProjectionExpression: Syntax error; token: \",\", near: \",,b\""),
+                Arguments.of(FILTERS, members(null, T_VALUES, null, null), VALUES_NEED_EXPRESSION),
+                Arguments.of(FILTERS, members(null, null, X_NAMES, null), NAMES_NEED_EXPRESSION),
+                Arguments.of(FILTERS, members(null, T_VALUES, X_NAMES, null), NAMES_NEED_EXPRESSION),
+                Arguments.of(FILTERS, members(null, T_VALUES, C_NAMES, "\"#c\""), VALUES_NEED_EXPRESSION),
+                Arguments.of(FILTERS, members(null, T_VALUES, null, "\"#zz\""), VALUES_NEED_EXPRESSION),
+                Arguments.of(FILTERS, members(null, null, CX_NAMES, "\"#c\""), UNUSED_NAME_X),
+                Arguments.of(FILTERS, members(null, null, C_NAMES, "\"#c\""), "SearchConditionExpression "
+                        + "must be provided when SearchSchema has a HASH key"),
+                Arguments.of(MISSING_TABLE, members("\"tenant = :t AND nope(category)\"", T_VALUES, null, null),
+                        invalidFunction("nope")),
+                Arguments.of(MISSING_TABLE, members(TENANT_EQUALS, TX_VALUES, null, null), UNUSED_VALUE_X),
+                Arguments.of(MISSING_TABLE, members(TENANT_EQUALS, T_VALUES, null, "\"#zz\""), UNDEFINED_ZZ),
+                Arguments.of(MISSING_TABLE, members("\"attribute_exists(price)\"", "{}", null, null),
+                        EMPTY_VALUES),
+                Arguments.of(MISSING_TABLE, members(null, T_VALUES, null, null), VALUES_NEED_EXPRESSION));
+    }
+
+    @ParameterizedTest
+    @Order(50)
+    @MethodSource("searchChecksBeforeTheTableLookup")
+    void searchVectorsChecksTheExpressionsBeforeItLooksUpTheTable(String table, String extraMembers,
+                                                                  String message) {
+        expectValidation("SearchVectors", search(table, "full", 10, extraMembers), message);
+    }
+
+    @Test
+    @Order(51)
+    void searchVectorsAcceptsAProjectionThatUsesANameAlias() throws Exception {
+        JsonNode response = json("SearchVectors", search(FILTERS, "full", 10,
+                members(TENANT_EQUALS, T_VALUES, C_NAMES, "\"#c\"")));
+        assertFalse(response.path("SearchResults").isEmpty());
+        boolean projected = false;
+        for (JsonNode result : response.path("SearchResults")) {
+            List<String> attributes = new ArrayList<>();
+            result.path("Item").fieldNames().forEachRemaining(attributes::add);
+            assertTrue(List.of("category").containsAll(attributes));
+            projected |= !attributes.isEmpty();
+        }
+        assertTrue(projected);
     }
 
 }

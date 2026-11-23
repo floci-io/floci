@@ -81,10 +81,11 @@ class ExpressionEvaluatorTest {
         }
 
         @Test
-        void functionTokens() {
+        void functionNamesAreIdentifiers() {
             List<ExpressionEvaluator.Token> tokens = ExpressionEvaluator.tokenize("attribute_exists(a) AND begins_with(b, :v) AND contains(c, :w) AND size(d) > :x AND attribute_not_exists(e)");
             List<String> functions = tokens.stream()
-                    .filter(t -> t.type() == ExpressionEvaluator.TokenType.FUNCTION)
+                    .filter(t -> t.type() == ExpressionEvaluator.TokenType.IDENTIFIER)
+                    .filter(t -> ExpressionEvaluator.CONDITION_FUNCTIONS.contains(t.value()))
                     .map(ExpressionEvaluator.Token::value)
                     .toList();
             assertEquals(List.of("attribute_exists", "begins_with", "contains", "size", "attribute_not_exists"), functions);
@@ -121,6 +122,20 @@ class ExpressionEvaluatorTest {
         void simpleComparison() {
             ExpressionEvaluator.Expr expr = ExpressionEvaluator.parse("pk = :pk");
             assertInstanceOf(ExpressionEvaluator.CompareExpr.class, expr);
+        }
+
+        @Test
+        void unknownFunctionNameParsesAsACallNamedAsWritten() {
+            ExpressionEvaluator.FunctionCallExpr call = assertInstanceOf(
+                    ExpressionEvaluator.FunctionCallExpr.class, ExpressionEvaluator.parse("nope(a)"));
+            assertEquals("nope", call.functionName());
+        }
+
+        @Test
+        void functionNamesAreCaseSensitive() {
+            ExpressionEvaluator.FunctionCallExpr call = assertInstanceOf(
+                    ExpressionEvaluator.FunctionCallExpr.class, ExpressionEvaluator.parse("ATTRIBUTE_EXISTS(a)"));
+            assertEquals("ATTRIBUTE_EXISTS", call.functionName());
         }
 
         @Test
@@ -268,6 +283,20 @@ class ExpressionEvaluatorTest {
 
         private JsonNode names(String json) throws Exception {
             return mapper.readTree(json);
+        }
+
+        @Test
+        void sizeCanSitLeftOfBetween() throws Exception {
+            JsonNode i = item("{\"a\": {\"S\": \"abc\"}}");
+            JsonNode v = values("{\":lo\": {\"N\": \"2\"}, \":hi\": {\"N\": \"4\"}}");
+            assertTrue(ExpressionEvaluator.matches("size(a) BETWEEN :lo AND :hi", i, null, v));
+        }
+
+        @Test
+        void sizeCanSitLeftOfIn() throws Exception {
+            JsonNode i = item("{\"a\": {\"S\": \"abc\"}}");
+            JsonNode v = values("{\":n\": {\"N\": \"3\"}}");
+            assertTrue(ExpressionEvaluator.matches("size(a) IN (:n)", i, null, v));
         }
 
         // DynamoDB's size() of a Binary is its length in bytes; "AQID" encodes the three bytes 1, 2, 3.
