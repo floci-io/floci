@@ -2,6 +2,7 @@ package io.floci.aws.services.elbv2;
 
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.TlsProxyServer;
+import io.floci.aws.config.TlsProxyServer.ServerNameTarget;
 import io.floci.aws.core.common.CertificateReferenceResolver;
 import io.floci.aws.core.common.CertificateReferenceResolver.CertificateMaterial;
 import io.floci.aws.core.common.Pem;
@@ -11,7 +12,9 @@ import io.floci.aws.services.elbv2.model.Action;
 import io.floci.aws.services.elbv2.model.Listener;
 import io.floci.aws.services.elbv2.model.LoadBalancer;
 import io.floci.aws.services.elbv2.model.Rule;
+import io.floci.aws.services.elbv2.model.RuleCondition;
 import io.floci.aws.testing.InlineMocks;
+import io.floci.aws.testutil.LogCapture;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.Promise;
@@ -20,6 +23,7 @@ import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
+import io.vertx.core.net.NetServerOptions;
 import io.vertx.core.net.SSLOptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -27,8 +31,10 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntConsumer;
+import java.util.logging.LogRecord;
 
 import static io.floci.aws.services.elbv2.ElbV2PublicationTestSupport.publishRuntime;
 import static io.floci.aws.services.elbv2.ElbV2PublicationTestSupport.removeRuntime;
@@ -36,6 +42,7 @@ import static io.floci.aws.services.elbv2.ElbV2PublicationTestSupport.servedCert
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -154,6 +161,138 @@ class ElbV2ReservedPortTest {
         assertDoesNotThrow(() -> publishRuntime(dataPlane, listener, "us-west-2", listener.getPort(), List.of()),
                 "the released-port replay re-entered the server map for the key it was computing");
         verify(vertx, times(1)).createHttpServer(any(HttpServerOptions.class));
+    }
+
+    /** A data plane whose TLS proxy holds 443, with one HTTPS listener ready to publish there. */
+    private static final class ProxiedPort {
+        final AtomicBoolean proxyHolds443 = new AtomicBoolean(true);
+        final TlsProxyServer proxy = mock(TlsProxyServer.class);
+        final HttpServer local = mock(HttpServer.class);
+        final HttpServer public443 = mock(HttpServer.class);
+        final Vertx vertx = mock(Vertx.class);
+        final ElbV2DataPlane dataPlane = new ElbV2DataPlane();
+        final Listener listener = new Listener();
+        final Rule hostRule = fixedRule("api");
+
+        ProxiedPort() {
+            EmulatorConfig.TlsConfig tls = mock(EmulatorConfig.TlsConfig.class);
+            when(tls.enabled()).thenReturn(true);
+            when(tls.awsHttpsPort()).thenReturn(443);
+            EmulatorConfig.ElbV2ServiceConfig elbv2 = mock(EmulatorConfig.ElbV2ServiceConfig.class);
+            when(elbv2.mock()).thenReturn(false);
+            EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+            when(services.elbv2()).thenReturn(elbv2);
+            EmulatorConfig config = mock(EmulatorConfig.class);
+            when(config.port()).thenReturn(4566);
+            when(config.tls()).thenReturn(tls);
+            when(config.services()).thenReturn(services);
+            when(proxy.reservesPort(anyInt())).thenAnswer(inv -> proxyHolds443.get() && (int) inv.getArgument(0) == 443);
+            for (HttpServer server : List.of(local, public443)) {
+                when(server.requestHandler(any())).thenReturn(server);
+                when(server.listen()).thenReturn(Future.succeededFuture(server));
+                when(server.close()).thenReturn(Future.succeededFuture());
+            }
+            when(local.actualPort()).thenReturn(50443);
+            when(vertx.createHttpServer(any(HttpServerOptions.class))).thenReturn(local, public443);
+            dataPlane.config = config;
+            dataPlane.tlsProxyServer = proxy;
+            dataPlane.vertx = vertx;
+            dataPlane.elbV2Service = mock(ElbV2Service.class);
+            dataPlane.certificateResolver = mock(CertificateReferenceResolver.class);
+
+            String certificateArn = "arn:aws:acm:us-west-2:000000000000:certificate/sni";
+            listener.setListenerArn("arn:aws:elasticloadbalancing:us-west-2:000000000000:listener/app/lb/1/2");
+            listener.setLoadBalancerArn("arn:aws:elasticloadbalancing:us-west-2:000000000000:loadbalancer/app/lb/1");
+            listener.setPort(443);
+            listener.setProtocol("HTTPS");
+            listener.setDefaultCertificate(certificateArn);
+            LoadBalancer loadBalancer = new LoadBalancer();
+            loadBalancer.setDnsName("lb-1.elb.example.test");
+            when(dataPlane.elbV2Service.getLoadBalancer("us-west-2", listener.getLoadBalancerArn())).thenReturn(loadBalancer);
+            CertificateGenerator.GeneratedCertificate certificate = new CertificateGenerator().generateSelfSignedCertificate(
+                    "www.example.test", List.of(), KeyAlgorithm.RSA_2048);
+            when(dataPlane.certificateResolver.publishedMaterial(listener.getListenerArn(), "us-west-2", certificateArn))
+                    .thenReturn(new CertificateMaterial(certificateArn, certificate.certificatePem(),
+                            certificate.privateKeyPem(), null));
+            RuleCondition condition = new RuleCondition();
+            condition.setField("host-header");
+            condition.setValues(List.of("api.example.test"));
+            hostRule.setDefault(false);
+            hostRule.setConditions(List.of(condition));
+        }
+
+        void publish() {
+            publishRuntime(dataPlane, listener, "us-west-2", 443, List.of(hostRule));
+        }
+
+        TlsProxyServer.ServerNameRoute route() {
+            ArgumentCaptor<TlsProxyServer.ServerNameRoute> route = ArgumentCaptor.forClass(TlsProxyServer.ServerNameRoute.class);
+            verify(proxy).routeServerNames(route.capture());
+            return route.getValue();
+        }
+    }
+
+    @Test
+    void anHttpsListenerOnTheProxyPortIsServedLocallyAndRoutedByServerName() {
+        ProxiedPort fixture = new ProxiedPort();
+        try {
+            fixture.publish();
+
+            ArgumentCaptor<HttpServerOptions> options = ArgumentCaptor.forClass(HttpServerOptions.class);
+            verify(fixture.vertx).createHttpServer(options.capture());
+            assertEquals("127.0.0.1", options.getValue().getHost());
+            assertEquals(0, options.getValue().getPort());
+            assertTrue(options.getValue().isSsl());
+            TlsProxyServer.ServerNameRoute route = fixture.route();
+            ServerNameTarget expected = new ServerNameTarget(50443, fixture.listener.getListenerArn());
+            assertEquals(expected, route.resolve(443, "lb-1.elb.example.test", false));
+            assertNull(route.resolve(443, "api.example.test", false));
+            assertEquals(expected, route.resolve(443, "www.example.test", true));
+            assertEquals(expected, route.resolve(443, "api.example.test", true));
+            assertNull(route.resolve(443, "s3.amazonaws.com", true),
+                    "an unclaimed name stays with Floci even when a single load balancer serves the port");
+            assertNull(route.resolve(8443, "lb-1.elb.example.test", true));
+
+            ArgumentCaptor<IntConsumer> released = ArgumentCaptor.forClass(IntConsumer.class);
+            verify(fixture.proxy).onPortReleased(released.capture());
+            fixture.proxyHolds443.set(false);
+            released.getValue().accept(443);
+            verify(fixture.local).close();
+            verify(fixture.vertx, times(2)).createHttpServer(options.capture());
+            assertEquals("0.0.0.0", options.getValue().getHost());
+            assertEquals(443, options.getValue().getPort());
+            assertNull(route.resolve(443, "lb-1.elb.example.test", true),
+                    "once the listener owns 443 itself the proxy no longer forwards to it");
+        } finally {
+            fixture.dataPlane.shutdown();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"HTTP", "TCP"})
+    void modifyingTheProxiedListenerAwayFromHttpsStopsRoutingAndWarnsTheirPortIsReserved(String protocol) {
+        ProxiedPort fixture = new ProxiedPort();
+        try {
+            fixture.publish();
+            TlsProxyServer.ServerNameRoute route = fixture.route();
+            assertEquals(new ServerNameTarget(50443, fixture.listener.getListenerArn()),
+                    route.resolve(443, "lb-1.elb.example.test", false));
+            assertNull(route.resolve(443, "api.example.test", false));
+
+            fixture.listener.setProtocol(protocol);
+            fixture.listener.setDefaultCertificate(null);
+            List<LogRecord> records = LogCapture.capture(ElbV2DataPlane.class, fixture::publish);
+
+            verify(fixture.local).close();
+            verify(fixture.vertx, times(1)).createHttpServer(any(HttpServerOptions.class));
+            verify(fixture.vertx, never()).createNetServer(any(NetServerOptions.class));
+            assertNull(route.resolve(443, "lb-1.elb.example.test", true));
+            assertTrue(records.stream().map(LogCapture::formatted)
+                            .anyMatch(message -> message.contains("port 443 is reserved by Floci itself")),
+                    "expected the reserved-port warning, got " + records.stream().map(LogCapture::formatted).toList());
+        } finally {
+            fixture.dataPlane.shutdown();
+        }
     }
 
     @Test

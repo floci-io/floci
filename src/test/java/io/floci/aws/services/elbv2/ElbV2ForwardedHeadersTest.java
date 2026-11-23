@@ -179,4 +179,18 @@ class ElbV2ForwardedHeadersTest {
         assertEquals(List.of("client.example.test", "second.example.test:8443"),
                 ((Map<String, List<String>>) event.get("multiValueHeaders")).get("host"));
     }
+
+    @Test
+    void portIsTheListenersEvenWhenTheSocketIsALoopbackBehindTheProxy() {
+        HttpServerRequest request = mock(HttpServerRequest.class);
+        when(request.remoteAddress()).thenReturn(CLIENT_V4);
+        when(request.isSSL()).thenReturn(true);
+        when(request.localAddress()).thenReturn(SocketAddress.inetSocketAddress(50443, "127.0.0.1"));
+        MultiMap outbound = MultiMap.caseInsensitiveMultiMap();
+
+        ElbV2ForwardedHeaders.of(request, 443, "append", false).applyTo(MultiMap.caseInsensitiveMultiMap(), outbound);
+
+        assertEquals(List.of("443"), outbound.getAll("X-Forwarded-Port"));
+        assertEquals(List.of("https"), outbound.getAll("X-Forwarded-Proto"));
+    }
 }

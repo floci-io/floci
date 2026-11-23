@@ -27,8 +27,8 @@ record ElbV2ForwardedHeaders(SocketAddress client, boolean secure, int listenerP
     private static final String FORWARDED_PROTO = "X-Forwarded-Proto";
     private static final String FORWARDED_PORT = "X-Forwarded-Port";
 
-    static ElbV2ForwardedHeaders of(HttpServerRequest req, String xffMode, boolean xffClientPort) {
-        return new ElbV2ForwardedHeaders(req.remoteAddress(), req.isSSL(), req.localAddress().port(),
+    static ElbV2ForwardedHeaders of(HttpServerRequest req, int listenerPort, String xffMode, boolean xffClientPort) {
+        return new ElbV2ForwardedHeaders(req.remoteAddress(), req.isSSL(), listenerPort,
                 xffMode, xffClientPort);
     }
 

@@ -1,5 +1,6 @@
 package io.floci.aws.config;
 
+import io.floci.aws.config.TlsProxyServer.ServerNameTarget;
 import io.floci.aws.testutil.FreePorts;
 import io.vertx.core.Vertx;
 import io.vertx.core.net.NetServer;
@@ -15,8 +16,10 @@ import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.net.Socket;
 import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -67,6 +70,12 @@ class TlsProxyServerTest {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.TlsConfig tls = mock(EmulatorConfig.TlsConfig.class);
         when(config.port()).thenReturn(publicPort);
+        when(config.baseUrl()).thenReturn("http://base.example.test:4566");
+        when(config.hostname()).thenReturn(Optional.of("api.example.test"));
+        when(config.dns()).thenReturn(mock(EmulatorConfig.DnsConfig.class));
+        when(config.services()).thenReturn(mock(EmulatorConfig.ServicesConfig.class));
+        when(config.services().lambda()).thenReturn(mock(EmulatorConfig.LambdaServiceConfig.class));
+        when(config.services().iot()).thenReturn(mock(EmulatorConfig.IotServiceConfig.class));
         when(config.tls()).thenReturn(tls);
         when(tls.enabled()).thenReturn(tlsEnabled);
         when(tls.awsHttpsPort()).thenReturn(awsHttpsPort);
@@ -152,6 +161,137 @@ class TlsProxyServerTest {
 
     @Test
     @Timeout(20)
+    void awsHttpsPort_routesAKnownServerNameAndLeavesTheRestToFloci() throws Exception {
+        httpBackend = startMarkerBackend("PLAIN");
+        httpsBackend = startMarkerBackend("TLS");
+        NetServer albBackend = startMarkerBackend("ALB");
+        try {
+            int[] ports = FreePorts.anyInterfacePorts(2);
+            int publicPort = ports[0];
+            int awsHttpsPort = ports[1];
+            EmulatorConfig config = configWith(true, publicPort, awsHttpsPort);
+            when(config.services().iot().endpointAddress()).thenReturn(Optional.of("  MQTT.example.test:8443  "));
+            proxy = new TlsProxyServer(vertx, config, "127.0.0.1",
+                    httpBackend.actualPort(), httpsBackend.actualPort());
+            proxy.routeServerNames((port, name, allowAliases) -> port == awsHttpsPort && allowAliases && !name.equals("other.example.test")
+                    ? new ServerNameTarget(albBackend.actualPort(), "listener") : null);
+
+            assertEquals("ALB", roundTrip(awsHttpsPort, TlsClientHelloTest.clientHello("ALB.example.test").getBytes()));
+            assertEquals("TLS", roundTrip(awsHttpsPort, TlsClientHelloTest.clientHello("other.example.test").getBytes()));
+            assertEquals("TLS", roundTrip(awsHttpsPort, TlsClientHelloTest.clientHello(null).getBytes()));
+            for (String endpoint : Set.of("localhost.floci.io", "api.example.test", "base.example.test",
+                    "host.docker.internal", "sqs.us-east-1.localhost.floci.io", "mqtt.example.test")) {
+                assertEquals("TLS", roundTrip(awsHttpsPort, TlsClientHelloTest.clientHello(endpoint).getBytes()),
+                        endpoint);
+            }
+            assertEquals("PLAIN", roundTrip(awsHttpsPort, new byte[]{(byte) 'G'}));
+            assertEquals("TLS", roundTrip(publicPort, TlsClientHelloTest.clientHello("alb.example.test").getBytes()),
+                    "the public port never routes by server name");
+        } finally {
+            closeBackend(albBackend);
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    void awsHttpsPort_waitsForAClientHelloSplitAcrossWrites() throws Exception {
+        httpsBackend = startMarkerBackend("TLS");
+        NetServer albBackend = startMarkerBackend("ALB");
+        try {
+            int[] ports = FreePorts.anyInterfacePorts(2);
+            int awsHttpsPort = ports[1];
+            proxy = new TlsProxyServer(vertx, configWith(true, ports[0], awsHttpsPort), "127.0.0.1",
+                    4510, httpsBackend.actualPort());
+            proxy.routeServerNames((port, name, allowAliases) -> "alb.example.test".equals(name)
+                    ? new ServerNameTarget(albBackend.actualPort(), "listener") : null);
+            byte[] hello = TlsClientHelloTest.clientHello("alb.example.test").getBytes();
+
+            awaitListening(awsHttpsPort);
+            try (Socket sock = new Socket("127.0.0.1", awsHttpsPort)) {
+                sock.setTcpNoDelay(true);
+                sock.getOutputStream().write(hello, 0, 3);
+                sock.getOutputStream().flush();
+                Thread.sleep(100);
+                sock.getOutputStream().write(hello, 3, hello.length - 3);
+                sock.getOutputStream().flush();
+                byte[] buf = new byte[64];
+                int n = sock.getInputStream().read(buf);
+                assertEquals("ALB", new String(buf, 0, n, StandardCharsets.UTF_8));
+            }
+        } finally {
+            closeBackend(albBackend);
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    void awsHttpsPort_aRouteThatThrowsLeavesTheConnectionWithFloci() throws Exception {
+        httpsBackend = startMarkerBackend("TLS");
+        int[] ports = FreePorts.anyInterfacePorts(2);
+        proxy = new TlsProxyServer(vertx, configWith(true, ports[0], ports[1]), "127.0.0.1",
+                4510, httpsBackend.actualPort());
+        proxy.routeServerNames((port, name, allowAliases) -> {
+            throw new IllegalStateException("route failed");
+        });
+
+        assertEquals("TLS", roundTrip(ports[1], TlsClientHelloTest.clientHello("alb.example.test").getBytes()));
+    }
+
+    @Test
+    @Timeout(20)
+    void awsHttpsPort_aStalledPartialClientHelloGoesToFloci() throws Exception {
+        httpsBackend = startMarkerBackend("TLS");
+        int[] ports = FreePorts.anyInterfacePorts(2);
+        proxy = new TlsProxyServer(vertx, configWith(true, ports[0], ports[1]), "127.0.0.1",
+                4510, httpsBackend.actualPort());
+        proxy.clientHelloTimeoutMillis = 200;
+        proxy.routeServerNames((port, name, allowAliases) -> fail("a partial ClientHello has no server name to route"));
+        byte[] hello = TlsClientHelloTest.clientHello("alb.example.test").getBytes();
+
+        awaitListening(ports[1]);
+        try (Socket sock = new Socket("127.0.0.1", ports[1])) {
+            sock.getOutputStream().write(hello, 0, 3);
+            sock.getOutputStream().flush();
+            byte[] buf = new byte[64];
+            int n = sock.getInputStream().read(buf);
+            assertEquals("TLS", new String(buf, 0, n, StandardCharsets.UTF_8));
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    void awsHttpsPort_aClientHelloTrickledInGoesToFlociAtAFixedDeadline() throws Exception {
+        httpsBackend = startMarkerBackend("TLS");
+        int[] ports = FreePorts.anyInterfacePorts(2);
+        proxy = new TlsProxyServer(vertx, configWith(true, ports[0], ports[1]), "127.0.0.1",
+                4510, httpsBackend.actualPort());
+        proxy.clientHelloTimeoutMillis = 500;
+        proxy.routeServerNames((port, name, allowAliases) -> fail("the deadline passed before the ClientHello was complete"));
+        byte[] hello = TlsClientHelloTest.clientHello("alb.example.test").getBytes();
+
+        awaitListening(ports[1]);
+        try (Socket sock = new Socket("127.0.0.1", ports[1])) {
+            sock.setTcpNoDelay(true);
+            sock.setSoTimeout(100);
+            byte[] buf = new byte[64];
+            // One byte every 100ms keeps the buffer growing for far longer than the deadline.
+            for (int i = 0; i < hello.length - 1; i++) {
+                sock.getOutputStream().write(hello[i]);
+                sock.getOutputStream().flush();
+                try {
+                    int n = sock.getInputStream().read(buf);
+                    assertEquals("TLS", new String(buf, 0, n, StandardCharsets.UTF_8));
+                    return;
+                } catch (SocketTimeoutException stillWaiting) {
+                    // No backend yet; the next byte follows.
+                }
+            }
+            fail("a trickling client held the connection past its deadline");
+        }
+    }
+
+    @Test
+    @Timeout(20)
     void tlsDisabled_bindsNothing() throws Exception {
         int publicPort = FreePorts.anyInterfacePort();
         proxy = new TlsProxyServer(vertx, configWith(false, publicPort, 443), "127.0.0.1", 4510, 4511);
@@ -176,9 +316,13 @@ class TlsProxyServerTest {
     }
 
     private String roundTrip(int proxyPort, byte firstByte) throws Exception {
+        return roundTrip(proxyPort, new byte[]{firstByte});
+    }
+
+    private String roundTrip(int proxyPort, byte[] firstBytes) throws Exception {
         awaitListening(proxyPort);
         try (Socket sock = new Socket("127.0.0.1", proxyPort)) {
-            sock.getOutputStream().write(new byte[]{firstByte});
+            sock.getOutputStream().write(firstBytes);
             sock.getOutputStream().flush();
             byte[] buf = new byte[64];
             int n = sock.getInputStream().read(buf);
