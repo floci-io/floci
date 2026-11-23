@@ -15,6 +15,7 @@ import software.amazon.awssdk.services.cloudfront.model.ResourceNotDisabledExcep
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CloudFrontConnectionGroupTest {
@@ -128,6 +129,7 @@ class CloudFrontConnectionGroupTest {
             String freshEtag = cloudFront.getConnectionGroup(request -> request.identifier(groupId)).eTag();
             cloudFront.deleteConnectionGroup(request -> request.id(groupId).ifMatch(freshEtag));
         } catch (EntityNotFoundException ignored) {
+            // teardown only: the emulator state is per-test, so a partially cleaned connection group cannot leak into another test
         }
     }
 }

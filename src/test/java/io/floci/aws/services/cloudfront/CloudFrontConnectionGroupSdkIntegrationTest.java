@@ -298,6 +298,7 @@ class CloudFrontConnectionGroupSdkIntegrationTest {
         } catch (NoSuchDistributionException | EntityNotFoundException | InvalidIfMatchVersionException
                  | PreconditionFailedException | ResourceNotDisabledException
                  | CannotDeleteEntityWhileInUseException | EntityAlreadyExistsException ignored) {
+            // teardown only: the emulator state is per-test, so a partially cleaned distribution cannot leak into another test
         }
     }
 
@@ -312,6 +313,7 @@ class CloudFrontConnectionGroupSdkIntegrationTest {
         } catch (EntityNotFoundException | InvalidIfMatchVersionException | PreconditionFailedException
                  | ResourceNotDisabledException | CannotDeleteEntityWhileInUseException
                  | EntityAlreadyExistsException ignored) {
+            // teardown only: the emulator state is per-test, so a partially cleaned connection group cannot leak into another test
         }
     }
 
