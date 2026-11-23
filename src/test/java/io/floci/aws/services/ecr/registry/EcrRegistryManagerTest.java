@@ -18,6 +18,7 @@ import com.github.dockerjava.api.model.ContainerNetworkSettings;
 import com.github.dockerjava.api.model.ContainerPort;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.Info;
+import com.github.dockerjava.api.model.StreamType;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
@@ -43,6 +44,7 @@ import org.mockito.Mockito;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -50,6 +52,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -1107,6 +1110,45 @@ class EcrRegistryManagerTest {
                 "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_layers",
                 "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_manifests",
                 "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_uploads");
+    }
+
+    /** The registry's API lists tags only; untagged manifests are read from the revision links of its storage. */
+    @Test
+    void heldManifestDigestsAreReadFromTheRevisionLinks() {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        String revisions = "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app"
+                + "/_manifests/revisions/sha256";
+        String first = "a".repeat(64);
+        String second = "0123456789abcdef".repeat(4);
+        DockerClient dockerClient = Mockito.mock(DockerClient.class);
+        ExecCreateCmd execCreate = Mockito.mock(ExecCreateCmd.class, Mockito.RETURNS_SELF);
+        ExecCreateCmdResponse exec = Mockito.mock(ExecCreateCmdResponse.class);
+        when(exec.getId()).thenReturn("exec-id");
+        when(execCreate.exec()).thenReturn(exec);
+        when(dockerClient.execCreateCmd("container-id")).thenReturn(execCreate);
+        ExecStartCmd execStart = Mockito.mock(ExecStartCmd.class);
+        when(execStart.exec(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            ResultCallback<Frame> callback = invocation.getArgument(0);
+            callback.onNext(new Frame(StreamType.STDOUT, (revisions + "/" + first + "/link\n" + revisions + "/"
+                    + second + "/link\n" + revisions + "/not-a-digest/link\n").getBytes(StandardCharsets.UTF_8)));
+            callback.onComplete();
+            return callback;
+        });
+        when(dockerClient.execStartCmd("exec-id")).thenReturn(execStart);
+        InspectExecCmd inspect = Mockito.mock(InspectExecCmd.class);
+        InspectExecResponse result = Mockito.mock(InspectExecResponse.class);
+        when(result.getExitCodeLong()).thenReturn(0L);
+        when(inspect.exec()).thenReturn(result);
+        when(dockerClient.inspectExecCmd("exec-id")).thenReturn(inspect);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        manager.ensureStarted();
+
+        assertEquals(Set.of("sha256:" + first, "sha256:" + second),
+                manager.heldManifestDigests("000000000000/us-east-1/team/app"));
+        verify(execCreate).withCmd("timeout", "-k", "1", "10", "sh", "-c", "[ -d '" + revisions + "' ] || exit 0; "
+                + "find '" + revisions + "' -mindepth 2 -maxdepth 2 -name link");
     }
 
     @Test

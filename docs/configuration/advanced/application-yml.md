@@ -352,6 +352,8 @@ floci:
       keep-running-on-shutdown: true
       uri-style: hostname                     # hostname | path
       prefer-local-images: true
+      lifecycle-sweep-enabled: true           # apply repository lifecycle policies in the background
+      lifecycle-sweep-interval-seconds: 60
 ```
 
 ### Initialization hooks
