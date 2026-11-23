@@ -19,6 +19,7 @@ import io.floci.aws.services.cloudfront.model.PublicKey;
 import io.floci.aws.services.cloudfront.model.ResponseHeadersPolicy;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
@@ -60,6 +61,7 @@ class CloudFrontCfnProvisionerTest {
     private static final String PUBLIC_KEY = "AWS::CloudFront::PublicKey";
     private static final String KEY_GROUP = "AWS::CloudFront::KeyGroup";
     private static final String FUNCTION = "AWS::CloudFront::Function";
+    private static final String CONNECTION_GROUP_TYPE = "AWS::CloudFront::ConnectionGroup";
     private static final String FUNCTION_ARN = "arn:aws:cloudfront::000000000000:function/my-function";
     private static final String REGION = "us-east-1";
     private static final String ID = "5cc3b908-e619-4b99-88e5-2cf7f45965bd";
@@ -1188,10 +1190,10 @@ class CloudFrontCfnProvisionerTest {
                     return g;
                 });
 
-        StackResource r = resource("AWS::CloudFront::ConnectionGroup");
+        StackResource r = resource(CONNECTION_GROUP_TYPE);
         provisioner.provision(r, json("""
                 {"Name": "edge-group", "Enabled": true, "Ipv6Enabled": false}
-                """), ctx());
+                """), connectionCtx(null));
 
         ArgumentCaptor<String> name = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<Boolean> enabled = ArgumentCaptor.forClass(Boolean.class);
@@ -1213,41 +1215,37 @@ class CloudFrontCfnProvisionerTest {
                 "LastModifiedTime", MODIFIED.toString()), r.getAttributes());
     }
 
-    @Test
-    void updatesConnectionGroupInPlaceWithThePriorEtagAndCarriesItsViewerFallback() throws Exception {
-        ConnectionGroup prior = new ConnectionGroup();
-        prior.setId("cg_prior");
-        prior.setEtag(ETAG);
-        prior.setAnycastIpListId("aip_prior");
-        prior.setEnabled(true);
-        prior.setIpv6Enabled(true);
-        prior.setLastModifiedTime(MODIFIED);
-        when(cloudFront.getConnectionGroup("cg_prior")).thenReturn(prior);
-        when(cloudFront.updateConnectionGroup(eq("cg_prior"), eq(ETAG), eq("aip_prior"), eq(Boolean.FALSE),
-                eq(Boolean.TRUE), eq("E12X3MPWexample")))
-                .thenAnswer(inv -> withIdentity(prior, g -> g.setEtag(NEW_ETAG)));
-
-        StackResource r = resource("AWS::CloudFront::ConnectionGroup", "cg_prior", Map.of("Id", "cg_prior"));
-        provisioner.provision(r, json("""
-                {"Name": "edge-group", "Enabled": false, "ViewerFallback": {"DistributionId": "E12X3MPWexample"}}
-                """), ctx("cg_prior"));
-
-        verify(cloudFront, never()).createConnectionGroup(any(), any(), any(), any(), any(), any());
-        assertEquals("cg_prior", r.getPhysicalId());
-        assertEquals(NEW_ETAG, r.getAttributes().get("ETag"));
+    /**
+     * The connection-group members are scalars the template may hand an intrinsic, so the context's
+     * {@code resolveOptional} answers them: an object node reads as its resolved value, as
+     * {@code Ref} and {@code Fn::Sub} names and booleans do.
+     */
+    private ProvisionContext connectionCtx(String priorPhysicalId) {
+        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+        when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(engine.resolve(any())).thenAnswer(inv -> {
+            JsonNode node = inv.getArgument(0);
+            if (node == null || node.isMissingNode() || node.isNull()) {
+                return "";
+            }
+            return node.isValueNode() ? node.asText() : "resolved-name";
+        });
+        return new ProvisionContext(engine, REGION, "000000000000", "my-stack", priorPhysicalId);
     }
 
     @Test
-    void deletesConnectionGroupWithItsOwnNotFoundCodeTolerated() throws Exception {
-        when(cloudFront.getConnectionGroup(ID)).thenReturn(connectionGroup(ID, ETAG));
+    void aRefResolvedNameAndBooleansCreateTheGroup() throws Exception {
+        when(cloudFront.createConnectionGroup(eq("resolved-name"), any(), eq(Boolean.TRUE), any(),
+                any(), any())).thenReturn(connectionGroup("cg_new", ETAG));
+        StackResource r = resource(CONNECTION_GROUP_TYPE);
 
-        provisioner.delete("AWS::CloudFront::ConnectionGroup", ID, REGION);
-        verify(cloudFront).deleteConnectionGroup(ID, ETAG);
+        provisioner.provision(r, json("""
+                {"Name": {"Fn::Sub": "${AWS::StackName}-group"}, "Enabled": true, "Ipv6Enabled": false}
+                """), connectionCtx(null));
 
-        when(cloudFront.getConnectionGroup(ID)).thenThrow(
-                new AwsException("EntityNotFound", "The connection group " + ID + " does not exist.", 404));
-        provisioner.delete("AWS::CloudFront::ConnectionGroup", ID, REGION);
-        verify(cloudFront, Mockito.times(1)).deleteConnectionGroup(any(), any());
+        assertEquals("cg_new", r.getPhysicalId());
+        verify(cloudFront, never()).updateConnectionGroup(any(), any(), any(), any(), any(), any(),
+                any(), any());
     }
 
     private static ConnectionGroup connectionGroup(String id, String etag) {
@@ -1255,5 +1253,163 @@ class CloudFrontCfnProvisionerTest {
         g.setId(id);
         g.setEtag(etag);
         return g;
+    }
+
+    @Test
+    void updatesConnectionGroupInPlaceWithThePriorEtagAndCarriesItsViewerFallback() throws Exception {
+        ConnectionGroup prior = connectionGroup("cg_prior", ETAG);
+        prior.setName("edge-group");
+        prior.setAnycastIpListId("aip_prior");
+        prior.setEnabled(true);
+        prior.setIpv6Enabled(true);
+        prior.setLastModifiedTime(MODIFIED);
+        when(cloudFront.getConnectionGroup("cg_prior")).thenReturn(prior);
+        when(cloudFront.updateConnectionGroup(eq("cg_prior"), eq(ETAG), eq("aip_prior"), eq(Boolean.FALSE),
+                eq(Boolean.TRUE), eq("E12X3MPWexample"), ArgumentMatchers.isNull(), any()))
+                .thenAnswer(inv -> withIdentity(prior, g -> g.setEtag(NEW_ETAG)));
+
+        StackResource r = resource(CONNECTION_GROUP_TYPE, "cg_prior", Map.of("Id", "cg_prior"));
+        provisioner.provision(r, json("""
+                {"Name": "edge-group", "Enabled": false, "ViewerFallback": {"DistributionId": "E12X3MPWexample"}}
+                """), connectionCtx("cg_prior"));
+
+        verify(cloudFront, never()).createConnectionGroup(any(), any(), any(), any(), any(), any());
+        assertEquals("cg_prior", r.getPhysicalId());
+        assertEquals(NEW_ETAG, r.getAttributes().get("ETag"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void anUpdateReconcilesTheGroupsTags() throws Exception {
+        ConnectionGroup prior = connectionGroup("cg_prior", ETAG);
+        prior.setName("edge-group");
+        prior.setArn("arn:aws:cloudfront::000000000000:connection-group/cg_prior");
+        when(cloudFront.getConnectionGroup("cg_prior")).thenReturn(prior);
+        when(cloudFront.updateConnectionGroup(eq("cg_prior"), eq(ETAG), ArgumentMatchers.isNull(),
+                ArgumentMatchers.isNull(), ArgumentMatchers.isNull(), ArgumentMatchers.isNull(),
+                ArgumentMatchers.isNull(), any())).thenReturn(prior);
+
+        StackResource r = resource(CONNECTION_GROUP_TYPE, "cg_prior", Map.of("Id", "cg_prior"));
+        provisioner.provision(r, json("""
+                {"Name": "edge-group", "Tags": [{"Key": "Env", "Value": "test"}]}
+                """), connectionCtx("cg_prior"));
+
+        ArgumentCaptor<Map<String, String>> tags =
+                ArgumentCaptor.forClass((Class<Map<String, String>>) (Class<?>) Map.class);
+        verify(cloudFront).updateConnectionGroup(eq("cg_prior"), eq(ETAG), ArgumentMatchers.isNull(),
+                ArgumentMatchers.isNull(), ArgumentMatchers.isNull(), ArgumentMatchers.isNull(),
+                ArgumentMatchers.isNull(), tags.capture());
+        assertEquals(Map.of("Env", "test"), tags.getValue());
+    }
+
+    @Test
+    void anUpdateWithAnExplicitlyNullViewerFallbackClearsIt() throws Exception {
+        ConnectionGroup prior = connectionGroup("cg_prior", ETAG);
+        prior.setName("edge-group");
+        prior.setViewerFallbackDistributionId("E12X3MPWexample");
+        when(cloudFront.getConnectionGroup("cg_prior")).thenReturn(prior);
+        when(cloudFront.updateConnectionGroup(eq("cg_prior"), eq(ETAG), ArgumentMatchers.isNull(),
+                ArgumentMatchers.isNull(), ArgumentMatchers.isNull(), ArgumentMatchers.isNull(),
+                eq(Boolean.TRUE), any())).thenReturn(prior);
+
+        StackResource r = resource(CONNECTION_GROUP_TYPE, "cg_prior", Map.of("Id", "cg_prior"));
+        provisioner.provision(r, json("""
+                {"Name": "edge-group", "ViewerFallback": null}
+                """), connectionCtx("cg_prior"));
+
+        verify(cloudFront).updateConnectionGroup(eq("cg_prior"), eq(ETAG), ArgumentMatchers.isNull(),
+                ArgumentMatchers.isNull(), ArgumentMatchers.isNull(), ArgumentMatchers.isNull(),
+                eq(Boolean.TRUE), any());
+    }
+
+    @Test
+    void aChangedNameCreatesANewGroupAndOwesTheOldOneCleanup() throws Exception {
+        ConnectionGroup prior = connectionGroup("cg_prior", ETAG);
+        prior.setName("edge-group");
+        prior.setEnabled(false);
+        when(cloudFront.getConnectionGroup("cg_prior")).thenReturn(prior);
+        ConnectionGroup created = connectionGroup("cg_new", NEW_ETAG);
+        created.setEnabled(false);
+        when(cloudFront.createConnectionGroup(eq("renamed-group"), any(), any(), any(), any(), any()))
+                .thenReturn(created);
+        when(cloudFront.getConnectionGroup("cg_new")).thenReturn(created);
+        StackResource r = resource(CONNECTION_GROUP_TYPE, "cg_prior", Map.of("Id", "cg_prior"));
+
+        provisioner.provision(r, json("""
+                {"Name": "renamed-group", "Enabled": false}
+                """), connectionCtx("cg_prior"));
+
+        verify(cloudFront, never()).updateConnectionGroup(any(), any(), any(), any(), any(), any(),
+                any(), any());
+        assertEquals("cg_new", r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r), "the old group is owed a cleanup");
+        assertEquals("cg_prior", provisioner.updateCleanupPhysicalId(r));
+        provisioner.completeUpdate(r);
+        verify(cloudFront).deleteConnectionGroup("cg_prior", ETAG);
+    }
+
+    @Test
+    void rollingBackANameReplacementDeletesTheNewGroupAndRestoresThePriorId() throws Exception {
+        ConnectionGroup prior = connectionGroup("cg_prior", ETAG);
+        prior.setName("edge-group");
+        prior.setEnabled(false);
+        when(cloudFront.getConnectionGroup("cg_prior")).thenReturn(prior);
+        ConnectionGroup created = connectionGroup("cg_new", NEW_ETAG);
+        created.setEnabled(false);
+        when(cloudFront.createConnectionGroup(eq("renamed-group"), any(), any(), any(), any(), any()))
+                .thenReturn(created);
+        when(cloudFront.getConnectionGroup("cg_new")).thenReturn(created);
+        StackResource r = resource(CONNECTION_GROUP_TYPE, "cg_prior", Map.of("Id", "cg_prior"));
+
+        provisioner.provision(r, json("""
+                {"Name": "renamed-group", "Enabled": false}
+                """), connectionCtx("cg_prior"));
+        assertEquals("cg_new", r.getPhysicalId());
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(cloudFront).deleteConnectionGroup("cg_new", NEW_ETAG);
+        assertEquals("cg_prior", r.getPhysicalId(), "the prior id is named again");
+        assertEquals("cg_prior", r.getAttributes().get("Id"));
+    }
+
+    @Test
+    void deleteOfAnEnabledGroupDisablesItFirstAndDeletesWithTheNewEtag() {
+        ConnectionGroup group = connectionGroup(ID, ETAG);
+        group.setEnabled(true);
+        when(cloudFront.getConnectionGroup(ID)).thenReturn(group);
+        ConnectionGroup disabled = connectionGroup(ID, NEW_ETAG);
+        disabled.setEnabled(false);
+        when(cloudFront.updateConnectionGroup(ID, ETAG, null, false, null, null)).thenReturn(disabled);
+
+        provisioner.delete(CONNECTION_GROUP_TYPE, ID, REGION);
+
+        verify(cloudFront).updateConnectionGroup(ID, ETAG, null, false, null, null);
+        verify(cloudFront).deleteConnectionGroup(ID, NEW_ETAG);
+    }
+
+    @Test
+    void deleteOfADisabledGroupGoesStraightToTheService() {
+        ConnectionGroup group = connectionGroup(ID, ETAG);
+        group.setEnabled(false);
+        when(cloudFront.getConnectionGroup(ID)).thenReturn(group);
+
+        provisioner.delete(CONNECTION_GROUP_TYPE, ID, REGION);
+
+        verify(cloudFront, never()).updateConnectionGroup(any(), any(), any(), any(), any(), any());
+        verify(cloudFront).deleteConnectionGroup(ID, ETAG);
+    }
+
+    @Test
+    void deletesConnectionGroupWithItsOwnNotFoundCodeTolerated() throws Exception {
+        when(cloudFront.getConnectionGroup(ID)).thenReturn(connectionGroup(ID, ETAG));
+
+        provisioner.delete(CONNECTION_GROUP_TYPE, ID, REGION);
+        verify(cloudFront).deleteConnectionGroup(ID, ETAG);
+
+        when(cloudFront.getConnectionGroup(ID)).thenThrow(
+                new AwsException("EntityNotFound", "The connection group " + ID + " does not exist.", 404));
+        provisioner.delete(CONNECTION_GROUP_TYPE, ID, REGION);
+        verify(cloudFront, Mockito.times(1)).deleteConnectionGroup(any(), any());
     }
 }

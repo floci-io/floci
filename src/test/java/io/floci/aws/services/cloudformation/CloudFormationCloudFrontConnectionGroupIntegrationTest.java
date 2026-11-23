@@ -1,24 +1,29 @@
 package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.services.cloudfront.CloudFrontService;
 import io.floci.aws.services.cloudfront.model.ConnectionGroup;
+import io.floci.aws.services.cloudfront.model.Distribution;
+import io.floci.aws.services.cloudfront.model.DistributionConfig;
+import io.floci.aws.testing.CfnRequests;
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
-import static io.restassured.RestAssured.given;
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * AWS::CloudFront::ConnectionGroup through the stack lifecycle: the exact {@code Ref} and
- * {@code Fn::GetAtt} values from the registry schema's read-only members, an in-place update, and
- * DeleteStack.
+ * {@code Fn::GetAtt} values from the registry schema's read-only members, an in-place update with
+ * its tags and {@code ViewerFallback} handling, a replacement when the create-only {@code Name}
+ * changes, and DeleteStack of a group that is still enabled.
  */
 @QuarkusTest
 class CloudFormationCloudFrontConnectionGroupIntegrationTest {
@@ -34,47 +39,140 @@ class CloudFormationCloudFrontConnectionGroupIntegrationTest {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-cloudfront-connection-group-" + suffix;
 
-        stackCall("CreateStack", stackName, template(suffix, true));
-        assertStatus(stackName, "CREATE_COMPLETE");
-        String describe = describeStacks(stackName);
+        CfnRequests.deploy("CreateStack", stackName, template(subName(suffix), true,
+                "[{\"Key\": \"Env\", \"Value\": \"test\"}]", null), CFN_AUTH, "CREATE_COMPLETE");
 
-        String groupId = output(describe, "GroupRef");
-        assertEquals(groupId, output(describe, "GroupId"));
+        String groupId = output(stackName, "GroupRef");
+        assertEquals(groupId, output(stackName, "GroupId"));
         ConnectionGroup group = cloudFrontService.getConnectionGroup(groupId);
         assertEquals("cfn-connection-group-" + suffix, group.getName());
         assertTrue(group.getEnabled());
         assertTrue(group.getIpv6Enabled());
         assertTrue(group.getArn().endsWith(":connection-group/" + groupId));
-        assertEquals(group.getArn(), output(describe, "GroupArn"));
-        assertEquals(group.getRoutingEndpoint(), output(describe, "GroupRoutingEndpoint"));
-        assertEquals(group.getStatus(), output(describe, "GroupStatus"));
-        assertEquals(String.valueOf(group.getIsDefault()), output(describe, "GroupIsDefault"));
-        assertEquals(group.getEtag(), output(describe, "GroupEtag"));
-        assertEquals(group.getCreatedTime().toString(), output(describe, "GroupCreatedTime"));
-        assertEquals(group.getLastModifiedTime().toString(), output(describe, "GroupLastModifiedTime"));
+        assertEquals(group.getArn(), output(stackName, "GroupArn"));
+        assertEquals(group.getRoutingEndpoint(), output(stackName, "GroupRoutingEndpoint"));
+        assertEquals(group.getStatus(), output(stackName, "GroupStatus"));
+        assertEquals(String.valueOf(group.getIsDefault()), output(stackName, "GroupIsDefault"));
+        assertEquals(group.getEtag(), output(stackName, "GroupEtag"));
+        assertEquals(group.getCreatedTime().toString(), output(stackName, "GroupCreatedTime"));
+        assertEquals(group.getLastModifiedTime().toString(), output(stackName, "GroupLastModifiedTime"));
+        assertEquals(Map.of("Env", "test"), cloudFrontService.listTagsForResource(group.getArn()));
 
-        stackCall("UpdateStack", stackName, template(suffix, false));
-        assertStatus(stackName, "UPDATE_COMPLETE");
+        CfnRequests.deploy("UpdateStack", stackName, template(subName(suffix), false,
+                "[{\"Key\": \"Team\", \"Value\": \"edge\"}]", null), CFN_AUTH, "UPDATE_COMPLETE");
         ConnectionGroup updated = cloudFrontService.getConnectionGroup(groupId);
-        assertEquals(groupId, output(describeStacks(stackName), "GroupRef"), "an update keeps the group");
+        assertEquals(groupId, output(stackName, "GroupRef"), "an update keeps the group");
         assertFalse(updated.getEnabled());
         assertTrue(updated.getIpv6Enabled());
+        assertEquals(Map.of("Team", "edge"), cloudFrontService.listTagsForResource(updated.getArn()));
+        assertEquals(Map.of("Team", "edge"), updated.getTags());
 
         deleteStack(stackName);
         assertEquals("EntityNotFound",
                 assertThrows(AwsException.class, () -> cloudFrontService.getConnectionGroup(groupId)).getErrorCode());
     }
 
-    private static String template(String suffix, boolean enabled) {
+    @Test
+    void viewerFallbackPresenceOnTheTemplateIsAuthoritative() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-cloudfront-connection-group-fallback-" + suffix;
+        String distributionId = createdDistributionId(suffix);
+        try {
+            CfnRequests.deploy("CreateStack", stackName, template(subName(suffix), false, "[]", null),
+                    CFN_AUTH, "CREATE_COMPLETE");
+            String groupId = output(stackName, "GroupRef");
+
+            CfnRequests.deploy("UpdateStack", stackName, template(subName(suffix), false, "[]",
+                    "{\"DistributionId\": \"" + distributionId + "\"}"), CFN_AUTH, "UPDATE_COMPLETE");
+            assertEquals(distributionId,
+                    cloudFrontService.getConnectionGroup(groupId).getViewerFallbackDistributionId());
+
+            CfnRequests.deploy("UpdateStack", stackName, template(subName(suffix), false, "[]", null),
+                    CFN_AUTH, "UPDATE_COMPLETE");
+            assertEquals(distributionId,
+                    cloudFrontService.getConnectionGroup(groupId).getViewerFallbackDistributionId(),
+                    "an update that drops ViewerFallback keeps the fallback");
+
+            CfnRequests.deploy("UpdateStack", stackName, template(subName(suffix), false, "[]",
+                    "{}"), CFN_AUTH, "UPDATE_COMPLETE");
+            assertNull(cloudFrontService.getConnectionGroup(groupId).getViewerFallbackDistributionId(),
+                    "a ViewerFallback the template still declares is authoritative");
+
+            deleteStack(stackName);
+        } finally {
+            cloudFrontService.removeDistribution(distributionId);
+        }
+    }
+
+    @Test
+    void aChangedNameReplacesTheGroup() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-cloudfront-connection-group-rename-" + suffix;
+
+        CfnRequests.deploy("CreateStack", stackName, template(subName(suffix), true, "[]", null),
+                CFN_AUTH, "CREATE_COMPLETE");
+        String firstId = output(stackName, "GroupRef");
+
+        String renamed = "renamed-" + suffix;
+        CfnRequests.deploy("UpdateStack", stackName, template(subName(renamed), true, "[]", null),
+                CFN_AUTH, "UPDATE_COMPLETE");
+        String secondId = output(stackName, "GroupRef");
+        assertEquals("cfn-connection-group-" + renamed, cloudFrontService.getConnectionGroup(secondId).getName());
+        assertEquals("EntityNotFound",
+                assertThrows(AwsException.class,
+                        () -> cloudFrontService.getConnectionGroup(firstId)).getErrorCode(),
+                "the displaced group is deleted once the update commits");
+
+        deleteStack(stackName);
+    }
+
+    @Test
+    void aStackWithAnEnabledGroupDeletesIt() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-cloudfront-connection-group-enabled-" + suffix;
+
+        CfnRequests.deploy("CreateStack", stackName, template(subName(suffix), true, "[]", null),
+                CFN_AUTH, "CREATE_COMPLETE");
+        String groupId = output(stackName, "GroupRef");
+        assertTrue(cloudFrontService.getConnectionGroup(groupId).getEnabled());
+
+        deleteStack(stackName);
+        assertEquals("EntityNotFound",
+                assertThrows(AwsException.class, () -> cloudFrontService.getConnectionGroup(groupId)).getErrorCode());
+    }
+
+    /** The name routes through an intrinsic, as a parameterized template would. */
+    private static String subName(String suffix) {
+        return "{\"Fn::Sub\": [\"cfn-connection-group-${Suffix}\", {\"Suffix\": \"" + suffix + "\"}]}";
+    }
+
+    private String createdDistributionId(String suffix) {
+        DistributionConfig config = new DistributionConfig();
+        config.setCallerReference("cfn-fallback-" + suffix);
+        Distribution dist = new Distribution();
+        dist.setConfig(config);
+        return cloudFrontService.createDistribution(dist, Map.of()).getId();
+    }
+
+    private static String output(String stackName, String key) {
+        return CfnRequests.output(CfnRequests.describe(stackName, CFN_AUTH), key);
+    }
+
+    private static String template(String nameJson, boolean enabled, String tagsJson,
+                                   String viewerFallbackJson) {
+        String viewerFallback = viewerFallbackJson == null ? ""
+                : "\"ViewerFallback\": " + viewerFallbackJson + ",";
         return """
                 {
                   "Resources": {
                     "Group": {
                       "Type": "AWS::CloudFront::ConnectionGroup",
                       "Properties": {
-                        "Name": "cfn-connection-group-%1$s",
-                        "Enabled": %2$s,
-                        "Ipv6Enabled": true
+                        "Name": %s,
+                        "Enabled": %s,
+                        "Ipv6Enabled": true,
+                        %s
+                        "Tags": %s
                       }
                     }
                   },
@@ -90,58 +188,10 @@ class CloudFormationCloudFrontConnectionGroupIntegrationTest {
                     "GroupLastModifiedTime": {"Value": {"Fn::GetAtt": "Group.LastModifiedTime"}}
                   }
                 }
-                """.formatted(suffix, enabled);
-    }
-
-    private static void assertStatus(String stackName, String expected) {
-        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
-        assertEquals(expected, state.status(), state.reason());
-    }
-
-    private static void stackCall(String action, String stackName, String template) {
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", action)
-            .formParam("StackName", stackName)
-            .formParam("TemplateBody", template)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
+                """.formatted(nameJson, enabled, viewerFallback, tagsJson);
     }
 
     private static void deleteStack(String stackName) {
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DeleteStack")
-            .formParam("StackName", stackName)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
-        CfnStackWaits.awaitStackDeleted(stackName);
-    }
-
-    private static String describeStacks(String stackName) {
-        return given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .extract().asString();
-    }
-
-    private static String output(String describeStacks, String key) {
-        String value = XmlParser.extractPairs(describeStacks, "Outputs", "OutputKey", "OutputValue").get(key);
-        if (value == null) {
-            throw new AssertionError("missing output " + key + " in " + describeStacks);
-        }
-        return value;
+        CfnStackWaits.deleteStack(stackName, CFN_AUTH);
     }
 }

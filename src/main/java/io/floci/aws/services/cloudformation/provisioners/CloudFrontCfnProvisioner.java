@@ -190,49 +190,75 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
                     id -> cloudFrontService.getKeyGroup(id).getEtag(),
                     cloudFrontService::deleteKeyGroup, NO_SUCH_KEY_GROUP);
             case FUNCTION -> deleteFunction(physicalId);
-            case CONNECTION_GROUP -> deleteWithEtag("connection group", physicalId,
-                    id -> cloudFrontService.getConnectionGroup(id).getEtag(),
-                    cloudFrontService::deleteConnectionGroup, ENTITY_NOT_FOUND);
+            case CONNECTION_GROUP -> deleteConnectionGroup(physicalId);
             default -> { }
         }
     }
 
     /**
+     * An enabled group refuses its delete with {@code ResourceNotDisabled}, so a stack delete, a
+     * replacement cleanup or a rollback disables it first with the etag it carries and deletes it
+     * with the fresh one the disable minted. Only the type's own not-found code is tolerated.
+     */
+    private void deleteConnectionGroup(String physicalId) {
+        CfnDeletes.safeDelete("connection group", physicalId, () -> {
+            ConnectionGroup group = cloudFrontService.getConnectionGroup(physicalId);
+            String etag = group.getEtag();
+            if (Boolean.TRUE.equals(group.getEnabled())) {
+                etag = cloudFrontService.updateConnectionGroup(physicalId, etag, null, false, null, null)
+                        .getEtag();
+            }
+            cloudFrontService.deleteConnectionGroup(physicalId, etag);
+        }, ENTITY_NOT_FOUND);
+    }
+
+    /**
      * The group the template names is created on first use and updated in place afterwards:
-     * {@code Name} is the only create-only property the registry schema declares, and an update
-     * keeps the id, so the physical id only changes when the prior group is already gone. The
-     * registry schema's read-only members ({@code Id}, {@code Arn}, {@code RoutingEndpoint},
-     * {@code Status}, {@code IsDefault}, {@code ETag} and the two timestamps) travel to
-     * {@code Fn::GetAtt} from the provisioned object.
+     * {@code Name} is the only create-only property the registry schema declares, so an update whose
+     * resolved {@code Name} differs from the prior group's replaces it, and the engine's replacement
+     * cleanup deletes the old group through {@link #deleteConnectionGroup} once the update commits.
+     * Otherwise the physical id only changes when the prior group is already gone. The registry
+     * schema's read-only members ({@code Id}, {@code Arn}, {@code RoutingEndpoint}, {@code Status},
+     * {@code IsDefault}, {@code ETag} and the two timestamps) travel to {@code Fn::GetAtt} from the
+     * provisioned object.
+     *
+     * <p>An update drives the tags to the template's desired set and treats a present
+     * {@code ViewerFallback} property as authoritative, so removing it clears the group's fallback
+     * distribution; an update whose template drops the property keeps the prior one.
      */
     private void provisionConnectionGroup(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String name = text(props, "Name");
-        String anycastIpListId = text(props, "AnycastIpListId");
-        Boolean enabled = text(props, "Enabled") == null ? null
-                : Boolean.parseBoolean(text(props, "Enabled"));
-        Boolean ipv6Enabled = text(props, "Ipv6Enabled") == null ? null
-                : Boolean.parseBoolean(text(props, "Ipv6Enabled"));
-        JsonNode viewerFallback = props.get("ViewerFallback");
+        String name = ctx.resolveOptional(props, "Name");
+        String anycastIpListId = ctx.resolveOptional(props, "AnycastIpListId");
+        Boolean enabled = ctx.resolveOptionalBoolean(props, "Enabled");
+        Boolean ipv6Enabled = ctx.resolveOptionalBoolean(props, "Ipv6Enabled");
+        JsonNode viewerFallbackRaw = props.get("ViewerFallback");
+        JsonNode viewerFallback = viewerFallbackRaw == null || viewerFallbackRaw.isNull()
+                ? viewerFallbackRaw : ctx.engine().resolveNode(viewerFallbackRaw);
+        boolean viewerFallbackDeclared = viewerFallback != null;
         String viewerFallbackDistributionId =
                 viewerFallback == null || viewerFallback.isNull() ? null
-                        : text(ctx.engine().resolveNode(viewerFallback), "DistributionId");
+                        : text(viewerFallback, "DistributionId");
+        Boolean clearViewerFallback = viewerFallbackDeclared && viewerFallbackDistributionId == null
+                ? Boolean.TRUE : null;
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
 
         ConnectionGroup provisioned;
         ConnectionGroup prior = prior(ctx, "connection group",
                 cloudFrontService::getConnectionGroup, ENTITY_NOT_FOUND);
         if (prior == null) {
-            if (name == null || name.isBlank()) {
-                throw new AwsException("ValidationError", CONNECTION_GROUP + " requires Name", 400);
-            }
+            requireConnectionGroupName(name);
             provisioned = cloudFrontService.createConnectionGroup(name, anycastIpListId,
-                    enabled, ipv6Enabled, viewerFallbackDistributionId, ctx.resolveTags(props, "Tags"));
+                    enabled, ipv6Enabled, viewerFallbackDistributionId, tags);
+        } else if (name != null && !name.isBlank() && !name.equals(prior.getName())) {
+            requireConnectionGroupName(name);
+            provisioned = cloudFrontService.createConnectionGroup(name, anycastIpListId,
+                    enabled, ipv6Enabled, viewerFallbackDistributionId, tags);
         } else {
             provisioned = cloudFrontService.updateConnectionGroup(prior.getId(), prior.getEtag(),
                     anycastIpListId != null ? anycastIpListId : prior.getAnycastIpListId(),
                     enabled != null ? enabled : prior.getEnabled(),
                     ipv6Enabled != null ? ipv6Enabled : prior.getIpv6Enabled(),
-                    viewerFallback == null ? prior.getViewerFallbackDistributionId()
-                            : viewerFallbackDistributionId);
+                    viewerFallbackDistributionId, clearViewerFallback, tags);
         }
         r.setPhysicalId(provisioned.getId());
         r.getAttributes().put("Id", provisioned.getId());
@@ -245,6 +271,12 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
                 provisioned.getCreatedTime() == null ? "" : provisioned.getCreatedTime().toString());
         r.getAttributes().put("LastModifiedTime",
                 provisioned.getLastModifiedTime() == null ? "" : provisioned.getLastModifiedTime().toString());
+    }
+
+    private static void requireConnectionGroupName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ValidationError", CONNECTION_GROUP + " requires Name", 400);
+        }
     }
 
     private void provisionResponseHeadersPolicy(StackResource r, JsonNode props, ProvisionContext ctx) {
