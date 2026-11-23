@@ -29,7 +29,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Supplier;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -371,8 +371,17 @@ class CloudWatchLogsMetricFilterTest {
         boolean present = expected != null && expected.has("Sum");
         List<String> recorded = present ? MetricFilterQueryAssertions.recorded(expected) : List.of();
         List<Statistic> statistics = MetricFilterQueryAssertions.STATISTICS.stream().map(Statistic::fromValue).toList();
-        List<Datapoint> points = awaitSeries(
-                () -> statistics(metric, minute, dimensions, statistics), expected, present, recorded, Duration.ofSeconds(10));
+        AtomicReference<List<Datapoint>> lastRead = new AtomicReference<>(List.of());
+        if (present) {
+            TestFixtures.await(() -> {
+                lastRead.set(statistics(metric, minute, dimensions, statistics));
+                return matchesSeries(lastRead.get(), expected, recorded);
+            }, metric + " at " + minute + " " + dimensions, "all recorded statistics " + expected,
+                    Duration.ofSeconds(10).toNanos(), 50, () -> "; last read: " + lastRead.get());
+        } else {
+            lastRead.set(statistics(metric, minute, dimensions, statistics));
+        }
+        List<Datapoint> points = lastRead.get();
         assertThat(points).as(metric + " at " + minute + " " + dimensions).hasSize(present ? 1 : 0);
         if (present) {
             Datapoint point = points.get(0);
@@ -403,17 +412,6 @@ class CloudWatchLogsMetricFilterTest {
             }
         }
         MetricFilterQueryAssertions.assertSeries(namespace, metric, minute, dimensions, expected);
-    }
-
-    static List<Datapoint> awaitSeries(Supplier<List<Datapoint>> read, JsonNode expected, boolean present,
-                                     List<String> recorded, Duration timeout) throws InterruptedException {
-        long deadline = System.nanoTime() + timeout.toNanos();
-        List<Datapoint> points = read.get();
-        while (present && !matchesSeries(points, expected, recorded) && System.nanoTime() < deadline) {
-            Thread.sleep(50);
-            points = read.get();
-        }
-        return points;
     }
 
     private static boolean matchesSeries(List<Datapoint> points, JsonNode expected, List<String> recorded) {
