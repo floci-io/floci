@@ -408,9 +408,16 @@ populated"), and one that names a `nodeRoleArn` without node pools with `Invalid
 Compute Config nodeRoleArn is not null or empty, nodePool value(s) must be provided."). A `computeConfig` with
 neither is accepted, as AWS accepts it for Auto Mode without its built-in node pools.
 
-In CloudFormation, `AWS::EKS::Cluster` leaves EKS Auto Mode out for now: it accepts `ComputeConfig`,
-`StorageConfig` and `KubernetesNetworkConfig.ElasticLoadBalancing` and ignores them, so a template that enables
-Auto Mode creates its cluster without it.
+`UpdateClusterConfig` turns Auto Mode on or off for an existing cluster and changes its node pools, taking
+`computeConfig`, `storageConfig` and `kubernetesNetworkConfig.elasticLoadBalancing` together as one update, which
+it records as an `AutoModeUpdate`. A member the request leaves out keeps its stored value, and while compute stays
+on, a `computeConfig` without `nodeRoleArn` keeps the cluster's role, which can't change while it is on. A request
+that changes nothing is refused with `InvalidRequestException` ("No changes needed for EKS Auto Mode
+configuration provided").
+
+In CloudFormation, `AWS::EKS::Cluster` creates its cluster with `ComputeConfig`, `StorageConfig` and
+`KubernetesNetworkConfig.ElasticLoadBalancing`, and an update changes them in place through `UpdateClusterConfig`:
+a property the template drops is read as disabled, and a stack rollback puts the configuration before back.
 
 With IAM enforcement on, `CreateCluster` checks `iam:PassRole` on the cluster role, passed to
 `eks.amazonaws.com`, and not yet on the node role. AWS's Service Reference lists both `ec2.amazonaws.com` and

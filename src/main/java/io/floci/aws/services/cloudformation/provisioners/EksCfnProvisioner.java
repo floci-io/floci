@@ -453,9 +453,9 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
      * The EKS Auto Mode change the template asks for, or null when it asks for none. ComputeConfig, StorageConfig
      * and KubernetesNetworkConfig.ElasticLoadBalancing are updated in place, not create-only, and go to
      * UpdateClusterConfig together, as its Auto Mode members: one the template drops is read as disabled. The
-     * request is sent only when what the template declares differs from the live cluster: whether each capability
-     * is on, and with compute on, its node pools and node role. A role the template leaves out is the live one,
-     * which UpdateClusterConfig keeps, so that is no change either.
+     * request is sent only when it changes the live cluster's configuration, as {@link EksService#changesAutoMode}
+     * decides with UpdateClusterConfig's own rules, and names the node role {@link EksService#keepingNodeRole}
+     * keeps.
      */
     private static AutoModeChange autoModeChange(JsonNode props, ProvisionContext ctx, PropertyChanges changes,
                                                  Cluster live) {
@@ -470,20 +470,12 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         ElasticLoadBalancing loadBalancing = declaredNetwork == null || declaredNetwork.getElasticLoadBalancing() == null
                 ? new ElasticLoadBalancing(false) : declaredNetwork.getElasticLoadBalancing();
         compute = compute == null ? new ComputeConfig(false, null, null) : compute;
-        ComputeConfig liveCompute = live.getComputeConfig();
-        if (Boolean.TRUE.equals(compute.enabled()) && liveCompute != null && Boolean.TRUE.equals(liveCompute.enabled())
-                && (compute.nodeRoleArn() == null || compute.nodeRoleArn().isEmpty())) {
-            // The role can't change while compute stays on, so a template that leaves it out keeps the live one, and
-            // names it: node pools are refused without one.
-            compute = new ComputeConfig(true, compute.nodePools(), liveCompute.nodeRoleArn());
-        }
         storage = storage == null || storage.blockStorage() == null ? new StorageConfig(new BlockStorage(false)) : storage;
-        KubernetesNetworkConfig liveNetwork = live.getKubernetesNetworkConfig();
-        if (autoModeOn(compute, storage, loadBalancing).equals(autoModeOn(live.getComputeConfig(), live.getStorageConfig(),
-                liveNetwork == null ? null : liveNetwork.getElasticLoadBalancing()))
-                && (!Boolean.TRUE.equals(compute.enabled()) || sameCompute(compute, live.getComputeConfig()))) {
+        if (!EksService.changesAutoMode(live, compute, storage, loadBalancing)) {
             return null;
         }
+        // A role the template leaves out is the live one; UpdateClusterConfig refuses node pools named without one.
+        compute = EksService.keepingNodeRole(live, compute);
         KubernetesNetworkConfig network = new KubernetesNetworkConfig();
         network.setElasticLoadBalancing(loadBalancing);
         return new AutoModeChange(compute, storage, network);
@@ -502,25 +494,6 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         JsonNode prior = change.prior() == null ? null : change.prior().get("ElasticLoadBalancing");
         JsonNode current = change.current() == null ? null : change.current().get("ElasticLoadBalancing");
         return !Objects.equals(prior, current);
-    }
-
-    private static List<Boolean> autoModeOn(ComputeConfig compute, StorageConfig storage,
-                                            ElasticLoadBalancing loadBalancing) {
-        return List.of(compute != null && Boolean.TRUE.equals(compute.enabled()),
-                storage != null && storage.blockStorage() != null && Boolean.TRUE.equals(storage.blockStorage().enabled()),
-                loadBalancing != null && Boolean.TRUE.equals(loadBalancing.enabled()));
-    }
-
-    /** With compute on in both: the same node pools, and the same role unless the template leaves it out. */
-    private static boolean sameCompute(ComputeConfig declared, ComputeConfig live) {
-        if (live == null) {
-            return false;
-        }
-        Set<String> declaredPools = declared.nodePools() == null ? Set.of() : new HashSet<>(declared.nodePools());
-        Set<String> livePools = live.nodePools() == null ? Set.of() : new HashSet<>(live.nodePools());
-        boolean roleKept = declared.nodeRoleArn() == null || declared.nodeRoleArn().isEmpty()
-                || declared.nodeRoleArn().equals(live.nodeRoleArn());
-        return declaredPools.equals(livePools) && roleKept;
     }
 
     private static boolean changed(PropertyChanges changes, String name) {

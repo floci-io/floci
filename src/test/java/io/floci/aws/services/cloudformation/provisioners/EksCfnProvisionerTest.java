@@ -168,15 +168,12 @@ class EksCfnProvisionerTest {
         provisioner.provision(r, before, ctx());
         when(eks.describeCluster("prod")).thenReturn(created);
         JsonNode after = props(PROD_ROLE + AUTO_MODE + "}");
-        ProvisionContext update = new ProvisionContext(ctx().engine(), "us-east-1", "000000000000", "my-stack",
-                "prod", event -> { }, before, PropertyChanges.between("AWS::EKS::Cluster", true, before, after));
-
-        provisioner.provision(r, after, update);
+        provisioner.provision(r, after, update(before, after));
 
         ArgumentCaptor<UpdateClusterConfigRequest> request = ArgumentCaptor.forClass(UpdateClusterConfigRequest.class);
         verify(eks).updateClusterConfig(eq("prod"), request.capture());
-        assertEquals(new ComputeConfig(true, List.of("general-purpose", "system"),
-                NODE_ROLE), request.getValue().computeConfig());
+        assertEquals(new ComputeConfig(true, List.of("general-purpose", "system"), NODE_ROLE),
+                request.getValue().computeConfig());
         assertEquals(new StorageConfig(new BlockStorage(true)), request.getValue().storageConfig());
         assertEquals(new ElasticLoadBalancing(true),
                 request.getValue().kubernetesNetworkConfig().getElasticLoadBalancing());
@@ -186,27 +183,13 @@ class EksCfnProvisionerTest {
 
     @Test
     void anUpdateThatOnlyLeavesOutTheNodeRoleChangesNoAutoMode() throws Exception {
-        Cluster created = new Cluster();
-        created.setName("prod");
-        created.setArn("arn:aws:eks:us-east-1:000000000000:cluster/prod");
-        when(eks.createCluster(any(CreateClusterRequest.class))).thenReturn(created);
-        StackResource r = resource("AWS::EKS::Cluster", "Control");
+        StackResource r = autoModeCluster();
         JsonNode before = props(PROD_ROLE + AUTO_MODE + "}");
-        provisioner.provision(r, before, ctx());
-        created.setComputeConfig(new ComputeConfig(true, List.of("general-purpose", "system"),
-                NODE_ROLE));
-        created.setStorageConfig(new StorageConfig(new BlockStorage(true)));
-        KubernetesNetworkConfig network = new KubernetesNetworkConfig();
-        network.setElasticLoadBalancing(new ElasticLoadBalancing(true));
-        created.setKubernetesNetworkConfig(network);
-        when(eks.describeCluster("prod")).thenReturn(created);
         // The same pools in another order, and no node role: the live one is kept.
         JsonNode after = props(PROD_ROLE + AUTO_MODE.replace("[\"general-purpose\", \"system\"], \"NodeRoleArn\": \""
                 + NODE_ROLE + "\"", "[\"system\", \"general-purpose\"]") + "}");
-        ProvisionContext update = new ProvisionContext(ctx().engine(), "us-east-1", "000000000000", "my-stack",
-                "prod", event -> { }, before, PropertyChanges.between("AWS::EKS::Cluster", true, before, after));
 
-        provisioner.provision(r, after, update);
+        provisioner.provision(r, after, update(before, after));
 
         verify(eks, never()).updateClusterConfig(any(), any());
     }

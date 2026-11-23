@@ -1281,23 +1281,17 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private static AutoMode requireAutoModeChange(Cluster cluster, UpdateClusterConfigRequest request) {
         AutoMode current = autoMode(cluster);
         ComputeConfig requested = request.computeConfig();
-        ComputeConfig compute = current.compute();
         if (requested != null) {
             requireNodePoolsWithRole(requested);
-            boolean staysOn = current.computeOn() && Boolean.TRUE.equals(requested.enabled());
             String role = requested.nodeRoleArn();
-            if (staysOn && role != null && !role.isEmpty() && !role.equals(current.compute().nodeRoleArn())) {
+            if (current.computeOn() && Boolean.TRUE.equals(requested.enabled()) && role != null && !role.isEmpty()
+                    && !role.equals(current.compute().nodeRoleArn())) {
                 throw new AwsException("InvalidParameterException",
                         "nodeRoleArn cannot be changed after the compute capability of EKS Auto Mode is enabled", 400);
             }
-            compute = staysOn && (role == null || role.isEmpty())
-                    ? new ComputeConfig(requested.enabled(), requested.nodePools(), current.compute().nodeRoleArn())
-                    : requested;
         }
-        ElasticLoadBalancing requestedLoadBalancing = elasticLoadBalancing(request.kubernetesNetworkConfig());
-        AutoMode next = new AutoMode(compute,
-                request.storageConfig() != null ? request.storageConfig() : current.storage(),
-                requestedLoadBalancing != null ? requestedLoadBalancing : current.loadBalancing());
+        AutoMode next = nextAutoMode(cluster, requested, request.storageConfig(),
+                elasticLoadBalancing(request.kubernetesNetworkConfig()));
         requireCapabilitiesTogether(next.compute(), next.storage(), next.loadBalancing());
         if (current.state().equals(next.state())) {
             throw new AwsException("InvalidRequestException",
@@ -1306,13 +1300,48 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         return next;
     }
 
+    /** The configuration an update leaves: a member it leaves null keeps the stored one; see {@link #keepingNodeRole}. */
+    private static AutoMode nextAutoMode(Cluster cluster, ComputeConfig compute, StorageConfig storage,
+                                         ElasticLoadBalancing loadBalancing) {
+        AutoMode current = autoMode(cluster);
+        return new AutoMode(compute == null ? current.compute() : keepingNodeRole(cluster, compute),
+                storage != null ? storage : current.storage(),
+                loadBalancing != null ? loadBalancing : current.loadBalancing());
+    }
+
+    /**
+     * The compute configuration an update leaves {@code cluster} with: while the compute capability stays on, one
+     * that names no node role keeps the cluster's, which can't change while it is on.
+     */
+    public static ComputeConfig keepingNodeRole(Cluster cluster, ComputeConfig requested) {
+        ComputeConfig live = cluster.getComputeConfig();
+        boolean staysOn = live != null && Boolean.TRUE.equals(live.enabled()) && Boolean.TRUE.equals(requested.enabled());
+        String role = requested.nodeRoleArn();
+        return staysOn && (role == null || role.isEmpty())
+                ? new ComputeConfig(requested.enabled(), requested.nodePools(), live.nodeRoleArn()) : requested;
+    }
+
+    /**
+     * Whether an UpdateClusterConfig naming these EKS Auto Mode members changes {@code cluster}'s configuration; it
+     * answers one that doesn't "No changes needed". A member left null keeps the stored one. Only that is decided
+     * here; UpdateClusterConfig checks the rest.
+     */
+    public static boolean changesAutoMode(Cluster cluster, ComputeConfig compute, StorageConfig storage,
+                                          ElasticLoadBalancing loadBalancing) {
+        return !autoMode(cluster).state().equals(nextAutoMode(cluster, compute, storage, loadBalancing).state());
+    }
+
+    private static void storeAutoMode(Cluster cluster, AutoMode autoMode) {
+        cluster.setComputeConfig(autoMode.compute());
+        cluster.setStorageConfig(autoMode.storage());
+        if (cluster.getKubernetesNetworkConfig() != null) {
+            cluster.getKubernetesNetworkConfig().setElasticLoadBalancing(autoMode.loadBalancing());
+        }
+    }
+
     /** Stores {@code next}, and returns the Auto Mode members the request names as the update's parameters. */
     private static List<UpdateParam> applyAutoMode(Cluster cluster, AutoMode next, UpdateClusterConfigRequest request) {
-        cluster.setComputeConfig(next.compute());
-        cluster.setStorageConfig(next.storage());
-        if (cluster.getKubernetesNetworkConfig() != null) {
-            cluster.getKubernetesNetworkConfig().setElasticLoadBalancing(next.loadBalancing());
-        }
+        storeAutoMode(cluster, next);
         List<UpdateParam> params = new ArrayList<>();
         if (request.computeConfig() != null) {
             params.add(new UpdateParam("ComputeConfig", json(request.computeConfig())));
@@ -1379,13 +1408,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     public synchronized void restoreAutoMode(String name, ComputeConfig compute, StorageConfig storage,
                                              ElasticLoadBalancing loadBalancing) {
         Cluster cluster = requireClusterInRequestRegion(name);
-        saveClusterIfNotDeleting(regionResolver.getAccountId(), clusterKey(cluster), current -> {
-            current.setComputeConfig(compute);
-            current.setStorageConfig(storage);
-            if (current.getKubernetesNetworkConfig() != null) {
-                current.getKubernetesNetworkConfig().setElasticLoadBalancing(loadBalancing);
-            }
-        });
+        saveClusterIfNotDeleting(regionResolver.getAccountId(), clusterKey(cluster),
+                current -> storeAutoMode(current, new AutoMode(compute, storage, loadBalancing)));
     }
 
     /** The log types a {@link Logging} setting enables; empty for a null setting. */
