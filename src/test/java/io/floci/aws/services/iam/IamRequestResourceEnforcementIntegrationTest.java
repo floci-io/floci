@@ -3309,6 +3309,135 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .formParam("DashboardName", name).formParam("DashboardBody", "{\"widgets\":[]}").post("/").then();
     }
 
+    /**
+     * An AWS Config rule is checked on the ARN Config stores it under, which ends in the id Config minted for it and
+     * not in its name, so a grant on that ARN lets the caller act on the rule a request names by name, and not on
+     * another.
+     */
+    @Test
+    void aConfigRuleIsCheckedOnTheArnConfigStoresItUnder() {
+        String rule = "res-rule-" + suffix();
+        config("PutConfigRule", "{\"ConfigRule\":{\"ConfigRuleName\":\"" + rule + "\",\"Source\":{\"Owner\":\"AWS\","
+                + "\"SourceIdentifier\":\"S3_BUCKET_VERSIONING_ENABLED\"}}}").statusCode(200);
+        cleanup.register(() -> config("DeleteConfigRule", "{\"ConfigRuleName\":\"" + rule + "\"}"));
+        String arn = config("DescribeConfigRules", "{\"ConfigRuleNames\":[\"" + rule + "\"]}").statusCode(200)
+                .extract().jsonPath().getString("ConfigRules[0].ConfigRuleArn");
+        assertTrue(arn.startsWith("arn:aws:config:" + REGION + ":" + ACCOUNT + ":config-rule/config-rule-"), arn);
+
+        User user = user("res-config-rule");
+        user.policy(allowOn("config:GetComplianceDetailsByConfigRule", arn));
+        send(user, "config", "StarlingDoveService.GetComplianceDetailsByConfigRule", "1.1",
+                "{\"ConfigRuleName\":\"" + rule + "\"}").statusCode(200);
+        refusedJson(send(user, "config", "StarlingDoveService.GetComplianceDetailsByConfigRule", "1.1",
+                "{\"ConfigRuleName\":\"" + rule + "-other\"}"), "config:GetComplianceDetailsByConfigRule");
+    }
+
+    /**
+     * A PutConfigRule naming one rule by its id and another by its name updates the rule its id names, as the
+     * PutConfigRule reference lets an update name its rule by id, so the rule it is checked on is the one it changes:
+     * a grant on the first rule does not let the caller change the second.
+     */
+    @Test
+    void aConfigRulePutUpdatesTheRuleItsIdNames() {
+        String first = configRule("res-rule-a-" + suffix());
+        String second = configRule("res-rule-b-" + suffix());
+        JsonNode firstRule = describeConfigRule(first);
+        User user = user("res-config-put");
+        user.policy(allowOn("config:PutConfigRule", firstRule.path("ConfigRuleArn").asText()));
+
+        send(user, "config", "StarlingDoveService.PutConfigRule", "1.1", "{\"ConfigRule\":{\"ConfigRuleId\":\""
+                + firstRule.path("ConfigRuleId").asText() + "\",\"ConfigRuleName\":\"" + second + "\","
+                + "\"Description\":\"changed\",\"Source\":{\"Owner\":\"AWS\","
+                + "\"SourceIdentifier\":\"S3_BUCKET_VERSIONING_ENABLED\"}}}").statusCode(200);
+        assertEquals("changed", describeConfigRule(first).path("Description").asText());
+        assertTrue(!"changed".equals(describeConfigRule(second).path("Description").asText()));
+    }
+
+    /**
+     * An AWS Config aggregation authorization is checked on the ARN Config gives it, in the caller's account with the
+     * account and Region it authorizes in its path, so a grant on that ARN lets the caller put it and not another.
+     */
+    @Test
+    void aConfigAggregationAuthorizationIsCheckedOnTheArnConfigGivesIt() {
+        String region = "eu-west-" + (1 + (int) (System.nanoTime() % 3));
+        cleanup.register(() -> config("DeleteAggregationAuthorization",
+                "{\"AuthorizedAccountId\":\"111122223333\",\"AuthorizedAwsRegion\":\"" + region + "\"}"));
+        User user = user("res-config-aggregation");
+        user.policy(allowOn("config:PutAggregationAuthorization", "arn:aws:config:" + REGION + ":" + ACCOUNT
+                + ":aggregation-authorization/111122223333/" + region));
+        String arn = send(user, "config", "StarlingDoveService.PutAggregationAuthorization", "1.1",
+                "{\"AuthorizedAccountId\":\"111122223333\",\"AuthorizedAwsRegion\":\"" + region + "\"}")
+                .statusCode(200).extract().jsonPath().getString("AggregationAuthorization.AggregationAuthorizationArn");
+        assertEquals("arn:aws:config:" + REGION + ":" + ACCOUNT + ":aggregation-authorization/111122223333/" + region,
+                arn);
+        refusedJson(send(user, "config", "StarlingDoveService.PutAggregationAuthorization", "1.1",
+                "{\"AuthorizedAccountId\":\"444455556666\",\"AuthorizedAwsRegion\":\"" + region + "\"}"),
+                "config:PutAggregationAuthorization");
+    }
+
+    /**
+     * An AWS Config recorder put is checked on the recorder its ConfigurationRecorder structure names, the ARN Config
+     * stores it under, so a grant on that ARN lets the caller update it, and a grant on another refuses it.
+     */
+    @Test
+    void aConfigRecorderPutIsCheckedOnTheRecorderItsStructureNames() {
+        String role = "arn:aws:iam::" + ACCOUNT + ":role/res-config-role";
+        String body = "{\"ConfigurationRecorder\":{\"name\":\"default\",\"roleARN\":\"" + role + "\"}}";
+        config("PutConfigurationRecorder", body).statusCode(200);
+        cleanup.register(() -> config("DeleteConfigurationRecorder", "{\"ConfigurationRecorderName\":\"default\"}"));
+        String arn = config("DescribeConfigurationRecorders", "{}").statusCode(200).extract().jsonPath()
+                .getString("ConfigurationRecorders[0].arn");
+        User user = user("res-config-recorder");
+        user.policy(allowOn("config:PutConfigurationRecorder", arn) + "," + allowOn("iam:PassRole", role));
+        send(user, "config", "StarlingDoveService.PutConfigurationRecorder", "1.1", body).statusCode(200);
+        user.policy(allowOn("config:PutConfigurationRecorder", arn + "0") + "," + allowOn("iam:PassRole", role));
+        refusedJson(send(user, "config", "StarlingDoveService.PutConfigurationRecorder", "1.1", body),
+                "config:PutConfigurationRecorder");
+    }
+
+    /** A config rule of the name, created as the admin and deleted after the test; its name. */
+    private String configRule(String name) {
+        config("PutConfigRule", "{\"ConfigRule\":{\"ConfigRuleName\":\"" + name + "\",\"Source\":{\"Owner\":\"AWS\","
+                + "\"SourceIdentifier\":\"S3_BUCKET_VERSIONING_ENABLED\"}}}").statusCode(200);
+        cleanup.register(() -> config("DeleteConfigRule", "{\"ConfigRuleName\":\"" + name + "\"}"));
+        return name;
+    }
+
+    private static JsonNode describeConfigRule(String name) {
+        try {
+            return new ObjectMapper().readTree(config("DescribeConfigRules", "{\"ConfigRuleNames\":[\"" + name
+                    + "\"]}").statusCode(200).extract().asString()).path("ConfigRules").path(0);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
+     * An AWS Config conformance pack is checked on the ARN Config stores it under, its name followed by the id Config
+     * minted for it, so a grant on that ARN lets the caller update the pack, and a pack Config holds none of is checked
+     * on its name with the id open.
+     */
+    @Test
+    void aConfigConformancePackIsCheckedOnTheArnConfigStoresItUnder() {
+        String pack = "res-pack-" + suffix();
+        String body = "\",\"TemplateS3Uri\":\"s3://templates/pack.yaml\"}";
+        config("PutConformancePack", "{\"ConformancePackName\":\"" + pack + body).statusCode(200);
+        cleanup.register(() -> config("DeleteConformancePack", "{\"ConformancePackName\":\"" + pack + "\"}"));
+        String arn = config("DescribeConformancePacks", "{\"ConformancePackNames\":[\"" + pack + "\"]}")
+                .statusCode(200).extract().jsonPath().getString("ConformancePackDetails[0].ConformancePackArn");
+
+        User user = user("res-config-pack");
+        user.policy(allowOn("config:PutConformancePack", arn));
+        send(user, "config", "StarlingDoveService.PutConformancePack", "1.1",
+                "{\"ConformancePackName\":\"" + pack + body).statusCode(200);
+        refusedJson(send(user, "config", "StarlingDoveService.PutConformancePack", "1.1",
+                "{\"ConformancePackName\":\"" + pack + "-other" + body), "config:PutConformancePack");
+    }
+
+    private static ValidatableResponse config(String operation, String body) {
+        return adminJson("config", "StarlingDoveService." + operation).body(body).post("/").then();
+    }
+
     private static ValidatableResponse glue(String operation, String body) {
         return adminJson("glue", "AWSGlue." + operation).body(body).post("/").then();
     }
