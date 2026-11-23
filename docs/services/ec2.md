@@ -1426,7 +1426,7 @@ Spot prices returned by `DescribeSpotPriceHistory` are synthetic and derived det
 | DeleteClientVpnEndpoint | Deletes an endpoint with no associated target networks. `DryRun=true` is answered with `DryRunOperation` and deletes nothing. |
 | AssociateClientVpnTargetNetwork | Associates a subnet and adds the route to its VPC through it. |
 | DescribeClientVpnTargetNetworks | Lists an endpoint's associations. `DryRun=true` is answered with `DryRunOperation`. |
-| DisassociateClientVpnTargetNetwork | Removes an association and the routes through its subnet. `DryRun=true` is answered with `DryRunOperation` before the endpoint is looked up, and disassociates nothing. |
+| DisassociateClientVpnTargetNetwork | Removes an association and the routes through its subnet. `DryRun=true` checks the endpoint and the association first, so an unknown one is refused as for the real call, and is otherwise answered with `DryRunOperation` and disassociates nothing. |
 | ApplySecurityGroupsToClientVpnTargetNetwork | Sets the security groups the endpoint applies in its VPC. `DryRun=true` is answered with `DryRunOperation` before the endpoint is looked up, and applies nothing. |
 | AuthorizeClientVpnIngress | Adds an authorization rule for a network, for one group or all. `DryRun=true` is answered with `DryRunOperation` and adds no rule. |
 | DescribeClientVpnAuthorizationRules | Lists an endpoint's authorization rules. `DryRun=true` is answered with `DryRunOperation`. |
