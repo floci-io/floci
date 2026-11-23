@@ -546,6 +546,25 @@ class EksClusterManagerTest {
         assertEquals(List.of("floci-k3s", "server"), cmdCaptor.getValue().subList(0, 2));
     }
 
+    @Test
+    void theBlockStorageManifestRunsTheConfiguredImagesUnderTheAutoModeProvisionerName() {
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
+        when(config.services().eks().blockStorageProvisionerImage()).thenReturn("mirror.test/local-path:v1");
+        when(config.services().eks().blockStorageHelperImage()).thenReturn("mirror.test/busybox:v2");
+        EksClusterManager manager = EksClusterManagers.create(Mockito.mock(ContainerBuilder.class),
+                Mockito.mock(ContainerLifecycleManager.class), Mockito.mock(ContainerDetector.class),
+                Mockito.mock(PortAllocator.class), Mockito.mock(DockerHostResolver.class),
+                Mockito.mock(EcrRegistryManager.class), config, new RegionResolver("us-east-1", "000000000000"));
+
+        String manifest = manager.blockStorageManifest();
+
+        assertTrue(manifest.contains("image: \"mirror.test/local-path:v1\""), manifest);
+        assertTrue(manifest.contains("image: \"mirror.test/busybox:v2\""), manifest);
+        assertTrue(manifest.contains("- --provisioner-name\n        - ebs.csi.eks.amazonaws.com\n"), manifest);
+        assertFalse(manifest.contains("%"), manifest);
+        assertFalse(manifest.contains("kind: StorageClass"), manifest);
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void startClusterDefaultStorageClassFlag(boolean defaultStorageClass) {

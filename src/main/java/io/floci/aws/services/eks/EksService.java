@@ -1138,6 +1138,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     + "change the supportType", 400);
         }
         AutoMode nextAutoMode = request.changesAutoMode() ? requireAutoModeChange(cluster, request) : null;
+        // Read before the write below, which may change this very object.
+        boolean blockStorageWasOn = blockStorageOn(cluster.getStorageConfig());
 
         Boolean finalPublicAccess = publicAccess;
         Boolean finalPrivateAccess = privateAccess;
@@ -1193,6 +1195,11 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     + "logging, accessConfig.authenticationMode, upgradePolicy.supportType and the EKS Auto Mode "
                     + "configuration only", 400);
         }
+        if (nextAutoMode != null && blockStorageOn(nextAutoMode.storage()) != blockStorageWasOn
+                && !config.services().eks().mock() && clusterManager != null && cluster.getContainerId() != null) {
+            // The running node gets the block storage provisioner, or loses it, as it would when it next starts.
+            clusterManager.applyBlockStorage(cluster.getContainerId(), requireClusterInRequestRegion(name));
+        }
         LOG.infov("Updated the configuration of EKS cluster {0}: {1}", cluster.getName(),
                 updates.stream().map(Update::type).toList());
         return updates;
@@ -1241,6 +1248,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                             && Boolean.TRUE.equals(storage.blockStorage().enabled()),
                     loadBalancing != null && Boolean.TRUE.equals(loadBalancing.enabled()));
         }
+    }
+
+    private static boolean blockStorageOn(StorageConfig storage) {
+        return storage != null && storage.blockStorage() != null && Boolean.TRUE.equals(storage.blockStorage().enabled());
     }
 
     private static AutoMode autoMode(Cluster cluster) {

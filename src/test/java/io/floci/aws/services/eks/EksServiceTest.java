@@ -404,6 +404,45 @@ class EksServiceTest {
     }
 
     @Test
+    void turningAutoModeOnGivesTheRunningNodeBlockStorageAndAPoolChangeDoesNotReapplyIt() {
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        var clusterStore = new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+        Cluster running = new Cluster();
+        running.setName("auto-running");
+        running.setArn("arn:aws:eks:us-east-1:000000000000:cluster/auto-running");
+        running.setStatus(ClusterStatus.ACTIVE);
+        running.setContainerId("k3s-auto-running");
+        running.setKubernetesNetworkConfig(new KubernetesNetworkConfig());
+        clusterStore.putForAccount("000000000000", EksService.clusterKey("us-east-1", "auto-running"), running);
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        EksAddonService addons = mock(EksAddonService.class);
+        when(addons.recordUpdate(any(), anyString(), any(), any(), any()))
+                .thenReturn(new Update("u", "Successful", "AutoModeUpdate", List.of(), 0, List.of()));
+        EksService service = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
+                new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
+                new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
+                        new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class), addons);
+        KubernetesNetworkConfig loadBalancing = new KubernetesNetworkConfig();
+        loadBalancing.setElasticLoadBalancing(new ElasticLoadBalancing(true));
+        String nodeRole = "arn:aws:iam::000000000000:role/eks-auto-node";
+
+        service.updateClusterConfig("auto-running", new UpdateClusterConfigRequest(null, null, null, null, null,
+                new ComputeConfig(true, List.of("general-purpose", "system"), nodeRole),
+                new StorageConfig(new BlockStorage(true)), loadBalancing));
+
+        ArgumentCaptor<Cluster> applied = ArgumentCaptor.forClass(Cluster.class);
+        verify(clusterManager).applyBlockStorage(eq("k3s-auto-running"), applied.capture());
+        assertEquals(Boolean.TRUE, applied.getValue().getStorageConfig().blockStorage().enabled());
+
+        service.updateClusterConfig("auto-running", new UpdateClusterConfigRequest(null, null, null, null, null,
+                new ComputeConfig(true, List.of("general-purpose"), nodeRole),
+                new StorageConfig(new BlockStorage(true)), loadBalancing));
+
+        verify(clusterManager, times(1)).applyBlockStorage(anyString(), any());
+    }
+
+    @Test
     void initRestoresPersistedClustersAfterARestart() {
         // A cluster restored from eks-clusters.json after a Floci/Docker restart (#2609) has no
         // container attached — init must re-latch it and hand it back to the readiness poller.
