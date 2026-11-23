@@ -182,6 +182,17 @@ Hive DDL runs against the Glue Data Catalog rather than the query engine, as it 
 
 Without `IF [NOT] EXISTS`, a table or partition that already exists, or does not, fails the query. Other `ALTER TABLE` statements are not supported.
 
+### Query executions and named queries under IAM enforcement
+
+With IAM enforcement on, a request naming a query execution by its `QueryExecutionId` (`GetQueryExecution`,
+`GetQueryResults`, `GetQueryRuntimeStatistics`, `StopQueryExecution`) or a named query by its `NamedQueryId`
+(`GetNamedQuery`, `UpdateNamedQuery`, `DeleteNamedQuery`) is checked on the workgroup it runs in,
+`arn:aws:athena:<region>:<account>:workgroup/<name>`, `primary` for one naming none, as the Service Authorization
+Reference gives these actions the workgroup. A query execution is checked on its workgroup in the Region it was
+started in, whichever Region the request is sent to, so a grant on another Region's workgroup of the same name does
+not reach it and a deny on its own workgroup holds. An id Athena holds none of names no workgroup, and the request is
+checked as one naming none.
+
 ### Glue permissions under IAM enforcement
 
 Athena runs a DDL statement against the Glue Data Catalog with the caller's identity, so with IAM enforcement on (`floci.services.iam.enforcement-enabled`) a statement of the default catalog also needs the Glue permissions Athena's user guide gives it in [Examples of database and table-level permissions](https://docs.aws.amazon.com/athena/latest/ug/fine-grained-access-to-glue-resources.html). Floci checks each action of the guide's example policy for the statement on each resource of it: the catalog, and the database and table the statement names. For example, `CREATE DATABASE` needs `glue:GetDatabase` and `glue:CreateDatabase`, and `CREATE TABLE` needs `glue:GetDatabase` and `glue:GetDatabases` on the catalog and database, and `glue:GetTables`, `glue:GetTable`, `glue:GetPartitions` and `glue:CreateTable` on the catalog, database and table. The guide's examples are what Floci requires in full, `glue:CreateDatabase` for `MSCK REPAIR TABLE` included, so a policy that grants less is refused even where AWS might allow it. As the guide says, `DROP TABLE` of a table without partitions needs no partition action.

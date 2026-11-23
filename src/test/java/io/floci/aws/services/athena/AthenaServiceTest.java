@@ -57,6 +57,7 @@ class AthenaServiceTest {
     private AthenaIcebergStatements icebergStatements;
     private S3Service s3Service;
     private AthenaService service;
+    private RegionResolver regionResolver;
 
     @BeforeEach
     void setUp() {
@@ -80,14 +81,34 @@ class AthenaServiceTest {
         when(services.athena()).thenReturn(athena);
         when(athena.mock()).thenReturn(false);
 
+        regionResolver = mock(RegionResolver.class);
         service = new AthenaService(storageFactory, duckClient, glueService, s3Service,
-                config, vertx, ddlBuilder, mock(RegionResolver.class), icebergStatements,
+                config, vertx, ddlBuilder, regionResolver, icebergStatements,
                 mock(IamEnforcementFilter.class));
     }
 
     @AfterEach
     void tearDown() {
         vertx.close();
+    }
+
+    @Test
+    void aQueryExecutionRecordsTheRegionItWasStartedIn() {
+        when(regionResolver.getRegion()).thenReturn("eu-west-1");
+        String id = service.startQueryExecution("SELECT 1", "primary", null, null);
+
+        assertTrue(service.findQueryExecution(id).isPresent());
+        assertEquals("eu-west-1", service.findQueryExecutionRegion(id).orElseThrow());
+        assertTrue(service.findQueryExecutionRegion("missing").isEmpty());
+    }
+
+    @Test
+    void aQueryExecutionStartedWithNoRegionRecordsNone() {
+        when(regionResolver.getRegion()).thenReturn(null);
+        String id = service.startQueryExecution("SELECT 1", "primary", null, null);
+
+        assertTrue(service.findQueryExecution(id).isPresent());
+        assertTrue(service.findQueryExecutionRegion(id).isEmpty());
     }
 
     @Test

@@ -112,6 +112,9 @@ public class AthenaService {
     private final StorageBackend<String, WorkGroup> workGroupStore;
     private final StorageBackend<String, DataCatalog> dataCatalogStore;
     private final StorageBackend<String, List<String>> resultColumnTypeStore;
+    // The Region each query execution was started in, by its id: the execution's own record is the API's shape, which
+    // carries none, and IAM checks a request naming the execution on its workgroup in that Region alone.
+    private final StorageBackend<String, String> queryRegionStore;
     private final FlociDuckClient duckClient;
     private final GlueService glueService;
     private final S3Service s3Service;
@@ -141,6 +144,8 @@ public class AthenaService {
         this.dataCatalogStore = storageFactory.create("athena", "data-catalogs.json",
                 new TypeReference<>() {});
         this.resultColumnTypeStore = storageFactory.create("athena", "query-result-column-types.json",
+                new TypeReference<>() {});
+        this.queryRegionStore = storageFactory.create("athena", "query-regions.json",
                 new TypeReference<>() {});
         this.duckClient = duckClient;
         this.glueService = glueService;
@@ -222,6 +227,11 @@ public class AthenaService {
             execution.setStatementType("DDL");
         }
         execution.getStatus().setState(QueryExecutionState.RUNNING);
+        // Recorded before the execution, so no lookup finds the execution without its Region.
+        String startedIn = regionResolver.getRegion();
+        if (startedIn != null) {
+            queryRegionStore.put(id, startedIn);
+        }
         queryStore.put(id, execution);
 
         if (hiveDdlStatement) {
@@ -359,6 +369,16 @@ public class AthenaService {
             LOG.debugv("Could not fetch tables for projection check on {0}: {1}", database, e.getMessage());
             return List.of();
         }
+    }
+
+    /** The stored query execution of the id; empty for one Athena holds none of. */
+    public Optional<QueryExecution> findQueryExecution(String id) {
+        return id == null ? Optional.empty() : queryStore.get(id);
+    }
+
+    /** The Region the query execution of the id was started in; empty for one whose Region Athena did not record. */
+    public Optional<String> findQueryExecutionRegion(String id) {
+        return id == null ? Optional.empty() : queryRegionStore.get(id);
     }
 
     public QueryExecution getQueryExecution(String id) {
