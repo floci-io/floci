@@ -5,7 +5,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -78,6 +80,15 @@ public class SessionCredential {
      * counting from the authentication itself.
      */
     private Instant mfaAuthenticatedAt;
+    /**
+     * The session tags this session was minted with, which its requests publish as
+     * {@code aws:PrincipalTag/<key>} beside the tags of the user or role it acts as. They are the
+     * session's own: "session tags are valid only for the current session", and a session carries
+     * them whether they came as a request member, as a SAML assertion's attributes or as a web
+     * identity token's claims. Empty for a session minted with none and for one stored before
+     * Floci recorded them.
+     */
+    private Map<String, String> sessionTags = new LinkedHashMap<>();
 
     public SessionCredential() {}
 
@@ -200,5 +211,13 @@ public class SessionCredential {
 
     public void setMfaAuthenticatedAt(Instant mfaAuthenticatedAt) {
         this.mfaAuthenticatedAt = mfaAuthenticatedAt;
+    }
+
+    public Map<String, String> getSessionTags() {
+        return sessionTags;
+    }
+
+    public void setSessionTags(Map<String, String> sessionTags) {
+        this.sessionTags = sessionTags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(sessionTags);
     }
 }

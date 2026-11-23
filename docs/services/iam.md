@@ -3840,12 +3840,16 @@ floci populates:
   `o-.../r-.../ou-.../`, which is the value the key's own published condition compares with
   `StringEquals`, and is `o-.../r-.../` for an account the organization holds at its root.
 - `aws:PrincipalTag/<key>`: the stored tags of the IAM user making the request, including a
-  `GetSessionToken` session, or of the role an assumed-role session represents. Tags are read
+  `GetSessionToken` session, or of the role an assumed-role session represents, with the session
+  tags the credentials were minted with over them. Tags are read
   from that identity's account and copied for the request; later requests see tag updates and
-  removals. Identity policies, resource policies and `AssumeRole` trust policies see the same
-  caller tags. A role session uses its role's tags, not those of the user that assumed it.
-  Untagged identities, account-root principals and federated users have no stored principal tags.
-  STS session tags, their overrides and transitive inheritance are not implemented.
+  removals, while the session tags are the session's own and do not change after it is minted.
+  Identity policies, resource policies and `AssumeRole` trust policies see the same
+  caller tags. A role session uses its role's tags, not those of the user that assumed it, and a
+  federated user carries the tags of the user whose key minted it. An account-root principal has
+  no stored tags and no way to pass one. A session tag replaces the identity's tag of that key
+  whatever its case; [STS](sts.md#session-tags) has where each operation takes its session tags
+  from, and the transitive inheritance that is not implemented.
 - `aws:PrincipalType` and `aws:userid`: resolved from the same lookup as `aws:PrincipalArn`, so
   they always describe the same credential. The values follow the user guide's principal key
   values list: `Account` with the account id for the account-root principal and for a session

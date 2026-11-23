@@ -5156,6 +5156,35 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
+     * Records the session tags {@code sessionAccessKeyId} was minted with, which its requests then
+     * publish as {@code aws:PrincipalTag/<key>}: "when you request a session, you can specify
+     * principal tags as the session tags. The tags apply to requests that you make using the
+     * session's credentials." Where they came from is the operation's business, a request member
+     * on one, a SAML assertion's attributes or a web identity token's claims on another, and what
+     * reaches here is the pairs themselves.
+     *
+     * <p>Two of those pairs whose keys differ only in case are one tag, the later winning, which is
+     * what a tag key is on an identity as well: "you cannot have separate Department and department
+     * tag keys", and a second such tag "replaces the first tag. A second tag is not added." Stored
+     * as two they would reach a policy as one key with the other's value dropped, and a Deny keyed
+     * on that value would stop matching.
+     */
+    public void recordSessionTags(String sessionAccessKeyId, Map<String, String> tags) {
+        if (sessionAccessKeyId == null || tags == null || tags.isEmpty()) {
+            return;
+        }
+        Map<String, String> oneTagPerKey = new LinkedHashMap<>();
+        tags.forEach((key, value) -> {
+            oneTagPerKey.keySet().removeIf(stored -> stored.equalsIgnoreCase(key));
+            oneTagPerKey.put(key, value);
+        });
+        sessions.get(sessionAccessKeyId).ifPresent(session -> {
+            session.setSessionTags(oneTagPerKey);
+            sessions.put(sessionAccessKeyId, session);
+        });
+    }
+
+    /**
      * When the credentials {@code accessKeyId} names last authenticated with an MFA device, empty
      * for a session minted without one and for every long-term key. A session assumed from such a
      * session inherits the instant rather than taking the instant of the assume, so the age the
@@ -6497,8 +6526,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * @param userName      the request's {@code aws:username}, which only an IAM user has
      * @param permissionsBoundary whether a permissions boundary is attached to the user, or to the
      *                      role a session assumed, which a Deny's {@code NotPrincipal} never spares
-     * @param principalTags the stored user's or assumed role's tags, snapshotted for this request;
-     *                      STS session tags are not yet recorded
+     * @param principalTags the tags this request publishes, snapshotted for it: the stored user's
+     *                      or assumed role's, with the session tags its credentials were minted
+     *                      with over them
      * @param sessionMfa    what the credentials the request was signed with say about multi-factor
      *                      authentication, or null when they publish neither key
      * @param organization  the organization the principal's account belongs to, whose three keys go
@@ -6807,11 +6837,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return delegatedApproverArns(session);
         }
         if (isFederatedUserSession(session)) {
-            // A federated user has no aws:username at all, only the account:name userid.
+            // A federated user has no aws:username at all, only the account:name userid. Its
+            // principal tags are both halves the guide names: "the session principal tags include
+            // the user tags and the passed session tags".
             String federatedArn = session.getRoleArn();
             return Optional.of(new CallerArns(federatedArn, federatedArn,
                     CallerArns.TYPE_FEDERATED_USER,
-                    sessionUserId(session).orElse(null), null));
+                    sessionUserId(session).orElse(null), null, false,
+                    withSessionTags(issuingUser(session).map(IamUser::getTags).orElse(Map.of()),
+                            session.getSessionTags())));
         }
         String roleArn = session.getRoleArn();
         if (roleArn == null) {
@@ -6839,7 +6873,35 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return Optional.of(new CallerArns(sessionArn, roleArn, CallerArns.TYPE_ASSUMED_ROLE,
                 sessionUserId(session).orElse(null), null,
                 role.map(IamRole::getPermissionsBoundaryArn).isPresent(),
-                role.map(IamRole::getTags).orElse(Map.of())));
+                withSessionTags(role.map(IamRole::getTags).orElse(Map.of()), session.getSessionTags())));
+    }
+
+    /**
+     * The principal tags a session's requests publish: the tags of the identity it acts as, with
+     * its own session tags over them. The guide gives the order and the collision rule both. The
+     * principal tags of a session "come from any new session tags, the inherited transitive
+     * session tags, and the role tags", a session tag "overrides the role" tag of the same key,
+     * and a new session tag replaces an existing one "regardless of character case", which is how
+     * IAM compares a tag key on a user or a role as well: "tag key values for IAM users and roles
+     * are not case sensitive, but case is preserved", so the session's own spelling is the one
+     * published and the identity's tag of that key in any other spelling is the one dropped.
+     */
+    private static Map<String, String> withSessionTags(Map<String, String> identityTags,
+                                                       Map<String, String> sessionTags) {
+        if (sessionTags.isEmpty()) {
+            return identityTags;
+        }
+        Set<String> replaced = sessionTags.keySet().stream()
+                .map(key -> key.toLowerCase(Locale.ROOT))
+                .collect(Collectors.toSet());
+        Map<String, String> tags = new LinkedHashMap<>();
+        identityTags.forEach((key, value) -> {
+            if (!replaced.contains(key.toLowerCase(Locale.ROOT))) {
+                tags.put(key, value);
+            }
+        });
+        tags.putAll(sessionTags);
+        return tags;
     }
 
     /**

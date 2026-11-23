@@ -228,6 +228,7 @@ public class StsQueryHandler {
         iamService.registerSession(
                 accessKeyId, secretKey, sessionToken, sessionRoleArn, expiration, sessionPolicy, callerAccountId,
                 sessionName, assumedRoleId);
+        iamService.recordSessionTags(accessKeyId, requestTags(params));
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -319,8 +320,18 @@ public class StsQueryHandler {
      * {@code AssumeRoleWithSAML} inside the assertion rather than as a member of the request, and
      * the two operations that mint a session out of the caller's own credentials declare no state
      * at all, so a parameter STS would ignore cannot be made to cost a caller anything.
+     *
+     * <p>{@code carriedTags} is for the tags an operation takes from its message instead: they are
+     * state the session carries like any other, "session policies and session tags add to the
+     * session token size", and they are known only once the assertion or the token they arrived in
+     * has been verified, which is where those two operations read this.
      */
     private AssembledSession assembledSession(String action, MultivaluedMap<String, String> params) {
+        return assembledSession(action, params, Map.of());
+    }
+
+    private AssembledSession assembledSession(String action, MultivaluedMap<String, String> params,
+                                              Map<String, String> carriedTags) {
         StringBuilder state = new StringBuilder();
         if (StsRequestShapes.hasMember(action, "Policy")) {
             String document = params.getFirst("Policy");
@@ -337,8 +348,9 @@ public class StsQueryHandler {
             }
         }
         if (StsRequestShapes.hasMember(action, "Tags")) {
-            tagClaims(params).forEach((key, value) -> state.append(key).append(value));
+            requestTags(params).forEach((key, value) -> state.append(key).append(value));
         }
+        carriedTags.forEach((key, value) -> state.append(key).append(value));
         return new AssembledSession(sessionTokenLength(params)
                 + state.toString().getBytes(StandardCharsets.UTF_8).length);
     }
@@ -366,7 +378,11 @@ public class StsQueryHandler {
      * the refusal read the same request as over the limit.
      */
     private String sessionSizeXml(String action, MultivaluedMap<String, String> params) {
-        AssembledSession session = assembledSession(action, params);
+        return sessionSizeXml(action, assembledSession(action, params));
+    }
+
+    /** The same members, for an operation that measured its session itself. */
+    private String sessionSizeXml(String action, AssembledSession session) {
         XmlBuilder members = new XmlBuilder();
         if (PACKED_SESSION_OPERATIONS.contains(action)) {
             members.elem("PackedPolicySize", session.utilization());
@@ -502,13 +518,22 @@ public class StsQueryHandler {
         if (externalId != null) {
             trustContext.put("sts:ExternalId", List.of(externalId));
         }
-        if (trustPolicyEvaluator.allows(role.getAssumeRolePolicyDocument(), caller, callerAccount,
+        if (!trustPolicyEvaluator.allows(role.getAssumeRolePolicyDocument(), caller, callerAccount,
                 trustContext)) {
-            return null;
+            return AwsQueryResponse.error("AccessDenied",
+                    "User: " + callerArn + " is not authorized to perform: sts:AssumeRole on resource: " + roleArn,
+                    AwsNamespaces.STS, 403);
         }
-        return AwsQueryResponse.error("AccessDenied",
-                "User: " + callerArn + " is not authorized to perform: sts:AssumeRole on resource: " + roleArn,
-                AwsNamespaces.STS, 403);
+        // A request that carries session tags needs the trust policy's permission to carry them:
+        // "for roles without this permission in the trust policy, the AssumeRole operation fails".
+        if (!requestTags(params).isEmpty()
+                && !trustPolicyEvaluator.allowsTagging(role.getAssumeRolePolicyDocument(), caller,
+                        callerAccount, trustContext)) {
+            return AwsQueryResponse.error("AccessDenied", "User: " + callerArn
+                    + " is not authorized to perform: " + AssumeRolePolicyEvaluator.TAG_SESSION_ACTION
+                    + " on resource: " + roleArn, AwsNamespaces.STS, 403);
+        }
+        return null;
     }
 
     private String canonicalRoleArn(IamRole role, String accountId, String roleName) {
@@ -654,6 +679,15 @@ public class StsQueryHandler {
             return roleDurationError;
         }
 
+        // The token's tags are state its session has to carry, measured here because the
+        // pre-dispatch check reads the members a request declares and this operation declares no
+        // Tags member: what the token passed is known once it has been verified.
+        Map<String, String> carriedTags = verified != null ? verified.principalTags() : Map.of();
+        AssembledSession session = assembledSession("AssumeRoleWithWebIdentity", params, carriedTags);
+        if (session.tooLarge()) {
+            return session.refusal();
+        }
+
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = sessionToken(params);
@@ -672,6 +706,9 @@ public class StsQueryHandler {
         iamService.registerSession(
                 accessKeyId, secretKey, sessionToken, sessionRoleArn, expiration, sessionPolicy, callerAccountId,
                 sessionName, assumedRoleId);
+        // The token's own claims, this operation declaring no Tags member: a session tag reaches it
+        // "in the JSON Web Token (JWT) when you submit the AssumeRoleWithWebIdentity request".
+        iamService.recordSessionTags(accessKeyId, carriedTags);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -679,7 +716,7 @@ public class StsQueryHandler {
                   .elem("Arn", assumedRoleArn)
                   .elem("AssumedRoleId", assumedRoleId)
                 .end("AssumedRoleUser")
-                .raw(sessionSizeXml("AssumeRoleWithWebIdentity", params))
+                .raw(sessionSizeXml("AssumeRoleWithWebIdentity", session))
                 .elem("Provider", provider)
                 .elem("Audience", audience)
                 .elem("SubjectFromWebIdentityToken", subject)
@@ -707,7 +744,8 @@ public class StsQueryHandler {
     }
 
     /** The claims of a token Floci issued and verified, used to fill the response accurately. */
-    private record VerifiedWebIdentity(String issuer, String subject, String audience) {}
+    private record VerifiedWebIdentity(String issuer, String subject, String audience,
+                                       Map<String, String> principalTags) {}
 
     private record WebIdentityOutcome(VerifiedWebIdentity verified, IamRole role, Response denial) {
 
@@ -777,12 +815,21 @@ public class StsQueryHandler {
                 oidcProviderArn, issuerKeyPrefix, conditionClaims, sessionName)) {
             LOG.debugv("Trust policy on role {0} denies web identity subject {1}",
                     roleArn, claims.subject());
-            return WebIdentityOutcome.deny(accessDenied(roleArn));
+            return WebIdentityOutcome.deny(accessDenied("sts:AssumeRoleWithWebIdentity", roleArn));
+        }
+        if (!claims.principalTags().isEmpty()
+                && !webIdentityTrustEvaluator.allowsTagging(role.get().getAssumeRolePolicyDocument(),
+                        oidcProviderArn, issuerKeyPrefix, conditionClaims, sessionName)) {
+            LOG.debugv("Trust policy on role {0} does not permit tagging the session of subject {1}",
+                    roleArn, claims.subject());
+            return WebIdentityOutcome.deny(
+                    accessDenied(AssumeRolePolicyEvaluator.TAG_SESSION_ACTION, roleArn));
         }
 
         // verify() already required the audience list to contain STS_AUDIENCE.
         return WebIdentityOutcome.allow(
-                new VerifiedWebIdentity(claims.issuer(), claims.subject(), STS_AUDIENCE), role.get());
+                new VerifiedWebIdentity(claims.issuer(), claims.subject(), STS_AUDIENCE,
+                        claims.principalTags()), role.get());
     }
 
     private static String assumedRoleId(IamRole role, String sessionName) {
@@ -802,8 +849,13 @@ public class StsQueryHandler {
     }
 
     private Response accessDenied(String roleArn) {
+        return accessDenied("sts:AssumeRoleWithWebIdentity", roleArn);
+    }
+
+    /** The refusal this operation answers, for the assume itself or for the tagging it also needs. */
+    private Response accessDenied(String action, String roleArn) {
         return AwsQueryResponse.error("AccessDenied",
-                "Not authorized to perform sts:AssumeRoleWithWebIdentity on resource: " + roleArn,
+                "Not authorized to perform " + action + " on resource: " + roleArn,
                 AwsNamespaces.STS, 403);
     }
 
@@ -849,12 +901,20 @@ public class StsQueryHandler {
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
         IamRole role = iamService.findRole(accountId, roleName).orElseThrow(() ->
                 new AwsException("AccessDenied", "Not authorized to perform sts:AssumeRoleWithSAML on resource: " + roleArn, 403));
-        if (!samlTrustEvaluator.allows(role.getAssumeRolePolicyDocument(), principalArn, Map.of(
+        Map<String, List<String>> assertionClaims = Map.of(
                 "aud", List.of(STS_AUDIENCE),
                 "iss", List.of(verified.issuer()),
                 "sub", List.of(verified.subject()),
-                "namequalifier", List.of(verified.nameQualifier())), verified.roleSessionName())) {
+                "namequalifier", List.of(verified.nameQualifier()));
+        if (!samlTrustEvaluator.allows(role.getAssumeRolePolicyDocument(), principalArn, assertionClaims,
+                verified.roleSessionName())) {
             throw new AwsException("AccessDenied", "Not authorized to perform sts:AssumeRoleWithSAML on resource: " + roleArn, 403);
+        }
+        if (!verified.principalTags().isEmpty()
+                && !samlTrustEvaluator.allowsTagging(role.getAssumeRolePolicyDocument(), principalArn,
+                        assertionClaims, verified.roleSessionName())) {
+            throw new AwsException("AccessDenied", "Not authorized to perform "
+                    + AssumeRolePolicyEvaluator.TAG_SESSION_ACTION + " on resource: " + roleArn, 403);
         }
 
         Response roleDurationError = validateMaxSessionDuration(durationSeconds, role);
@@ -871,6 +931,14 @@ public class StsQueryHandler {
                 sessionName = sessionName.substring(0, 64);
             }
         }
+        // The assertion's tags are state the token has to carry, and they are known only here:
+        // the pre-dispatch check reads the members a request declares, and this operation declares
+        // no Tags member, so what the assertion passed is measured once it has been verified.
+        AssembledSession session = assembledSession("AssumeRoleWithSAML", params, verified.principalTags());
+        if (session.tooLarge()) {
+            return session.refusal();
+        }
+
         Instant requestedExpiration = clock.instant().plusSeconds(durationSeconds);
         Instant expiration = verified.expiration().isBefore(requestedExpiration) ? verified.expiration() : requestedExpiration;
         String accessKeyId = "ASIA" + randomId(16);
@@ -882,10 +950,12 @@ public class StsQueryHandler {
 
         iamService.registerSession(accessKeyId, secretKey, sessionToken, sessionRoleArn, expiration, null,
                 callerAccountId, sessionName, assumedRoleId);
+        // The assertion's own attributes, this operation declaring no Tags member either.
+        iamService.recordSessionTags(accessKeyId, verified.principalTags());
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
                 .start("AssumedRoleUser").elem("Arn", assumedRoleArn).elem("AssumedRoleId", assumedRoleId).end("AssumedRoleUser")
-                .raw(sessionSizeXml("AssumeRoleWithSAML", params)).elem("Issuer", verified.issuer())
+                .raw(sessionSizeXml("AssumeRoleWithSAML", session)).elem("Issuer", verified.issuer())
                 .elem("Audience", "urn:amazon:webservices")
                 .elem("NameQualifier", verified.nameQualifier()).elem("SubjectType", verified.subjectType()).elem("Subject", verified.subject()).build();
         return Response.ok(AwsQueryResponse.envelope("AssumeRoleWithSAML", AwsNamespaces.STS, result)).build();
@@ -935,6 +1005,7 @@ public class StsQueryHandler {
         // minted it, so the caller is recorded with it.
         iamService.registerIssuedSession(accessKeyId, secretKey, sessionToken, federatedUserArn, expiration,
                 sessionPolicy, accountId, callerAccessKeyId());
+        iamService.recordSessionTags(accessKeyId, requestTags(params));
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -1316,7 +1387,7 @@ public class StsQueryHandler {
                 WebIdentityTokenIssuer.Algorithm.valueOf(params.getFirst("SigningAlgorithm")),
                 federation.get().getIssuerIdentifier(), subject, audiences(params),
                 new WebIdentityTokenIssuer.CustomClaims(regionResolver.getAccountId(),
-                        regionResolver.getRegion(), tagClaims(params)),
+                        regionResolver.getRegion(), requestTags(params)),
                 issuedAt, expiration);
         LOG.debugv("Issued a web identity token for {0} expiring at {1}", subject, expiration);
         String result = new XmlBuilder()
@@ -1338,11 +1409,13 @@ public class StsQueryHandler {
     }
 
     /**
-     * The tags the request turns into claims, the last value winning for a key sent twice, which is
-     * how a Query map's duplicate key resolves elsewhere in this package. {@code Tag} declares both
-     * its fields required, so a member reaching here carries them.
+     * The tags the request's own {@code Tags} member carries, the last value winning for a key
+     * sent twice, which is how a Query map's duplicate key resolves elsewhere in this package.
+     * {@code Tag} declares both its fields required, so a member reaching here carries them. They
+     * are a session's tags where the operation mints one, and a minted token's claims where it
+     * mints a token.
      */
-    private static Map<String, String> tagClaims(MultivaluedMap<String, String> params) {
+    private static Map<String, String> requestTags(MultivaluedMap<String, String> params) {
         Map<String, String> claims = new LinkedHashMap<>();
         for (AwsQueryLists.IndexedMember tag : AwsQueryLists.members(params, "Tags", null)) {
             String key = params.getFirst(tag.prefix() + ".Key");

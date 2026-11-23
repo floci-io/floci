@@ -190,6 +190,95 @@ class WebIdentityTokenVerifierTest {
         assertTrue(thrown.getMessage().contains("not yet valid"));
     }
 
+    /**
+     * The session tags a token passes in the nested format, "a structure within the
+     * https://aws.amazon.com/tags namespace", where the tags sit "under the principal_tags key".
+     * The published example writes each value as an array holding one string while the prose calls
+     * each tag "a single string value", so both forms are read. The transitive keys beside them are
+     * not read.
+     */
+    @Test
+    void readsTheSessionTagsOfTheNestedClaimFormat() throws Exception {
+        KeyPair keyPair = newKeyPair();
+        String token = signRs256(keyPair.getPrivate(), claims(
+                "\"https://aws.amazon.com/tags\":{"
+                        + "\"principal_tags\":{\"Project\":[\"Automation\"],\"CostCenter\":\"987654\"},"
+                        + "\"transitive_tag_keys\":[\"Project\"]}"));
+
+        WebIdentityToken verified = verifier.verify(token, (RSAPublicKey) keyPair.getPublic(), ISSUER,
+                EksOidcService.STS_AUDIENCE);
+
+        assertEquals(Map.of("Project", "Automation", "CostCenter", "987654"), verified.principalTags());
+    }
+
+    /**
+     * A tag carrying anything but one string is a multi-valued session tag, which "AWS STS does not
+     * support", and the token is refused rather than verified with that tag quietly dropped: a tag
+     * a policy would have been evaluated with cannot go missing. A tag claim naming no key at all
+     * is refused the same way.
+     */
+    @Test
+    void refusesATokenWhoseSessionTagCarriesNoSingleValue() throws Exception {
+        KeyPair keyPair = newKeyPair();
+        String multiValued = signRs256(keyPair.getPrivate(), claims(
+                "\"https://aws.amazon.com/tags\":{\"principal_tags\":{\"Teams\":[\"one\",\"two\"]}}"));
+
+        WebIdentityTokenVerifier.InvalidTokenException thrown = assertThrows(
+                WebIdentityTokenVerifier.InvalidTokenException.class,
+                () -> verifier.verify(multiValued, (RSAPublicKey) keyPair.getPublic(), ISSUER,
+                        EksOidcService.STS_AUDIENCE));
+        assertTrue(thrown.getMessage().contains("Teams does not carry a single value"),
+                thrown.getMessage());
+
+        String keyless = signRs256(keyPair.getPrivate(),
+                claims("\"https://aws.amazon.com/tags/principal_tags/\":\"Automation\""));
+
+        assertTrue(assertThrows(WebIdentityTokenVerifier.InvalidTokenException.class,
+                () -> verifier.verify(keyless, (RSAPublicKey) keyPair.getPublic(), ISSUER,
+                        EksOidcService.STS_AUDIENCE))
+                .getMessage().contains("session tag with no key"));
+    }
+
+    /**
+     * And in the flattened format, "compatible with identity providers that don't support nested
+     * objects in JWT claims", where each tag is "a separate claim with the prefix
+     * https://aws.amazon.com/tags/principal_tags/" and the transitive keys are one claim of their
+     * own, which is not a tag.
+     */
+    @Test
+    void readsTheSessionTagsOfTheFlattenedClaimFormat() throws Exception {
+        KeyPair keyPair = newKeyPair();
+        String token = signRs256(keyPair.getPrivate(), claims(
+                "\"https://aws.amazon.com/tags/principal_tags/Project\":\"Automation\","
+                        + "\"https://aws.amazon.com/tags/principal_tags/Department\":\"Engineering\","
+                        + "\"https://aws.amazon.com/tags/transitive_tag_keys\":[\"Project\"]"));
+
+        WebIdentityToken verified = verifier.verify(token, (RSAPublicKey) keyPair.getPublic(), ISSUER,
+                EksOidcService.STS_AUDIENCE);
+
+        assertEquals(Map.of("Project", "Automation", "Department", "Engineering"),
+                verified.principalTags());
+    }
+
+    /** A token passing no tags carries none, which is every token this emulator mints itself. */
+    @Test
+    void aTokenWithoutTagClaimsCarriesNoSessionTags() throws Exception {
+        String token = mint("my-namespace", "my-service-account", null, null);
+
+        WebIdentityToken verified = verifier.verify(token, publicKey(), ISSUER,
+                EksOidcService.STS_AUDIENCE);
+
+        assertTrue(verified.principalTags().isEmpty());
+    }
+
+    /** A valid claim set carrying {@code extra} beside the three claims every token needs. */
+    private static String claims(String extra) {
+        long now = System.currentTimeMillis() / 1000;
+        return "{\"iss\":\"" + ISSUER + "\",\"aud\":[\"" + EksOidcService.STS_AUDIENCE + "\"],"
+                + "\"sub\":\"system:serviceaccount:my-namespace:my-service-account\","
+                + "\"exp\":" + (now + 3600) + "," + extra + "}";
+    }
+
     @Test
     void rejectsKeyFromAnotherCluster() {
         String otherIssuer = "https://oidc.eks.us-east-1.amazonaws.com/id/OTHERCLUSTER0000000000000000";

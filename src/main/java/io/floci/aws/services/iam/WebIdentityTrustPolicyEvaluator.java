@@ -32,6 +32,8 @@ public class WebIdentityTrustPolicyEvaluator {
 
     private static final Logger LOG = Logger.getLogger(WebIdentityTrustPolicyEvaluator.class);
     private static final String WEB_IDENTITY_ACTION = "sts:assumerolewithwebidentity";
+    /** What a trust policy also has to allow for the token's session tags to be taken. */
+    private static final String TAG_SESSION_ACTION = AssumeRolePolicyEvaluator.TAG_SESSION_ACTION;
     private static final String ROLE_SESSION_NAME_KEY = "sts:RoleSessionName";
 
     private final ObjectMapper objectMapper;
@@ -53,6 +55,23 @@ public class WebIdentityTrustPolicyEvaluator {
      */
     public boolean allows(String trustPolicyDocument, String oidcProviderArn, String issuerKeyPrefix,
                           Map<String, List<String>> claims, String roleSessionName) {
+        return allows(WEB_IDENTITY_ACTION, trustPolicyDocument, oidcProviderArn, issuerKeyPrefix, claims,
+                roleSessionName);
+    }
+
+    /**
+     * Whether the trust policy lets this token's holder tag the session it is assuming, read on the
+     * same document with the same principal and the same conditions as the assume itself.
+     */
+    public boolean allowsTagging(String trustPolicyDocument, String oidcProviderArn, String issuerKeyPrefix,
+                                 Map<String, List<String>> claims, String roleSessionName) {
+        return allows(TAG_SESSION_ACTION, trustPolicyDocument, oidcProviderArn, issuerKeyPrefix, claims,
+                roleSessionName);
+    }
+
+    private boolean allows(String action, String trustPolicyDocument, String oidcProviderArn,
+                           String issuerKeyPrefix, Map<String, List<String>> claims,
+                           String roleSessionName) {
         if (trustPolicyDocument == null || trustPolicyDocument.isBlank()) {
             return false;
         }
@@ -70,7 +89,7 @@ public class WebIdentityTrustPolicyEvaluator {
         boolean allow = false;
         if (statements.isArray()) {
             for (JsonNode stmt : statements) {
-                switch (evaluate(stmt, oidcProviderArn, issuerKeyPrefix, claims, roleSessionName)) {
+                switch (evaluate(action, stmt, oidcProviderArn, issuerKeyPrefix, claims, roleSessionName)) {
                     case DENY -> { return false; }
                     case ALLOW -> allow = true;
                     case NO_MATCH -> { }
@@ -79,16 +98,17 @@ public class WebIdentityTrustPolicyEvaluator {
             return allow;
         }
         if (statements.isObject()) {
-            return evaluate(statements, oidcProviderArn, issuerKeyPrefix, claims, roleSessionName) == Match.ALLOW;
+            return evaluate(action, statements, oidcProviderArn, issuerKeyPrefix, claims, roleSessionName)
+                    == Match.ALLOW;
         }
         return false;
     }
 
     private enum Match { ALLOW, DENY, NO_MATCH }
 
-    private Match evaluate(JsonNode stmt, String oidcProviderArn, String issuerKeyPrefix,
+    private Match evaluate(String action, JsonNode stmt, String oidcProviderArn, String issuerKeyPrefix,
                            Map<String, List<String>> claims, String roleSessionName) {
-        if (!actionApplies(stmt)) {
+        if (!actionApplies(stmt, action)) {
             return Match.NO_MATCH;
         }
         if (!matchesFederatedPrincipal(stmt.get("Principal"), oidcProviderArn)) {
@@ -101,29 +121,29 @@ public class WebIdentityTrustPolicyEvaluator {
     }
 
     /**
-     * True when the statement's action element covers {@code sts:AssumeRoleWithWebIdentity}. Action
-     * names are case-insensitive in AWS policy documents, and wildcards are honoured.
+     * True when the statement's action element covers {@code action}, the assume itself or the
+     * {@code sts:TagSession} a tagged assume also needs. Action names are case-insensitive in AWS
+     * policy documents, and wildcards are honoured.
      */
-    private boolean actionApplies(JsonNode stmt) {
-        JsonNode action = stmt.get("Action");
-        if (action != null) {
-            return matchesAction(action);
+    private boolean actionApplies(JsonNode stmt, String action) {
+        JsonNode element = stmt.get("Action");
+        if (element != null) {
+            return matchesAction(element, action);
         }
         JsonNode notAction = stmt.get("NotAction");
         if (notAction != null) {
-            return !matchesAction(notAction);
+            return !matchesAction(notAction, action);
         }
         return false;
     }
 
-    private boolean matchesAction(JsonNode actionNode) {
+    private boolean matchesAction(JsonNode actionNode, String action) {
         if (actionNode.isTextual()) {
-            return IamPolicyEvaluator.globMatches(actionNode.asText(), WEB_IDENTITY_ACTION);
+            return IamPolicyEvaluator.globMatches(actionNode.asText(), action);
         }
         if (actionNode.isArray()) {
             for (JsonNode entry : actionNode) {
-                if (entry.isTextual()
-                        && IamPolicyEvaluator.globMatches(entry.asText(), WEB_IDENTITY_ACTION)) {
+                if (entry.isTextual() && IamPolicyEvaluator.globMatches(entry.asText(), action)) {
                     return true;
                 }
             }
