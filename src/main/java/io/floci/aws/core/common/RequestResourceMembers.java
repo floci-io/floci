@@ -75,13 +75,18 @@ final class RequestResourceMembers {
     private static final Set<String> ARN_KEYS = Set.of("types", "arn", "made", "endpoint");
     /** The keys of a resource whose format's variables members fill, or its service finds by them. */
     private static final Set<String> FILL_KEYS = Set.of("type", "fill", "when", "unless", "arnOf", "account", "fixed",
-            "made", "find", "endpoint", "default", "whenDefault", "unlessDefault", "defaults", "partialArn");
+            "made", "find", "endpoint", "default", "whenDefault", "unlessDefault", "defaults", "partialArn", "path",
+            "renames");
+    /** The keys a resource whose one variable is a name after its path does not take: it is read no other way. */
+    private static final List<String> PATHED_ONLY = List.of("find", "default", "when", "unless", "partialArn");
     /** The keys of a resource named through a member naming another of its service's own: it is read no other way. */
     private static final Set<String> THROUGH_KEYS = Set.of("types", "through", "when", "endpoint");
     /** The keys of a resource a statement the request carries names, which its service parses. */
     private static final Set<String> STATEMENT_KEYS = Set.of("types", "statement", "verb", "names");
     /** The keys of a resource its service acts on for a request naming none of it: it is read no other way. */
     private static final Set<String> DEFAULT_KEYS = Set.of("type", "fill", "when", "default", "endpoint");
+    /** The keys of the user who signs a request, which an operation acts on: it is read no other way. */
+    private static final Set<String> SIGNER_KEYS = Set.of("types", "signer", "when");
 
     /**
      * A request selector that holds a string, an array when {@code list}, or map values when {@code map}.
@@ -245,14 +250,30 @@ final class RequestResourceMembers {
      * ({@code 123456789012:function:my-function}) or its Region too, which the reader completes in the request's
      * partition, and Region where the value leaves that out. A resource a {@code statement} the request carries names
      * is the one of its types whose every variable the service's parse of the statement names, by the word
-     * {@code names} gives each variable, when the statement's verb is {@code verb}.
+     * {@code names} gives each variable, when the statement's verb is {@code verb}. A type whose one variable is a
+     * name after its path takes the name its one member filling it gives after the path the member {@code path}
+     * gives (a create's {@code UserName} and {@code Path}: {@code user/<path><name>}); one a request
+     * {@code renames} is the resource the member it names gives, as its service holds it, with the name and the path
+     * the request gives each in place of its own (UpdateUser's {@code UserName}, renamed {@code NewUserName}, moved
+     * {@code NewPath}). A {@code signer} resource is the user whose access key signs the request, which its service
+     * gives, {@code when} the request leaves out the members that would name another.
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
                     Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
                     boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault,
                     Map<String, String> defaults, boolean partialArn, Member statement, String verb,
-                    Map<String, String> names) {
+                    Map<String, String> names, Member path, Member renames, boolean signer) {
+
+        Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
+                 Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
+                 Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
+                 boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault,
+                 Map<String, String> defaults, boolean partialArn, Member statement, String verb,
+                 Map<String, String> names) {
+            this(types, arn, fill, when, unless, arnOf, account, fixed, made, find, endpoint, through, byDefault,
+                    whenDefault, unlessDefault, defaults, partialArn, statement, verb, names, null, null, false);
+        }
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                  Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
@@ -772,6 +793,9 @@ final class RequestResourceMembers {
         if (resource.has("statement")) {
             return statementResource(operation, resource, formats);
         }
+        if (resource.has("signer")) {
+            return signerResource(operation, resource, formats);
+        }
         Set<String> keys = resource.has("through") ? THROUGH_KEYS : resource.has("arn") ? ARN_KEYS : FILL_KEYS;
         List<String> unknown = resource.properties().stream().map(Map.Entry::getKey)
                 .filter(key -> !keys.contains(key)).toList();
@@ -880,9 +904,33 @@ final class RequestResourceMembers {
             throw new IllegalStateException(RESOURCE_NAME + " reads " + type + " for " + operation
                     + " from a partial ARN " + resource.path("partialArn") + ", not true for a type its members fill");
         }
+        Member path = resource.has("path") ? member(operation, resource.path("path").asText("")) : null;
+        Member renames = resource.has("renames") ? member(operation, resource.path("renames").asText("")) : null;
+        if ((path != null || renames != null) && (fill.size() != 1 || (renames != null && path == null)
+                || (path != null && path.list()) || (renames != null && renames.list())
+                || PATHED_ONLY.stream().anyMatch(resource::has))) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads " + type + " for " + operation + " as a name after "
+                    + "the path " + resource.path("path") + ", no member of one value beside one filling its one "
+                    + "variable, or beside members reading it otherwise");
+        }
         return new Resource(List.of(type), null, Map.copyOf(fill), when, unless, Map.copyOf(arnOf), account,
                 Map.copyOf(fixed), made, List.copyOf(find), endpoint, null, byDefault, whenDefault, unlessDefault,
-                defaults(operation, type, resource.path("defaults"), fill, formats), partialArn);
+                defaults(operation, type, resource.path("defaults"), fill, formats), partialArn, null, null, Map.of(),
+                path, renames, false);
+    }
+
+    /** The user who signs a request, of one of {@code types}, {@code when} the request gives those members' values. */
+    private static Resource signerResource(String operation, JsonNode resource, Map<String, ArnFormat> formats) {
+        List<String> types = resource.path("types").valueStream().map(JsonNode::asText).toList();
+        if (types.size() != 1 || !formats.containsKey(types.getFirst()) || !resource.path("signer").isBoolean()
+                || !resource.path("signer").booleanValue() || resource.properties().stream()
+                        .map(Map.Entry::getKey).anyMatch(key -> !SIGNER_KEYS.contains(key))) {
+            throw new IllegalStateException(RESOURCE_NAME + " names the user signing a request of " + operation
+                    + " as " + types + ", no one type with a format, or beside members reading it otherwise");
+        }
+        return new Resource(types, null, Map.of(), values(operation, types.getFirst(), resource.path("when")),
+                Map.of(), Map.of(), null, Map.of(), false, List.of(), null, null, false, Map.of(), Map.of(), Map.of(),
+                false, null, null, Map.of(), null, null, true);
     }
 
     /**

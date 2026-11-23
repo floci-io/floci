@@ -87,6 +87,8 @@ class ResourceArnBuilderTest {
     private UriInfo uriInfo;
     private MultivaluedMap<String, String> queryParams;
     private Map<String, Object> contextProperties;
+    /** The form {@link #setFormBody} last sent, whose {@code Action} or {@code Operation} is what IAM dispatches. */
+    private String sentForm;
 
     @ParameterizedTest
     @CsvSource({"aws,us-east-1", "aws-us-gov,us-gov-west-1", "aws-cn,cn-north-1"})
@@ -124,6 +126,7 @@ class ResourceArnBuilderTest {
 
     /** Query-protocol services carry their parameters in a form body, as IAM does. */
     private void setFormBody(String form) {
+        sentForm = form;
         contextProperties.clear();
         byte[] bytes = form.getBytes(StandardCharsets.UTF_8);
         ByteArrayInputStream in = new ByteArrayInputStream(bytes);
@@ -183,18 +186,21 @@ class ResourceArnBuilderTest {
         stored.setArn(arn);
         IamService service = mock(IamService.class);
         when(service.findServerCertificate(name)).thenReturn(Optional.of(stored));
-        @SuppressWarnings("unchecked")
-        Instance<IamService> instance = mock(Instance.class);
-        when(instance.get()).thenReturn(service);
-        return new ResourceArnBuilder(new ObjectMapper(), instance);
+        return backedBy(service);
     }
 
-    /** A builder reading {@code service}, for the actions that name a resource that exists. */
+    /**
+     * A builder reading {@code service} through IAM's stored ARNs, as the filter's does, for the actions that name a
+     * resource that exists.
+     */
     private static ResourceArnBuilder backedBy(IamService service) {
         @SuppressWarnings("unchecked")
         Instance<IamService> instance = mock(Instance.class);
         when(instance.get()).thenReturn(service);
-        return new ResourceArnBuilder(new ObjectMapper(), instance);
+        @SuppressWarnings("unchecked")
+        Instance<DelegationRequestOwnership> delegations = mock(Instance.class);
+        when(delegations.isUnsatisfied()).thenReturn(true);
+        return reading(new IamStoredResourceArns(delegations, instance, new RegionResolver("us-east-1", ACCOUNT)));
     }
 
     private static IamService storeHolding(String userName, String path, String arn) {
@@ -210,7 +216,28 @@ class ResourceArnBuilderTest {
     /** The ARN the builder gives for the request in {@code form}, with one resource expected. */
     private String resourceOf(ResourceArnBuilder resourceArnBuilder, String form) {
         setFormBody(form);
-        return resourceArnBuilder.build("iam", ctx, "us-east-1", ACCOUNT);
+        return iamResource(resourceArnBuilder, "us-east-1", ACCOUNT);
+    }
+
+    /** The first of {@link #iamResources}, as the filter's single resource. */
+    private String iamResource(ResourceArnBuilder resourceArnBuilder, String region, String account) {
+        return iamResources(resourceArnBuilder, region, account).getFirst();
+    }
+
+    /**
+     * The resources the builder gives the IAM request set up, in the request's partition, for the operation IAM
+     * dispatches it as: the form's {@code Action}, or its legacy {@code Operation}, or else the query's.
+     */
+    private List<String> iamResources(ResourceArnBuilder resourceArnBuilder, String region, String account) {
+        String action = queryParams.getFirst("Action");
+        for (String parameter : sentForm == null ? new String[0] : sentForm.split("&")) {
+            if (parameter.startsWith("Action=") || parameter.startsWith("Operation=")) {
+                action = parameter.substring(parameter.indexOf('=') + 1);
+                break;
+            }
+        }
+        return resourceArnBuilder.buildResources("iam", "iam:" + action, ctx, region, account,
+                AwsRegions.partitionFor(region));
     }
 
     /**
@@ -251,22 +278,19 @@ class ResourceArnBuilderTest {
     @Test
     void iamNamesTheDelegationRequestABlockOfActionsActsOn() {
         String id = "dr-0123456789abcdef01234567";
-        // The forward is in this block now. AWS's "Managing Permissions for Delegation Requests"
-        // lists iam:UpdateDelegationRequest among the permissions an administrator grants, as
-        // "Forward a delegation request to an administrator for approval", so it is authorizable
-        // and names the request its id names, where this suite used to pin it at the wildcard on
-        // the belief that AWS published no action for it.
+        // The forward is one of them: the Service Reference does not list it, and its API reference says "that owner
+        // gets a default permission to update the delegation request" its DelegationRequestId names.
         for (String action : List.of("AssociateDelegationRequest", "AcceptDelegationRequest",
-                "RejectDelegationRequest", "GetDelegationRequest", "UpdateDelegationRequest")) {
+                "RejectDelegationRequest", "GetDelegationRequest", "SendDelegationToken", "UpdateDelegationRequest")) {
             assertEquals("arn:aws:iam::000000000000:delegation-request/" + id,
                     resourceOf(builder, "Action=" + action + "&DelegationRequestId=" + id), action);
         }
     }
 
     @Test
-    void iamLeavesADelegationRequestItIsAboutToMintAtTheWildcard() {
-        // IAM assigns the id, so the create names no resource to authorize against.
-        assertEquals("*", resourceOf(builder,
+    void iamLeavesTheIdOfADelegationRequestItIsAboutToMintOpen() {
+        // IAM assigns the id, so the create is checked on a request of any id.
+        assertEquals("arn:aws:iam::000000000000:delegation-request/*", resourceOf(builder,
                 "Action=CreateDelegationRequest&Description=d&RequestorWorkflowId=w"));
     }
 
@@ -353,7 +377,7 @@ class ResourceArnBuilderTest {
     void iamMintsACreateInTheRequestsPartition() {
         setFormBody("Action=CreateUser&UserName=bob");
         assertEquals("arn:aws-cn:iam::000000000000:user/bob",
-                builder.build("iam", ctx, "cn-north-1", ACCOUNT));
+                iamResource(builder, "cn-north-1", ACCOUNT));
     }
 
     /**
@@ -388,17 +412,37 @@ class ResourceArnBuilderTest {
     }
 
     /**
-     * A SAML provider's ARN is its bare name and an OIDC provider's is its URL without the
-     * scheme, neither of which carries a path. Minting them the way the pathed types are minted
-     * would name resources that do not exist.
+     * {@code SimulatePrincipalPolicy} is checked on each user, role or group its request names by ARN, as the table
+     * reads every member holding an ARN of a type the action acts on: its {@code PolicySourceArn}, and a
+     * {@code CallerArn} or {@code ResourceArns} entry naming one too. A resource of another service there names nothing
+     * of IAM's, so a simulation of S3 objects is checked on its source principal alone.
      */
     @Test
-    void iamMintsProviderArnsWithoutAPath() {
+    void iamChecksASimulationOnEachPrincipalItsRequestNames() {
+        String alice = "arn:aws:iam::000000000000:user/alice";
+        String bob = "arn:aws:iam::000000000000:user/bob";
+        setFormBody("Action=SimulatePrincipalPolicy&ActionNames.member.1=s3%3AGetObject"
+                + "&PolicySourceArn=" + URLEncoder.encode(alice, StandardCharsets.UTF_8)
+                + "&ResourceArns.member.1=" + URLEncoder.encode(bob, StandardCharsets.UTF_8)
+                + "&ResourceArns.member.2=arn%3Aaws%3As3%3A%3A%3Abucket%2Fkey");
+        assertEquals(List.of(alice, bob), iamResources(builder, "us-east-1", ACCOUNT));
+        setFormBody("Action=SimulatePrincipalPolicy&ActionNames.member.1=s3%3AGetObject"
+                + "&PolicySourceArn=" + URLEncoder.encode(alice, StandardCharsets.UTF_8)
+                + "&ResourceArns.member.1=arn%3Aaws%3As3%3A%3A%3Abucket%2Fkey");
+        assertEquals(List.of(alice), iamResources(builder, "us-east-1", ACCOUNT));
+    }
+
+    /**
+     * A SAML provider's ARN is its bare name, which carries no path. An OIDC provider's is its URL without the scheme,
+     * which no source the table reads says of the request's {@code Url}, so that create names nothing and is checked
+     * on {@code *}.
+     */
+    @Test
+    void iamNamesASamlProviderByItsNameAndAnOidcCreateByNothing() {
         assertEquals("arn:aws:iam::000000000000:saml-provider/corp",
                 resourceOf(builder, "Action=CreateSAMLProvider&Name=corp"));
-        assertEquals("arn:aws:iam::000000000000:oidc-provider/example.com/app",
-                resourceOf(builder, "Action=CreateOpenIDConnectProvider"
-                        + "&Url=https%3A%2F%2Fexample.com%2Fapp"));
+        assertEquals("*", resourceOf(builder, "Action=CreateOpenIDConnectProvider"
+                + "&Url=https%3A%2F%2Fexample.com%2Fapp"));
     }
 
     /**
@@ -411,8 +455,7 @@ class ResourceArnBuilderTest {
         String userArn = "arn:aws:iam::000000000000:user/bob";
         setFormBody("Action=UpdateUser&UserName=bob&NewUserName=robert");
         assertEquals(List.of(userArn, "arn:aws:iam::000000000000:user/robert"),
-                backedBy(storeHolding("bob", "/", userArn))
-                        .buildResources("iam", ctx, "us-east-1", ACCOUNT));
+                iamResources(backedBy(storeHolding("bob", "/", userArn)), "us-east-1", ACCOUNT));
 
         String groupArn = "arn:aws:iam::000000000000:group/managers";
         IamGroup group = new IamGroup();
@@ -423,31 +466,17 @@ class ResourceArnBuilderTest {
         when(store.findGroup(ACCOUNT, "managers")).thenReturn(Optional.of(group));
         setFormBody("Action=UpdateGroup&GroupName=managers&NewGroupName=mgrs");
         assertEquals(List.of(groupArn, "arn:aws:iam::000000000000:group/mgrs"),
-                backedBy(store).buildResources("iam", ctx, "us-east-1", ACCOUNT));
+                iamResources(backedBy(store), "us-east-1", ACCOUNT));
     }
 
     /**
-     * {@code CreateServiceLinkedRole} does not name the role it creates. AWS derives it from
-     * {@code AWSServiceName}, so the same table the create reads gives the name, and the role
-     * sits under the service-role path carrying the canonical principal.
+     * {@code CreateServiceLinkedRole} does not name the role it creates: AWS derives it from {@code AWSServiceName},
+     * which no source the table reads says, so the create is checked on a role with its path and name open.
      */
     @Test
-    void iamNamesTheRoleAServiceLinkedCreateWouldMint() {
-        assertEquals("arn:aws:iam::000000000000:role/aws-service-role/autoscaling.amazonaws.com/"
-                        + "AWSServiceRoleForAutoScaling",
-                resourceOf(builder, "Action=CreateServiceLinkedRole"
-                        + "&AWSServiceName=autoscaling.amazonaws.com"));
-        // A suffix is part of the name AWS mints, so it is part of the resource too.
-        assertEquals("arn:aws:iam::000000000000:role/aws-service-role/autoscaling.amazonaws.com/"
-                        + "AWSServiceRoleForAutoScaling_fleet",
-                resourceOf(builder, "Action=CreateServiceLinkedRole"
-                        + "&AWSServiceName=autoscaling.amazonaws.com&CustomSuffix=fleet"));
-        // A principal the table does not carry keeps the derived name, which is what the create
-        // mints for it: the two read the same table, so the check cannot name a different role.
-        assertEquals("arn:aws:iam::000000000000:role/aws-service-role/es.amazonaws.com/"
-                        + "AWSServiceRoleForEs",
-                resourceOf(builder,
-                        "Action=CreateServiceLinkedRole&AWSServiceName=es.amazonaws.com"));
+    void iamChecksAServiceLinkedCreateOnAnyRole() {
+        assertEquals("arn:aws:iam::000000000000:role/*", resourceOf(builder, "Action=CreateServiceLinkedRole"
+                + "&AWSServiceName=autoscaling.amazonaws.com&CustomSuffix=fleet"));
     }
 
     /**
@@ -487,7 +516,7 @@ class ResourceArnBuilderTest {
         iam.createUser("worker", "/");
 
         setFormBody("Action=GetAccessKeyLastUsed&AccessKeyId=AKIALEGACYEXAMPLE");
-        assertEquals(List.of("*"), backedBy(iam).buildResources("iam", ctx, "us-east-1", stranger));
+        assertEquals(List.of("*"), iamResources(backedBy(iam), "us-east-1", stranger));
         assertTrue(raw.get("AKIALEGACYEXAMPLE").isPresent(), "the lookup must leave the key unmoved");
         assertTrue(raw.get(stranger + "/AKIALEGACYEXAMPLE").isEmpty(), "the lookup must not copy the key");
     }
@@ -503,9 +532,8 @@ class ResourceArnBuilderTest {
     }
 
     /**
-     * An action whose resource the request does not name stays at {@code *}: the ones the
-     * reference gives no resource type, and the ones that default to the calling user, whose
-     * identity is the filter's to supply rather than this builder's.
+     * An action whose resource the request does not name stays at {@code *}: the ones the reference gives no resource
+     * type, and the ones acting on the user who signs them, with no stored ARNs to give that user.
      */
     @Test
     void iamFallsBackToTheWildcardWhenTheRequestNamesNoResource() {
@@ -517,22 +545,53 @@ class ResourceArnBuilderTest {
     }
 
     /**
-     * The deletion task identifier carries the role's path and name, in the format the action's
-     * reference publishes, which is the only thing left to name: the role itself is already gone
-     * by the time the status is asked for.
+     * The role a deletion task deleted, which IAM gives for the task it holds: the role itself is already gone by the
+     * time the status is asked for. A task IAM does not hold names nothing rather than half a resource.
      */
     @Test
     void iamNamesTheRoleADeletionTaskIdentifies() {
-        assertEquals("arn:aws:iam::000000000000:role/aws-service-role/lex.amazonaws.com/"
-                        + "AWSServiceRoleForLexBots",
-                resourceOf(builder, "Action=GetServiceLinkedRoleDeletionStatus&DeletionTaskId="
-                        + "task%2Faws-service-role%2Flex.amazonaws.com"
-                        + "%2FAWSServiceRoleForLexBots%2F12345678-1234-1234-1234-123456789012"));
-        // A malformed identifier names nothing rather than half a resource.
-        for (String taskId : List.of("task%2Faws-service-role%2F", "nonsense", "task%2Fother%2Fx")) {
-            assertEquals("*", resourceOf(builder,
-                    "Action=GetServiceLinkedRoleDeletionStatus&DeletionTaskId=" + taskId), taskId);
-        }
+        String task = "task/aws-service-role/lex.amazonaws.com/AWSServiceRoleForLexBots/"
+                + "12345678-1234-1234-1234-123456789012";
+        String role = "arn:aws:iam::000000000000:role/aws-service-role/lex.amazonaws.com/AWSServiceRoleForLexBots";
+        IamService store = mock(IamService.class);
+        when(store.findServiceLinkedRoleDeletionArn(task)).thenReturn(Optional.of(role));
+        when(store.findServiceLinkedRoleDeletionArn("nonsense")).thenReturn(Optional.empty());
+        assertEquals(role, resourceOf(backedBy(store), "Action=GetServiceLinkedRoleDeletionStatus&DeletionTaskId="
+                + URLEncoder.encode(task, StandardCharsets.UTF_8)));
+        assertEquals("*", resourceOf(backedBy(store),
+                "Action=GetServiceLinkedRoleDeletionStatus&DeletionTaskId=nonsense"));
+    }
+
+    /**
+     * An operation acting on the user who signs it when its request names none, as {@code GetUser} with no
+     * {@code UserName} and {@code ChangePassword} always do, is checked on that user's stored ARN, path included, or on
+     * the account root's for a key of the root; a role session's key names no user, and its {@code UserName}, given,
+     * names the user it gives.
+     */
+    @Test
+    void iamNamesTheUserWhoSignsARequestNamingNone() {
+        String bob = "arn:aws:iam::000000000000:user/team/bob";
+        IamService store = storeHolding("bob", "/team/", bob);
+        when(store.findUserNameByAccessKeyId("AKIABOB")).thenReturn(Optional.of("bob"));
+        when(store.resolveCallerArn("AKIAROOT")).thenReturn(Optional.of("arn:aws:iam::000000000000:root"));
+        when(store.resolveCallerArn("ASIASESSION"))
+                .thenReturn(Optional.of("arn:aws:sts::000000000000:assumed-role/app/s"));
+        ResourceArnBuilder stored = backedBy(store);
+        when(ctx.getHeaderString("Authorization")).thenReturn(signedBy("AKIABOB"));
+        assertEquals(bob, resourceOf(stored, "Action=GetUser"));
+        assertEquals(bob, resourceOf(stored, "Action=ChangePassword&OldPassword=a&NewPassword=b"));
+        assertEquals(bob, resourceOf(stored, "Action=ListAccessKeys"));
+        assertEquals("arn:aws:iam::000000000000:user/alice", resourceOf(stored, "Action=GetUser&UserName=alice"));
+        when(ctx.getHeaderString("Authorization")).thenReturn(signedBy("AKIAROOT"));
+        assertEquals("arn:aws:iam::000000000000:root", resourceOf(stored, "Action=GetUser"));
+        when(ctx.getHeaderString("Authorization")).thenReturn(signedBy("ASIASESSION"));
+        assertEquals("*", resourceOf(stored, "Action=GetUser"));
+    }
+
+    /** A SigV4 {@code Authorization} header signed with {@code accessKeyId}. */
+    private static String signedBy(String accessKeyId) {
+        return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20261123/us-east-1/iam/aws4_request, "
+                + "SignedHeaders=host, Signature=0";
     }
 
     /**
@@ -575,7 +634,7 @@ class ResourceArnBuilderTest {
     void iamNamesTheServerCertificateBeingActedOn() {
         String arn = "arn:aws:iam::000000000000:server-certificate/my-cert";
         setFormBody("Action=DeleteServerCertificate&ServerCertificateName=my-cert");
-        assertEquals(arn, backedBy("my-cert", arn).build("iam", ctx, "us-east-1", "000000000000"));
+        assertEquals(arn, iamResource(backedBy("my-cert", arn), "us-east-1", "000000000000"));
     }
 
     @Test
@@ -586,11 +645,11 @@ class ResourceArnBuilderTest {
                 "DeleteServerCertificate", "TagServerCertificate", "UntagServerCertificate",
                 "ListServerCertificateTags")) {
             setFormBody("Action=" + action + "&ServerCertificateName=c1");
-            assertEquals(arn, stored.build("iam", ctx, "us-east-1", "000000000000"), action);
+            assertEquals(arn, iamResource(stored, "us-east-1", "000000000000"), action);
         }
         // The upload is the one that mints rather than reads: nothing is stored yet.
         setFormBody("Action=UploadServerCertificate&ServerCertificateName=c1");
-        assertEquals(arn, builder.build("iam", ctx, "us-east-1", "000000000000"));
+        assertEquals(arn, iamResource(builder, "us-east-1", "000000000000"));
     }
 
     /**
@@ -617,7 +676,7 @@ class ResourceArnBuilderTest {
                     for (String region : List.of("us-east-1", "cn-north-1", "us-gov-west-1")) {
                         setFormBody(spelling + "=" + action + "&ServerCertificateName=c1");
                         assertEquals(storedArn,
-                                stored.build("iam", ctx, region, "000000000000"),
+                                iamResource(stored, region, "000000000000"),
                                 action + " named by " + spelling + ", signed in " + region);
                     }
                 }
@@ -637,7 +696,7 @@ class ResourceArnBuilderTest {
                 + "&NewServerCertificateName=new");
         assertEquals(
                 List.of(stored, "arn:aws:iam::000000000000:server-certificate/new"),
-                backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+                iamResources(backedBy("old", stored), "us-east-1", "000000000000"));
     }
 
     /** A move renames the path, so the destination path is named the same way. */
@@ -647,7 +706,7 @@ class ResourceArnBuilderTest {
         setFormBody("Action=UpdateServerCertificate&ServerCertificateName=old&NewPath=/team/");
         assertEquals(
                 List.of(stored, "arn:aws:iam::000000000000:server-certificate/team/old"),
-                backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+                iamResources(backedBy("old", stored), "us-east-1", "000000000000"));
     }
 
     /**
@@ -659,7 +718,7 @@ class ResourceArnBuilderTest {
         String stored = "arn:aws:iam::000000000000:server-certificate/old";
         setFormBody("Action=UpdateServerCertificate&ServerCertificateName=old");
         assertEquals(List.of(stored),
-                backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+                iamResources(backedBy("old", stored), "us-east-1", "000000000000"));
     }
 
     /**
@@ -674,16 +733,16 @@ class ResourceArnBuilderTest {
                 + "&NewServerCertificateName=new");
         assertEquals(
                 List.of(stored, "arn:aws-cn:iam::000000000000:server-certificate/new"),
-                backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+                iamResources(backedBy("old", stored), "us-east-1", "000000000000"));
     }
 
     @Test
     void missingGetRoleUsesItsNameButCannotAcceptAnInjectedPath() {
         setFormBody("Action=GetRole&RoleName=local-storage&Path=/injected/");
         assertEquals("arn:aws:iam::000000000000:role/local-storage",
-                builder.build("iam", ctx, "us-east-1", ACCOUNT));
+                iamResource(builder, "us-east-1", ACCOUNT));
         assertEquals("arn:aws-us-gov:iam::000000000000:role/local-storage",
-                builder.build("iam", ctx, "us-gov-west-1", ACCOUNT));
+                iamResource(builder, "us-gov-west-1", ACCOUNT));
     }
 
     @Test
@@ -767,14 +826,14 @@ class ResourceArnBuilderTest {
         queryParams.add("RoleName", "query-decoy");
         setFormBody("Operation=GetRole&RoleName=first&RoleName=duplicate&Path=/injected/");
         assertEquals("arn:aws:iam::111122223333:role/first",
-                builder.build("iam", ctx, "us-east-1", "111122223333"));
+                iamResource(builder, "us-east-1", "111122223333"));
         for (String action : List.of("DeleteRole", "ListRolePolicies", "TagRole", "UpdateRole")) {
             setFormBody("Action=" + action + "&RoleName=first&Path=/injected/");
             assertEquals("arn:aws:iam::" + ACCOUNT + ":role/first",
-                    builder.build("iam", ctx, "us-east-1", ACCOUNT), action);
+                    iamResource(builder, "us-east-1", ACCOUNT), action);
         }
         setFormBody("Action=GetRole");
-        assertEquals("*", builder.build("iam", ctx, "us-east-1", ACCOUNT));
+        assertEquals("*", iamResource(builder, "us-east-1", ACCOUNT));
     }
 
     @Test
@@ -786,7 +845,7 @@ class ResourceArnBuilderTest {
         queryParams.add("RoleName", "first");
         queryParams.add("RoleName", "duplicate");
         queryParams.add("Path", "/injected/");
-        assertEquals("arn:aws:iam::000000000000:role/first", builder.build("iam", ctx, "us-east-1", ACCOUNT));
+        assertEquals("arn:aws:iam::000000000000:role/first", iamResource(builder, "us-east-1", ACCOUNT));
         queryParams.clear();
         queryParams.add("Action", "CreateTags");
         queryParams.add("ResourceId.1", "i-first");
@@ -797,15 +856,13 @@ class ResourceArnBuilderTest {
                 builder.buildResources("ec2", "ec2:CreateTags", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
-    /**
-     * Nothing stored under that name means nothing to name: the operation fails as NoSuchEntity
-     * regardless, and minting an ARN for an absent resource would hand a policy something to match.
-     */
+    /** A certificate IAM does not hold is named as its name alone names it, under the root path. */
     @Test
-    void iamFallsBackToTheWildcardWhenNoCertificateIsStored() {
+    void iamNamesACertificateItDoesNotHoldUnderTheRootPath() {
         setFormBody("Action=DeleteServerCertificate&ServerCertificateName=absent");
-        assertEquals("*", backedBy("other", "arn:aws:iam::000000000000:server-certificate/other")
-                .build("iam", ctx, "us-east-1", "000000000000"));
+        assertEquals("arn:aws:iam::000000000000:server-certificate/absent",
+                iamResource(backedBy("other", "arn:aws:iam::000000000000:server-certificate/other"), "us-east-1",
+                        "000000000000"));
     }
 
     /**
@@ -817,17 +874,17 @@ class ResourceArnBuilderTest {
     void iamTakesTheUploadPathFromTheRequest() {
         setFormBody("Action=UploadServerCertificate&ServerCertificateName=c1&Path=/team/");
         assertEquals("arn:aws:iam::000000000000:server-certificate/team/c1",
-                builder.build("iam", ctx, "us-east-1", "000000000000"));
+                iamResource(builder, "us-east-1", "000000000000"));
 
         // Written without surrounding slashes, it still lands as a path segment.
         setFormBody("Action=UploadServerCertificate&ServerCertificateName=c1&Path=team");
         assertEquals("arn:aws:iam::000000000000:server-certificate/team/c1",
-                builder.build("iam", ctx, "us-east-1", "000000000000"));
+                iamResource(builder, "us-east-1", "000000000000"));
 
         // Omitted, it is the root path.
         setFormBody("Action=UploadServerCertificate&ServerCertificateName=c1");
         assertEquals("arn:aws:iam::000000000000:server-certificate/c1",
-                builder.build("iam", ctx, "us-east-1", "000000000000"));
+                iamResource(builder, "us-east-1", "000000000000"));
     }
 
     /**
@@ -838,11 +895,11 @@ class ResourceArnBuilderTest {
     void iamMintsAnUploadedCertificateArnInTheRequestPartition() {
         setFormBody("Action=UploadServerCertificate&ServerCertificateName=my-cert");
         assertEquals("arn:aws-cn:iam::000000000000:server-certificate/my-cert",
-                builder.build("iam", ctx, "cn-north-1", "000000000000"));
+                iamResource(builder, "cn-north-1", "000000000000"));
 
         setFormBody("Action=UploadServerCertificate&ServerCertificateName=my-cert");
         assertEquals("arn:aws-us-gov:iam::000000000000:server-certificate/my-cert",
-                builder.build("iam", ctx, "us-gov-west-1", "000000000000"));
+                iamResource(builder, "us-gov-west-1", "000000000000"));
     }
 
     /**
@@ -856,26 +913,20 @@ class ResourceArnBuilderTest {
         ResourceArnBuilder stored = backedBy("my-cert", arn);
 
         setFormBody("Action=DeleteServerCertificate&ServerCertificateName=my-cert");
-        assertEquals(arn, stored.build("iam", ctx, "cn-north-1", "000000000000"));
+        assertEquals(arn, iamResource(stored, "cn-north-1", "000000000000"));
 
         setFormBody("Action=DeleteServerCertificate&ServerCertificateName=my-cert");
-        assertEquals(arn, stored.build("iam", ctx, "us-gov-west-1", "000000000000"));
+        assertEquals(arn, iamResource(stored, "us-gov-west-1", "000000000000"));
     }
 
-    /**
-     * ListServerCertificates names no certificate, and every other IAM action is still unmapped,
-     * so both resolve to the wildcard rather than to a fabricated ARN.
-     */
+    /** ListServerCertificates names no certificate, nor does a delete leaving its name out: both are on {@code *}. */
     @Test
     void iamFallsBackToTheWildcardWhenNoCertificateIsNamed() {
         setFormBody("Action=ListServerCertificates&PathPrefix=/team/");
-        assertEquals("*", builder.build("iam", ctx, "us-east-1", "000000000000"));
-
-        setFormBody("Action=DeleteUser&UserName=bob");
-        assertEquals("*", builder.build("iam", ctx, "us-east-1", "000000000000"));
+        assertEquals("*", iamResource(builder, "us-east-1", "000000000000"));
 
         setFormBody("Action=DeleteServerCertificate");
-        assertEquals("*", builder.build("iam", ctx, "us-east-1", "000000000000"));
+        assertEquals("*", iamResource(builder, "us-east-1", "000000000000"));
     }
 
     private void setJsonBody(String json) {
@@ -1448,7 +1499,7 @@ class ResourceArnBuilderTest {
         @SuppressWarnings("unchecked")
         Instance<StoredResourceArns> instance = mock(Instance.class);
         when(instance.iterator()).thenAnswer(invocation -> List.of(stored).iterator());
-        return new ResourceArnBuilder(new ObjectMapper(), null, instance);
+        return new ResourceArnBuilder(new ObjectMapper(), instance);
     }
 
     /** The finder of the stored ARNs of a namespace, answering one name of one type with one ARN. */
@@ -1805,7 +1856,7 @@ class ResourceArnBuilderTest {
         Instance<RequestPathLabels> labels = mock(Instance.class);
         when(labels.isUnsatisfied()).thenReturn(false);
         when(labels.iterator()).thenAnswer(invocation -> List.of(s3Keys).iterator());
-        return new ResourceArnBuilder(new ObjectMapper(), null, null, labels);
+        return new ResourceArnBuilder(new ObjectMapper(), null, labels);
     }
 
     /** A current request whose path is {@code sentPath}, the path the server received. */

@@ -27,7 +27,7 @@ import java.util.Map;
  * <p>{@code make iam-action-resources-check} gates its shape offline and
  * {@code make iam-action-resources-verify} checks every claim in it against AWS, so a type that
  * drifts from what AWS publishes fails in CI rather than quietly authorizing against the wrong
- * resource. {@link ResourceArnBuilder} is the only consumer.
+ * resource. {@link SimulatedResourceTemplates} reads it for the templates a simulation names.
  *
  * <p>An action absent from the file is one AWS does not publish, which is different from an action
  * published with no resource type: the first is a gap, the second is a wildcard on purpose. Both

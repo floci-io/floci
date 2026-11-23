@@ -559,7 +559,8 @@ class RequestResourceMembersTest {
                     ArnFormat format = table.formats().get(namespace).get(type);
                     String arn = example(format.format());
                     String account = resource.account() != null ? "111122223333" : "000000000000";
-                    String expected = resource.arn() != null || resource.through() != null || resource.byDefault() ? arn
+                    String expected = resource.arn() != null || resource.through() != null || resource.byDefault()
+                            || resource.signer() ? arn
                             : expected(format.format(), resource, account) + (format.minted() ? "/*"
                                     : format.mintedSuffix() != null && resource.fill().size() == 1
                                     ? format.mintedSuffix() : "");
@@ -567,7 +568,8 @@ class RequestResourceMembersTest {
                     StringBuilder form = new StringBuilder("Action=" + name);
                     Map<Member, String> values = resource.arn() != null ? Map.of(resource.arn(), arn)
                             : resource.through() != null ? Map.of(resource.through(), "x")
-                            : Stream.concat(resource.fill().values().stream(), resource.find().stream()).distinct()
+                            : Stream.of(resource.fill().values().stream(), resource.find().stream(),
+                                    Stream.ofNullable(resource.renames())).flatMap(members -> members).distinct()
                                     .collect(Collectors.toMap(m -> m, m -> "x"));
                     Map<Member, String> given = new LinkedHashMap<>(values);
                     if (resource.account() != null) {
@@ -599,13 +601,15 @@ class RequestResourceMembersTest {
                         form.append('&').append(parameter).append('=').append(encoded(sent));
                     });
                     List<String> named = operation.getValue().stream()
-                            .filter(other -> (other == resource || named(other) || sharesAMember(other, given)
+                            .filter(other -> (other == resource || named(other) && !other.signer()
+                                    || signedFor(other, given) || sharesAMember(other, given)
                                     || fillsFromTheArn(other, resource, type)
                                     || !other.find().isEmpty() && other.find().equals(resource.find())
                                     && other.when().equals(resource.when()) && other.unless().equals(resource.unless()))
                                     && (other.endpoint() == null || resource.endpoint() == null
                                     || other.endpoint().equals(resource.endpoint())))
                             .flatMap(other -> other == resource ? inTheRequestsRegionToo(expected, resource).stream()
+                                    : other.signer() ? Stream.of(arn)
                                     : Stream.of(expected(table.formats().get(namespace).get(other.types().getFirst())
                                     .format(), other, "000000000000", given.keySet())))
                             .distinct().toList();
@@ -714,6 +718,17 @@ class RequestResourceMembersTest {
                 .map(other -> other.types().getFirst()).findFirst().orElse(resource.types().getFirst());
     }
 
+    /**
+     * Whether a request giving these members names the user who signs it: the resource is that user, and every member
+     * it is named {@code when} is absent from them, as each value list holds absent as {@code ""}.
+     */
+    private static boolean signedFor(Resource resource, Map<Member, String> given) {
+        Map<String, String> values = given.entrySet().stream()
+                .collect(Collectors.toMap(entry -> entry.getKey().name(), Map.Entry::getValue, (a, b) -> a));
+        return resource.signer() && resource.when().entrySet().stream()
+                .allMatch(member -> member.getValue().contains(values.getOrDefault(member.getKey(), "")));
+    }
+
     /** Whether every request of its operation names the resource: no member names it and no member's value selects it. */
     private static boolean named(Resource resource) {
         return resource.arn() == null && resource.fill().isEmpty() && resource.find().isEmpty()
@@ -721,11 +736,17 @@ class RequestResourceMembersTest {
     }
 
     /**
-     * A namespace's stored ARNs that find nothing, and give {@code arn} for whatever a request names a resource through
-     * and, when {@code defaults}, as the resource of any type the service acts on for a request naming none.
+     * A namespace's stored ARNs that find nothing, and give {@code arn} for whatever a request names a resource
+     * through, as the user whose key signs a request and, when {@code defaults}, as the resource of any type the
+     * service acts on for a request naming none.
      */
     private static StoredResourceArns runningOn(String namespace, String arn, boolean defaults) {
         return new StoredResourceArns() {
+            @Override
+            public Optional<String> signedBy(String accessKeyId) {
+                return Optional.of(arn);
+            }
+
             @Override
             public Optional<String> findDefault(String type, String region) {
                 return defaults ? Optional.of(arn) : Optional.empty();
@@ -946,6 +967,8 @@ class RequestResourceMembersTest {
         when(request.getMethod()).thenReturn("POST");
         when(request.getMediaType()).thenReturn(MediaType.valueOf(mediaType));
         when(request.getEntityStream()).thenAnswer(invocation -> new ByteArrayInputStream(bytes));
+        when(request.getHeaderString("Authorization"))
+                .thenReturn("AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20261123/us-east-1/iam/aws4_request");
         return request;
     }
 }

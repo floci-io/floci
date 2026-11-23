@@ -7,8 +7,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.TreeSet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -73,84 +71,6 @@ class IamActionResourcesTest {
         }
         assertEquals(List.of("arn:${Partition}:iam::${Account}:user/${UserNameWithPath}"),
                 formats.get("user"));
-    }
-
-    @Test
-    void everyCreateIsAuthorizedAgainstExactlyOneResourceType() {
-        // A create has nothing to read the resource off, so ResourceArnBuilder mints the ARN from
-        // the type AWS gives the action. One type is what lets it mint without being told which,
-        // and two would leave it picking. Iterated rather than restated: a create added to the
-        // resolver that AWS gives no single type falls back to the wildcard, which is the
-        // permissive answer and a silent one, so this is what says it out loud.
-        for (String create : ResourceArnBuilder.CREATE_PARAMETERS.keySet()) {
-            assertEquals(1, IamActionResources.typesOf(create).size(),
-                    create + " is no longer authorized against exactly one resource type, so "
-                            + "there is no single ARN for it to mint: "
-                            + IamActionResources.typesOf(create));
-        }
-    }
-
-    @Test
-    void anArnSpellsTheResourceTypeInFrontOfTheName() {
-        // What minting assumes. ResourceArnBuilder builds `:<type>/<name>`, which holds only
-        // while AWS spells that type's ARN the same way, and the reference publishes the format,
-        // so the assumption is checked rather than carried.
-        for (Map.Entry<String, List<String>> entry : IamActionResources.arnFormats().entrySet()) {
-            for (String arnFormat : entry.getValue()) {
-                assertTrue(arnFormat.contains(":" + entry.getKey() + "/"),
-                        "AWS spells a " + entry.getKey() + " ARN as " + arnFormat
-                                + ", which this resolver's minting does not match");
-            }
-        }
-    }
-
-    @Test
-    void everyResourceTypeInUseIsOneTheResolverCoversOrDeclaresUnresolved() {
-        // Read off the resolver's own tables rather than restated, so a type cannot be waved
-        // through by adding it to a list in this file. The resolver answers `*` for a type it
-        // does not know, which is the permissive answer and a silent one.
-        Set<String> covered = new TreeSet<>(ResourceArnBuilder.NAME_PARAMETERS.keySet());
-        covered.addAll(ResourceArnBuilder.UNRESOLVED_TYPES.keySet());
-        for (String action : ResourceArnBuilder.IAM_ARN_PARAMETERS.keySet()) {
-            covered.addAll(IamActionResources.typesOf(action));
-        }
-        for (String action : ResourceArnBuilder.CREATE_PARAMETERS.keySet()) {
-            covered.addAll(IamActionResources.typesOf(action));
-        }
-        for (String action : ResourceArnBuilder.DERIVED_RESOLVERS.keySet()) {
-            covered.addAll(IamActionResources.typesOf(action));
-        }
-        for (Map.Entry<String, List<String>> entry : IamActionResources.all().entrySet()) {
-            for (String resourceType : entry.getValue()) {
-                assertTrue(covered.contains(resourceType), "AWS authorizes " + entry.getKey()
-                        + " against '" + resourceType + "', which ResourceArnBuilder neither "
-                        + "resolves nor lists as unresolved, so the action falls back to *");
-            }
-        }
-    }
-
-    @Test
-    void theResourceTypesInUseAreTheOnesTheResolverKnowsAbout() {
-        // The upstream half of the same question: which types AWS uses at all. The test above
-        // catches a type nothing resolves; this one catches AWS changing the set, including a
-        // type disappearing, which leaves a dead entry behind rather than a gap.
-        Set<String> inUse = new TreeSet<>();
-        IamActionResources.all().values().forEach(inUse::addAll);
-        assertEquals(Set.of(
-                        // Named by a parameter the resolver reads.
-                        "user", "role", "group", "instance-profile", "server-certificate",
-                        // Named by an ARN the request carries, or minted by a create.
-                        "policy", "mfa", "sms-mfa", "saml-provider", "oidc-provider",
-                        // Named by a parameter that is not an IAM entity name.
-                        "access-report",
-                        // Derived from an id the request carries.
-                        "delegation-request",
-                        // Named by an ARN the request carries, in the aws account rather than the
-                        // caller's.
-                        "role-template"),
-                inUse,
-                "AWS has changed which resource types IAM actions are authorized against; "
-                        + "teach ResourceArnBuilder the new one or list it as unresolved");
     }
 
     @Test

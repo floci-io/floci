@@ -207,6 +207,33 @@ class IamOpenIDConnectProviderIntegrationTest {
             .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
     }
 
+    /**
+     * IdentityCenterInstanceArn names an IAM Identity Center instance; the ARN of a provider there is refused, and no
+     * provider is made for the request's Url.
+     */
+    @Test
+    @Order(9)
+    void anIdentityCenterInstanceArnNamingAnythingElseIsRejected() {
+        given()
+            .formParam("Action", "CreateOpenIDConnectProvider")
+            .formParam("Url", "https://oidc.example.com/id/spoofed")
+            .formParam("IdentityCenterInstanceArn", providerArn)
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+        given()
+            .formParam("Action", "GetOpenIDConnectProvider")
+            .formParam("OpenIDConnectProviderArn", providerArn.replace(OIDC_HOST, "oidc.example.com/id/spoofed"))
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404);
+    }
+
     @Test
     @Order(10)
     void deleteOpenIDConnectProvider() {
