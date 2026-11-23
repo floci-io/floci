@@ -58,6 +58,13 @@ class StsQueryHandlerTest {
     private static final Pattern SESSION_TOKEN =
             Pattern.compile("<SessionToken>([^<]+)</SessionToken>");
 
+    private static final Pattern SESSION_TOKEN_SIZE =
+            Pattern.compile("<SessionTokenSize>([^<]+)</SessionTokenSize>");
+    private static final Pattern SESSION_TOKEN_UTILIZATION =
+            Pattern.compile("<SessionTokenUtilization>([^<]+)</SessionTokenUtilization>");
+    private static final Pattern PACKED_POLICY_SIZE =
+            Pattern.compile("<PackedPolicySize>([^<]+)</PackedPolicySize>");
+
     private static final Pattern ARN = Pattern.compile("<Arn>([^<]+)</Arn>");
     private static final Pattern EXPIRATION = Pattern.compile("<Expiration>([^<]+)</Expiration>");
 
@@ -374,6 +381,72 @@ class StsQueryHandlerTest {
         String shorter = (String) newHandler().handle(action, under).getEntity();
 
         assertEquals(200, extract(SESSION_TOKEN, shorter).length());
+    }
+
+    /**
+     * What a session cost is published as the two members that replace the deprecated one: the
+     * size the token comes to in bytes, and that size as the percentage of the 4,096-byte limit it
+     * consumes. A token asked to be 1024 characters is a quarter of the limit, and the pair is
+     * asked of each operation on its own so one that stopped publishing it is caught here. The two
+     * this harness cannot reach are pinned where their requests can be built, as the token length
+     * above is.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"GetSessionToken", "AssumeRole", "AssumeRoleWithWebIdentity",
+            "GetFederationToken"})
+    void theSizeMembersReportTheTokenAndItsShareOfTheLimit(String action) {
+        MultivaluedMap<String, String> params = sessionRequest(action);
+        params.putSingle("MinimumSessionTokenSize", "1024");
+
+        String body = (String) newHandler().handle(action, params).getEntity();
+
+        assertEquals("1024", extract(SESSION_TOKEN_SIZE, body));
+        assertEquals("25", extract(SESSION_TOKEN_UTILIZATION, body));
+    }
+
+    /**
+     * The member AWS deprecated is published where its response still declares it, carrying the
+     * same percentage as the member that replaces it, and nowhere else: a session minted out of
+     * the caller's own credentials never packed anything, and its response declares neither that
+     * member nor the refusal.
+     */
+    @Test
+    void theDeprecatedMemberIsPublishedOnlyWhereItsResponseDeclaresIt() {
+        String assumed = (String) newHandler()
+                .handle("AssumeRole", sessionRequest("AssumeRole")).getEntity();
+
+        assertEquals(extract(SESSION_TOKEN_UTILIZATION, assumed), extract(PACKED_POLICY_SIZE, assumed));
+
+        String longTerm = (String) newHandler()
+                .handle("GetSessionToken", sessionRequest("GetSessionToken")).getEntity();
+
+        assertFalse(PACKED_POLICY_SIZE.matcher(longTerm).find(), longTerm);
+    }
+
+    /**
+     * What a session's size counts is the state the operation declares, read from the generated
+     * request shapes rather than named per operation in the handler. These are the declarations
+     * the measure turns on, so a regenerated file that stopped carrying an operation is caught
+     * here rather than by a session quietly reporting its token alone.
+     */
+    @Test
+    void theGeneratedShapesDeclareTheStateEachSessionCarries() {
+        assertTrue(StsRequestShapes.hasMember("AssumeRole", "Policy"));
+        assertTrue(StsRequestShapes.hasMember("AssumeRole", "PolicyArns"));
+        assertTrue(StsRequestShapes.hasMember("AssumeRole", "Tags"));
+        assertTrue(StsRequestShapes.hasMember("GetFederationToken", "Policy"));
+        assertTrue(StsRequestShapes.hasMember("GetFederationToken", "Tags"));
+        assertTrue(StsRequestShapes.hasMember("AssumeRoleWithSAML", "Policy"));
+        assertTrue(StsRequestShapes.hasMember("AssumeRoleWithWebIdentity", "Policy"));
+
+        // A session tag reaches these two inside the assertion or the token rather than as a
+        // member of the request, and the two below carry no state into their token at all.
+        assertFalse(StsRequestShapes.hasMember("AssumeRoleWithSAML", "Tags"));
+        assertFalse(StsRequestShapes.hasMember("AssumeRoleWithWebIdentity", "Tags"));
+        assertFalse(StsRequestShapes.hasMember("GetSessionToken", "Policy"));
+        assertFalse(StsRequestShapes.hasMember("GetSessionToken", "Tags"));
+        assertFalse(StsRequestShapes.hasMember("AssumeRoot", "Policy"));
+        assertFalse(StsRequestShapes.hasMember("AssumeRoot", "Tags"));
     }
 
     /** The least a request needs to reach issuance on an operation that models a token size. */

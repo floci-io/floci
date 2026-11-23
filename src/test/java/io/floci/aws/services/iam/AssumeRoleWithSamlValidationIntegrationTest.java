@@ -519,6 +519,28 @@ class AssumeRoleWithSamlValidationIntegrationTest {
         assertEquals(1024, token.length());
     }
 
+    /**
+     * And it publishes what that token cost, the three members its response declares: the size in
+     * bytes, the percentage of the 4,096-byte limit it consumes, and the deprecated member
+     * carrying the same percentage. A tag is not among the state counted here, this operation
+     * declaring none: a session tag reaches it inside the assertion.
+     */
+    @Test
+    void theSessionPublishesWhatItsTokenCost() {
+        String role = createRole(true);
+        String assertion = assertion(role, PROVIDER, Instant.now().plusSeconds(300), AUDIENCE, ISSUER, true);
+
+        String result = "AssumeRoleWithSAMLResponse.AssumeRoleWithSAMLResult.";
+        assumeRequest(role, assertion, PROVIDER)
+                .formParam("MinimumSessionTokenSize", "1024")
+                .formParam("Tags.member.1.Key", "team")
+                .formParam("Tags.member.1.Value", "payments")
+                .when().post("/").then().statusCode(200)
+                .body(result + "SessionTokenSize", equalTo("1024"))
+                .body(result + "SessionTokenUtilization", equalTo("25"))
+                .body(result + "PackedPolicySize", equalTo("25"));
+    }
+
     private static void assertSignatureInvalid(Function<XMLSignatureFactory, List<Transform>> transforms) {
         String role = createRole(true);
         assume(role, assertion(role, PROVIDER, Instant.now().plusSeconds(300), AUDIENCE, ISSUER, true, false, transforms),
