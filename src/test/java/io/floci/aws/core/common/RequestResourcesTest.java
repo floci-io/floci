@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -55,6 +56,8 @@ class RequestResourcesTest {
     void detachFindsBothAttachmentEndpointsAndKeepsTypedMissingFallbacks() {
         String prefix = "arn:aws:ec2:us-east-1:000000000000:";
         StoredResourceArns stored = mock(StoredResourceArns.class);
+        // The reader asks with the members' paths too, which a service finding by the values alone leaves to them.
+        when(stored.findByMembers(any(), any(), any(), any())).thenCallRealMethod();
         when(stored.findByMembers("instance", List.of("eni-attach-one"), "us-east-1"))
                 .thenReturn(Optional.of(prefix + "instance/i-one"));
         when(stored.findByMembers("network-interface", List.of("eni-attach-one"), "us-east-1"))
