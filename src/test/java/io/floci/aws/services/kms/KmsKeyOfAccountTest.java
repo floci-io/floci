@@ -9,7 +9,10 @@ import io.floci.aws.services.kms.model.KmsKey;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -96,18 +99,51 @@ class KmsKeyOfAccountTest {
         assertFalse(stored.grantsItsAccountThroughServices(key.getArn()));
     }
 
-    /** A key KMS would refuse a decrypt with, disabled or pending deletion, is none a forwarded request finds. */
+    /**
+     * A request naming an alias, a grant or a ciphertext reaches the key the alias points at, the grant is on or the
+     * ciphertext was encrypted under; a value naming none reaches nothing.
+     */
     @Test
-    void theStoredResourceArnsFindNoKeyKmsWouldNotUse() {
+    void theStoredResourceArnsReachTheKeyOfAnAliasAGrantOrACiphertext() {
+        KmsStoredResourceArns stored = new KmsStoredResourceArns(owners, new RegionResolver(REGION, OWNER));
+        String grantId = owners.createGrant(key.getKeyId(), "arn:aws:iam::" + OWNER + ":user/grantee",
+                List.of("Encrypt"), REGION).getGrantId();
+        String ciphertext = Base64.getEncoder().encodeToString(
+                owners.encrypt(key.getKeyId(), "plaintext".getBytes(StandardCharsets.UTF_8), REGION));
+
+        assertEquals(List.of(key.getArn()), stored.through("AliasName", "alias/snapshots", REGION));
+        assertEquals(List.of(key.getArn()), stored.through("GrantId", grantId, REGION));
+        assertEquals(List.of(key.getArn()), stored.through("CiphertextBlob", ciphertext, REGION));
+        assertEquals(List.of(), stored.through("AliasName", "alias/none", REGION));
+        assertEquals(List.of(), stored.through("CiphertextBlob", "not base64!", REGION));
+        assertEquals(List.of(), stored.through("KeyId", key.getKeyId(), REGION));
+    }
+
+    /** The tags of the key an ARN names, a tag without a value as an empty one; none for an alias. */
+    @Test
+    void theStoredResourceArnsGiveTheTagsOfAKey() {
+        KmsStoredResourceArns stored = new KmsStoredResourceArns(owners, new RegionResolver(REGION, OWNER));
+        KmsKey tagged = owners.createKey("tagged key", null, Map.of("team", "blue"), REGION);
+        assertEquals(Map.of("team", "blue"), stored.storedTags(tagged.getArn()));
+        assertEquals(Map.of(), stored.storedTags("arn:aws:kms:" + REGION + ":" + OWNER + ":alias/snapshots"));
+    }
+
+    /**
+     * A key disabled or pending deletion is still the key a request naming it acts on, but none KMS uses for a request
+     * another service forwards, which KMS refuses with it.
+     */
+    @Test
+    void theStoredResourceArnsFindAKeyInAnyStateAndUseOnlyAnEnabledOne() {
         KmsStoredResourceArns stored = new KmsStoredResourceArns(owners, new RegionResolver(REGION, OWNER));
         owners.disableKey(key.getKeyId(), REGION);
-        assertEquals(Optional.empty(), stored.find("key", List.of(key.getKeyId()), REGION));
-        owners.enableKey(key.getKeyId(), REGION);
         assertEquals(Optional.of(key.getArn()), stored.find("key", List.of(key.getKeyId()), REGION));
+        assertEquals(Optional.of(key.getArn()), stored.find("key", List.of("alias/snapshots"), REGION));
+        assertFalse(stored.usable(key.getArn()));
+        owners.enableKey(key.getKeyId(), REGION);
+        assertTrue(stored.usable(key.getArn()));
         owners.scheduleKeyDeletion(key.getKeyId(), 7, REGION);
-        assertEquals(Optional.empty(), stored.find("key", List.of(key.getKeyId()), REGION));
-        // Its lookup still finds it: only a request KMS would serve with it is refused.
-        assertEquals(Optional.of(key.getArn()), owners.findKeyArnOfAccount(key.getKeyId(), OWNER, REGION));
+        assertEquals(Optional.of(key.getArn()), stored.find("key", List.of(key.getKeyId()), REGION));
+        assertFalse(stored.usable(key.getArn()));
     }
 
     /**

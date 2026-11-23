@@ -131,9 +131,12 @@ public class LambdaMicrovmsService implements ResourceProvider {
     }
 
     @RegisterForReflection
-    public record BuildSpec(String baseImageArn, String baseImageVersion, String buildRoleArn, String codeArtifactUri) {
+    /** What a version was built from, its KMS key among them: the key encrypts that version's contents. */
+    public record BuildSpec(String baseImageArn, String baseImageVersion, String buildRoleArn, String codeArtifactUri,
+                            String kmsKeyIdentifier) {
         static BuildSpec from(MicrovmImage image) {
-            return new BuildSpec(image.baseImageArn, image.baseImageVersion, image.buildRoleArn, image.codeArtifactUri);
+            return new BuildSpec(image.baseImageArn, image.baseImageVersion, image.buildRoleArn, image.codeArtifactUri,
+                    image.kmsKeyIdentifier);
         }
     }
 
@@ -147,6 +150,8 @@ public class LambdaMicrovmsService implements ResourceProvider {
         public String baseImageVersion;
         public String buildRoleArn;
         public String codeArtifactUri;
+        /** The customer managed key the image's versions are built with; null for an AWS owned key. */
+        public String kmsKeyIdentifier;
         public String latestActiveImageVersion;
         public RuntimeSettings runtimeSettings = RuntimeSettings.defaults();
         public Instant createdAt;
@@ -186,6 +191,14 @@ public class LambdaMicrovmsService implements ResourceProvider {
     public MicrovmImage createImage(String region, String accountId, String name,
                                     String baseImageArn, String buildRoleArn, String codeArtifactUri, String description,
                                     String baseImageVersion, RuntimeSettings runtimeSettings, Map<String, String> tags) {
+        return createImage(region, accountId, name, baseImageArn, buildRoleArn, codeArtifactUri, description,
+                baseImageVersion, runtimeSettings, tags, null);
+    }
+
+    public MicrovmImage createImage(String region, String accountId, String name,
+                                    String baseImageArn, String buildRoleArn, String codeArtifactUri, String description,
+                                    String baseImageVersion, RuntimeSettings runtimeSettings, Map<String, String> tags,
+                                    String kmsKeyIdentifier) {
         if (name == null || !NAME_PATTERN.matcher(name).matches()) {
             throw new AwsException("ValidationException",
                     "name must match [a-zA-Z0-9-_]{1,64}", 400);
@@ -215,6 +228,7 @@ public class LambdaMicrovmsService implements ResourceProvider {
         }
         image.buildRoleArn = buildRoleArn;
         image.codeArtifactUri = codeArtifactUri;
+        image.kmsKeyIdentifier = kmsKeyIdentifier;
         image.createdAt = Instant.now();
         image.updatedAt = image.createdAt;
         addVersion(image);
@@ -290,6 +304,13 @@ public class LambdaMicrovmsService implements ResourceProvider {
     public MicrovmImage updateImage(String region, String name, String baseImageArn,
                                     String buildRoleArn, String codeArtifactUri, String description,
                                     String baseImageVersion, RuntimeSettings runtimeSettings) {
+        return updateImage(region, name, baseImageArn, buildRoleArn, codeArtifactUri, description, baseImageVersion,
+                runtimeSettings, null);
+    }
+
+    public MicrovmImage updateImage(String region, String name, String baseImageArn,
+                                    String buildRoleArn, String codeArtifactUri, String description,
+                                    String baseImageVersion, RuntimeSettings runtimeSettings, String kmsKeyIdentifier) {
         MicrovmImage image = getImage(region, name);
         if (baseImageArn == null || buildRoleArn == null || codeArtifactUri == null) {
             // Recorded live: the PUT is a full replace, not a patch.
@@ -302,6 +323,8 @@ public class LambdaMicrovmsService implements ResourceProvider {
         image.description = description;
         image.baseImageVersion = baseImageVersion != null ? baseImageVersion : "1.0";
         image.runtimeSettings = runtimeSettings;
+        // A full replace like the rest: a request without a key builds the next version with an AWS owned key.
+        image.kmsKeyIdentifier = kmsKeyIdentifier;
         // A full-replace update rebuilds: it mints a new version and walks the
         // image to UPDATED rather than back to CREATED. Recorded live, and a
         // consumer polling for UPDATED after a PUT never converges without it.
@@ -400,7 +423,7 @@ public class LambdaMicrovmsService implements ResourceProvider {
     public record RunSettings(String imageVersion, String executionRoleArn, List<String> ingressNetworkConnectors,
                               List<String> egressNetworkConnectors, Integer maximumDurationInSeconds,
                               Boolean autoResumeEnabled, Integer maxIdleDurationSeconds,
-                              Integer suspendedDurationSeconds) {
+                              Integer suspendedDurationSeconds, String kmsKeyIdentifier) {
         public RunSettings {
             ingressNetworkConnectors = ingressNetworkConnectors == null ? List.of() : List.copyOf(ingressNetworkConnectors);
             egressNetworkConnectors = egressNetworkConnectors == null ? List.of() : List.copyOf(egressNetworkConnectors);
@@ -408,7 +431,7 @@ public class LambdaMicrovmsService implements ResourceProvider {
         }
 
         public static RunSettings defaults() {
-            return new RunSettings(null, null, null, null, null, null, null, null);
+            return new RunSettings(null, null, null, null, null, null, null, null, null);
         }
     }
 

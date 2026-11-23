@@ -11,6 +11,8 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.List;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
@@ -30,8 +32,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String REGION = "us-east-1";
     private static final String CS = "cs-suppression-options";
 
@@ -47,9 +47,7 @@ class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
     @Test
     @Order(1)
     void createConfigurationSet() {
-        given()
-                .contentType("application/json")
-                .header("Authorization", AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + CS + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
@@ -73,9 +71,7 @@ class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
     @Test
     @Order(3)
     void putSuppressionOptions_bounceOnly() {
-        given()
-                .contentType("application/json")
-                .header("Authorization", AUTH)
+        v2()
                 .body("{\"SuppressedReasons\":[\"BOUNCE\"]}")
         .when()
                 .put("/v2/email/configuration-sets/" + CS + "/suppression-options")
@@ -99,9 +95,7 @@ class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
     @Test
     @Order(5)
     void putSuppressionOptions_emptyList_explicitlyDisablesFiltering() {
-        given()
-                .contentType("application/json")
-                .header("Authorization", AUTH)
+        v2()
                 .body("{\"SuppressedReasons\":[]}")
         .when()
                 .put("/v2/email/configuration-sets/" + CS + "/suppression-options")
@@ -120,9 +114,7 @@ class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
     @Test
     @Order(6)
     void putSuppressionOptions_bothReasons() {
-        given()
-                .contentType("application/json")
-                .header("Authorization", AUTH)
+        v2()
                 .body("{\"SuppressedReasons\":[\"BOUNCE\",\"COMPLAINT\"]}")
         .when()
                 .put("/v2/email/configuration-sets/" + CS + "/suppression-options")
@@ -143,9 +135,7 @@ class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
     void putSuppressionOptions_invalidReason_rejected() {
         // Message verified against real AWS V2 SES on 2026-06-03:
         //   "Reason INVALID is invalid, must be one of [BOUNCE, COMPLAINT]."
-        given()
-                .contentType("application/json")
-                .header("Authorization", AUTH)
+        v2()
                 .body("{\"SuppressedReasons\":[\"BOUNCE\",\"INVALID\"]}")
         .when()
                 .put("/v2/email/configuration-sets/" + CS + "/suppression-options")
@@ -159,9 +149,7 @@ class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
     @Test
     @Order(8)
     void putSuppressionOptions_nonArrayReasons_rejected() {
-        given()
-                .contentType("application/json")
-                .header("Authorization", AUTH)
+        v2()
                 .body("{\"SuppressedReasons\":\"BOUNCE\"}")
         .when()
                 .put("/v2/email/configuration-sets/" + CS + "/suppression-options")
@@ -172,9 +160,7 @@ class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
     @Test
     @Order(9)
     void putSuppressionOptions_unknownConfigSet_returns404() {
-        given()
-                .contentType("application/json")
-                .header("Authorization", AUTH)
+        v2()
                 .body("{\"SuppressedReasons\":[\"BOUNCE\"]}")
         .when()
                 .put("/v2/email/configuration-sets/does-not-exist/suppression-options")
@@ -185,9 +171,7 @@ class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
     @Test
     @Order(10)
     void putSuppressionOptions_omittedSuppressedReasons_treatedAsEmptyList() {
-        given()
-                .contentType("application/json")
-                .header("Authorization", AUTH)
+        v2()
                 .body("{}")
         .when()
                 .put("/v2/email/configuration-sets/" + CS + "/suppression-options")
@@ -209,9 +193,7 @@ class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
         // Start from a non-empty override so an ignored null would leave BOUNCE behind.
         configSetService.putSuppressionOptions(CS, List.of("BOUNCE"), REGION);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", AUTH)
+        v2()
                 .body("{\"SuppressedReasons\":null}")
         .when()
                 .put("/v2/email/configuration-sets/" + CS + "/suppression-options")
@@ -233,9 +215,7 @@ class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
     @Order(20)
     void effectiveReasons_csWithoutOverride_fallsBackToAccountLevel() {
         String csNoOverride = "cs-suppression-no-override";
-        given()
-                .contentType("application/json")
-                .header("Authorization", AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + csNoOverride + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
@@ -253,9 +233,7 @@ class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
     @Order(21)
     void effectiveReasons_csWithBounceOverride_returnsBounceOnly() {
         String csBounceOnly = "cs-suppression-bounce-only";
-        given()
-                .contentType("application/json")
-                .header("Authorization", AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + csBounceOnly + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
@@ -272,9 +250,7 @@ class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
     @Order(22)
     void effectiveReasons_csWithEmptyOverride_explicitlyDisablesFiltering() {
         String csEmpty = "cs-suppression-empty";
-        given()
-                .contentType("application/json")
-                .header("Authorization", AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + csEmpty + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")

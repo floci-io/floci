@@ -7,7 +7,9 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.TagHandler;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.aps.model.PrometheusWorkspace;
@@ -17,14 +19,18 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class ApsService implements TagHandler {
+public class ApsService implements TagHandler, StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(ApsService.class);
     // AMP's ListWorkspacesRequest declares maxResults with a default of 100 and a maximum of 1000.
@@ -33,6 +39,8 @@ public class ApsService implements TagHandler {
     private static final int MAX_NAMESPACE_NAME_LENGTH = 128;
     private static final Pattern NAMESPACE_NAME = Pattern.compile(".*[0-9A-Za-z][-.0-9A-Z_a-z]*.*");
     private static final Pattern CLIENT_TOKEN = Pattern.compile("[!-~]{1,64}");
+    private static final String WORKSPACE_PREFIX = "workspace/";
+    private static final String NAMESPACE_PREFIX = "rulegroupsnamespace/";
 
     private final StorageBackend<String, PrometheusWorkspace> storage;
     private final StorageBackend<String, RuleGroupsNamespace> namespaceStorage;
@@ -87,9 +95,7 @@ public class ApsService implements TagHandler {
                 "https://" + AwsEndpoints.host("aps-workspaces", region) + "/workspaces/" + workspaceId + "/");
         workspace.setCreatedAt(Instant.now());
         workspace.setKmsKeyArn(kmsKeyArn);
-        if (tags != null) {
-            workspace.getTags().putAll(tags);
-        }
+        workspace.setTags(tags);
 
         PrometheusWorkspace response = clientToken != null ? copyWorkspace(workspace) : workspace;
         if (clientToken != null) {
@@ -136,7 +142,7 @@ public class ApsService implements TagHandler {
                 DEFAULT_PAGE, MAX_PAGE, "ValidationException");
     }
 
-    public void deleteWorkspace(String region, String workspaceId) {
+    public synchronized void deleteWorkspace(String region, String workspaceId) {
         describeWorkspace(region, workspaceId);
         String namespacePrefix = namespaceKeyPrefix(region, workspaceId);
         for (RuleGroupsNamespace namespace : namespaceStorage.scan(k -> k.startsWith(namespacePrefix))) {
@@ -146,14 +152,14 @@ public class ApsService implements TagHandler {
         LOG.infov("Deleted AMP workspace: {0} in {1}", workspaceId, region);
     }
 
-    public void updateWorkspaceAlias(String region, String workspaceId, String alias) {
+    public synchronized void updateWorkspaceAlias(String region, String workspaceId, String alias) {
         PrometheusWorkspace workspace = describeWorkspace(region, workspaceId);
         workspace.setAlias(stripAlias(alias));
         storage.put(key(region, workspaceId), workspace);
     }
 
-    public RuleGroupsNamespace createRuleGroupsNamespace(String region, String workspaceId, String name,
-                                                         String encodedData, Map<String, String> tags) {
+    public synchronized RuleGroupsNamespace createRuleGroupsNamespace(String region, String workspaceId, String name,
+                                                                      String encodedData, Map<String, String> tags) {
         describeWorkspace(region, workspaceId);
         requireNamespaceName(name);
         requireNamespaceData(encodedData);
@@ -172,9 +178,7 @@ public class ApsService implements TagHandler {
         Instant now = Instant.now();
         namespace.setCreatedAt(now);
         namespace.setModifiedAt(now);
-        if (tags != null) {
-            namespace.getTags().putAll(tags);
-        }
+        namespace.setTags(tags);
 
         namespaceStorage.put(namespaceKey(region, workspaceId, name), namespace);
         LOG.infov("Created AMP rule groups namespace: {0} in workspace {1}", name, workspaceId);
@@ -201,8 +205,8 @@ public class ApsService implements TagHandler {
                 DEFAULT_PAGE, MAX_PAGE, "ValidationException");
     }
 
-    public RuleGroupsNamespace putRuleGroupsNamespace(String region, String workspaceId, String name,
-                                                      String encodedData) {
+    public synchronized RuleGroupsNamespace putRuleGroupsNamespace(String region, String workspaceId, String name,
+                                                                   String encodedData) {
         requireNamespaceData(encodedData);
         RuleGroupsNamespace namespace = describeRuleGroupsNamespace(region, workspaceId, name);
         namespace.setEncodedData(encodedData);
@@ -211,7 +215,7 @@ public class ApsService implements TagHandler {
         return namespace;
     }
 
-    public void deleteRuleGroupsNamespace(String region, String workspaceId, String name) {
+    public synchronized void deleteRuleGroupsNamespace(String region, String workspaceId, String name) {
         describeRuleGroupsNamespace(region, workspaceId, name);
         namespaceStorage.delete(namespaceKey(region, workspaceId, name));
         LOG.infov("Deleted AMP rule groups namespace: {0} in workspace {1}", name, workspaceId);
@@ -241,7 +245,7 @@ public class ApsService implements TagHandler {
     }
 
     @Override
-    public void tagResource(String region, String arn, Map<String, String> tags) {
+    public synchronized void tagResource(String region, String arn, Map<String, String> tags) {
         // Per AMP's TagResource: keys must not begin with the reserved "aws:" prefix
         // (case-insensitive, matching the sibling checks in FisService and BatchService).
         for (String tagKey : tags.keySet()) {
@@ -251,18 +255,25 @@ public class ApsService implements TagHandler {
             }
         }
         Taggable taggable = taggableByArn(region, arn);
-        taggable.tags().putAll(tags);
-        taggable.persist().run();
+        Map<String, String> tagged = new HashMap<>(taggable.tags());
+        tagged.putAll(tags);
+        taggable.store().accept(tagged);
     }
 
     @Override
-    public void untagResource(String region, String arn, List<String> tagKeys) {
+    public synchronized void untagResource(String region, String arn, List<String> tagKeys) {
         Taggable taggable = taggableByArn(region, arn);
-        tagKeys.forEach(taggable.tags()::remove);
-        taggable.persist().run();
+        Map<String, String> untagged = new HashMap<>(taggable.tags());
+        tagKeys.forEach(untagged::remove);
+        taggable.store().accept(untagged);
     }
 
-    private record Taggable(Map<String, String> tags, Runnable persist) {
+    /**
+     * A resource's tags and how to store a new set of them. A tag change stores a whole new map in the resource's
+     * volatile field, never changing a stored one, so a reader of the tags ({@link #storedTags}), which takes no lock,
+     * sees one whole set; it does so under the service's lock, so two changes cannot lose each other's tags.
+     */
+    private record Taggable(Map<String, String> tags, Consumer<Map<String, String>> store) {
     }
 
     private Taggable taggableByArn(String region, String arn) {
@@ -277,25 +288,89 @@ public class ApsService implements TagHandler {
             throw new AwsException("ValidationException",
                     "The resource ARN does not belong to this AMP account and region: " + arn, 400);
         }
-        String resource = parsed.resource();
-        String workspacePrefix = "workspace/";
-        if (resource.startsWith(workspacePrefix) && resource.length() > workspacePrefix.length()) {
-            PrometheusWorkspace workspace =
-                    describeWorkspace(region, resource.substring(workspacePrefix.length()));
-            return new Taggable(workspace.getTags(),
-                    () -> storage.put(key(region, workspace.getWorkspaceId()), workspace));
+        List<String> ids = resourceIds(parsed.resource());
+        if (ids.size() == 1) {
+            PrometheusWorkspace workspace = describeWorkspace(region, ids.get(0));
+            return new Taggable(workspace.getTags(), tags -> {
+                workspace.setTags(tags);
+                storage.put(key(region, workspace.getWorkspaceId()), workspace);
+            });
         }
-        String namespacePrefix = "rulegroupsnamespace/";
-        if (resource.startsWith(namespacePrefix)) {
-            String[] parts = resource.substring(namespacePrefix.length()).split("/", 2);
-            if (parts.length == 2 && !parts[0].isEmpty() && !parts[1].isEmpty()) {
-                RuleGroupsNamespace namespace = describeRuleGroupsNamespace(region, parts[0], parts[1]);
-                return new Taggable(namespace.getTags(),
-                        () -> namespaceStorage.put(namespaceKey(region, parts[0], parts[1]), namespace));
-            }
+        if (ids.size() == 2) {
+            RuleGroupsNamespace namespace = describeRuleGroupsNamespace(region, ids.get(0), ids.get(1));
+            return new Taggable(namespace.getTags(), tags -> {
+                namespace.setTags(tags);
+                namespaceStorage.put(namespaceKey(region, ids.get(0), ids.get(1)), namespace);
+            });
         }
         throw new AwsException("ValidationException",
                 "Tags are only supported on AMP workspaces and rule groups namespaces: " + arn, 400);
+    }
+
+    // ── StoredResourceArns: the tags IAM gives a resource-tag condition ──
+
+    @Override
+    public String namespace() {
+        return "aps";
+    }
+
+    /**
+     * A request names a workspace by the id AMP minted and a namespace by its workspace and name, which the table
+     * fills into the ARN itself, so there is nothing to find by name.
+     */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the workspace or the rule groups namespace whose ARN is {@code arn}, read in place under its key in
+     * the Region the ARN names, in the request's account, where the handlers read: an ARN of another account names
+     * none. A tag change stores a whole new map in a volatile field, so the read, which takes no lock, is of one
+     * whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "aps")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.accountId().equals(regionResolver.getAccountId())) {
+            return Map.of();
+        }
+        List<String> ids = resourceIds(parsed.resource());
+        if (ids.size() == 1) {
+            return AccountAwareStorageBackend.readInAccount(storage, parsed.accountId(),
+                            key(parsed.region(), ids.get(0)))
+                    .filter(workspace -> arn.equals(workspace.getArn()))
+                    .<Map<String, String>>map(workspace -> new LinkedHashMap<>(workspace.getTags()))
+                    .orElse(Map.of());
+        }
+        if (ids.size() != 2) {
+            return Map.of();
+        }
+        return AccountAwareStorageBackend.readInAccount(namespaceStorage, parsed.accountId(),
+                        namespaceKey(parsed.region(), ids.get(0), ids.get(1)))
+                .filter(namespace -> arn.equals(namespace.getArn()))
+                .<Map<String, String>>map(namespace -> new LinkedHashMap<>(namespace.getTags()))
+                .orElse(Map.of());
+    }
+
+    /**
+     * The ids an AMP ARN's resource names: a workspace's id, or a rule groups namespace's workspace id and name; none
+     * for anything else. Tag calls and IAM's tag lookup read an ARN alike.
+     */
+    private static List<String> resourceIds(String resource) {
+        if (resource.startsWith(WORKSPACE_PREFIX) && resource.length() > WORKSPACE_PREFIX.length()) {
+            return List.of(resource.substring(WORKSPACE_PREFIX.length()));
+        }
+        if (resource.startsWith(NAMESPACE_PREFIX)) {
+            String[] parts = resource.substring(NAMESPACE_PREFIX.length()).split("/", 2);
+            if (parts.length == 2 && !parts[0].isEmpty() && !parts[1].isEmpty()) {
+                return List.of(parts[0], parts[1]);
+            }
+        }
+        return List.of();
     }
 
     // AMP is regional ("You can have one or more workspaces in each Region in your account"), so

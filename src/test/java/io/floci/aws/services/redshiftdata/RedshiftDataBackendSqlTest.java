@@ -8,8 +8,10 @@ import org.postgresql.copy.CopyManager;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -43,5 +45,21 @@ class RedshiftDataBackendSqlTest {
         SpectrumReadException error = assertThrows(SpectrumReadException.class,
                 () -> new RedshiftDataBackendSql(connection).execute("SELECT 1"));
         assertEquals("42501", error.sqlState());
+    }
+
+    @Test
+    void queryStringReadsFirstColumnAndHandlesNullOrNoRows() throws Exception {
+        Connection connection = mock(Connection.class);
+        Statement statement = mock(Statement.class);
+        ResultSet rows = mock(ResultSet.class);
+        when(connection.createStatement()).thenReturn(statement);
+        when(statement.executeQuery("SELECT pg_catalog.current_schema()")).thenReturn(rows);
+        when(rows.next()).thenReturn(true, true, false);
+        when(rows.getString(1)).thenReturn("analytics", (String) null);
+
+        RedshiftDataBackendSql backend = new RedshiftDataBackendSql(connection);
+        assertEquals(Optional.of("analytics"), backend.queryString("SELECT pg_catalog.current_schema()"));
+        assertEquals(Optional.empty(), backend.queryString("SELECT pg_catalog.current_schema()"));
+        assertEquals(Optional.empty(), backend.queryString("SELECT pg_catalog.current_schema()"));
     }
 }

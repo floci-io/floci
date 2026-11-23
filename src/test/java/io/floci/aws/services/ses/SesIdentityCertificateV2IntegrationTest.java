@@ -20,8 +20,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class SesIdentityCertificateV2IntegrationTest {
 
-    private static final String SES_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String ACM_AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/acm/aws4_request";
     private static final String MISSING_CERT_ARN =
@@ -130,11 +128,11 @@ class SesIdentityCertificateV2IntegrationTest {
     void deleteEmailIdentityIsRefusedWhileACertificateIsAssociated() {
         String identity = "smime-delete@floci.test";
         createIdentity(identity);
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        SesV2Requests.v2()
                 .body("{\"EmailIdentity\":\"" + identity + "\",\"CertificateArn\":\"" + MISSING_CERT_ARN + "\"}")
         .when().post("/v2/email/identity/certificates").then().statusCode(200);
 
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", SesV2Requests.AUTH)
         .when().delete("/v2/email/identities/" + identity).then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
                 .body("message", equalTo("Cannot delete <arn:aws:ses:us-east-1:000000000000:identity/" + identity
@@ -142,7 +140,7 @@ class SesIdentityCertificateV2IntegrationTest {
                         + "Disassociate all certificates and try again."));
 
         disassociate("{\"EmailIdentity\":\"" + identity + "\"}").then().statusCode(200);
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", SesV2Requests.AUTH)
         .when().delete("/v2/email/identities/" + identity).then().statusCode(200);
     }
 
@@ -165,33 +163,33 @@ class SesIdentityCertificateV2IntegrationTest {
 
     private static Response v1Delete(String action, String member, String identity) {
         return given().contentType("application/x-www-form-urlencoded")
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+                .header("Authorization", SesV1Requests.AUTH)
                 .formParam("Action", action)
                 .formParam(member, identity)
                 .when().post("/");
     }
 
     private static void createIdentity(String identity) {
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        SesV2Requests.v2()
                 .body("{\"EmailIdentity\":\"" + identity + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
     }
 
     private static Response associate(String identity, String fromAddress, String certificateArn) {
         String from = fromAddress == null ? "" : ",\"FromAddress\":\"" + fromAddress + "\"";
-        return given().contentType("application/json").header("Authorization", SES_AUTH)
+        return SesV2Requests.v2()
                 .body("{\"EmailIdentity\":\"" + identity + "\"" + from
                         + ",\"CertificateArn\":\"" + certificateArn + "\"}")
                 .when().post("/v2/email/identity/certificates");
     }
 
     private static Response disassociate(String body) {
-        return given().contentType("application/json").header("Authorization", SES_AUTH)
+        return SesV2Requests.v2()
                 .body(body).when().post("/v2/email/identity/certificates/delete");
     }
 
     private static Response list(String body) {
-        return given().contentType("application/json").header("Authorization", SES_AUTH)
+        return SesV2Requests.v2()
                 .body(body).when().post("/v2/email/identity/certificates/list");
     }
 

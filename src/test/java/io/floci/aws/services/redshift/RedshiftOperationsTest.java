@@ -1155,6 +1155,18 @@ public class RedshiftOperationsTest {
         return redshiftIn("us-east-1", action, keyValues);
     }
 
+    /** DeleteClusterParameterGroup refuses the default group with Redshift's fault and message (measured on AWS). */
+    @Test
+    void theDefaultParameterGroupCannotBeDeleted() {
+        Response response = redshift("DeleteClusterParameterGroup", "ParameterGroupName", "default.redshift-1.0");
+
+        assertFault(response, 400, "InvalidParameterValue");
+        assertEquals("The Cluster Parameter Group cannot be deleted: default.redshift-1.0",
+                XmlPath.from(response.asString()).getString("ErrorResponse.Error.Message"));
+        assertEquals(200, redshift("DescribeClusterParameterGroups", "ParameterGroupName", "default.redshift-1.0")
+                .statusCode());
+    }
+
     private static void assertFault(Response response, int status, String code) {
         assertEquals(status, response.statusCode(), response.asString());
         assertEquals(code, XmlPath.from(response.asString()).getString("ErrorResponse.Error.Code"));

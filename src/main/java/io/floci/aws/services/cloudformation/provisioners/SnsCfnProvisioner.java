@@ -430,8 +430,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
                     () -> snsService.deleteTopic(physicalId, region), "NotFound");
             case SUBSCRIPTION -> CfnDeletes.safeDelete("subscription", physicalId,
                     () -> snsService.unsubscribe(physicalId, region), "NotFound");
-            // No entity to remove. The topics keep the last policy written, the same choice
-            // SqsCfnProvisioner makes for AWS::SQS::QueuePolicy.
+            // No entity to remove; the topics keep the last policy written.
             case TOPIC_POLICY -> { }
             default -> throw new IllegalStateException(
                     "SnsCfnProvisioner cannot delete " + resourceType);

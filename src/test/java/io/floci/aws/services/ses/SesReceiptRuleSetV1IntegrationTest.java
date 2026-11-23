@@ -1,13 +1,12 @@
 package io.floci.aws.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.ses.SesV1Requests.query;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 
@@ -21,21 +20,13 @@ import static org.hamcrest.Matchers.not;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesReceiptRuleSetV1IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-west-2/email/aws4_request";
+    private static final String AUTH = SesV1Requests.authFor("us-west-2");
     private static final String RS = "floci-v1-rule-set";
-
-    private static RequestSpecification req(String action) {
-        return given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", AUTH)
-                .formParam("Action", action);
-    }
 
     @Test
     @Order(1)
     void createReceiptRuleSet() {
-        req("CreateReceiptRuleSet").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRuleSet").formParam("RuleSetName", RS)
         .when().post("/").then().statusCode(200)
                 .body(containsString("CreateReceiptRuleSetResponse"));
     }
@@ -43,7 +34,7 @@ class SesReceiptRuleSetV1IntegrationTest {
     @Test
     @Order(2)
     void createDuplicate_returnsAlreadyExists() {
-        req("CreateReceiptRuleSet").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRuleSet").formParam("RuleSetName", RS)
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>AlreadyExists</Code>"))
                 .body(containsString("Rule set already exists: " + RS));
@@ -52,7 +43,7 @@ class SesReceiptRuleSetV1IntegrationTest {
     @Test
     @Order(3)
     void describeReceiptRuleSet_returnsMetadataWithEmptyRules() {
-        req("DescribeReceiptRuleSet").formParam("RuleSetName", RS)
+        query(AUTH, "DescribeReceiptRuleSet").formParam("RuleSetName", RS)
         .when().post("/").then().statusCode(200)
                 .body(containsString("<Metadata>"))
                 .body(containsString("<Name>" + RS + "</Name>"))
@@ -63,7 +54,7 @@ class SesReceiptRuleSetV1IntegrationTest {
     @Test
     @Order(4)
     void listReceiptRuleSets_containsTheRuleSet() {
-        req("ListReceiptRuleSets")
+        query(AUTH, "ListReceiptRuleSets")
         .when().post("/").then().statusCode(200)
                 .body(containsString("<RuleSets>"))
                 .body(containsString("<Name>" + RS + "</Name>"));
@@ -72,10 +63,10 @@ class SesReceiptRuleSetV1IntegrationTest {
     // Unordered on purpose: it holds whether or not the rule set above still exists.
     @Test
     void listReceiptRuleSets_treatsAnEmptyTokenAsAbsentAndRefusesAnyOther() {
-        req("ListReceiptRuleSets").formParam("NextToken", "")
+        query(AUTH, "ListReceiptRuleSets").formParam("NextToken", "")
         .when().post("/").then().statusCode(200)
                 .body(containsString("ListReceiptRuleSetsResponse"));
-        req("ListReceiptRuleSets").formParam("NextToken", "garbage")
+        query(AUTH, "ListReceiptRuleSets").formParam("NextToken", "garbage")
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>InvalidParameterValue</Code>"))
                 .body(containsString("<Message>Invalid page token: garbage</Message>"));
@@ -84,7 +75,7 @@ class SesReceiptRuleSetV1IntegrationTest {
     @Test
     @Order(5)
     void describeNonExistent_returnsRuleSetDoesNotExist() {
-        req("DescribeReceiptRuleSet").formParam("RuleSetName", "floci-v1-nope")
+        query(AUTH, "DescribeReceiptRuleSet").formParam("RuleSetName", "floci-v1-nope")
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>RuleSetDoesNotExist</Code>"))
                 .body(containsString("Rule set does not exist: floci-v1-nope"));
@@ -93,21 +84,21 @@ class SesReceiptRuleSetV1IntegrationTest {
     @Test
     @Order(6)
     void setActive_thenDescribeActive_returnsIt() {
-        req("SetActiveReceiptRuleSet").formParam("RuleSetName", RS)
+        query(AUTH, "SetActiveReceiptRuleSet").formParam("RuleSetName", RS)
         .when().post("/").then().statusCode(200);
 
-        req("DescribeActiveReceiptRuleSet")
+        query(AUTH, "DescribeActiveReceiptRuleSet")
         .when().post("/").then().statusCode(200)
                 .body(containsString("<Metadata>"))
                 .body(containsString("<Name>" + RS + "</Name>"));
 
         // While active, deleting the rule set is rejected (verified against AWS) and it is preserved.
-        req("DeleteReceiptRuleSet").formParam("RuleSetName", RS)
+        query(AUTH, "DeleteReceiptRuleSet").formParam("RuleSetName", RS)
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>CannotDelete</Code>"))
                 .body(containsString("Cannot delete active rule set: " + RS));
 
-        req("DescribeReceiptRuleSet").formParam("RuleSetName", RS)
+        query(AUTH, "DescribeReceiptRuleSet").formParam("RuleSetName", RS)
         .when().post("/").then().statusCode(200)
                 .body(containsString("<Name>" + RS + "</Name>"));
     }
@@ -115,7 +106,7 @@ class SesReceiptRuleSetV1IntegrationTest {
     @Test
     @Order(7)
     void setActiveNonExistent_returnsRuleSetDoesNotExist() {
-        req("SetActiveReceiptRuleSet").formParam("RuleSetName", "floci-v1-nope")
+        query(AUTH, "SetActiveReceiptRuleSet").formParam("RuleSetName", "floci-v1-nope")
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>RuleSetDoesNotExist</Code>"));
     }
@@ -123,11 +114,11 @@ class SesReceiptRuleSetV1IntegrationTest {
     @Test
     @Order(8)
     void setActiveWithoutName_clearsActive() {
-        req("SetActiveReceiptRuleSet")
+        query(AUTH, "SetActiveReceiptRuleSet")
         .when().post("/").then().statusCode(200);
 
         // With no active rule set, AWS returns an empty result (no Metadata / Name).
-        req("DescribeActiveReceiptRuleSet")
+        query(AUTH, "DescribeActiveReceiptRuleSet")
         .when().post("/").then().statusCode(200)
                 .body(containsString("DescribeActiveReceiptRuleSetResponse"))
                 .body(not(containsString("<Name>")));
@@ -136,19 +127,19 @@ class SesReceiptRuleSetV1IntegrationTest {
     @Test
     @Order(9)
     void deleteReceiptRuleSet_thenIdempotentDelete() {
-        req("DeleteReceiptRuleSet").formParam("RuleSetName", RS)
+        query(AUTH, "DeleteReceiptRuleSet").formParam("RuleSetName", RS)
         .when().post("/").then().statusCode(200)
                 .body(containsString("DeleteReceiptRuleSetResponse"));
 
         // AWS delete is idempotent: deleting again (now absent) still succeeds.
-        req("DeleteReceiptRuleSet").formParam("RuleSetName", RS)
+        query(AUTH, "DeleteReceiptRuleSet").formParam("RuleSetName", RS)
         .when().post("/").then().statusCode(200);
     }
 
     @Test
     @Order(10)
     void describeAfterDelete_returnsRuleSetDoesNotExist() {
-        req("DescribeReceiptRuleSet").formParam("RuleSetName", RS)
+        query(AUTH, "DescribeReceiptRuleSet").formParam("RuleSetName", RS)
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>RuleSetDoesNotExist</Code>"));
     }
@@ -157,7 +148,7 @@ class SesReceiptRuleSetV1IntegrationTest {
     @Order(11)
     void createRuleSet_charOutsideAllowedSet_returnsValidationError() {
         // A character outside ^[a-zA-Z0-9_.-]+$ is a Smithy ValidationError (verified against AWS).
-        req("CreateReceiptRuleSet").formParam("RuleSetName", "floci bad name")
+        query(AUTH, "CreateReceiptRuleSet").formParam("RuleSetName", "floci bad name")
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>ValidationError</Code>"))
                 .body(containsString("ruleSetName"));
@@ -167,7 +158,7 @@ class SesReceiptRuleSetV1IntegrationTest {
     @Order(12)
     void createRuleSet_badFormat_returnsNotValidRuleSetName() {
         // Valid characters, but a name must start/end with an alphanumeric (verified against AWS).
-        req("CreateReceiptRuleSet").formParam("RuleSetName", "-floci-bad")
+        query(AUTH, "CreateReceiptRuleSet").formParam("RuleSetName", "-floci-bad")
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>InvalidParameterValue</Code>"))
                 .body(containsString("Not a valid ruleSetName: -floci-bad"));
@@ -177,9 +168,9 @@ class SesReceiptRuleSetV1IntegrationTest {
     @Order(13)
     void createRuleSet_dottedName_isAccepted() {
         // A dot is inside the allowed character set (verified against AWS).
-        req("CreateReceiptRuleSet").formParam("RuleSetName", "floci.v1.dotted")
+        query(AUTH, "CreateReceiptRuleSet").formParam("RuleSetName", "floci.v1.dotted")
         .when().post("/").then().statusCode(200);
-        req("DeleteReceiptRuleSet").formParam("RuleSetName", "floci.v1.dotted")
+        query(AUTH, "DeleteReceiptRuleSet").formParam("RuleSetName", "floci.v1.dotted")
         .when().post("/").then().statusCode(200);
     }
 }

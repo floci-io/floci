@@ -21,6 +21,13 @@ the ARN formats AWS mints it in. Both halves are vendored: the types decide whic
 names, and the formats are what `ResourceArnBuilder` checks its own minting against, so a prefix
 that drifts from AWS fails at startup rather than producing an ARN no policy matches.
 
+Each action also carries its access level, as the properties `IsWrite`, `IsPermissionManagement`
+and `IsTaggingOnly`. The actions that have none of them, the Read and List ones, are vendored as
+`readOnlyActions`: CloudTrail "considers an action read-only if it does not have any mutating
+effect on a resource" and records it with `readOnly: true` and no `responseElements`
+(https://docs.aws.amazon.com/IAM/latest/UserGuide/cloudtrail-integration.html), which is what
+`IamCloudTrailEvents` reads them for.
+
 That endpoint is live rather than a pinned dependency, so a fresh generation is not byte-identical:
 AWS adds actions whenever it ships them. Byte-equality is therefore the wrong gate. What must be
 guaranteed is that nothing here is invented, which is checkable directly:
@@ -79,6 +86,21 @@ ANCHORS = {
     "ListUsers": [],
 }
 
+# The access level properties that mark an action as one that changes something. An action with
+# none of them set is a Read or List one.
+MUTATING_PROPERTIES = ("IsWrite", "IsPermissionManagement", "IsTaggingOnly")
+
+# Read-only or not, whichever way the reference says, for one action of each kind the file must
+# still carry: a read, a list, a simulation, and a write, a permissions change and a tagging one.
+READ_ONLY_ANCHORS = {
+    "GetUser": True,
+    "ListUsers": True,
+    "SimulatePrincipalPolicy": True,
+    "CreateUser": False,
+    "PutUserPolicy": False,
+    "TagUser": False,
+}
+
 
 def fetch_reference(source: Path | None) -> tuple[dict, str]:
     """AWS's IAM service reference and a provenance label for where it came from."""
@@ -115,6 +137,22 @@ def action_resources_from(reference: dict) -> dict[str, list[str]]:
     return dict(sorted(found.items()))
 
 
+def read_only_actions_from(reference: dict) -> list[str]:
+    """Every action the reference gives none of the mutating access level properties, sorted.
+
+    An action whose properties the reference leaves out is not counted as read-only: nothing then
+    says it changes nothing.
+    """
+    found: list[str] = []
+    for action in reference.get("Actions", []):
+        properties = action.get("Annotations", {}).get("Properties")
+        if not isinstance(properties, dict):
+            continue
+        if not any(properties.get(name) for name in MUTATING_PROPERTIES):
+            found.append(action["Name"])
+    return sorted(found)
+
+
 def arn_formats_from(reference: dict) -> dict[str, list[str]]:
     """Every resource type the reference publishes, mapped to its ARN formats, sorted."""
     resources = reference.get("Resources")
@@ -145,6 +183,7 @@ def build(reference: dict, provenance: str) -> dict:
         },
         "actionResources": action_resources_from(reference),
         "resourceArnFormats": arn_formats_from(reference),
+        "readOnlyActions": read_only_actions_from(reference),
     }
 
 
@@ -194,7 +233,33 @@ def validate(document: dict) -> list[str]:
         elif actions[action] != expected:
             problems.append(f"{action!r} should be authorized against {expected}, "
                             f"not {actions[action]}")
+    read_only = document.get("readOnlyActions")
+    if not isinstance(read_only, list) or not read_only:
+        problems.append("readOnlyActions is missing or empty")
+        return problems
+    if read_only != sorted(read_only):
+        problems.append("readOnlyActions is not sorted")
+    if len(read_only) != len(set(read_only)):
+        problems.append("readOnlyActions lists an action twice")
+    for action in read_only:
+        if action not in actions:
+            problems.append(f"readOnlyActions names {action!r}, which is not an action of the file")
+    for action, expected in READ_ONLY_ANCHORS.items():
+        if (action in read_only) != expected:
+            problems.append(f"{action!r} should {'' if expected else 'not '}be read-only")
     return problems
+
+
+def verify_read_only_against(vendored: list[str], upstream: list[str]) -> tuple[list[str], list[str]]:
+    """What the vendored read-only list claims and AWS does not, and what AWS has since added.
+
+    An action listed here that AWS gives a mutating access level fails: its record would hide the
+    result of a change. A read-only action AWS has added is only a file that is behind.
+    """
+    untrue = [f"{action!r} is not a read-only action AWS publishes" for action in vendored
+              if action not in upstream]
+    added = [f"{action} (new read-only action)" for action in upstream if action not in vendored]
+    return untrue, sorted(added)
 
 
 def verify_against(vendored: dict[str, list[str]],
@@ -287,10 +352,12 @@ def main(argv: list[str] | None = None) -> int:
         document = json.loads(args.output.read_text(encoding="utf-8"))
         vendored = document["actionResources"]
         vendored_formats = document.get("resourceArnFormats", {})
+        vendored_read_only = document.get("readOnlyActions", [])
         try:
             reference, provenance = fetch_reference(args.source)
             upstream = action_resources_from(reference)
             upstream_formats = arn_formats_from(reference)
+            upstream_read_only = read_only_actions_from(reference)
         except (OSError, ValueError) as e:
             # Distinct from a data problem: the gate could not run, rather than having found
             # something invented. Separate exit code so CI can tell the two apart. ValueError
@@ -300,8 +367,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         untrue, added = verify_against(vendored, upstream)
         format_untrue, format_added = verify_formats_against(vendored_formats, upstream_formats)
-        untrue += format_untrue
-        added += format_added
+        read_only_untrue, read_only_added = verify_read_only_against(vendored_read_only, upstream_read_only)
+        untrue += format_untrue + read_only_untrue
+        added += format_added + read_only_added
         for claim in untrue:
             print(f"error: {claim}", file=sys.stderr)
         if untrue:

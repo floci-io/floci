@@ -290,7 +290,7 @@ class KinesisStreamingViewsTest {
 
         assertThat(views.overSchema(SESSION, "kds"), equalTo(List.of(view)));
         assertThat(views.overSchema(SESSION, "other"), equalTo(List.of()));
-        assertThat(KinesisStreamingViews.dropSql(view, true, false),
+        assertThat(StreamingViewSupport.dropSql(view.viewSchema(), view.viewName(), true, false),
                 equalTo("DROP TABLE IF EXISTS \"public\".\"events_mv\" RESTRICT"));
     }
 }

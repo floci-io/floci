@@ -135,6 +135,10 @@ public class SsoPermissionSetRoleProvisioner {
         RequestScopes.runAs(provisioning.accountId(), region, () -> {
             IamRole role = findRole(provisioning);
             if (role != null && ownsRole(provisioning, role)) {
+                // Asked before the policies go: a role an instance profile holds cannot be
+                // deleted, and emptying it first would leave the assignment's role in place
+                // with nothing on it.
+                iam.requireNotHeldByAnInstanceProfile(role.getRoleName());
                 iam.replaceRolePolicies(role.getRoleName(), role.getRoleId(), List.of(), Map.of(), null, 0);
                 iam.deleteRole(role.getRoleName(), role.getRoleId());
             }

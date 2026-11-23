@@ -542,7 +542,7 @@ final class DynamoDbAccessPathValidator {
             if (value == null) {
                 continue;
             }
-            String expectedType = startKeyAttributeType(table, attribute);
+            String expectedType = table.attributeType(attribute);
             if (isEmptyKeyValue(value, expectedType)) {
                 throw DynamoDbKeyValueErrors.emptyKeyValue(expectedType, attribute);
             }
@@ -574,7 +574,7 @@ final class DynamoDbAccessPathValidator {
             Set<String> attributes = startKeyAttributeNames(table, index);
             for (String attribute : attributes) {
                 JsonNode value = exclusiveStartKey.get(attribute);
-                String expectedType = startKeyAttributeType(table, attribute);
+                String expectedType = table.attributeType(attribute);
                 if (value != null && value.isObject() && !value.isEmpty()
                         && expectedType != null && !value.has(expectedType)) {
                     throw DynamoDbKeyValueErrors.indexKeyTypeMismatch(attribute, expectedType,
@@ -583,7 +583,7 @@ final class DynamoDbAccessPathValidator {
             }
             for (String attribute : attributes) {
                 JsonNode value = exclusiveStartKey.get(attribute);
-                String expectedType = startKeyAttributeType(table, attribute);
+                String expectedType = table.attributeType(attribute);
                 if (value != null && isEmptyKeyValue(value, expectedType)) {
                     throw DynamoDbKeyValueErrors.emptyIndexKeyValue(expectedType, index.indexName(), attribute);
                 }
@@ -613,17 +613,6 @@ final class DynamoDbAccessPathValidator {
             table.getLocalSecondaryIndexes().forEach(lsi -> names.add(lsi.getIndexName()));
         }
         return names.stream().sorted().toList();
-    }
-
-    private static String startKeyAttributeType(TableDefinition table, String attribute) {
-        if (table.getAttributeDefinitions() == null) {
-            return null;
-        }
-        return table.getAttributeDefinitions().stream()
-                .filter(definition -> attribute.equals(definition.getAttributeName()))
-                .map(AttributeDefinition::getAttributeType)
-                .findFirst()
-                .orElse(null);
     }
 
     private static boolean isEmptyKeyValue(JsonNode value, String expectedType) {

@@ -8,6 +8,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.floci.aws.services.ses.SesV2TimestampMatchers.DECIMAL_NUMBERS;
 import static io.floci.aws.services.ses.SesV2TimestampMatchers.epochSecondsWithMillis;
 import static io.restassured.RestAssured.given;
@@ -24,21 +26,19 @@ import static org.hamcrest.Matchers.hasSize;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesContactV2IntegrationTest {
 
-    private static final String SES_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String LIST = "contacts-it-list";
     private static final String EMAIL = "alice@example.com";
     private static final String CONTACTS = "/v2/email/contact-lists/" + LIST + "/contacts";
 
     private static Response post(String path, String body) {
-        return given().contentType("application/json").header("Authorization", SES_AUTH)
+        return v2()
                 .body(body).when().post(path);
     }
 
     @Test
     @Order(1)
     void setup_createContactList() {
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ContactListName\":\"" + LIST + "\",\"Topics\":["
                         + "{\"TopicName\":\"weekly\",\"DisplayName\":\"Weekly\",\"DefaultSubscriptionStatus\":\"OPT_IN\"},"
                         + "{\"TopicName\":\"promos\",\"DisplayName\":\"Promos\",\"DefaultSubscriptionStatus\":\"OPT_OUT\"}]}")
@@ -57,7 +57,7 @@ class SesContactV2IntegrationTest {
     @Test
     @Order(3)
     void getContact_shape() {
-        given().config(DECIMAL_NUMBERS).header("Authorization", SES_AUTH)
+        given().config(DECIMAL_NUMBERS).header("Authorization", AUTH)
         .when().get(CONTACTS + "/" + EMAIL)
         .then().statusCode(200)
                 .body("EmailAddress", equalTo(EMAIL))
@@ -86,7 +86,7 @@ class SesContactV2IntegrationTest {
     @Test
     @Order(5)
     void getContact_unknownEmail_returns404() {
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get(CONTACTS + "/ghost@example.com")
         .then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"))
@@ -96,7 +96,7 @@ class SesContactV2IntegrationTest {
     @Test
     @Order(6)
     void getContact_unknownList_returns404() {
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/contact-lists/does-not-exist/contacts/" + EMAIL)
         .then().statusCode(404)
                 .body("message", equalTo("List with name: does-not-exist doesn't exist."));
@@ -146,11 +146,11 @@ class SesContactV2IntegrationTest {
     @Test
     @Order(11)
     void updateContact_unsubscribeAll_replacesAttributesKeepsPreferences() {
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"UnsubscribeAll\":true}")
         .when().put(CONTACTS + "/" + EMAIL).then().statusCode(200);
 
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get(CONTACTS + "/" + EMAIL)
         .then().statusCode(200)
                 .body("UnsubscribeAll", equalTo(true))
@@ -163,11 +163,11 @@ class SesContactV2IntegrationTest {
     @Test
     @Order(12)
     void updateContact_topicPreferences_mergeByTopicName() {
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"TopicPreferences\":[{\"TopicName\":\"promos\",\"SubscriptionStatus\":\"OPT_IN\"}]}")
         .when().put(CONTACTS + "/" + EMAIL).then().statusCode(200);
 
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get(CONTACTS + "/" + EMAIL)
         .then().statusCode(200)
                 // Merged: existing weekly kept + promos added; no topic left for defaults.
@@ -178,7 +178,7 @@ class SesContactV2IntegrationTest {
     @Test
     @Order(13)
     void listContacts_lightweightProjection() {
-        given().config(DECIMAL_NUMBERS).contentType("application/json").header("Authorization", SES_AUTH).body("{}")
+        given().config(DECIMAL_NUMBERS).contentType("application/json").header("Authorization", AUTH).body("{}")
         .when().post(CONTACTS + "/list")
         .then().statusCode(200)
                 .body("Contacts", hasSize(1))
@@ -193,17 +193,17 @@ class SesContactV2IntegrationTest {
     @Test
     @Order(14)
     void deleteContact_thenGone() {
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().delete(CONTACTS + "/" + EMAIL).then().statusCode(200);
 
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get(CONTACTS + "/" + EMAIL).then().statusCode(404);
     }
 
     @Test
     @Order(15)
     void deleteContact_unknown_returns404() {
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().delete(CONTACTS + "/ghost@example.com")
         .then().statusCode(404)
                 .body("message", equalTo("ghost@example.com doesn't exist in List."));
@@ -215,15 +215,15 @@ class SesContactV2IntegrationTest {
         // Add a contact, delete the list (which must cascade-delete its contacts), then recreate a
         // same-named list — the old contact must not leak into it.
         post(CONTACTS, "{\"EmailAddress\":\"carol@example.com\"}").then().statusCode(200);
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().delete("/v2/email/contact-lists/" + LIST).then().statusCode(200);
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ContactListName\":\"" + LIST + "\",\"Topics\":["
                         + "{\"TopicName\":\"weekly\",\"DisplayName\":\"Weekly\","
                         + "\"DefaultSubscriptionStatus\":\"OPT_IN\"}]}")
         .when().post("/v2/email/contact-lists").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", SES_AUTH).body("{}")
+        v2().body("{}")
         .when().post(CONTACTS + "/list")
         .then().statusCode(200).body("Contacts", hasSize(0));
     }
@@ -232,7 +232,7 @@ class SesContactV2IntegrationTest {
     @Order(17)
     void getContact_invalidEmail_returns400() {
         // Verified against real AWS: the EmailAddress format is validated before list existence.
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get(CONTACTS + "/not-an-email")
         .then().statusCode(400)
                 .body("message", equalTo("EmailAddress <not-an-email> is invalid"));
@@ -241,7 +241,7 @@ class SesContactV2IntegrationTest {
     @Test
     @Order(18)
     void getContact_invalidEmailAndUnknownList_reportsEmailFirst() {
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/contact-lists/does-not-exist/contacts/not-an-email")
         .then().statusCode(400)
                 .body("message", equalTo("EmailAddress <not-an-email> is invalid"));
@@ -250,7 +250,7 @@ class SesContactV2IntegrationTest {
     @Test
     @Order(19)
     void deleteContact_invalidEmail_returns400() {
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().delete(CONTACTS + "/not-an-email")
         .then().statusCode(400)
                 .body("message", equalTo("EmailAddress <not-an-email> is invalid"));
@@ -259,7 +259,7 @@ class SesContactV2IntegrationTest {
     @Test
     @Order(20)
     void listContacts_nonObjectBody_returns400() {
-        given().contentType("application/json").header("Authorization", SES_AUTH).body("[]")
+        v2().body("[]")
         .when().post(CONTACTS + "/list")
         .then().statusCode(400)
                 .body("__type", equalTo("SerializationException"))
@@ -302,15 +302,15 @@ class SesContactV2IntegrationTest {
     void createContact_unsubscribeAllString_coercesByText() {
         post(CONTACTS, "{\"EmailAddress\":\"type-d@example.com\",\"UnsubscribeAll\":\"yes\"}")
         .then().statusCode(200);
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get(CONTACTS + "/type-d@example.com")
         .then().statusCode(200).body("UnsubscribeAll", equalTo(true));
 
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"UnsubscribeAll\":\"no\"}")
         .when().put(CONTACTS + "/type-d@example.com")
         .then().statusCode(200);
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get(CONTACTS + "/type-d@example.com")
         .then().statusCode(200).body("UnsubscribeAll", equalTo(false));
 
@@ -323,7 +323,7 @@ class SesContactV2IntegrationTest {
     @Test
     @Order(25)
     void updateContact_attributesDataNumber_returns400() {
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"AttributesData\":123}")
         .when().put(CONTACTS + "/" + EMAIL)
         .then().statusCode(400)
@@ -369,14 +369,14 @@ class SesContactV2IntegrationTest {
         // that has been deleted (which would orphan the contact for a same-named list recreated later).
         // AWS allows only one contact list per account, so this reuses (and deletes) LIST.
         post(CONTACTS, "{\"EmailAddress\":\"bob@example.com\"}").then().statusCode(200);
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().delete("/v2/email/contact-lists/" + LIST).then().statusCode(200);
 
         post(CONTACTS, "{\"EmailAddress\":\"ghost@example.com\"}")
         .then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"));
 
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"UnsubscribeAll\":true}")
         .when().put(CONTACTS + "/bob@example.com")
         .then().statusCode(404)

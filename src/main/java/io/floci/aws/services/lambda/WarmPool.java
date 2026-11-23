@@ -5,6 +5,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.ContainerTeardown;
 import io.floci.aws.core.common.ContainerTeardowns;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.docker.DockerCapacityExceededException;
 import io.floci.aws.services.lambda.launcher.ContainerHandle;
 import io.floci.aws.services.lambda.launcher.LambdaRuntimeLauncher;
 import io.floci.aws.services.lambda.model.ContainerState;
@@ -292,7 +293,7 @@ public class WarmPool implements ContainerTeardown, Resettable {
             if (launching) {
                 LOG.debugv(ephemeral ? "Ephemeral start for function: {0}" : "Cold start for function: {0}",
                         fn.getFunctionName());
-                handle = lambdaRuntimeLauncher.launch(fn);
+                handle = launchWithinBudget(fn);
                 owned.add(handle);
             } else {
                 LOG.debugv("Reusing warm container for function: {0}", fn.getFunctionName());
@@ -408,6 +409,48 @@ public class WarmPool implements ContainerTeardown, Resettable {
             LOG.debugv("Pool full for function {0}, stopping excess container", handle.getFunctionName());
             stopQuietly(handle);
         }
+    }
+
+    /**
+     * Launches a container for {@code fn}. When Lambda's Docker budget
+     * ({@code floci.docker.service-max-containers.lambda}) refuses it, the least recently used idle
+     * container of any function is stopped and the launch tried once more, so the budget bounds the
+     * containers doing work rather than the warm ones; the refusal stands only when none is idle.
+     */
+    private ContainerHandle launchWithinBudget(LambdaFunction fn) {
+        try {
+            return lambdaRuntimeLauncher.launch(fn);
+        } catch (RuntimeException e) {
+            if (DockerCapacityExceededException.findIn(e) == null) {
+                throw e;
+            }
+            List<ContainerHandle> evicted;
+            synchronized (capLock) {
+                int idle = idleTotal();
+                evicted = idle == 0 ? List.of() : evictIdleBeyond(idle - 1);
+            }
+            if (evicted.isEmpty()) {
+                throw e;
+            }
+            for (ContainerHandle victim : evicted) {
+                LOG.infov("Lambda''s Docker budget is full; stopping least-recently-used idle container {0} of"
+                        + " function {1} to launch one for {2}", victim.getContainerId(), victim.getFunctionName(),
+                        fn.getFunctionName());
+                stopQuietly(victim);
+            }
+            return lambdaRuntimeLauncher.launch(fn);
+        }
+    }
+
+    /** Idle containers across every function. Must be called under {@link #capLock}. */
+    private int idleTotal() {
+        int total = 0;
+        for (PoolState poolState : poolStates.values()) {
+            synchronized (poolState) {
+                total += idleSize(poolState);
+            }
+        }
+        return total;
     }
 
     /**

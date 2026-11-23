@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV1Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -21,8 +22,6 @@ import static org.hamcrest.Matchers.not;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesConfigurationSetEventDestinationV1IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     private static final String CS = "v1-evt-cs";
     private static final String ED = "v1-ed-sns";
     private static final String TOPIC_ARN_A = "arn:aws:sns:us-east-1:000000000000:topic-a";

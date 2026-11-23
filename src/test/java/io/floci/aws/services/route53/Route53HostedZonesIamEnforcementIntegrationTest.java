@@ -22,6 +22,7 @@ import java.net.URI;
 import java.util.UUID;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
+import static io.floci.aws.testing.IamTestPolicies.allow;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -133,12 +134,6 @@ class Route53HostedZonesIamEnforcementIntegrationTest {
 
     private static String zoneArn(String id) {
         return "arn:aws:route53:::hostedzone/" + id;
-    }
-
-    private static String allow(String actions, String resource) {
-        return """
-                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":%s,"Resource":"%s"}]}
-                """.formatted(actions, resource);
     }
 
     private String userWithPolicy(String policy) {

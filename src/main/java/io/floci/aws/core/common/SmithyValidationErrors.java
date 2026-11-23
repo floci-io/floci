@@ -267,6 +267,10 @@ public final class SmithyValidationErrors {
             return constraint(path, value, "Map keys must satisfy constraint: " + rules);
         }
 
+        public String mapValues(String path, String value, List<String> rules) {
+            return constraint(path, value, "Map value must satisfy constraint: " + rules);
+        }
+
         /** The violation for a value outside its enum, the values in the model's order. */
         public String notInEnum(String value, String path, List<String> allowed) {
             return constraint(path, value, "Member must satisfy enum value set: " + allowed);

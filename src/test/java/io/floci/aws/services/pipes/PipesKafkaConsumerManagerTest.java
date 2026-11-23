@@ -2,6 +2,9 @@ package io.floci.aws.services.pipes;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.kafka.KafkaConsumerHandle;
+import io.floci.aws.core.common.kafka.KafkaRestClient;
+import io.floci.aws.core.common.kafka.KarapaceManager;
 import io.floci.aws.services.msk.MskService;
 import io.floci.aws.services.pipes.model.Pipe;
 import org.junit.jupiter.api.BeforeEach;
@@ -28,14 +31,14 @@ class PipesKafkaConsumerManagerTest {
 
     private MskService mskService;
     private KarapaceManager karapaceManager;
-    private PipesKafkaRestClient restClient;
+    private KafkaRestClient restClient;
     private PipesKafkaConsumerManager manager;
 
     @BeforeEach
     void setUp() {
         mskService = mock(MskService.class);
         karapaceManager = mock(KarapaceManager.class);
-        restClient = mock(PipesKafkaRestClient.class);
+        restClient = mock(KafkaRestClient.class);
         manager = new PipesKafkaConsumerManager(mskService, karapaceManager, restClient);
     }
 

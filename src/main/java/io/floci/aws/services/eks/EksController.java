@@ -61,9 +61,12 @@ public class EksController {
             + "aws(?::|%3[aA])cluster-access-policy(?:/|%2[fF])[^/]+";
 
 
-    private static final List<String> UPDATE_CONFIG_FAMILIES = List.of("resourcesVpcConfig", "logging", "accessConfig");
-    private static final Set<String> UPDATE_CONFIG_MEMBERS =
-            Set.of("name", "clientRequestToken", "resourcesVpcConfig", "logging", "accessConfig");
+    private static final List<String> UPDATE_CONFIG_FAMILIES =
+            List.of("resourcesVpcConfig", "logging", "accessConfig", "upgradePolicy");
+    /** The members that together make one EKS Auto Mode update. */
+    private static final List<String> AUTO_MODE_MEMBERS = List.of("computeConfig", "storageConfig", "kubernetesNetworkConfig");
+    private static final Set<String> UPDATE_CONFIG_MEMBERS = Set.of("name", "clientRequestToken", "resourcesVpcConfig",
+            "logging", "accessConfig", "upgradePolicy", "computeConfig", "storageConfig", "kubernetesNetworkConfig");
 
     private final EksService eksService;
     private final EksAccessEntryService accessEntries;
@@ -137,7 +140,7 @@ public class EksController {
      */
     private Cluster toClusterResponse(Cluster cluster) {
         if (cluster == null || (!cluster.isExplicitVersion() && cluster.getNodeInstanceType() == null
-                && cluster.getNodePrivateIp() == null
+                && cluster.getNodePrivateIp() == null && cluster.getNodePodPrefixes() == null
                 && cluster.getClusterArgs() == null && cluster.getDefaultStorageClass() == null
                 && cluster.getJoinedInstanceIds() == null && cluster.getDockerNameRegion() == null)) {
             return cluster;
@@ -147,6 +150,7 @@ public class EksController {
         response.setExplicitVersion(false);
         response.setNodeInstanceType(null);
         response.setNodePrivateIp(null);
+        response.setNodePodPrefixes(null);
         response.setClusterArgs(null);
         response.setDefaultStorageClass(null);
         response.setJoinedInstanceIds(null);
@@ -366,7 +370,24 @@ public class EksController {
                             "Floci does not support updating " + member + " through UpdateClusterConfig yet", 400);
                 }
             }
-            if (UPDATE_CONFIG_FAMILIES.stream().filter(body::has).count() > 1) {
+            JsonNode network = body.path("kubernetesNetworkConfig");
+            for (String member : (Iterable<String>) network::fieldNames) {
+                if (!"elasticLoadBalancing".equals(member)) {
+                    throw new AwsException("InvalidParameterException",
+                            "Floci does not support updating kubernetesNetworkConfig." + member
+                                    + " through UpdateClusterConfig yet", 400);
+                }
+            }
+            for (String member : (Iterable<String>) network.path("elasticLoadBalancing")::fieldNames) {
+                if (!"enabled".equals(member)) {
+                    throw new AwsException("InvalidParameterException",
+                            "Floci does not support updating kubernetesNetworkConfig.elasticLoadBalancing." + member
+                                    + " through UpdateClusterConfig yet", 400);
+                }
+            }
+            long families = UPDATE_CONFIG_FAMILIES.stream().filter(body::has).count()
+                    + (AUTO_MODE_MEMBERS.stream().anyMatch(body::has) ? 1 : 0);
+            if (families > 1) {
                 throw new AwsException("InvalidParameterException", "Only one type of update can be allowed.", 400);
             }
             try {

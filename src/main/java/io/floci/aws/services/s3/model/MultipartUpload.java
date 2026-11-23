@@ -21,6 +21,11 @@ public class MultipartUpload {
     private String cacheControl;
     private String serverSideEncryption;
     private String sseKmsKeyId;
+    // What the bucket's default encryption gave an upload whose request named none, when it was created. The two
+    // fields above hold only what the request sent: the CreateMultipartUpload request is judged by its own headers,
+    // its parts and completion by the effective encryption.
+    private String defaultServerSideEncryption;
+    private String defaultSseKmsKeyId;
     private String sseCustomerAlgorithm;
     private String sseCustomerKeyMd5;
     private String acl;
@@ -86,6 +91,23 @@ public class MultipartUpload {
 
     public String getSseKmsKeyId() { return sseKmsKeyId; }
     public void setSseKmsKeyId(String sseKmsKeyId) { this.sseKmsKeyId = sseKmsKeyId; }
+
+    public String getDefaultServerSideEncryption() { return defaultServerSideEncryption; }
+    public void setDefaultServerSideEncryption(String defaultServerSideEncryption) {
+        this.defaultServerSideEncryption = defaultServerSideEncryption;
+    }
+
+    public String getDefaultSseKmsKeyId() { return defaultSseKmsKeyId; }
+    public void setDefaultSseKmsKeyId(String defaultSseKmsKeyId) { this.defaultSseKmsKeyId = defaultSseKmsKeyId; }
+
+    /** The encryption the upload's parts and object take: what the request sent, else the bucket default taken at creation. */
+    public String effectiveServerSideEncryption() {
+        return serverSideEncryption != null ? serverSideEncryption : defaultServerSideEncryption;
+    }
+
+    public String effectiveSseKmsKeyId() {
+        return serverSideEncryption != null ? sseKmsKeyId : defaultSseKmsKeyId;
+    }
 
     public String getSseCustomerAlgorithm() { return sseCustomerAlgorithm; }
     public void setSseCustomerAlgorithm(String sseCustomerAlgorithm) { this.sseCustomerAlgorithm = sseCustomerAlgorithm; }

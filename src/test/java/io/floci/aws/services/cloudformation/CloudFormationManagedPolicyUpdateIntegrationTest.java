@@ -234,6 +234,56 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
         }
     }
 
+    /**
+     * The stack still comes down after an update. The update publishes the new document as the
+     * default version and leaves the version before it on the policy, which IAM refuses to delete
+     * a policy over, so the delete clears the other versions first: without that a stack could
+     * create and update a managed policy it would never be able to take down again.
+     */
+    @Test
+    void theStackComesDownAfterAnUpdateLeftAnEarlierVersion() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-mp-delete-" + suffix;
+        String policyName = "mp-delete-" + suffix;
+        String roleName = "mp-delete-role-" + suffix;
+
+        try {
+            createStack(stackName, managedPolicyTemplate(policyName, roleName, "s3:GetObject"));
+            assertStackStatus(stackName, "CREATE_COMPLETE");
+            updateStack(stackName, managedPolicyTemplate(policyName, roleName, "s3:PutObject"));
+            assertStackStatus(stackName, "UPDATE_COMPLETE");
+
+            CfnStackWaits.deleteStack(stackName, CFN_AUTH);
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", IAM_AUTH)
+                .formParam("Action", "GetPolicy")
+                .formParam("PolicyArn", policyArn(policyName))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(404);
+        } finally {
+            // An assertion failing ahead of the delete would otherwise leave the stack, its role
+            // and its policy in the store every class here shares. This asks for the delete and
+            // reports nothing, so it cannot mask the failure that brought it here; the delete
+            // under test is the one above.
+            sweepUp(stackName);
+        }
+    }
+
+    /** Asks for a stack to go and says nothing about the answer, for use in a teardown. */
+    private static void sweepUp(String stackName) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/");
+    }
+
     @Test
     void updateRetargetingRolesDetachesTheRemovedRole() {
         String suffix = Long.toString(System.nanoTime(), 36);

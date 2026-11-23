@@ -3656,11 +3656,18 @@ public class Ec2QueryHandler {
 
     private Response handleModifySubnetAttribute(MultivaluedMap<String, String> p, String region) {
         String subnetId = p.getFirst("SubnetId");
+        String hostnameType = p.getFirst("PrivateDnsHostnameTypeOnLaunch");
+        if (hostnameType != null) {
+            service.modifySubnetAttribute(region, subnetId, "privateDnsHostnameTypeOnLaunch", hostnameType);
+            return booleanResponse("ModifySubnetAttribute");
+        }
         for (String attr : List.of(
                 "MapPublicIpOnLaunch",
                 "AssignIpv6AddressOnCreation",
                 "EnableDns64",
-                "MapCustomerOwnedIpOnLaunch")) {
+                "MapCustomerOwnedIpOnLaunch",
+                "EnableResourceNameDnsARecordOnLaunch",
+                "EnableResourceNameDnsAAAARecordOnLaunch")) {
             String val = p.getFirst(attr + ".Value");
             if (val != null) {
                 String camel = Character.toLowerCase(attr.charAt(0)) + attr.substring(1);
@@ -3753,7 +3760,7 @@ public class Ec2QueryHandler {
         List<Tag> ruleTags = parseTagsForResource(p, "security-group-rule");
         String groupId = p.getFirst("GroupId");
         List<IpPermission> perms = parseIpPermissions(p, "IpPermissions");
-        List<SecurityGroupRule> rules = service.authorizeSecurityGroupIngress(region, groupId, perms);
+        List<SecurityGroupRule> rules = service.authorizeSecurityGroupIngress(region, groupId, perms, dryRun(p));
         applySecurityGroupRuleTags(ruleTags, region, rules);
         XmlBuilder xml = new XmlBuilder()
                 .start("AuthorizeSecurityGroupIngressResponse", AwsNamespaces.EC2)
@@ -3771,7 +3778,7 @@ public class Ec2QueryHandler {
         List<Tag> ruleTags = parseTagsForResource(p, "security-group-rule");
         String groupId = p.getFirst("GroupId");
         List<IpPermission> perms = parseIpPermissions(p, "IpPermissions");
-        List<SecurityGroupRule> rules = service.authorizeSecurityGroupEgress(region, groupId, perms);
+        List<SecurityGroupRule> rules = service.authorizeSecurityGroupEgress(region, groupId, perms, dryRun(p));
         applySecurityGroupRuleTags(ruleTags, region, rules);
         XmlBuilder xml = new XmlBuilder()
                 .start("AuthorizeSecurityGroupEgressResponse", AwsNamespaces.EC2)
@@ -3789,11 +3796,14 @@ public class Ec2QueryHandler {
         String groupId = p.getFirst("GroupId");
         List<IpPermission> perms = parseIpPermissions(p, "IpPermissions");
         List<String> ruleIds = getList(p, "SecurityGroupRuleId");
+        boolean dryRun = dryRun(p);
+        // A dry run naming rule ids is answered once they are checked: the permissions' revoke refuses only a
+        // group that doesn't exist, which the ids' check refuses first.
         if (!ruleIds.isEmpty()) {
-            service.revokeSecurityGroupRulesByIds(region, groupId, ruleIds, false);
+            service.revokeSecurityGroupRulesByIds(region, groupId, ruleIds, false, dryRun);
         }
         if (!perms.isEmpty() || ruleIds.isEmpty()) {
-            service.revokeSecurityGroupIngress(region, groupId, perms);
+            service.revokeSecurityGroupIngress(region, groupId, perms, dryRun);
         }
         return booleanResponse("RevokeSecurityGroupIngress");
     }
@@ -3802,11 +3812,13 @@ public class Ec2QueryHandler {
         String groupId = p.getFirst("GroupId");
         List<IpPermission> perms = parseIpPermissions(p, "IpPermissions");
         List<String> ruleIds = getList(p, "SecurityGroupRuleId");
+        boolean dryRun = dryRun(p);
+        // As for RevokeSecurityGroupIngress, a dry run naming rule ids is answered once they are checked.
         if (!ruleIds.isEmpty()) {
-            service.revokeSecurityGroupRulesByIds(region, groupId, ruleIds, true);
+            service.revokeSecurityGroupRulesByIds(region, groupId, ruleIds, true, dryRun);
         }
         if (!perms.isEmpty() || ruleIds.isEmpty()) {
-            service.revokeSecurityGroupEgress(region, groupId, perms);
+            service.revokeSecurityGroupEgress(region, groupId, perms, dryRun);
         }
         return booleanResponse("RevokeSecurityGroupEgress");
     }
@@ -3848,17 +3860,19 @@ public class Ec2QueryHandler {
             if (desc != null) update.put("Description", desc);
             updates.add(update);
         }
-        service.modifySecurityGroupRules(region, groupId, updates);
+        service.modifySecurityGroupRules(region, groupId, updates, dryRun(p));
         return booleanResponse("ModifySecurityGroupRules");
     }
 
     private Response handleUpdateSgRuleDescriptionsIngress(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         String groupId = p.getFirst("GroupId");
         service.updateSecurityGroupRuleDescriptionsIngress(region, groupId, Collections.emptyList());
         return booleanResponse("UpdateSecurityGroupRuleDescriptionsIngress");
     }
 
     private Response handleUpdateSgRuleDescriptionsEgress(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         String groupId = p.getFirst("GroupId");
         service.updateSecurityGroupRuleDescriptionsEgress(region, groupId, Collections.emptyList());
         return booleanResponse("UpdateSecurityGroupRuleDescriptionsEgress");
@@ -5546,6 +5560,7 @@ public class Ec2QueryHandler {
             xml.elem("ipv6Address", ni.getIpv6Addresses().getFirst());
         }
         xml.raw(ipv6AddressesSetXml(ni.getIpv6Addresses()));
+        xml.raw(ipv4PrefixSetXml(ni.getIpv4Prefixes()));
         return xml.build();
     }
 
@@ -5559,6 +5574,18 @@ public class Ec2QueryHandler {
             xml.start("item").elem("ipv6Address", address).elem("isPrimaryIpv6", "false").end("item");
         }
         return xml.end("ipv6AddressesSet").build();
+    }
+
+    /** The IPv4 prefixes delegated to an interface, as {@code ipv4PrefixSet}; nothing for an interface with none. */
+    private static String ipv4PrefixSetXml(List<String> prefixes) {
+        if (prefixes == null || prefixes.isEmpty()) {
+            return "";
+        }
+        XmlBuilder xml = new XmlBuilder().start("ipv4PrefixSet");
+        for (String prefix : prefixes) {
+            xml.start("item").elem("ipv4Prefix", prefix).end("item");
+        }
+        return xml.end("ipv4PrefixSet").build();
     }
 
     private static String networkInterfaceAssociationXml(NetworkInterfaceAssociation association) {
@@ -5863,6 +5890,7 @@ public class Ec2QueryHandler {
                     .end("item")
                     .end("privateIpAddressesSet")
                     .raw(ipv6AddressesSetXml(eni.getIpv6Addresses()))
+                    .raw(ipv4PrefixSetXml(eni.getIpv4Prefixes()))
                     .end("item");
         }
         xml.end("networkInterfaceSet");
@@ -5990,6 +6018,13 @@ public class Ec2QueryHandler {
             xml.start("item").raw(subnetIpv6AssociationXml(assoc)).end("item");
         }
         xml.end("ipv6CidrBlockAssociationSet")
+                .start("privateDnsNameOptionsOnLaunch")
+                    .elem("hostnameType", s.getPrivateDnsHostnameTypeOnLaunch())
+                    .elem("enableResourceNameDnsARecord",
+                            String.valueOf(s.isEnableResourceNameDnsARecordOnLaunch()))
+                    .elem("enableResourceNameDnsAAAARecord",
+                            String.valueOf(s.isEnableResourceNameDnsAAAARecordOnLaunch()))
+                .end("privateDnsNameOptionsOnLaunch")
                 .elem("ownerId", s.getOwnerId())
                 .raw(tagSetXml(s.getTags()));
         return xml.build();

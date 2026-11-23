@@ -151,7 +151,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [CloudFront](cloudfront.md) | `/2020-05-31/distribution/*`, `/2020-05-31/cache-policy/*`, `/2020-05-31/function/*`, `/2020-05-31/key-value-store/*` | REST XML | 97 |
 | [CloudFront KeyValueStore](cloudfront.md#key-value-stores) | `/key-value-stores/*` | REST JSON | 6 |
 | [Route53](route53.md) | `/2013-04-01/hostedzone/*`, `/2013-04-01/healthcheck/*`, `/2013-04-01/change/*`, `/2013-04-01/delegationset/*` | REST XML | 31 |
-| [Route 53 Resolver](route53resolver.md) | `POST /` + `X-Amz-Target: Route53Resolver.*` | JSON 1.1 | 24 |
+| [Route 53 Resolver](route53resolver.md) | `POST /` + `X-Amz-Target: Route53Resolver.*` | JSON 1.1 | 25 |
 | [Amazon SageMaker](sagemaker.md) | `POST /` + `X-Amz-Target: SageMaker.*` | JSON 1.1 | 20 |
 | [SageMaker Runtime](sagemaker.md#endpoint-hosting) | `/endpoints/{EndpointName}/invocations` | REST (binary payload) | 1 |
 | [Cloud Map](cloudmap.md) | `POST /` + `X-Amz-Target: Route53AutoNaming_v20170314.*` | JSON 1.1 | 22 |

@@ -112,7 +112,7 @@ public class EmrServerlessController {
     public UpdateApplicationResponse updateApplication(@PathParam("applicationId") String applicationId,
                                                      UpdateApplicationRequest request) {
         UpdateApplicationResponse response = new UpdateApplicationResponse();
-        response.setApplication(service.updateApplication(applicationId, request));
+        response.setApplication(jobRuns.updateApplication(applicationId, request));
         return response;
     }
 
@@ -216,8 +216,10 @@ public class EmrServerlessController {
     @DELETE
     @Path("/{applicationId}/jobruns/{jobRunId}")
     public CancelJobRunResponse cancelJobRun(@PathParam("applicationId") String applicationId,
-                                             @PathParam("jobRunId") String jobRunId) {
-        JobRun run = jobRuns.cancelJobRun(applicationId, jobRunId);
+                                             @PathParam("jobRunId") String jobRunId,
+                                             @QueryParam("shutdownGracePeriodInSeconds") String gracePeriod) {
+        JobRun run = jobRuns.cancelJobRun(applicationId, jobRunId,
+                EmrServerlessJobRunService.queryInteger(gracePeriod, "shutdownGracePeriodInSeconds"));
         CancelJobRunResponse response = new CancelJobRunResponse();
         response.setApplicationId(run.getApplicationId());
         response.setJobRunId(run.getJobRunId());

@@ -13,22 +13,17 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.stream.Stream;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesTestRenderV2IntegrationTest {
 
-    private static final String AUTH_HEADER =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
-
     @Test
     @Order(1)
     void createTemplate() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                   "TemplateName": "v2-render-welcome",
@@ -48,9 +43,7 @@ class SesTestRenderV2IntegrationTest {
     @Test
     @Order(2)
     void testRenderEmailTemplate_substitutesVariables() {
-        String rendered = given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        String rendered = v2()
             .body("""
                 {"TemplateData": "{\\"name\\":\\"Alice\\",\\"team\\":\\"floci\\"}"}
                 """)
@@ -69,9 +62,7 @@ class SesTestRenderV2IntegrationTest {
     @Test
     @Order(3)
     void testRenderEmailTemplate_unknownTemplate_returns404() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"TemplateData": "{}"}
                 """)
@@ -86,9 +77,7 @@ class SesTestRenderV2IntegrationTest {
     @Test
     @Order(6)
     void testRenderEmailTemplate_unknownTemplateWithMalformedData_reportsTheData() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"TemplateData": "[1]"}
                 """)
@@ -103,9 +92,7 @@ class SesTestRenderV2IntegrationTest {
     @Test
     @Order(4)
     void testRenderEmailTemplate_invalidJson_returns400() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"TemplateData": "{not json"}
                 """)
@@ -120,9 +107,7 @@ class SesTestRenderV2IntegrationTest {
     @Test
     @Order(5)
     void testRenderEmailTemplate_missingVariable_returns400() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"TemplateData": "{\\"name\\":\\"Alice\\"}"}
                 """)
@@ -137,9 +122,7 @@ class SesTestRenderV2IntegrationTest {
     @MethodSource("malformedRenderBodies")
     @Order(7)
     void testRenderEmailTemplate_malformedBody_returns400(String label, String body) {
-        RequestSpecification spec = given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER);
+        RequestSpecification spec = v2();
         if (body != null) {
             spec = spec.body(body);
         }
@@ -161,9 +144,7 @@ class SesTestRenderV2IntegrationTest {
     @Test
     @Order(8)
     void testRenderEmailTemplate_arrayBody_isASerializationException() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("[1,2,3]")
         .when()
             .post("/v2/email/templates/v2-render-welcome/render")
@@ -176,9 +157,7 @@ class SesTestRenderV2IntegrationTest {
     @Test
     @Order(10)
     void testRenderEmailTemplate_dateHeaderIsUtc() {
-        String rendered = given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        String rendered = v2()
             .body("""
                 {"TemplateData": "{\\"name\\":\\"Alice\\",\\"team\\":\\"floci\\"}"}
                 """)
@@ -197,9 +176,7 @@ class SesTestRenderV2IntegrationTest {
     @Test
     @Order(11)
     void testRenderEmailTemplate_utf8Body_isBase64WithAnEncodedSubject() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                   "TemplateName": "v2-render-jp",
@@ -214,9 +191,7 @@ class SesTestRenderV2IntegrationTest {
         .then()
             .statusCode(200);
 
-        String rendered = given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        String rendered = v2()
             .body("""
                 {"TemplateData": "{\\"name\\":\\"太郎\\"}"}
                 """)

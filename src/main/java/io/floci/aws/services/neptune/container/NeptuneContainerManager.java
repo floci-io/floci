@@ -140,7 +140,7 @@ public class NeptuneContainerManager {
         String logGroup = "/aws/neptune/cluster/" + identity + "/" + dbType.name().toLowerCase() + "-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
 
-        Closeable logHandle = logStreamer.attach(
+        Closeable logHandle = logStreamer.attachPolled(
                 info.containerId(), logGroup, logStream, region, "neptune:" + identity);
         handle.setLogStream(logHandle);
 

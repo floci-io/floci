@@ -20,6 +20,7 @@ import io.floci.aws.services.emrserverless.model.JobRunSummary;
 import io.floci.aws.services.emrserverless.model.MaximumCapacity;
 import io.floci.aws.services.emrserverless.model.MonitoringConfiguration;
 import io.floci.aws.services.emrserverless.model.RuntimeConfiguration;
+import io.floci.aws.services.emrserverless.model.SchedulerConfiguration;
 import io.floci.aws.services.emrserverless.model.StartJobRunRequest;
 import io.floci.aws.services.emrserverless.model.UpdateApplicationRequest;
 import io.floci.aws.services.iam.IamService;
@@ -33,8 +34,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -1035,6 +1038,218 @@ class EmrServerlessJobRunServiceTest {
     }
 
     @Test
+    void aRunCancelledWithAGracePeriodGetsSigtermAndMayEndByItselfUntilThePeriodEnds() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String graceful = application("graceful", "emr-7.9.0", null);
+        String ended = service.startJobRun(graceful, request(null, null)).getJobRunId();
+        List<String> cancelling = new ArrayList<>();
+        runner.whileRunning = () -> {
+            cancelling.add(service.cancelJobRun(graceful, ended, 60).getState());
+            // A second cancel while it is CANCELLING changes nothing.
+            service.cancelJobRun(graceful, ended, 0);
+            clock.advance(Duration.ofSeconds(59));
+        };
+        runNext();
+        runNext();
+
+        assertEquals(List.of("CANCELLING"), cancelling);
+        assertEquals(List.of(false, false), runner.cancelledAsRunning, "its driver may run on within the period");
+        assertEquals(Set.of(ended), runner.interrupted);
+        assertTrue(runner.stopped.isEmpty());
+        assertTrue(tasks.isEmpty());
+        assertTrue(runner.jobs.get(0).interruptible(), "its driver gets the SIGTERM through an init process");
+        assertEquals("CANCELLED", service.getJobRun(graceful, ended, null).getState());
+
+        String outlasted = service.startJobRun(graceful, request(null, null)).getJobRunId();
+        runner.cancelledAsRunning.clear();
+        runner.whileRunning = () -> {
+            service.cancelJobRun(graceful, outlasted, 15);
+            clock.advance(Duration.ofSeconds(15));
+        };
+        runNext();
+        runNext();
+
+        assertEquals(List.of(false, true), runner.cancelledAsRunning, "its driver is stopped when the period ends");
+        assertEquals("CANCELLED", service.getJobRun(graceful, outlasted, null).getState());
+    }
+
+    @Test
+    void aStreamingRunHasAGracePeriodByDefaultAndABatchRunOrAnEarlierReleaseNone() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String graceful = application("graceful", "emr-7.9.0", null);
+        String earlier = application("earlier", "emr-7.8.0", null);
+        String streaming = service.startJobRun(graceful, request("STREAMING", null)).getJobRunId();
+        runner.whileRunning = () -> {
+            service.cancelJobRun(graceful, streaming);
+            clock.advance(Duration.ofSeconds(119));
+        };
+        runNext();
+        runNext();
+        String batch = service.startJobRun(graceful, request(null, null)).getJobRunId();
+        runner.whileRunning = () -> service.cancelJobRun(graceful, batch);
+        runNext();
+        runNext();
+        String immediate = service.startJobRun(graceful, request("STREAMING", null)).getJobRunId();
+        runner.whileRunning = () -> service.cancelJobRun(graceful, immediate, 0);
+        runNext();
+        runNext();
+        String older = service.startJobRun(earlier, request("STREAMING", null)).getJobRunId();
+        runner.whileRunning = () -> service.cancelJobRun(earlier, older, 60);
+        runNext();
+        runNext();
+
+        assertEquals(Set.of(streaming), runner.interrupted);
+        assertEquals(Set.of(batch, immediate, older), runner.stopped);
+        assertEquals(List.of(false, false, false, true, false, true, false, true), runner.cancelledAsRunning);
+        assertFalse(runner.jobs.get(3).interruptible(), "an earlier release's driver needs no init process");
+        for (String run : List.of(streaming, batch, immediate)) {
+            assertEquals("CANCELLED", service.getJobRun(graceful, run, null).getState());
+        }
+        assertEquals("CANCELLED", service.getJobRun(earlier, older, null).getState());
+    }
+
+    @Test
+    void aGracePeriodOutsideItsRangeIsRefused() {
+        EmrServerlessJobRunService service = service(60);
+        String running = service.startJobRun(applicationId, request(null, null)).getJobRunId();
+        for (int seconds : List.of(14, 1801, -1)) {
+            AwsException refused = assertThrows(AwsException.class,
+                    () -> service.cancelJobRun(applicationId, running, seconds));
+            assertEquals("ValidationException", refused.getErrorCode());
+            assertEquals("shutdownGracePeriodInSeconds must be 0, or from 15 to 1800 seconds.", refused.getMessage());
+        }
+        assertEquals("CANCELLED", service.cancelJobRun(applicationId, running, 1800).getState());
+    }
+
+    @Test
+    void aRunKeepsItsFlexExecutionAndANonBooleanEnabledIsRefused() {
+        EmrServerlessJobRunService service = service(0);
+        StartJobRunRequest flex = request(null, null);
+        // A member FlexExecution does not have is not kept.
+        flex.setFlexExecution(Map.of("enabled", true, "capacity", "spare"));
+        String jobRunId = service.startJobRun(applicationId, flex).getJobRunId();
+
+        assertEquals(Map.of("enabled", true), service.getJobRun(applicationId, jobRunId, null).getFlexExecution());
+        JobRunSummary listed = service.listJobRuns(applicationId, null, null, null, null, null, null).items().stream()
+                .filter(summary -> jobRunId.equals(summary.getId())).findFirst().orElseThrow();
+        assertEquals(Map.of("enabled", true), listed.getFlexExecution());
+        assertEquals(Map.of("enabled", true),
+                service.listJobRunAttempts(applicationId, jobRunId, null, null).items().get(0).getFlexExecution());
+
+        StartJobRunRequest notBoolean = request(null, null);
+        notBoolean.setFlexExecution(Map.of("enabled", "yes"));
+        AwsException refused = assertThrows(AwsException.class, () -> service.startJobRun(applicationId, notBoolean));
+        assertEquals("SerializationException", refused.getErrorCode());
+    }
+
+    @Test
+    void anEndedSparkRunGivesItsResourceUtilizationAndAHiveRunNone() {
+        EmrServerlessJobRunService service = service(90);
+        StartJobRunRequest sized = request(null, null);
+        sized.getJobDriver().getSparkSubmit()
+                .setSparkSubmitParameters("--conf spark.dynamicAllocation.enabled=false"
+                        + " --conf spark.executor.instances=1 --conf spark.executor.cores=2");
+        String spark = service.startJobRun(applicationId, sized).getJobRunId();
+        String hiveApplication = applications.createApplication(applicationRequest("hive", "emr-7.5.0", "HIVE"))
+                .getApplicationId();
+        String hive = service.startJobRun(hiveApplication, hiveRequest("s3://bucket/queries/report.sql", null, null))
+                .getJobRunId();
+
+        assertNull(service.getJobRun(applicationId, spark, null).getTotalResourceUtilization(),
+                "a run still running has used nothing yet");
+        clock.advance(Duration.ofSeconds(90));
+        JobRun ended = service.getJobRun(applicationId, spark, null);
+
+        // A default driver, 4 vCPUs, 16 GB and 20 GB, and one executor of 2 vCPUs, whose 14G and 1.4G of overhead
+        // round up to a 2-vCPU worker's largest 16 GB, for 90 seconds.
+        assertEquals("SUCCESS", ended.getState());
+        assertEquals(Map.of("vCPUHour", 6 * 90 / 3600.0, "memoryGBHour", 32 * 90 / 3600.0,
+                "storageGBHour", 40 * 90 / 3600.0), ended.getTotalResourceUtilization());
+        assertEquals(Map.of("vCPUHour", 6 * 90 / 3600.0, "memoryGBHour", 32 * 90 / 3600.0, "storageGBHour", 0.0),
+                ended.getBilledResourceUtilization());
+        JobRun hiveRun = service.getJobRun(hiveApplication, hive, null);
+        assertEquals("SUCCESS", hiveRun.getState());
+        assertNull(hiveRun.getTotalResourceUtilization());
+    }
+
+    @Test
+    void aRunWhoseExecutorsHadContainersCountsTheTimeEachRanAndOneStoredWithoutWorkersGetsThemAsItEnds() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String measured = service.startJobRun(applicationId, request(null, null)).getJobRunId();
+        runner.whileRunning = () -> clock.advance(Duration.ofSeconds(100));
+        runner.executorLifetimes = List.of(Duration.ofSeconds(30), Duration.ofMillis(90_500));
+        runNext();
+
+        // The driver for its attempt, a little over 100 seconds as the test's clock ticks, rounded up; the executors
+        // for 121 seconds between them, each billed a minute at least.
+        JobRun ended = service.getJobRun(applicationId, measured, null);
+        long driver = Math.ceilDiv(Duration.between(ended.getStartedAt(), ended.getEndedAt()).toMillis(), 1000);
+        assertEquals(101, driver);
+        assertEquals((4 * driver + 4 * 121) / 3600.0, ended.getTotalResourceUtilization().get("vCPUHour"));
+        assertEquals((4 * driver + 4 * 151) / 3600.0, ended.getBilledResourceUtilization().get("vCPUHour"));
+
+        EmrServerlessJobRunService immediate = service(90);
+        String stored = immediate.startJobRun(applicationId, request(null, null)).getJobRunId();
+        JobRunRecord record = store.get(stored).orElseThrow();
+        record.setWorkers(null);
+        store.put(stored, record);
+        clock.advance(Duration.ofSeconds(90));
+
+        assertEquals(16 * 90 / 3600.0,
+                immediate.getJobRun(applicationId, stored, null).getTotalResourceUtilization().get("vCPUHour"));
+    }
+
+    @Test
+    void aRunsCredentialsAreScopedByItsInlinePolicyAndItKeepsOnlyThePolicysMembers() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
+        String readOnly = "arn:aws:iam::aws:policy/ReadOnlyAccess";
+        StartJobRunRequest scoped = request(null, null);
+        scoped.setExecutionIamPolicy(Map.of("policy", policy, "policyArns", List.of(readOnly), "extra", "dropped"));
+        String scopedRun = service.startJobRun(applicationId, scoped).getJobRunId();
+        runNext();
+        service.startJobRun(applicationId, request(null, null));
+        runNext();
+
+        assertEquals(Arrays.asList(policy, null), runner.sessionPolicies);
+        assertEquals(Map.of("policy", policy, "policyArns", List.of(readOnly)),
+                service.getJobRun(applicationId, scopedRun, null).getExecutionIamPolicy());
+    }
+
+    @Test
+    void anExecutionIamPolicyOutsideTheModelsBoundsIsRefused() {
+        EmrServerlessJobRunService service = service(0);
+        List<String> elevenArns = new ArrayList<>();
+        for (int i = 0; i < 11; i++) {
+            elevenArns.add("arn:aws:iam::aws:policy/Policy" + i);
+        }
+        Map<Map<String, Object>, String> refusals = new LinkedHashMap<>();
+        refusals.put(Map.of("policy", ""), "'executionIamPolicy.policy'");
+        refusals.put(Map.of("policy", "x".repeat(2049)), "'executionIamPolicy.policy'");
+        refusals.put(Map.of("policyArns", elevenArns), "'executionIamPolicy.policyArns'");
+        refusals.put(Map.of("policyArns", List.of("arn:aws:iam::1:p/x")), "'executionIamPolicy.policyArns.1.member'");
+        for (Map.Entry<Map<String, Object>, String> refusal : refusals.entrySet()) {
+            StartJobRunRequest refused = request(null, null);
+            refused.setExecutionIamPolicy(refusal.getKey());
+            AwsException error = assertThrows(AwsException.class, () -> service.startJobRun(applicationId, refused));
+            assertEquals("ValidationException", error.getErrorCode());
+            assertTrue(error.getMessage().contains(refusal.getValue()), error.getMessage());
+        }
+        for (Map<String, Object> malformed : List.<Map<String, Object>>of(Map.of("policy", 1),
+                Map.of("policyArns", "arn:aws:iam::aws:policy/ReadOnlyAccess"))) {
+            StartJobRunRequest refused = request(null, null);
+            refused.setExecutionIamPolicy(malformed);
+            assertEquals("SerializationException", assertThrows(AwsException.class,
+                    () -> service.startJobRun(applicationId, refused)).getErrorCode());
+        }
+    }
+
+    @Test
     void eachAttemptIsLaunchedWhileItsApplicationCannotBeDeleted() {
         FakeRunner runner = new FakeRunner();
         runner.outcome = SparkJobRunner.Outcome.exitedWith(1);
@@ -1105,6 +1320,216 @@ class EmrServerlessJobRunServiceTest {
     }
 
     // A SPARK application on releaseLabel, with monitoring as its monitoring configuration (null for none).
+    // An application on releaseLabel with these scheduler members, none for no scheduler configuration.
+    private String queuingApplication(String releaseLabel, Map<String, Object> scheduler) {
+        CreateApplicationRequest create = applicationRequest("queuing", releaseLabel, "SPARK");
+        if (!scheduler.isEmpty()) {
+            create.setSchedulerConfiguration(EmrServerlessServiceTest.scheduler(scheduler));
+        }
+        return applications.createApplication(create).getApplicationId();
+    }
+
+    private String start(EmrServerlessJobRunService service, String app, String mode) {
+        return service.startJobRun(app, request(mode, null)).getJobRunId();
+    }
+
+    @Test
+    void aRunBeyondMaxConcurrentRunsIsQueuedAndStartsTheMomentARunEnds() {
+        EmrServerlessJobRunService service = service(600);
+        String app = queuingApplication("emr-7.5.0", Map.of("maxConcurrentRuns", 1));
+        String first = start(service, app, null);
+        clock.advance(Duration.ofSeconds(1));
+        String second = start(service, app, null);
+
+        assertEquals("RUNNING", service.getJobRun(app, first, null).getState());
+        JobRun queued = service.getJobRun(app, second, null);
+        assertEquals("QUEUED", queued.getState());
+        assertNull(queued.getStartedAt());
+        assertNull(queued.getQueuedDurationMilliseconds());
+        assertEquals(List.of(second), service.listJobRuns(app, List.of("QUEUED"), null, null, null, null, null)
+                .items().stream().map(JobRunSummary::getId).toList());
+
+        // Read only once both have ended: the second started the moment the first ended.
+        clock.advance(Duration.ofHours(1));
+        JobRun ended = service.getJobRun(app, first, null);
+        JobRun started = service.getJobRun(app, second, null);
+        assertEquals("SUCCESS", started.getState());
+        assertEquals(ended.getEndedAt(), started.getStartedAt());
+        assertEquals(Duration.between(started.getCreatedAt(), ended.getEndedAt()).toMillis(),
+                started.getQueuedDurationMilliseconds());
+        assertEquals(600, started.getTotalExecutionDurationSeconds());
+    }
+
+    @Test
+    void aRunStillQueuedAtTheQueueTimeoutIsCancelled() {
+        EmrServerlessJobRunService service = service(0);
+        String app = queuingApplication("emr-7.5.0", Map.of("maxConcurrentRuns", 1, "queueTimeoutMinutes", 15));
+        start(service, app, "STREAMING");
+        String queued = start(service, app, null);
+
+        clock.advance(Duration.ofMinutes(15));
+        JobRun run = service.getJobRun(app, queued, null);
+        assertEquals("CANCELLED", run.getState());
+        assertEquals(run.getCreatedAt().plus(Duration.ofMinutes(15)), run.getEndedAt());
+        assertEquals(900_000L, run.getQueuedDurationMilliseconds());
+        assertNull(run.getStartedAt());
+        assertEquals(0, run.getTotalExecutionDurationSeconds());
+        assertTrue(run.getStateDetails().contains("15 minutes"), run.getStateDetails());
+    }
+
+    @Test
+    void aCancelOrAHigherLimitOnTheStartedApplicationStartsTheQueuedRunsInOrderAtOnce() {
+        EmrServerlessJobRunService service = service(0);
+        String app = queuingApplication("emr-7.5.0", Map.of("maxConcurrentRuns", 1));
+        String first = start(service, app, "STREAMING");
+        String second = start(service, app, "STREAMING");
+        String third = start(service, app, "STREAMING");
+        String fourth = start(service, app, "STREAMING");
+
+        clock.advance(Duration.ofMinutes(1));
+        service.cancelJobRun(app, third);
+        JobRun cancelled = service.getJobRun(app, third, null);
+        assertEquals("CANCELLED", cancelled.getState());
+        assertEquals(Duration.between(cancelled.getCreatedAt(), cancelled.getEndedAt()).toMillis(),
+                cancelled.getQueuedDurationMilliseconds());
+        assertTrue(cancelled.getQueuedDurationMilliseconds() >= 60_000L);
+
+        service.cancelJobRun(app, first);
+        Instant firstEnded = service.getJobRun(app, first, null).getEndedAt();
+        JobRun next = service.getJobRun(app, second, null);
+        assertEquals("RUNNING", next.getState());
+        assertFalse(next.getStartedAt().isBefore(firstEnded));
+        assertTrue(Duration.between(firstEnded, next.getStartedAt()).toSeconds() < 1, next.getStartedAt()::toString);
+        assertEquals("QUEUED", service.getJobRun(app, fourth, null).getState());
+        AwsException stop = assertThrows(AwsException.class, () -> service.stopApplication(app));
+        assertEquals("ValidationException", stop.getErrorCode());
+
+        UpdateApplicationRequest raise = new UpdateApplicationRequest();
+        raise.setSchedulerConfiguration(EmrServerlessServiceTest.scheduler(Map.of("maxConcurrentRuns", 2)));
+        service.updateApplication(app, raise);
+        assertEquals("RUNNING", service.getJobRun(app, fourth, null).getState());
+    }
+
+    @Test
+    void runsQueueByDefaultFromRelease730AndNeverBeforeRelease700() {
+        EmrServerlessJobRunService service = service(0);
+        String byDefault = queuingApplication("emr-7.3.0", Map.of());
+        String sparkRuntime = queuingApplication("emr-spark-8.0.0", Map.of());
+        String notByDefault = queuingApplication("emr-7.2.0", Map.of());
+        String tooEarly = queuingApplication("emr-6.15.0", Map.of("maxConcurrentRuns", 1));
+        for (int run = 0; run < 15; run++) {
+            for (String app : List.of(byDefault, sparkRuntime, notByDefault, tooEarly)) {
+                start(service, app, "STREAMING");
+            }
+        }
+
+        assertEquals("QUEUED", service.getJobRun(byDefault, start(service, byDefault, "STREAMING"), null).getState());
+        assertEquals("QUEUED",
+                service.getJobRun(sparkRuntime, start(service, sparkRuntime, "STREAMING"), null).getState());
+        assertEquals("RUNNING",
+                service.getJobRun(notByDefault, start(service, notByDefault, "STREAMING"), null).getState());
+        assertEquals("RUNNING", service.getJobRun(tooEarly, start(service, tooEarly, "STREAMING"), null).getState());
+    }
+
+    @Test
+    void aQueuedBatchRunThatStartsWithoutADurationEndsAsItStarts() {
+        EmrServerlessJobRunService service = service(0);
+        String app = queuingApplication("emr-7.5.0", Map.of("maxConcurrentRuns", 1));
+        String streaming = start(service, app, "STREAMING");
+        String batch = start(service, app, null);
+        assertEquals("QUEUED", service.getJobRun(app, batch, null).getState());
+
+        service.cancelJobRun(app, streaming);
+
+        JobRun run = service.getJobRun(app, batch, null);
+        assertEquals("SUCCESS", run.getState());
+        assertEquals(run.getStartedAt(), run.getEndedAt());
+    }
+
+    @Test
+    void manyRunsEndingTogetherHandTheirSlotsOnInOrder() {
+        EmrServerlessJobRunService service = service(600);
+        String app = queuingApplication("emr-7.5.0", Map.of("maxConcurrentRuns", 5));
+        List<String> runs = new ArrayList<>();
+        for (int run = 0; run < 20; run++) {
+            runs.add(start(service, app, null));
+        }
+
+        clock.advance(Duration.ofHours(1));
+        List<JobRun> ended = runs.stream().map(id -> service.getJobRun(app, id, null)).toList();
+        for (int run = 0; run < ended.size(); run++) {
+            assertEquals("SUCCESS", ended.get(run).getState(), "run " + run);
+            if (run >= 5) {
+                assertEquals(ended.get(run - 5).getEndedAt(), ended.get(run).getStartedAt(), "run " + run);
+            }
+        }
+    }
+
+    @Test
+    void anEmptySchedulerConfigurationTurnsQueuingOffOnAReleaseThatQueuesByDefault() {
+        EmrServerlessJobRunService service = service(0);
+        CreateApplicationRequest create = applicationRequest("off", "emr-7.5.0", "SPARK");
+        create.setSchedulerConfiguration(new SchedulerConfiguration());
+        String app = applications.createApplication(create).getApplicationId();
+        assertNull(applications.getApplication(app).getSchedulerConfiguration());
+        for (int run = 0; run < 15; run++) {
+            start(service, app, "STREAMING");
+        }
+
+        assertEquals("RUNNING", service.getJobRun(app, start(service, app, "STREAMING"), null).getState());
+    }
+
+    @Test
+    void aQueuedRunWhoseDriverIsNotItsApplicationsFailsAsItLeavesTheQueueAndTakesNoSlot() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String app = queuingApplication("emr-7.5.0", Map.of("maxConcurrentRuns", 1));
+        String first = start(service, app, null);
+        StartJobRunRequest hive = request(null, null);
+        JobDriver.Hive query = new JobDriver.Hive();
+        query.setQuery("s3://bucket/query.sql");
+        JobDriver hiveDriver = new JobDriver();
+        hiveDriver.setHive(query);
+        hive.setJobDriver(hiveDriver);
+        String mismatched = service.startJobRun(app, hive).getJobRunId();
+        String next = start(service, app, null);
+        clock.advance(Duration.ofSeconds(5));
+
+        runNext();
+
+        JobRun failed = service.getJobRun(app, mismatched, null);
+        assertEquals("FAILED", failed.getState());
+        assertEquals(EmrServerlessJobRunService.DRIVER_NOT_THE_APPLICATIONS, failed.getStateDetails());
+        assertTrue(failed.getEndedAt().isAfter(failed.getCreatedAt()), "it fails as it leaves the queue");
+        assertEquals(failed.getCreatedAt().plusMillis(failed.getQueuedDurationMilliseconds()), failed.getEndedAt());
+        assertEquals("SCHEDULED", service.getJobRun(app, next, null).getState());
+        assertEquals("SUCCESS", service.getJobRun(app, first, null).getState());
+    }
+
+    @Test
+    void aQueuedContainerRunStartsItsDriverOnlyOnceTheRunningOneHasEnded() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String app = queuingApplication("emr-7.5.0", Map.of("maxConcurrentRuns", 1));
+        String first = start(service, app, null);
+        String second = start(service, app, null);
+        String third = start(service, app, null);
+
+        assertEquals(1, tasks.size(), "only the first run's driver is launched");
+        assertEquals("QUEUED", service.getJobRun(app, second, null).getState());
+        service.cancelJobRun(app, third);
+        assertEquals("CANCELLED", service.getJobRun(app, third, null).getState());
+        assertFalse(runner.stopped.contains(third), "a queued run has no driver to stop");
+
+        runNext();
+        assertEquals("SUCCESS", service.getJobRun(app, first, null).getState());
+        assertEquals("SCHEDULED", service.getJobRun(app, second, null).getState());
+        runNext();
+        assertEquals("SUCCESS", service.getJobRun(app, second, null).getState());
+        assertEquals(List.of(first, second), runner.driversStarted);
+        assertTrue(tasks.isEmpty());
+    }
+
     private String application(String name, String releaseLabel, MonitoringConfiguration monitoring) {
         CreateApplicationRequest create = applicationRequest(name, releaseLabel, "SPARK");
         create.setMonitoringConfiguration(monitoring);
@@ -1528,12 +1953,18 @@ class EmrServerlessJobRunServiceTest {
     private static final class FakeRunner implements SparkJobRunner {
         final List<Job> jobs = new ArrayList<>();
         final Set<String> stopped = new HashSet<>();
+        final Set<String> interrupted = new HashSet<>();
         final List<String> driversStarted = new ArrayList<>();
+        // The session policy each run's credentials were scoped by, as its driver started.
+        final List<String> sessionPolicies = new ArrayList<>();
         // What progress.cancelled() said once the driver ran, and again after whileRunning.
         final List<Boolean> cancelledAsRunning = new ArrayList<>();
         Outcome outcome = Outcome.exitedWith(0);
         Runnable whileRunning = () -> { };
         Runnable whileTimingOut = () -> { };
+        // How long its executors' workers ran, told as the run ends, as the Docker runner tells it for executors with
+        // containers of their own; null for none told.
+        List<Duration> executorLifetimes;
         // The manifest digest each custom image resolves to, told before the driver starts as the Docker runner does,
         // and the executors' where their pull resolves another, as a push between the two pulls gives.
         final Map<String, String> digests = new HashMap<>();
@@ -1555,6 +1986,7 @@ class EmrServerlessJobRunServiceTest {
                 resolved(progress, WorkerType.EXECUTOR, job.executors().image(), executorsResolve);
             }
             driversStarted.add(job.runId());
+            sessionPolicies.add(progress.sessionPolicy());
             progress.started();
             cancelledAsRunning.add(progress.cancelled());
             whileRunning.run();
@@ -1562,6 +1994,9 @@ class EmrServerlessJobRunServiceTest {
             if (outcome.timedOut()) {
                 progress.timedOut();
                 whileTimingOut.run();
+            }
+            if (executorLifetimes != null) {
+                progress.executorsRan(executorLifetimes);
             }
             return stopped.contains(job.runId()) ? Outcome.halted() : outcome;
         }
@@ -1576,6 +2011,11 @@ class EmrServerlessJobRunServiceTest {
         @Override
         public void stop(String runId) {
             stopped.add(runId);
+        }
+
+        @Override
+        public void interrupt(String runId) {
+            interrupted.add(runId);
         }
 
         @Override

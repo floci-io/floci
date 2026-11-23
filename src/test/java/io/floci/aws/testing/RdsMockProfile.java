@@ -42,7 +42,7 @@ import java.util.Set;
  *   <li>{@code floci.services.iot.enabled=false} turns IoT off, so its data-plane host routing never
  *   sees a request. {@code ApiGatewayCustomDomainIamAuthIntegrationTest} relies on it, to check the
  *   custom-domain invocation path with IoT disabled.</li>
- *   <li>{@code floci.services.emr.default-release-label=emr-7.9.0} sets a default release the
+ *   <li>{@code floci.services.emr.default-release-label=emr-7.15.0} sets a default release the
  *   catalogue does not describe. {@code EmrReleaseCatalogCustomDefaultIntegrationTest} relies on
  *   it.</li>
  *   <li>{@code floci.services.firehose.flush-record-count=2} delivers a batch of two records inline.
@@ -102,7 +102,7 @@ public class RdsMockProfile implements QuarkusTestProfile {
                 Map.entry("quarkus.http.test-port", String.valueOf(TEST_PORT)),
                 Map.entry("quarkus.http.port", String.valueOf(TEST_PORT)),
                 Map.entry("floci.services.iot.enabled", "false"),
-                Map.entry("floci.services.emr.default-release-label", "emr-7.9.0"),
+                Map.entry("floci.services.emr.default-release-label", "emr-7.15.0"),
                 Map.entry("floci.services.firehose.flush-record-count", "2"),
                 Map.entry("floci.services.elasticache.default-image", ELASTICACHE_SHELL_LESS_IMAGE),
                 Map.entry("floci.services.elasticache.shell-less-backend", "true"),

@@ -8,6 +8,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.stream.Stream;
 
+import static io.floci.aws.services.ses.SesV2Requests.authFor;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.EXPECTED_LIST;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.EXPECTED_MAP;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.EXPECTED_NULL;
@@ -15,7 +16,6 @@ import static io.floci.aws.services.ses.SesV2SerializationErrors.LIST;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.NUMBER;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.STRUCTURE;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.assertSerializationException;
-import static io.floci.aws.services.ses.SesV2SerializationErrors.authFor;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 

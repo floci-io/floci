@@ -13,6 +13,8 @@ import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridge.model.ApiDestination;
 import io.floci.aws.services.eventbridge.model.BatchParameters;
+import io.floci.aws.services.eventbridge.model.Connection;
+import io.floci.aws.services.eventbridge.model.ConnectionState;
 import io.floci.aws.services.eventbridge.model.EcsParameters;
 import io.floci.aws.services.eventbridge.model.EventBus;
 import io.floci.aws.services.eventbridge.model.HttpParameters;
@@ -25,9 +27,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -62,6 +66,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     /** The shape AWS::Events::Rule's resource schema declares for its targets. */
     private static final String TARGETS = CfnPropertyTypes.propertyShape("AWS::Events::Rule", "Targets");
 
+    private static final String CONNECTION = "AWS::Events::Connection";
     private static final String EVENT_BUS_CREATED_TIME_ATTR = "FlociEventBusCreatedTime";
     private static final String EVENT_BUS_MANAGED_TAG_KEYS_ATTR = "FlociEventBusManagedTagKeys";
     private static final String EVENT_BUS_MANAGED_POLICY_ATTR = "FlociEventBusManagedPolicy";
@@ -71,6 +76,15 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             Pattern.compile("[\\p{L}\\p{N}\\p{Z}_.:/=+\\-@]*");
     private static final Pattern STATEMENT_ID_PATTERN = Pattern.compile("[a-zA-Z0-9\\-_]+");
     private static final int STATEMENT_ID_MAX_LENGTH = 64;
+    /** Connection properties an update cannot clear (EventBridge keeps an omitted field) or replace. */
+    private static final Set<String> CONNECTION_REFUSED_DROPS = Set.of(
+            "Name", "AuthorizationType", "AuthParameters");
+    /**
+     * Connection properties a template that drops them clears. A dropped {@code Description} is not
+     * among them: CloudFormation leaves it as it is, and only an explicit empty string clears it.
+     */
+    private static final Set<String> CONNECTION_CLEARED_DROPS = Set.of(
+            "InvocationConnectivityParameters", "KmsKeyIdentifier");
 
     private final EventBridgeService eventBridgeService;
 
@@ -82,7 +96,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public Set<String> resourceTypes() {
         return Set.of("AWS::Events::Rule", "AWS::Events::EventBus", "AWS::Events::EventBusPolicy",
-                "AWS::Events::ApiDestination");
+                "AWS::Events::ApiDestination", "AWS::Events::Connection");
     }
 
     @Override
@@ -92,6 +106,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             case "AWS::Events::EventBus" -> provisionEventBus(r, props, ctx);
             case "AWS::Events::EventBusPolicy" -> provisionEventBusPolicy(r, props, ctx);
             case "AWS::Events::ApiDestination" -> provisionApiDestination(r, props, ctx);
+            case "AWS::Events::Connection" -> provisionConnection(r, props, ctx);
             default -> throw new IllegalStateException(
                     "EventsCfnProvisioner cannot handle " + r.getResourceType());
         }
@@ -124,6 +139,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             case "AWS::Events::EventBus" -> deleteEventBusSafe(physicalId, region);
             case "AWS::Events::EventBusPolicy" -> removeEventBusPolicySafe(physicalId, region);
             case "AWS::Events::ApiDestination" -> deleteApiDestinationSafe(physicalId, region);
+            case "AWS::Events::Connection" -> deleteConnectionSafe(physicalId, region);
             default -> {
                 // no other type reaches this provisioner
             }
@@ -351,6 +367,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         }
         if ("AWS::Events::EventBus".equals(resource.getResourceType())) {
             return rollbackEventBusUpdate(resource);
+        }
+        if ("AWS::Events::Connection".equals(resource.getResourceType())) {
+            return rollbackConnectionUpdate(resource);
         }
         String rawSnapshot = resource.getAttributes().get(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
         if (rawSnapshot == null) {
@@ -1012,6 +1031,132 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     private void deleteApiDestinationSafe(String name, String region) {
         CfnDeletes.safeDelete("EventBridge API destination", name,
                 () -> eventBridgeService.deleteApiDestination(name, region),
+                "ResourceNotFoundException");
+    }
+
+    /**
+     * {@code AWS::Events::Connection}: {@code Ref} is the connection name, {@code Fn::GetAtt} gives
+     * {@code Arn} and {@code SecretArn}. An update changes the supplied properties in place, and a
+     * template that drops {@code InvocationConnectivityParameters} or {@code KmsKeyIdentifier}
+     * clears it. A dropped {@code Description} stays as it is and an empty one clears it. These
+     * follow what a real AWS account does, checked against a stack. EventBridge's UpdateConnection leaves an omitted
+     * {@code AuthorizationType} or {@code AuthParameters} as it is, so dropping one is refused rather
+     * than left silently stale, and a different name is a replacement, refused too. The properties are
+     * read as the resource handler reads them, so an {@code ApiKeyAuthParameters} without its
+     * {@code ApiKeyValue} fails the resource. A connection an older Floci stubbed names nothing that
+     * exists, so an update creates it.
+     */
+    private void provisionConnection(StackResource r, JsonNode template, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale, and
+        // a check below that refuses this update would otherwise leave it for the rollback to restore
+        r.getAttributes().remove(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR);
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
+        boolean updating = ctx.isUpdate() && !CfnResourceDispatcher.isStub(ctx.priorPhysicalId(), attributesBefore);
+        Set<String> cleared = new HashSet<>();
+        if (updating) {
+            for (String dropped : ctx.droppedProperties(template)) {
+                if (CONNECTION_REFUSED_DROPS.contains(dropped)) {
+                    throw new AwsException("ValidationError", "Removing " + dropped
+                            + " from a Connection is not supported: EventBridge keeps the value it has.", 400);
+                }
+                if (CONNECTION_CLEARED_DROPS.contains(dropped)) {
+                    cleared.add(dropped);
+                }
+            }
+        }
+        JsonNode props = new CfnPropertyTypes.HandlerReader(ctx.engine()).read(CONNECTION, template);
+        String name = ctx.stablePhysicalName(
+                ctx.resolveOptional(props, "Name"), r.getLogicalId(), 64, false);
+        if (updating && ctx.priorPhysicalId() != null && !ctx.priorPhysicalId().equals(name)) {
+            throw new AwsException("ValidationError",
+                    "Updating Connection Name requires resource replacement, which is not supported.", 400);
+        }
+
+        String description = ctx.resolveOptional(props, "Description");
+        String authorizationType = ctx.resolveOptional(props, "AuthorizationType");
+        String authParameters = resolvedObjectAsJson(props, "AuthParameters", ctx);
+        String connectivityParameters = resolvedObjectAsJson(props, "InvocationConnectivityParameters", ctx);
+        String kmsKeyIdentifier = ctx.resolveOptional(props, "KmsKeyIdentifier");
+
+        Connection connection;
+        if (updating && ctx.reusesPriorEntity(name)) {
+            snapshotConnectionBeforeUpdate(r, eventBridgeService.describeConnection(name, ctx.region()),
+                    ctx.region());
+            connection = eventBridgeService.updateConnection(name, description, authorizationType,
+                    authParameters, connectivityParameters, kmsKeyIdentifier, cleared, ctx.region());
+        } else {
+            connection = eventBridgeService.createConnection(name, description, authorizationType,
+                    authParameters, connectivityParameters, kmsKeyIdentifier, ctx.region());
+        }
+
+        r.setPhysicalId(name);
+        String arn = connection.getConnectionArn();
+        r.getAttributes().put("Arn", arn);
+        // The ARN EventBridge allows in a policy is the one without the trailing id: connection/<name>
+        r.getAttributes().put("ArnForPolicy", arn.substring(0, arn.lastIndexOf('/')));
+        r.getAttributes().put("SecretArn", connection.getSecretArn());
+        r.getAttributes().put("Name", name);
+    }
+
+    /**
+     * A nested object property with its intrinsics resolved, as the JSON text EventBridge stores;
+     * null when the property is absent or empty, which the service reads as "not supplied".
+     */
+    private static String resolvedObjectAsJson(JsonNode props, String name, ProvisionContext ctx) {
+        if (props == null || !props.has(name) || props.get(name).isNull()) {
+            return null;
+        }
+        JsonNode resolved = ctx.engine().resolveNode(props.get(name));
+        return resolved != null && resolved.isObject() && !resolved.isEmpty() ? resolved.toString() : null;
+    }
+
+    private void snapshotConnectionBeforeUpdate(StackResource r, Connection current, String region) {
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("region", region);
+        snapshot.put("name", current.getName());
+        snapshot.put("description", current.getDescription());
+        snapshot.put("authorizationType", current.getAuthorizationType());
+        snapshot.put("authParameters", current.getAuthParameters());
+        snapshot.put("invocationConnectivityParameters", current.getInvocationConnectivityParameters());
+        snapshot.put("kmsKeyIdentifier", current.getKmsKeyIdentifier());
+        snapshot.put("connectionState",
+                current.getConnectionState() == null ? null : current.getConnectionState().name());
+        snapshot.put("stateReason", current.getStateReason());
+        snapshot.put("lastModifiedTime",
+                current.getLastModifiedTime() == null ? null : current.getLastModifiedTime().toString());
+        snapshot.put("lastAuthorizedTime",
+                current.getLastAuthorizedTime() == null ? null : current.getLastAuthorizedTime().toString());
+        r.getAttributes().put(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+    }
+
+    // The snapshot is spent only once the restore succeeded: a restore that throws leaves it for the next attempt
+    private boolean rollbackConnectionUpdate(StackResource resource) {
+        JsonNode snapshot = CfnRollback.updateSnapshot(resource, CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR);
+        if (snapshot == null) {
+            return false;
+        }
+        Connection previous = new Connection();
+        previous.setName(snapshot.path("name").asText());
+        previous.setDescription(snapshotText(snapshot, "description"));
+        previous.setAuthorizationType(snapshotText(snapshot, "authorizationType"));
+        previous.setAuthParameters(snapshotText(snapshot, "authParameters"));
+        previous.setInvocationConnectivityParameters(snapshotText(snapshot, "invocationConnectivityParameters"));
+        previous.setKmsKeyIdentifier(snapshotText(snapshot, "kmsKeyIdentifier"));
+        String state = snapshotText(snapshot, "connectionState");
+        previous.setConnectionState(state == null ? null : ConnectionState.valueOf(state));
+        previous.setStateReason(snapshotText(snapshot, "stateReason"));
+        String modified = snapshotText(snapshot, "lastModifiedTime");
+        previous.setLastModifiedTime(modified == null ? null : Instant.parse(modified));
+        String authorized = snapshotText(snapshot, "lastAuthorizedTime");
+        previous.setLastAuthorizedTime(authorized == null ? null : Instant.parse(authorized));
+        eventBridgeService.restoreConnection(previous, snapshot.path("region").asText());
+        resource.getAttributes().remove(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR);
+        return true;
+    }
+
+    private void deleteConnectionSafe(String name, String region) {
+        CfnDeletes.safeDelete("EventBridge connection", name,
+                () -> eventBridgeService.deleteConnection(name, region),
                 "ResourceNotFoundException");
     }
 

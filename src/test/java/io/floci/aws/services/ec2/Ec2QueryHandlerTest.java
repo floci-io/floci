@@ -7,8 +7,15 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.ec2.model.BlockDeviceMapping;
 import io.floci.aws.services.ec2.model.EbsBlockDevice;
 import io.floci.aws.services.ec2.model.Image;
+import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.ec2.model.InstanceNetworkInterface;
+import io.floci.aws.services.ec2.model.InstanceState;
 import io.floci.aws.services.ec2.model.KeyPair;
 import io.floci.aws.services.ec2.model.NetworkAcl;
+import io.floci.aws.services.ec2.model.NetworkInterface;
+import io.floci.aws.services.ec2.model.NetworkInterfaceListResult;
+import io.floci.aws.services.ec2.model.Placement;
+import io.floci.aws.services.ec2.model.Reservation;
 import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.ec2.model.Vpc;
@@ -41,6 +48,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -671,6 +679,39 @@ class Ec2QueryHandlerTest {
         assertEquals(400, response.getStatus());
         assertTrue(response.getEntity().toString().contains("<Code>InvalidVpcID.NotFound</Code>"));
         verify(service, never()).createSecurityGroup(any(), any(), any(), any());
+    }
+
+    @Test
+    void anInterfacesIpv4PrefixesAreDescribedWithItAndWithItsInstance() {
+        Ec2Service service = mock(Ec2Service.class);
+        List<String> prefixes = List.of("10.60.0.224/28", "10.60.0.208/28");
+        NetworkInterface ni = new NetworkInterface();
+        ni.setNetworkInterfaceId("eni-0de0000000000005a");
+        ni.setPrivateIpAddress("10.60.0.25");
+        ni.setIpv4Prefixes(prefixes);
+        when(service.describeNetworkInterfaces(eq("us-east-1"), anyList(), anyList(), anyInt(), any()))
+                .thenReturn(new NetworkInterfaceListResult(List.of(ni), null));
+        Instance node = new Instance();
+        node.setInstanceId("i-0de0000000000005a");
+        node.setRegion("us-east-1");
+        node.setState(InstanceState.running());
+        node.setPlacement(new Placement("us-east-1a"));
+        InstanceNetworkInterface eni = new InstanceNetworkInterface();
+        eni.setNetworkInterfaceId("eni-0de0000000000005a");
+        eni.setPrivateIpAddress("10.60.0.25");
+        eni.setIpv4Prefixes(prefixes);
+        node.getNetworkInterfaces().add(eni);
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(node));
+        when(service.describeInstances(eq("us-east-1"), anyList(), anyList())).thenReturn(List.of(reservation));
+
+        String prefixSet = "<ipv4PrefixSet><item><ipv4Prefix>10.60.0.224/28</ipv4Prefix></item>"
+                + "<item><ipv4Prefix>10.60.0.208/28</ipv4Prefix></item></ipv4PrefixSet>";
+        for (String action : List.of("DescribeNetworkInterfaces", "DescribeInstances")) {
+            String body = ((String) handler(service).handle(action, new MultivaluedHashMap<>(), "us-east-1")
+                    .getEntity()).replaceAll(">\\s+<", "><");
+            assertTrue(body.contains(prefixSet), action + ": " + body);
+        }
     }
 
     private Ec2QueryHandler handler(Ec2Service service) {

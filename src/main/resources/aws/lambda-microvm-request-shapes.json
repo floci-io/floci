@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_lambda_microvm_shapes.py",
-    "botocore": "botocore 1.43.118 (installed package)"
+    "botocore": "botocore 1.44.9 (local/aws/botocore)"
   },
   "operations": {
     "CreateMicrovmImage": "CreateMicrovmImageRequest",
@@ -12,7 +12,8 @@
     "Architecture": {
       "type": "string",
       "enum": [
-        "ARM_64"
+        "ARM_64",
+        "X86_64"
       ]
     },
     "Boolean": {
@@ -87,6 +88,7 @@
         "additionalOsCapabilities": "CapabilityList",
         "hooks": "Hooks",
         "environmentVariables": "EnvironmentVariableMap",
+        "kmsKeyIdentifier": "KmsKeyIdentifier",
         "name": "ImageName",
         "tags": "Tags",
         "clientToken": "CreateMicrovmImageRequestClientTokenString"
@@ -112,7 +114,7 @@
     "EnvironmentVariableMap": {
       "type": "map",
       "min": 0,
-      "max": 50,
+      "max": 100,
       "key": "EnvironmentVariableKey",
       "value": "EnvironmentVariableValue"
     },
@@ -170,6 +172,12 @@
     },
     "Integer": {
       "type": "integer"
+    },
+    "KmsKeyIdentifier": {
+      "type": "string",
+      "min": 1,
+      "max": 2048,
+      "pattern": "(arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:(key|alias)/[a-zA-Z0-9:/_-]+|alias/[a-zA-Z0-9:/_-]+|[a-zA-Z0-9-]+)"
     },
     "Logging": {
       "type": "structure",
@@ -295,6 +303,7 @@
         "executionRoleArn": "RoleArn",
         "idlePolicy": "IdlePolicy",
         "logging": "Logging",
+        "kmsKeyIdentifier": "KmsKeyIdentifier",
         "runHookPayload": "RunHookPayload",
         "maximumDurationInSeconds": "RunMicrovmRequestMaximumDurationInSecondsInteger",
         "clientToken": "RunMicrovmRequestClientTokenString"
@@ -350,6 +359,7 @@
         "additionalOsCapabilities": "CapabilityList",
         "hooks": "Hooks",
         "environmentVariables": "EnvironmentVariableMap",
+        "kmsKeyIdentifier": "KmsKeyIdentifier",
         "clientToken": "UpdateMicrovmImageRequestClientTokenString"
       }
     },

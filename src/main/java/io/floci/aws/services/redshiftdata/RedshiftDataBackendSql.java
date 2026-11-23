@@ -7,8 +7,10 @@ import org.postgresql.PGConnection;
 import java.io.IOException;
 import java.io.InputStream;
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.Optional;
 
 final class RedshiftDataBackendSql implements BackendSql {
     private final Connection connection;
@@ -21,6 +23,24 @@ final class RedshiftDataBackendSql implements BackendSql {
     RedshiftDataBackendSql(Connection connection, RedshiftDataExecution execution) {
         this.connection = connection;
         this.execution = execution;
+    }
+
+    @Override
+    public Optional<String> queryString(String sql) {
+        try (Statement statement = connection.createStatement()) {
+            if (execution != null) {
+                execution.track(statement);
+            }
+            try (ResultSet rows = statement.executeQuery(sql)) {
+                return rows.next() ? Optional.ofNullable(rows.getString(1)) : Optional.empty();
+            } finally {
+                if (execution != null) {
+                    execution.untrack(statement);
+                }
+            }
+        } catch (SQLException exception) {
+            throw failure(exception);
+        }
     }
 
     @Override

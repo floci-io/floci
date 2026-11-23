@@ -40,6 +40,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -207,6 +208,30 @@ class ContainerLogStreamerTest {
                 eq("/jobs/1/SPARK_DRIVER/stderr"),
                 argThat(events -> "INFO SparkContext: stopped".equals(events.getFirst().get("message"))),
                 eq("us-east-1"));
+    }
+
+    @Test
+    void aByStreamAttachSendsAFramesLinesInOneCallEachAsWritten() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        LogContainerCmd command = mock(LogContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.logContainerCmd("container-1")).thenReturn(command);
+        CloudWatchLogsService cloudWatchLogsService = mock(CloudWatchLogsService.class);
+        ContainerLogStreamer streamer = new ContainerLogStreamer(dockerClient, cloudWatchLogsService);
+        streamer.attachByStreamForAccount("555555555555", "container-1", "/emr-on-eks/jobs", "driver/stdout",
+                "driver/stderr", "us-east-1", "emr-containers:1");
+        ArgumentCaptor<ContainerLogStreamer.LogReassemblyCallback> callback =
+                ArgumentCaptor.forClass(ContainerLogStreamer.LogReassemblyCallback.class);
+        verify(command).exec(callback.capture());
+
+        LogCapture.capture(ContainerLogStreamer.class, () -> callback.getValue()
+                .onNext(new Frame(StreamType.STDOUT, utf8("first\n   \n  indented  \r\n\nlast\n"))));
+
+        // One call for the frame's lines, which keep their whitespace; the empty one, which CloudWatch Logs refuses
+        // as an event, is left out.
+        verify(cloudWatchLogsService, times(1)).putLogEventsForAccount(any(), any(), any(), anyList(), any());
+        verify(cloudWatchLogsService).putLogEventsForAccount(eq("555555555555"), eq("/emr-on-eks/jobs"),
+                eq("driver/stdout"), argThat(events -> events.stream().map(event -> event.get("message")).toList()
+                        .equals(List.of("first", "   ", "  indented  ", "last"))), eq("us-east-1"));
     }
 
     @Test

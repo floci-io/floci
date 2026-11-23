@@ -8,6 +8,10 @@ shape of every operation, reduced to the members carried in the JSON body, and f
 reachable from one, its type and the shapes of its members, list elements or map values.
 `regen_emr_serverless_shapes.py` keeps every operation's output shape too, with `outputs=True`.
 `regen_dynamodb_shapes.py` keeps the members each structure requires too, with `required=True`.
+`regen_iam_cloudtrail_shapes.py` keeps what a CloudTrail record reads of every call: each operation's
+result shape and the element it is wrapped in with `results=True`, the shapes the model marks
+`sensitive` with `sensitive=True`, and the shape each modeled error code is answered by with
+`errors=True`, holding every shape it keeps to what the record can read through `check`.
 `regen_iam_shapes.py` and `regen_sts_shapes.py` name their operations instead, which switches
 `main()` to `build_constraints()`.
 
@@ -36,7 +40,30 @@ def load_model(data: Path, model: Path) -> dict:
     return load_json_model(source)
 
 
-def build(model: dict, provenance: str, generator: str, outputs: bool = False, required: bool = False) -> dict:
+def errors_from(model: dict) -> dict[str, str]:
+    """Every error the model declares, from the code the service answers it with to its shape's name."""
+    found: dict[str, str] = {}
+    for name, shape in model["shapes"].items():
+        if not shape.get("exception"):
+            continue
+        code = shape.get("error", {}).get("code", name)
+        if code in found:
+            raise ValueError(f"{found[code]} and {name} both answer {code}")
+        found[code] = name
+    return dict(sorted(found.items()))
+
+
+def build(model: dict, provenance: str, generator: str, outputs: bool = False, required: bool = False,
+          results: bool = False, sensitive: bool = False, errors: bool = False,
+          check: Callable[[str, dict], None] | None = None) -> dict:
+    """The input shape of every operation and every shape reachable from one, reduced to its type and
+    the shapes of its members, list elements or map values.
+
+    `outputs` keeps each operation's output shape too. `results` does as well, and names it with the
+    element its result is wrapped in, under `results`. `required` keeps the members each structure
+    requires, `sensitive` marks the shapes the model marks `sensitive`, and `errors` adds the shape
+    each modeled error code is answered by. `check` sees every shape kept, by name and as the model
+    declares it, and raises for one the file's reader cannot read."""
     shapes = model["shapes"]
     kept: dict[str, dict] = {}
 
@@ -44,8 +71,12 @@ def build(model: dict, provenance: str, generator: str, outputs: bool = False, r
         if name in kept:
             return
         shape = shapes[name]
+        if check is not None:
+            check(name, shape)
         kind = shape["type"]
         entry: dict = {"type": kind}
+        if sensitive and shape.get("sensitive"):
+            entry["sensitive"] = True
         kept[name] = entry
         if kind == "structure":
             members = {member: spec for member, spec in shape.get("members", {}).items()
@@ -63,21 +94,30 @@ def build(model: dict, provenance: str, generator: str, outputs: bool = False, r
             keep(shape["value"]["shape"])
 
     operations = {}
+    wrapped = {}
     for name, operation in sorted(model["operations"].items()):
         if "input" in operation:
             operations[name] = operation["input"]["shape"]
             keep(operation["input"]["shape"], body_only=True)
-        if outputs and "output" in operation:
+        if (outputs or results) and "output" in operation:
             keep(operation["output"]["shape"], body_only=True)
+        if results and "output" in operation:
+            wrapped[name] = {"shape": operation["output"]["shape"],
+                             "resultWrapper": operation["output"].get("resultWrapper")}
 
-    return {
+    document = {
         "_source": {
             "generator": generator,
             "botocore": provenance,
         },
         "operations": operations,
-        "shapes": dict(sorted(kept.items())),
     }
+    if results:
+        document["results"] = wrapped
+    document["shapes"] = dict(sorted(kept.items()))
+    if errors:
+        document["errors"] = errors_from(model)
+    return document
 
 
 def build_constraints(model: dict, operations: tuple[str, ...], provenance: str, generator: str) -> dict:
@@ -171,7 +211,9 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path,
          description: str | None = None,
          outputs: bool = False, required: bool = False, operations: tuple[str, ...] | None = None,
          constraints: bool = False,
-         prepare: Callable[[dict], dict] | None = None) -> int:
+         prepare: Callable[[dict], dict] | None = None,
+         results: bool = False, sensitive: bool = False, errors: bool = False,
+         check: Callable[[str, dict], None] | None = None) -> int:
     """Drives one generator: parse the flags, read the model, write or check the vendored file.
 
     `operations` picks the constraints flavour, keeping those operations' declared constraints
@@ -185,7 +227,10 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path,
 
     `prepare` is the one thing a generator may do to the model before any of that, for an operation
     it vendors in part: IAM reduces a paged request to its paging members, the rest of it keeping
-    the reading it has today."""
+    the reading it has today.
+
+    `results`, `sensitive`, `errors` and `check` are `build`'s, for a generator that keeps every
+    operation's member types."""
     parser = argparse.ArgumentParser(description=description, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="exit 1 when the vendored file differs from a fresh generation")
     parser.add_argument("--botocore-data", type=Path, help="botocore data directory")
@@ -200,7 +245,8 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path,
         operations = tuple(name for name, operation in sorted(loaded["operations"].items()) if "input" in operation)
     generator = generator_name(script)
     fresh = render(build_constraints(loaded, operations, provenance, generator) if operations is not None
-                   else build(loaded, provenance, generator, outputs, required))
+                   else build(loaded, provenance, generator, outputs, required,
+                              results=results, sensitive=sensitive, errors=errors, check=check))
 
     if args.check:
         current = args.output.read_text(encoding="utf-8") if args.output.exists() else ""

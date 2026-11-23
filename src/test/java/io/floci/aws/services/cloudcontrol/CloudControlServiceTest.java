@@ -13,6 +13,8 @@ import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.s3.S3Service;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -87,37 +89,41 @@ class CloudControlServiceTest {
     }
 
     /**
-     * Cloud Control names an AWS::ApiGatewayV2::ApiMapping by the type's primary identifier,
-     * {@code <ApiMappingId>|<DomainName>}, where CloudFormation's Ref is the bare ApiMappingId.
+     * Cloud Control names a resource by its type's primary identifier and reports the identifying
+     * property in its model. One that joins two properties is named by both: an
+     * AWS::ApiGatewayV2::ApiMapping by {@code <ApiMappingId>|<DomainName>} and an
+     * AWS::VerifiedPermissions::Policy by {@code <PolicyId>|<PolicyStoreId>}, where CloudFormation's
+     * Ref is the bare id, and an AWS::VerifiedPermissions::PolicyTemplate by its physical id,
+     * {@code <PolicyStoreId>|<PolicyTemplateId>}, whose model names the template alone.
      */
-    @Test
-    void anApiMappingIsIdentifiedByItsIdAndItsDomain() throws Exception {
+    @ParameterizedTest
+    @CsvSource(delimiter = ';', value = {
+        "AWS::ApiGatewayV2::ApiMapping;ApiMappingId;abc123;{\"DomainName\":\"api.example.com\",\"ApiId\":\"a1b2c3\",\"Stage\":\"$default\"};abc123|api.example.com;abc123",
+        "AWS::VerifiedPermissions::Policy;PolicyId;SP1;{\"PolicyStoreId\":\"PS1\"};SP1|PS1;SP1",
+        "AWS::VerifiedPermissions::PolicyTemplate;PolicyTemplateId;PS1|PT1;{\"PolicyStoreId\":\"PS1\"};PS1|PT1;PT1",
+        "AWS::VerifiedPermissions::PolicyStore;PolicyStoreId;PS1;{\"ValidationSettings\":{\"Mode\":\"OFF\"}};PS1;PS1"
+    })
+    void aResourceIsNamedByItsPrimaryIdentifierAndReportsItInItsModel(String type, String idField, String physicalId,
+                                                                       String desiredState, String identifier,
+                                                                       String modelId) throws Exception {
         CfnResourceDispatcher provisioner = mock(CfnResourceDispatcher.class);
         StackResource resource = new StackResource();
-        resource.setPhysicalId("abc123");
-        resource.setAttributes(Map.of("ApiMappingId", "abc123"));
-        when(provisioner.provisionStandalone(eq("AWS::ApiGatewayV2::ApiMapping"),
-                any(), eq("us-east-1"), eq("111111111111"))).thenReturn(resource);
+        resource.setPhysicalId(physicalId);
+        resource.setAttributes(Map.of(idField, physicalId));
+        when(provisioner.provisionStandalone(eq(type), any(), eq("us-east-1"), eq("111111111111"))).thenReturn(resource);
         CloudControlService service = new CloudControlService(
                 mock(S3Service.class), mock(Ec2Service.class), mock(IamService.class), provisioner,
                 new ObjectMapper());
-        String identifier = "abc123|api.example.com";
 
-        CloudControlService.ProgressEvent pending = service.createResource("us-east-1", "111111111111",
-                "AWS::ApiGatewayV2::ApiMapping",
-                "{\"DomainName\":\"api.example.com\",\"ApiId\":\"a1b2c3\",\"Stage\":\"$default\"}");
+        CloudControlService.ProgressEvent pending = service.createResource("us-east-1", "111111111111", type, desiredState);
         awaitSuccess(service, "111111111111", pending.requestToken());
         assertEquals(identifier, service.requestStatus("111111111111", pending.requestToken()).identifier());
-        String model = service.getResource("us-east-1", "111111111111",
-                "AWS::ApiGatewayV2::ApiMapping", identifier).properties();
-        assertEquals("abc123", new ObjectMapper().readTree(model).path("ApiMappingId").asText());
+        String model = service.getResource("us-east-1", "111111111111", type, identifier).properties();
+        assertEquals(modelId, new ObjectMapper().readTree(model).path(idField).asText());
 
-        assertEquals("SUCCESS", service.deleteResource("us-east-1", "111111111111",
-                "AWS::ApiGatewayV2::ApiMapping", identifier).operationStatus());
-        verify(provisioner).deleteStandalone("AWS::ApiGatewayV2::ApiMapping", identifier, "us-east-1",
-                Map.of("ApiMappingId", "abc123"));
-        assertThrows(AwsException.class, () -> service.getResource("us-east-1", "111111111111",
-                "AWS::ApiGatewayV2::ApiMapping", identifier));
+        assertEquals("SUCCESS", service.deleteResource("us-east-1", "111111111111", type, identifier).operationStatus());
+        verify(provisioner).deleteStandalone(type, identifier, "us-east-1", Map.of(idField, physicalId));
+        assertThrows(AwsException.class, () -> service.getResource("us-east-1", "111111111111", type, identifier));
     }
 
     /**

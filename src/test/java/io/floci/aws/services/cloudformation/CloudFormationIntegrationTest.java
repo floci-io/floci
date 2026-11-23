@@ -2004,7 +2004,8 @@ class CloudFormationIntegrationTest {
                                     ],
                                     "Projection": {"ProjectionType": "KEYS_ONLY"}
                                 }
-                            ]
+                            ],
+                            "BillingMode": "PAY_PER_REQUEST"
                         }
                     }
                 }
@@ -2868,7 +2869,8 @@ class CloudFormationIntegrationTest {
                     ],
                     "KeySchema": [
                       {"AttributeName": "pk", "KeyType": "HASH"}
-                    ]
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
                   }
                 },
                 "TableNameParam": {
@@ -3041,7 +3043,8 @@ class CloudFormationIntegrationTest {
                     ],
                     "KeySchema": [
                       {"AttributeName": "id", "KeyType": "HASH"}
-                    ]
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
                   }
                 }
               }
@@ -3230,7 +3233,8 @@ class CloudFormationIntegrationTest {
                     ],
                     "KeySchema": [
                       {"AttributeName": "id", "KeyType": "HASH"}
-                    ]
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
                   }
                 },
                 "TableB": {
@@ -3241,7 +3245,8 @@ class CloudFormationIntegrationTest {
                     ],
                     "KeySchema": [
                       {"AttributeName": "id", "KeyType": "HASH"}
-                    ]
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
                   }
                 }
               }
@@ -3354,7 +3359,8 @@ class CloudFormationIntegrationTest {
                     ],
                     "KeySchema": [
                       {"AttributeName": "pk", "KeyType": "HASH"}
-                    ]
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
                   }
                 },
                 "ArnParam": {
@@ -4579,7 +4585,8 @@ class CloudFormationIntegrationTest {
                     ],
                     "KeySchema": [
                       {"AttributeName": "pk", "KeyType": "HASH"}
-                    ]
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
                   }
                 }
               }

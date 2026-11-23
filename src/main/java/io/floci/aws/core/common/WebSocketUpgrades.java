@@ -9,6 +9,8 @@ import io.vertx.core.http.HttpVersion;
 import io.vertx.core.net.NetSocket;
 import org.jboss.logging.Logger;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 /**
  * The parts of proxying a WebSocket handshake that the proxies Floci emulates share. An ALB and a
  * CloudFront distribution both forward a WebSocket upgrade to their origin with its upgrade headers
@@ -57,6 +59,24 @@ public final class WebSocketUpgrades {
         });
         connection.close().onFailure(err ->
                 LOG.warnv(err, "Could not close refused WebSocket origin connection to {0}", connection.remoteAddress()));
+    }
+
+    /**
+     * Joins two connections into a byte tunnel, as an upgraded WebSocket's two ends: each reads into the other until
+     * either ends, closes or fails, which closes both, and then {@code closed} runs, once.
+     */
+    public static void splice(NetSocket one, NetSocket other, Runnable closed) {
+        AtomicBoolean over = new AtomicBoolean();
+        Runnable close = () -> {
+            if (over.compareAndSet(false, true)) {
+                one.close();
+                other.close();
+                closed.run();
+            }
+        };
+        Runnable onData = () -> { };
+        relay(one, other, onData, close);
+        relay(other, one, onData, close);
     }
 
     /**

@@ -24,6 +24,7 @@ import io.floci.aws.services.emrserverless.model.ApplicationSummary;
 import io.floci.aws.services.emrserverless.model.CreateApplicationRequest;
 import io.floci.aws.services.emrserverless.model.ImageConfiguration;
 import io.floci.aws.services.emrserverless.model.ListApplicationsRequest;
+import io.floci.aws.services.emrserverless.model.SchedulerConfiguration;
 import io.floci.aws.services.emrserverless.model.UpdateApplicationRequest;
 import io.floci.aws.services.emrserverless.model.WorkerTypeSpecification;
 import io.floci.aws.services.iam.IamService;
@@ -59,19 +60,20 @@ public class EmrServerlessService {
     // on a key or a value. TagKey and TagValue share one character set in the API model.
     private static final String NOT_STOPPED_FOR_UPDATE =
             "Application must be in a stopped or created state in order to be updated.";
-    // The settings an update may change only on a CREATED or STOPPED application: all but its maximum capacity and
-    // its custom images, which a STARTED one takes too (checkStartedUpdate).
+    // The settings an update may change only on a CREATED or STOPPED application: all but its maximum capacity, its
+    // custom images and its scheduler's maxConcurrentRuns, which a STARTED one takes too (checkStartedUpdate).
     private static final List<Function<UpdateApplicationRequest, Object>> STOPPED_ONLY_SETTINGS = List.of(
             UpdateApplicationRequest::getReleaseLabel, UpdateApplicationRequest::getInitialCapacity,
             UpdateApplicationRequest::getAutoStartConfiguration, UpdateApplicationRequest::getAutoStopConfiguration,
             UpdateApplicationRequest::getNetworkConfiguration, UpdateApplicationRequest::getArchitecture,
             UpdateApplicationRequest::getMonitoringConfiguration, UpdateApplicationRequest::getRuntimeConfiguration,
-            UpdateApplicationRequest::getSchedulerConfiguration,
             UpdateApplicationRequest::getDiskEncryptionConfiguration,
             UpdateApplicationRequest::getInteractiveConfiguration,
             UpdateApplicationRequest::getIdentityCenterConfiguration,
             UpdateApplicationRequest::getJobLevelCostAllocationConfiguration);
     private static final int MAX_TAGS = 50;
+    /** The model's Architecture enum, which an application's architecture must be in. */
+    public static final List<String> ARCHITECTURES = List.of("ARM64", "X86_64");
     private static final String RESERVED_PREFIX = "aws:";
     private static final Pattern TAG_TEXT = Pattern.compile("[A-Za-z0-9 /_.:=+@-]*");
     // ResourceArn's resource: an application, or one of its job runs or sessions.
@@ -126,7 +128,10 @@ public class EmrServerlessService {
         if (request.getClientToken() == null || request.getClientToken().isBlank()) {
             throw new AwsException("ValidationException", "clientToken is required", 400);
         }
+        validateArchitecture(request.getArchitecture());
         validateImages(request.getImageConfiguration(), request.getWorkerTypeSpecifications(), true);
+        SchedulerConfiguration scheduler = request.getSchedulerConfiguration() != null
+                ? EmrServerlessScheduler.merged(null, request.getSchedulerConfiguration()) : null;
 
         String region = regionResolver.getRegion();
         if (request.getClientToken() != null) {
@@ -166,7 +171,9 @@ public class EmrServerlessService {
         app.setWorkerTypeSpecifications(request.getWorkerTypeSpecifications());
         app.setMonitoringConfiguration(request.getMonitoringConfiguration());
         app.setRuntimeConfiguration(request.getRuntimeConfiguration());
-        app.setSchedulerConfiguration(request.getSchedulerConfiguration());
+        if (request.getSchedulerConfiguration() != null) {
+            EmrServerlessScheduler.apply(app, scheduler);
+        }
         app.setDiskEncryptionConfiguration(request.getDiskEncryptionConfiguration());
         app.setInteractiveConfiguration(request.getInteractiveConfiguration());
         app.setIdentityCenterConfiguration(request.getIdentityCenterConfiguration());
@@ -206,6 +213,7 @@ public class EmrServerlessService {
     }
 
     public synchronized Application updateApplication(String applicationId, UpdateApplicationRequest request) {
+        validateArchitecture(request.getArchitecture());
         validateImages(request.getImageConfiguration(), request.getWorkerTypeSpecifications(), false);
         Application app = getApplication(applicationId);
 
@@ -215,6 +223,10 @@ public class EmrServerlessService {
         } else if (!"CREATED".equals(state) && !"STOPPED".equals(state)) {
             throw new AwsException("ValidationException", NOT_STOPPED_FOR_UPDATE, 400);
         }
+        // Before anything changes: a refused value leaves the application as it was.
+        SchedulerConfiguration scheduler = request.getSchedulerConfiguration() != null
+                ? EmrServerlessScheduler.merged(app.getSchedulerConfiguration(), request.getSchedulerConfiguration())
+                : null;
 
         if (request.getReleaseLabel() != null) {
             app.setReleaseLabel(request.getReleaseLabel());
@@ -255,7 +267,7 @@ public class EmrServerlessService {
             app.setRuntimeConfiguration(request.getRuntimeConfiguration());
         }
         if (request.getSchedulerConfiguration() != null) {
-            app.setSchedulerConfiguration(request.getSchedulerConfiguration());
+            EmrServerlessScheduler.apply(app, scheduler);
         }
         if (request.getDiskEncryptionConfiguration() != null) {
             app.setDiskEncryptionConfiguration(request.getDiskEncryptionConfiguration());
@@ -280,13 +292,15 @@ public class EmrServerlessService {
      * What an update may change on a STARTED application, from AWS's "Updating Running Applications": its maximum
      * capacity, "for a STARTED application to modify the scaling boundary", and its custom images, "without stopping
      * it", though "Custom image updates on running applications are not supported on applications with
-     * pre-initialized capacity configured". Any other setting still needs the application "in a stopped or created
+     * pre-initialized capacity configured". The concurrency and queuing guide adds "You can update maxConcurrentRuns
+     * for an application in the STARTED state". Any other setting still needs the application "in a stopped or created
      * state". A run already going keeps the image and maximum capacity it was launched with, as "existing workloads
      * continue with the original image" and "The new settings only apply to workers on new workloads"; a new run, or a
      * new attempt of one, takes the application's current ones.
      */
     private static void checkStartedUpdate(Application app, UpdateApplicationRequest request) {
-        if (STOPPED_ONLY_SETTINGS.stream().anyMatch(setting -> setting.apply(request) != null)) {
+        if (STOPPED_ONLY_SETTINGS.stream().anyMatch(setting -> setting.apply(request) != null)
+                || !EmrServerlessScheduler.startedApplicationMayTake(request.getSchedulerConfiguration())) {
             throw new AwsException("ValidationException", NOT_STOPPED_FOR_UPDATE, 400);
         }
         boolean images = request.getImageConfiguration() != null || request.getWorkerTypeSpecifications() != null;
@@ -580,6 +594,11 @@ public class EmrServerlessService {
                 .filter(app -> !"TERMINATED".equals(app.getState()));
     }
 
+    /** The application, when it exists and has not been deleted, which leaves it TERMINATED. */
+    public synchronized Optional<Application> findLive(String applicationId) {
+        return live(applicationId);
+    }
+
     /** Whether the application exists and has not been deleted, which leaves it TERMINATED. */
     public synchronized boolean isLive(String applicationId) {
         return live(applicationId).isPresent();
@@ -701,6 +720,14 @@ public class EmrServerlessService {
             violations.add(SmithyValidationErrors.notAllInEnum(states, "states", allowed));
         }
         return violations;
+    }
+
+    /** An architecture outside the model's enum, refused as the framework refuses one. */
+    private static void validateArchitecture(String architecture) {
+        if (architecture != null && !ARCHITECTURES.contains(architecture)) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notInEnum(architecture, "architecture", ARCHITECTURES));
+        }
     }
 
     /**

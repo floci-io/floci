@@ -1,5 +1,6 @@
 package io.floci.aws.services.lambda;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -436,6 +437,24 @@ class ProvisionedConcurrencyPoolTest {
         assertEquals(ContainerState.BUSY, first.handle.getState());
         assertTrue(pool.release(first.handle, false));
         assertEquals(1, first.stops.get());
+    }
+
+    // Catches: the idle warm-pool total (128 by default) capping provisioned concurrency again, which
+    // AWS bounds only by reserved and regional concurrency.
+    @Test
+    @SuppressWarnings("unchecked")
+    void theWarmPoolTotalDoesNotBoundProvisionedConcurrency() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().lambda().warmPoolMaxTotal()).thenReturn(1);
+        when(config.services().lambda().warmPoolMaxPerFunction()).thenReturn(Optional.of(4));
+        when(config.services().lambda().containerDrainTimeoutSeconds()).thenReturn(15);
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(eq("lambda"), eq("lambda-provisioned-concurrency.json"), any(TypeReference.class)))
+                .thenReturn(storage);
+        pool.shutdown();
+        pool = new ProvisionedConcurrencyPool(launcher, functions, aliases, storageFactory, config, Clock.systemUTC());
+
+        assertEquals(2, put(2).requested());
     }
 
     @ParameterizedTest

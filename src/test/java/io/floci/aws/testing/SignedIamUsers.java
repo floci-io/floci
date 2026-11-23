@@ -1,5 +1,8 @@
 package io.floci.aws.testing;
 
+import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.model.AccessKey;
 import io.floci.aws.testutil.AwsRequestSigner;
 import io.restassured.response.Response;
 
@@ -19,7 +22,8 @@ import static io.restassured.RestAssured.given;
  *
  * <p>{@link #createUser} makes an IAM user with an access key and an optional inline policy; closing the
  * returned {@link User} deletes the key, the policy and the user, so a test can hold it in a
- * try-with-resources block.
+ * try-with-resources block. {@link #createUser(IamService, PartitionCleanup, String, String, String, String)} makes
+ * one in an account of the test's own, which the root {@code test} key, signing for the default account, cannot.
  */
 public final class SignedIamUsers {
 
@@ -78,7 +82,26 @@ public final class SignedIamUsers {
         }
     }
 
-    /** An IAM user made by {@link #createUser}; {@link #close} removes it with its key and policy. */
+    /**
+     * Creates the user {@code name} of {@code account} through {@code iam}, with one access key and the inline policy
+     * {@code policyName} holding {@code policyDocument}; {@code cleanup} removes the key, the policy and the user
+     * after the test.
+     */
+    public static AccessKey createUser(IamService iam, PartitionCleanup cleanup, String account, String name,
+                                       String policyName, String policyDocument) {
+        RequestScopes.runAs(account, () -> iam.createUser(name, "/"));
+        cleanup.register(() -> RequestScopes.runAs(account, () -> iam.deleteUser(name)));
+        RequestScopes.runAs(account, () -> iam.putUserPolicy(name, policyName, policyDocument));
+        cleanup.register(() -> RequestScopes.runAs(account, () -> iam.deleteUserPolicy(name, policyName)));
+        AccessKey key = RequestScopes.callAs(account, () -> iam.createAccessKey(name));
+        cleanup.register(() -> RequestScopes.runAs(account, () -> iam.deleteAccessKey(name, key.getAccessKeyId())));
+        return key;
+    }
+
+    /**
+     * An IAM user made by {@link #createUser(URI, String, String, String)}; {@link #close} removes it with its key
+     * and policy.
+     */
     public record User(URI endpoint, String name, String policyName, String accessKeyId, String secretAccessKey)
             implements AutoCloseable {
 

@@ -96,7 +96,7 @@ public class LambdaMicrovmsController {
                 text(request, "buildRoleArn"),
                 codeArtifact.isMissingNode() ? null : text(codeArtifact, "uri"),
                 text(request, "description"), text(request, "baseImageVersion"), runtimeSettings(request),
-                mapMember(request, "tags"));
+                mapMember(request, "tags"), text(request, "kmsKeyIdentifier"));
         return Response.status(201).entity(imageNode(image, ImageShape.CREATE)).build();
     }
 
@@ -135,7 +135,8 @@ public class LambdaMicrovmsController {
         MicrovmImage image = service.updateImage(region, imageIdentifier,
                 text(request, "baseImageArn"), text(request, "buildRoleArn"),
                 updArtifact.isMissingNode() ? null : text(updArtifact, "uri"),
-                text(request, "description"), text(request, "baseImageVersion"), runtimeSettings(request));
+                text(request, "description"), text(request, "baseImageVersion"), runtimeSettings(request),
+                text(request, "kmsKeyIdentifier"));
         return Response.ok(imageNode(image, ImageShape.UPDATE, activeBefore)).build();
     }
 
@@ -382,6 +383,7 @@ public class LambdaMicrovmsController {
             node.put("buildRoleArn", image.buildRoleArn);
             node.putObject("codeArtifact").put("uri", image.codeArtifactUri);
             node.put("imageVersion", image.versions.get(image.versions.size() - 1).imageVersion);
+            putKmsKey(node, image.kmsKeyIdentifier);
             // Neither is settable — not by the request, not by the
             // CloudFormation resource type. The service fills them in.
             node.putArray("resources").addObject().put("minimumMemoryInMiB", DEFAULT_MEMORY_MIB);
@@ -414,6 +416,7 @@ public class LambdaMicrovmsController {
         node.put("baseImageVersion", buildSpec.baseImageVersion());
         node.put("buildRoleArn", buildSpec.buildRoleArn());
         node.putObject("codeArtifact").put("uri", buildSpec.codeArtifactUri());
+        putKmsKey(node, buildSpec.kmsKeyIdentifier());
         // A version's description is its own and nothing sets it. It stays null
         // even once the parent image has one, which is why it cannot simply be
         // read off the image.
@@ -535,7 +538,15 @@ public class LambdaMicrovmsController {
                 listMember(request, "ingressNetworkConnectors"), listMember(request, "egressNetworkConnectors"),
                 integerMember(request, "maximumDurationInSeconds"),
                 idle.hasNonNull("autoResumeEnabled") ? idle.get("autoResumeEnabled").booleanValue() : null,
-                integerMember(idle, "maxIdleDurationSeconds"), integerMember(idle, "suspendedDurationSeconds"));
+                integerMember(idle, "maxIdleDurationSeconds"), integerMember(idle, "suspendedDurationSeconds"),
+                text(request, "kmsKeyIdentifier"));
+    }
+
+    /** The customer managed key a request named, as it named it; a resource with an AWS owned key has none. */
+    private static void putKmsKey(ObjectNode node, String kmsKeyIdentifier) {
+        if (kmsKeyIdentifier != null) {
+            node.put("kmsKeyIdentifier", kmsKeyIdentifier);
+        }
     }
 
     private static Integer integerMember(JsonNode request, String name) {
@@ -571,6 +582,7 @@ public class LambdaMicrovmsController {
         putConnectors(node.putArray("ingressNetworkConnectors"), settings.ingressNetworkConnectors(), region,
                 "HTTP_INGRESS");
         node.put("executionRoleArn", settings.executionRoleArn());
+        putKmsKey(node, settings.kmsKeyIdentifier());
         if (settings.autoResumeEnabled() == null) {
             node.putNull("idlePolicy");
         } else {

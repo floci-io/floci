@@ -48,12 +48,15 @@ final class CloudFormationTemplateParser {
             return new CloudFormationYamlParser(objectMapper).parse(body);
         } catch (YAMLException yamlError) {
             if (jsonError != null && trimmed.startsWith("{") && trimmed.endsWith("}")) {
-                JsonLocation at = jsonError.getLocation();
-                throw new TemplateFormatException("JSON not well-formed. (line " + at.getLineNr()
-                        + ", column " + at.getColumnNr() + ")", jsonError);
+                throw new TemplateFormatException("JSON not well-formed." + position(jsonError), jsonError);
             }
             throw new TemplateFormatException("YAML not well-formed." + position(yamlError), yamlError);
         }
+    }
+
+    private static String position(JsonProcessingException error) {
+        JsonLocation at = error.getLocation();
+        return at == null ? "" : " (line " + at.getLineNr() + ", column " + at.getColumnNr() + ")";
     }
 
     /** Where the YAML parser stopped, 1-based as CloudFormation counts; nothing for an error with no mark. */

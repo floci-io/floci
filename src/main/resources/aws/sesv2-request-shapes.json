@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_sesv2_shapes.py",
-    "botocore": "botocore 1.43.118 (local/aws/botocore)"
+    "botocore": "botocore 1.44.9 (local/aws/botocore)"
   },
   "operations": {
     "AssociateEmailIdentityCertificate": "AssociateEmailIdentityCertificateRequest",
@@ -82,6 +82,7 @@
     "ListTenantResources": "ListTenantResourcesRequest",
     "ListTenants": "ListTenantsRequest",
     "PutAccountDedicatedIpWarmupAttributes": "PutAccountDedicatedIpWarmupAttributesRequest",
+    "PutAccountDeliveryAttributes": "PutAccountDeliveryAttributesRequest",
     "PutAccountDetails": "PutAccountDetailsRequest",
     "PutAccountPricingAttributes": "PutAccountPricingAttributesRequest",
     "PutAccountSendingAttributes": "PutAccountSendingAttributesRequest",
@@ -122,6 +123,9 @@
     "UpdateReputationEntityPolicy": "UpdateReputationEntityPolicyRequest"
   },
   "shapes": {
+    "AccountSharedPoolDeliveryMode": {
+      "type": "string"
+    },
     "AdditionalContactEmailAddress": {
       "type": "string"
     },
@@ -522,7 +526,8 @@
       "members": {
         "TlsPolicy": "TlsPolicy",
         "SendingPoolName": "PoolName",
-        "MaxDeliverySeconds": "MaxDeliverySeconds"
+        "MaxDeliverySeconds": "MaxDeliverySeconds",
+        "SharedPoolDeliveryMode": "SharedPoolDeliveryMode"
       }
     },
     "Description": {
@@ -1219,6 +1224,12 @@
         "AutoWarmupEnabled": "Enabled"
       }
     },
+    "PutAccountDeliveryAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "SharedPoolDeliveryMode": "AccountSharedPoolDeliveryMode"
+      }
+    },
     "PutAccountDetailsRequest": {
       "type": "structure",
       "members": {
@@ -1266,7 +1277,8 @@
       "members": {
         "TlsPolicy": "TlsPolicy",
         "SendingPoolName": "SendingPoolName",
-        "MaxDeliverySeconds": "MaxDeliverySeconds"
+        "MaxDeliverySeconds": "MaxDeliverySeconds",
+        "SharedPoolDeliveryMode": "SharedPoolDeliveryMode"
       }
     },
     "PutConfigurationSetReputationOptionsRequest": {
@@ -1494,6 +1506,9 @@
       "type": "string"
     },
     "SendingStatus": {
+      "type": "string"
+    },
+    "SharedPoolDeliveryMode": {
       "type": "string"
     },
     "SignatureFormat": {

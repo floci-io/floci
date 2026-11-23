@@ -1067,8 +1067,28 @@ kept, as in Redshift.
 - `CREATE EXTERNAL SCHEMA` inside an explicit transaction fails with SQLSTATE `0A000`, and `DROP SCHEMA`
   with `25001`, because the schema registration is not part of the PostgreSQL transaction.
 - `DROP EXTERNAL DATABASE` and dropping several schemas in one statement are outside this implementation.
-- Schemas over Amazon MSK or Kafka are not supported.
 - `DROP SCHEMA ... CASCADE` also drops the streaming views that read the schema.
+
+### External schemas over Amazon MSK
+
+An external schema over an Amazon MSK cluster maps a local schema to the cluster for streaming ingestion.
+
+```sql
+CREATE EXTERNAL SCHEMA [IF NOT EXISTS] msk
+FROM MSK
+IAM_ROLE 'arn:aws:iam::123456789012:role/StreamRole'
+AUTHENTICATION iam
+CLUSTER_ARN 'arn:aws:kafka:us-east-1:123456789012:cluster/my-cluster/00000000-0000-0000-0000-000000000000-1';
+```
+
+`CREATE EXTERNAL SCHEMA` creates a local PostgreSQL schema, remembers the role, authentication mode and cluster ARN, and lists the schema in `svv_external_schemas` with `eskind` 10 and those options in `esoptions`. `DROP SCHEMA [IF EXISTS] msk [CASCADE | RESTRICT]` removes the local schema, its metadata row and its registration; `RESTRICT` is the default, as in Redshift.
+
+- `AUTHENTICATION` accepts `iam` or `none`. `AUTHENTICATION mtls`, `AUTHENTICATION_ARN`, `SECRET_ARN`, `URI`, `IAM_ROLE DEFAULT` and `FROM KAFKA` schemas are refused with SQLSTATE `0A000`.
+- The role and cluster ARN are not checked when the schema is created.
+- A statement that names a relation of the schema (`SELECT * FROM msk.my_topic`, `INSERT INTO msk.t`, `UPDATE msk.t`, `CREATE TABLE msk.t (...)`) is refused with SQLSTATE `0A000`. A topic is read through a streaming materialized view; see
+  [Streaming materialized views over Amazon MSK](#streaming-materialized-views-over-amazon-msk).
+- `CREATE EXTERNAL SCHEMA` inside an explicit transaction fails with SQLSTATE `0A000`, and `DROP SCHEMA` with `25001`, because the schema registration is not part of the PostgreSQL transaction.
+- `DROP EXTERNAL DATABASE` and dropping several schemas in one statement are outside this implementation.
 
 ### Streaming materialized views
 
@@ -1112,6 +1132,104 @@ service, never through Firehose or S3.
 - Floci keeps a staging table named after the stream in the external schema. Do not query it. It is dropped with
   the last view that reads the stream, so `DROP SCHEMA` without `CASCADE` works once every view is dropped.
 - Refreshes of the views over one stream run one at a time.
+
+### Streaming materialized views over Amazon MSK
+
+A streaming materialized view reads one topic of an MSK external schema, and `REFRESH` loads what the topic
+holds since the last refresh.
+
+```sql
+CREATE MATERIALIZED VIEW my_view [AUTO REFRESH NO] AS
+SELECT kafka_partition, kafka_offset, kafka_timestamp, refresh_time,
+       JSON_PARSE(FROM_VARBYTE(kafka_value, 'utf-8')) AS doc
+FROM msk."my_topic";
+
+REFRESH MATERIALIZED VIEW my_view;
+DROP MATERIALIZED VIEW [IF EXISTS] my_view [CASCADE | RESTRICT];
+```
+
+The topic's relation has the eight columns Redshift documents: `kafka_partition` (`bigint`), `kafka_offset`
+(`bigint`), `kafka_timestamp_type` (`char(1)`), `kafka_timestamp` (`timestamp`), `kafka_key` (`varbyte`),
+`kafka_value` (`varbyte`), `kafka_headers` (`super`) and `refresh_time` (`timestamp`). The view is a PostgreSQL
+table that `SELECT` fills; an unqualified name is created in `public`. Records are read from the cluster's
+Redpanda container through the Kafka REST Proxy sidecar that EventBridge Pipes uses, so Docker is needed.
+
+- **Refresh:** every partition is assigned and positioned by Floci itself, never by a group rebalance. The first
+  refresh reads each partition from its earliest offset. Every later one starts at the offset after the last
+  record that a refresh loaded, kept per partition. A refresh reads each partition up to the offset it ends at
+  when the refresh starts; a record at or past that offset waits for the next refresh. A batch is loaded, run through the view's `SELECT` and committed as one statement,
+  and the partition's offset is saved only after that commit, so it never runs ahead of the data. A crash between
+  the commit and the save re-reads that last batch. `TRUNCATE` or `DELETE` on the view does not move the offsets.
+  A partition that ends before its saved offset means the topic was deleted and created again, so that partition is
+  read from its beginning. A recreated topic that has already grown past the old offset cannot be told apart from
+  the old one, and its earlier records are skipped.
+- **Stopping early:** a refresh also stops after three polls of one second that return no records, because the offsets
+  left may hold none (transaction markers, compaction). It logs a warning naming the partitions that fell short, and
+  the next refresh continues from the saved offsets.
+- **Consumer groups:** each view reads through its own group, named `floci-redshift-msk-` and a hash of the view,
+  so it never shares a group with EventBridge Pipes or Lambda. The consumer instance is closed when the refresh
+  ends, and refreshes of the views over one topic run one at a time.
+- **Broker failures:** `CREATE MATERIALIZED VIEW` and `REFRESH` fail with SQLSTATE `58030` when the cluster has
+  no running broker, the Kafka REST bridge cannot start, or the broker cannot be reached, so an unavailable
+  broker never looks like an empty topic. A refresh that fails leaves the offsets where they were.
+  A cluster that does not exist, or a `CLUSTER_ARN` that is not a cluster ARN, fails with `42704`, and a topic that does
+  not exist with `42P01`.
+- **Columns:** `kafka_timestamp_type` is `C` when the record has a timestamp and `U` otherwise. Floci cannot tell
+  `LogAppendTime` from `CreateTime`, because the Kafka REST Proxy does not report it. `kafka_headers` is a JSON
+  object of header name to value as UTF-8 text, or null for a header without a value; a name that repeats keeps
+  its last value. Bytes that are not UTF-8 text, and a NUL, which `jsonb` refuses, become U+FFFD, so one binary
+  header cannot fail every refresh. `kafka_key` and `kafka_headers` values of a record that has none are null and `{}`.
+- **IAM:** `CREATE MATERIALIZED VIEW`, before it looks at the broker, and each refresh check the schema's role
+  against `kafka:GetBootstrapBrokers` on the cluster, with trust
+  for `redshift.amazonaws.com`, when IAM enforcement is on. With `AUTHENTICATION iam` it also checks
+  `kafka-cluster:Connect` on the cluster, `kafka-cluster:DescribeTopic` and `kafka-cluster:ReadData` on the topic,
+  and `kafka-cluster:AlterGroup` and `kafka-cluster:DescribeGroup` on the view's consumer group.
+- **Not supported:** `AUTO REFRESH YES` is refused with `0A000`; refresh the view yourself. `JOIN`, grouping and
+  aggregation in the view are refused with `0A000` as for Kinesis, as is a view that reads more than one topic.
+  `ALTER MATERIALIZED VIEW`, a view that reads both Kinesis and MSK, and PartiQL navigation into `SUPER` values are
+  not implemented.
+- `CREATE MATERIALIZED VIEW` over a topic fails with `0A000` inside a transaction block, and `DROP MATERIALIZED VIEW`
+  and `REFRESH MATERIALIZED VIEW` of a streaming view with `25001`.
+- Floci keeps a staging table named after the topic in the external schema. Do not query it. It is dropped with
+  the last view that reads the topic, so `DROP SCHEMA` without `CASCADE` works once every view is dropped, and
+  `DROP SCHEMA ... CASCADE` also drops the views that read the schema.
+
+### Scalar Lambda UDFs
+
+`CREATE EXTERNAL FUNCTION` registers a scalar Lambda UDF, and `DROP FUNCTION` removes it.
+
+```sql
+CREATE [OR REPLACE] EXTERNAL FUNCTION exfunc_sum(INT, INT)
+RETURNS INT
+{ VOLATILE | STABLE }
+LAMBDA 'lambda_sum'
+IAM_ROLE 'arn:aws:iam::123456789012:role/LambdaUdfRole'
+[RETRY_TIMEOUT 20000] [MAX_BATCH_ROWS 1000] [MAX_BATCH_SIZE 5 MB];
+
+DROP FUNCTION exfunc_sum(INT, INT) [CASCADE | RESTRICT];
+```
+
+The statement creates a stub function of the same signature in the local database and remembers the Lambda function,
+role, volatility and batch options. `CREATE OR REPLACE` replaces only a function that `CREATE EXTERNAL FUNCTION` made, with the same signature and return type; an ordinary function of that signature is refused with `42723`. An overload of
+the same name with other argument types is a separate function. `DROP FUNCTION` removes both the stub and the
+registration; a `DROP FUNCTION` of any function Floci does not track is left to PostgreSQL.
+
+- **Calling the function is not supported yet.** The stub refuses every call with SQLSTATE `0A000`; invoking Lambda
+  from SQL is a later change. Creating and dropping the function work today.
+- Argument and return types are `SMALLINT`, `INTEGER`, `BIGINT`, `DECIMAL`, `REAL`, `DOUBLE PRECISION`, `CHAR`,
+  `VARCHAR`, `BOOLEAN`, `DATE` and `TIMESTAMP`, with their aliases. Any other type is refused with `0A000`.
+- `VOLATILE` or `STABLE` is required, and `IMMUTABLE` is refused with `0A000`, as Redshift does not support it for
+  Lambda UDFs. `IAM_ROLE DEFAULT` is refused with `0A000`.
+- `MAX_BATCH_SIZE` takes `KB` or `MB` (`KB` when omitted) between 1 KB and 5 MB, and `MAX_BATCH_ROWS` is at least 1.
+  The defaults are the documented 20000 ms, 2147483647 rows and 5 MB. The options are stored, and not applied yet.
+- An unqualified name is created in the session's current schema (`search_path`), failing with `3F000` if no schema is
+  selected, and unqualified `DROP FUNCTION` resolves through `search_path`. The role and the Lambda function are not
+  checked at creation.
+- `CREATE EXTERNAL FUNCTION` and `DROP FUNCTION` of such a function inside an explicit transaction fail with SQLSTATE
+  `25001`, because the registration is not part of the PostgreSQL transaction.
+- Privileges on `LANGUAGE exfunc` are not modeled: any user the backend lets create a function can create one.
+- `DROP SCHEMA ... CASCADE` of a schema holding such a function removes the stub. The registration is cleared by the
+  next `DROP FUNCTION` of it, or replaced by a new `CREATE`.
 
 ### COPY from S3
 

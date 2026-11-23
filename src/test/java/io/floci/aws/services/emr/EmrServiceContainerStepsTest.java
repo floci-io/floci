@@ -756,6 +756,31 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void aNodeOfAGroupWithItsOwnAmiRunsThatAmiAndHasThePublicAddressItsNameNames() {
+        EmrCluster requested = cluster("own-ami", true);
+        requested.setCustomAmiId("ami-0000000000000c1a5");
+        EmrInstanceGroup master = new EmrInstanceGroup();
+        master.setInstanceGroupType("MASTER");
+        master.setInstanceType("m5.xlarge");
+        master.setRequestedInstanceCount(1);
+        EmrInstanceGroup core = new EmrInstanceGroup();
+        core.setInstanceGroupType("CORE");
+        core.setInstanceType("m5.xlarge");
+        core.setRequestedInstanceCount(1);
+        core.setCustomAmiId("ami-00000000000000c0e");
+        requested.setInstanceGroups(new ArrayList<>(List.of(master, core)));
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+
+        Instance primary = service.nodeInstance(cluster, "111111111111", 0, 1);
+        Instance coreNode = service.nodeInstance(cluster, "111111111111", 1, 1);
+
+        assertEquals("ami-0000000000000c1a5", primary.getImageId());
+        assertEquals("ami-00000000000000c0e", coreNode.getImageId());
+        assertEquals("203.0.113.2", coreNode.getPublicIpAddress());
+        assertEquals("ec2-203-0-113-2.compute-1.amazonaws.com", coreNode.getPublicDnsName());
+    }
+
+    @Test
     void aRelayThatCannotStartFailsTheStepThatWouldReadIt() {
         fixture.clusterStorage.metadata = true;
         fixture.clusterStorage.metadataFailure = new IllegalStateException("The relay did not listen");
@@ -1146,7 +1171,8 @@ class EmrServiceContainerStepsTest {
 
         // The next step starts once the driver is gone, before anything reads the cluster.
         assertEquals(1, fixture.stepThreadsWaiting());
-        assertEquals(Set.of(stoppedId), runner.stopped);
+        // SEND_INTERRUPT, the default, sends it SIGTERM, which ends it.
+        assertEquals(Set.of(stoppedId), runner.interrupted);
         // "Canceling a running step does not allow a pending step to start running" while its driver stops.
         assertEquals(List.of("RUNNING", "CANCEL_PENDING", "PENDING", "PENDING"), whileStopping);
         // "CancelSteps is idempotent".
@@ -1157,6 +1183,69 @@ class EmrServiceContainerStepsTest {
         assertEquals(List.of("CANCELLED", "RUNNING", "PENDING"), stepStates(running.getSteps()));
         assertEquals(List.of("STARTING", "PENDING stopped", "PENDING next", "RUNNING stopped", "CANCEL_PENDING stopped",
                 "PENDING added", "CANCELLED stopped", "RUNNING next"), fixture.states());
+    }
+
+    /**
+     * SEND_INTERRUPT, the default: "EMR sends a SIGTERM signal to the step", which may "terminate descendant step
+     * processes or wait for them to complete". The step is CANCEL_PENDING while its driver goes on, and CANCELLED,
+     * without its ActionOnFailure, once the driver has ended on its own.
+     */
+    @Test
+    void aSendInterruptCancelSignalsTheStepAndLetsItsDriverEndOnItsOwn() {
+        EmrCluster cluster = service.runJobFlow(cluster("interrupted", true,
+                sparkStep("interrupted", "TERMINATE_CLUSTER"), sparkStep("next", "CONTINUE")), REGION);
+        String interruptedId = cluster.getSteps().get(0).getId();
+        List<String> whileInterrupted = new ArrayList<>();
+        // A driver ended by SIGTERM: 128 + 15.
+        runner.outcome = SparkJobRunner.Outcome.exitedWith(143);
+        runner.whileRunning = () -> {
+            service.cancelSteps(cluster.getId(), List.of(interruptedId));
+            whileInterrupted.add(service.describeCluster(cluster.getId()).getSteps().get(0).getState());
+        };
+
+        fixture.runStepThread();
+
+        assertEquals(Set.of(interruptedId), runner.interrupted);
+        assertEquals(Set.of(), runner.stopped);
+        assertEquals(List.of(false, false), runner.cancelledAsRunning, "the driver may go on until it ends");
+        assertEquals(List.of("CANCEL_PENDING"), whileInterrupted);
+        EmrCluster running = service.describeCluster(cluster.getId());
+        assertEquals("RUNNING", running.getState());
+        assertEquals(List.of("CANCELLED", "RUNNING"), stepStates(running.getSteps()));
+        assertNull(running.getSteps().get(0).getFailureMessage());
+    }
+
+    /** TERMINATE_PROCESS: "EMR sends a SIGKILL signal to the step and all its descendant processes". */
+    @Test
+    void aTerminateProcessCancelKillsTheStepAtOnce() {
+        EmrCluster cluster = service.runJobFlow(cluster("killed", true, sparkStep("killed", "CONTINUE")), REGION);
+        String killedId = cluster.getSteps().get(0).getId();
+        runner.whileRunning = () -> service.cancelSteps(cluster.getId(), List.of(killedId), "TERMINATE_PROCESS");
+
+        fixture.runStepThread();
+
+        assertEquals(Set.of(killedId), runner.stopped);
+        assertEquals(Set.of(), runner.interrupted);
+        assertEquals(List.of(false, true), runner.cancelledAsRunning);
+        assertEquals("CANCELLED", service.describeCluster(cluster.getId()).getSteps().get(0).getState());
+    }
+
+    @Test
+    void aTerminateProcessCancelKillsAStepAnInterruptLeftRunning() {
+        EmrCluster cluster = service.runJobFlow(cluster("escalated", true, sparkStep("escalated", "CONTINUE")),
+                REGION);
+        String escalatedId = cluster.getSteps().get(0).getId();
+        runner.whileRunning = () -> {
+            service.cancelSteps(cluster.getId(), List.of(escalatedId), "SEND_INTERRUPT");
+            service.cancelSteps(cluster.getId(), List.of(escalatedId), "TERMINATE_PROCESS");
+        };
+
+        fixture.runStepThread();
+
+        assertEquals(Set.of(escalatedId), runner.interrupted);
+        assertEquals(Set.of(escalatedId), runner.stopped);
+        assertEquals(List.of(false, true), runner.cancelledAsRunning);
+        assertEquals("CANCELLED", service.describeCluster(cluster.getId()).getSteps().get(0).getState());
     }
 
     @Test
@@ -2445,6 +2534,8 @@ class EmrServiceContainerStepsTest {
     private static final class FakeRunner implements SparkJobRunner {
         final List<Job> jobs = new ArrayList<>();
         final Set<String> stopped = new HashSet<>();
+        // Runs sent SIGTERM: a driver that ignores it runs on.
+        final Set<String> interrupted = new HashSet<>();
         final List<String> driversStarted = new ArrayList<>();
         // What progress.cancelled() said once the driver ran, and again after whileRunning.
         final List<Boolean> cancelledAsRunning = new ArrayList<>();
@@ -2455,7 +2546,7 @@ class EmrServiceContainerStepsTest {
         public Outcome run(Job job, Progress progress) {
             jobs.add(job);
             // As the Docker runner, a stop counts only for a run in progress, so a cancel before then is read here.
-            if (progress.cancelled()) {
+            if (progress.cancelled() || stopped.contains(job.runId())) {
                 return Outcome.halted();
             }
             driversStarted.add(job.runId());
@@ -2469,6 +2560,14 @@ class EmrServiceContainerStepsTest {
         @Override
         public void stop(String runId) {
             stopped.add(runId);
+        }
+
+        // As the Docker runner, only a run whose driver runs is interrupted; one before then reads as cancelled.
+        @Override
+        public void interrupt(String runId) {
+            if (driversStarted.contains(runId)) {
+                interrupted.add(runId);
+            }
         }
 
         @Override

@@ -65,11 +65,20 @@ create_acg() {
     CVK_ARN=$(create_cvk)
     [ -n "$CVK_ARN" ]
 
+    run aws_cmd payment-cryptography-data generate-card-validation-data \
+        --key-identifier "$CVK_ARN" \
+        --primary-account-number "5081470082639564" \
+        --generation-attributes 'CardVerificationValue1={CardExpiryDate=3003,ServiceCode=201}'
+    assert_success
+    VALUE=$(json_get "$output" '.ValidationData')
+    # The card's own value with another first digit, so it can't be the key's own.
+    INVALID="$([ "${VALUE:0:1}" = 0 ] && echo 1 || echo 0)${VALUE:1}"
+
     # The value is not the one over the card account, so the verification fails.
     run aws_cmd payment-cryptography-data verify-card-validation-data \
         --key-identifier "$CVK_ARN" \
         --primary-account-number "5081470082639564" \
-        --validation-data "999" \
+        --validation-data "$INVALID" \
         --verification-attributes 'CardVerificationValue1={CardExpiryDate=3003,ServiceCode=201}'
     assert_failure
     # A value that does not verify is a verification that failed, not a malformed request.

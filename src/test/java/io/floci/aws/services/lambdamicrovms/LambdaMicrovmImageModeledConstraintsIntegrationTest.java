@@ -50,8 +50,8 @@ class LambdaMicrovmImageModeledConstraintsIntegrationTest {
         return Stream.of(
                 "\"additionalOsCapabilities\":[\"SYS_ADMIN\"]",
                 "\"egressNetworkConnectors\":[\"one\",\"two\"]",
-                "\"cpuConfigurations\":[{\"architecture\":\"X86_64\"}]",
-                environment(51, "KEY", "value"),
+                "\"cpuConfigurations\":[{\"architecture\":\"RISCV_64\"}]",
+                environment(101, "KEY", "value"),
                 environment(1, "", "value"),
                 environment(1, "k".repeat(257), "value"),
                 environment(1, "bad key", "value"),

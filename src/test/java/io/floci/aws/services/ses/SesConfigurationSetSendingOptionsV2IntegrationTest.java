@@ -7,6 +7,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -24,8 +26,6 @@ import static org.hamcrest.Matchers.equalTo;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesConfigurationSetSendingOptionsV2IntegrationTest {
 
-    private static final String SES_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String CS = "cs-sending-options";
     // A sender of its own, verified below: the identity outlives this class, and other SES classes
     // that share the application create sender@example.com themselves.
@@ -36,7 +36,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
     void verifySender() {
         given()
                 .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .formParam("Action", "VerifyEmailIdentity")
                 .formParam("EmailAddress", SENDER)
         .when()
@@ -48,9 +48,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
     @Test
     @Order(1)
     void createConfigurationSet() {
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + CS + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
@@ -62,7 +60,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
     @Order(2)
     void getConfigurationSet_defaultSendingEnabledTrue() {
         given()
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .get("/v2/email/configuration-sets/" + CS)
         .then()
@@ -80,9 +78,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
     @Test
     @Order(4)
     void putSendingOptions_disableViaV2() {
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"SendingEnabled\":false}")
         .when()
                 .put("/v2/email/configuration-sets/" + CS + "/sending")
@@ -94,7 +90,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
     @Order(5)
     void getConfigurationSet_reflectsDisabled() {
         given()
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .get("/v2/email/configuration-sets/" + CS)
         .then()
@@ -120,7 +116,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
         // narrows this to SendingPausedException for v2 callers only.
         given()
                 .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .formParam("Action", "SendEmail")
                 .formParam("Source", SENDER)
                 .formParam("Destination.ToAddresses.member.1", "recipient@example.com")
@@ -141,7 +137,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
     void v1_describeConfigurationSet_reputationOptions_reflectsDisabled() {
         given()
                 .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .formParam("Action", "DescribeConfigurationSet")
                 .formParam("ConfigurationSetName", CS)
                 .formParam("ConfigurationSetAttributeNames.member.1", "reputationOptions")
@@ -157,7 +153,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
     void v1_updateConfigurationSetSendingEnabled_reEnables() {
         given()
                 .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .formParam("Action", "UpdateConfigurationSetSendingEnabled")
                 .formParam("ConfigurationSetName", CS)
                 .formParam("Enabled", "true")
@@ -177,7 +173,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
     @Order(11)
     void getConfigurationSet_reflectsReEnabled() {
         given()
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .get("/v2/email/configuration-sets/" + CS)
         .then()
@@ -190,16 +186,14 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
     void putSendingOptions_emptyBody_treatsSendingEnabledAsFalse() {
         // AWS treats an absent SendingEnabled as false: a true empty body succeeds (200) and
         // disables sending (verified against real AWS). Sending is enabled here from @Order(9).
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
         .when()
                 .put("/v2/email/configuration-sets/" + CS + "/sending")
         .then()
                 .statusCode(200);
 
         given()
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .get("/v2/email/configuration-sets/" + CS)
         .then()
@@ -212,9 +206,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
     void putSendingOptions_stringSendingEnabled_coercesToTrue() {
         // Real AWS coerces "yes" to true (200), matching CreateConfigurationSet. Verify the
         // persisted value, not just the status — CS was disabled by @Order(12).
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"SendingEnabled\":\"yes\"}")
         .when()
                 .put("/v2/email/configuration-sets/" + CS + "/sending")
@@ -222,7 +214,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
                 .statusCode(200);
 
         given()
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .get("/v2/email/configuration-sets/" + CS)
         .then()
@@ -235,9 +227,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
     void putSendingOptions_nullSendingEnabled_returnsSerializationException() {
         // Real AWS rejects an explicit JSON null for the boolean field with SerializationException,
         // matching CreateConfigurationSet's deserialization.
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"SendingEnabled\":null}")
         .when()
                 .put("/v2/email/configuration-sets/" + CS + "/sending")
@@ -249,9 +239,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
     @Test
     @Order(15)
     void putSendingOptions_unknownConfigSet_returns404_NotFoundException() {
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"SendingEnabled\":false}")
         .when()
                 .put("/v2/email/configuration-sets/does-not-exist/sending")
@@ -269,7 +257,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
         // silently coerced to false (which would disable sending without the caller realizing).
         given()
                 .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .formParam("Action", "UpdateConfigurationSetSendingEnabled")
                 .formParam("ConfigurationSetName", CS)
                 .formParam("Enabled", "yes")
@@ -282,9 +270,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
     }
 
     private static Response sendEmail(String configSet) {
-        return given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        return v2()
                 .body("""
                     {
                       "FromEmailAddress": "%s",

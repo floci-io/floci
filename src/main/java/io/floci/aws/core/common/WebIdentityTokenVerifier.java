@@ -14,7 +14,9 @@ import java.security.interfaces.RSAPublicKey;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -36,6 +38,9 @@ public class WebIdentityTokenVerifier {
 
     /** Tolerance for clock drift between Floci and a token minted elsewhere. */
     private static final long CLOCK_SKEW_SECONDS = 60;
+    /** The namespace AWS publishes a token's session tags under, whichever format they take. */
+    private static final String TAGS_CLAIM = "https://aws.amazon.com/tags";
+    private static final String FLATTENED_TAG_CLAIM = TAGS_CLAIM + "/principal_tags/";
 
     private final ObjectMapper objectMapper;
 
@@ -121,7 +126,7 @@ public class WebIdentityTokenVerifier {
             throw new InvalidTokenException("The web identity token has no subject claim");
         }
 
-        return new WebIdentityToken(issuer, subject, audiences);
+        return new WebIdentityToken(issuer, subject, audiences, readPrincipalTags(claims));
     }
 
     private void verifyValidityWindow(JsonNode claims) throws InvalidTokenException {
@@ -153,6 +158,52 @@ public class WebIdentityTokenVerifier {
             LOG.debugv("Web identity token signature check failed: {0}", e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * The session tags the token passes, in either format AWS reads them in. The nested format
+     * puts them "under the principal_tags key" inside the {@code https://aws.amazon.com/tags}
+     * namespace; the flattened one, "compatible with identity providers that don't support nested
+     * objects in JWT claims", carries each as its own claim "with the prefix
+     * https://aws.amazon.com/tags/principal_tags/". Both "achieve the same result", so both are
+     * read, the flattened claims last for a token that somehow carries both.
+     *
+     * <p>A tag's value is one string: "each principal tag is a single string value", while the
+     * published nested example writes each as an array holding that one value, so a single-element
+     * array is read as the value it holds. Anything else is a multi-valued session tag, which "AWS
+     * STS does not support", and the token is refused rather than verified with that tag dropped:
+     * a tag a policy would have been evaluated with cannot go missing quietly. The transitive tag
+     * keys the same namespace carries are not read: nothing here passes a tag into a later session
+     * yet, and a key stored unread would say otherwise.
+     */
+    private Map<String, String> readPrincipalTags(JsonNode claims) throws InvalidTokenException {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (Map.Entry<String, JsonNode> tag : claims.path(TAGS_CLAIM).path("principal_tags").properties()) {
+            tags.put(tag.getKey(), singleValue(tag.getKey(), tag.getValue()));
+        }
+        for (Map.Entry<String, JsonNode> claim : claims.properties()) {
+            if (!claim.getKey().startsWith(FLATTENED_TAG_CLAIM)) {
+                continue;
+            }
+            String key = claim.getKey().substring(FLATTENED_TAG_CLAIM.length());
+            if (key.isEmpty()) {
+                throw new InvalidTokenException("The web identity token carries a session tag with no key");
+            }
+            tags.put(key, singleValue(key, claim.getValue()));
+        }
+        return tags;
+    }
+
+    /** The one value a tag claim carries, written as a string or as an array holding it alone. */
+    private static String singleValue(String key, JsonNode value) throws InvalidTokenException {
+        if (value.isTextual()) {
+            return value.asText();
+        }
+        if (value.isArray() && value.size() == 1 && value.get(0).isTextual()) {
+            return value.get(0).asText();
+        }
+        throw new InvalidTokenException("The web identity token's session tag " + key
+                + " does not carry a single value");
     }
 
     private List<String> readAudiences(JsonNode claims) {

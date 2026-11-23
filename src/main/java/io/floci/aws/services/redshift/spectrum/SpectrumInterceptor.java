@@ -45,7 +45,11 @@ public final class SpectrumInterceptor {
     }
 
     public Plan plan(String sql, SpectrumSession session) {
-        if (preparation != null && preparation.handlesDdl(sql, session)) {
+        return plan(sql, session, null);
+    }
+
+    public Plan plan(String sql, SpectrumSession session, BackendSql backend) {
+        if (preparation != null && preparation.handlesDdl(sql, session, backend)) {
             return new Plan.ExternalDdl(sql, session);
         }
         if (preparation != null && preparation.referencesExternal(sql, session)) {
@@ -55,9 +59,10 @@ public final class SpectrumInterceptor {
     }
 
     public Decision intercept(String sql, SpectrumSession session, Socket backend) {
-        Plan plan = plan(sql, session);
+        PostgresBackendSession backendSql = new PostgresBackendSession(backend);
+        Plan plan = plan(sql, session, backendSql);
         if (plan instanceof Plan.Forward && preparation != null) {
-            preparation.prepare(sql, session, new PostgresBackendSession(backend));
+            preparation.prepare(sql, session, backendSql);
         }
         return execute(plan, session.accountId(), session.databaseName(), backend);
     }

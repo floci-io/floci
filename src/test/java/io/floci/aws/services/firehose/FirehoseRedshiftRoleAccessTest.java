@@ -11,6 +11,7 @@ import io.floci.aws.services.iam.ScpProvider;
 import io.floci.aws.services.iam.ServiceRoleAuthorizer;
 import io.floci.aws.services.iam.model.CallerContext;
 import io.floci.aws.services.iam.model.IamRole;
+import io.floci.aws.services.redshift.RedshiftJdbcTargets;
 import io.floci.aws.services.redshift.RedshiftService;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessService;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
@@ -68,9 +69,9 @@ class FirehoseRedshiftRoleAccessTest {
         when(scpProvider.isResolvable()).thenReturn(false);
         ServiceRoleAuthorizer authorizer = new ServiceRoleAuthorizer(config, iamService, evaluator,
                 new AssumeRolePolicyEvaluator(new ObjectMapper(), evaluator), scpProvider);
-        delivery = new FirehoseRedshiftDelivery(mock(RedshiftService.class), mock(RedshiftServerlessService.class),
-                mock(SecretsManagerService.class), authorizer, iamService, new ObjectMapper(),
-                (url, user, password, sql) -> { });
+        delivery = new FirehoseRedshiftDelivery(new RedshiftJdbcTargets(mock(RedshiftService.class),
+                mock(RedshiftServerlessService.class), mock(SecretsManagerService.class), new ObjectMapper()),
+                authorizer, iamService, (url, user, password, sql) -> { });
     }
 
     private void role(String name, String arn, String trust, String policy) {

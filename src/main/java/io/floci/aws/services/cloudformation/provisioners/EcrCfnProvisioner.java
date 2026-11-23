@@ -103,6 +103,7 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
         }
 
         String mutability = ctx.resolveOptional(props, "ImageTagMutability");
+        Boolean scanOnPush = scanOnPush(props, ctx);
         Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, ctx);
         String region = ctx.region();
         String lifecyclePolicy = lifecyclePolicyText(props, ctx);
@@ -117,8 +118,8 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
         // EncryptionConfiguration is create-only, so it is read only when the repository is created.
         JsonNode encryption = props != null ? props.get("EncryptionConfiguration") : null;
         Repository repo = reusing
-                ? reconcileExisting(repoName, mutability, tags, region)
-                : ecrService.createRepository(repoName, null, mutability, null,
+                ? reconcileExisting(repoName, mutability, scanOnPush, tags, region)
+                : ecrService.createRepository(repoName, null, mutability, scanOnPush,
                         ctx.resolveOptional(encryption, "EncryptionType"), ctx.resolveOptional(encryption, "KmsKey"),
                         tags, region);
         if (!reusing) {
@@ -170,10 +171,11 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
      * template's desired state (TagResource alone leaves unspecified tags in place, so dropped
      * keys are untagged first), and so is ImageTagMutability: a template that no longer declares
      * it means the MUTABLE default the API applies when the parameter is omitted, not "keep the
-     * previous value". Both are updatable in the registry schema.
+     * previous value". ImageScanningConfiguration is applied only when declared, leaving the
+     * stored setting intact if an update drops it.
      */
-    private Repository reconcileExisting(String repoName, String mutability, Map<String, String> tags,
-                                         String region) {
+    private Repository reconcileExisting(String repoName, String mutability, Boolean scanOnPush,
+                                         Map<String, String> tags, String region) {
         List<String> stale = ProvisionContext.staleTagKeys(
                 ecrService.listTagsForResource(repoName, null, region), tags);
         if (!stale.isEmpty()) {
@@ -182,8 +184,41 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
         if (!tags.isEmpty()) {
             ecrService.tagResource(repoName, null, tags, region);
         }
-        return ecrService.putImageTagMutability(repoName, null,
+        Repository repo = ecrService.putImageTagMutability(repoName, null,
                 mutability != null ? mutability : DEFAULT_IMAGE_TAG_MUTABILITY, region);
+        if (scanOnPush != null) {
+            repo = ecrService.putImageScanningConfiguration(repoName, null, scanOnPush, region);
+        }
+        return repo;
+    }
+
+    /** {@code ImageScanningConfiguration.ScanOnPush}, or null when the template declares none. */
+    private static Boolean scanOnPush(JsonNode props, ProvisionContext ctx) {
+        if (props == null || !props.has("ImageScanningConfiguration")) {
+            return null;
+        }
+        JsonNode config = ctx.engine().resolveNode(props.get("ImageScanningConfiguration"));
+        if (config == null || config.isNull() || config.isMissingNode() || !config.has("ScanOnPush")) {
+            return null;
+        }
+        JsonNode value = ctx.engine().resolveNode(config.get("ScanOnPush"));
+        if (value == null || value.isNull() || value.isMissingNode()) {
+            return null;
+        }
+        if (value.isBoolean()) {
+            return value.booleanValue();
+        }
+        String text = value.asText(null);
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        if ("true".equalsIgnoreCase(text)) {
+            return Boolean.TRUE;
+        }
+        if ("false".equalsIgnoreCase(text)) {
+            return Boolean.FALSE;
+        }
+        return null;
     }
 
     /** {@code LifecyclePolicy.LifecyclePolicyText}, or null when the template declares none. */

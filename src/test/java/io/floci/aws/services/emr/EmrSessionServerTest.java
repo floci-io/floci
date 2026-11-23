@@ -4,7 +4,8 @@ import io.floci.aws.core.common.SparkConnectEndpoint;
 import io.floci.aws.core.common.SparkConnectTargets;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrSession;
-import io.floci.aws.services.emrserverless.SparkConnectServers;
+import io.floci.aws.services.emrserverless.SessionServers;
+import io.floci.aws.services.emrserverless.SparkConnectSessionOwner;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 import io.floci.aws.services.iam.IamService;
 import org.junit.jupiter.api.Test;
@@ -43,7 +44,7 @@ class EmrSessionServerTest {
 
     private final FakeServerRunner runner = new FakeServerRunner();
     private final AtomicBoolean answering = new AtomicBoolean(true);
-    private final SparkConnectServers.Probe probe = (host, port) ->
+    private final SessionServers.Probe probe = (host, port) ->
             answering.get() && SERVER_HOST.equals(host) && port == SERVER_PORT ? null : "Connection refused";
     private final EmrServiceFixture fixture = EmrServiceFixture.dockerSessions(runner, mock(IamService.class), probe);
     private final EmrService service = fixture.service;
@@ -58,8 +59,11 @@ class EmrSessionServerTest {
         EmrSession idle = awaitState(clusterId, started.getId(), "IDLE");
 
         assertEquals("SUBMITTED", started.getState());
+        assertNull(started.getServerUrl());
         assertNotNull(idle.getStartedAt());
         assertEquals(idle.getStartedAt(), idle.getIdleSince());
+        // Floci's own address, whose proxy takes only a call with GetSessionEndpoint's token on to the server.
+        assertEquals("sc://localhost:4566", idle.getServerUrl());
         SparkJobRunner.Job job = runner.jobs.get(started.getId());
         assertEquals(EmrSessions.SPARK_CONNECT_PORT, job.listenPort());
         assertEquals(List.of("--class", "org.apache.spark.sql.connect.service.SparkConnectServer", "spark-internal"),
@@ -120,6 +124,7 @@ class EmrSessionServerTest {
         assertEquals("TERMINATING", terminating.getState());
         assertTrue(runner.stopped.contains(sessionId));
         assertEquals(EmrSessions.USER_REQUEST, terminated.getStateChangeReason());
+        assertNull(terminated.getServerUrl(), "an ended session's server has gone");
         assertTrue(service.route(token).isEmpty());
     }
 
@@ -132,7 +137,7 @@ class EmrSessionServerTest {
         runner.end(sessionId).complete(SparkJobRunner.Outcome.exitedWith(1));
         EmrSession failed = awaitState(clusterId, sessionId, "FAILED");
 
-        assertEquals(String.format(SparkConnectServers.SERVER_EXITED, 1), failed.getStateChangeReason());
+        assertEquals(String.format(SparkConnectSessionOwner.SERVER_EXITED, 1), failed.getStateChangeReason());
     }
 
     @Test

@@ -20,10 +20,6 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 class SesTemplateNameIntegrationTest {
 
-    private static final String V1_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
-    private static final String V2_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String BLANK = "The template name must be specified.";
     private static final String TOO_LONG = "Template name cannot exceed 64 characters.";
 
@@ -49,7 +45,7 @@ class SesTemplateNameIntegrationTest {
         for (String action : new String[] {"CreateTemplate", "UpdateTemplate"}) {
             given()
                 .contentType("application/x-www-form-urlencoded; charset=UTF-8")
-                .header("Authorization", V1_AUTH)
+                .header("Authorization", SesV1Requests.AUTH)
                 .formParam("Action", action)
                 .formParam("Template.TemplateName", name)
                 .formParam("Template.SubjectPart", "S")
@@ -64,7 +60,7 @@ class SesTemplateNameIntegrationTest {
         for (String action : new String[] {"GetTemplate", "DeleteTemplate", "TestRenderTemplate"}) {
             given()
                 .contentType("application/x-www-form-urlencoded; charset=UTF-8")
-                .header("Authorization", V1_AUTH)
+                .header("Authorization", SesV1Requests.AUTH)
                 .formParam("Action", action)
                 .formParam("TemplateName", name)
                 .formParam("TemplateData", "{}")
@@ -82,7 +78,7 @@ class SesTemplateNameIntegrationTest {
     void v2_everyOperationRefusesTheName(String name, String message) {
         given()
             .contentType("application/json; charset=UTF-8")
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("{\"TemplateName\": \"" + name + "\", \"TemplateContent\": {\"Subject\": \"S\", \"Text\": \"t\"}}")
         .when()
             .post("/v2/email/templates")
@@ -91,9 +87,7 @@ class SesTemplateNameIntegrationTest {
             .body("__type", equalTo("BadRequestException"))
             .body("message", equalTo(message));
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", V2_AUTH)
+        SesV2Requests.v2()
             .body("{\"TemplateContent\": {\"Subject\": \"S\", \"Text\": \"t\"}}")
         .when()
             .put("/v2/email/templates/{name}", name)
@@ -103,7 +97,7 @@ class SesTemplateNameIntegrationTest {
             .body("message", equalTo(message));
 
         given()
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .get("/v2/email/templates/{name}", name)
         .then()
@@ -112,7 +106,7 @@ class SesTemplateNameIntegrationTest {
             .body("message", equalTo(message));
 
         given()
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .delete("/v2/email/templates/{name}", name)
         .then()
@@ -120,9 +114,7 @@ class SesTemplateNameIntegrationTest {
             .body("__type", equalTo("BadRequestException"))
             .body("message", equalTo(message));
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", V2_AUTH)
+        SesV2Requests.v2()
             .body("{\"TemplateData\": \"{}\"}")
         .when()
             .post("/v2/email/templates/{name}/render", name)
@@ -137,7 +129,7 @@ class SesTemplateNameIntegrationTest {
     void theNameIsCheckedBeforeTheContent() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "CreateTemplate")
             .formParam("Template.TemplateName", "name probe")
             .formParam("Template.TextPart", "t")
@@ -147,9 +139,7 @@ class SesTemplateNameIntegrationTest {
             .statusCode(400)
             .body("ErrorResponse.Error.Message", equalTo(notAllowed("name probe")));
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", V2_AUTH)
+        SesV2Requests.v2()
             .body("{\"TemplateName\": \"name probe\", \"TemplateContent\": {\"Text\": \"t\"}}")
         .when()
             .post("/v2/email/templates")
@@ -163,7 +153,7 @@ class SesTemplateNameIntegrationTest {
     void v1SpellsOutAControlCharacterOfTheName() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "GetTemplate")
             .formParam("TemplateName", "name\tprobe\u0001")
         .when()
@@ -172,9 +162,7 @@ class SesTemplateNameIntegrationTest {
             .statusCode(400)
             .body("ErrorResponse.Error.Message", equalTo(notAllowed("name0x0009probe0x0001")));
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", V2_AUTH)
+        SesV2Requests.v2()
             .body("{\"TemplateName\": \"name\\tprobe\", \"TemplateContent\": {\"Subject\": \"S\", \"Text\": \"t\"}}")
         .when()
             .post("/v2/email/templates")
@@ -188,7 +176,7 @@ class SesTemplateNameIntegrationTest {
         String name = "Name_probe-0123456789" + "a".repeat(43);
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "CreateTemplate")
             .formParam("Template.TemplateName", name)
             .formParam("Template.SubjectPart", "S")
@@ -199,7 +187,7 @@ class SesTemplateNameIntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .get("/v2/email/templates/{name}", name)
         .then()
@@ -208,7 +196,7 @@ class SesTemplateNameIntegrationTest {
 
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "GetTemplate")
             .formParam("TemplateName", name)
         .when()
@@ -218,7 +206,7 @@ class SesTemplateNameIntegrationTest {
             .body(containsString("<TemplateName>" + name + "</TemplateName>"));
 
         given()
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .delete("/v2/email/templates/{name}", name)
         .then()

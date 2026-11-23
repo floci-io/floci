@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.model.Queue;
@@ -12,7 +13,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -27,6 +30,7 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(SqsCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final String POLICY_QUEUES_ATTR = "__FlociQueuePolicyQueues";
     /** The schema's mutable properties that map one to one onto a queue attribute of the same name. */
     private static final List<String> SCALAR_ATTRIBUTES = List.of(
             "ContentBasedDeduplication", "DeduplicationScope", "DelaySeconds", "FifoThroughputLimit",
@@ -67,7 +71,7 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         switch (r.getResourceType()) {
             case "AWS::SQS::Queue" -> provisionQueue(r, props, ctx);
-            case "AWS::SQS::QueuePolicy" -> provisionQueuePolicy(r, ctx);
+            case "AWS::SQS::QueuePolicy" -> provisionQueuePolicy(r, props, ctx);
             default -> throw new IllegalStateException("SqsCfnProvisioner cannot handle " + r.getResourceType());
         }
     }
@@ -77,7 +81,18 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
         if ("AWS::SQS::Queue".equals(resourceType)) {
             sqsService.deleteQueue(physicalId, region);
         }
-        // AWS::SQS::QueuePolicy has no backing resource to delete (matches prior behavior).
+        // AWS::SQS::QueuePolicy's physical id does not name its queues; see delete(StackResource, String).
+    }
+
+    @Override
+    public void delete(StackResource resource, String region) {
+        if ("AWS::SQS::QueuePolicy".equals(resource.getResourceType())) {
+            for (String queueUrl : readQueueUrls(resource)) {
+                clearQueuePolicy(queueUrl, region);
+            }
+            return;
+        }
+        delete(resource.getResourceType(), resource.getPhysicalId(), region);
     }
 
     @Override
@@ -274,10 +289,77 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private void provisionQueuePolicy(StackResource r, ProvisionContext ctx) {
+    private void provisionQueuePolicy(StackResource r, JsonNode props, ProvisionContext ctx) {
+        List<String> queues = ctx.resolveStringList(props, "Queues").stream()
+                .filter(q -> !q.isBlank())
+                .toList();
+        if (queues.isEmpty()) {
+            throw new AwsException("ValidationError",
+                    "AWS::SQS::QueuePolicy requires at least one queue URL in Queues.", 400);
+        }
+        if (props == null || !props.hasNonNull("PolicyDocument")) {
+            throw new AwsException("ValidationError",
+                    "AWS::SQS::QueuePolicy requires a PolicyDocument.", 400);
+        }
+        String policy = ctx.engine().resolveJsonAttribute(props.path("PolicyDocument"));
+        if (policy == null || policy.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "AWS::SQS::QueuePolicy requires a PolicyDocument.", 400);
+        }
+        List<String> priorQueues = ctx.isUpdate() ? readQueueUrls(r) : List.of();
+        for (String queueUrl : queues) {
+            sqsService.setQueueAttributes(queueUrl, Map.of("Policy", policy), ctx.region());
+        }
+        Set<String> currentQueues = new HashSet<>(queues);
+        for (String priorQueue : priorQueues) {
+            if (!currentQueues.contains(priorQueue)) {
+                clearQueuePolicy(priorQueue, ctx.region());
+            }
+        }
         // A policy has no backing entity, so its id only has to stay put across updates.
         r.setPhysicalId(ctx.isUpdate()
                 ? ctx.priorPhysicalId()
                 : "queue-policy-" + UUID.randomUUID().toString().substring(0, 8));
+        r.getAttributes().put(POLICY_QUEUES_ATTR, writeQueueUrls(queues));
+    }
+
+    private void clearQueuePolicy(String queueUrl, String region) {
+        CfnDeletes.safeDelete("SQS queue policy", queueUrl,
+                () -> sqsService.setQueueAttributes(queueUrl, Map.of("Policy", ""), region),
+                "AWS.SimpleQueueService.NonExistentQueue", "QueueDoesNotExist");
+    }
+
+    private static String writeQueueUrls(List<String> queues) {
+        try {
+            return MAPPER.writeValueAsString(queues);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not serialize queue policy URLs", e);
+        }
+    }
+
+    private static List<String> readQueueUrls(StackResource r) {
+        if (r.getAttributes() == null) {
+            return List.of();
+        }
+        String raw = r.getAttributes().get(POLICY_QUEUES_ATTR);
+        if (raw == null || raw.isBlank()) {
+            return List.of();
+        }
+        try {
+            JsonNode node = MAPPER.readTree(raw);
+            if (!node.isArray()) {
+                return List.of();
+            }
+            List<String> urls = new ArrayList<>();
+            for (JsonNode entry : node) {
+                if (entry.isTextual() && !entry.asText().isBlank()) {
+                    urls.add(entry.asText());
+                }
+            }
+            return urls;
+        } catch (JsonProcessingException e) {
+            LOG.errorv("Could not parse queue policy URLs for {0}: {1}", r.getLogicalId(), e.getMessage());
+            return List.of();
+        }
     }
 }

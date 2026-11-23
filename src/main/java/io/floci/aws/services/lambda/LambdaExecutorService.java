@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.DelayedTaskScheduler;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.docker.DockerCapacityExceededException;
 import io.floci.aws.services.lambda.launcher.ContainerHandle;
 import io.floci.aws.services.lambda.launcher.LambdaInitException;
 import io.floci.aws.services.lambda.model.FunctionEventInvokeConfig;
@@ -378,6 +379,10 @@ public class LambdaExecutorService implements Resettable {
         InvokeResult result;
         try (permit) {
             result = executeSync(event.fn(), event.payload(), event.requestId(), null, event.invokedQualifier(), null, null, false);
+        } catch (DockerCapacityExceededException throttled) {
+            // Lambda's Docker budget is full: backed off like a throttled event, which it is to the caller.
+            schedule(event, throttledWaitMs, attempt, previous, Math.min(throttledWaitMs * 2, throttledRetryMaxWaitMs));
+            return;
         } catch (RuntimeException e) {
             LOG.warnv("Error in async Lambda execution for {0}: {1}", event.fn().getFunctionName(), e.getMessage());
             // Stops retrying, as upstream did: routes the previous attempt's result, or UnknownError when
@@ -463,6 +468,11 @@ public class LambdaExecutorService implements Resettable {
                 handle = warmPool.acquire(fn);
             }
         } catch (Exception e) {
+            DockerCapacityExceededException overBudget = DockerCapacityExceededException.findIn(e);
+            if (overBudget != null) {
+                // Out of Floci's Docker budget for Lambda is AWS's throttle, not a function error.
+                throw overBudget;
+            }
             LOG.warnv("Failed to acquire container for function {0}: {1}", fn.getFunctionName(), e.getMessage());
             return new InvokeResult(200, "Unhandled",
                     buildErrorPayload(initFailureMessage(e, dockerExecutor), initFailureType(e)),

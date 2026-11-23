@@ -19,6 +19,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -30,7 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 /**
  * A dry run checks the caller's permission and changes nothing else: under IAM enforcement a caller the
  * policy does not allow gets UnauthorizedOperation for a dry run, as for the real call, and one it allows
- * gets DryRunOperation, with nothing created, deleted or terminated either way.
+ * gets DryRunOperation, with nothing created, deleted, terminated or authorized either way.
  */
 @QuarkusTest
 @TestProfile(SignedIamEnforcementProfile.class)
@@ -120,6 +121,24 @@ class Ec2DryRunIamIntegrationTest {
                 if (!admin.describeVpcs(r -> r.filters(f -> f.name("vpc-id").values(vpcId))).vpcs().isEmpty()) {
                     admin.deleteVpc(r -> r.vpcId(vpcId));
                 }
+            }
+        }
+    }
+
+    @Test
+    void anAuthorizeSecurityGroupIngressDryRunNeedsTheCallersCurrentPermission() throws Exception {
+        try (Ec2Client admin = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1, endpoint)) {
+            String groupId = admin.createSecurityGroup(r -> r.groupName("dryrun-" + UUID.randomUUID())
+                    .description("dry run")).groupId();
+            try {
+                assertADryRunNeedsTheCallersCurrentPermission("AuthorizeSecurityGroupIngress",
+                        () -> admin.describeSecurityGroupRules(r -> r.filters(f -> f.name("group-id")
+                                .values(groupId))).securityGroupRules(),
+                        caller -> caller.authorizeSecurityGroupIngress(r -> r.groupId(groupId).dryRun(true)
+                                .ipPermissions(p -> p.ipProtocol("tcp").fromPort(22).toPort(22)
+                                        .ipRanges(range -> range.cidrIp("10.0.0.0/8")))));
+            } finally {
+                admin.deleteSecurityGroup(r -> r.groupId(groupId));
             }
         }
     }

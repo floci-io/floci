@@ -401,6 +401,41 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
+    void createClusterNamingAParameterGroupThatDoesNotExistIsRefusedBeforeAClusterIsCreated() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+        params.putSingle("NodeType", "dc2.large");
+        params.putSingle("MasterUsername", "admin");
+        params.putSingle("MasterUserPassword", "pw");
+        params.putSingle("ClusterParameterGroupName", "missing-pg");
+        when(service.describeClusterParameterGroups("missing-pg")).thenThrow(
+                new AwsException("ClusterParameterGroupNotFound", "Cluster parameter group missing-pg not found", 404));
+
+        AwsException refused = assertThrows(AwsException.class, () -> handler.handle("CreateCluster", params));
+
+        assertEquals("ClusterParameterGroupNotFound", refused.getErrorCode());
+        verify(service, never()).createCluster(any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void createClusterWhoseParameterGroupIsDeletedBeforeItIsAppliedLeavesNoCluster() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+        params.putSingle("NodeType", "dc2.large");
+        params.putSingle("MasterUsername", "admin");
+        params.putSingle("MasterUserPassword", "pw");
+        params.putSingle("ClusterParameterGroupName", "custom-pg");
+        when(service.createCluster(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(new Cluster());
+        when(service.modifyCluster("c1", null, null, null, "custom-pg", null, null)).thenThrow(
+                new AwsException("ClusterParameterGroupNotFound", "Cluster parameter group custom-pg not found", 404));
+
+        AwsException refused = assertThrows(AwsException.class, () -> handler.handle("CreateCluster", params));
+
+        assertEquals("ClusterParameterGroupNotFound", refused.getErrorCode());
+        verify(service).deleteCluster("c1");
+    }
+
+    @Test
     void createClusterWithManagedMasterPasswordUsesSecretsManagerSecret() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "managed-cluster");
