@@ -18,6 +18,7 @@ import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.eventbridgev2.model.EventBusV2;
+import io.floci.aws.services.eventbridgev2.model.EventSourceV2;
 import io.floci.aws.services.eventbridgev2.model.SubscriberV2;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -82,6 +83,7 @@ public class EventBridgeV2Service implements Resettable {
     private final AccountAwareStorageBackend<SubscriberV2> subscribers;
     private final RegionResolver regionResolver;
     private final EventBridgeV2Delivery delivery;
+    private final EventBridgeV2EventSources eventSources;
     private final Clock clock;
     private final boolean enabled;
     private final SecureRandom random = new SecureRandom();
@@ -89,21 +91,24 @@ public class EventBridgeV2Service implements Resettable {
 
     @Inject
     public EventBridgeV2Service(StorageFactory storageFactory, RegionResolver regionResolver,
-                                EventBridgeV2Delivery delivery, EmulatorConfig config) {
+                                EventBridgeV2Delivery delivery, EventBridgeV2EventSources eventSources,
+                                EmulatorConfig config) {
         this(storageFactory.create("eventbridgev2", "eventbridgev2-buses.json",
                         new TypeReference<Map<String, EventBusV2>>() {}),
                 storageFactory.create("eventbridgev2", "eventbridgev2-subscribers.json",
                         new TypeReference<Map<String, SubscriberV2>>() {}),
-                regionResolver, delivery, Clock.systemUTC(), config.services().eventbridgev2().enabled());
+                regionResolver, delivery, eventSources, Clock.systemUTC(), config.services().eventbridgev2().enabled());
     }
 
     EventBridgeV2Service(AccountAwareStorageBackend<EventBusV2> buses,
                          AccountAwareStorageBackend<SubscriberV2> subscribers, RegionResolver regionResolver,
-                         EventBridgeV2Delivery delivery, Clock clock, boolean enabled) {
+                         EventBridgeV2Delivery delivery, EventBridgeV2EventSources eventSources, Clock clock,
+                         boolean enabled) {
         this.buses = buses;
         this.subscribers = subscribers;
         this.regionResolver = regionResolver;
         this.delivery = delivery;
+        this.eventSources = eventSources;
         this.clock = clock;
         this.enabled = enabled;
     }
@@ -206,10 +211,16 @@ public class EventBridgeV2Service implements Resettable {
         deleteEventBus(requireText(request, "EventBusArn"), region);
     }
 
-    /** Deletes a bus, which must have no subscribers left. */
+    /** Deletes a bus, which must have no subscribers or event sources left. */
     public synchronized void deleteEventBus(String eventBusArn, String region) {
         EventBusV2 bus = requireEventBus(eventBusArn, region);
-        if (!subscribersOf(bus, region).isEmpty()) {
+        boolean hasSubscribers = !subscribersOf(bus, region).isEmpty();
+        if (eventSources.hasSourcesOn(bus.getArn(), region)) {
+            throw new AwsException("ResourceInUseException", "The event bus cannot be deleted because it has "
+                    + (hasSubscribers ? "subscribers and event sources" : "one or more event sources")
+                    + " that are not revoked. Delete or revoke them and retry.", 409);
+        }
+        if (hasSubscribers) {
             throw new AwsException("ResourceInUseException",
                     "Event bus " + bus.getName() + " still has subscribers; delete them first.", 409);
         }
@@ -408,6 +419,42 @@ public class EventBridgeV2Service implements Resettable {
         return Optional.ofNullable(busName(eventBusArn))
                 .flatMap(name -> buses.get(storageKey(region, name)))
                 .filter(bus -> bus.getArn().equals(eventBusArn));
+    }
+
+    // ──────────────────────────── Event sources ────────────────────────────
+
+    public synchronized EventSourceV2 createEventSource(JsonNode request, String region) {
+        return eventSources.create(request, region, arn -> findEventBus(arn, region));
+    }
+
+    public synchronized EventSourceV2 describeEventSource(JsonNode request, String region) {
+        return eventSources.describe(request, region);
+    }
+
+    public synchronized EventSourceV2 updateEventSource(JsonNode request, String region) {
+        return eventSources.update(request, region);
+    }
+
+    public synchronized void deleteEventSource(JsonNode request, String region) {
+        eventSources.delete(request, region);
+    }
+
+    /**
+     * One page of the Region's event sources, or those of the bus {@code EventBusArn} names, whose name starts
+     * with {@code NamePrefix}, in order of the ids in their ARNs.
+     */
+    public synchronized PaginatedResult<EventSourceV2> listEventSources(JsonNode request, String region) {
+        String namePrefix = optionalNamePrefix(request);
+        String eventBusArn = text(request, "EventBusArn");
+        if (eventBusArn != null) {
+            requireEventBus(eventBusArn, region);
+        }
+        return page(eventSources.list(eventBusArn, namePrefix, region), EventBridgeV2EventSources::id, request,
+                "event-sourcev2");
+    }
+
+    public String webhookUrl(EventSourceV2 source) {
+        return eventSources.webhookUrl(source);
     }
 
     // ──────────────────────────── Events ────────────────────────────
@@ -888,7 +935,7 @@ public class EventBridgeV2Service implements Resettable {
      * The request without its {@code ClientToken}, every object's fields in name order, so a retry that sends the same
      * values with its fields or tags in another order compares equal to the request it repeats.
      */
-    private static String withoutClientToken(JsonNode request) {
+    static String withoutClientToken(JsonNode request) {
         JsonNode copy = request.deepCopy();
         if (copy instanceof ObjectNode object) {
             object.remove("ClientToken");

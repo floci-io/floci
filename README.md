@@ -334,7 +334,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | SWF | In-process | Decision and activity tasks, timers, child workflows, timeouts, real Lambda invocation |
 | CloudFormation | In-process | Stacks, change sets, resource provisioning, StackSets (cross-account instances) |
 | EventBridge | In-process | Custom buses, rules, SQS, SNS and Lambda targets |
-| EventBridge V2 | In-process | Event buses and filtered subscribers delivering to SQS |
+| EventBridge V2 | In-process | Event buses, filtered subscribers delivering to SQS, and webhook event sources |
 | EventBridge Pipes | In-process | Poller-based integration connecting SQS, Kinesis, DynamoDB, and MSK sources to targets with optional filtering |
 | EventBridge Scheduler | In-process | Schedule groups, schedules, flexible time windows, retry policies, DLQs |
 | CloudWatch Logs | In-process | Log groups, streams, ingestion, filtering |

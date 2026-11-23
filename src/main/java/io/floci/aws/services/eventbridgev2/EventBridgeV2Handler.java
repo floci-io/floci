@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.services.eventbridgev2.model.EventBusV2;
+import io.floci.aws.services.eventbridgev2.model.EventSourceV2;
 import io.floci.aws.services.eventbridgev2.model.SubscriberV2;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -52,6 +53,11 @@ public class EventBridgeV2Handler {
             case "ListSubscribers" -> handleListSubscribers(request, region);
             case "UpdateSubscriber" -> handleUpdateSubscriber(request, region);
             case "DeleteSubscriber" -> handleDeleteSubscriber(request, region);
+            case "CreateEventSource" -> handleCreateEventSource(request, region);
+            case "DescribeEventSource" -> handleDescribeEventSource(request, region);
+            case "ListEventSources" -> handleListEventSources(request, region);
+            case "UpdateEventSource" -> handleUpdateEventSource(request, region);
+            case "DeleteEventSource" -> handleDeleteEventSource(request, region);
             case "PutEvents" -> handlePutEvents(request, region);
             default -> throw new AwsException("UnsupportedOperation",
                     "Operation " + operation + " is not supported.", 400);
@@ -193,6 +199,82 @@ public class EventBridgeV2Handler {
     private Response handleDeleteSubscriber(JsonNode request, String region) {
         service.deleteSubscriber(request, region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleCreateEventSource(JsonNode request, String region) {
+        EventSourceV2 source = service.createEventSource(request, region);
+        ObjectNode response = eventSourceIdentity(source);
+        response.set("EventSourceDetails", eventSourceDetails(source));
+        response.put("CreationTime", epochSeconds(source.getCreationTime()));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeEventSource(JsonNode request, String region) {
+        EventSourceV2 source = service.describeEventSource(request, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("EventSourceArn", source.getArn());
+        response.put("Name", source.getName());
+        response.put("EventBusArn", source.getEventBusArn());
+        response.set("Configuration", source.getConfiguration());
+        if (source.getDescription() != null) {
+            response.put("Description", source.getDescription());
+        }
+        response.put("State", source.getState());
+        response.set("EventSourceDetails", eventSourceDetails(source));
+        response.put("CreationTime", epochSeconds(source.getCreationTime()));
+        response.put("LastModifiedTime", epochSeconds(source.getLastModifiedTime()));
+        return Response.ok(response).build();
+    }
+
+    private Response handleUpdateEventSource(JsonNode request, String region) {
+        EventSourceV2 source = service.updateEventSource(request, region);
+        ObjectNode response = eventSourceIdentity(source);
+        response.put("LastModifiedTime", epochSeconds(source.getLastModifiedTime()));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteEventSource(JsonNode request, String region) {
+        service.deleteEventSource(request, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleListEventSources(JsonNode request, String region) {
+        PaginatedResult<EventSourceV2> page = service.listEventSources(request, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode sources = response.putArray("EventSources");
+        for (EventSourceV2 source : page.items()) {
+            ObjectNode summary = sources.addObject();
+            summary.put("EventSourceArn", source.getArn());
+            summary.put("Name", source.getName());
+            summary.put("EventBusArn", source.getEventBusArn());
+            summary.put("Type", "WEBHOOK_EVENTS");
+            summary.put("State", source.getState());
+            summary.put("CreationTime", epochSeconds(source.getCreationTime()));
+            summary.put("LastModifiedTime", epochSeconds(source.getLastModifiedTime()));
+            summary.put("EventSourceAccountId", AwsArnUtils.parse(source.getArn()).accountId());
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    /** The members {@code CreateEventSource} and {@code UpdateEventSource} both answer with. */
+    private ObjectNode eventSourceIdentity(EventSourceV2 source) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("EventSourceArn", source.getArn());
+        response.put("Name", source.getName());
+        response.put("EventBusArn", source.getEventBusArn());
+        response.put("State", source.getState());
+        return response;
+    }
+
+    private ObjectNode eventSourceDetails(EventSourceV2 source) {
+        ObjectNode details = objectMapper.createObjectNode();
+        ObjectNode webhook = details.putObject("WebhookDetails");
+        webhook.put("WebhookUrl", service.webhookUrl(source));
+        webhook.put("SecretArn", source.getSecretArn());
+        return details;
     }
 
     private Response handlePutEvents(JsonNode request, String region) {
