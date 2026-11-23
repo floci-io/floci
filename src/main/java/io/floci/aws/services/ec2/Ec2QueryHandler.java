@@ -1984,6 +1984,7 @@ public class Ec2QueryHandler {
     private Response handleDescribeVpcEndpointServices(MultivaluedMap<String, String> p, String region) {
         List<String> requested = getList(p, "ServiceName");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
+        checkDryRun(p);
         List<String> azNames = service.describeAvailabilityZones(region, List.of(), List.of(), null).stream()
                 .map(z -> z.get("zoneName")).toList();
 
@@ -1996,7 +1997,6 @@ public class Ec2QueryHandler {
             return Ec2ErrorResponses.of(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
 
-        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeVpcEndpointServicesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2731,8 +2731,8 @@ public class Ec2QueryHandler {
     private Response handleDescribePrefixLists(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "PrefixListId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
-        List<PrefixList> lists = service.describePrefixLists(region, ids, filters);
         checkDryRun(p);
+        List<PrefixList> lists = service.describePrefixLists(region, ids, filters);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribePrefixListsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2770,8 +2770,8 @@ public class Ec2QueryHandler {
     private Response handleDescribeManagedPrefixLists(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "PrefixListId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
-        List<ManagedPrefixList> lists = service.describeManagedPrefixLists(region, ids, filters);
         checkDryRun(p);
+        List<ManagedPrefixList> lists = service.describeManagedPrefixLists(region, ids, filters);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeManagedPrefixListsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2844,9 +2844,9 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeTransitGateways(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         List<TransitGateway> gateways = service.describeTransitGateways(
                 region, getList(p, "TransitGatewayIds"), getFiltersList(p));
-        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTransitGatewaysResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2920,9 +2920,9 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeTransitGatewayVpcAttachments(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         List<TransitGatewayVpcAttachment> attachments = service.describeTransitGatewayVpcAttachments(
                 region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p));
-        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTransitGatewayVpcAttachmentsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2940,9 +2940,9 @@ public class Ec2QueryHandler {
      * route table association shows up here and nowhere else.
      */
     private Response handleDescribeTransitGatewayAttachments(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         List<TransitGatewayVpcAttachment> attachments = service.describeTransitGatewayVpcAttachments(
                 region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p));
-        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTransitGatewayAttachmentsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2972,8 +2972,8 @@ public class Ec2QueryHandler {
 
     /** floci does not yet support creating Connect attachments, so this is always an empty list. */
     private Response handleDescribeTransitGatewayConnects(MultivaluedMap<String, String> p, String region) {
-        service.describeTransitGatewayConnects(region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p));
         checkDryRun(p);
+        service.describeTransitGatewayConnects(region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTransitGatewayConnectsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3034,9 +3034,9 @@ public class Ec2QueryHandler {
 
     private Response handleDescribeTransitGatewayPeeringAttachments(MultivaluedMap<String, String> p,
                                                                    String region) {
+        checkDryRun(p);
         List<TransitGatewayPeeringAttachment> attachments = service.describeTransitGatewayPeeringAttachments(
                 region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p));
-        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTransitGatewayPeeringAttachmentsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3103,9 +3103,9 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeTransitGatewayRouteTables(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         List<TransitGatewayRouteTable> routeTables = service.describeTransitGatewayRouteTables(
                 region, getList(p, "TransitGatewayRouteTableIds"), getFiltersList(p));
-        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTransitGatewayRouteTablesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4455,8 +4455,8 @@ public class Ec2QueryHandler {
     private Response handleDescribeRouteTables(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "RouteTableId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
-        List<RouteTable> rts = service.describeRouteTables(region, ids, filters);
         checkDryRun(p);
+        List<RouteTable> rts = service.describeRouteTables(region, ids, filters);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeRouteTablesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4683,8 +4683,8 @@ public class Ec2QueryHandler {
     private Response handleDescribeNetworkAcls(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "NetworkAclId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
-        List<NetworkAcl> acls = service.describeNetworkAcls(region, ids, filters);
         checkDryRun(p);
+        List<NetworkAcl> acls = service.describeNetworkAcls(region, ids, filters);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeNetworkAclsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4766,8 +4766,8 @@ public class Ec2QueryHandler {
     private Response handleDescribeNatGateways(MultivaluedMap<String, String> p, String region) {
         List<String> natGatewayIds = getList(p, "NatGatewayId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
-        List<NatGateway> natGateways = service.describeNatGateways(region, natGatewayIds, filters);
         checkDryRun(p);
+        List<NatGateway> natGateways = service.describeNatGateways(region, natGatewayIds, filters);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeNatGatewaysResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4911,8 +4911,8 @@ public class Ec2QueryHandler {
     private Response handleDescribeCapacityReservations(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "CapacityReservationId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
-        List<CapacityReservation> reservations = service.describeCapacityReservations(region, ids, filters);
         checkDryRun(p);
+        List<CapacityReservation> reservations = service.describeCapacityReservations(region, ids, filters);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeCapacityReservationsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -5262,8 +5262,8 @@ public class Ec2QueryHandler {
 
     private Response handleDescribeInstanceTypes(MultivaluedMap<String, String> p, String region) {
         List<String> typeNames = getList(p, "InstanceType");
-        List<Map<String, Object>> types = service.describeInstanceTypes(typeNames);
         checkDryRun(p);
+        List<Map<String, Object>> types = service.describeInstanceTypes(typeNames);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeInstanceTypesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -5479,8 +5479,8 @@ public class Ec2QueryHandler {
         int maxResults = parseIntParam(p, "MaxResults", 0);
         String nextToken = p.getFirst("NextToken");
 
-        NetworkInterfaceListResult result = service.describeNetworkInterfaces(region, ids, filters, maxResults, nextToken);
         checkDryRun(p);
+        NetworkInterfaceListResult result = service.describeNetworkInterfaces(region, ids, filters, maxResults, nextToken);
         List<NetworkInterface> nis = result.networkInterfaces();
 
         XmlBuilder xml = new XmlBuilder()

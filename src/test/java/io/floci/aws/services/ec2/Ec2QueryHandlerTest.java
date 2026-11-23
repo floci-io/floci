@@ -664,6 +664,29 @@ class Ec2QueryHandlerTest {
         verifyNoInteractions(service);
     }
 
+    /**
+     * A dry-run describe answers before it calls the service: the service call seeds the account's default
+     * resources (and, for capacity reservations, reconciles state), which a dry run must not do.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"DescribeRouteTables", "DescribeNetworkAcls", "DescribeNatGateways",
+            "DescribeNetworkInterfaces", "DescribeCapacityReservations", "DescribeInstanceTypes",
+            "DescribePrefixLists", "DescribeManagedPrefixLists", "DescribeVpcEndpointServices",
+            "DescribeTransitGateways", "DescribeTransitGatewayVpcAttachments", "DescribeTransitGatewayAttachments",
+            "DescribeTransitGatewayConnects", "DescribeTransitGatewayPeeringAttachments",
+            "DescribeTransitGatewayRouteTables"})
+    void aDryRunDescribeAnswersBeforeCallingTheService(String action) {
+        Ec2Service service = mock(Ec2Service.class);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("DryRun", "true");
+
+        Response response = handler(service).handle(action, params, "us-east-1");
+
+        assertEquals(412, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("<Code>DryRunOperation</Code>"));
+        verifyNoInteractions(service);
+    }
+
     @Test
     void aSecurityGroupDryRunWithoutAVpcIdNeedsTheDefaultVpcToExist() {
         Ec2Service service = mock(Ec2Service.class);

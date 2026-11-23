@@ -44,6 +44,9 @@ class Ec2ControlPlaneDryRunIntegrationTest {
             "DescribeTransitGatewayPeeringAttachments|",
             "DescribeTransitGatewayVpcAttachments|",
             "DescribeTransitGatewayRouteTables|",
+            "DescribeTransitGateways|TransitGatewayIds.1=" + TGW,
+            "DescribeCapacityReservations|CapacityReservationId.1=cr-0123456789abcdef0",
+            "DescribeNetworkInterfaces|NetworkInterfaceId.1=eni-0123456789abcdef0",
             "DescribeClientVpnEndpoints|",
             "DescribeInstanceTypes|",
             "DescribePrefixLists|",
@@ -85,7 +88,6 @@ class Ec2ControlPlaneDryRunIntegrationTest {
                     + "|InvalidRouteTableID.NotFound",
             "AcceptTransitGatewayPeeringAttachment|TransitGatewayAttachmentId=not-an-attachment"
                     + "|InvalidTransitGatewayAttachmentID.Malformed",
-            "DescribeTransitGateways|TransitGatewayIds.1=" + TGW + "|InvalidTransitGatewayID.NotFound",
             "ModifyClientVpnEndpoint|ClientVpnEndpointId=" + CLIENT_VPN + "&Description=d"
                     + "|InvalidClientVpnEndpointId.NotFound",
             "DeleteClientVpnEndpoint|ClientVpnEndpointId=" + CLIENT_VPN + "|InvalidClientVpnEndpointId.NotFound",
@@ -101,10 +103,6 @@ class Ec2ControlPlaneDryRunIntegrationTest {
             "DeleteLaunchTemplate|LaunchTemplateName=no-such-template|InvalidLaunchTemplateName.NotFoundException",
             "ModifyCapacityReservation|CapacityReservationId=cr-0123456789abcdef0&InstanceCount=2"
                     + "|InvalidCapacityReservationId.NotFound",
-            "DescribeCapacityReservations|CapacityReservationId.1=cr-0123456789abcdef0"
-                    + "|InvalidCapacityReservationId.NotFound",
-            "DescribeNetworkInterfaces|NetworkInterfaceId.1=eni-0123456789abcdef0"
-                    + "|InvalidNetworkInterfaceID.NotFound",
             "DeleteKeyPair||MissingParameter",
             "ExportTransitGatewayRoutes|TransitGatewayRouteTableId=" + ROUTE_TABLE + "&S3Bucket=b"
                     + "|InvalidRouteTableID.NotFound"
