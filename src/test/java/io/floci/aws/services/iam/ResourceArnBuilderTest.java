@@ -2134,6 +2134,24 @@ class ResourceArnBuilderTest {
                 builder.buildResources("sagemaker", "sagemaker:CreateEndpoint", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
+    // ── Transcribe ──────────────────────────────────────────────────────────────
+
+    /**
+     * A Transcribe request is checked on the transcription job or vocabulary its name names, as {@code <type>/<name>};
+     * the Service Reference lists no resource type for starting a job or creating a vocabulary, so those are checked on
+     * {@code *}.
+     */
+    @Test
+    void transcribeChecksTheJobOrVocabularyItsNameNames() {
+        setJsonBody("{\"TranscriptionJobName\":\"call-1\"}");
+        assertEquals(List.of("arn:aws:transcribe:us-east-1:000000000000:transcription-job/call-1"),
+                builder.buildResources("transcribe", "transcribe:GetTranscriptionJob", ctx, "us-east-1", ACCOUNT,
+                        "aws"));
+        setJsonBody("{\"TranscriptionJobName\":\"call-2\",\"Media\":{\"MediaFileUri\":\"s3://b/k.mp4\"}}");
+        assertEquals(List.of("*"), builder.buildResources("transcribe", "transcribe:StartTranscriptionJob", ctx,
+                "us-east-1", ACCOUNT, "aws"));
+    }
+
     // ── S3 and S3 Control ───────────────────────────────────────────────────────
 
     /** The resources an S3 or S3 Control request names, read from the generated table on the route it matches. */
