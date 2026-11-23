@@ -41,6 +41,7 @@ import io.floci.aws.services.eks.model.ComputeConfig;
 import io.floci.aws.services.eks.model.CreateClusterRequest;
 import io.floci.aws.services.eks.model.CreateFargateProfileRequest;
 import io.floci.aws.services.eks.model.CreateNodeGroupRequest;
+import io.floci.aws.services.eks.model.ElasticLoadBalancing;
 import io.floci.aws.services.eks.model.EncryptionConfig;
 import io.floci.aws.services.eks.model.FargateProfile;
 import io.floci.aws.services.eks.model.FargateProfileStatus;
@@ -1065,9 +1066,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         Cluster cluster = requireClusterInRequestRegion(name);
         EksAddonService.requireActiveCluster(cluster);
         if (request == null || (request.resourcesVpcConfig() == null && request.logging() == null
-                && request.accessConfig() == null && request.upgradePolicy() == null)) {
-            throw new AwsException("InvalidParameterException",
-                    "UpdateClusterConfig supports resourcesVpcConfig, logging, accessConfig and upgradePolicy only", 400);
+                && request.accessConfig() == null && request.upgradePolicy() == null && !request.changesAutoMode())) {
+            throw new AwsException("InvalidParameterException", "UpdateClusterConfig supports resourcesVpcConfig, "
+                    + "logging, accessConfig, upgradePolicy and the EKS Auto Mode configuration only", 400);
         }
         String token = request.clientRequestToken();
         if (token != null && !token.isBlank()) {
@@ -1123,6 +1124,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     + "\" is not in standard support. Please update the cluster to a version in standard support to "
                     + "change the supportType", 400);
         }
+        if (request.changesAutoMode()) {
+            requireAutoModeChange(cluster, request);
+        }
 
         Boolean finalPublicAccess = publicAccess;
         Boolean finalPrivateAccess = privateAccess;
@@ -1165,13 +1169,18 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                         List.of(new UpdateParam("UpgradePolicy", json(policy))), null,
                         updates.isEmpty() ? request : null));
             }
+            if (request.changesAutoMode()) {
+                updates.add(addons.recordUpdate(current, "AutoModeUpdate", applyAutoMode(current, request), null,
+                        updates.isEmpty() ? request : null));
+            }
         });
         if (!saved[0]) {
             throw new AwsException("ResourceNotFoundException", "No cluster found for name: " + name, 404);
         }
         if (updates.isEmpty()) {
             throw new AwsException("InvalidParameterException", "UpdateClusterConfig supports resourcesVpcConfig, "
-                    + "logging, accessConfig.authenticationMode and upgradePolicy.supportType only", 400);
+                    + "logging, accessConfig.authenticationMode, upgradePolicy.supportType and the EKS Auto Mode "
+                    + "configuration only", 400);
         }
         LOG.infov("Updated the configuration of EKS cluster {0}: {1}", cluster.getName(),
                 updates.stream().map(Update::type).toList());
@@ -1192,7 +1201,71 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                         && Objects.equals(a.getPublicAccessCidrs(), b.getPublicAccessCidrs());
         return sameVpc && Objects.equals(existing.logging(), request.logging())
                 && Objects.equals(existing.accessConfig(), request.accessConfig())
-                && Objects.equals(existing.upgradePolicy(), request.upgradePolicy());
+                && Objects.equals(existing.upgradePolicy(), request.upgradePolicy())
+                && Objects.equals(existing.computeConfig(), request.computeConfig())
+                && Objects.equals(existing.storageConfig(), request.storageConfig())
+                && Objects.equals(elasticLoadBalancing(existing.kubernetesNetworkConfig()),
+                        elasticLoadBalancing(request.kubernetesNetworkConfig()));
+    }
+
+    private static ElasticLoadBalancing elasticLoadBalancing(KubernetesNetworkConfig network) {
+        return network == null ? null : network.getElasticLoadBalancing();
+    }
+
+    /**
+     * Refuses the EKS Auto Mode changes AWS refuses: the capabilities enabled apart, node pools without a node
+     * role, a different node role while the compute capability is on (botocore's ComputeConfigRequest: "This value
+     * cannot be changed after the compute capability of EKS Auto Mode is enabled"), and a request that changes
+     * nothing, with the error EKS answers it.
+     */
+    private static void requireAutoModeChange(Cluster cluster, UpdateClusterConfigRequest request) {
+        validateAutoMode(request.computeConfig(), request.storageConfig(), request.kubernetesNetworkConfig());
+        ComputeConfig current = cluster.getComputeConfig();
+        ComputeConfig requested = request.computeConfig();
+        boolean computeOn = current != null && Boolean.TRUE.equals(current.enabled());
+        if (computeOn && requested != null && Boolean.TRUE.equals(requested.enabled())
+                && !Objects.equals(current.nodeRoleArn(), requested.nodeRoleArn())) {
+            throw new AwsException("InvalidParameterException",
+                    "nodeRoleArn cannot be changed after the compute capability of EKS Auto Mode is enabled", 400);
+        }
+        if (autoModeState(cluster.getComputeConfig(), cluster.getStorageConfig(),
+                elasticLoadBalancing(cluster.getKubernetesNetworkConfig()))
+                .equals(autoModeState(request.computeConfig(), request.storageConfig(),
+                        elasticLoadBalancing(request.kubernetesNetworkConfig())))) {
+            throw new AwsException("InvalidRequestException",
+                    "No changes needed for EKS Auto Mode configuration provided", 400);
+        }
+    }
+
+    /** What an Auto Mode configuration turns on: off, or on with its node pools and node role. */
+    private static List<Object> autoModeState(ComputeConfig compute, StorageConfig storage,
+                                              ElasticLoadBalancing loadBalancing) {
+        boolean on = compute != null && Boolean.TRUE.equals(compute.enabled());
+        return on ? List.of(true, compute.nodePools() == null ? List.of() : Set.copyOf(compute.nodePools()),
+                String.valueOf(compute.nodeRoleArn()),
+                storage != null && storage.blockStorage() != null && Boolean.TRUE.equals(storage.blockStorage().enabled()),
+                loadBalancing != null && Boolean.TRUE.equals(loadBalancing.enabled()))
+                : List.of(false);
+    }
+
+    /** Stores the Auto Mode members the request names, and returns them as the update's parameters. */
+    private static List<UpdateParam> applyAutoMode(Cluster cluster, UpdateClusterConfigRequest request) {
+        List<UpdateParam> params = new ArrayList<>();
+        if (request.computeConfig() != null) {
+            cluster.setComputeConfig(request.computeConfig());
+            params.add(new UpdateParam("ComputeConfig", json(request.computeConfig())));
+        }
+        if (request.storageConfig() != null) {
+            cluster.setStorageConfig(request.storageConfig());
+            params.add(new UpdateParam("StorageConfig", json(request.storageConfig())));
+        }
+        ElasticLoadBalancing loadBalancing = elasticLoadBalancing(request.kubernetesNetworkConfig());
+        if (loadBalancing != null && cluster.getKubernetesNetworkConfig() != null) {
+            cluster.getKubernetesNetworkConfig().setElasticLoadBalancing(loadBalancing);
+            params.add(new UpdateParam("KubernetesNetworkConfig",
+                    json(Map.of("elasticLoadBalancing", loadBalancing))));
+        }
+        return params;
     }
 
     /** The cluster's current settings with the request applied on top, in the shape createCluster validates. */
