@@ -11,6 +11,7 @@ import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -58,9 +59,7 @@ class SesTemplateTagOrderIntegrationTest {
     @ParameterizedTest
     @MethodSource("refused")
     void create_refusesInTheOrderSesDoes(String name, String content, String tags, String message) {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body(createBody(name, content, tags))
         .when()
             .post("/v2/email/templates")
@@ -72,9 +71,7 @@ class SesTemplateTagOrderIntegrationTest {
 
     @Test
     void create_refusedForAReservedKeyStoresNothing() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body(createBody("tag-order-reserved", VALID, tag("aws:x")))
         .when()
             .post("/v2/email/templates")

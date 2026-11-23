@@ -24,6 +24,7 @@ import java.util.Base64;
 import java.util.List;
 
 import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -43,7 +44,7 @@ class SesSimpleAttachmentsV2IntegrationTest {
     @Test
     @Order(1)
     void createSender() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"EmailIdentity\": \"" + SENDER + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
     }
@@ -298,7 +299,7 @@ class SesSimpleAttachmentsV2IntegrationTest {
     }
 
     private static Response send(String body) {
-        return given().contentType("application/json").header("Authorization", AUTH)
+        return v2()
                 .body(body)
                 .when().post("/v2/email/outbound-emails");
     }

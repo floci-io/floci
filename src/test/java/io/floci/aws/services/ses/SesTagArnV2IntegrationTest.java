@@ -7,6 +7,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -115,9 +116,7 @@ class SesTagArnV2IntegrationTest {
 
     @Test
     void omittedResourceArn_onTagAndUntag_isMessagelessValidation() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("{\"Tags\": [{\"Key\": \"k\", \"Value\": \"v\"}]}")
         .when()
             .post("/v2/email/tags")
@@ -157,9 +156,7 @@ class SesTagArnV2IntegrationTest {
 
     private static String createConfigurationSet(String prefix, String key, String value) {
         String name = prefix + "-" + System.nanoTime();
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("""
                 {"ConfigurationSetName": "%s", "Tags": [{"Key": "%s", "Value": "%s"}]}
                 """.formatted(name, key, value))
@@ -183,9 +180,7 @@ class SesTagArnV2IntegrationTest {
     }
 
     private static Response tagWith(String arn, String key, String value) {
-        return given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        return v2()
             .body("""
                 {"ResourceArn": "%s", "Tags": [{"Key": "%s", "Value": "%s"}]}
                 """.formatted(arn, key, value))

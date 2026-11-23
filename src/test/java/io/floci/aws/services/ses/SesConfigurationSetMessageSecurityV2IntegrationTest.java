@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anEmptyMap;
 import static org.hamcrest.Matchers.equalTo;
@@ -187,13 +188,13 @@ class SesConfigurationSetMessageSecurityV2IntegrationTest {
     }
 
     private static ValidatableResponse create(String body) {
-        return given().contentType("application/json").header("Authorization", AUTH).body(body)
+        return v2().body(body)
         .when().post("/v2/email/configuration-sets")
         .then();
     }
 
     private static ValidatableResponse update(String body) {
-        return given().contentType("application/json").header("Authorization", AUTH).body(body)
+        return v2().body(body)
         .when().post("/v2/email/update-configuration-sets")
         .then();
     }

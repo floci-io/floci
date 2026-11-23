@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -32,11 +33,11 @@ class SesSendCustomVerificationEmailV2IntegrationTest {
     @Test
     @Order(0)
     void setup_verifyFromAndCreateTemplate() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"EmailIdentity\":\"" + FROM + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("""
                     {
                       "TemplateName": "%s",
@@ -53,7 +54,7 @@ class SesSendCustomVerificationEmailV2IntegrationTest {
     @Test
     @Order(1)
     void send_returnsMessageId() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"EmailAddress\":\"" + RECIPIENT + "\",\"TemplateName\":\"" + NAME + "\"}")
         .when().post(SEND).then().statusCode(200)
                 .body("MessageId", notNullValue());
@@ -84,7 +85,7 @@ class SesSendCustomVerificationEmailV2IntegrationTest {
     @Test
     @Order(4)
     void send_missingTemplate_returnsNotFound() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"EmailAddress\":\"" + RECIPIENT + "\",\"TemplateName\":\"scve-v2-ghost\"}")
         .when().post(SEND).then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"))
@@ -96,7 +97,7 @@ class SesSendCustomVerificationEmailV2IntegrationTest {
     @Test
     @Order(5)
     void send_unknownConfigurationSet_returnsNotFound() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"EmailAddress\":\"" + RECIPIENT + "\",\"TemplateName\":\"" + NAME
                         + "\",\"ConfigurationSetName\":\"scve-v2-ghost-cs\"}")
         .when().post(SEND).then().statusCode(404)
@@ -106,7 +107,7 @@ class SesSendCustomVerificationEmailV2IntegrationTest {
     @Test
     @Order(6)
     void send_missingEmailAddress_returnsBadRequest() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"TemplateName\":\"" + NAME + "\"}")
         .when().post(SEND).then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"));
@@ -120,10 +121,10 @@ class SesSendCustomVerificationEmailV2IntegrationTest {
         // (consistent with the CreateCustomVerificationEmailTemplate unverified-From mapping).
         String from2 = "scve-v2-stale-from@floci.test";
         String template2 = "scve-v2-stale-template";
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"EmailIdentity\":\"" + from2 + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("""
                     {
                       "TemplateName": "%s",
@@ -138,7 +139,7 @@ class SesSendCustomVerificationEmailV2IntegrationTest {
         given().header("Authorization", AUTH)
         .when().delete("/v2/email/identities/" + from2).then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"EmailAddress\":\"" + RECIPIENT + "\",\"TemplateName\":\"" + template2 + "\"}")
         .when().post(SEND).then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"));
@@ -148,16 +149,16 @@ class SesSendCustomVerificationEmailV2IntegrationTest {
     @Order(8)
     void send_accountSendingDisabled_returnsSendingPaused() {
         // Like the v2 SendEmail endpoint, the send is refused while account sending is paused.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"SendingEnabled\":false}")
         .when().put("/v2/email/account/sending").then().statusCode(200);
         try {
-            given().contentType("application/json").header("Authorization", AUTH)
+            v2()
                     .body("{\"EmailAddress\":\"" + RECIPIENT + "\",\"TemplateName\":\"" + NAME + "\"}")
             .when().post(SEND).then().statusCode(400)
                     .body("__type", equalTo("SendingPausedException"));
         } finally {
-            given().contentType("application/json").header("Authorization", AUTH)
+            v2()
                     .body("{\"SendingEnabled\":true}")
             .when().put("/v2/email/account/sending").then().statusCode(200);
         }
@@ -168,7 +169,7 @@ class SesSendCustomVerificationEmailV2IntegrationTest {
     void send_malformedEmailAddress_returnsBadRequestWithAwsMessage() {
         // AWS returns the same "Invalid email address<addr>." message on v2 as on v1 (verified);
         // Floci throws the v1-native InvalidParameterValue which remaps to BadRequestException / 400.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"EmailAddress\":\"not-an-email\",\"TemplateName\":\"" + NAME + "\"}")
         .when().post(SEND).then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
@@ -180,7 +181,7 @@ class SesSendCustomVerificationEmailV2IntegrationTest {
     void send_multipleUnquotedAt_returnsBadRequest() {
         // AWS rejects more than one unquoted '@'; a quoted local part that contains '@' is accepted
         // (see the v1 test) — the check must only reject the unquoted case.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"EmailAddress\":\"a@@b.com\",\"TemplateName\":\"" + NAME + "\"}")
         .when().post(SEND).then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
@@ -191,7 +192,7 @@ class SesSendCustomVerificationEmailV2IntegrationTest {
     @Order(11)
     void send_emptyDomain_returnsBadRequest() {
         // A trailing '@' is an empty domain, which AWS rejects (verified).
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"EmailAddress\":\"local@\",\"TemplateName\":\"" + NAME + "\"}")
         .when().post(SEND).then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
