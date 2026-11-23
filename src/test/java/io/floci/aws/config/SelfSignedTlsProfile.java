@@ -4,9 +4,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.testing.SidecarContainersProfile;
+import io.floci.aws.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTestProfile;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
@@ -34,8 +36,13 @@ import java.util.Map;
  *   <li>{@code floci.tls.*}, the two {@code quarkus.tls.key-store} entries and
  *   {@code floci.storage.persistent-path} serve that leaf on HTTPS, with the CA it was issued by
  *   behind {@code GET /_floci/ca.pem}, and keep plain HTTP served beside it. Every class here
- *   relies on them. {@code aws-https-port=0} keeps the TLS proxy from also binding 443, which an
- *   unprivileged test JVM cannot do and no class here uses.</li>
+ *   relies on them.</li>
+ *   <li>{@code floci.tls.aws-https-port} set to a free port chosen when the class loads stands in
+ *   for 443, which an unprivileged test JVM cannot bind, and {@code floci.services.elbv2.mock=false}
+ *   runs the real ELBv2 data plane behind it. {@code ElbV2AwsHttpsPortIntegrationTest} relies on
+ *   them, and awaits the proxy's actual bind result before connecting. It uses
+ *   {@code floci.services.iot.endpoint-address} to check shared-port SNI precedence. The other
+ *   classes only see the proxy listening on one more port, and create no load balancer.</li>
  *   <li>{@code floci.docker.resource-namespace} and
  *   {@code floci.services.ecr.keep-running-on-shutdown=false} name the ECR registry container in
  *   this run's {@link SidecarContainersProfile#namespace() sidecar namespace} and stop it at
@@ -64,6 +71,10 @@ public class SelfSignedTlsProfile implements QuarkusTestProfile {
     public static final String DATA_DIR = "target/floci-self-signed-tls-test";
 
     public static final String TLS_DIR = DATA_DIR + "/tls";
+
+    public static final String IOT_ENDPOINT_HOST = "iot.example.test";
+
+    private static final int AWS_HTTPS_PORT = freePort();
 
     static {
         Path tlsDir = Path.of(TLS_DIR);
@@ -97,7 +108,9 @@ public class SelfSignedTlsProfile implements QuarkusTestProfile {
         return Map.ofEntries(
                 Map.entry("floci.tls.enabled", "true"),
                 Map.entry("floci.tls.self-signed", "true"),
-                Map.entry("floci.tls.aws-https-port", "0"),
+                Map.entry("floci.tls.aws-https-port", String.valueOf(AWS_HTTPS_PORT)),
+                Map.entry("floci.services.elbv2.mock", "false"),
+                Map.entry("floci.services.iot.endpoint-address", IOT_ENDPOINT_HOST + ":8443"),
                 Map.entry("floci.storage.persistent-path", Path.of(DATA_DIR).toAbsolutePath().toString()),
                 Map.entry("quarkus.tls.key-store.pem.0.cert", tlsDir.resolve("floci-server.crt").toString()),
                 Map.entry("quarkus.tls.key-store.pem.0.key", tlsDir.resolve("floci-server.key").toString()),
@@ -105,5 +118,13 @@ public class SelfSignedTlsProfile implements QuarkusTestProfile {
                 Map.entry("floci.docker.resource-namespace", SidecarContainersProfile.namespace()),
                 Map.entry("floci.services.ecr.keep-running-on-shutdown", "false"),
                 Map.entry("floci.services.ecr.tls-uri", "true"));
+    }
+
+    private static int freePort() {
+        try {
+            return FreePorts.anyInterfacePort();
+        } catch (IOException e) {
+            throw new UncheckedIOException("No free port for the AWS-HTTPS proxy port", e);
+        }
     }
 }

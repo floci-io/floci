@@ -506,10 +506,8 @@ public class TlsConfigSource implements ConfigSource {
         String iotEndpoint = resolveProperty("floci.services.iot.endpoint-address", "").strip();
         if (!iotEndpoint.isEmpty()) {
             try {
-                // Anything beyond host[:port] is a typo: java.net.URI would read "https" as the host of a URL.
-                URI uri = new URI("//" + iotEndpoint);
-                String host = uri.getHost();
-                if (host == null || uri.getUserInfo() != null || !iotEndpoint.equals(uri.getRawAuthority())) {
+                String host = iotEndpointHost(iotEndpoint);
+                if (host == null) {
                     LOG.warnv("TLS: floci.services.iot.endpoint-address is not a host or host:port, not added to the certificate: {0}",
                             iotEndpoint);
                 } else if (!isDefaultHostname(host)) {
@@ -527,6 +525,13 @@ public class TlsConfigSource implements ConfigSource {
             LOG.infov("TLS: detected custom hostnames: {0}", result);
         }
         return result;
+    }
+
+    /** Extracts the host from an IoT endpoint address in host[:port] form. */
+    static String iotEndpointHost(String endpointAddress) throws URISyntaxException {
+        String authority = endpointAddress.strip();
+        URI uri = new URI("//" + authority);
+        return uri.getUserInfo() == null && authority.equals(uri.getRawAuthority()) ? uri.getHost() : null;
     }
 
     /**
