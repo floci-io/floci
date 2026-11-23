@@ -72,7 +72,7 @@ final class ExternalFunctionValues {
             case "smallint" -> whole(base, value, Short.MIN_VALUE, Short.MAX_VALUE);
             case "integer" -> whole(base, value, Integer.MIN_VALUE, Integer.MAX_VALUE);
             case "bigint" -> whole(base, value, Long.MIN_VALUE, Long.MAX_VALUE);
-            case "numeric" -> number(base, value).decimalValue().toPlainString();
+            case "numeric" -> numericResult(base, value);
             case "real", "double precision" -> floatResult(base, value);
             case "boolean" -> Boolean.toString(bool(base, value));
             case "date" -> date(text(base, value));
@@ -93,6 +93,14 @@ final class ExternalFunctionValues {
             case "f", "false" -> false;
             default -> throw new IllegalArgumentException("Not a boolean: " + text);
         };
+    }
+
+    private static String numericResult(String base, JsonNode value) {
+        // PostgreSQL numeric can hold NaN, which travels as text because JSON has no NaN
+        if (value.isTextual() && "NaN".equalsIgnoreCase(value.textValue())) {
+            return "NaN";
+        }
+        return number(base, value).decimalValue().toPlainString();
     }
 
     private static String floatResult(String base, JsonNode value) {

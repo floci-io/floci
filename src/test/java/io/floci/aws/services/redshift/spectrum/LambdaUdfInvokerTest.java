@@ -2,9 +2,13 @@ package io.floci.aws.services.redshift.spectrum;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.services.iam.IamPolicyEvaluator;
+import io.floci.aws.services.iam.ResourcePolicyProvider.ResourcePolicy;
 import io.floci.aws.services.iam.ServiceRoleAuthorizer;
+import io.floci.aws.services.lambda.LambdaResourcePolicyProvider;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
@@ -28,12 +32,14 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -51,6 +57,8 @@ class LambdaUdfInvokerTest {
 
     private LambdaService lambda;
     private ServiceRoleAuthorizer authorizer;
+    private LambdaResourcePolicyProvider lambdaResourcePolicies;
+    private EmulatorConfig config;
     private AtomicLong now;
     private List<Long> sleeps;
     private LambdaUdfInvoker invoker;
@@ -61,6 +69,10 @@ class LambdaUdfInvokerTest {
         authorizer = mock(ServiceRoleAuthorizer.class);
         when(authorizer.refusal(anyString(), anyString(), anyString(), any(), anyList()))
                 .thenReturn(Optional.empty());
+        lambdaResourcePolicies = mock(LambdaResourcePolicyProvider.class);
+        when(lambdaResourcePolicies.getResourcePolicies(anyString(), anyString())).thenReturn(List.of());
+        config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().iam().enforcementEnabled()).thenReturn(true);
         RegionResolver regions = mock(RegionResolver.class);
         when(regions.getDefaultRegion()).thenReturn("us-east-1");
         when(regions.partitionForRegion("us-east-1")).thenReturn("aws");
@@ -82,7 +94,8 @@ class LambdaUdfInvokerTest {
                 return Instant.ofEpochMilli(now.get());
             }
         };
-        invoker = new LambdaUdfInvoker(lambda, authorizer, regions, clock, millis -> {
+        invoker = new LambdaUdfInvoker(lambda, authorizer, lambdaResourcePolicies, new IamPolicyEvaluator(JSON),
+                config, regions, clock, millis -> {
             sleeps.add(millis);
             now.addAndGet(millis);
         });
@@ -193,6 +206,28 @@ class LambdaUdfInvokerTest {
         assertThat(JSON.readTree(payloads.getAllValues().get(0)).get("num_records").intValue(), equalTo(1));
         assertThat(JSON.readTree(payloads.getAllValues().get(1)).get("arguments").toString(),
                 equalTo("[[\"y\"],[\"z\"]]"));
+    }
+
+    @Test
+    void batchesCountArgumentsArrayBracketsAndCommasAgainstMaxBatchSize() throws Exception {
+        long limit = 20;
+        when(lambda.invokeArn(eq(FUNCTION_ARN), any(), any())).thenAnswer(call -> {
+            JsonNode request = JSON.readTree((byte[]) call.getArgument(1));
+            int count = request.get("num_records").intValue();
+            return ok("{\"success\":true,\"num_records\":" + count + ",\"results\":["
+                    + String.join(",", Collections.nCopies(count, "0")) + "]}");
+        });
+
+        // each row is "[1]" (3 bytes); 4 rows serialize to "[[1],[1],[1],[1]]" (17 bytes <= 20), 5 rows would be 21
+        List<List<String>> input = Collections.nCopies(10, List.of("1"));
+        invoker.invoke(function(List.of("integer"), "integer", 100, limit, 0), SESSION, "u", 1, input);
+
+        ArgumentCaptor<byte[]> payloads = ArgumentCaptor.forClass(byte[].class);
+        verify(lambda, times(3)).invokeArn(eq(FUNCTION_ARN), payloads.capture(), any());
+        for (byte[] payload : payloads.getAllValues()) {
+            String argumentsJson = JSON.readTree(payload).get("arguments").toString();
+            assertThat((long) argumentsJson.getBytes(StandardCharsets.UTF_8).length, lessThanOrEqualTo(limit));
+        }
     }
 
     @Test
@@ -384,16 +419,65 @@ class LambdaUdfInvokerTest {
     }
 
     @Test
-    void aFunctionGivenAsAccountFunctionNameIsInvokedInThatAccount() {
+    void aFunctionGivenAsAccountFunctionNameIsInvokedInThatAccountWhenGranted() {
         String arn = "arn:aws:lambda:us-east-1:111111111111:function:sum";
         ExternalFunctionBinding function = new ExternalFunctionBinding(ACCOUNT, SESSION.clusterKey(), "dev",
                 "public", "f", List.of("integer"), "integer", "STABLE", "111111111111:function:sum", ROLE, 0, 10,
                 1024);
+        String grantPolicy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                "Principal":{"AWS":"%s"},"Action":"lambda:InvokeFunction","Resource":"%s"}]}
+                """.formatted(ROLE, arn);
+        when(lambdaResourcePolicies.getResourcePolicies("lambda", arn))
+                .thenReturn(List.of(new ResourcePolicy(grantPolicy, "111111111111")));
         when(lambda.invokeArn(eq(arn), any(), any())).thenReturn(
                 ok("{\"success\":true,\"num_records\":1,\"results\":[5]}"));
 
         assertThat(invoker.invoke(function, SESSION, "u", 1, rows(new String[] {"1"})), equalTo(List.of("5")));
         verify(authorizer).refusal(eq(ROLE), eq(ACCOUNT), anyString(), isNull(), anyList());
+    }
+
+    @Test
+    void aCrossAccountFunctionWithoutResourcePolicyGrantIsRefusedWhenEnforcementIsOn() {
+        String arn = "arn:aws:lambda:us-east-1:111111111111:function:sum";
+        ExternalFunctionBinding function = new ExternalFunctionBinding(ACCOUNT, SESSION.clusterKey(), "dev",
+                "public", "f", List.of("integer"), "integer", "STABLE", arn, ROLE, 0, 10, 1024);
+        when(lambdaResourcePolicies.getResourcePolicies("lambda", arn))
+                .thenReturn(List.of(new ResourcePolicy(null, "111111111111")));
+
+        SpectrumSqlException refused = assertThrows(SpectrumSqlException.class,
+                () -> invoker.invoke(function, SESSION, "u", 1, rows(new String[] {"1"})));
+
+        assertThat(refused.sqlState(), equalTo("42501"));
+        verify(lambda, never()).invokeArn(anyString(), any(), any());
+    }
+
+    @Test
+    void aCrossAccountFunctionRunsWithoutResourcePolicyWhenEnforcementIsOff() {
+        when(config.services().iam().enforcementEnabled()).thenReturn(false);
+        String arn = "arn:aws:lambda:us-east-1:111111111111:function:sum";
+        ExternalFunctionBinding function = new ExternalFunctionBinding(ACCOUNT, SESSION.clusterKey(), "dev",
+                "public", "f", List.of("integer"), "integer", "STABLE", arn, ROLE, 0, 10, 1024);
+        when(lambda.invokeArn(eq(arn), any(), any())).thenReturn(
+                ok("{\"success\":true,\"num_records\":1,\"results\":[5]}"));
+
+        assertThat(invoker.invoke(function, SESSION, "u", 1, rows(new String[] {"1"})), equalTo(List.of("5")));
+    }
+
+    @Test
+    void aSameAccountFunctionWithExplicitDenyInResourcePolicyIsRefused() {
+        String denyPolicy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Deny",
+                "Principal":{"AWS":"%s"},"Action":"lambda:InvokeFunction","Resource":"%s"}]}
+                """.formatted(ROLE, FUNCTION_ARN);
+        when(lambdaResourcePolicies.getResourcePolicies("lambda", FUNCTION_ARN))
+                .thenReturn(List.of(new ResourcePolicy(denyPolicy, ACCOUNT)));
+
+        SpectrumSqlException refused = assertThrows(SpectrumSqlException.class,
+                () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"})));
+
+        assertThat(refused.sqlState(), equalTo("42501"));
+        verify(lambda, never()).invokeArn(anyString(), any(), any());
     }
 
     @Test

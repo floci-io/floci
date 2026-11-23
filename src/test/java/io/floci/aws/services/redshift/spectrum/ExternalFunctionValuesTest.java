@@ -78,8 +78,14 @@ class ExternalFunctionValuesTest {
     }
 
     @Test
-    void aNumericNanTravelsAsItsText() {
+    void aNumericNanRoundTripsAsItsText() {
         assertThat(ExternalFunctionValues.toJson("numeric", "NaN").textValue(), equalTo("NaN"));
+        assertThat(ExternalFunctionValues.fromJson("numeric", JSON.textNode("NaN")), equalTo("NaN"));
+        assertThat(ExternalFunctionValues.fromJson("numeric(10,2)", JSON.textNode("nan")), equalTo("NaN"));
+        assertThrows(SpectrumSqlException.class,
+                () -> ExternalFunctionValues.fromJson("numeric", JSON.textNode("Infinity")));
+        assertThrows(SpectrumSqlException.class,
+                () -> ExternalFunctionValues.fromJson("numeric", JSON.textNode("not-a-number")));
     }
 
     @Test
