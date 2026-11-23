@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.services.dynamodb.model.AttributeDefinition;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.dynamodb.model.VectorIndex;
@@ -150,7 +149,7 @@ final class DynamoDbVectorSearch {
                         "SearchConditionExpression must not contain any attributes that is not in "
                         + "SearchSchema. Invalid attribute: " + attribute, 400);
             }
-            String attributeType = attributeType(table, attribute);
+            String attributeType = table.attributeType(attribute);
             checkOperatorType(leaf.expr(), attribute, attributeType);
             checkValueTypes(leaf.expr(), attribute, attributeType, exprAttrValues);
         }
@@ -296,15 +295,6 @@ final class DynamoDbVectorSearch {
                         + ")", 400);
             }
         }
-    }
-
-    private static String attributeType(TableDefinition table, String attribute) {
-        for (AttributeDefinition definition : table.getAttributeDefinitions()) {
-            if (definition.getAttributeName().equals(attribute)) {
-                return definition.getAttributeType();
-            }
-        }
-        return null;
     }
 
     /** The attribute a leaf constrains, with any {@code #alias} resolved. */
