@@ -447,6 +447,13 @@ class StsQueryHandlerTest {
         assertFalse(StsRequestShapes.hasMember("GetSessionToken", "Tags"));
         assertFalse(StsRequestShapes.hasMember("AssumeRoot", "Policy"));
         assertFalse(StsRequestShapes.hasMember("AssumeRoot", "Tags"));
+
+        // The one operation that chains tags is the one declaring the keys to chain them under,
+        // which is what the inheritance reads rather than naming the operation itself.
+        assertTrue(StsRequestShapes.hasMember("AssumeRole", "TransitiveTagKeys"));
+        assertFalse(StsRequestShapes.hasMember("GetFederationToken", "TransitiveTagKeys"));
+        assertFalse(StsRequestShapes.hasMember("AssumeRoleWithSAML", "TransitiveTagKeys"));
+        assertFalse(StsRequestShapes.hasMember("AssumeRoleWithWebIdentity", "TransitiveTagKeys"));
     }
 
     /**
@@ -470,7 +477,7 @@ class StsQueryHandlerTest {
                 .handle("AssumeRole", params);
 
         assertEquals(200, response.getStatus(), (String) response.getEntity());
-        verify(assumed).recordSessionTags(anyString(), eq(Map.of("Project", "atlas")));
+        verify(assumed).recordSessionTags(anyString(), eq(Map.of("Project", "atlas")), eq(List.of()));
 
         IamService longTerm = mock(IamService.class);
         MultivaluedMap<String, String> untagged = sessionRequest("GetSessionToken");
@@ -481,7 +488,63 @@ class StsQueryHandlerTest {
                 .handle("GetSessionToken", untagged);
 
         assertEquals(200, longTermResponse.getStatus(), (String) longTermResponse.getEntity());
-        verify(longTerm, never()).recordSessionTags(anyString(), anyMap());
+        verify(longTerm, never()).recordSessionTags(anyString(), anyMap(), anyList());
+    }
+
+    /**
+     * What the calling session passes down joins the tags of the session being minted, and the
+     * keys it came in under stay transitive so the next link inherits them too. The request's own
+     * transitive keys are added to them, and a request that names one is still measured by the
+     * tags it carries rather than by the keys: "the transitive status of a session tag does not
+     * impact its packed binary size".
+     */
+    @Test
+    void aChainedSessionCarriesTheTagsTheCallingSessionPassesDown() {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        IamService chained = mock(IamService.class);
+        when(chained.findRole(anyString(), anyString())).thenReturn(Optional.of(role));
+        when(chained.callerTransitiveSessionTags(any())).thenReturn(Map.of("Star", "1"));
+        MultivaluedMap<String, String> params = sessionRequest("AssumeRole");
+        params.putSingle("Tags.member.1.Key", "Sun");
+        params.putSingle("Tags.member.1.Value", "2");
+        params.putSingle("TransitiveTagKeys.member.1", "Sun");
+
+        Response response = newHandler(chained, new RegionResolver(REGION, "000000000000"))
+                .handle("AssumeRole", params);
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
+        verify(chained).recordSessionTags(anyString(), eq(Map.of("Star", "1", "Sun", "2")),
+                eq(List.of("Star", "Sun")));
+    }
+
+    /**
+     * A session tag whose key the calling session already passes down is refused: "if you pass a
+     * session tag with the same key as an inherited tag, the operation fails". Nothing is minted
+     * for it, and the key is matched without regard to case.
+     */
+    @Test
+    void aSessionTagCollidingWithAnInheritedTransitiveTagIsRefused() {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        IamService chained = mock(IamService.class);
+        when(chained.findRole(anyString(), anyString())).thenReturn(Optional.of(role));
+        when(chained.callerTransitiveSessionTags(any())).thenReturn(Map.of("Star", "1"));
+        MultivaluedMap<String, String> params = sessionRequest("AssumeRole");
+        params.putSingle("Tags.member.1.Key", "star");
+        params.putSingle("Tags.member.1.Value", "9");
+
+        Response response = newHandler(chained, new RegionResolver(REGION, "000000000000"))
+                .handle("AssumeRole", params);
+
+        assertEquals(400, response.getStatus(), (String) response.getEntity());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("ValidationError"), body);
+        assertTrue(body.contains("Session tag star"), body);
+        verify(chained, never()).registerSession(anyString(), anyString(), anyString(), anyString(),
+                any(), any(), anyString(), anyString(), anyString());
     }
 
     /** The least a request needs to reach issuance on an operation that models a token size. */
@@ -1070,7 +1133,8 @@ class StsQueryHandlerTest {
         when(verifier.peekIssuer("jwt0")).thenReturn(Optional.of(issuer));
         when(verifier.verify(eq("jwt0"), any(), eq(issuer), anyString()))
                 .thenReturn(new WebIdentityToken(issuer, "system:serviceaccount:default:app",
-                        List.of("sts.amazonaws.com"), Map.of("Project", "atlas")));
+                        List.of("sts.amazonaws.com"), Map.of("Project", "atlas"),
+                        List.of("Project")));
         OidcIssuerKeyLookup keys = mock(OidcIssuerKeyLookup.class);
         when(keys.findVerificationKey(issuer)).thenReturn(Optional.of(mock(RSAPublicKey.class)));
         WebIdentityTrustPolicyEvaluator trust = mock(WebIdentityTrustPolicyEvaluator.class);
@@ -1095,7 +1159,10 @@ class StsQueryHandlerTest {
         verify(trust).allows(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap(), eq("app"));
         assertEquals("arn:aws-cn:sts::000000000000:assumed-role/web-role/app",
                 extract(ARN, (String) response.getEntity()));
-        verify(iamService).recordSessionTags(anyString(), eq(Map.of("Project", "atlas")));
+        // The token's own transitive key is recorded with its tags, so a session assumed from this
+        // one inherits the tag.
+        verify(iamService).recordSessionTags(anyString(), eq(Map.of("Project", "atlas")),
+                eq(List.of("Project")));
         // The token's tags are state its session carries, so they count with the token itself.
         assertEquals(Integer.toString(200 + "Project".length() + "atlas".length()),
                 extract(SESSION_TOKEN_SIZE, (String) response.getEntity()));

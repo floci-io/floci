@@ -5198,8 +5198,18 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * tag keys", and a second such tag "replaces the first tag. A second tag is not added." Stored
      * as two they would reach a policy as one key with the other's value dropped, and a Deny keyed
      * on that value would stop matching.
+     *
+     * <p>{@code transitiveTagKeys} are the keys among them the request asked to set as transitive,
+     * which is what {@link #callerTransitiveSessionTags} then carries into a session assumed from
+     * this one. Only a key naming one of these tags selects anything: a key naming none carries no
+     * tag onward, there being no tag of that key in the session to carry, and the keys are matched
+     * against the tags the same way a tag key is compared anywhere else here, without regard to
+     * case. The spellings kept are the ones the request sent, as the tag keys themselves are, and a
+     * key named twice, which a chained request can do by naming one it already inherits, is one
+     * key.
      */
-    public void recordSessionTags(String sessionAccessKeyId, Map<String, String> tags) {
+    public void recordSessionTags(String sessionAccessKeyId, Map<String, String> tags,
+                                  List<String> transitiveTagKeys) {
         if (sessionAccessKeyId == null || tags == null || tags.isEmpty()) {
             return;
         }
@@ -5208,10 +5218,53 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             oneTagPerKey.keySet().removeIf(stored -> stored.equalsIgnoreCase(key));
             oneTagPerKey.put(key, value);
         });
+        List<String> transitive = new ArrayList<>();
+        if (transitiveTagKeys != null) {
+            for (String key : transitiveTagKeys) {
+                if (oneTagPerKey.keySet().stream().anyMatch(key::equalsIgnoreCase)
+                        && transitive.stream().noneMatch(key::equalsIgnoreCase)) {
+                    transitive.add(key);
+                }
+            }
+        }
         sessions.get(sessionAccessKeyId).ifPresent(session -> {
             session.setSessionTags(oneTagPerKey);
+            session.setTransitiveTagKeys(transitive);
             sessions.put(sessionAccessKeyId, session);
         });
+    }
+
+    /**
+     * The transitive session tags the credentials {@code accessKeyId} carry, which a session
+     * assumed from them inherits: "if you used temporary credentials to perform this operation,
+     * the new session inherits any transitive session tags from the calling session".
+     *
+     * <p>Only session tags are ever in it. A role's own tags are never transitive, which the guide
+     * states outright, "you cannot set role tags as transitive", and shows: the second session of
+     * its chain inherits the first session's two transitive tags and not the tag attached to the
+     * role it assumed. A long-term key carries none, there being no session behind it, and so does
+     * a session that named no transitive key.
+     */
+    public Map<String, String> callerTransitiveSessionTags(String accessKeyId) {
+        return findSessionForCallerContext(accessKeyId)
+                .map(IamService::transitiveSessionTags)
+                .orElseGet(Map::of);
+    }
+
+    private static Map<String, String> transitiveSessionTags(SessionCredential session) {
+        if (session.getTransitiveTagKeys().isEmpty()) {
+            return Map.of();
+        }
+        Set<String> transitive = session.getTransitiveTagKeys().stream()
+                .map(key -> key.toLowerCase(Locale.ROOT))
+                .collect(Collectors.toSet());
+        Map<String, String> tags = new LinkedHashMap<>();
+        session.getSessionTags().forEach((key, value) -> {
+            if (transitive.contains(key.toLowerCase(Locale.ROOT))) {
+                tags.put(key, value);
+            }
+        });
+        return tags;
     }
 
     /**
