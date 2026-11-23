@@ -74,13 +74,21 @@ final class EmrContainersSparkJobs {
      * {@code spark-defaults} classification of its {@code applicationConfiguration}, a later one's winning.
      */
     static Map<String, String> sparkDefaults(JsonNode configurationOverrides) {
+        return properties(configurationOverrides, SPARK_DEFAULTS);
+    }
+
+    /**
+     * The properties of a {@code configurationOverrides}' {@code classification}: those of each such classification of
+     * its {@code applicationConfiguration}, a later one's winning.
+     */
+    static Map<String, String> properties(JsonNode configurationOverrides, String classification) {
         JsonNode configurations = configurationOverrides != null
                 ? configurationOverrides.path("applicationConfiguration") : null;
         if (configurations == null || !configurations.isArray()) {
             return new LinkedHashMap<>();
         }
         List<?> list = JSON.convertValue(configurations, List.class);
-        return EmrServerlessJobRunService.classificationProperties(list, SPARK_DEFAULTS);
+        return EmrServerlessJobRunService.classificationProperties(list, classification);
     }
 
     /**

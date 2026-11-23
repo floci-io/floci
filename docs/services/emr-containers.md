@@ -251,7 +251,14 @@ remote kernel lifecycle management capability that interactive clients need" (EM
   restarted kernel answers, the gateway ends the cell with the replies the magic prepared; if it dies first, or does
   not answer within a minute, the cell ends with an error saying so. The magic itself refuses a reserved setting,
   such as `spark.kubernetes.namespace`.
-* **Not emulated yet**: the "Apache Spark with Scala" kernel, `jupyter-kernel-overrides` images, and `jeg-config`'s
-  culling settings. A browser's CORS preflight (`OPTIONS`), which Jupyter Enterprise Gateway takes without a token,
-  needs one here. Every kernel runs with the endpoint's execution role, whichever role its
-  session token was asked for with. `certificateArn` is kept, and the `serverUrl` is plain HTTP on Floci's port.
+* **`jeg-config`**: the two settings the guide's "Jupyter Enterprise Gateway (JEG) configuration options"
+  allow-lists go to the gateway's kernel manager, named `RemoteMappingKernelManager` as Jupyter Enterprise Gateway's
+  is: `RemoteMappingKernelManager.cull_idle_timeout`, "Timeout in seconds (integer), after which a kernel is
+  considered idle and ready to be culled. Values of 0 or lower deactivate culling.", and
+  `RemoteMappingKernelManager.cull_interval`, "The interval in seconds (integer) on which to check for idle kernels
+  that exceed the cull timeout value." As jupyter_server's culler does by default, a kernel with a client connected
+  is not culled. Other `jeg-config` properties go nowhere.
+* **Not emulated yet**: the "Apache Spark with Scala" kernel and `jupyter-kernel-overrides` images. A browser's CORS
+  preflight (`OPTIONS`), which Jupyter Enterprise Gateway takes without a token, needs one here. Every kernel runs
+  with the endpoint's execution role, whichever role its session token was asked for with. `certificateArn` is
+  kept, and the `serverUrl` is plain HTTP on Floci's port.

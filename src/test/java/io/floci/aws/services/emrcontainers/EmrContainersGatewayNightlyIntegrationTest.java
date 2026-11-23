@@ -56,7 +56,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  * {@code serverUrl} with a session token, starts a PySpark kernel there, and a session with a kernel of its own, which
  * the kernels and sessions listings show that token alone, and runs code on Floci's S3 over the PySpark kernel's
  * WebSocket, as the guide's "Example: Deploy a JupyterLab notebook" does through {@code JUPYTER_GATEWAY_URL}, then
- * changes its Spark session's settings with {@code %%configure}, as "Modifying PySpark session parameters" does.
+ * changes its Spark session's settings with {@code %%configure}, as "Modifying PySpark session parameters" does. An
+ * endpoint whose {@code jeg-config} sets a short idle timeout culls a kernel left idle.
  *
  * <p>A nightly check: the release's notebook image is about 6 GB.
  */
@@ -65,10 +66,6 @@ import static org.junit.jupiter.api.Assertions.fail;
 @EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 // One instance, so that the image is pulled once for the class.
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-// The endpoint's gateway answers within its five minutes, the kernel's WebSocket opens within its two, once its Spark
-// session is up, and each of its four cells answers within its two: fifteen minutes, and one for the requests
-// between. With the image's pull of up to 21, 37 minutes, which the Nightly checks' docker-runner group counts.
-@Timeout(value = 16, unit = TimeUnit.MINUTES)
 class EmrContainersGatewayNightlyIntegrationTest {
 
     private static final String ACCOUNT = "000000000000";
@@ -104,7 +101,11 @@ class EmrContainersGatewayNightlyIntegrationTest {
         docker.pullImageCmd(NOTEBOOK_IMAGE).exec(new PullImageResultCallback()).awaitCompletion(20, TimeUnit.MINUTES);
     }
 
+    // The endpoint's gateway answers within its five minutes, the kernel's WebSocket opens within its two, once its
+    // Spark session is up, and each of its four cells answers within its two: fifteen minutes, and one for the
+    // requests between. The Nightly checks' docker-runner group counts it.
     @Test
+    @Timeout(value = 16, unit = TimeUnit.MINUTES)
     void pysparkKernelOnTheEndpointsGatewayRunsCodeOnFlocisS3() throws Exception {
         S3Client s3 = AwsTestClients.create(S3Client.builder().forcePathStyle(true), ACCOUNT, Region.US_EAST_1);
         cleanup.register(s3::close);
@@ -113,25 +114,8 @@ class EmrContainersGatewayNightlyIntegrationTest {
         cleanup.register(() -> S3TestClients.deleteBucket(s3, bucket));
         s3.putObject(request -> request.bucket(bucket).key("lines.txt"), RequestBody.fromString("a\nb\nc\n"));
         String virtualClusterId = virtualCluster();
-        String endpointId = emr().body("""
-                        {"name": "nightly", "type": "JUPYTER_ENTERPRISE_GATEWAY", "releaseLabel": "%s",
-                         "executionRoleArn": "%s", "clientToken": "%s"}
-                        """.formatted(RELEASE, ROLE, UUID.randomUUID()))
-                .post("/virtualclusters/" + virtualClusterId + "/endpoints")
-                .then().statusCode(200)
-                .extract().path("id");
-        cleanup.register(() -> emr().delete("/virtualclusters/" + virtualClusterId + "/endpoints/" + endpointId)
-                .then().statusCode(200));
-
-        await().atMost(ACTIVE_TIMEOUT).pollInterval(Duration.ofSeconds(1)).until(() -> "ACTIVE".equals(
-                emr().get("/virtualclusters/" + virtualClusterId + "/endpoints/" + endpointId)
-                        .then().statusCode(200).extract().path("endpoint.state")));
-        String serverUrl = emr().get("/virtualclusters/" + virtualClusterId + "/endpoints/" + endpointId)
-                .then().extract().path("endpoint.serverUrl");
-        // On the profile's base URL; the test's own server is on a port of its own.
-        String path = URI.create(serverUrl).getPath();
-        assertEquals(EmrContainersService.GATEWAY_PATH + endpointId, path);
-        String gateway = "http://localhost:" + RestAssured.port + path;
+        String endpointId = endpoint(virtualClusterId, "{}");
+        String gateway = gateway(virtualClusterId, endpointId);
         String token = sessionToken(virtualClusterId, endpointId);
 
         HttpClient http = HttpClient.newHttpClient();
@@ -192,6 +176,60 @@ class EmrContainersGatewayNightlyIntegrationTest {
         assertEquals(204, http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/kernels/" + kernelId))
                 .header("Authorization", "token " + token).DELETE().build(),
                 HttpResponse.BodyHandlers.discarding()).statusCode());
+    }
+
+    // The endpoint's gateway answers within its five minutes, and the kernel goes within its one: six minutes, and one
+    // for the requests between. The Nightly checks' docker-runner group counts it.
+    @Test
+    @Timeout(value = 7, unit = TimeUnit.MINUTES)
+    void endpointsJegConfigCullsAKernelLeftIdle() throws Exception {
+        String virtualClusterId = virtualCluster();
+        // The two settings "Jupyter Enterprise Gateway (JEG) configuration options" allow-lists.
+        String endpointId = endpoint(virtualClusterId, """
+                {"applicationConfiguration": [{"classification": "jeg-config", "properties": {
+                  "RemoteMappingKernelManager.cull_idle_timeout": "10",
+                  "RemoteMappingKernelManager.cull_interval": "5"}}]}""");
+        String gateway = gateway(virtualClusterId, endpointId);
+        String token = sessionToken(virtualClusterId, endpointId);
+        HttpClient http = HttpClient.newHttpClient();
+        HttpResponse<String> started = http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/kernels"))
+                .header("Authorization", "token " + token)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"name\": \"python3\"}")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(201, started.statusCode(), started.body());
+        assertEquals(List.of(JSON.readTree(started.body()).path("id").textValue()),
+                ids(http, gateway + "/api/kernels", token));
+
+        await("the idle kernel culled").atMost(Duration.ofMinutes(1)).pollInterval(Duration.ofSeconds(1))
+                .until(() -> ids(http, gateway + "/api/kernels", token).isEmpty());
+    }
+
+    // An endpoint of the virtual cluster with configurationOverrides, once it is ACTIVE.
+    private String endpoint(String virtualClusterId, String configurationOverrides) {
+        String endpointId = emr().body("""
+                        {"name": "nightly", "type": "JUPYTER_ENTERPRISE_GATEWAY", "releaseLabel": "%s",
+                         "executionRoleArn": "%s", "clientToken": "%s", "configurationOverrides": %s}
+                        """.formatted(RELEASE, ROLE, UUID.randomUUID(), configurationOverrides))
+                .post("/virtualclusters/" + virtualClusterId + "/endpoints")
+                .then().statusCode(200)
+                .extract().path("id");
+        cleanup.register(() -> emr().delete("/virtualclusters/" + virtualClusterId + "/endpoints/" + endpointId)
+                .then().statusCode(200));
+        await().atMost(ACTIVE_TIMEOUT).pollInterval(Duration.ofSeconds(1)).until(() -> "ACTIVE".equals(
+                emr().get("/virtualclusters/" + virtualClusterId + "/endpoints/" + endpointId)
+                        .then().statusCode(200).extract().path("endpoint.state")));
+        return endpointId;
+    }
+
+    // Where the test reaches the endpoint's gateway: its serverUrl's path, on the test's own port, as the profile's
+    // base URL names another.
+    private static String gateway(String virtualClusterId, String endpointId) {
+        String serverUrl = emr().get("/virtualclusters/" + virtualClusterId + "/endpoints/" + endpointId)
+                .then().extract().path("endpoint.serverUrl");
+        String path = URI.create(serverUrl).getPath();
+        assertEquals(EmrContainersService.GATEWAY_PATH + endpointId, path);
+        return "http://localhost:" + RestAssured.port + path;
     }
 
     // Runs code in the kernel and answers its result's text/plain.

@@ -12,6 +12,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -71,6 +72,11 @@ final class EmrContainersGateways {
     // after that class path.
     static final String CLASS_PATH_VARIABLE = "SPARK_DIST_CLASSPATH";
     static final String AWS_SDK = "/usr/share/aws/aws-java-sdk-v2/*";
+    // The classification of Jupyter Enterprise Gateway's settings, and those the guide allow-lists ("Jupyter
+    // Enterprise Gateway (JEG) configuration options"), which go to the program as its arguments.
+    static final String JEG_CONFIG = "jeg-config";
+    static final List<String> JEG_PROPERTIES = List.of("RemoteMappingKernelManager.cull_idle_timeout",
+            "RemoteMappingKernelManager.cull_interval");
 
     /** The servers' kind, in the answers to the calls they cannot take. */
     static final SessionServers.Kind KIND = new SessionServers.Kind("Jupyter Enterprise Gateway", "Endpoint",
@@ -205,8 +211,9 @@ final class EmrContainersGateways {
 
             # Records the session token of a kernel the kernels API or the sessions API starts, and gives the kernel
             # the KERNEL_ID and the AES key the magic reads, as Jupyter Enterprise Gateway's launcher does; forgets
-            # both once the kernel goes, whether a request, the culler or the kernel's death removes it.
-            class KernelManager(AsyncMappingKernelManager):
+            # both once the kernel goes, whether a request, the culler or the kernel's death removes it. Named as
+            # Jupyter Enterprise Gateway's, whose name the endpoint's jeg-config properties give, from the arguments.
+            class RemoteMappingKernelManager(AsyncMappingKernelManager):
 
                 async def start_kernel(self, *, kernel_id=None, **kwargs):
                     if kernel_id is not None and kernel_id in self:
@@ -342,7 +349,7 @@ final class EmrContainersGateways {
                 "--ServerApp.allow_remote_access=True",
                 "--KernelSpecManager.allowed_kernelspecs=python3",
                 "--KernelSpecManager.allowed_kernelspecs=spark-python-kubernetes",
-            ], kernel_manager_class=KernelManager))
+            ] + sys.argv[1:], kernel_manager_class=RemoteMappingKernelManager))
             """.replace("@HOME@", HOME).replace("@PORT@", String.valueOf(PORT))
             .replace("@PROGRAM_VARIABLE@", PROGRAM_VARIABLE).replace("@SESSION_HEADER@", SESSION_HEADER);
 
@@ -361,9 +368,10 @@ final class EmrContainersGateways {
      * {@code configurationOverrides}, listening on {@link #PORT}. Its kernels' {@code spark-submit} gets those
      * defaults, in Spark's local mode and client deploy mode whatever master and deploy mode they name, as a job run's
      * driver does, on the image's Python: the virtualenv the image gives a PySpark driver is made on YARN and
-     * Kubernetes alone. Their class path gains the AWS SDK that S3A runs on, which the image's own leaves out. As a
-     * Spark Connect server does, it checks no token
-     * itself: Floci reaches it on the Docker host's loopback interface alone, and checks the session token first.
+     * Kubernetes alone. Their class path gains the AWS SDK that S3A runs on, which the image's own leaves out. The
+     * allow-listed properties of the endpoint's {@code jeg-config} classification go to the program as its arguments,
+     * other ones nowhere. As a Spark Connect server does, it checks no token itself: Floci reaches it on the Docker
+     * host's loopback interface alone, and checks the session token first.
      */
     static SparkJobRunner.Job job(ObjectNode endpoint, String imageTemplate, String dockerNetwork) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(endpoint.get("arn").textValue());
@@ -377,8 +385,16 @@ final class EmrContainersGateways {
                 "spark.kubernetes.driverEnv."));
         environment.merge(CLASS_PATH_VARIABLE, AWS_SDK, (endpointClassPath, sdk) -> endpointClassPath + ":" + sdk);
         environment.put(PROGRAM_VARIABLE, PROGRAM);
-        List<String> command = List.of("/bin/bash", "-c", "mkdir -p " + HOME + " && printf '%s' \"$"
-                + PROGRAM_VARIABLE + "\" > " + HOME + "/gateway.py && exec python3 " + HOME + "/gateway.py");
+        List<String> command = new ArrayList<>(List.of("/bin/bash", "-c", "mkdir -p " + HOME + " && printf '%s' \"$"
+                + PROGRAM_VARIABLE + "\" > " + HOME + "/gateway.py && exec python3 " + HOME + "/gateway.py \"$@\"",
+                "gateway"));
+        Map<String, String> jegConfig =
+                EmrContainersSparkJobs.properties(endpoint.get("configurationOverrides"), JEG_CONFIG);
+        for (String property : JEG_PROPERTIES) {
+            if (jegConfig.containsKey(property)) {
+                command.add("--" + property + "=" + jegConfig.get(property));
+            }
+        }
         return new SparkJobRunner.Job(EmrContainersService.SERVICE, endpoint.get("id").textValue(), arn.accountId(),
                 arn.region(), releaseLabel, SparkJobRunner.Engine.SPARK, image(imageTemplate, releaseLabel), null,
                 dockerNetwork, endpoint.get("executionRoleArn").textValue(), sparkDefaults, List.of(), command,
