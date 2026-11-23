@@ -2802,8 +2802,8 @@ vendored in `src/main/resources/aws/rest-routes.json` (`make aws-data-sync` rege
 routes it matches, the most specific, segment by segment from the left a literal before a label and a
 label before a greedy one, then the route naming more of the query. It is checked as that operation's
 action, the way a request naming its operation is, when Floci checks it on the resources AWS does:
-those its request names, which Floci builds for the service itself or reads from the request, or none,
-when the Service Reference gives the action no resource type, as AWS authorizes such an action on `*`.
+those its request names, which Floci reads from the request, or none, when the Service Reference
+gives the action no resource type, as AWS authorizes such an action on `*`.
 The actions of no resource type are vendored in `src/main/resources/aws/iam-authorized-actions.json`
 for each scope whose routes are read (`make iam-authorized-actions-sync` regenerates them). So
 OpenSearch Service's `ListDomainNames`, `ListVersions` and VPC endpoint operations, in both API

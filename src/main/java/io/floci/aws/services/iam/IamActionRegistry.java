@@ -747,14 +747,12 @@ public class IamActionRegistry {
 
     /**
      * Whether a request of the operation is checked on the resources AWS checks its action on: those its request
-     * names, which the vendored request resources read for the operation ({@link RequestResources#reads}) or
-     * {@code ResourceArnBuilder} builds for its namespace ({@link RequestResources#builtByHand}), or {@code *}
-     * when AWS authorizes the action on no resource type ({@link IamAuthorizedActions#actsOnNoResourceType}), so
-     * none of the resources in the request's path is needed.
+     * names, which the vendored request resources read for the operation ({@link RequestResources#reads}), or
+     * {@code *} when AWS authorizes the action on no resource type ({@link IamAuthorizedActions#actsOnNoResourceType}),
+     * so none of the resources in the request's path is needed.
      */
     private static boolean checkedAsAws(String credentialScope, String operation, String action) {
         return RequestResources.reads(credentialScope + ":" + operation)
-                || RequestResources.builtByHand(credentialScope)
                 || IamAuthorizedActions.actsOnNoResourceType(action);
     }
 
