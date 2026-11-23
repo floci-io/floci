@@ -15,6 +15,7 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -112,6 +113,10 @@ public class VpcNetworkManager {
      * than leaving them with nothing at all to hand out.
      */
     static final int FIRST_HOST_OFFSET = 10;
+
+    /** The length of the IPv4 prefixes a subnet leases, the /28 AWS delegates to a network interface. */
+    public static final int PREFIX_LENGTH = 28;
+    private static final long PREFIX_SIZE = 1L << (32 - PREFIX_LENGTH);
 
     /**
      * The smallest offset any block can start allocating at: past the network address, and past
@@ -534,6 +539,176 @@ public class VpcNetworkManager {
         }
     }
 
+    /**
+     * Leases up to {@code count} IPv4 /28 prefixes of the subnet's effective range none of whose addresses is leased or in
+     * {@code held}, which names what else holds addresses there, the containers on the VPC's network among them (see
+     * {@link #networkEndpointAddresses}). The highest such prefixes are taken: Floci and Docker give a container
+     * attached without an address of its own the lowest free address of the VPC's range, so prefixes from the top of
+     * the subnet stay clear of those. A prefix keeps clear of the subnet's last address, which AWS reserves, and of the
+     * addresses below the first one the subnet hands out.
+     *
+     * @return the prefixes leased, fewer than {@code count} when the subnet has no other free one, none when it has no
+     *         Docker-backed range
+     */
+    public List<Cidr4> allocatePrefixes(String accountId, String region, String subnetId, int count, Set<String> held) {
+        if (!enabled() || subnetId == null || count <= 0) {
+            return List.of();
+        }
+        SubnetBinding subnet = subnetBinding(accountId, region, subnetId);
+        if (subnet == null || subnet.effective == null) {
+            return List.of();
+        }
+        List<Cidr4> leased = new ArrayList<>();
+        synchronized (subnet) {
+            for (long start = (subnet.effective.size() - PREFIX_SIZE - 1) / PREFIX_SIZE * PREFIX_SIZE;
+                 start >= subnet.firstOffset && leased.size() < count; start -= PREFIX_SIZE) {
+                List<String> addresses = prefixAddresses(subnet.effective.network() + start);
+                if (addresses.stream().noneMatch(address -> subnet.leased.contains(address) || held.contains(address))) {
+                    subnet.leased.addAll(addresses);
+                    leased.add(Cidr4.parse(addresses.getFirst() + "/" + PREFIX_LENGTH).orElseThrow());
+                }
+            }
+        }
+        if (leased.size() < count) {
+            LOG.warnv("Subnet {0} range {1} has {2} of the {3} free /{4} prefixes asked for.",
+                    subnetId, subnet.effective, leased.size(), count, PREFIX_LENGTH);
+        }
+        return leased;
+    }
+
+    /**
+     * Re-claims a prefix a persisted container holder (an EKS cluster node) leased before a restart.
+     *
+     * @param held what else holds addresses in the subnet, as {@link #allocatePrefixes} takes it
+     * @return false, with a warning, when the prefix is not a /28 of the subnet's effective range, or one of its
+     *         addresses is leased already or held
+     */
+    public boolean reservePrefix(String accountId, String region, String subnetId, Cidr4 prefix, Set<String> held) {
+        if (!enabled() || subnetId == null || prefix == null) {
+            return false;
+        }
+        SubnetBinding subnet = subnetBinding(accountId, region, subnetId);
+        if (subnet == null || subnet.effective == null) {
+            return false;
+        }
+        if (prefix.prefix() != PREFIX_LENGTH || !subnet.effective.contains(prefix)) {
+            LOG.warnv("Cannot reserve prefix {0} in subnet {1}: it is not a /{2} of the subnet''s effective range {3}.",
+                    prefix, subnetId, PREFIX_LENGTH, subnet.effective);
+            return false;
+        }
+        List<String> addresses = prefixAddresses(prefix.network());
+        synchronized (subnet) {
+            if (addresses.stream().anyMatch(address -> subnet.leased.contains(address) || held.contains(address))) {
+                LOG.warnv("Cannot reserve prefix {0} in subnet {1}: another holder has one of its addresses.",
+                        prefix, subnetId);
+                return false;
+            }
+            subnet.leased.addAll(addresses);
+            return true;
+        }
+    }
+
+    public void releasePrefix(String accountId, String region, String subnetId, Cidr4 prefix) {
+        if (prefix != null) {
+            prefixAddresses(prefix.network()).forEach(address -> releasePrivateIp(accountId, region, subnetId, address));
+        }
+    }
+
+    /**
+     * The IPv4 addresses Docker gave the containers on the subnet's VPC network: none before the network exists, and
+     * empty when Docker cannot say, in which case nothing that needs to know is placed. It asks Docker, so a caller
+     * holding a lock others wait on reads it before taking that lock.
+     */
+    public Optional<Set<String>> networkEndpointAddresses(String accountId, String region, String subnetId) {
+        String vpcKey = subnetOwner.get(key(accountId, region, subnetId));
+        VpcBinding vpc = vpcKey == null ? null : bindings.get(vpcKey);
+        if (!enabled() || vpc == null || vpc.networkName == null) {
+            return Optional.of(Set.of());
+        }
+        return endpointAddresses(vpc.networkName);
+    }
+
+    /** {@link #networkEndpointAddresses} for the network named {@code networkName}. */
+    private Optional<Set<String>> endpointAddresses(String networkName) {
+        Network network;
+        try {
+            network = dockerClient.inspectNetworkCmd().withNetworkId(networkName).exec();
+        } catch (NotFoundException notCreatedYet) {
+            return Optional.of(Set.of());
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not inspect VPC network {0}, so the addresses its containers hold are unknown: {1}",
+                    networkName, e.getMessage());
+            return Optional.empty();
+        }
+        return Optional.of(endpointAddresses(network));
+    }
+
+    private static Set<String> endpointAddresses(Network network) {
+        Set<String> addresses = new HashSet<>();
+        if (network != null && network.getContainers() != null) {
+            for (Network.ContainerNetworkConfig container : network.getContainers().values()) {
+                String address = container.getIpv4Address();
+                if (address != null && !address.isBlank()) {
+                    addresses.add(address.contains("/") ? address.substring(0, address.indexOf('/')) : address);
+                }
+            }
+        }
+        return addresses;
+    }
+
+    /**
+     * The address a container attached with none of its own takes on the VPC's network: the lowest of the VPC's range
+     * that no subnet leases and no container on the network holds. Docker would otherwise choose one itself, without
+     * knowing what Floci leased, and could take an address of a prefix a node's pods hold. Empty when the range has
+     * none left, and Docker chooses then.
+     */
+    private static Optional<String> unleasedAddress(VpcBinding vpc, Set<String> attached) {
+        Set<String> leased = new HashSet<>();
+        vpc.subnets.values().forEach(subnet -> leased.addAll(subnet.leased));
+        for (long offset = MIN_HOST_OFFSET; offset < vpc.effective.size() - 1; offset++) {
+            String address = Cidr4.format(vpc.effective.network() + offset);
+            if (!leased.contains(address) && !attached.contains(address)) {
+                return Optional.of(address);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Connects a container to the VPC's network at {@link #unleasedAddress}, or where Docker puts it when the range has
+     * none left or Docker refuses that one, which another attachment can take between the two.
+     */
+    private void connectUnplaced(VpcBinding vpc, String containerId, Set<String> attached) {
+        Optional<String> address = unleasedAddress(vpc, attached);
+        if (address.isPresent()) {
+            try {
+                dockerClient.connectToNetworkCmd()
+                        .withContainerId(containerId)
+                        .withNetworkId(vpc.networkName)
+                        .withContainerNetwork(new ContainerNetwork()
+                                .withIpamConfig(new ContainerNetwork.Ipam().withIpv4Address(address.get())))
+                        .exec();
+                return;
+            } catch (RuntimeException refused) {
+                LOG.debugv("Docker refused container {0} at {1} on VPC network {2}, so it picks the address: {3}",
+                        containerId, address.get(), vpc.networkName, refused.getMessage());
+            }
+        }
+        dockerClient.connectToNetworkCmd()
+                .withContainerId(containerId)
+                .withNetworkId(vpc.networkName)
+                .exec();
+    }
+
+    /** The addresses of the /28 prefix starting at {@code network}. */
+    public static List<String> prefixAddresses(long network) {
+        List<String> addresses = new ArrayList<>();
+        for (long offset = 0; offset < PREFIX_SIZE; offset++) {
+            addresses.add(Cidr4.format(network + offset));
+        }
+        return addresses;
+    }
+
     public void releasePrivateIp(String accountId, String region, String subnetId, String address) {
         String vpcKey = subnetOwner.get(key(accountId, region, subnetId));
         VpcBinding vpc = vpcKey == null ? null : bindings.get(vpcKey);
@@ -621,10 +796,7 @@ public class VpcNetworkManager {
                     return true;
                 }
             }
-            dockerClient.connectToNetworkCmd()
-                    .withContainerId(containerId)
-                    .withNetworkId(networkName)
-                    .exec();
+            connectUnplaced(vpc, containerId, endpointAddresses(networkName).orElse(Set.of()));
             LOG.infov("Attached container {0} to VPC network {1}", containerId, networkName);
             return true;
         } catch (Exception e) {
@@ -753,10 +925,8 @@ public class VpcNetworkManager {
             return;
         }
         try {
-            dockerClient.connectToNetworkCmd()
-                    .withContainerId(containerId)
-                    .withNetworkId(vpc.networkName)
-                    .exec();
+            connectUnplaced(vpc, containerId, network != null ? endpointAddresses(network)
+                    : endpointAddresses(vpc.networkName).orElse(Set.of()));
             vpc.flociContainerId = containerId;
             LOG.infov("Attached Floci container {0} to VPC network {1}", containerId, vpc.networkName);
         } catch (Exception e) {

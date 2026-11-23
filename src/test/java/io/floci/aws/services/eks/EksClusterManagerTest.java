@@ -121,6 +121,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
@@ -5449,6 +5450,29 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void aFirstLaunchThatFallsBackToTheBridgeGivesItsPrefixesBackWithItsAddress() {
+            when(config.services().eks().vpcPodNetwork()).thenReturn(true);
+            when(config.services().eks().vpcPodPrefixes()).thenReturn(1);
+            when(portAllocator.allocate(6440, 6499)).thenReturn(6440);
+            when(lifecycleManager.create(any())).thenReturn("cid-vpc", "cid-bridge");
+            when(lifecycleManager.startCreated(eq("cid-bridge"), any()))
+                    .thenReturn(new ContainerInfo("cid-bridge", Map.of()));
+            when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-1"))
+                    .thenReturn(Optional.of("10.0.1.25"));
+            when(ec2Service.allocateVpcPrefixes("000000000000", "us-east-1", "subnet-1", 1))
+                    .thenReturn(List.of("10.0.1.224/28"));
+            when(ec2Service.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-1", "cid-vpc", "10.0.1.25"))
+                    .thenReturn(Optional.empty());
+            Cluster cluster = vpcCluster("prefix-fallback", "vpc-1", List.of("subnet-1"));
+
+            manager.startCluster(cluster);
+
+            assertNull(cluster.getNodePrivateIp());
+            assertNull(cluster.getNodePodPrefixes());
+            verify(ec2Service).releaseVpcPrefix("000000000000", "us-east-1", "subnet-1", "10.0.1.224/28");
+        }
+
+        @Test
         void restoreClusterFailsStartAndRetainsNodeIpWhenVpcAttachFails() {
             when(lifecycleManager.findByName("floci-eks-restore-attach-fail")).thenReturn(Optional.empty());
             when(portAllocator.allocate(6440, 6499)).thenReturn(6440);
@@ -5469,6 +5493,123 @@ class EksClusterManagerTest {
             verify(lifecycleManager).removeIfExistsStrict("floci-aws-eks-restore-attach-fail", true);
             verify(lifecycleManager, Mockito.times(1)).create(any());
             verify(lifecycleManager, never()).startCreated(anyString(), any());
+        }
+
+        @Test
+        void withVpcPodNetworkANodeLeasesItsPrefixesListsThemOnItsInterfaceAndReleasesThemOnStop() {
+            when(config.services().eks().vpcPodNetwork()).thenReturn(true);
+            when(config.services().eks().vpcPodPrefixes()).thenReturn(2);
+            when(portAllocator.allocate(6440, 6499)).thenReturn(6440);
+            when(lifecycleManager.create(any())).thenReturn("cid-1");
+            when(lifecycleManager.startCreated(eq("cid-1"), any())).thenReturn(new ContainerInfo("cid-1", Map.of()));
+            when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-1"))
+                    .thenReturn(Optional.of("10.0.1.25"));
+            when(ec2Service.allocateVpcPrefixes("000000000000", "us-east-1", "subnet-1", 2))
+                    .thenReturn(List.of("10.0.1.224/28", "10.0.1.208/28"));
+            Cluster cluster = vpcCluster("prefix-cluster", "vpc-1", List.of("subnet-1"));
+
+            manager.startCluster(cluster);
+
+            assertEquals(List.of("10.0.1.224/28", "10.0.1.208/28"), cluster.getNodePodPrefixes());
+            Instance node = manager.synthesizeClusterNodeInstance(cluster, "172.17.0.2", "us-east-1", "000000000000");
+            assertEquals(List.of("10.0.1.224/28", "10.0.1.208/28"),
+                    node.getNetworkInterfaces().getFirst().getIpv4Prefixes());
+
+            manager.stopCluster(cluster);
+            verify(ec2Service).releaseVpcPrefix("000000000000", "us-east-1", "subnet-1", "10.0.1.224/28");
+            verify(ec2Service).releaseVpcPrefix("000000000000", "us-east-1", "subnet-1", "10.0.1.208/28");
+            // Kept with the cluster, as its address is, for the next start to reserve.
+            assertEquals(List.of("10.0.1.224/28", "10.0.1.208/28"), cluster.getNodePodPrefixes());
+        }
+
+        @Test
+        void aRestartReservesTheNodesPrefixesAndLeasesOnlyTheOnesItLost() {
+            when(config.services().eks().vpcPodNetwork()).thenReturn(true);
+            when(config.services().eks().vpcPodPrefixes()).thenReturn(2);
+            when(lifecycleManager.findByName("floci-eks-recreated")).thenReturn(Optional.empty());
+            when(portAllocator.allocate(6440, 6499)).thenReturn(6440);
+            when(lifecycleManager.create(any())).thenReturn("cid-recreated");
+            when(lifecycleManager.startCreated(eq("cid-recreated"), any()))
+                    .thenReturn(new ContainerInfo("cid-recreated", Map.of()));
+            when(ec2Service.reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-1", "10.0.1.25")).thenReturn(true);
+            when(ec2Service.reserveVpcPrefixes("000000000000", "us-east-1", "subnet-1",
+                    List.of("10.0.1.224/28", "10.0.1.208/28"))).thenReturn(List.of("10.0.1.224/28"));
+            when(ec2Service.allocateVpcPrefixes("000000000000", "us-east-1", "subnet-1", 1))
+                    .thenReturn(List.of("10.0.1.192/28"));
+            Cluster cluster = vpcCluster("recreated", "vpc-1", List.of("subnet-1"));
+            cluster.setNodePrivateIp("10.0.1.25");
+            cluster.setNodePodPrefixes(List.of("10.0.1.224/28", "10.0.1.208/28"));
+
+            manager.restoreCluster(cluster);
+
+            assertEquals(List.of("10.0.1.224/28", "10.0.1.192/28"), cluster.getNodePodPrefixes());
+        }
+
+        @Test
+        void anAdoptedNodeKeepsThePrefixesItCanReserveAndLeasesNoOthers() {
+            when(config.services().eks().vpcPodNetwork()).thenReturn(true);
+            when(config.services().eks().vpcPodPrefixes()).thenReturn(2);
+            when(lifecycleManager.findByName("floci-eks-survivor"))
+                    .thenReturn(Optional.of(survivingContainer("cid-survivor")));
+            when(lifecycleManager.adopt(eq("cid-survivor"), eq(List.of(6443)), any()))
+                    .thenReturn(new ContainerInfo("cid-survivor", Map.of(), Map.of(6443, 6440)));
+            when(ec2Service.reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-1", "10.0.1.25")).thenReturn(true);
+            when(ec2Service.reserveVpcPrefixes("000000000000", "us-east-1", "subnet-1",
+                    List.of("10.0.1.224/28", "10.0.1.208/28"))).thenReturn(List.of("10.0.1.224/28"));
+            Cluster cluster = vpcCluster("survivor", "vpc-1", List.of("subnet-1"));
+            cluster.setNodePrivateIp("10.0.1.25");
+            cluster.setNodePodPrefixes(List.of("10.0.1.224/28", "10.0.1.208/28"));
+
+            manager.restoreCluster(cluster);
+
+            // Its pods keep the addresses it handed out; a prefix it did not start with would not be in its config.
+            assertEquals(List.of("10.0.1.224/28"), cluster.getNodePodPrefixes());
+            verify(ec2Service, never()).allocateVpcPrefixes(anyString(), anyString(), anyString(), anyInt());
+        }
+
+        @Test
+        void aContainerReplacingAnAdoptedNodeLeasesThePrefixesTheNodeLacks() {
+            when(config.services().eks().vpcPodNetwork()).thenReturn(true);
+            when(config.services().eks().vpcPodPrefixes()).thenReturn(2);
+            when(lifecycleManager.findByName("floci-eks-survivor"))
+                    .thenReturn(Optional.of(survivingContainer("cid-survivor")));
+            when(lifecycleManager.adopt(eq("cid-survivor"), eq(List.of(6443)), any()))
+                    .thenReturn(new ContainerInfo("cid-survivor", Map.of(), Map.of(6443, 6440)));
+            when(ec2Service.reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-1", "10.0.1.25")).thenReturn(true);
+            when(ec2Service.reserveVpcPrefixes("000000000000", "us-east-1", "subnet-1", List.of("10.0.1.224/28")))
+                    .thenReturn(List.of("10.0.1.224/28"));
+            when(ec2Service.allocateVpcPrefixes("000000000000", "us-east-1", "subnet-1", 1))
+                    .thenReturn(List.of("10.0.1.192/28"));
+            when(lifecycleManager.create(any())).thenReturn("cid-new");
+            when(lifecycleManager.startCreated(eq("cid-new"), any())).thenReturn(new ContainerInfo("cid-new", Map.of()));
+            Cluster cluster = vpcCluster("survivor", "vpc-1", List.of("subnet-1"));
+            cluster.setDockerName("floci-eks-survivor");
+            cluster.setNodePrivateIp("10.0.1.25");
+            cluster.setNodePodPrefixes(List.of("10.0.1.224/28"));
+            manager.restoreCluster(cluster);
+            assertEquals(List.of("10.0.1.224/28"), cluster.getNodePodPrefixes());
+
+            assertTrue(manager.restartForNodeCapacity(cluster, "m5.large"));
+
+            assertEquals(List.of("10.0.1.224/28", "10.0.1.192/28"), cluster.getNodePodPrefixes());
+            verify(ec2Service, Mockito.times(1)).reserveVpcPrefixes(anyString(), anyString(), anyString(), anyList());
+        }
+
+        @Test
+        void withoutVpcPodNetworkANodeHoldsNoPrefixes() {
+            when(portAllocator.allocate(6440, 6499)).thenReturn(6440);
+            when(lifecycleManager.create(any())).thenReturn("cid-1");
+            when(lifecycleManager.startCreated(eq("cid-1"), any())).thenReturn(new ContainerInfo("cid-1", Map.of()));
+            when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-1"))
+                    .thenReturn(Optional.of("10.0.1.25"));
+            Cluster cluster = vpcCluster("plain-cluster", "vpc-1", List.of("subnet-1"));
+            cluster.setNodePodPrefixes(List.of("10.0.1.224/28"));
+
+            manager.startCluster(cluster);
+
+            assertNull(cluster.getNodePodPrefixes());
+            verify(ec2Service, never()).allocateVpcPrefixes(anyString(), anyString(), anyString(), anyInt());
+            verify(ec2Service, never()).reserveVpcPrefixes(anyString(), anyString(), anyString(), anyList());
         }
 
         @Test

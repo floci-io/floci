@@ -140,7 +140,7 @@ public class EksController {
      */
     private Cluster toClusterResponse(Cluster cluster) {
         if (cluster == null || (!cluster.isExplicitVersion() && cluster.getNodeInstanceType() == null
-                && cluster.getNodePrivateIp() == null
+                && cluster.getNodePrivateIp() == null && cluster.getNodePodPrefixes() == null
                 && cluster.getClusterArgs() == null && cluster.getDefaultStorageClass() == null
                 && cluster.getJoinedInstanceIds() == null && cluster.getDockerNameRegion() == null)) {
             return cluster;
@@ -150,6 +150,7 @@ public class EksController {
         response.setExplicitVersion(false);
         response.setNodeInstanceType(null);
         response.setNodePrivateIp(null);
+        response.setNodePodPrefixes(null);
         response.setClusterArgs(null);
         response.setDefaultStorageClass(null);
         response.setJoinedInstanceIds(null);
