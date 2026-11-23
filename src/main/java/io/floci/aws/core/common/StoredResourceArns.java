@@ -69,7 +69,8 @@ import java.util.Optional;
  * association or an access entry; Resource Groups, for the tags of a group; CloudWatch Logs, for a delivery, the
  * delivery destinations of a delivery source and the tags of a log group, a destination, a delivery source, a
  * delivery destination or a delivery; Pricing Calculator, for the tags of a workload estimate; Amazon Managed Service
- * for Prometheus, for the tags of a workspace or a rule groups namespace); looked up lazily by
+ * for Prometheus, for the tags of a workspace or a rule groups namespace; AWS Config, for the config rule,
+ * configuration recorder or conformance pack a name names, whose id it minted); looked up lazily by
  * {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for
  * the namespace a request or an ARN is of, so IAM never depends on that service directly.</p>
  *

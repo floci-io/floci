@@ -353,7 +353,7 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs", "cloudwatch",
-              "comprehend",
+              "comprehend", "config",
               "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms", "dynamodb", "iam")
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -596,7 +596,6 @@ NOT_COVERED: dict[str, str] = {
                   "arn:aws:codedeploy:region:account-id:instance/instance-ID and AWS's GetOnPremisesInstance example "
                   "answers instance/<name>_<id>, an id the service mints after the name; reading it needs that format "
                   "corrected",
-    "config": _LATER,
     "connect": _REST,
     "detective": _REST,
     "dlm": _REST,
@@ -1900,15 +1899,89 @@ def with_parent_ids(resources: list[dict], formats: dict[str, str], types: list[
     return found
 
 
+def region_members(models: dict[str, dict], operation: str) -> list[str]:
+    """The top-level string members of the operation's request named as a Region (`AuthorizedAwsRegion`), by name."""
+    found: set[str] = set()
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec is None or "input" not in spec or not READ_PROTOCOLS & _protocols(model):
+            continue
+        found.update(name for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items()
+                     if member.get("location") in BODY_LOCATIONS and re.search(r"region$", name, re.IGNORECASE)
+                     and model["shapes"][member["shape"]]["type"] == "string")
+    return sorted(found)
+
+
+def with_account_variables(resources: list[dict], formats: dict[str, str], accounts: list[str],
+                           regions: list[str]) -> list[dict]:
+    """The resources, each a type named by its variables whose format names an account or a Region of its own beside
+    the ARN's (Config's `aggregation-authorization/${AggregatorAccount}/${AggregatorRegion}`), taking that account
+    from the request's one account id member and that Region from its one Region member; the ARN's own account then
+    stays the caller's (`with_account`)."""
+    found = []
+    for resource in resources:
+        if "fill" not in resource or "default" in resource:
+            found.append(resource)
+            continue
+        fill = dict(resource["fill"])
+        for variable in VARIABLE_RE.findall(formats.get(resource["type"], "")):
+            if variable in fill:
+                continue
+            if variable != "Account" and variable.endswith("Account") and len(accounts) == 1:
+                fill[variable] = accounts[0]
+            elif variable != "Region" and variable.endswith("Region") and len(regions) == 1:
+                fill[variable] = regions[0]
+        found.append(dict(resource, fill=dict(sorted(fill.items()))) if fill != resource["fill"] else resource)
+    return found
+
+
 def with_account(resources: list[dict], formats: dict[str, str], accounts: list[str]) -> list[dict]:
     """The resources, each a type named by its variables taking its account from the request's one account id
     member, when it has exactly one and the type's format has an account, unless the resource applies only when that
-    member is absent."""
+    member is absent or the member fills one of the type's own variables, the account of something its ARN names."""
     if len(accounts) != 1:
         return resources
     return [dict(resource, account=accounts[0]) if "fill" in resource and "default" not in resource
             and "${Account}" in formats.get(resource["type"], "")
+            and accounts[0] not in resource["fill"].values()
             and resource.get("when", {}).get(accounts[0]) != [None] else resource for resource in resources]
+
+
+def structure_name_fields(models: dict[str, dict], operation: str, types: list[str]) -> dict[str, str]:
+    """By type, the `name` field of the operation's request's top-level structure member named after the type
+    (PutConfigurationRecorder's `ConfigurationRecorder.name`), the name the structure gives the resource; a type with
+    no such structure, or two, is left out."""
+    found: dict[str, set[str]] = {}
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec is None or "input" not in spec or not READ_PROTOCOLS & _protocols(model):
+            continue
+        for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+            shape = model["shapes"][member["shape"]]
+            if member.get("location") not in BODY_LOCATIONS or shape["type"] != "structure":
+                continue
+            fields = [field for field, inner in shape.get("members", {}).items()
+                      if field.lower() == "name" and model["shapes"][inner["shape"]]["type"] == "string"]
+            for kind in types:
+                if stem(name) == stem(kind) and len(fields) == 1:
+                    found.setdefault(kind, set()).add(f"{name}.{fields[0]}")
+    return {kind: next(iter(paths)) for kind, paths in sorted(found.items()) if len(paths) == 1}
+
+
+def with_structure_names(resources: list[dict], formats: dict[str, str], names: dict[str, str]) -> list[dict]:
+    """The resources of a type the request names but fills no variable of, whose format has one variable that is a
+    name (`configuration-recorder/${RecorderName}/${RecorderId}`), taking it from the request's structure named after
+    the type."""
+    found = []
+    for resource in resources:
+        kind = resource.get("type")
+        variables = [variable for variable in VARIABLE_RE.findall(formats.get(kind, "")) if variable.endswith("Name")
+                     and variable not in KNOWN_VARIABLES] if isinstance(kind, str) else []
+        if "fill" in resource and not resource["fill"] and kind in names and len(variables) == 1:
+            found.append(dict(resource, fill={variables[0]: names[kind]}))
+        else:
+            found.append(resource)
+    return found
 
 
 def structure_account_members(models: dict[str, dict], operation: str, types: list[str]) -> dict[str, str]:
@@ -3479,8 +3552,10 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
     resources = with_absent_arn(resources, formats, optional)
     resources = with_absent_account(resources, formats, account_members(models, name), optional)
     resources = with_map_fields(resources, types, formats, map_fields(models, name))
+    resources = with_account_variables(resources, formats, account_members(models, name), region_members(models, name))
     resources = with_account(resources, formats, account_members(models, name))
     resources = with_structure_account(resources, formats, structure_account_members(models, name, types))
+    resources = with_structure_names(resources, formats, structure_name_fields(models, name, types))
     resources = with_arn_of(resources, formats, name_or_arn_members(models, name),
                             documented_name_or_arn_members(models, name))
     resources = with_default_pairs(resources, formats, optional)

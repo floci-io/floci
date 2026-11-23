@@ -16,6 +16,9 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsStoredResourceArns;
 import io.floci.aws.services.cloudwatch.logs.model.Delivery;
+import io.floci.aws.services.configservice.AwsConfigService;
+import io.floci.aws.services.configservice.ConfigFixtures;
+import io.floci.aws.services.configservice.ConfigStoredResourceArns;
 import io.floci.aws.services.dynamodb.DynamoDbStoredResourceArns;
 import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess;
 import io.floci.aws.services.eks.EksService;
@@ -1874,6 +1877,47 @@ class ResourceArnBuilderTest {
         setFormBody("Action=PutMetricData&Version=2010-08-01&Namespace=App&MetricData.member.1.MetricName=Hits");
         assertEquals(List.of("*"),
                 builder.buildResources("cloudwatch", "cloudwatch:PutMetricData", ctx, "us-west-2", ACCOUNT, "aws"));
+    }
+
+    // ── AWS Config ──────────────────────────────────────────────────────────────
+
+    /**
+     * A config rule, a configuration recorder and a conformance pack carry an id Config mints in their ARNs, which a
+     * request naming them by name does not give, so each is checked on the ARN Config stores it under; one Config holds
+     * none of is checked on its name with that id open, or on every rule for a rule.
+     */
+    @Test
+    void configChecksARuleARecorderAndAConformancePackOnTheArnsConfigStoresThemUnder() {
+        AwsConfigService config = new AwsConfigService(new RegionResolver("us-east-1", ACCOUNT), null);
+        ConfigFixtures.Stored stored = ConfigFixtures.stored(config, "us-east-1");
+        ResourceArnBuilder reading = reading(new ConfigStoredResourceArns(config));
+
+        setJsonBody("{\"ConfigRuleName\":\"versioning\"}");
+        assertEquals(List.of(stored.rule()), config(reading, "DeleteEvaluationResults"));
+        setJsonBody("{\"ConfigurationRecorderName\":\"default\"}");
+        assertEquals(List.of(stored.recorder()), config(reading, "StopConfigurationRecorder"));
+        setJsonBody("{\"ConformancePackName\":\"pack\"}");
+        assertEquals(List.of(stored.pack()), config(reading, "DeleteConformancePack"));
+
+        setJsonBody("{\"ConfigRuleName\":\"missing\"}");
+        assertEquals(List.of("arn:aws:config:us-east-1:000000000000:config-rule/*"),
+                config(reading, "DeleteEvaluationResults"));
+        setJsonBody("{\"ConformancePackName\":\"other\"}");
+        assertEquals(List.of("arn:aws:config:us-east-1:000000000000:conformance-pack/other/*"),
+                config(reading, "DeleteConformancePack"));
+
+        // A recorder put names its recorder in its ConfigurationRecorder structure, the stored one when it exists.
+        setJsonBody("{\"ConfigurationRecorder\":{\"name\":\"default\",\"roleARN\":\"arn:aws:iam::000000000000:role/r\"}}");
+        assertEquals(List.of(stored.recorder()), config(reading, "PutConfigurationRecorder"));
+        // An aggregation authorization is the caller's, its path the account and Region it authorizes.
+        setJsonBody("{\"AuthorizedAccountId\":\"111122223333\",\"AuthorizedAwsRegion\":\"eu-west-1\"}");
+        assertEquals(List.of("arn:aws:config:us-east-1:000000000000:aggregation-authorization/111122223333/eu-west-1"),
+                config(reading, "PutAggregationAuthorization"));
+    }
+
+    /** The resources an AWS Config request is checked on, as the table reads {@code operation}. */
+    private List<String> config(ResourceArnBuilder builder, String operation) {
+        return builder.buildResources("config", "config:" + operation, ctx, "us-east-1", ACCOUNT, "aws");
     }
 
     // ── S3 and S3 Control ───────────────────────────────────────────────────────

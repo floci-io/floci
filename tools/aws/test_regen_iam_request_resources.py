@@ -549,6 +549,43 @@ def test_a_member_holding_an_account_id_gives_the_account_of_the_types_named_by_
     assert r.with_account([{"type": "thing", "fill": {}}], FORMATS, ["a", "b"]) == [{"type": "thing", "fill": {}}]
 
 
+def test_an_account_and_a_region_a_format_names_beside_its_own_take_the_requests_members(tmp_path):
+    # Config's aggregation authorization: arn:...:<caller>:aggregation-authorization/<authorized account>/<Region>.
+    formats = {"grant": "arn:${Partition}:svc:${Region}:${Account}:grant/${GranteeAccount}/${GranteeRegion}"}
+    write_models(tmp_path, {"svc": model({"PutGrant": {"AuthorizedAccountId": "AccountId",
+                                                       "AuthorizedAwsRegion": "String"}})})
+    models = r.load_models(tmp_path, {"svc"})
+    assert r.region_members(models, "PutGrant") == ["AuthorizedAwsRegion"]
+    filled = r.with_account_variables([{"type": "grant", "fill": {}}], formats,
+                                      r.account_members(models, "PutGrant"), r.region_members(models, "PutGrant"))
+    assert filled == [{"type": "grant", "fill": {"GranteeAccount": "AuthorizedAccountId",
+                                                 "GranteeRegion": "AuthorizedAwsRegion"}}]
+    # The member that fills the format's own account variable is not also the ARN's account, which stays the caller's.
+    assert r.with_account(filled, formats, ["AuthorizedAccountId"]) == filled
+    # A format naming no other account or Region is left as it is.
+    assert r.with_account_variables([{"type": "thing", "fill": {}}], FORMATS, ["registryId"], ["Region"]) == [
+        {"type": "thing", "fill": {}}]
+
+
+def test_a_structure_named_after_the_type_gives_its_name_to_a_type_named_by_nothing_else(tmp_path):
+    # Config's PutConfigurationRecorder names its recorder in ConfigurationRecorder.name.
+    service = model({"PutRecorder": {"Recorder": "Recorder"}})
+    service["shapes"]["Recorder"] = {"type": "structure", "members": {"name": {"shape": "String"},
+                                                                      "roleARN": {"shape": "String"}}}
+    write_models(tmp_path, {"svc": service})
+    models = r.load_models(tmp_path, {"svc"})
+    assert r.structure_name_fields(models, "PutRecorder", ["recorder"]) == {"recorder": "Recorder.name"}
+    formats = {"recorder": "arn:${Partition}:svc:${Region}:${Account}:recorder/${RecorderName}/${RecorderId}"}
+    assert r.with_structure_names([{"type": "recorder", "fill": {}}], formats, {"recorder": "Recorder.name"}) == [
+        {"type": "recorder", "fill": {"RecorderName": "Recorder.name"}}]
+    # A row another rule filled keeps its fill, and a format of two names says nothing about which one it is.
+    given = [{"type": "recorder", "fill": {"RecorderId": "Id"}}]
+    assert r.with_structure_names(given, formats, {"recorder": "Recorder.name"}) == given
+    two = {"recorder": "arn:${Partition}:svc:${Region}:${Account}:recorder/${GroupName}/${RecorderName}"}
+    assert r.with_structure_names([{"type": "recorder", "fill": {}}], two, {"recorder": "Recorder.name"}) == [
+        {"type": "recorder", "fill": {}}]
+
+
 def test_an_account_member_of_a_types_own_structure_gives_that_types_account_alone(tmp_path):
     service = model({"RestoreThing": {"ThingName": "String", "PoolId": "String", "OwnerAccount": "String"}})
     service["shapes"]["Thing"] = {"type": "structure", "members": {"OwnerAccount": {"shape": "String"}}}
@@ -1241,6 +1278,20 @@ def test_the_vendored_file_is_well_formed():
         "action": "comprehend:DetectSentiment", "types": [], "resources": []}
     assert operations["comprehend:DescribeDocumentClassifier"]["resources"] == [
         {"types": ["document-classifier"], "arn": "DocumentClassifierArn"}]
+    # Config is read whole: a rule is found by its name, its ARN ending in the id Config mints; a conformance pack is
+    # its name, the id it mints after it found the same way when Config holds the pack.
+    assert "config" in document["namespaces"] and "config" not in document["notCovered"]
+    assert operations["config:DeleteConfigRule"]["resources"] == [
+        {"type": "ConfigRule", "fill": {}, "find": ["ConfigRuleName"]}]
+    assert operations["config:DeleteConformancePack"]["resources"] == [
+        {"type": "ConformancePack", "fill": {"ConformancePackName": "ConformancePackName"}}]
+    # An aggregation authorization is the caller's, its path the account and Region it authorizes; a recorder put
+    # names its recorder in the ConfigurationRecorder structure.
+    assert operations["config:PutAggregationAuthorization"]["resources"] == [
+        {"type": "AggregationAuthorization",
+         "fill": {"AggregatorAccount": "AuthorizedAccountId", "AggregatorRegion": "AuthorizedAwsRegion"}}]
+    assert {"type": "ConfigurationRecorder", "fill": {"RecorderName": "ConfigurationRecorder.name"}} in operations[
+        "config:PutConfigurationRecorder"]["resources"]
     # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
     assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]

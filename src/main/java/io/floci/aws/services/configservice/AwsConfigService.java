@@ -37,6 +37,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
@@ -177,7 +178,7 @@ public class AwsConfigService {
      *  the tags alone, which TagResource/UntagResource change instead. The get-then-put runs under
      *  the lock delete takes, so a delete cannot land between them and orphan the creation tags. */
     public ConfigRule putConfigRule(String region, ConfigRule requested, List<Map<String, String>> tagList) {
-        String ruleName = requested.configRuleName();
+        String ruleName = ruleNamed(region, requested);
         if (ruleName == null) {
             throw new AwsException("InvalidParameterValueException",
                     "ConfigRuleName must be specified.", 400);
@@ -185,6 +186,29 @@ public class AwsConfigService {
         synchronized (lockFor(ruleKey(region, ruleName))) {
             return storeConfigRule(region, requested, ruleName, tagList);
         }
+    }
+
+    /**
+     * The name of the rule a put acts on. The PutConfigRule reference lets an update name its rule by
+     * {@code ConfigRuleName}, {@code ConfigRuleId} or {@code ConfigRuleArn}, and requires the name only of a new
+     * rule: a put giving an ARN or an id acts on the stored rule it names, the ARN first, and that rule keeps its
+     * name; one giving neither is the rule of its name. An ARN or id naming no rule is refused, so a put never acts
+     * on another rule than the one it names.
+     */
+    private String ruleNamed(String region, ConfigRule requested) {
+        String arn = requested.configRuleArn();
+        String id = requested.configRuleId();
+        if (isBlank(arn) && isBlank(id)) {
+            return requested.configRuleName();
+        }
+        boolean byArn = !isBlank(arn);
+        return configRules.getOrDefault(region, Map.of()).values().stream()
+                .filter(rule -> byArn ? arn.equals(rule.configRuleArn()) : id.equals(rule.configRuleId()))
+                .map(ConfigRule::configRuleName)
+                .findFirst()
+                .orElseThrow(() -> new AwsException("InvalidParameterValueException", byArn
+                        ? "The ConfigRuleArn " + arn + " does not name a config rule in this account and Region."
+                        : "The ConfigRuleId " + id + " does not name a config rule in this account and Region.", 400));
     }
 
     private ConfigRule storeConfigRule(String region, ConfigRule requested, String ruleName,
@@ -1068,6 +1092,23 @@ public class AwsConfigService {
         int end = Math.min(offset + pageSize, items.size());
         List<T> page = new ArrayList<>(items.subList(offset, end));
         return new Paged<>(page, end < items.size() ? String.valueOf(end) : null);
+    }
+
+    /**
+     * The ARN the Region's config rule, configuration recorder or conformance pack of the name is stored under, which
+     * carries the id the service minted for it; empty for a name it holds none of, any other type, or a recorder saved
+     * before recorders had an ARN. Reads the stores without adding a Region to them.
+     */
+    public Optional<String> storedArn(String type, String region, String name) {
+        return switch (type) {
+            case "ConfigRule" -> Optional.ofNullable(configRules.getOrDefault(region, Map.of()).get(name))
+                    .map(ConfigRule::configRuleArn);
+            case "ConfigurationRecorder" -> Optional.ofNullable(configurationRecorders.get(region))
+                    .filter(recorder -> recorder.name().equals(name)).map(ConfigurationRecorder::arn);
+            case "ConformancePack" -> Optional.ofNullable(conformancePacks.getOrDefault(region, Map.of()).get(name))
+                    .map(ConformancePack::conformancePackArn);
+            default -> Optional.empty();
+        };
     }
 
     // --- Helpers ---
