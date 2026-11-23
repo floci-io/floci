@@ -695,6 +695,25 @@ def test_the_vendored_reference_gives_the_types_an_action_requires():
         r.required_types("identitystore:DeleteGroupMembership", ["Group", "GroupMembership", "Identitystore"])
 
 
+def test_a_member_holding_another_services_arn_names_nothing_of_the_namespace(tmp_path):
+    # Route 53 Resolver's CreateOutpostResolver names the Outpost it runs on in its OutpostArn, an outposts ARN, whose
+    # name begins its own outpost resolver's.
+    service = model({"CreateOutpostResolver": {"Name": "String", "OutpostArn": "OutpostArn",
+                                               "ResolverArn": "ResolverArn"}})
+    service["shapes"]["OutpostArn"] = {"type": "string",
+                                       "pattern": "^arn:aws([a-z-]+)?:outposts:[a-z\\d-]+:\\d{12}:outpost/.+"}
+    service["shapes"]["ResolverArn"] = {"type": "string", "pattern": "^arn:aws([a-z-]+)?:svc:[a-z\\d-]+:\\d{12}:.+"}
+    write_models(tmp_path, {"svc": service})
+    models = r.load_models(tmp_path, {"svc"})
+    formats = {"outpost-resolver": "arn:${Partition}:svc:${Region}:${Account}:outpost-resolver/${ResourceId}"}
+    assert r.foreign_arn_members(models, "CreateOutpostResolver", formats) == {"OutpostArn"}
+    members = {"Name": "Name", "OutpostArn": "OutpostArn"}
+    assert r.resources_for("svc:CreateOutpostResolver", ["outpost-resolver"], formats, members) == [
+        {"types": ["outpost-resolver"], "arn": "OutpostArn"}]
+    assert r.resources_for("svc:CreateOutpostResolver", ["outpost-resolver"], formats, members,
+                           foreign={"OutpostArn"}) == [{"type": "outpost-resolver", "fill": {}}]
+
+
 def test_a_member_named_after_a_type_and_its_variable_fills_that_type():
     # MemoryDB's cluster and multi-Region cluster both name their variable ClusterName.
     formats = {"cluster": "arn:${Partition}:svc:${Region}:${Account}:cluster/${ClusterName}",
@@ -1482,6 +1501,13 @@ def test_the_vendored_file_is_well_formed():
     # MemoryDB is read whole: a cluster, ACL or user by its name.
     assert "memorydb" in document["namespaces"] and "memorydb" not in document["notCovered"]
     assert operations["memorydb:DeleteACL"]["resources"] == [{"type": "acl", "fill": {"AclName": "ACLName"}}]
+    # Route 53 Resolver is read whole: a rule, an endpoint or a domain list by the id its request names.
+    assert "route53resolver" in document["namespaces"] and "route53resolver" not in document["notCovered"]
+    assert operations["route53resolver:GetResolverRule"]["resources"] == [
+        {"type": "resolver-rule", "fill": {"ResourceId": "ResolverRuleId"}}]
+    # CreateOutpostResolver's OutpostArn is an Outpost's ARN, so it holds no resolver: it makes its own, id open.
+    assert operations["route53resolver:CreateOutpostResolver"]["resources"] == [
+        {"type": "outpost-resolver", "fill": {}}]
     # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
     assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]
