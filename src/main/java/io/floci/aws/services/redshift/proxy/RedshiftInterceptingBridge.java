@@ -155,8 +155,14 @@ public class RedshiftInterceptingBridge {
      * budget the caller supplies.
      */
     RedshiftInterceptingBridge(Socket client, Socket backend, ReentrantLock backendLock, long ownershipWaitMillis) {
-        this(client, backend, null, null, null, List.of(), null, null, null, null, null, null, backendLock,
-                ownershipWaitMillis, null);
+        this(client, backend, null, backendLock, ownershipWaitMillis);
+    }
+
+    /** For tests: as above, with the Spectrum interceptor whose ownership-gated paths the test drives. */
+    RedshiftInterceptingBridge(Socket client, Socket backend, SpectrumInterceptor spectrumInterceptor,
+                               ReentrantLock backendLock, long ownershipWaitMillis) {
+        this(client, backend, null, null, null, List.of(), spectrumInterceptor, "000000000000:c", "dev", null, null,
+                null, backendLock, ownershipWaitMillis, null);
     }
 
     private RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
