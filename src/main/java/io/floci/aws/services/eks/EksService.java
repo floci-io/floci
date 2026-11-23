@@ -543,6 +543,16 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
     }
 
+    /** Ends the cluster's node instance in EC2, which goes with the cluster: its stored copy and its volumes' attachments. */
+    private void endClusterNodeInstance(Cluster cluster) {
+        if (ec2Service == null || clusterManager == null) {
+            return;
+        }
+        String region = resolveClusterRegion(cluster);
+        ec2Service.endClusterNodeInstance(cluster.getAccountId(), region,
+                clusterManager.deriveClusterNodeInstanceId(cluster, region, cluster.getAccountId()));
+    }
+
     private void deleteClusterSecurityGroup(Cluster cluster) {
         if (ec2Service == null || cluster.getResourcesVpcConfig() == null) {
             return;
@@ -1571,6 +1581,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     throw e;
                 }
             }
+            endClusterNodeInstance(cluster);
             deleteClusterSecurityGroup(cluster);
             deleteNodeGroupAutoScalingGroups(cluster.getAccountId(), cluster);
             accessEntries.deleteClusterEntries(cluster);

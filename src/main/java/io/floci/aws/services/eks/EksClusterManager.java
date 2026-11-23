@@ -46,7 +46,9 @@ import io.floci.aws.services.ec2.Ec2MetadataProxy;
 import io.floci.aws.services.ec2.Ec2MetadataServer;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.VpcRouteTableListener;
+import io.floci.aws.services.ec2.model.GroupIdentifier;
 import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.ec2.model.InstanceNetworkInterface;
 import io.floci.aws.services.ec2.model.InstanceState;
 import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import io.floci.aws.services.ec2.model.Placement;
@@ -3434,6 +3436,19 @@ public class EksClusterManager
     }
 
     String deriveClusterNodeInstanceId(Cluster cluster, String region, String accountId) {
+        return "i-" + clusterNodeHex(cluster, region, accountId, "");
+    }
+
+    String deriveClusterNodeNetworkInterfaceId(Cluster cluster, String region, String accountId) {
+        return "eni-" + clusterNodeHex(cluster, region, accountId, "-eni");
+    }
+
+    private String deriveClusterNodeInterfaceAttachmentId(Cluster cluster, String region, String accountId) {
+        return "eni-attach-" + clusterNodeHex(cluster, region, accountId, "-eni-attach");
+    }
+
+    /** 17 hex digits derived from the cluster's identity and {@code purpose}, so the node's ids survive a restart. */
+    private String clusterNodeHex(Cluster cluster, String region, String accountId, String purpose) {
         String safeClusterName = (cluster != null && cluster.getName() != null && !cluster.getName().isBlank())
                 ? cluster.getName()
                 : "eks-cluster";
@@ -3444,9 +3459,9 @@ public class EksClusterManager
                 ? region
                 : clusterRegion(cluster);
 
-        String seed = safeClusterName + "-" + safeAccountId + "-" + safeRegion;
+        String seed = safeClusterName + "-" + safeAccountId + "-" + safeRegion + purpose;
         String hex = UUID.nameUUIDFromBytes(seed.getBytes(StandardCharsets.UTF_8)).toString().replace("-", "");
-        return "i-" + (hex.length() >= 17 ? hex.substring(0, 17) : (hex + "00000000000000000").substring(0, 17));
+        return hex.substring(0, 17);
     }
 
     String deriveClusterNodeInstanceId(Cluster cluster) {
@@ -3534,7 +3549,45 @@ public class EksClusterManager
         tags.add(new Tag("kubernetes.io/cluster/" + safeClusterName, "owned"));
         tags.add(new Tag(CLUSTER_NAME_TAG, safeClusterName));
         inst.setTags(tags);
+        addPrimaryNetworkInterface(inst, cluster, safeRegion, safeAccountId);
         return inst;
+    }
+
+    /**
+     * The node's primary network interface, in the node's subnet at the address leased for it there. An EKS node's
+     * interface carries the cluster security group, where the AWS Load Balancer Controller opens a target's ports, so
+     * the node instance and its interface hold it. A node outside a subnet has no interface, and neither has one
+     * without a subnet address, whose own address is then its container's on a network that is not the subnet's.
+     */
+    private void addPrimaryNetworkInterface(Instance inst, Cluster cluster, String region, String accountId) {
+        String leased = cluster.getNodePrivateIp();
+        if (inst.getVpcId() == null || inst.getSubnetId() == null || leased == null || leased.isBlank()) {
+            return;
+        }
+        List<GroupIdentifier> groups = clusterSecurityGroup(cluster, region, accountId).map(List::of).orElse(List.of());
+        inst.setSecurityGroups(new ArrayList<>(groups));
+        InstanceNetworkInterface eni = new InstanceNetworkInterface();
+        eni.setNetworkInterfaceId(deriveClusterNodeNetworkInterfaceId(cluster, region, accountId));
+        eni.setSubnetId(inst.getSubnetId());
+        eni.setVpcId(inst.getVpcId());
+        eni.setOwnerId(accountId);
+        eni.setPrivateIpAddress(inst.getPrivateIpAddress());
+        eni.setPrivateDnsName(inst.getPrivateDnsName());
+        eni.setGroups(new ArrayList<>(groups));
+        eni.setAttachmentId(deriveClusterNodeInterfaceAttachmentId(cluster, region, accountId));
+        eni.setDeviceIndex(0);
+        inst.getNetworkInterfaces().add(eni);
+    }
+
+    /** The cluster security group, named as EC2 holds it, or empty when the cluster has none EC2 holds. */
+    private Optional<GroupIdentifier> clusterSecurityGroup(Cluster cluster, String region, String accountId) {
+        String groupId = cluster.getResourcesVpcConfig() == null ? null
+                : cluster.getResourcesVpcConfig().getClusterSecurityGroupId();
+        Ec2Service ec2 = ec2Service();
+        if (groupId == null || groupId.isBlank() || ec2 == null) {
+            return Optional.empty();
+        }
+        return ec2.securityGroupName(accountId, region, groupId).map(name -> new GroupIdentifier(groupId, name));
     }
 
     @Override
