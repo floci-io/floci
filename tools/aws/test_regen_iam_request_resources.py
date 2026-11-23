@@ -104,6 +104,11 @@ def test_an_optional_arn_member_of_a_type_without_variables_names_it_when_absent
         {"type": "catalog", "fill": {}, "when": {"CatalogArn": [None]}}]
     # A required member is always there.
     assert r.with_absent_arn(named, FORMATS, set()) == named
+    # A format ending in a wildcard (DMS's `cert:*`) names every resource of its type, so a request leaving the member
+    # out names none of them.
+    wildcard = {"cert": "arn:${Partition}:svc:${Region}:${Account}:cert:*"}
+    assert r.with_absent_arn([{"types": ["cert"], "arn": "CertificateArn"}], wildcard, {"CertificateArn"}) == [
+        {"types": ["cert"], "arn": "CertificateArn"}]
 
 
 def test_an_optional_arn_member_of_a_type_with_variables_names_its_services_default_when_absent():
@@ -1292,6 +1297,12 @@ def test_the_vendored_file_is_well_formed():
          "fill": {"AggregatorAccount": "AuthorizedAccountId", "AggregatorRegion": "AuthorizedAwsRegion"}}]
     assert {"type": "ConfigurationRecorder", "fill": {"RecorderName": "ConfigurationRecorder.name"}} in operations[
         "config:PutConfigurationRecorder"]["resources"]
+    # DMS is read whole: an existing resource by the ARN its request names it by, each format ending in a literal `*`.
+    assert document["arnFormats"]["dms"]["Endpoint"] == "arn:${Partition}:dms:${Region}:${Account}:endpoint:*"
+    assert "dms" in document["namespaces"] and "dms" not in document["notCovered"]
+    assert operations["dms:DeleteEndpoint"]["resources"] == [{"types": ["Endpoint"], "arn": "EndpointArn"}]
+    # An endpoint written with no CertificateArn names no certificate.
+    assert not any(resource.get("type") == "Certificate" for resource in operations["dms:CreateEndpoint"]["resources"])
     # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
     assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]

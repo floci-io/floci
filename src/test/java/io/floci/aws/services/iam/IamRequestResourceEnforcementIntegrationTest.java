@@ -3438,6 +3438,23 @@ class IamRequestResourceEnforcementIntegrationTest {
         return adminJson("config", "StarlingDoveService." + operation).body(body).post("/").then();
     }
 
+    /**
+     * A DMS subnet group is checked on the ARN format the Service Reference gives it,
+     * {@code arn:aws:dms:<region>:<account>:subgrp:*}, so a grant on that pattern lets the request reach DMS, which
+     * answers that the group does not exist, and a grant on another type's refuses it.
+     */
+    @Test
+    void aDmsSubnetGroupIsCheckedOnTheFormatTheReferenceGivesIt() {
+        String body = "{\"ReplicationSubnetGroupIdentifier\":\"res-dms-missing-" + suffix() + "\"}";
+        User user = user("res-dms");
+        user.policy(allowOn("dms:DeleteReplicationSubnetGroup", "arn:aws:dms:" + REGION + ":" + ACCOUNT + ":subgrp:*"));
+        send(user, "dms", "AmazonDMSv20160101.DeleteReplicationSubnetGroup", "1.1", body).statusCode(400)
+                .body(containsString("ResourceNotFoundFault"));
+        user.policy(allowOn("dms:DeleteReplicationSubnetGroup", "arn:aws:dms:" + REGION + ":" + ACCOUNT + ":rep:*"));
+        refusedJson(send(user, "dms", "AmazonDMSv20160101.DeleteReplicationSubnetGroup", "1.1", body),
+                "dms:DeleteReplicationSubnetGroup");
+    }
+
     private static ValidatableResponse glue(String operation, String body) {
         return adminJson("glue", "AWSGlue." + operation).body(body).post("/").then();
     }

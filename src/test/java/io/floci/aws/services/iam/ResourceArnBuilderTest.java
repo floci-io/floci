@@ -1920,6 +1920,26 @@ class ResourceArnBuilderTest {
         return builder.buildResources("config", "config:" + operation, ctx, "us-east-1", ACCOUNT, "aws");
     }
 
+    // ── AWS DMS ─────────────────────────────────────────────────────────────────
+
+    /**
+     * The Service Reference gives each DMS type an ARN format ending in a literal {@code *}, which the reader matches
+     * as written, so a request naming an endpoint by its ARN matches no format and is checked on {@code *}, and one
+     * naming a subnet group by its identifier is checked on the format itself.
+     */
+    @Test
+    void dmsChecksASubnetGroupOnTheFormatTheReferenceGivesIt() {
+        setJsonBody("{\"EndpointArn\":\"arn:aws:dms:us-east-1:000000000000:endpoint:ABCDEFGHIJKLMNOP\"}");
+        assertEquals(List.of("*"),
+                builder.buildResources("dms", "dms:DeleteEndpoint", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ReplicationSubnetGroupIdentifier\":\"default\"}");
+        assertEquals(List.of("arn:aws:dms:us-east-1:000000000000:subgrp:*"),
+                builder.buildResources("dms", "dms:DeleteReplicationSubnetGroup", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{}");
+        assertEquals(List.of("*"),
+                builder.buildResources("dms", "dms:DescribeEndpoints", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
     // ── S3 and S3 Control ───────────────────────────────────────────────────────
 
     /** The resources an S3 or S3 Control request names, read from the generated table on the route it matches. */

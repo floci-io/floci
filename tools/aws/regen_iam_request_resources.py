@@ -353,7 +353,7 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs", "cloudwatch",
-              "comprehend", "config",
+              "comprehend", "config", "dms",
               "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms", "dynamodb", "iam")
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -599,7 +599,6 @@ NOT_COVERED: dict[str, str] = {
     "connect": _REST,
     "detective": _REST,
     "dlm": _REST,
-    "dms": _LATER,
     "elasticache": _LATER,
     "elasticbeanstalk": "not read yet: an environment's ARN carries its application's name, "
                         "`environment/<application>/<name>`, while most of its requests name it by EnvironmentName "
@@ -883,7 +882,9 @@ def with_absent_arn(resources: list[dict], formats: dict[str, str], optional: se
     out. A type whose format has no variable of its own (Security Hub's `hub/default`) has one resource in the caller's
     account and Region, the one its service acts on then (`DescribeHub` with no `HubArn`). Any other is the one its
     service uses for a request naming none (`default`), which the reader asks the service for, and none when it has
-    none: Resource Explorer's `Search` with no `ViewArn` searches with the Region's default view."""
+    none: Resource Explorer's `Search` with no `ViewArn` searches with the Region's default view. A format ending in a
+    wildcard (DMS's `cert:*`) names every resource of its type, not one, so a request leaving the member out names
+    none of them."""
     named = {resource["type"] for resource in resources if "type" in resource}
     added = []
     for resource in resources:
@@ -892,6 +893,8 @@ def with_absent_arn(resources: list[dict], formats: dict[str, str], optional: se
             continue
         for kind in resource["types"]:
             variables = [v for v in VARIABLE_RE.findall(formats.get(kind, "")) if v not in KNOWN_VARIABLES]
+            if kind in formats and "*" in VARIABLE_RE.sub("", formats[kind]):
+                continue
             if kind in formats and kind not in named and related(stem(member), stem(kind)):
                 added.append({"type": kind, "fill": {}, "when": {member: [None]}} if not variables
                              else {"type": kind, "fill": {}, "when": {member: [None]}, "default": True})
