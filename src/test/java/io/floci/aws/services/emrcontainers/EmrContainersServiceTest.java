@@ -5,12 +5,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.SparkConnectTargets;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.eks.model.AccessConfig;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.emrcontainers.EmrContainersService.ListQuery;
+import io.floci.aws.services.emrserverless.SessionServers;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.testing.MutableClock;
@@ -28,9 +30,16 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -696,7 +705,7 @@ class EmrContainersServiceTest {
         when(iam.resolveCallerArn(eq(null))).thenReturn(Optional.empty());
         return new EmrContainersService(stores.get(0), stores.get(1), stores.get(2), stores.get(3), stores.get(4),
                 mapper, new RegionResolver(REGION, ACCOUNT_ID), eks, iam, null, clock, 0, runner, executor,
-                "registry.internal/emr-on-eks/spark/%s", "floci-net", delays);
+                "registry.internal/emr-on-eks/spark/%s", "floci-net", delays, null);
     }
 
     private EmrContainersService dockerService(FakeRunner runner, QueuedExecutor executor) {
@@ -1268,6 +1277,244 @@ class EmrContainersServiceTest {
             while (!tasks.isEmpty()) {
                 runNext();
             }
+        }
+    }
+
+    // ── Managed endpoints' gateways ───────────────────────────────────────────────
+
+    // Why the gateways' probe finds none answering, until a test sets it to null.
+    private final AtomicReference<String> gatewayUnanswered = new AtomicReference<>();
+
+    // A docker service whose endpoints' gateways run on threads of their own, Floci at http://floci.test:4566/.
+    private EmrContainersService gatewayService(GatewayRunner runner,
+                                                List<AccountAwareStorageBackend<ObjectNode>> stores) {
+        IamService iam = mock(IamService.class);
+        when(iam.resolveCallerArn(eq(null))).thenReturn(Optional.empty());
+        // A pool, as the service's own is, so that its shutdown interrupts the gateways' threads.
+        SessionServers servers = new SessionServers(EmrContainersGateways.KIND, runner,
+                Executors.newCachedThreadPool(Thread.ofPlatform().daemon().factory()), null,
+                (host, port) -> gatewayUnanswered.get(), clock);
+        return new EmrContainersService(stores.get(0), stores.get(1), stores.get(2), stores.get(3), stores.get(4),
+                mapper, new RegionResolver(REGION, ACCOUNT_ID), eks, iam, null, clock, 0, runner, Runnable::run,
+                null, "floci-net", delays, new EmrContainersService.EndpointGateways(servers,
+                        "registry.internal/emr-on-eks/notebook-spark/%s", "http://floci.test:4566/"));
+    }
+
+    private String gatewayEndpoint(EmrContainersService service, String clusterId) {
+        return service.createManagedEndpoint(clusterId, json("""
+                {"name": "studio", "type": "JUPYTER_ENTERPRISE_GATEWAY", "releaseLabel": "%s",
+                 "executionRoleArn": "%s", "clientToken": "%s",
+                 "configurationOverrides": {"applicationConfiguration": [{"classification": "spark-defaults",
+                   "properties": {"spark.sql.shuffle.partitions": "4", "spark.master": "k8s://https://eks.test:443",
+                     "spark.submit.deployMode": "cluster",
+                     "spark.kubernetes.driverEnv.SPARK_DIST_CLASSPATH": "/opt/extra/*"}}]}}
+                """.formatted(RELEASE, ROLE, UUID.randomUUID()))).get("id").textValue();
+    }
+
+    private static JsonNode endpoint(EmrContainersService service, String clusterId, String endpointId) {
+        return service.describeManagedEndpoint(clusterId, endpointId).get("endpoint");
+    }
+
+    // The endpoint once it is in that state, which a gateway's thread puts it in.
+    private static JsonNode awaitEndpoint(EmrContainersService service, String clusterId, String endpointId,
+                                          String state) {
+        return await("endpoint " + endpointId + " " + state).atMost(Duration.ofSeconds(10))
+                .pollInterval(Duration.ofMillis(10))
+                .until(() -> endpoint(service, clusterId, endpointId), endpoint -> state.equals(state(endpoint)));
+    }
+
+    private String sessionToken(EmrContainersService service, String clusterId, String endpointId) {
+        return service.getManagedEndpointSessionCredentials(clusterId, endpointId,
+                json("{\"executionRoleArn\": \"%s\", \"credentialType\": \"TOKEN\"}".formatted(ROLE)))
+                .at("/credentials/token").textValue();
+    }
+
+    @Test
+    void dockerEndpointRunsItsGatewayAndIsActiveWithItsServerUrlOnceTheGatewayAnswers() {
+        GatewayRunner runner = new GatewayRunner();
+        gatewayUnanswered.set("not yet");
+        EmrContainersService service = gatewayService(runner, stores());
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String endpointId = gatewayEndpoint(service, clusterId);
+
+        JsonNode creating = endpoint(service, clusterId, endpointId);
+        assertEquals("CREATING", state(creating), "Initially, your endpoint is in the CREATING state");
+        assertFalse(creating.has("serverUrl"));
+        SparkJobRunner.Job job = runner.awaitJob(endpointId);
+        assertEquals("registry.internal/emr-on-eks/notebook-spark/emr-7.5.0:latest", job.imageTemplate());
+        assertEquals(EmrContainersGateways.PORT, job.listenPort());
+        assertEquals(ROLE, job.executionRole());
+        assertEquals("floci-net", job.dockerNetwork());
+        assertEquals("4", job.sparkDefaults().get("spark.sql.shuffle.partitions"));
+        assertEquals("false", job.sparkDefaults().get(EmrContainersGateways.PYSPARK_VIRTUALENV),
+                "a kernel in Spark's local mode runs on the image's Python");
+        assertFalse(job.sparkDefaults().containsKey("spark.master"), "the runner's local mode stands");
+        assertEquals("client", job.sparkDefaults().get("spark.submit.deployMode"));
+        assertEquals("/opt/extra/*:" + EmrContainersGateways.AWS_SDK,
+                job.environment().get(EmrContainersGateways.CLASS_PATH_VARIABLE),
+                "a kernel's driver keeps the endpoint's class path and gains S3A's AWS SDK");
+        assertEquals(EmrContainersGateways.PROGRAM, job.environment().get(EmrContainersGateways.PROGRAM_VARIABLE));
+        assertTrue(job.command().get(2).endsWith("exec python3 /tmp/floci-gateway/gateway.py"), job.command().get(2));
+
+        clock.advance(Duration.ofMinutes(3).plusSeconds(15));
+        gatewayUnanswered.set(null);
+        JsonNode active = awaitEndpoint(service, clusterId, endpointId, "ACTIVE");
+
+        assertEquals("http://floci.test:4566/_aws/emr-containers/endpoints/" + endpointId,
+                active.get("serverUrl").textValue());
+        assertEquals("Endpoint created successfully. It took 3 Minutes 15 Seconds",
+                active.get("stateDetails").textValue());
+        runner.stop(endpointId);
+    }
+
+    @Test
+    void sessionTokenReachesItsOwnEndpointsGatewayUntilItExpires() {
+        GatewayRunner runner = new GatewayRunner();
+        EmrContainersService service = gatewayService(runner, stores());
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String endpointId = gatewayEndpoint(service, clusterId);
+        String otherId = gatewayEndpoint(service, clusterId);
+        awaitEndpoint(service, clusterId, endpointId, "ACTIVE");
+        awaitEndpoint(service, clusterId, otherId, "ACTIVE");
+        String token = sessionToken(service, clusterId, endpointId);
+
+        SparkConnectTargets.Route route = service.gatewayRoute(endpointId, token).orElseThrow();
+        assertEquals("127.0.0.1", route.host());
+        assertEquals(GatewayRunner.PORT, route.port());
+        route.ended().run();
+        assertTrue(service.gatewayRoute(otherId, token).isEmpty(), "another endpoint's token is not its");
+        assertTrue(service.gatewayRoute(endpointId, "not-a-token").isEmpty());
+        assertTrue(service.gatewayRoute(endpointId, null).isEmpty());
+
+        clock.advance(Duration.ofMinutes(15));
+        SparkConnectTargets.Route expired = service.gatewayRoute(endpointId, token).orElseThrow();
+        assertEquals(SparkConnectTargets.Route.UNAUTHENTICATED, expired.status());
+        assertEquals("The authentication token has expired. Call GetManagedEndpointSessionCredentials for a new "
+                + "one.", expired.refusal());
+        runner.stop(endpointId);
+        runner.stop(otherId);
+    }
+
+    @Test
+    void deletedDockerEndpointStopsItsGatewayAndItsTokensGo() {
+        GatewayRunner runner = new GatewayRunner();
+        EmrContainersService service = gatewayService(runner, stores());
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String endpointId = gatewayEndpoint(service, clusterId);
+        awaitEndpoint(service, clusterId, endpointId, "ACTIVE");
+        String token = sessionToken(service, clusterId, endpointId);
+
+        service.deleteManagedEndpoint(clusterId, endpointId);
+        JsonNode terminated = awaitEndpoint(service, clusterId, endpointId, "TERMINATED");
+
+        assertTrue(runner.stopped.contains(endpointId));
+        assertFalse(terminated.has("serverUrl"));
+        assertTrue(service.gatewayRoute(endpointId, token).isEmpty());
+    }
+
+    @Test
+    void dockerEndpointWhoseGatewayExitsIsTerminatedWithErrors() {
+        GatewayRunner runner = new GatewayRunner();
+        EmrContainersService service = gatewayService(runner, stores());
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String endpointId = gatewayEndpoint(service, clusterId);
+        awaitEndpoint(service, clusterId, endpointId, "ACTIVE");
+
+        runner.end(endpointId, SparkJobRunner.Outcome.exitedWith(1));
+        JsonNode failed = awaitEndpoint(service, clusterId, endpointId, "TERMINATED_WITH_ERRORS");
+
+        assertEquals("INTERNAL_ERROR", failed.get("failureReason").textValue());
+        assertEquals("The endpoint's Jupyter Enterprise Gateway exited with code 1.",
+                failed.get("stateDetails").textValue());
+        assertFalse(failed.has("serverUrl"));
+    }
+
+    @Test
+    void dockerEndpointsGatewayStoppedWithFlociIsTerminatedWithErrors() {
+        GatewayRunner runner = new GatewayRunner();
+        EmrContainersService service = gatewayService(runner, stores());
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String endpointId = gatewayEndpoint(service, clusterId);
+        awaitEndpoint(service, clusterId, endpointId, "ACTIVE");
+
+        service.shutdown();
+        JsonNode lost = awaitEndpoint(service, clusterId, endpointId, "TERMINATED_WITH_ERRORS");
+
+        assertEquals("INTERNAL_ERROR", lost.get("failureReason").textValue());
+        assertEquals("The endpoint's Jupyter Enterprise Gateway stopped with Floci.",
+                lost.get("stateDetails").textValue());
+        assertFalse(lost.has("serverUrl"));
+        assertTrue(runner.stopped.isEmpty(), "nothing deleted it");
+    }
+
+    @Test
+    void dockerEndpointAnEarlierProcessRanIsTerminatedWithErrors() {
+        List<AccountAwareStorageBackend<ObjectNode>> stores = stores();
+        GatewayRunner earlierRunner = new GatewayRunner();
+        EmrContainersService earlier = gatewayService(earlierRunner, stores);
+        String clusterId = virtualCluster(earlier, EKS_CLUSTER);
+        String endpointId = gatewayEndpoint(earlier, clusterId);
+        awaitEndpoint(earlier, clusterId, endpointId, "ACTIVE");
+
+        EmrContainersService restarted = gatewayService(new GatewayRunner(), stores);
+        JsonNode lost = endpoint(restarted, clusterId, endpointId);
+
+        assertEquals("TERMINATED_WITH_ERRORS", state(lost));
+        assertEquals("INTERNAL_ERROR", lost.get("failureReason").textValue());
+        assertEquals("The endpoint's Jupyter Enterprise Gateway stopped with Floci.",
+                lost.get("stateDetails").textValue());
+        earlierRunner.stop(endpointId);
+    }
+
+    /**
+     * A runner whose gateways listen at once on 127.0.0.1:{@value #PORT} and run until they are stopped, interrupted,
+     * or ended as a test says.
+     */
+    private static final class GatewayRunner implements SparkJobRunner {
+        static final int PORT = 18888;
+        final List<Job> jobs = new CopyOnWriteArrayList<>();
+        final Set<String> stopped = ConcurrentHashMap.newKeySet();
+        private final Map<String, CompletableFuture<Outcome>> ends = new ConcurrentHashMap<>();
+
+        @Override
+        public Outcome run(Job job, Progress progress) {
+            jobs.add(job);
+            progress.started();
+            progress.listening("127.0.0.1", PORT);
+            try {
+                return end(job.runId()).get();
+            } catch (InterruptedException e) {
+                // As the Docker runner answers when Floci's shutdown interrupts it.
+                return Outcome.halted();
+            } catch (ExecutionException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+
+        @Override
+        public void stop(String runId) {
+            stopped.add(runId);
+            end(runId, Outcome.halted());
+        }
+
+        @Override
+        public void removeLeftoverDrivers(String service) {
+        }
+
+        void end(String runId, Outcome outcome) {
+            end(runId).complete(outcome);
+        }
+
+        Job awaitJob(String runId) {
+            return await("a gateway started for " + runId).atMost(Duration.ofSeconds(10))
+                    .pollInterval(Duration.ofMillis(10))
+                    .until(() -> jobs.stream().filter(started -> started.runId().equals(runId)).findFirst(),
+                            Optional::isPresent)
+                    .get();
+        }
+
+        private CompletableFuture<Outcome> end(String runId) {
+            return ends.computeIfAbsent(runId, id -> new CompletableFuture<>());
         }
     }
 

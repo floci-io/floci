@@ -227,8 +227,16 @@ public final class SessionServers {
      * session takes until it ends.
      */
     public Optional<Route> route(String token, Owner owner) {
+        return route(token, null, owner);
+    }
+
+    /**
+     * {@link #route(String, Owner)}, for a call to the server of session {@code sessionId} alone: a token given for
+     * another session is not one of its, and empty too.
+     */
+    public Optional<Route> route(String token, String sessionId, Owner owner) {
         Grant grant = grants.get(token);
-        if (grant == null) {
+        if (grant == null || sessionId != null && !sessionId.equals(grant.sessionId())) {
             return Optional.empty();
         }
         if (!clock.instant().isBefore(grant.expiresAt())) {

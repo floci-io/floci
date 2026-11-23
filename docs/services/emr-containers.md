@@ -16,9 +16,10 @@ container (see [Running job runs](#running-job-runs)).
 |-----|-------------|---------|
 | `floci.services.emrcontainers.enabled` | Whether the EMR on EKS API is enabled | `true` |
 | `floci.services.emrcontainers.job-run-duration-seconds` | In the `immediate` runner mode, how long a job run stays `RUNNING` before it is `COMPLETED`; `0` completes it as soon as it is submitted | `0` |
-| `floci.services.emrcontainers.runner-mode` | `immediate` moves job runs through their states without running anything; `docker` runs each job run's Spark job in a container (see [Running job runs](#running-job-runs)) | `immediate` |
+| `floci.services.emrcontainers.runner-mode` | `immediate` moves job runs through their states without running anything; `docker` runs each job run's Spark job in a container (see [Running job runs](#running-job-runs)), and each managed endpoint's Jupyter Enterprise Gateway (see [Running managed endpoints](#running-managed-endpoints)) | `immediate` |
 | `floci.services.emrcontainers.docker-network` | Docker network for job run containers | the global default |
 | `floci.services.emrcontainers.image-template` | Image for a `docker` job run that names no custom image, `%s` standing for its release's container image tag, `emr-7.2.0:20240610` for `emr-7.2.0-20240610` | `public.ecr.aws/emr-on-eks/spark/%s` |
+| `floci.services.emrcontainers.gateway-image-template` | Image a `docker` managed endpoint's gateway and kernels run in, `%s` standing for its release's container image tag | `public.ecr.aws/emr-on-eks/notebook-spark/%s` |
 | `floci.services.emrcontainers.reconcile-containers-on-startup` | Remove the drivers a previous run of this Floci left on the Docker daemon before the first job run starts; turn it off when two Floci instances share a daemon with the same port and no resource namespace | `true` |
 | `floci.storage.services.emrcontainers.mode` | Storage mode for EMR on EKS resources | the global storage mode |
 | `floci.storage.services.emrcontainers.flush-interval-ms` | Flush interval for persistent storage | `5000` |
@@ -106,8 +107,9 @@ parameter's value in `jobTemplateParameters`, or else its `defaultValue`. A decl
 neither, or a `NUMBER` parameter whose value is not a number, is refused with `ValidationException`; a
 placeholder no parameter declares stays as written.
 
-**Managed endpoints.** An endpoint is `ACTIVE` as soon as it is created and `TERMINATED` once deleted.
-Floci runs no Jupyter Enterprise Gateway, so an endpoint has no `serverUrl`.
+**Managed endpoints.** In the `immediate` runner mode, an endpoint is `ACTIVE` as soon as it is created and
+`TERMINATED` once deleted, and has no `serverUrl`, as nothing runs it; in the `docker` one it runs a Jupyter
+Enterprise Gateway (see [Running managed endpoints](#running-managed-endpoints)).
 `GetManagedEndpointSessionCredentials` accepts the `TOKEN` credential type alone and a duration of up to
 12 hours, 15 minutes by default, as the API reference gives them, and answers a random token.
 
@@ -198,3 +200,48 @@ wrapper with `FLOCI_SERVICES_EMRCONTAINERS_RUNNER_MODE=docker` (see [Docker](../
   makes its next attempt. A driver that cannot start, or that Floci stopped, is not retried. Floci sends no
   EMR on EKS events, so there is no `EMR Job Run New Driver Attempt` event for each new driver.
 * **Not emulated yet**: a run waits for its container however long it takes, with no `job-start-timeout`.
+
+## Running managed endpoints
+
+With `runner-mode` set to `docker`, a managed endpoint runs the Jupyter Enterprise Gateway that "provides the
+remote kernel lifecycle management capability that interactive clients need" (EMR on EKS Development Guide,
+"Overview of interactive endpoints"), so a self-hosted Jupyter or JupyterLab can run kernels on it as the guide's
+"Example: Deploy a JupyterLab notebook" does, with `JUPYTER_GATEWAY_URL` set to the endpoint's `serverUrl` and
+`JUPYTER_GATEWAY_AUTH_TOKEN` to a token `GetManagedEndpointSessionCredentials` gave for it.
+
+* **Image**: the gateway and its kernels run in one container of the release's `notebook-spark` image on Amazon
+  ECR Public, the base image of interactive endpoints ("the base image URI in your Docker file must use
+  notebook-spark in place of spark"), so `emr-7.5.0-latest` runs
+  `public.ecr.aws/emr-on-eks/notebook-spark/emr-7.5.0:latest`. That image holds jupyter_server and ipykernel but
+  no Enterprise Gateway, so a program of Floci's own serves the gateway's kernels API on jupyter_server. The first
+  endpoint of a release pulls its image. The container gets the endpoint's execution role's credentials and the
+  `spark-defaults` of its `configurationOverrides`, and reaches Floci's S3, as a job run's driver does.
+* **States**: an endpoint is `CREATING` until its gateway answers ("Initially, your endpoint is in the CREATING
+  state"), then `ACTIVE`, with its `serverUrl` and `stateDetails` "Endpoint created successfully. It took
+  *m* Minutes *s* Seconds", the guide's wording. `DeleteManagedEndpoint` makes it `TERMINATING` until its gateway
+  has stopped, then `TERMINATED`. A gateway that cannot start, exits or does not answer within 10 minutes ends its
+  endpoint `TERMINATED_WITH_ERRORS`, with `failureReason` `INTERNAL_ERROR` and a `stateDetails` of Floci's own, as
+  does Floci shutting down, and a restart that finds an endpoint still `CREATING` or `ACTIVE`, once it is read
+  again: its kernels go with the container.
+* **serverUrl**: Floci's own port, at `/_aws/emr-containers/endpoints/<endpoint-id>` under Floci's base URL, as
+  every URL Floci gives is (`FLOCI_BASE_URL`, its host replaced by `FLOCI_HOSTNAME` where that is set; see
+  [Docker Compose](../configuration/docker-compose.md)). A client that reaches Floci at another address, such as a
+  port Testcontainers maps, joins that path to the address it uses. A request there goes to the
+  endpoint's gateway, its kernels' WebSocket tunnelled through, when it carries a token given for that endpoint and
+  not yet expired, as Jupyter Enterprise Gateway takes one: its last `token` parameter, else an `Authorization: token
+  <token>` header, which is what a Jupyter client sends. Any other request gets that gateway's 401
+  `{"reason": "Unauthorized", "message": ""}`, an expired token's with a message saying so, and one to an endpoint
+  that is not `ACTIVE` gets 503.
+* **Kernels**: the image's `python3` ("Python 3"), and `spark-python-kubernetes` ("PySpark on Kubernetes", the
+  name the guide's `jupyter-kernel-overrides` example gives it), whose `spark` and `sc` are a Spark session in
+  Spark's local mode, where EMR on EKS runs each kernel and its executors in pods of their own. It runs on the image's
+  Python, with `spark.pyspark.virtualenv.enabled` set to `false`: the image's `spark-defaults.conf` turns the
+  virtualenv on, and `spark-submit` makes one on YARN and Kubernetes alone. As Jupyter Enterprise
+  Gateway does, a kernel gets the `KERNEL_` variables of its start request's `env`, which a Jupyter client sends from
+  its own environment; `KERNEL_EXTRA_SPARK_OPTS`, "additional Spark configurations for the Spark kernels", goes to
+  the PySpark kernel's `spark-submit`.
+* **Not emulated yet**: the "Apache Spark with Scala" kernel, `%%configure`, `jupyter-kernel-overrides` images,
+  `jeg-config`'s culling settings, and listing only the kernels a session token started. A browser's CORS preflight
+  (`OPTIONS`), which Jupyter Enterprise Gateway takes without a token, needs one here. Every kernel runs with
+  the endpoint's execution role, whichever role its session token was asked for with. `certificateArn` is kept,
+  and the `serverUrl` is plain HTTP on Floci's port.
