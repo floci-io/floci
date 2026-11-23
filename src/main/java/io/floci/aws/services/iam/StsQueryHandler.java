@@ -843,8 +843,8 @@ public class StsQueryHandler {
             }
             key = registeredIssuerKey(issuer.get(), keyId.get());
             if (key.isEmpty()) {
-                return WebIdentityOutcome.deny(AwsQueryResponse.error("IDPCommunicationError",
-                        "Couldn't retrieve verification key from your identity provider,  please reference "
+                return WebIdentityOutcome.deny(AwsQueryResponse.error("InvalidIdentityToken",
+                        "Couldn't retrieve verification key from your identity provider, please reference "
                                 + "AssumeRoleWithWebIdentity documentation for requirements",
                         AwsNamespaces.STS, 400));
             }
@@ -906,7 +906,7 @@ public class StsQueryHandler {
     /**
      * The key an issuer registered with {@code CreateOpenIDConnectProvider} publishes under
      * {@code keyId}, fetched from its {@code jwks_uri}. Empty when the keys cannot be fetched or
-     * none carries that id, which AWS answers as {@code IDPCommunicationError}.
+     * none carries that id, which AWS answers as {@code InvalidIdentityToken}.
      */
     private Optional<RSAPublicKey> registeredIssuerKey(String issuer, String keyId) {
         try {

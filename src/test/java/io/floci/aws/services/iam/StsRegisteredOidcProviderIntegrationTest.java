@@ -196,16 +196,16 @@ class StsRegisteredOidcProviderIntegrationTest {
     }
 
     @Test
-    void issuerWhoseKeysCannotBeFetchedAnswersIdpCommunicationError() throws Exception {
+    void issuerWhoseKeysCannotBeFetchedAnswersInvalidIdentityToken() throws Exception {
         when(issuerKeys.signingKey(issuer, KEY_ID))
                 .thenThrow(new JwtSignatureVerifier.JwtVerificationException("connection refused"));
 
         StsException error = assertThrows(StsException.class,
                 () -> assume(token(issuer, "sts.amazonaws.com", privateKey)));
 
-        assertEquals("IDPCommunicationError", error.awsErrorDetails().errorCode());
+        assertEquals("InvalidIdentityToken", error.awsErrorDetails().errorCode());
         assertEquals(400, error.statusCode());
-        assertEquals("Couldn't retrieve verification key from your identity provider,  please reference "
+        assertEquals("Couldn't retrieve verification key from your identity provider, please reference "
                 + "AssumeRoleWithWebIdentity documentation for requirements", error.awsErrorDetails().errorMessage());
     }
 

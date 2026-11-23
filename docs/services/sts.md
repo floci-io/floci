@@ -629,7 +629,7 @@ When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, a token from an issuer Floci
 
 - Floci reads `<issuer>/.well-known/openid-configuration`, fetches the key set at its `jwks_uri`, and verifies the signature with the key named by the token's `kid`. The key set is cached for 10 minutes and fetched again when a token names a key it does not hold.
 - `aud` must hold one of the provider's client IDs, and `Audience` in the response is that client ID. The other checks are the ones listed above.
-- When the key set cannot be fetched, or it holds no key with the token's `kid`, the call returns `IDPCommunicationError` (400). A token with no `kid` returns `InvalidIdentityToken`.
+- When the key set cannot be fetched, or it holds no key with the token's `kid`, the call returns `InvalidIdentityToken` (400) with "Couldn't retrieve verification key from your identity provider, please reference AssumeRoleWithWebIdentity documentation for requirements". A token with no `kid` also returns `InvalidIdentityToken`.
 - Only an `https://` issuer matches a provider, as IAM accepts only `https://` provider URLs.
 - The issuer is fetched as API Gateway fetches a JWT authorizer's issuer: over HTTPS, trusting the JVM's roots and the CAs Floci trusts for its own outbound HTTPS, and refusing a private or local address unless `FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS=true`. The provider's thumbprints are not compared.
 
