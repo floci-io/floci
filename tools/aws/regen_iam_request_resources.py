@@ -219,6 +219,19 @@ filling its variables, and on the guide's ARN format with that path where no pub
 every published path a route matches is that route's own, the `/v2` of an HTTP or WebSocket API's left out.
 `pathFormats` records the formats of those the reference gives no type, which `--check` derives again from the vendored
 pages and botocore, and `--verify` checks the vendored pages against the live ones.
+Where a KMS operation acts on several resources, or on one its request leaves out, which neither botocore nor the
+Service Reference says, they come from one more source, granted for that namespace alone: the developer guide's
+permissions table, the API reference pages it links to and the guide's key identifiers, which their own script vendors
+as they stand (`PERMISSION_SOURCES`). Each resource a row of the table lists is checked as the action it names, of the
+type it names by its name, on the member the rules read that type from or holding the botocore shape the service's
+records hold the type's variable in, the one documented as used for what the row says where it says it, and else
+through the record of another resource the row lists (`permission_resources`): ReEncrypt as `kms:ReEncryptFrom` on its
+`SourceKeyId` and `kms:ReEncryptTo` on its `DestinationKeyId`, UpdateAlias also on the key its alias points at now. An
+operation the table checks as several actions records them (`actions`, each with the types the reference gives it) and
+each resource the one it is checked as (`action`); an action on no resource is checked on `*`. A parameter whose API
+reference says KMS reads its resource out of another's metadata names it through that one when the request leaves it
+out (`with_from_metadata`: Decrypt's `KeyId`, `CiphertextBlob`), and a type the key identifiers give a name of that is
+another identifier's ARN's resource is named by that resource whole (`named_resources`, `partialArn`: `alias/<name>`).
 A qualified type the reference gives an action, one whose format is another type's and one more `:${...}` (Lambda's
 `function alias` and `function version`), which no member fills alone, is named by that type's member and the
 request's one member documented as naming the qualified types ("The version number or alias name"): Lambda's
@@ -286,6 +299,7 @@ from pathlib import Path
 
 import fetch_apigateway_arn_formats
 import fetch_athena_glue_ddl_permissions
+import fetch_kms_api_permissions
 from regen_iam_authorized_actions import (ROUTES as ROUTES_FILE, authorized_actions, fetch_references,
                                           load_s3_required, s3_query_parameters, s3_version_choices,
                                           vendored_sections)
@@ -317,10 +331,10 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs",
-              "ec2-instance-connect", "s3", "bedrock", "apigateway")
+              "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
-HAND_BUILT = ("dynamodb", "iam", "kms")
+HAND_BUILT = ("dynamodb", "iam")
 
 # ---------------------------------------------------------------------------------------------------------------------
 # MEASURED: what AWS was measured to check where neither botocore nor the Service Reference says it.
@@ -410,7 +424,8 @@ MEASURED: dict[str, tuple[list[dict], str]] = {
 # STATEMENT_SOURCES: the statements an operation's request carries that its service runs against another service as
 # the caller, and the vendored page each one's permissions come from.
 #
-# This is one of the file's two sources besides botocore and the Service Reference (`PATH_SOURCES` is the other),
+# This is one of the file's sources besides botocore and the Service Reference (`PATH_SOURCES` and
+# `PERMISSION_SOURCES` are the others),
 # granted for Athena's DDL statements alone: it is not a place for any other table. Its file is written by its own
 # script from AWS's documentation, unchanged
 # (tools/aws/fetch_athena_glue_ddl_permissions.py, with a prompt beside the file for rebuilding it when the page's
@@ -436,6 +451,35 @@ UNPARTITIONED_RE = re.compile(r"does not have partitions, do not include partiti
 PATH_SOURCES: dict[str, Path] = {
     "apigateway": REPO_ROOT / "tools/aws/sources/apigateway-arn-formats.json",
 }
+
+# ---------------------------------------------------------------------------------------------------------------------
+# PERMISSION_SOURCES: the namespaces whose documentation says which resources an operation's actions are each checked
+# on where a request names several, and where the service reads a resource the request leaves out, and the vendored
+# pages that say so.
+#
+# Granted for KMS alone, whose developer guide's permissions table says it ("kms:ReEncryptFrom on the KMS key used to
+# decrypt", "kms:ReEncryptTo on the KMS key used to encrypt"; UpdateAlias "on three resources: The alias, The currently
+# associated KMS key, The newly associated KMS key") and whose API reference says Decrypt's key may come from its
+# ciphertext ("AWS KMS can get the KMS key from metadata that it adds to the symmetric ciphertext blob"), and whose
+# key identifiers give an alias name as the alias ARN's resource ("alias/<alias-name>"). Its file is written by its own
+# script from those pages, unchanged (tools/aws/fetch_kms_api_permissions.py), and the generator only reads it
+# (`permission_resources`, `with_from_metadata`, `named_resources`): nothing about an operation is stated here.
+# ---------------------------------------------------------------------------------------------------------------------
+PERMISSION_SOURCES: dict[str, Path] = {
+    "kms": REPO_ROOT / "tools/aws/sources/kms-api-permissions.json",
+}
+# A resource a permissions row's list names, after the action it is checked as when it names one: "kms:ReEncryptFrom
+# on the KMS key used to decrypt", "The alias (in an IAM policy)"; an action checked on no resource names none ("in an
+# IAM policy in the replica Region").
+PERMISSION_ITEM_RE = re.compile(r"^(?:(?P<action>[a-z0-9-]+:[A-Za-z0-9]+)\s+)?(?P<rest>.*)$")
+NAMED_RESOURCE_RE = re.compile(r"^(?:on\s+)?the\s+(?P<phrase>.+?)(?:\s*\([^)]*\))?\s*$", re.I)
+# What a resource is used for, as the row says ("the KMS key used to decrypt") and botocore's member documents it ("the
+# KMS key that KMS will use to decrypt the ciphertext").
+USED_TO_RE = re.compile(r"\buse(?:d)? to (?P<verb>[a-z]+)\b")
+# The member a resource left out is read from, as a parameter's sentence names it ("from metadata that it adds to the
+# symmetric ciphertext blob").
+FROM_METADATA_RE = re.compile(r"\bcan get the (?P<thing>[A-Za-z ]+?) from metadata that it adds to the "
+                              r"(?P<phrase>[A-Za-z ]+?)\.?$")
 # What the route of an operation is checked as, where it is not the operation's own name: the authorized-actions file
 # `regen_iam_authorized_actions.py` writes, whose `authorizedByMethod` and `authorizedByModel` IamAuthorizedActions
 # reads.
@@ -2369,7 +2413,8 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
               routed: list[dict] | None = None) -> dict:
     """What the file says for one operation, `forwarded` being what the file records of each action a `MEASURED` entry
     names, and `routed` the resources its routes name where AWS authorizes them as their method (`routed_resources`),
-    which are then its resources."""
+    which are then its resources. `upstream` gives, for a namespace with vendored permissions, the resource types of
+    the actions they may name (`actions`)."""
     types = upstream["types"] or []
     members = request_members(models, operation.split(":", 1)[1])
     patterns = string_patterns(models, operation.split(":", 1)[1])
@@ -2381,17 +2426,32 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     targets = id_targets(operation, types, formats, models, known) if namespace_of(operation) in ID_TARGETS else None
     if targets is not None:
         return {"action": upstream["action"], "types": types, "resources": [], "targets": targets}
+    actions = None
     if routed is not None:
         resources = routed
     else:
         resources = by_client(operation, models, lambda read: read_resources(operation, types, formats, read), formats)
         resources = with_documented_creation(resources, operation, types, formats, models)
         resources = with_made(resources, operation, formats)
+        source = load_permission_source(namespace_of(operation))
+        if source is not None:
+            name = operation.split(":", 1)[1]
+            row = next((found for found in source["permissions"] if found["operation"] == name), None)
+            resources, actions = permission_resources(operation, upstream["action"], resources, row,
+                                                      {upstream["action"]: types, **(upstream.get("actions") or {})},
+                                                      formats, models)
+            resources = with_from_metadata(resources, operation,
+                                           [found for found in source["fromMetadata"] if found["operation"] == name],
+                                           models)
+            named = named_resources(source["identifiers"], formats)
+            resources = [dict(resource, partialArn=True) if resource.get("type") in named
+                         and len(resource.get("fill") or {}) == 1 else resource for resource in resources]
     uses = MEASURED.get(operation, (None, ""))[0]
     # An entry naming only another action AWS checks gives the operation no resources of its own.
     if uses is not None and not (uses and all("action" in use for use in uses)):
         resources = measured_resources(operation, types, formats, resources)
-    entry = {"action": upstream["action"], "types": types, "resources": resources}
+    entry = {"action": upstream["action"], "types": types, **({"actions": actions} if actions else {}),
+             "resources": resources}
     unread = body_only_identifiers(types, formats, resources, models, operation.split(":", 1)[1])
     if unread:
         entry["unread"] = unread
@@ -2849,6 +2909,170 @@ def namespace_routed(operations: dict[str, dict], formats: dict[str, dict[str, s
         if kinds:
             needed[namespace] = kinds
     return resources, needed
+
+
+def load_permission_source(namespace: str) -> dict | None:
+    """The namespace's vendored permission source (`PERMISSION_SOURCES`), or None for a namespace it is not granted."""
+    path = PERMISSION_SOURCES.get(namespace)
+    return None if path is None else json.loads(path.read_text(encoding="utf-8"))
+
+
+def _named_kind(operation: str, phrase: str, kinds: list[str]) -> str:
+    """The one of `kinds` a vendored phrase names by its name, a word of it ("KMS key used to decrypt" names `key`)."""
+    words = {word.lower() for word in re.findall(r"[A-Za-z]+", phrase)}
+    named = [kind for kind in kinds if kind.lower() in words]
+    if len(named) != 1:
+        raise ValueError(f"{operation}: the vendored permissions name '{phrase}', which names {named or 'none'} of the "
+                         f"types {kinds} the Service Reference gives its action")
+    return named[0]
+
+
+def _request_shapes(models: dict[str, dict], operation: str) -> dict[str, str]:
+    """The botocore shape each top-level member of the operation's request holds, in the request's order."""
+    found: dict[str, str] = {}
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec and "input" in spec:
+            for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+                found.setdefault(name, member["shape"])
+    return found
+
+
+def _held_shapes(models: dict[str, dict], member: str) -> set[str]:
+    """The botocore shapes the service's structures hold a member of that name in (KMS's `KeyId`, a `KeyIdType`)."""
+    return {held["shape"] for model in models.values() for shape in model["shapes"].values()
+            if shape.get("type") == "structure" for name, held in shape.get("members", {}).items() if name == member}
+
+
+def permission_resources(operation: str, checked_as: str, resources: list[dict], row: dict | None,
+                         known: dict[str, list[str]], formats: dict[str, str],
+                         models: dict[str, dict]) -> tuple[list[dict], dict | None]:
+    """The resources of an operation whose namespace's vendored permissions (`PERMISSION_SOURCES`) list those its
+    actions are each checked on, and those actions when the list names others than `checked_as`, the one the operation
+    is checked as otherwise, each with the
+    resource types the Service Reference gives it (`known`); the resources as they are and none when its row lists
+    none. Each item of the row's list is a resource of the type it names by its name, checked as the action it names
+    or else the row's one action, or no resource when it names none ("kms:CreateKey in an IAM policy in the replica
+    Region": that action on `*`). The members that may name a type are those the rules read it from and those holding
+    the botocore shape the service's records hold the type's variable in (`TargetKeyId`, `SourceKeyId` and
+    `DestinationKeyId` hold the `KeyIdType` of a key's `KeyId`): an item saying what its resource is used for takes the
+    member botocore documents as used for that, or for its re- form ("the KMS key used to decrypt", ReEncrypt's
+    `SourceKeyId`, "the KMS key that KMS will use to decrypt the ciphertext"; "used to encrypt", its
+    `DestinationKeyId`, "the KMS key that is used to reencrypt the data"), any other the next of them in the request's
+    order, and one no member is left for is reached through the member of another of the row's resources whose botocore
+    record holds a member of such a shape (UpdateAlias's currently associated key, through its `AliasName`:
+    `AliasListEntry` holds `AliasName` and `TargetKeyId`), which the reader asks the service for. They replace what the
+    rules read of the types the list names; an operation checked as several actions is checked on its list's resources
+    alone, each as its action (`action`)."""
+    if row is None or not row["items"]:
+        return resources, None
+    name = operation.split(":", 1)[1]
+    items = []
+    for item in row["items"]:
+        match = PERMISSION_ITEM_RE.match(item)
+        action = match.group("action") or (row["actions"][0] if len(row["actions"]) == 1 else None)
+        if action not in known:
+            raise ValueError(f"{operation}: the vendored permissions check '{item}' as {action}, which the Service "
+                             f"Reference does not have")
+        named = NAMED_RESOURCE_RE.match(match.group("rest"))
+        phrase = named.group("phrase") if named else None
+        items.append((action, None if phrase is None else _named_kind(operation, phrase, known[action]), phrase))
+    actions = list(dict.fromkeys([*row["actions"], *(action for action, _, _ in items)]))
+    several = set(actions) != {checked_as}
+    shapes = _request_shapes(models, name)
+    docs = {member: _lead(_member_documentation(models, name, member)) for member in shapes}
+    named_kinds = {kind for _, kind, _ in items if kind}
+    taken: list[str] = []
+    rows: list[dict] = []
+    for action, kind, phrase in items:
+        if kind is None:
+            continue
+        variables = [v for v in VARIABLE_RE.findall(formats[kind]) if v not in KNOWN_VARIABLES]
+        held = _held_shapes(models, variables[0]) if len(variables) == 1 else set()
+        candidates = list(dict.fromkeys(
+            [path for resource in resources if resource.get("type") == kind and len(resource.get("fill") or {}) == 1
+             for path in resource["fill"].values()]
+            + [member for member, shape in shapes.items() if shape in held]))
+        free = [member for member in candidates if member not in taken]
+        used = USED_TO_RE.search(phrase.lower())
+        if used:
+            verb = used.group("verb")
+            free = [member for member in free if (found := USED_TO_RE.search(docs[member]))
+                    and found.group("verb") in (verb, "re" + verb)]
+            if len(free) != 1:
+                raise ValueError(f"{operation}: the vendored permissions name '{phrase}', which {len(free)} members "
+                                 f"of the request are documented as used for")
+        resource: dict | None = None
+        if free:
+            taken.append(free[0])
+            resource = {"type": kind, "fill": {variables[0]: free[0]}}
+        else:
+            # Reached through another resource of the row whose record holds the type: an alias's key.
+            inputs = {spec["input"]["shape"] for model in models.values() for spec in model["operations"].values()
+                      if "input" in spec}
+            for other in rows:
+                member = next(iter(other.get("fill", {}).values()), None)
+                if other.get("type") != kind and member and any(
+                        record_name not in inputs and record.get("type") == "structure"
+                        and member in record.get("members", {})
+                        and any(held_member["shape"] in held for held_member in record["members"].values())
+                        for model in models.values() for record_name, record in model["shapes"].items()):
+                    resource = {"types": [kind], "through": member}
+                    break
+        if resource is None:
+            raise ValueError(f"{operation}: the vendored permissions name '{phrase}', which no member of the request "
+                             f"names or reaches")
+        rows.append(dict(resource, action=action) if several else resource)
+    if not several:
+        return [resource for resource in resources if not set(_kinds(resource)) & named_kinds] + rows, None
+    return rows, {action: known[action] for action in actions}
+
+
+def with_from_metadata(resources: list[dict], operation: str, sentences: list[dict],
+                       models: dict[str, dict]) -> list[dict]:
+    """The resources, and the type a member names that the vendored permissions (`PERMISSION_SOURCES`) say its service
+    gets from metadata another member holds when the request leaves it out ("If you used a symmetric encryption KMS
+    key, AWS KMS can get the KMS key from metadata that it adds to the symmetric ciphertext blob", of Decrypt's
+    `KeyId` and ReEncrypt's `SourceKeyId`), named then through that other member, the member the sentence's last words
+    name (`CiphertextBlob`), which the reader asks the service for. A resource checked as an action of its own keeps
+    it."""
+    name = operation.split(":", 1)[1]
+    given = list(_request_shapes(models, name))
+    found = list(resources)
+    for sentence in sentences:
+        match = FROM_METADATA_RE.search(sentence["sentence"])
+        words = match.group("phrase").split() if match else []
+        holder = next((joined for start in range(len(words))
+                       if (joined := "".join(word[:1].upper() + word[1:] for word in words[start:])) in given), None)
+        if holder is None or sentence["parameter"] not in given:
+            raise ValueError(f"{operation}: the vendored sentence of its {sentence['parameter']} names no member of "
+                             f"the request a resource is read from: '{sentence['sentence']}'")
+        for resource in resources:
+            fill = resource.get("fill") or {}
+            if list(fill.values()) != [sentence["parameter"]] or "type" not in resource:
+                continue
+            _named_kind(operation, match.group("thing"), [resource["type"]])
+            through = {"types": [resource["type"]], "through": holder, "when": {sentence["parameter"]: [None]}}
+            found.append(dict(through, action=resource["action"]) if "action" in resource else through)
+    return found
+
+
+def named_resources(identifiers: list[dict], formats: dict[str, str]) -> set[str]:
+    """The types the vendored permissions (`PERMISSION_SOURCES`) give an identifier of that is another's ARN's resource
+    ("alias/{alias-name}", the resource of "arn:{partition}:kms:{region}:{account-id}:alias/{alias-name}"): a type
+    whose format's resource is that identifier's literal and one variable (`alias/${Alias}`). A member naming one gives
+    that resource whole, `alias/ExampleAlias`, which the reader completes as the ARN (`partialArn`), not the
+    variable's value alone."""
+    arns = [identifier["format"] for identifier in identifiers if identifier["format"].startswith("arn:")]
+    found: set[str] = set()
+    for identifier in identifiers:
+        name = identifier["format"]
+        literal = name.split("{", 1)[0]
+        if not literal or name.startswith("arn:") or not any(arn.split(":", 5)[5:] == [name] for arn in arns):
+            continue
+        found |= {kind for kind, arn in formats.items() if ONE_VARIABLE_RE.match(_resource(arn))
+                  and _resource(arn).split("${", 1)[0] == literal}
+    return found
 
 
 def read_resources(operation: str, types: list[str], formats: dict[str, str], models: dict[str, dict]) -> list[dict]:
@@ -3642,12 +3866,19 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
     sources = load_statement_sources()
     statement_types = statement_actions(documents, sources)
     routed, path_formats = namespace_routed(covered, formats, namespaces, data)
+    # The actions a namespace's vendored permissions may name, with their resource types.
+    permission_actions = {document["Name"]: {f"{document['Name']}:{action['Name']}":
+                                             [resource["Name"] for resource in action.get("Resources") or []]
+                                             for action in document.get("Actions", [])}
+                          for document in documents if document["Name"] in PERMISSION_SOURCES}
     operations = {}
     prefixes = {namespace: namespace_id_prefixes(namespace, load_models(data, set(namespaces[namespace])),
                                                  load_examples(data, set(namespaces[namespace])))
                 for namespace in ID_TARGETS if namespace in namespaces}
     for operation, value in sorted(covered.items()):
         models = load_models(data, set(namespaces[namespace_of(operation)]))
+        if namespace_of(operation) in permission_actions:
+            value = {**value, "actions": permission_actions[namespace_of(operation)]}
         operations[operation] = entry_for(operation, value, {**formats.get(namespace_of(operation), {}),
                                                              **path_formats.get(namespace_of(operation), {})}, models,
                                           prefixes.get(namespace_of(operation)), forwarded, routed.get(operation))
@@ -3973,8 +4204,8 @@ def validate(document: dict) -> list[str]:
             problems.append(f"{operation!r} is not an operation of a namespace the file reads")
             continue
         if not isinstance(entry, dict) or not {"action", "types", "resources"} <= set(entry) <= {
-                "action", "types", "resources", "creates", "makes", "located", "locatedApart", "targets", "forwarded",
-                "ec2Query", "unread"}:
+                "action", "types", "actions", "resources", "creates", "makes", "located", "locatedApart", "targets",
+                "forwarded", "ec2Query", "unread"}:
             problems.append(f"{operation} is not an action, its types and its resources")
             continue
         if not isinstance(entry["action"], str) or not OPERATION_RE.match(entry["action"]) \
@@ -3984,14 +4215,32 @@ def validate(document: dict) -> list[str]:
         if not isinstance(types, list) or not all(isinstance(kind, str) for kind in types):
             problems.append(f"{operation} has no list of resource types")
             continue
+        several = entry.get("actions")
+        if several is not None and (namespace not in PERMISSION_SOURCES or not isinstance(several, dict)
+                                    or len(several) < 2 or not all(
+                isinstance(action, str) and OPERATION_RE.match(action) and namespace_of(action) == namespace
+                and isinstance(kinds, list)
+                and all(isinstance(kind, str) and kind in formats.get(namespace, {}) for kind in kinds)
+                for action, kinds in several.items())):
+            problems.append(f"{operation} is checked as {several!r}, which are not several actions of a namespace with "
+                            f"vendored permissions, with their resource types")
+            continue
         for resource in entry["resources"] if isinstance(entry["resources"], list) else [None]:
+            # A resource of an operation checked as several actions is checked as one of them, on that one's types.
+            acting = set(types)
+            if several is not None:
+                if not isinstance(resource, dict) or resource.get("action") not in several:
+                    problems.append(f"{operation} names {resource!r} as none of the actions it is checked as")
+                    continue
+                acting = set(several[resource["action"]])
+                resource = {key: value for key, value in resource.items() if key != "action"}
             # Only a measured entry names a type the reference omits for the action; MEASURED's admission checks
             # (see `measured_resources`) say when it may.
             measured = set(_kinds(resource)) if isinstance(resource, dict) and operation in MEASURED else set()
             # A route authorized by its method names the type of its path, which its action may not list (`--check`
             # says whether it is the one its path is).
             routed = set(formats.get(namespace, {})) if namespace in PATH_SOURCES else set()
-            problems += _resource_problems(operation, resource, set(types) | measured | routed,
+            problems += _resource_problems(operation, resource, acting | measured | routed,
                                            formats.get(namespace, {}))
         for created in entry.get("creates", []) if isinstance(entry.get("creates", []), list) else [None]:
             problems += _created_problems(operation, created, set(types), formats.get(namespace, {}))
@@ -4259,7 +4508,8 @@ def derive(document: dict, data: Path) -> list[str]:
     for operation, entry in document["operations"].items():
         namespace = namespace_of(operation)
         models = load_models(data, set(document["namespaces"][namespace]))
-        expected = entry_for(operation, {"action": entry["action"], "types": entry["types"]},
+        expected = entry_for(operation, {"action": entry["action"], "types": entry["types"],
+                                         **({"actions": entry["actions"]} if "actions" in entry else {})},
                              {**document["arnFormats"].get(namespace, {}), **path_formats.get(namespace, {})}, models,
                              prefixes.get(namespace), document["forwardedActions"], routed.get(operation))
         if expected != entry:
@@ -4322,6 +4572,30 @@ def verify_path_sources() -> list[str]:
             untrue.append(f"{' and '.join(pages)} no longer give what {PATH_SOURCES[namespace].name} holds for "
                           f"{namespace}: run {source['_source']['fetcher']}")
     return untrue
+
+
+def verify_permission_sources() -> list[str]:
+    """A vendored permission source whose pages AWS has changed."""
+    untrue: list[str] = []
+    for namespace, path in sorted(PERMISSION_SOURCES.items()):
+        source = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            changed = fetch_kms_api_permissions.stale(source, *fetch_kms_api_permissions.fetch_all())
+        except (OSError, ValueError) as e:
+            raise OSError(f"could not read {' and '.join(source['_source']['pages'])} ({e})") from e
+        if changed:
+            untrue.append(f"{' and '.join(source['_source']['pages'])} and the API reference pages they link to no "
+                          f"longer give what {path.name} holds for {namespace}: run {source['_source']['fetcher']}")
+    return untrue
+
+
+def verify_permission_actions(vendored: dict, documents: list[dict]) -> list[str]:
+    """An operation checked as several actions whose actions the Service Reference no longer gives those types."""
+    actions = {f"{document['Name']}:{action['Name']}": [resource["Name"] for resource in action.get("Resources") or []]
+               for document in documents for action in document.get("Actions", [])}
+    return [f"AWS gives {action} the resource types {actions.get(action)}, not {kinds} as {operation} records"
+            for operation, entry in sorted(vendored["operations"].items())
+            for action, kinds in (entry.get("actions") or {}).items() if actions.get(action) != kinds]
 
 
 def verify_against(vendored: dict, upstream: dict[str, dict], formats: dict[str, dict[str, str]]) -> tuple[list[str], list[str]]:
@@ -4398,9 +4672,11 @@ def main(argv: list[str] | None = None) -> int:
                                                              document["namespaces"]):
             untrue.append("resourceKeys differ from AWS Service Reference and botocore")
         untrue += verify_forwarded(document, documents)
+        untrue += verify_permission_actions(document, documents)
         try:
             untrue += verify_statements(document, documents)
             untrue += verify_path_sources()
+            untrue += verify_permission_sources()
         except OSError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2

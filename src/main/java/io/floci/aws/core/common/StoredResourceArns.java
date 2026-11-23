@@ -23,7 +23,9 @@ import java.util.Optional;
  * <p>Implemented by the service that owns such resources or whose requests name them (EventBridge, for its
  * connections and API destinations; Application Auto Scaling, for its scalable targets and their tags; Redshift
  * Data, for the Redshift Serverless workgroups it runs statements on and the targets of its sessions; Payment
- * Cryptography, for the key an alias names and the tags of a key; EMR, for the clusters of its instance groups and a
+ * Cryptography, for the key an alias names and the tags of a key; KMS, for the key an id, an alias or an
+ * ARN names, the key an alias points at, a grant is on or a ciphertext was encrypted under, and the tags of a key;
+ * EMR, for the clusters of its instance groups and a
  * tag call's resource and the tags of a cluster or a session; IAM Identity Center, for the accounts its permission
  * sets are provisioned to and the tags of an instance,
  * a permission set, an application or a trusted token issuer; Resource Explorer, for its default view and the tags
@@ -135,6 +137,15 @@ public interface StoredResourceArns {
         Map<String, String> copy = new LinkedHashMap<>();
         tags.forEach((key, value) -> copy.put(key, value == null ? "" : value));
         return copy;
+    }
+
+    /**
+     * Whether the service acts on the resource {@code arn} names, one {@link #find} gave, for a request another service
+     * forwards as the caller: false for a KMS key disabled or pending deletion, which KMS refuses such a request with,
+     * as for a resource it does not hold. True for any other.
+     */
+    default boolean usable(String arn) {
+        return true;
     }
 
     /**

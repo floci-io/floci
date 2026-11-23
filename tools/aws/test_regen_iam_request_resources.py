@@ -376,6 +376,7 @@ def isolated(monkeypatch):
     monkeypatch.setattr(r, "MEASURED", {})
     monkeypatch.setattr(r, "STATEMENT_SOURCES", {})
     monkeypatch.setattr(r, "PATH_SOURCES", {})
+    monkeypatch.setattr(r, "PERMISSION_SOURCES", {})
     return monkeypatch
 
 
@@ -2943,3 +2944,133 @@ def test_nested_record_id_finds_only_containing_and_adjacent_resource_types():
                                      members("AttachmentId", "OtherAttachmentId"), models) == []
     shapes["DescribeInterfaceResponse"] = shapes.pop("Interface")
     assert r.with_nested_record_find([], list(formats), formats, members("AttachmentId"), models) == []
+
+
+# --------------------------------------------------------------------------- #
+# PERMISSION_SOURCES: the vendored KMS permissions
+# --------------------------------------------------------------------------- #
+KEYS_FORMATS = {"alias": "arn:${Partition}:kms:${Region}:${Account}:alias/${Alias}",
+                "key": "arn:${Partition}:kms:${Region}:${Account}:key/${KeyId}"}
+KEYS_ACTIONS = {"kms:ReEncryptFrom": ["key"], "kms:ReEncryptTo": ["key"], "kms:UpdateAlias": ["alias", "key"],
+                "kms:DeleteAlias": ["alias", "key"], "kms:ReplicateKey": ["key"], "kms:CreateKey": []}
+
+
+def keys_model() -> dict:
+    """A model shaped as KMS's: ReEncrypt naming its keys by `SourceKeyId` and `DestinationKeyId`, documented as the
+    keys it decrypts and reencrypts with, the alias calls naming an alias whose record holds its `TargetKeyId`."""
+    def request(members: dict, required: list[str]) -> dict:
+        return {"type": "structure", "members": members, "required": required}
+    shapes = {
+        "KeyIdType": {"type": "string"}, "AliasNameType": {"type": "string"}, "CiphertextType": {"type": "blob"},
+        "RegionType": {"type": "string"},
+        "ReEncryptRequest": request({
+            "CiphertextBlob": {"shape": "CiphertextType"},
+            "SourceKeyId": {"shape": "KeyIdType", "documentation": "<p>Specifies the KMS key that KMS will use to "
+                                                                   "decrypt the ciphertext before it is re-encrypted."
+                                                                   "</p>"},
+            "DestinationKeyId": {"shape": "KeyIdType", "documentation": "<p>A unique identifier for the KMS key that "
+                                                                        "is used to reencrypt the data.</p>"}},
+            ["DestinationKeyId"]),
+        "UpdateAliasRequest": request({"AliasName": {"shape": "AliasNameType"},
+                                       "TargetKeyId": {"shape": "KeyIdType"}}, ["AliasName", "TargetKeyId"]),
+        "DeleteAliasRequest": request({"AliasName": {"shape": "AliasNameType"}}, ["AliasName"]),
+        "ReplicateKeyRequest": request({"KeyId": {"shape": "KeyIdType"}, "ReplicaRegion": {"shape": "RegionType"}},
+                                       ["KeyId", "ReplicaRegion"]),
+        "KeyMetadata": {"type": "structure", "members": {"KeyId": {"shape": "KeyIdType"}}},
+        "AliasListEntry": {"type": "structure", "members": {"AliasName": {"shape": "AliasNameType"},
+                                                            "TargetKeyId": {"shape": "KeyIdType"}}},
+    }
+    operations = {name: {"name": name, "input": {"shape": f"{name}Request"}}
+                  for name in ("ReEncrypt", "UpdateAlias", "DeleteAlias", "ReplicateKey")}
+    return {"metadata": {"protocol": "json", "endpointPrefix": "kms"}, "operations": operations, "shapes": shapes}
+
+
+def keys_row(operation: str, actions: list[str], items: list[str]) -> dict:
+    return {"operation": operation, "apiReference": f"https://example.com/API_{operation}.html", "actions": actions,
+            "description": [], "items": items, "policies": [{"policyType": "Key policy", "resources": "KMS key"}]}
+
+
+def test_vendored_permissions_check_each_resource_they_list_as_the_action_they_name():
+    models = {"kms": keys_model()}
+    row = keys_row("ReEncrypt", ["kms:ReEncryptFrom", "kms:ReEncryptTo"],
+                   ["kms:ReEncryptFrom on the KMS key used to decrypt",
+                    "kms:ReEncryptTo on the KMS key used to encrypt"])
+    resources, actions = r.permission_resources("kms:ReEncrypt", "kms:ReEncrypt", [], row, KEYS_ACTIONS,
+                                                KEYS_FORMATS, models)
+    assert actions == {"kms:ReEncryptFrom": ["key"], "kms:ReEncryptTo": ["key"]}
+    assert resources == [{"type": "key", "fill": {"KeyId": "SourceKeyId"}, "action": "kms:ReEncryptFrom"},
+                         {"type": "key", "fill": {"KeyId": "DestinationKeyId"}, "action": "kms:ReEncryptTo"}]
+    sentence = {"operation": "ReEncrypt", "parameter": "SourceKeyId",
+                "sentence": "If you used a symmetric encryption KMS key, AWS KMS can get the KMS key from metadata "
+                            "that it adds to the symmetric ciphertext blob."}
+    assert r.with_from_metadata(resources, "kms:ReEncrypt", [sentence], models)[2:] == [
+        {"types": ["key"], "through": "CiphertextBlob", "when": {"SourceKeyId": [None]}, "action": "kms:ReEncryptFrom"}]
+
+
+def test_a_listed_resource_no_member_names_is_reached_through_the_record_of_another_it_lists():
+    models = {"kms": keys_model()}
+    alias = {"type": "alias", "fill": {"Alias": "AliasName"}}
+    row = keys_row("UpdateAlias", ["kms:UpdateAlias"],
+                   ["The alias", "The currently associated KMS key", "The newly associated KMS key"])
+    assert r.permission_resources("kms:UpdateAlias", "kms:UpdateAlias", [alias], row, KEYS_ACTIONS, KEYS_FORMATS,
+                                  models) == (
+        [alias, {"type": "key", "fill": {"KeyId": "TargetKeyId"}}, {"types": ["key"], "through": "AliasName"}], None)
+    row = keys_row("DeleteAlias", ["kms:DeleteAlias"],
+                   ["The alias (in an IAM policy)", "The KMS key (in a key policy)"])
+    assert r.permission_resources("kms:DeleteAlias", "kms:DeleteAlias", [alias], row, KEYS_ACTIONS, KEYS_FORMATS,
+                                  models) == ([alias, {"types": ["key"], "through": "AliasName"}], None)
+
+
+def test_a_listed_action_on_no_resource_is_one_the_operation_is_checked_as():
+    row = keys_row("ReplicateKey", ["kms:ReplicateKey"],
+                   ["kms:ReplicateKey on the multi-Region primary key", "kms:CreateKey in an IAM policy in the replica "
+                                                                        "Region"])
+    assert r.permission_resources("kms:ReplicateKey", "kms:ReplicateKey", [], row, KEYS_ACTIONS, KEYS_FORMATS,
+                                  {"kms": keys_model()}) == (
+        [{"type": "key", "fill": {"KeyId": "KeyId"}, "action": "kms:ReplicateKey"}],
+        {"kms:ReplicateKey": ["key"], "kms:CreateKey": []})
+
+
+def test_vendored_permissions_the_metadata_does_not_bear_out_are_refused():
+    models = {"kms": keys_model()}
+    unknown = keys_row("ReEncrypt", [], ["kms:ReEncryptAll on the KMS key used to decrypt"])
+    with pytest.raises(ValueError, match="does not have"):
+        r.permission_resources("kms:ReEncrypt", "kms:ReEncrypt", [], unknown, KEYS_ACTIONS, KEYS_FORMATS, models)
+    undocumented = keys_row("ReEncrypt", ["kms:ReEncryptFrom"], ["kms:ReEncryptFrom on the KMS key used to sign"])
+    with pytest.raises(ValueError, match="documented as used for"):
+        r.permission_resources("kms:ReEncrypt", "kms:ReEncrypt", [], undocumented, KEYS_ACTIONS, KEYS_FORMATS, models)
+    sentence = {"operation": "ReEncrypt", "parameter": "SourceKeyId",
+                "sentence": "AWS KMS can get the KMS key from metadata that it adds to the envelope."}
+    with pytest.raises(ValueError, match="names no member"):
+        r.with_from_metadata([], "kms:ReEncrypt", [sentence], models)
+    assert r.permission_resources("kms:Encrypt", "kms:Encrypt", [{"type": "key", "fill": {"KeyId": "KeyId"}}],
+                                  keys_row("Encrypt", ["kms:Encrypt"], []), KEYS_ACTIONS, KEYS_FORMATS, models) == (
+        [{"type": "key", "fill": {"KeyId": "KeyId"}}], None)
+
+
+def test_an_identifier_given_as_another_arns_resource_names_its_type_by_that_resource():
+    identifiers = [{"identifier": "Key ARN", "sentence": "", "format": "arn:{partition}:kms:{region}:{account-id}:key/"
+                                                                        "{key-id}"},
+                   {"identifier": "Alias ARN", "sentence": "",
+                    "format": "arn:{partition}:kms:{region}:{account-id}:alias/{alias-name}"},
+                   {"identifier": "Alias name", "sentence": "", "format": "alias/{alias-name}"}]
+    assert r.named_resources(identifiers, KEYS_FORMATS) == {"alias"}
+    assert r.named_resources(identifiers[:2], KEYS_FORMATS) == set()
+
+
+def test_an_operation_checked_as_several_actions_checks_each_resource_as_one_of_them(isolated):
+    isolated.setattr(r, "PERMISSION_SOURCES", {"svc": Path("svc.json")})
+    document = good_document()
+    document["arnFormats"]["svc"]["key"] = "arn:${Partition}:svc:${Region}:${Account}:key/${KeyId}"
+    entry = {"action": "svc:ReEncrypt", "types": [],
+             "actions": {"svc:ReEncryptFrom": ["key"], "svc:ReEncryptTo": ["key"]},
+             "resources": [{"type": "key", "fill": {"KeyId": "SourceKeyId"}, "action": "svc:ReEncryptFrom"},
+                           {"type": "key", "fill": {"KeyId": "DestinationKeyId"}, "action": "svc:ReEncryptTo"}]}
+    document["operations"] = dict(sorted({**document["operations"], "svc:ReEncrypt": entry}.items()))
+    assert r.validate(document) == []
+    unchecked = dict(entry, resources=[{"type": "key", "fill": {"KeyId": "SourceKeyId"}}])
+    document["operations"]["svc:ReEncrypt"] = unchecked
+    assert any("none of the actions" in problem for problem in r.validate(document))
+    isolated.setattr(r, "PERMISSION_SOURCES", {})
+    document["operations"]["svc:ReEncrypt"] = entry
+    assert any("vendored permissions" in problem for problem in r.validate(document))

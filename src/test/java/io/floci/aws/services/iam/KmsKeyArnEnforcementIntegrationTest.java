@@ -20,6 +20,7 @@ import java.util.UUID;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
@@ -32,11 +33,12 @@ import static org.hamcrest.Matchers.equalTo;
  * and a Deny scoped to one key ARN fires for that key: the gap issue #6256 describes, where
  * every KMS call was evaluated against {@code key/*}.
  *
- * <p>The same mirror rule covers the members a handler reads that a plain {@code KeyId} does
- * not name: a {@code ReEncrypt} that names no {@code SourceKeyId} is authorized against the key
- * that encrypted its {@code CiphertextBlob}, never against a {@code KeyId} it carries, which
- * the handler ignores, and a token-only {@code RetireGrant} against the key its grant belongs
- * to, which is the key the handler retires the grant under.
+ * <p>The developer guide's permissions table gives the rest: {@code ReEncrypt} is checked as
+ * {@code kms:ReEncryptFrom} on the key it decrypts with, its {@code SourceKeyId} or else the key
+ * that encrypted its {@code CiphertextBlob}, and {@code kms:ReEncryptTo} on the key it encrypts
+ * with; {@code CreateAlias} on the alias and the key, {@code UpdateAlias} on the alias, the new
+ * key and the key the alias points at now, {@code DeleteAlias} on the alias and its key; and
+ * {@code ReplicateKey} as {@code kms:ReplicateKey} on the key and {@code kms:CreateKey}.
  */
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -144,23 +146,28 @@ class KmsKeyArnEnforcementIntegrationTest {
     }
 
     @Test
-    void aDecryptNamingNoKeyTheStoreHoldsFallsBackToEveryKeyAndTheHandlerRefusesIt() {
-        Session session = assumeRoleWith("""
+    void aDecryptWhoseCiphertextNamesNoKeyIsCheckedOnStar() {
+        Session onKeys = assumeRoleWith("""
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Allow","Action":"kms:Decrypt","Resource":"%s*"}]}"""
                 .formatted(KEY_ARN_PREFIX));
+        Session onEverything = assumeRoleWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"kms:Decrypt","Resource":"*"}]}""");
 
-        // A ciphertext no stored key answers to names every key, so a wildcard policy still
-        // matches it and the handler, not enforcement, refuses it.
-        keyCall(session, "Decrypt", "{\"CiphertextBlob\": \"AAAA\"}")
+        // A ciphertext no stored key answers to names no key, so the request is checked on *, which a policy
+        // granting every resource covers and the handler then refuses.
+        keyCall(onKeys, "Decrypt", "{\"CiphertextBlob\": \"AAAA\"}")
+                .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
+        keyCall(onEverything, "Decrypt", "{\"CiphertextBlob\": \"AAAA\"}")
                 .then().statusCode(400).body("__type", equalTo("InvalidCiphertextException"));
     }
 
     /**
      * A caller allowed on one key submits ciphertext another, denied key encrypted and
-     * carries a KeyId naming the allowed one, which the handler never reads. The source the
-     * request is authorized against is the key that encrypted the ciphertext, so the denied
-     * key's data does not come out re-encrypted under the allowed one.
+     * carries a KeyId naming the allowed one, which the handler never reads. The source
+     * {@code kms:ReEncryptFrom} is checked on is the key that encrypted the ciphertext, so the
+     * denied key's data does not come out re-encrypted under the allowed one.
      */
     @Test
     void aReEncryptIsAuthorizedAgainstTheKeyThatEncryptedTheCiphertextNotAKeyIdItCarries() {
@@ -172,8 +179,8 @@ class KmsKeyArnEnforcementIntegrationTest {
                 .then().statusCode(200).extract().path("CiphertextBlob");
         Session session = assumeRoleWith("""
                 {"Version":"2012-10-17","Statement":[
-                  {"Effect":"Allow","Action":"kms:ReEncrypt","Resource":"%s*"},
-                  {"Effect":"Deny","Action":"kms:ReEncrypt","Resource":"%s"}]}"""
+                  {"Effect":"Allow","Action":"kms:ReEncrypt*","Resource":"%s*"},
+                  {"Effect":"Deny","Action":"kms:ReEncryptFrom","Resource":"%s"}]}"""
                 .formatted(KEY_ARN_PREFIX, deniedArn));
 
         keyCall(session, "ReEncrypt",
@@ -189,41 +196,112 @@ class KmsKeyArnEnforcementIntegrationTest {
     }
 
     /**
-     * A token-only RetireGrant is authorized against the key the token's grant belongs to, the
-     * key the handler finds the grant under, so a policy allowing retirement on that key alone
-     * permits it and one allowing another key does not.
+     * ReEncrypt is checked as the two actions AWS authorizes it by, each on its own key: a
+     * caller allowed to re-encrypt from one key and to another may move data only that way, a
+     * policy naming neither is refused, and no permission named {@code kms:ReEncrypt} exists to
+     * grant it.
      */
     @Test
-    void aTokenOnlyRetireGrantIsAuthorizedAgainstTheKeyItsGrantBelongsTo() {
-        String keyArn = createKey();
-        String otherArn = createKey();
-        Grant grant = createGrantOn(keyArn);
-        Session onTheGrantsKey = assumeRoleWith(grantOperationOn("kms:RetireGrant", keyArn));
-        Session onAnotherKey = assumeRoleWith(grantOperationOn("kms:RetireGrant", otherArn));
+    void aReEncryptNeedsReEncryptFromOnItsSourceAndReEncryptToOnItsDestination() {
+        String sourceArn = createKey();
+        String destinationArn = createKey();
+        String ciphertext = accountCall("Encrypt", encryptBody(sourceArn))
+                .then().statusCode(200).extract().path("CiphertextBlob");
+        String reEncrypt = "{\"CiphertextBlob\": \"" + ciphertext + "\", \"SourceKeyId\": \"" + sourceArn
+                + "\", \"DestinationKeyId\": \"" + destinationArn + "\"}";
+        Session oneWay = assumeRoleWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"kms:ReEncryptFrom","Resource":"%s"},
+                  {"Effect":"Allow","Action":"kms:ReEncryptTo","Resource":"%s"}]}"""
+                .formatted(sourceArn, destinationArn));
+        Session backwards = assumeRoleWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"kms:ReEncryptFrom","Resource":"%s"},
+                  {"Effect":"Allow","Action":"kms:ReEncryptTo","Resource":"%s"}]}"""
+                .formatted(destinationArn, sourceArn));
+        Session byItsName = assumeRoleWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"kms:ReEncrypt","Resource":"*"}]}""");
 
-        keyCall(onAnotherKey, "RetireGrant", "{\"GrantToken\": \"" + grant.token() + "\"}")
+        keyCall(backwards, "ReEncrypt", reEncrypt)
                 .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
-        keyCall(onTheGrantsKey, "RetireGrant", "{\"GrantToken\": \"" + grant.token() + "\"}")
-                .then().statusCode(200);
-        accountCall("ListGrants", "{\"KeyId\": \"" + keyArn + "\"}")
-                .then().statusCode(200).body("Grants.size()", equalTo(0));
+        keyCall(byItsName, "ReEncrypt", reEncrypt)
+                .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
+        keyCall(oneWay, "ReEncrypt", reEncrypt)
+                .then().statusCode(200).body("KeyId", equalTo(destinationArn)).body("SourceKeyId", equalTo(sourceArn));
     }
 
-    /** A wildcard allow with a Deny on the grant's key still fires for a token-only RetireGrant. */
+    /**
+     * A RetireGrant naming its grant by its token alone names no key the table reads, so it is
+     * checked on {@code *}: a policy granting retirement on every resource allows it, one scoped
+     * to the grant's key does not.
+     */
     @Test
-    void aDenyOnTheGrantsKeyFiresForATokenOnlyRetireGrant() {
+    void aTokenOnlyRetireGrantIsCheckedOnStar() {
         String keyArn = createKey();
-        Grant grant = createGrantOn(keyArn);
-        Session session = assumeRoleWith("""
-                {"Version":"2012-10-17","Statement":[
-                  {"Effect":"Allow","Action":"kms:RetireGrant","Resource":"%s*"},
-                  {"Effect":"Deny","Action":"kms:RetireGrant","Resource":"%s"}]}"""
-                .formatted(KEY_ARN_PREFIX, keyArn));
+        Grant refused = createGrantOn(keyArn);
+        Grant retired = createGrantOn(keyArn);
+        Session onTheGrantsKey = assumeRoleWith(grantOperationOn("kms:RetireGrant", keyArn));
+        Session onEverything = assumeRoleWith(grantOperationOn("kms:RetireGrant", "*"));
 
-        keyCall(session, "RetireGrant", "{\"GrantToken\": \"" + grant.token() + "\"}")
+        keyCall(onTheGrantsKey, "RetireGrant", "{\"GrantToken\": \"" + refused.token() + "\"}")
                 .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
+        keyCall(onEverything, "RetireGrant", "{\"GrantToken\": \"" + retired.token() + "\"}")
+                .then().statusCode(200);
         accountCall("ListGrants", "{\"KeyId\": \"" + keyArn + "\"}")
                 .then().statusCode(200).body("Grants.size()", equalTo(1));
+    }
+
+    /**
+     * The alias calls need their action on the alias and on each key the permissions table
+     * names: CreateAlias on the key it associates, UpdateAlias on the new key and on the key the
+     * alias points at now, DeleteAlias on the key the alias points at.
+     */
+    @Test
+    void theAliasCallsNeedTheirActionOnTheAliasAndItsKeys() {
+        String currentArn = createKey();
+        String newArn = createKey();
+        String aliasName = "alias/" + UUID.randomUUID().toString().substring(0, 8);
+        String aliasArn = ALIAS_ARN_PREFIX + aliasName.substring("alias/".length());
+        String create = "{\"AliasName\": \"" + aliasName + "\", \"TargetKeyId\": \"" + currentArn + "\"}";
+        Session aliasOnly = assumeRoleWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["kms:CreateAlias","kms:UpdateAlias","kms:DeleteAlias"],
+                   "Resource":"%s"}]}""".formatted(aliasArn));
+        Session withKeys = assumeRoleWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["kms:CreateAlias","kms:UpdateAlias","kms:DeleteAlias"],
+                   "Resource":["%s","%s"]}]}""".formatted(aliasArn, currentArn));
+        Session withBothKeys = assumeRoleWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["kms:UpdateAlias"],"Resource":["%s","%s","%s"]}]}"""
+                .formatted(aliasArn, currentArn, newArn));
+
+        keyCall(aliasOnly, "CreateAlias", create)
+                .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
+        keyCall(withKeys, "CreateAlias", create).then().statusCode(200);
+        cleanup.register(() -> accountCall("DeleteAlias", "{\"AliasName\": \"" + aliasName + "\"}"));
+        String update = "{\"AliasName\": \"" + aliasName + "\", \"TargetKeyId\": \"" + newArn + "\"}";
+        keyCall(withKeys, "UpdateAlias", update)
+                .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
+        keyCall(withBothKeys, "UpdateAlias", update).then().statusCode(200);
+        keyCall(withKeys, "DeleteAlias", "{\"AliasName\": \"" + aliasName + "\"}")
+                .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
+        keyCall(withBothKeys, "UpdateAlias",
+                "{\"AliasName\": \"" + aliasName + "\", \"TargetKeyId\": \"" + currentArn + "\"}")
+                .then().statusCode(200);
+        keyCall(withKeys, "DeleteAlias", "{\"AliasName\": \"" + aliasName + "\"}").then().statusCode(200);
+    }
+
+    /** ReplicateKey also needs kms:CreateKey, which the permissions table lists beside kms:ReplicateKey. */
+    @Test
+    void aReplicateKeyNeedsCreateKeyBesideReplicateKey() {
+        String keyArn = createKey();
+        Session session = assumeRoleWith(grantOperationOn("kms:ReplicateKey", keyArn));
+
+        keyCall(session, "ReplicateKey", "{\"KeyId\": \"" + keyArn + "\", \"ReplicaRegion\": \"us-west-2\"}")
+                .then().statusCode(400).body("__type", equalTo("AccessDeniedException"))
+                .body("message", containsString("kms:CreateKey"));
     }
 
     /**

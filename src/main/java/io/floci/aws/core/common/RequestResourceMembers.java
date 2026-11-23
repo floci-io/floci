@@ -2,10 +2,12 @@ package io.floci.aws.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -340,7 +342,10 @@ final class RequestResourceMembers {
      * client ({@code locatedApart}), whose vendored route tells a request's client. Each operation's {@code forwarded}
      * requests are those its service makes to another as the caller, and its {@code statements} those it makes as the
      * caller to run each statement its request may carry. An {@code unread} operation names what it acts on in a body
-     * the reader does not read.
+     * the reader does not read. An operation AWS authorizes by several actions, none of its own name, has its
+     * resources under the one each is checked as ({@code checkedAs}, in the order the file gives the actions: KMS's
+     * ReEncrypt, {@code kms:ReEncryptFrom} on its source key and {@code kms:ReEncryptTo} on its destination key), and
+     * none in {@code operations}.
      */
     record Table(Map<String, List<Resource>> operations, Map<String, List<String>> types,
                  Map<String, List<Created>> creates, Map<String, List<Resource>> makes,
@@ -351,7 +356,8 @@ final class RequestResourceMembers {
                  Map<String, Map<String, Map<String, ResourceKey>>> resourceKeys,
                  Set<String> namespaces, Set<String> handBuilt, Set<String> notCovered, Set<String> otherNamespaces,
                  Map<String, List<Forwarded>> forwarded, Map<String, Map<String, List<StatementRequest>>> statements,
-                 Map<String, Map<String, Map<String, String>>> locatedApart, Set<String> unread) {
+                 Map<String, Map<String, Map<String, String>>> locatedApart, Set<String> unread,
+                 Map<String, Map<String, List<Resource>>> checkedAs) {
     }
 
     private static final class Holder {
@@ -454,6 +460,7 @@ final class RequestResourceMembers {
         });
         Map<String, Map<String, Map<String, ResourceKey>>> resourceKeys = resourceKeys(document, formats);
         Map<String, List<Resource>> entries = new LinkedHashMap<>();
+        Map<String, Map<String, List<Resource>>> checkedAs = new LinkedHashMap<>();
         Map<String, List<String>> actsOn = new LinkedHashMap<>();
         Map<String, List<Created>> creates = new LinkedHashMap<>();
         Map<String, List<Resource>> makes = new LinkedHashMap<>();
@@ -471,10 +478,26 @@ final class RequestResourceMembers {
                         + ", of no namespace it reads");
             }
             List<Resource> resources = new ArrayList<>();
+            // An operation checked as several actions has each resource checked as one of them.
+            Map<String, List<Resource>> byAction = new LinkedHashMap<>();
+            operation.getValue().path("actions").propertyStream()
+                    .forEach(action -> byAction.put(action.getKey(), new ArrayList<>()));
             for (JsonNode resource : operation.getValue().path("resources")) {
-                resources.add(resource(operation.getKey(), resource, formats.getOrDefault(namespace, Map.of())));
+                String action = resource.path("action").asText(null);
+                if (byAction.isEmpty() != (action == null) || action != null && !byAction.containsKey(action)) {
+                    throw new IllegalStateException(RESOURCE_NAME + " checks a resource of " + operation.getKey()
+                            + " as " + action + ", none of the actions it records for the operation");
+                }
+                (action == null ? resources : byAction.get(action)).add(resource(operation.getKey(),
+                        action == null ? resource : ((ObjectNode) resource.deepCopy()).without("action"),
+                        formats.getOrDefault(namespace, Map.of())));
             }
             entries.put(operation.getKey(), List.copyOf(resources));
+            if (!byAction.isEmpty()) {
+                Map<String, List<Resource>> actions = new LinkedHashMap<>();
+                byAction.forEach((action, named) -> actions.put(action, List.copyOf(named)));
+                checkedAs.put(operation.getKey(), Collections.unmodifiableMap(actions));
+            }
             List<String> types = operation.getValue().path("types").valueStream().map(JsonNode::asText).toList();
             actsOn.put(operation.getKey(), types);
             List<Resource> made = new ArrayList<>();
@@ -606,7 +629,7 @@ final class RequestResourceMembers {
                 names(document.path("handBuilt")),
                 Set.copyOf(document.path("notCovered").propertyStream().map(Map.Entry::getKey).toList()),
                 names(document.path("otherNamespaces")), Map.copyOf(forwarded), statements(document, formats),
-                Map.copyOf(locatedApart), Set.copyOf(unread));
+                Map.copyOf(locatedApart), Set.copyOf(unread), Map.copyOf(checkedAs));
     }
 
     /**

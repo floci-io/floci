@@ -519,7 +519,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         List<String> resources = resolveResourceArns(credentialScope,
-                targetResources(credentialScope, action, resolvedOperation.operation(), ctx, region, accountId));
+                targetResources(credentialScope, resolvedOperation.operation(), ctx, region, accountId));
 
         Optional<PresignedScope> presignedScope = iamService.presignedScope(akid);
         if (presignedScope.isPresent()) {
@@ -612,8 +612,24 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
             return;
         }
-        if (abortIfDenied(ctx, caller, principal, action, credentialScope, resources, targetContexts,
-                region, accountId, akid)) {
+        // An operation AWS authorizes by several actions (KMS's ReEncrypt, by kms:ReEncryptFrom on the key it decrypts
+        // with and kms:ReEncryptTo on the one it encrypts with) is checked as each on the resources the table gives
+        // it, with that action's condition keys, and not as the operation's own.
+        Map<String, List<String>> checkedAs = arnBuilder.checkedAs(credentialScope, resolvedOperation.operation(), ctx,
+                region, accountId, requestPartition());
+        for (Map.Entry<String, List<String>> checked : checkedAs.entrySet()) {
+            Map<String, List<String>> resolved =
+                    conditionContextResolver.resolve(credentialScope, checked.getKey(), ctx);
+            Map<String, List<String>> checkedContext = resolved == null ? new HashMap<>() : new HashMap<>(resolved);
+            callerArns.ifPresent(arns -> arns.putPrincipalKeys(checkedContext));
+            if (abortIfDenied(ctx, caller, principal, checked.getKey(), action, credentialScope,
+                    resolveResourceArns(credentialScope, checked.getValue()), List.of(checkedContext), region,
+                    accountId, akid)) {
+                return;
+            }
+        }
+        if (checkedAs.isEmpty() && abortIfDenied(ctx, caller, principal, action, credentialScope, resources,
+                targetContexts, region, accountId, akid)) {
             return;
         }
         if (abortIfRolePassDenied(ctx, caller, principal, callerArns.orElse(null), action, credentialScope,
@@ -1787,15 +1803,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     /**
-     * KMS targets depend on the serving operation and the request's partition, and the targets of a namespace the
-     * table of request resources reads on {@code operation}, the one the request is dispatched as (see
-     * {@link RequestResources}).
+     * The targets of a request, which the table of request resources reads on {@code operation}, the one the request
+     * is dispatched as, for a namespace it reads (see {@link RequestResources}).
      */
-    private List<String> targetResources(String credentialScope, String action, String operation,
-                                         ContainerRequestContext ctx, String region, String accountId) {
-        if ("kms".equals(credentialScope)) {
-            return arnBuilder.buildKmsResources(action, ctx, region, accountId, requestPartition());
-        }
+    private List<String> targetResources(String credentialScope, String operation, ContainerRequestContext ctx,
+                                         String region, String accountId) {
         // ARNs the table renders take the request's partition, which a Region Floci does not know cannot be mapped to.
         return arnBuilder.buildResources(credentialScope, operation, ctx, region, accountId, requestPartition());
     }

@@ -2412,6 +2412,15 @@ public class KmsService implements ResourceProvider {
     }
 
     /**
+     * The tags of the key {@code keyArn} names, read in the account and Region of the ARN, whoever is calling; none
+     * when that account holds no such key, or for an alias.
+     */
+    public Map<String, String> findKeyTags(String keyArn) {
+        return keyAt(keyArn).map(KmsKey::getTags).filter(Objects::nonNull)
+                .<Map<String, String>>map(LinkedHashMap::new).orElse(Map.of());
+    }
+
+    /**
      * The key policy of the key {@code keyArn} names, read in the account and Region of the ARN, whoever is calling,
      * which IAM evaluates as the key's resource policy; empty when that account holds no such key, or for an alias.
      */

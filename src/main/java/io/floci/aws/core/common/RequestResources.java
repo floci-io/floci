@@ -9,9 +9,11 @@ import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedMap;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -201,6 +203,35 @@ public final class RequestResources {
     }
 
     /**
+     * The actions an operation AWS authorizes by several actions, none of its own name, is checked as instead of its
+     * own, each with the ARNs of the resources the request names that it is checked on, as {@link #of} reads them:
+     * KMS's ReEncrypt, {@code kms:ReEncryptFrom} on its source key and {@code kms:ReEncryptTo} on its destination key.
+     * An action the request names no resource of is checked on {@code *}. Empty for every other operation, which is
+     * checked as its own action on what {@link #of} gives.
+     */
+    public static Map<String, List<String>> checkedAs(String operation, ContainerRequestContext ctx, String partition,
+                                                     String region, String accountId, StoredResourceArns stored,
+                                                     Map<String, String> labels) {
+        RequestResourceMembers.Table table = RequestResourceMembers.table();
+        Map<String, List<RequestResourceMembers.Resource>> actions = !readable(table, operation) ? null
+                : table.checkedAs().get(operation);
+        if (actions == null) {
+            return Map.of();
+        }
+        Map<String, String> sent = IamConditionContextResolver.formParameters(ctx);
+        JsonNode body = sent.isEmpty() ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null;
+        Map<String, String> form = ec2Query(table, operation, located(table, operation, sent, ctx, labels));
+        Map<String, List<String>> checked = new LinkedHashMap<>();
+        actions.forEach((action, resources) -> {
+            List<RequestResourceMembers.Resource> read = served(resources, ctx);
+            List<String> arns = read.isEmpty() ? List.of() : named(operation, read, formats(table, operation), form,
+                    body, partition, region, accountId, stored);
+            checked.put(action, arns.isEmpty() ? List.of("*") : arns);
+        });
+        return Collections.unmodifiableMap(checked);
+    }
+
+    /**
      * The ARNs of the resources a JSON request body names, for a call that is not an HTTP request of its own, as a
      * state machine's task to its integrated service: as {@link #of} reads the same request, whatever endpoint it
      * would have reached.
@@ -235,7 +266,8 @@ public final class RequestResources {
      * resources the request is checked on: for each of {@code resources} of the type whose record holds what the
      * action acts on, the resource that record's member names, as the action's service finds it in the account and
      * Region of the ARN, the caller's ({@code find}) or another's ({@code findInAccount}), or the value itself, not
-     * held, when it finds none. None for a resource whose service records nothing there (a snapshot under AWS's own
+     * held, when it finds none or one it does not act on for such a request ({@link StoredResourceArns#usable}: a
+     * disabled key). None for a resource whose service records nothing there (a snapshot under AWS's own
      * key records no key of the account's), or one whose policy lets every principal of its account have the service
      * act on it ({@link StoredResourceArns#grantsItsAccountThroughServices}: an AWS managed key). {@code held} is the
      * operation's service, and {@code services} gives the action's.
@@ -268,7 +300,7 @@ public final class RequestResources {
                 Optional<String> target = arn.accountId().equals(accountId)
                         ? service.find(use.type(), List.of(named.get()), arn.region())
                         : service.findInAccount(use.type(), List.of(named.get()), arn.accountId(), arn.region());
-                if (target.isEmpty()) {
+                if (target.isEmpty() || !service.usable(target.get())) {
                     found.add(new Forwarded(use.action(), named.get(), use.viaService(), use.endpoint(), false));
                 } else if (!service.grantsItsAccountThroughServices(target.get())) {
                     found.add(new Forwarded(use.action(), target.get(), use.viaService(), use.endpoint(), true));
