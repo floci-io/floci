@@ -234,13 +234,11 @@ class RequestResourceMembersTest {
         assertTrue(table.namespaces().contains("lambda"));
         assertFalse(table.handBuilt().contains("lambda"));
         assertFalse(table.handBuilt().contains("logs"));
-        assertEquals(Set.of("dynamodb"), table.namespaces().stream().filter(table.handBuilt()::contains)
+        assertEquals(Set.of(), table.namespaces().stream().filter(table.handBuilt()::contains)
                 .collect(Collectors.toSet()));
-        // What AWS was measured to check where the Service Reference lists no resource type (MEASURED).
-        assertEquals(Set.of("dynamodb:ListTables"), table.operations().keySet().stream()
+        assertEquals(Set.of(), table.operations().keySet().stream()
                 .filter(operation -> table.handBuilt().contains(operation.substring(0, operation.indexOf(':'))))
-                .collect(Collectors.toSet()),
-                "only what MEASURED gives is read in a hand-built namespace");
+                .collect(Collectors.toSet()), "nothing is read in a hand-built namespace");
         assertTrue(table.namespaces().stream().noneMatch(table.notCovered()::contains));
         assertTrue(table.operations().containsKey("rds:CreateDBParameterGroup"));
         assertTrue(table.operations().containsKey("rds:CreateDBProxy"));
@@ -371,9 +369,10 @@ class RequestResourceMembersTest {
                     + "{\"resources\":[],\"creates\":[{\"type\":\"part\",\"parent\":\"thing\",\"arn\":\"ThingArn\"}]}}}"),
                     part);
         }
-        // A member past one structure, or filling a variable from a list in a list.
+        // An ARN member past one structure, a member filling a variable past two, or one filling it from a list in a
+        // list.
         assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"types\":[\"thing\"],\"arn\":\"A[].B.ThingArn\"}")));
-        for (String bad : List.of("A.Names[]", "A[].Names[]", "A[].B.Name")) {
+        for (String bad : List.of("A.Names[]", "A[].Names[]", "A[].B.C.Name")) {
             assertThrows(IllegalStateException.class, () -> parse(document(formats,
                     "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"" + bad + "\"}}")), bad);
         }
@@ -782,7 +781,9 @@ class RequestResourceMembersTest {
     /** The value at the member's path in a body: in its list's first element, and in its field's structure. */
     private static void put(ObjectNode body, Member member, String value) {
         if (member.field() == null) {
-            if (member.list()) {
+            if (member.map()) {
+                body.putObject(member.name()).putObject(value);
+            } else if (member.list()) {
                 body.putArray(member.name()).add(value);
             } else {
                 body.put(member.name(), value);

@@ -952,8 +952,8 @@ class IamConditionContextResolverTest {
                     + "\"Key\":{\"PK\":{\"S\":\"USER_alice\"}}," + extra + "}}]}");
             JsonNode original = body.deepCopy();
             when(request.getProperty("floci.bufferedJsonBody")).thenReturn(body);
-            Map<String, List<String>> context = resolver.dynamoDbTransactionItems("dynamodb:TransactGetItems",
-                    request, "us-east-1", "000000000000").getFirst().context();
+            Map<String, List<String>> context = resolver.resolvePart("dynamodb", "dynamodb:GetItem",
+                    "dynamodb:TransactGetItems", request, body.path("TransactItems").path(0).path("Get"), "us-east-1");
             assertEquals(List.of("ALL_ATTRIBUTES"), context.get("dynamodb:Select"));
             assertEquals(List.of("PK"), context.get("dynamodb:Attributes"));
             assertEquals(List.of("USER_alice"), context.get("dynamodb:LeadingKeys"));

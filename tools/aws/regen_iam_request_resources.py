@@ -232,6 +232,14 @@ each resource the one it is checked as (`action`); an action on no resource is c
 reference says KMS reads its resource out of another's metadata names it through that one when the request leaves it
 out (`with_from_metadata`: Decrypt's `KeyId`, `CiphertextBlob`), and a type the key identifiers give a name of that is
 another identifier's ARN's resource is named by that resource whole (`named_resources`, `partialArn`: `alias/<name>`).
+DynamoDB's developer guide is granted the same way, its PartiQL page and its transactions page vendored by their own
+script: each item of a transaction is checked as the action the transactions page gives its kind, on the table its
+`TableName` names (`item_resources`: `TransactItems[].Put.TableName` as `dynamodb:PutItem`), and each PartiQL
+statement as the action the PartiQL page gives its verb, on the table or index it names, which the reader asks the
+service's parser for (`statement_resources`, `statement`, `verb`, `names`); an operation checked so records the
+actions (`actions`) and is checked on each element of a list apart. A top-level map keyed by a shape named after a type,
+held by a member named as the type's one variable elsewhere, names that type by its keys (`with_map_keys`:
+BatchGetItem's `RequestItems{}`).
 A qualified type the reference gives an action, one whose format is another type's and one more `:${...}` (Lambda's
 `function alias` and `function version`), which no member fills alone, is named by that type's member and the
 request's one member documented as naming the qualified types ("The version number or alias name"): Lambda's
@@ -299,6 +307,7 @@ from pathlib import Path
 
 import fetch_apigateway_arn_formats
 import fetch_athena_glue_ddl_permissions
+import fetch_dynamodb_permissions
 import fetch_kms_api_permissions
 from regen_iam_authorized_actions import (ROUTES as ROUTES_FILE, authorized_actions, fetch_references,
                                           load_s3_required, s3_query_parameters, s3_version_choices,
@@ -331,10 +340,10 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs",
-              "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms")
+              "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms", "dynamodb")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
-HAND_BUILT = ("dynamodb", "iam")
+HAND_BUILT = ("iam",)
 
 # ---------------------------------------------------------------------------------------------------------------------
 # MEASURED: what AWS was measured to check where neither botocore nor the Service Reference says it.
@@ -457,16 +466,28 @@ PATH_SOURCES: dict[str, Path] = {
 # on where a request names several, and where the service reads a resource the request leaves out, and the vendored
 # pages that say so.
 #
-# Granted for KMS alone, whose developer guide's permissions table says it ("kms:ReEncryptFrom on the KMS key used to
-# decrypt", "kms:ReEncryptTo on the KMS key used to encrypt"; UpdateAlias "on three resources: The alias, The currently
-# associated KMS key, The newly associated KMS key") and whose API reference says Decrypt's key may come from its
-# ciphertext ("AWS KMS can get the KMS key from metadata that it adds to the symmetric ciphertext blob"), and whose
-# key identifiers give an alias name as the alias ARN's resource ("alias/<alias-name>"). Its file is written by its own
-# script from those pages, unchanged (tools/aws/fetch_kms_api_permissions.py), and the generator only reads it
-# (`permission_resources`, `with_from_metadata`, `named_resources`): nothing about an operation is stated here.
+# Granted for KMS and DynamoDB. KMS's developer guide's permissions table says it ("kms:ReEncryptFrom on the KMS key
+# used to decrypt", "kms:ReEncryptTo on the KMS key used to encrypt"; UpdateAlias "on three resources: The alias, The
+# currently associated KMS key, The newly associated KMS key"), its API reference says Decrypt's key may come from its
+# ciphertext ("AWS KMS can get the KMS key from metadata that it adds to the symmetric ciphertext blob"), and its key
+# identifiers give an alias name as the alias ARN's resource ("alias/<alias-name>");
+# tools/aws/fetch_kms_api_permissions.py vendors those pages and `permission_resources`, `with_from_metadata` and
+# `named_resources` read them. DynamoDB's
+# developer guide gives the action each PartiQL statement's verb and each transaction item's kind is checked as ("To
+# read items using PartiQL for DynamoDB, you must have dynamodb:PartiQLSelect permission on the table or index";
+# "Permissions for Put, Update, Delete, and Get actions are governed by the permissions used for the underlying
+# PutItem, UpdateItem, DeleteItem, and GetItem operations"); tools/aws/fetch_dynamodb_permissions.py vendors those
+# pages and `item_resources` and `statement_resources` read them. Each file is written by its own script from the
+# pages, unchanged, and the generator only reads it: nothing about an operation is stated here.
 # ---------------------------------------------------------------------------------------------------------------------
 PERMISSION_SOURCES: dict[str, Path] = {
     "kms": REPO_ROOT / "tools/aws/sources/kms-api-permissions.json",
+    "dynamodb": REPO_ROOT / "tools/aws/sources/dynamodb-permissions.json",
+}
+# The script that writes each namespace's permission source, whose pages `verify_permission_sources` reads it against.
+PERMISSION_FETCHERS = {
+    "kms": fetch_kms_api_permissions,
+    "dynamodb": fetch_dynamodb_permissions,
 }
 # A resource a permissions row's list names, after the action it is checked as when it names one: "kms:ReEncryptFrom
 # on the KMS key used to decrypt", "The alias (in an IAM policy)"; an action checked on no resource names none ("in an
@@ -2434,18 +2455,24 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
         resources = with_documented_creation(resources, operation, types, formats, models)
         resources = with_made(resources, operation, formats)
         source = load_permission_source(namespace_of(operation))
-        if source is not None:
+        known = {upstream["action"]: types, **(upstream.get("actions") or {})}
+        if source is not None and "permissions" in source:
             name = operation.split(":", 1)[1]
             row = next((found for found in source["permissions"] if found["operation"] == name), None)
-            resources, actions = permission_resources(operation, upstream["action"], resources, row,
-                                                      {upstream["action"]: types, **(upstream.get("actions") or {})},
-                                                      formats, models)
+            resources, actions = permission_resources(operation, upstream["action"], resources, row, known, formats,
+                                                      models)
             resources = with_from_metadata(resources, operation,
                                            [found for found in source["fromMetadata"] if found["operation"] == name],
                                            models)
             named = named_resources(source["identifiers"], formats)
             resources = [dict(resource, partialArn=True) if resource.get("type") in named
                          and len(resource.get("fill") or {}) == 1 else resource for resource in resources]
+        if source is not None and "partiql" in source:
+            each = item_resources(operation, item_actions(source, namespace_of(operation)), known, formats, models) \
+                or statement_resources(operation, source, known, formats, models)
+            if each:
+                resources = each
+                actions = {action: known[action] for action in dict.fromkeys(row["action"] for row in each)}
     uses = MEASURED.get(operation, (None, ""))[0]
     # An entry naming only another action AWS checks gives the operation no resources of its own.
     if uses is not None and not (uses and all("action" in use for use in uses)):
@@ -3075,6 +3102,131 @@ def named_resources(identifiers: list[dict], formats: dict[str, str]) -> set[str
     return found
 
 
+def with_map_keys(resources: list[dict], types: list[str], formats: dict[str, str], models: dict[str, dict],
+                  operation: str) -> list[dict]:
+    """The resources, and a type no rule names that a top-level map of the request names by its keys: one whose botocore
+    key shape is named after the type and is a shape the service's structures hold a member named as the type's one
+    variable in (DynamoDB's BatchGetItem `RequestItems`, a `BatchGetRequestMap` keyed by `TableArn`, the shape
+    `Put.TableName` holds), each key filling that variable (`RequestItems{}`). A key of a shape any string takes
+    (EMR's `EnvironmentVariables`, keyed by `XmlStringMaxLen256`) names nothing."""
+    named = {kind for resource in resources for kind in _kinds(resource)}
+    found = list(resources)
+    for kind in types:
+        variables = [v for v in VARIABLE_RE.findall(formats.get(kind, "")) if v not in KNOWN_VARIABLES]
+        if kind in named or len(variables) != 1:
+            continue
+        held = _held_shapes(models, variables[0])
+        for model in models.values():
+            spec = model["operations"].get(operation)
+            if spec is None or "input" not in spec:
+                continue
+            for member, value in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+                shape = model["shapes"][value["shape"]]
+                row = {"type": kind, "fill": {variables[0]: f"{member}{{}}"}}
+                key = shape.get("key", {}).get("shape", "")
+                if shape.get("type") == "map" and key in held and related(stem(key), stem(kind)) and row not in found:
+                    found.append(row)
+            break
+    return found
+
+
+def item_actions(source: dict, namespace: str) -> dict[str, str]:
+    """The action each kind of a transaction's item is checked as, as the vendored transactions page pairs them, each
+    sentence naming the kinds and then, in the same order, their operations or actions ("Permissions for Put, Update,
+    Delete, and Get actions are governed by the permissions used for the underlying PutItem, UpdateItem, DeleteItem, and
+    GetItem operations"; "For the ConditionCheck action, you can use the dynamodb:ConditionCheckItem permission")."""
+    found: dict[str, str] = {}
+    for sentence in source.get("transactions", {}).get("sentences", []):
+        codes = sentence["code"]
+        if not codes or len(codes) % 2:
+            raise ValueError(f"the vendored transactions sentence '{sentence['text']}' pairs no kinds with actions")
+        half = len(codes) // 2
+        for kind, action in zip(codes[:half], codes[half:]):
+            found[kind] = action if ":" in action else f"{namespace}:{action}"
+    return found
+
+
+def item_resources(operation: str, kinds: dict[str, str], known: dict[str, list[str]], formats: dict[str, str],
+                   models: dict[str, dict]) -> list[dict]:
+    """The resources of a transaction, each item checked as the action the vendored page gives its kind (`kinds`), on
+    the resource of each type that action acts on whose one variable a member of that name in the item fills: a
+    TransactWriteItems' `TransactItems[].Put.TableName` as `dynamodb:PutItem`, its `TransactItems[].ConditionCheck.
+    TableName` as `dynamodb:ConditionCheckItem`. The request's items are the elements of a top-level list whose botocore
+    structure holds members named as those kinds. None for a request of no such list."""
+    name = operation.split(":", 1)[1]
+    rows: list[dict] = []
+    for model in models.values():
+        spec = model["operations"].get(name)
+        if spec is None or "input" not in spec:
+            continue
+        for member, held in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+            listed = model["shapes"][held["shape"]]
+            element = model["shapes"].get(listed.get("member", {}).get("shape", ""), {})
+            if listed.get("type") != "list" or element.get("type") != "structure":
+                continue
+            for kind, item in element.get("members", {}).items():
+                action = kinds.get(kind)
+                fields = model["shapes"][item["shape"]].get("members", {})
+                for type_ in (known.get(action) or []) if action else []:
+                    variables = [v for v in VARIABLE_RE.findall(formats.get(type_, "")) if v not in KNOWN_VARIABLES]
+                    if len(variables) == 1 and variables[0] in fields:
+                        row = {"type": type_, "fill": {variables[0]: f"{member}[].{kind}.{variables[0]}"},
+                               "action": action}
+                        if row not in rows:
+                            rows.append(row)
+        break
+    return rows
+
+
+def statement_resources(operation: str, source: dict, known: dict[str, list[str]], formats: dict[str, str],
+                        models: dict[str, dict]) -> list[dict]:
+    """The resources of a request carrying statements in the language the vendored PartiQL page names, each checked as
+    the action the page gives its verb, on the types of its "table or index" the action acts on (`statement`, `verb`):
+    the reader asks the service for each statement's verb and the names of what it acts on, as its parser reads them,
+    and checks it as the action named after that verb (`dynamodb:PartiQLSelect` for a SELECT). The statements are the
+    request's members, top-level or a field of each element of a top-level list, holding the botocore shape named as
+    that language and `Statement` (`PartiQLStatement`: ExecuteStatement's `Statement`, BatchExecuteStatement's
+    `Statements[].Statement`). Each variable of those types takes the name the service gives what the statement acts on
+    by the variable's stem (`names`: a table's `TableName` its `table`, an index's `IndexName` its `index`). None for a
+    request carrying none."""
+    name = operation.split(":", 1)[1]
+    items = source.get("partiql", {}).get("items", [])
+    languages = {match.group(1) for item in items if (match := re.search(r"\busing (\w+) for\b", item["text"]))}
+    if len(languages) != 1:
+        raise ValueError(f"the vendored PartiQL page names {sorted(languages)} as its language, not one")
+    shape_name = languages.pop() + "Statement"
+    paths: list[str] = []
+    for model in models.values():
+        spec = model["operations"].get(name)
+        if spec is None or "input" not in spec:
+            continue
+        for member, held in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+            if held["shape"] == shape_name:
+                paths.append(member)
+            listed = model["shapes"][held["shape"]]
+            element = model["shapes"].get(listed.get("member", {}).get("shape", ""), {})
+            if listed.get("type") == "list":
+                paths += [f"{member}[].{field}" for field, value in element.get("members", {}).items()
+                          if value["shape"] == shape_name]
+        break
+    rows: list[dict] = []
+    for path in paths:
+        for item in items:
+            action = next((code for code in item["code"] if ":" in code), None)
+            words = re.search(r"\bon the ([a-z ]+?)\.?$", item["text"])
+            if action not in known or words is None or not action.split(":", 1)[1].startswith(shape_name[:-9]):
+                raise ValueError(f"{operation}: the vendored PartiQL permission '{item['text']}' names no action of "
+                                 f"the namespace on its resources")
+            named = set(re.findall(r"[a-z]+", words.group(1)))
+            kinds = [kind for kind in known[action] if kind in named and kind in formats]
+            names = {variable: stem(variable) for kind in kinds for variable in VARIABLE_RE.findall(formats[kind])
+                     if variable not in KNOWN_VARIABLES}
+            rows.append({"types": kinds, "statement": path,
+                         "verb": action.split(":", 1)[1][len(shape_name) - 9:].upper(), "names": names,
+                         "action": action})
+    return rows
+
+
 def read_resources(operation: str, types: list[str], formats: dict[str, str], models: dict[str, dict]) -> list[dict]:
     """The resources the rules read from the request of the clients given."""
     name = operation.split(":", 1)[1]
@@ -3115,6 +3267,7 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
     resources = with_optional_qualifier(resources, optional)
     resources = with_qualifier(resources, types, formats, members, models, name)
     resources = with_partial_arns(resources, partial_arn_members(models, name, formats))
+    resources = with_map_keys(resources, types, formats, models, name)
     # Two rules naming the same resource the same way name it once.
     return [resource for index, resource in enumerate(resources) if resource not in resources[:index]]
 
@@ -4086,8 +4239,8 @@ PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?$")
 BODY_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_]*(\[])?)*$")
 # A member filling a variable may also be a field of a structure, or of each element of a list of structures, one
 # value for each.
-FILL_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[]|\[]\.[A-Za-z][A-Za-z0-9_]*|\{}\.[A-Za-z][A-Za-z0-9_]*"
-                          r"|\.[A-Za-z][A-Za-z0-9_]*)?$")
+FILL_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[]|\[]\.[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)?|\{}"
+                          r"|\{}\.[A-Za-z][A-Za-z0-9_]*|\.[A-Za-z][A-Za-z0-9_]*)?$")
 # ARN paths can traverse structures, array elements ([]) and map values ({}).
 ARN_PATH_RE = re.compile(r"^(?:[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_]*(\[])?)?"
                          r"|[A-Za-z][A-Za-z0-9_]*\{\}(\.[A-Za-z][A-Za-z0-9_]*){1,2})$")
@@ -4217,7 +4370,7 @@ def validate(document: dict) -> list[str]:
             continue
         several = entry.get("actions")
         if several is not None and (namespace not in PERMISSION_SOURCES or not isinstance(several, dict)
-                                    or len(several) < 2 or not all(
+                                    or not several or not all(
                 isinstance(action, str) and OPERATION_RE.match(action) and namespace_of(action) == namespace
                 and isinstance(kinds, list)
                 and all(isinstance(kind, str) and kind in formats.get(namespace, {}) for kind in kinds)
@@ -4306,6 +4459,17 @@ def validate(document: dict) -> list[str]:
 
 
 def _resource_problems(operation: str, resource: object, types: set[str], formats: dict[str, str]) -> list[str]:
+    if isinstance(resource, dict) and "statement" in resource:
+        kinds = _kinds(resource)
+        names = resource.get("names")
+        if set(resource) != {"types", "statement", "verb", "names"} or not kinds or not isinstance(names, dict) \
+                or set(names) != {v for kind in kinds for v in VARIABLE_RE.findall(formats.get(kind, ""))
+                                  if v not in KNOWN_VARIABLES} or not all(
+                isinstance(word, str) and re.fullmatch(r"[a-z0-9]+", word) for word in names.values()) or not all(
+                kind in types and kind in formats for kind in kinds) or not isinstance(resource["statement"], str) \
+                or not FILL_PATH_RE.match(resource["statement"]) or not re.fullmatch(r"[A-Z]+", str(resource["verb"])):
+            return [f"{operation} names {resource!r}, which is no statement member, verb and types its action acts on"]
+        return []
     if not isinstance(resource, dict) or not ({"types", "arn"} <= set(resource) <= {"types", "arn", "made", "endpoint"}
                                               or {"types", "through"} <= set(resource) <= {"types", "through", "when",
                                                                                             "endpoint"}
@@ -4579,13 +4743,14 @@ def verify_permission_sources() -> list[str]:
     untrue: list[str] = []
     for namespace, path in sorted(PERMISSION_SOURCES.items()):
         source = json.loads(path.read_text(encoding="utf-8"))
+        fetcher = PERMISSION_FETCHERS[namespace]
         try:
-            changed = fetch_kms_api_permissions.stale(source, *fetch_kms_api_permissions.fetch_all())
+            changed = fetcher.stale(source, *fetcher.fetch_all())
         except (OSError, ValueError) as e:
             raise OSError(f"could not read {' and '.join(source['_source']['pages'])} ({e})") from e
         if changed:
-            untrue.append(f"{' and '.join(source['_source']['pages'])} and the API reference pages they link to no "
-                          f"longer give what {path.name} holds for {namespace}: run {source['_source']['fetcher']}")
+            untrue.append(f"{' and '.join(source['_source']['pages'])} and the pages they link to no longer give what "
+                          f"{path.name} holds for {namespace}: run {source['_source']['fetcher']}")
     return untrue
 
 

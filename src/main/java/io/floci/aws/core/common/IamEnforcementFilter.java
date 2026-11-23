@@ -596,40 +596,29 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         RequestPrincipal principal = RequestPrincipal.caller(callerArns.orElse(null));
-        List<IamConditionContextResolver.DynamoDbTransactionItem> transactionItems =
-                "dynamodb".equals(credentialScope)
-                        ? conditionContextResolver.dynamoDbTransactionItems(action, ctx, region, accountId)
-                        : List.of();
-        if (!transactionItems.isEmpty()) {
-            for (IamConditionContextResolver.DynamoDbTransactionItem item : transactionItems) {
-                Map<String, List<String>> itemContext = new HashMap<>(item.context());
-                callerArns.ifPresent(arns -> arns.putPrincipalKeys(itemContext));
-                if (abortIfDenied(ctx, caller, principal, item.action(), credentialScope,
-                        resolveResourceArns(credentialScope, List.of(item.resource())), List.of(itemContext),
-                        region, accountId, akid)) {
+        // An operation AWS authorizes by actions its request's parts each take (KMS's ReEncrypt, kms:ReEncryptFrom on
+        // the key it decrypts with and kms:ReEncryptTo on the one it encrypts with; each of a DynamoDB transaction's
+        // items and each PartiQL statement, by its own) is checked as each on what the table gives it, with that
+        // part's condition keys, not as the operation's own; one naming nothing of any is checked as its own on *.
+        if (RequestResources.checkedByParts(resolvedOperation.operation())) {
+            List<RequestResources.Target> targets = arnBuilder.targets(credentialScope, resolvedOperation.operation(),
+                    ctx, region, accountId, requestPartition());
+            if (targets.isEmpty()) {
+                targets = List.of(new RequestResources.Target(action, List.of("*"), null));
+            }
+            for (RequestResources.Target target : targets) {
+                Map<String, List<String>> resolved = conditionContextResolver.resolvePart(credentialScope,
+                        target.action(), resolvedOperation.operation(), ctx, target.element(), region);
+                Map<String, List<String>> partContext = resolved == null ? new HashMap<>() : new HashMap<>(resolved);
+                callerArns.ifPresent(arns -> arns.putPrincipalKeys(partContext));
+                if (abortIfDenied(ctx, caller, principal, target.action(), action, credentialScope,
+                        resolveResourceArns(credentialScope, target.resources()), List.of(partContext), region,
+                        accountId, akid)) {
                     return;
                 }
             }
-            return;
-        }
-        // An operation AWS authorizes by several actions (KMS's ReEncrypt, by kms:ReEncryptFrom on the key it decrypts
-        // with and kms:ReEncryptTo on the one it encrypts with) is checked as each on the resources the table gives
-        // it, with that action's condition keys, and not as the operation's own.
-        Map<String, List<String>> checkedAs = arnBuilder.checkedAs(credentialScope, resolvedOperation.operation(), ctx,
-                region, accountId, requestPartition());
-        for (Map.Entry<String, List<String>> checked : checkedAs.entrySet()) {
-            Map<String, List<String>> resolved =
-                    conditionContextResolver.resolve(credentialScope, checked.getKey(), ctx);
-            Map<String, List<String>> checkedContext = resolved == null ? new HashMap<>() : new HashMap<>(resolved);
-            callerArns.ifPresent(arns -> arns.putPrincipalKeys(checkedContext));
-            if (abortIfDenied(ctx, caller, principal, checked.getKey(), action, credentialScope,
-                    resolveResourceArns(credentialScope, checked.getValue()), List.of(checkedContext), region,
-                    accountId, akid)) {
-                return;
-            }
-        }
-        if (checkedAs.isEmpty() && abortIfDenied(ctx, caller, principal, action, credentialScope, resources,
-                targetContexts, region, accountId, akid)) {
+        } else if (abortIfDenied(ctx, caller, principal, action, credentialScope, resources, targetContexts,
+                region, accountId, akid)) {
             return;
         }
         if (abortIfRolePassDenied(ctx, caller, principal, callerArns.orElse(null), action, credentialScope,

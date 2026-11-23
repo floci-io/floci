@@ -141,6 +141,22 @@ public interface StoredResourceArns {
     }
 
     /**
+     * A statement a request carries, as its service's parser reads it: its {@code verb} ({@code SELECT}) and the names
+     * of what it acts on, by the word the table gives each ({@code table}, {@code index}).
+     */
+    record Statement(String verb, Map<String, String> names) {
+    }
+
+    /**
+     * The verb of {@code statement} and the names of what it acts on, as the service's own parser reads the
+     * statement it runs (a DynamoDB PartiQL statement's table and index), which the table checks as the action of
+     * that verb; empty when it reads no such statement, which its handler then refuses.
+     */
+    default Optional<Statement> statement(String statement) {
+        return Optional.empty();
+    }
+
+    /**
      * Whether the service acts on the resource {@code arn} names, one {@link #find} gave, for a request another service
      * forwards as the caller: false for a KMS key disabled or pending deletion, which KMS refuses such a request with,
      * as for a resource it does not hold. True for any other.

@@ -18,15 +18,11 @@ import jakarta.ws.rs.container.ContainerRequestContext;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 
 /**
  * Constructs the target resource ARN for a request so the policy evaluator
@@ -126,7 +122,6 @@ public class ResourceArnBuilder {
             return namedResources(credentialScope, operation, ctx, region, accountId, partition);
         }
         return switch (credentialScope) {
-            case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
             case "iam"            -> buildIamArns(ctx, region, accountId);
             default               -> namedResources(credentialScope, operation, ctx, region, accountId, partition);
         };
@@ -150,18 +145,17 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * The actions an operation AWS authorizes by several actions is checked as instead of its own, each with the
-     * resources the request names that it is checked on (see {@link RequestResources#checkedAs}), read as
-     * {@link #buildResources} reads the others: KMS's ReEncrypt, {@code kms:ReEncryptFrom} on its source key and
-     * {@code kms:ReEncryptTo} on its destination key. Empty for every other operation.
+     * The checks an operation AWS authorizes by actions its request's parts each take is made of, each action on the
+     * resources its part names (see {@link RequestResources#targets}), read as {@link #buildResources} reads the
+     * others: KMS's ReEncrypt, a DynamoDB transaction's items or PartiQL statements. Empty for every other operation.
      */
-    public Map<String, List<String>> checkedAs(String credentialScope, String operation, ContainerRequestContext ctx,
-                                              String region, String accountId, String partition) {
+    public List<RequestResources.Target> targets(String credentialScope, String operation, ContainerRequestContext ctx,
+                                                 String region, String accountId, String partition) {
         if (credentialScope == null || operation == null || !operation.startsWith(credentialScope + ":")
                 || !RequestResources.reads(operation)) {
-            return Map.of();
+            return List.of();
         }
-        return RequestResources.checkedAs(operation, ctx, partition, region, accountId,
+        return RequestResources.targets(operation, ctx, partition, region, accountId,
                 storedResourceArns(credentialScope), labels(credentialScope, ctx));
     }
 
@@ -777,167 +771,6 @@ public class ResourceArnBuilder {
             return ctx.getUriInfo().getQueryParameters().getFirst("resourceArn");
         }
         return null;
-    }
-
-    // ── DynamoDB ─────────────────────────────────────────────────────────────────
-    private String buildDynamoDbArn(ContainerRequestContext ctx, String region, String accountId) {
-        List<String> arns = buildDynamoDbArns(ctx, region, accountId);
-        return arns.isEmpty() ? "*" : arns.getFirst();
-    }
-
-    private List<String> buildDynamoDbArns(ContainerRequestContext ctx, String region, String accountId) {
-        return dynamoDbArns(readJsonBody(ctx), region, accountId);
-    }
-
-    /**
-     * The resources a DynamoDB request names, read from its body alone: the tables, or the stream, export,
-     * import or other resource it gives, each as given when it gives an ARN, and {@code *} when it names none.
-     */
-    public static List<String> dynamoDbArns(JsonNode json, String region, String accountId) {
-        if (json != null && json.isObject()) {
-            if (json.hasNonNull("TableName")) {
-                String tableName = json.get("TableName").asText().trim();
-                if (!tableName.isEmpty()) {
-                    return List.of(toDynamoDbTableArn(tableName, region, accountId));
-                }
-            }
-            if (json.path("TableCreationParameters").hasNonNull("TableName")) {
-                String tableName = json.path("TableCreationParameters").get("TableName").asText().trim();
-                if (!tableName.isEmpty()) {
-                    return List.of(toDynamoDbTableArn(tableName, region, accountId));
-                }
-            }
-            if (json.hasNonNull("ResourceArn")) {
-                String resourceArn = json.get("ResourceArn").asText().trim();
-                if (!resourceArn.isEmpty()) {
-                    return List.of(resourceArn);
-                }
-            }
-            if (json.hasNonNull("TableArn")) {
-                String tableArn = json.get("TableArn").asText().trim();
-                if (!tableArn.isEmpty()) {
-                    return List.of(tableArn);
-                }
-            }
-            if (json.hasNonNull("StreamArn")) {
-                String streamArn = json.get("StreamArn").asText().trim();
-                if (!streamArn.isEmpty()) {
-                    return List.of(streamArn);
-                }
-            }
-            if (json.hasNonNull("ExportArn")) {
-                String exportArn = json.get("ExportArn").asText().trim();
-                if (!exportArn.isEmpty()) {
-                    return List.of(exportArn);
-                }
-            }
-            if (json.hasNonNull("ImportArn")) {
-                String importArn = json.get("ImportArn").asText().trim();
-                if (!importArn.isEmpty()) {
-                    return List.of(importArn);
-                }
-            }
-            // AWS authorizes RestoreTableToPointInTime on its source table.
-            if (json.hasNonNull("SourceTableArn")) {
-                String sourceTableArn = json.get("SourceTableArn").asText().trim();
-                if (!sourceTableArn.isEmpty()) {
-                    return List.of(sourceTableArn);
-                }
-            }
-            if (json.hasNonNull("SourceTableName")) {
-                String sourceTableName = json.get("SourceTableName").asText().trim();
-                if (!sourceTableName.isEmpty()) {
-                    return List.of(toDynamoDbTableArn(sourceTableName, region, accountId));
-                }
-            }
-            if (json.hasNonNull("RequestItems") && json.get("RequestItems").isObject()) {
-                Set<String> arns = new LinkedHashSet<>();
-                Iterator<String> fieldNames = json.get("RequestItems").fieldNames();
-                while (fieldNames.hasNext()) {
-                    String table = fieldNames.next().trim();
-                    if (!table.isEmpty()) {
-                        arns.add(toDynamoDbTableArn(table, region, accountId));
-                    }
-                }
-                if (!arns.isEmpty()) {
-                    return new ArrayList<>(arns);
-                }
-            }
-            if (json.hasNonNull("TransactItems") && json.get("TransactItems").isArray()) {
-                Set<String> arns = new LinkedHashSet<>();
-                JsonNode items = json.get("TransactItems");
-                for (JsonNode item : items) {
-                    String t = null;
-                    if (item.hasNonNull("Put") && item.get("Put").hasNonNull("TableName")) {
-                        t = item.get("Put").get("TableName").asText();
-                    } else if (item.hasNonNull("Delete") && item.get("Delete").hasNonNull("TableName")) {
-                        t = item.get("Delete").get("TableName").asText();
-                    } else if (item.hasNonNull("Update") && item.get("Update").hasNonNull("TableName")) {
-                        t = item.get("Update").get("TableName").asText();
-                    } else if (item.hasNonNull("ConditionCheck") && item.get("ConditionCheck").hasNonNull("TableName")) {
-                        t = item.get("ConditionCheck").get("TableName").asText();
-                    } else if (item.hasNonNull("Get") && item.get("Get").hasNonNull("TableName")) {
-                        t = item.get("Get").get("TableName").asText();
-                    }
-                    if (t != null) {
-                        t = t.trim();
-                        if (!t.isEmpty()) {
-                            arns.add(toDynamoDbTableArn(t, region, accountId));
-                        }
-                    }
-                }
-                if (!arns.isEmpty()) {
-                    return new ArrayList<>(arns);
-                }
-            }
-            if (json.hasNonNull("Statement")) {
-                String stmt = json.get("Statement").asText().trim();
-                String table = extractDynamoDbTableFromPartiQL(stmt);
-                if (table != null && !table.isEmpty()) {
-                    return List.of(toDynamoDbTableArn(table, region, accountId));
-                }
-            }
-            if (json.hasNonNull("Statements") && json.get("Statements").isArray()) {
-                Set<String> arns = new LinkedHashSet<>();
-                for (JsonNode s : json.get("Statements")) {
-                    if (s.hasNonNull("Statement")) {
-                        String table = extractDynamoDbTableFromPartiQL(s.get("Statement").asText());
-                        if (table != null && !table.isEmpty()) {
-                            arns.add(toDynamoDbTableArn(table, region, accountId));
-                        }
-                    }
-                }
-                if (!arns.isEmpty()) {
-                    return new ArrayList<>(arns);
-                }
-            }
-            if (json.hasNonNull("TransactStatements") && json.get("TransactStatements").isArray()) {
-                Set<String> arns = new LinkedHashSet<>();
-                for (JsonNode s : json.get("TransactStatements")) {
-                    if (s.hasNonNull("Statement")) {
-                        String table = extractDynamoDbTableFromPartiQL(s.get("Statement").asText());
-                        if (table != null && !table.isEmpty()) {
-                            arns.add(toDynamoDbTableArn(table, region, accountId));
-                        }
-                    }
-                }
-                if (!arns.isEmpty()) {
-                    return new ArrayList<>(arns);
-                }
-            }
-        }
-        return List.of("*");
-    }
-
-    private static String extractDynamoDbTableFromPartiQL(String statement) {
-        return io.floci.aws.services.dynamodb.DynamoDbPartiQLParser.extractTable(statement);
-    }
-
-    public static String toDynamoDbTableArn(String tableName, String region, String accountId) {
-        if (AwsArnUtils.isArnFor(tableName, "dynamodb")) {
-            return tableName;
-        }
-        return AwsArnUtils.Arn.of("dynamodb", region, accountId, "table/" + tableName).toString();
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────

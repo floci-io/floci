@@ -14,7 +14,6 @@ import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.iam.IamActionRegistry;
 import io.floci.aws.services.iam.IamService;
-import io.floci.aws.services.iam.ResourceArnBuilder;
 import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.iam.model.IamUser;
 import io.floci.aws.services.lambdaweb.LambdaWebService;
@@ -1347,91 +1346,45 @@ public class IamConditionContextResolver {
         return modes.isEmpty() ? List.of("NONE") : List.copyOf(modes);
     }
 
-    /** One transaction item keeps its action, table and condition keys together. */
-    record DynamoDbTransactionItem(String action, String resource, Map<String, List<String>> context) {
-    }
-
     /**
-     * Resolves every recognized item before the handler can mutate anything. Unknown envelope fields
-     * cannot turn item checks back into a transaction-verb permission check.
+     * The condition keys of one check of an operation whose request's parts each take an action (see
+     * {@link RequestResources#targets}): those {@link #resolve} gives the request for {@code action} when the check
+     * is of the request itself ({@code part} null), and otherwise those of the part: a DynamoDB transaction item's
+     * own keys with {@code dynamodb:EnclosingOperation} naming the transaction, or a batch's or transaction's PartiQL
+     * statement's, with {@code dynamodb:EnclosingOperation} for a transaction's. Null when it gives none.
      */
-    List<DynamoDbTransactionItem> dynamoDbTransactionItems(String action, ContainerRequestContext ctx,
-                                                         String region, String accountId) {
-        if ("dynamodb:BatchExecuteStatement".equals(action) || "dynamodb:ExecuteTransaction".equals(action)) {
-            return dynamoDbStatementItems(action, ctx, region, accountId);
+    public Map<String, List<String>> resolvePart(String credentialScope, String action, String operation,
+                                                 ContainerRequestContext ctx, JsonNode part, String region) {
+        if (part == null || !"dynamodb".equals(credentialScope) || operation == null) {
+            return resolve(credentialScope, action, ctx);
         }
-        boolean read = "dynamodb:TransactGetItems".equals(action);
-        if (!read && !"dynamodb:TransactWriteItems".equals(action)) {
-            return List.of();
-        }
-        JsonNode body = bufferedJsonBody(ctx);
-        JsonNode items = body == null ? null : body.get("TransactItems");
-        if (items == null || !items.isArray()) {
-            return List.of();
-        }
-        List<DynamoDbTransactionItem> checks = new ArrayList<>();
-        List<String> operations = read ? List.of("Get") : List.of("Put", "Delete", "Update", "ConditionCheck");
-        for (JsonNode item : items) {
-            for (String operation : operations) {
-                JsonNode request = item.get(operation);
-                if (request == null || !request.isObject()) {
-                    continue;
-                }
-                String tableName = targetTableName(request);
-                if (tableName == null) {
-                    continue;
-                }
-                // Execution resolves ARN inputs within the request account; authorize that same table.
-                String executionTable = DynamoDbTableNames.resolveWithRegion(tableName, region).name();
-                String itemAction = "dynamodb:" + operation + "Item";
-                TableDefinition table = describeTargetTable(executionTable);
-                DynamoDbConditionKeys.Result keys = read
-                        ? DynamoDbConditionKeys.extractTransactionGet(request, table)
-                        : DynamoDbConditionKeys.extract(itemAction, request, table);
-                Map<String, List<String>> context = new LinkedHashMap<>();
-                context.put("dynamodb:EnclosingOperation", List.of(read ? "TransactGetItems" : "TransactWriteItems"));
-                putKeyConditions(context, keys);
-                if (!read && request.hasNonNull("ReturnValuesOnConditionCheckFailure")) {
-                    context.put("dynamodb:ReturnValues",
-                            List.of(request.path("ReturnValuesOnConditionCheckFailure").asText()));
-                }
-                checks.add(new DynamoDbTransactionItem(itemAction,
-                        ResourceArnBuilder.toDynamoDbTableArn(executionTable, region, accountId), context));
+        String enclosing = operation.substring(operation.indexOf(':') + 1);
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        if (part.has("Statement")) {
+            String statement = DynamoDbConditionKeys.partiQLStatement(part);
+            if ("ExecuteTransaction".equals(enclosing)) {
+                context.put("dynamodb:EnclosingOperation", List.of(enclosing));
             }
+            putKeyConditions(context, DynamoDbConditionKeys.extract(action, part,
+                    describeTargetTable(DynamoDbPartiQLParser.extractTable(statement))));
+            return context;
         }
-        return checks;
-    }
-
-    /**
-     * One check per PartiQL statement of a batch or transaction, on the statement's own PartiQL action and
-     * table, as a single ExecuteStatement is checked. A statement with no PartiQL action keeps the batch's
-     * own action, which no PartiQL grant covers. Statements of a transaction carry
-     * {@code dynamodb:EnclosingOperation} {@code ExecuteTransaction}.
-     */
-    private List<DynamoDbTransactionItem> dynamoDbStatementItems(String action, ContainerRequestContext ctx,
-                                                                 String region, String accountId) {
-        boolean transaction = "dynamodb:ExecuteTransaction".equals(action);
-        String operation = action.substring("dynamodb:".length());
-        List<DynamoDbTransactionItem> checks = new ArrayList<>();
-        for (JsonNode request : DynamoDbConditionKeys.partiQLStatementRequests(operation, bufferedJsonBody(ctx))) {
-            String statement = DynamoDbConditionKeys.partiQLStatement(request);
-            String statementAction = DynamoDbPartiQLParser.iamAction(statement);
-            String tableName = DynamoDbPartiQLParser.extractTable(statement);
-            String resource = tableName == null || tableName.isEmpty()
-                    ? "*" : ResourceArnBuilder.toDynamoDbTableArn(tableName, region, accountId);
-            Map<String, List<String>> context = new LinkedHashMap<>();
-            if (transaction) {
-                context.put("dynamodb:EnclosingOperation", List.of("ExecuteTransaction"));
-            }
-            if (statementAction == null) {
-                checks.add(new DynamoDbTransactionItem(action, resource, context));
-                continue;
-            }
-            putKeyConditions(context, DynamoDbConditionKeys.extract(statementAction, request,
-                    describeTargetTable(tableName)));
-            checks.add(new DynamoDbTransactionItem(statementAction, resource, context));
+        boolean read = "TransactGetItems".equals(enclosing);
+        String tableName = targetTableName(part);
+        TableDefinition table;
+        try {
+            table = describeTargetTable(tableName == null ? null
+                    : DynamoDbTableNames.resolveWithRegion(tableName, region).name());
+        } catch (AwsException e) {
+            table = null;
         }
-        return checks;
+        context.put("dynamodb:EnclosingOperation", List.of(enclosing));
+        putKeyConditions(context, read ? DynamoDbConditionKeys.extractTransactionGet(part, table)
+                : DynamoDbConditionKeys.extract(action, part, table));
+        if (!read && part.hasNonNull("ReturnValuesOnConditionCheckFailure")) {
+            context.put("dynamodb:ReturnValues", List.of(part.path("ReturnValuesOnConditionCheckFailure").asText()));
+        }
+        return context;
     }
 
     /** Request-wide context for callers that do not yet have a resolved resource. */

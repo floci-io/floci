@@ -3074,3 +3074,137 @@ def test_an_operation_checked_as_several_actions_checks_each_resource_as_one_of_
     isolated.setattr(r, "PERMISSION_SOURCES", {})
     document["operations"]["svc:ReEncrypt"] = entry
     assert any("vendored permissions" in problem for problem in r.validate(document))
+
+
+def test_every_permission_source_is_written_by_its_own_fetcher():
+    assert set(r.PERMISSION_FETCHERS) == set(r.PERMISSION_SOURCES)
+    for namespace, path in r.PERMISSION_SOURCES.items():
+        assert r.PERMISSION_FETCHERS[namespace].OUTPUT == path, namespace
+
+
+def test_each_permission_source_is_verified_against_the_pages_its_own_fetcher_reads(isolated, tmp_path):
+    class Fetcher:
+        def __init__(self, page: str):
+            self.page = page
+
+        def fetch_all(self):
+            return (self.page,)
+
+        def stale(self, source, page):
+            return source["says"] != page
+
+    sources = {}
+    for namespace, says in (("first", "kept"), ("second", "kept")):
+        sources[namespace] = tmp_path / f"{namespace}.json"
+        sources[namespace].write_text(json.dumps({"_source": {"pages": [f"https://{namespace}"],
+                                                              "fetcher": f"fetch_{namespace}.py"}, "says": says}))
+    isolated.setattr(r, "PERMISSION_SOURCES", sources)
+    isolated.setattr(r, "PERMISSION_FETCHERS", {"first": Fetcher("kept"), "second": Fetcher("kept")})
+    assert r.verify_permission_sources() == []
+    isolated.setattr(r, "PERMISSION_FETCHERS", {"first": Fetcher("kept"), "second": Fetcher("changed")})
+    assert r.verify_permission_sources() == ["https://second and the pages they link to no longer give what "
+                                             "second.json holds for second: run fetch_second.py"]
+
+
+# --------------------------------------------------------------------------- #
+# PERMISSION_SOURCES: the vendored DynamoDB permissions
+# --------------------------------------------------------------------------- #
+TABLES_FORMATS = {"table": "arn:${Partition}:dynamodb:${Region}:${Account}:table/${TableName}",
+                  "index": "arn:${Partition}:dynamodb:${Region}:${Account}:table/${TableName}/index/${IndexName}"}
+TABLES_ACTIONS = {"dynamodb:PutItem": ["table"], "dynamodb:DeleteItem": ["table"], "dynamodb:GetItem": ["table"],
+                  "dynamodb:ConditionCheckItem": ["table"], "dynamodb:PartiQLSelect": ["index", "table"],
+                  "dynamodb:PartiQLInsert": ["table"]}
+TABLES_SOURCE = {
+    "partiql": {"items": [
+        {"text": "To read items using PartiQL for DynamoDB, you must have dynamodb:PartiQLSelect permission on the "
+                 "table or index.", "code": ["dynamodb:PartiQLSelect"]},
+        {"text": "To insert items using PartiQL for DynamoDB, you must have dynamodb:PartiQLInsert permission on the "
+                 "table or index.", "code": ["dynamodb:PartiQLInsert"]}]},
+    "transactions": {"sentences": [
+        {"text": "Permissions for Put, Delete, and Get actions are governed by the permissions used for the underlying "
+                 "PutItem, DeleteItem, and GetItem operations.",
+         "code": ["Put", "Delete", "Get", "PutItem", "DeleteItem", "GetItem"]},
+        {"text": "For the ConditionCheck action, you can use the dynamodb:ConditionCheckItem permission in IAM "
+                 "policies.", "code": ["ConditionCheck", "dynamodb:ConditionCheckItem"]}]},
+}
+
+
+def dynamodb_model() -> dict:
+    """A model shaped as DynamoDB's: a transaction's items, PartiQL statements alone and in a list, a batch keyed by
+    the shape a table's name has, and a map keyed by any string."""
+    shapes = {
+        "TableArn": {"type": "string"}, "PartiQLStatement": {"type": "string"}, "Name": {"type": "string"},
+        "Item": {"type": "structure", "members": {"TableName": {"shape": "TableArn"}}},
+        "TransactWriteItem": {"type": "structure", "members": {"ConditionCheck": {"shape": "Item"},
+                                                                "Put": {"shape": "Item"}, "Delete": {"shape": "Item"}}},
+        "TransactWriteItemList": {"type": "list", "member": {"shape": "TransactWriteItem"}},
+        "BatchStatementRequest": {"type": "structure", "members": {"Statement": {"shape": "PartiQLStatement"}}},
+        "PartiQLBatchRequest": {"type": "list", "member": {"shape": "BatchStatementRequest"}},
+        "BatchGetRequestMap": {"type": "map", "key": {"shape": "TableArn"}, "value": {"shape": "Item"}},
+        "VariablesMap": {"type": "map", "key": {"shape": "Name"}, "value": {"shape": "Name"}},
+        "TransactWriteItemsInput": {"type": "structure", "members": {"TransactItems": {"shape":
+                                                                                        "TransactWriteItemList"}}},
+        "ExecuteStatementInput": {"type": "structure", "members": {"Statement": {"shape": "PartiQLStatement"}}},
+        "BatchExecuteStatementInput": {"type": "structure",
+                                       "members": {"Statements": {"shape": "PartiQLBatchRequest"}}},
+        "BatchGetItemInput": {"type": "structure", "members": {"RequestItems": {"shape": "BatchGetRequestMap"},
+                                                               "Variables": {"shape": "VariablesMap"}}},
+    }
+    operations = {name: {"name": name, "input": {"shape": f"{name}Input"}}
+                  for name in ("TransactWriteItems", "ExecuteStatement", "BatchExecuteStatement", "BatchGetItem")}
+    return {"metadata": {"protocol": "json", "endpointPrefix": "dynamodb"}, "operations": operations, "shapes": shapes}
+
+
+def test_each_transaction_item_is_checked_as_the_action_the_vendored_page_gives_its_kind():
+    kinds = r.item_actions(TABLES_SOURCE, "dynamodb")
+    assert kinds == {"Put": "dynamodb:PutItem", "Delete": "dynamodb:DeleteItem", "Get": "dynamodb:GetItem",
+                     "ConditionCheck": "dynamodb:ConditionCheckItem"}
+    assert r.item_resources("dynamodb:TransactWriteItems", kinds, TABLES_ACTIONS, TABLES_FORMATS,
+                            {"dynamodb": dynamodb_model()}) == [
+        {"type": "table", "fill": {"TableName": "TransactItems[].ConditionCheck.TableName"},
+         "action": "dynamodb:ConditionCheckItem"},
+        {"type": "table", "fill": {"TableName": "TransactItems[].Put.TableName"}, "action": "dynamodb:PutItem"},
+        {"type": "table", "fill": {"TableName": "TransactItems[].Delete.TableName"}, "action": "dynamodb:DeleteItem"}]
+    assert r.item_resources("dynamodb:ExecuteStatement", kinds, TABLES_ACTIONS, TABLES_FORMATS,
+                            {"dynamodb": dynamodb_model()}) == []
+    with pytest.raises(ValueError, match="pairs no kinds"):
+        r.item_actions({"transactions": {"sentences": [{"text": "Put.", "code": ["Put"]}]}}, "dynamodb")
+
+
+def test_each_statement_is_checked_as_the_action_of_its_verb_on_its_table_or_index():
+    models = {"dynamodb": dynamodb_model()}
+    assert r.statement_resources("dynamodb:ExecuteStatement", TABLES_SOURCE, TABLES_ACTIONS, TABLES_FORMATS,
+                                 models) == [
+        {"types": ["index", "table"], "statement": "Statement", "verb": "SELECT",
+         "names": {"TableName": "table", "IndexName": "index"}, "action": "dynamodb:PartiQLSelect"},
+        {"types": ["table"], "statement": "Statement", "verb": "INSERT", "names": {"TableName": "table"},
+         "action": "dynamodb:PartiQLInsert"}]
+    assert [row["statement"] for row in r.statement_resources(
+        "dynamodb:BatchExecuteStatement", TABLES_SOURCE, TABLES_ACTIONS, TABLES_FORMATS, models)] == \
+        ["Statements[].Statement", "Statements[].Statement"]
+    assert r.statement_resources("dynamodb:TransactWriteItems", TABLES_SOURCE, TABLES_ACTIONS, TABLES_FORMATS,
+                                 models) == []
+    unknown = {"partiql": {"items": [{"text": "To scan items using PartiQL for DynamoDB, you must have "
+                                              "dynamodb:PartiQLScan permission on the table.",
+                                      "code": ["dynamodb:PartiQLScan"]}]}}
+    with pytest.raises(ValueError, match="names no action"):
+        r.statement_resources("dynamodb:ExecuteStatement", unknown, TABLES_ACTIONS, TABLES_FORMATS, models)
+
+
+def test_a_map_keyed_by_the_shape_a_types_name_has_names_that_type_by_its_keys():
+    models = {"dynamodb": dynamodb_model()}
+    assert r.with_map_keys([], ["table"], TABLES_FORMATS, models, "BatchGetItem") == [
+        {"type": "table", "fill": {"TableName": "RequestItems{}"}}]
+    # A type a rule already names, and a map keyed by any string, add nothing.
+    named = [{"type": "table", "fill": {"TableName": "TableName"}}]
+    assert r.with_map_keys(named, ["table"], TABLES_FORMATS, models, "BatchGetItem") == named
+    assert r.FILL_PATH_RE.match("RequestItems{}") and r.FILL_PATH_RE.match("TransactItems[].Put.TableName")
+
+
+def test_a_statement_resource_names_its_member_verb_and_every_variable_of_its_types():
+    good = {"types": ["index", "table"], "statement": "Statements[].Statement", "verb": "SELECT",
+            "names": {"TableName": "table", "IndexName": "index"}}
+    assert r._resource_problems("dynamodb:BatchExecuteStatement", good, {"index", "table"}, TABLES_FORMATS) == []
+    for bad in (dict(good, verb="select"), dict(good, names={"TableName": "table"}),
+                dict(good, statement="a.b.c.d"), dict(good, types=["stream"])):
+        assert r._resource_problems("dynamodb:BatchExecuteStatement", bad, {"index", "table"}, TABLES_FORMATS)
