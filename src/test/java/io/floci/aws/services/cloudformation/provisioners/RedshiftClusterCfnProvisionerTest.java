@@ -8,6 +8,7 @@ import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.redshift.RedshiftService;
 import io.floci.aws.services.redshift.model.Cluster;
 import io.floci.aws.services.redshift.model.ClusterParameterGroup;
+import io.floci.aws.services.redshift.model.ClusterSubnetGroup;
 import io.floci.aws.services.redshift.model.Endpoint;
 import io.floci.aws.services.redshift.model.Parameter;
 import org.junit.jupiter.api.Test;
@@ -16,6 +17,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -259,6 +261,8 @@ class RedshiftClusterCfnProvisionerTest {
     @Test
     void provisionSubnetGroupMapsToServiceAndReconcilesOnUpdate() {
         RedshiftService service = service();
+        when(service.modifyClusterSubnetGroup("sg1", "d2", List.of("subnet-a")))
+                .thenReturn(new ClusterSubnetGroup("sg1", "d2", "vpc-1", List.of("subnet-a")));
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
         StackResource r = new StackResource();
         r.setResourceType("AWS::Redshift::ClusterSubnetGroup");
@@ -280,6 +284,9 @@ class RedshiftClusterCfnProvisionerTest {
     @Test
     void provisionSubnetGroupAppliesItsTags() {
         RedshiftService service = service();
+        ClusterSubnetGroup stored = new ClusterSubnetGroup("sg1", "d", "vpc-1", List.of("subnet-a"));
+        stored.setTags(new LinkedHashMap<>(Map.of("env", "dev", "team", "data")));
+        when(service.modifyClusterSubnetGroup("sg1", "d", List.of("subnet-a"))).thenReturn(stored);
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
         StackResource r = new StackResource();
         r.setResourceType("AWS::Redshift::ClusterSubnetGroup");
@@ -293,7 +300,48 @@ class RedshiftClusterCfnProvisionerTest {
         p.provision(r, json("""
             {"ClusterSubnetGroupName":"sg1","Description":"d","SubnetIds":["subnet-a"],
              "Tags":[{"Key":"env","Value":"prod"}]}"""), ctx("sg1"));
+        verify(service).deleteTags(ARN_PREFIX + "subnetgroup:sg1", List.of("team"));
         verify(service).createTags(ARN_PREFIX + "subnetgroup:sg1", Map.of("env", "prod"));
+    }
+
+    @Test
+    void anUpdateWithoutTagsUntagsTheParameterGroup() {
+        RedshiftService service = service();
+        ClusterParameterGroup stored = new ClusterParameterGroup("pg1", "redshift-1.0", "d");
+        stored.setTags(new LinkedHashMap<>(Map.of("env", "dev")));
+        when(service.getClusterParameterGroup("pg1")).thenReturn(Optional.of(stored));
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::ClusterParameterGroup");
+        r.setLogicalId("Params");
+
+        p.provision(r, json("""
+            {"ParameterGroupName":"pg1","ParameterGroupFamily":"redshift-1.0","Description":"d"}"""), ctx("pg1"));
+
+        verify(service).deleteTags(ARN_PREFIX + "parametergroup:pg1", List.of("env"));
+        verify(service, never()).createTags(anyString(), any());
+    }
+
+    @Test
+    void anUpdateDroppingATagKeyUntagsItOnTheCluster() {
+        RedshiftService service = service();
+        Cluster stored = availableCluster("warehouse");
+        stored.setMasterUsername("admin");
+        stored.setTags(new LinkedHashMap<>(Map.of("env", "dev", "team", "data")));
+        when(service.describeClusters("warehouse")).thenReturn(List.of(stored));
+        when(service.modifyCluster(eq("warehouse"), eq("ra3.large"), isNull(), any(), isNull(), anyList()))
+                .thenReturn(stored);
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::Cluster");
+        r.setLogicalId("Warehouse");
+
+        p.provision(r, json("""
+            {"ClusterIdentifier":"warehouse","NodeType":"ra3.large","MasterUsername":"admin",
+             "MasterUserPassword":"Passw0rd!","Tags":[{"Key":"env","Value":"prod"}]}"""), ctx("warehouse"));
+
+        verify(service).deleteTags(ARN_PREFIX + "cluster:warehouse", List.of("team"));
+        verify(service).createTags(ARN_PREFIX + "cluster:warehouse", Map.of("env", "prod"));
     }
 
     @Test
