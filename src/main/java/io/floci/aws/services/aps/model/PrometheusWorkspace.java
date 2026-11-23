@@ -19,7 +19,7 @@ public class PrometheusWorkspace {
     private String prometheusEndpoint;
     private Instant createdAt;
     private String kmsKeyArn;
-    private Map<String, String> tags = new ConcurrentHashMap<>();
+    private volatile Map<String, String> tags = new ConcurrentHashMap<>();
 
     public PrometheusWorkspace() {
     }

@@ -18,7 +18,7 @@ public class RuleGroupsNamespace {
     private String encodedData;
     private Instant createdAt;
     private Instant modifiedAt;
-    private Map<String, String> tags = new ConcurrentHashMap<>();
+    private volatile Map<String, String> tags = new ConcurrentHashMap<>();
 
     public RuleGroupsNamespace() {
     }
