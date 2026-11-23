@@ -651,6 +651,7 @@ AWS::Transfer::User	Policy	rejected with a ValidationError, not supported by Flo
 AWS::Transfer::User	PosixProfile	rejected with a ValidationError, not supported by Floci (docs/services/cloudformation.md, Transfer Family)
 AWS::WAFv2::LoggingConfiguration	LoggingFilter	accepted and ignored
 AWS::WAFv2::LoggingConfiguration	RedactedFields	accepted and ignored
+AWS::WAFv2::WebACL	AnalyticsConfig	accepted and ignored
 AWS::WAFv2::WebACL	ApplicationConfig	accepted and ignored
 AWS::WAFv2::WebACL	MonetizationConfig	accepted and ignored
 AWS::WAFv2::WebACL	OnSourceDDoSProtectionConfig	accepted and ignored
