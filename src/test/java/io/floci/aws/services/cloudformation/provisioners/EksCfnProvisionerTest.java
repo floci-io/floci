@@ -52,6 +52,14 @@ class EksCfnProvisionerTest {
     private final EksCfnProvisioner provisioner = new EksCfnProvisioner(eks);
     private final ObjectMapper mapper = new ObjectMapper();
 
+    private static final String PROD_ROLE = "{\"Name\": \"prod\", \"RoleArn\": \"arn:aws:iam::000000000000:role/eks\", ";
+    private static final String NODE_ROLE = "arn:aws:iam::000000000000:role/eks-auto-node";
+    /** EKS Auto Mode on: both built-in pools with their node role, block storage and load balancing. */
+    private static final String AUTO_MODE = "\"ComputeConfig\": {\"Enabled\": true, "
+            + "\"NodePools\": [\"general-purpose\", \"system\"], \"NodeRoleArn\": \"" + NODE_ROLE + "\"}, "
+            + "\"StorageConfig\": {\"BlockStorage\": {\"Enabled\": true}}, "
+            + "\"KubernetesNetworkConfig\": {\"ElasticLoadBalancing\": {\"Enabled\": true}}";
+
     @Test
     void clusterRefIsItsNameAndItPublishesTheResolvableReadOnlyAttributes() throws Exception {
         Cluster created = new Cluster();
@@ -137,18 +145,12 @@ class EksCfnProvisionerTest {
         created.setArn("arn:aws:eks:us-east-1:000000000000:cluster/prod");
         when(eks.createCluster(any(CreateClusterRequest.class))).thenReturn(created);
 
-        provisioner.provision(resource("AWS::EKS::Cluster", "Control"), props("""
-                {"Name": "prod", "RoleArn": "arn:aws:iam::000000000000:role/eks",
-                 "ComputeConfig": {"Enabled": true, "NodePools": ["general-purpose", "system"],
-                 "NodeRoleArn": "arn:aws:iam::000000000000:role/eks-auto-node"},
-                 "StorageConfig": {"BlockStorage": {"Enabled": true}},
-                 "KubernetesNetworkConfig": {"ElasticLoadBalancing": {"Enabled": true}}}
-                """), ctx());
+        provisioner.provision(resource("AWS::EKS::Cluster", "Control"), props(PROD_ROLE + AUTO_MODE + "}"), ctx());
 
         ArgumentCaptor<CreateClusterRequest> create = ArgumentCaptor.forClass(CreateClusterRequest.class);
         verify(eks).createCluster(create.capture());
         assertEquals(new ComputeConfig(true, List.of("general-purpose", "system"),
-                "arn:aws:iam::000000000000:role/eks-auto-node"), create.getValue().getComputeConfig());
+                NODE_ROLE), create.getValue().getComputeConfig());
         assertEquals(new StorageConfig(new BlockStorage(true)), create.getValue().getStorageConfig());
         assertEquals(new ElasticLoadBalancing(true),
                 create.getValue().getKubernetesNetworkConfig().getElasticLoadBalancing());
@@ -165,13 +167,7 @@ class EksCfnProvisionerTest {
         JsonNode before = props("{\"Name\": \"prod\", \"RoleArn\": \"arn:aws:iam::000000000000:role/eks\"}");
         provisioner.provision(r, before, ctx());
         when(eks.describeCluster("prod")).thenReturn(created);
-        JsonNode after = props("""
-                {"Name": "prod", "RoleArn": "arn:aws:iam::000000000000:role/eks",
-                 "ComputeConfig": {"Enabled": true, "NodePools": ["general-purpose", "system"],
-                 "NodeRoleArn": "arn:aws:iam::000000000000:role/eks-auto-node"},
-                 "StorageConfig": {"BlockStorage": {"Enabled": true}},
-                 "KubernetesNetworkConfig": {"ElasticLoadBalancing": {"Enabled": true}}}
-                """);
+        JsonNode after = props(PROD_ROLE + AUTO_MODE + "}");
         ProvisionContext update = new ProvisionContext(ctx().engine(), "us-east-1", "000000000000", "my-stack",
                 "prod", event -> { }, before, PropertyChanges.between("AWS::EKS::Cluster", true, before, after));
 
@@ -180,7 +176,7 @@ class EksCfnProvisionerTest {
         ArgumentCaptor<UpdateClusterConfigRequest> request = ArgumentCaptor.forClass(UpdateClusterConfigRequest.class);
         verify(eks).updateClusterConfig(eq("prod"), request.capture());
         assertEquals(new ComputeConfig(true, List.of("general-purpose", "system"),
-                "arn:aws:iam::000000000000:role/eks-auto-node"), request.getValue().computeConfig());
+                NODE_ROLE), request.getValue().computeConfig());
         assertEquals(new StorageConfig(new BlockStorage(true)), request.getValue().storageConfig());
         assertEquals(new ElasticLoadBalancing(true),
                 request.getValue().kubernetesNetworkConfig().getElasticLoadBalancing());
@@ -195,33 +191,68 @@ class EksCfnProvisionerTest {
         created.setArn("arn:aws:eks:us-east-1:000000000000:cluster/prod");
         when(eks.createCluster(any(CreateClusterRequest.class))).thenReturn(created);
         StackResource r = resource("AWS::EKS::Cluster", "Control");
-        JsonNode before = props("""
-                {"Name": "prod", "RoleArn": "arn:aws:iam::000000000000:role/eks",
-                 "ComputeConfig": {"Enabled": true, "NodePools": ["general-purpose", "system"],
-                 "NodeRoleArn": "arn:aws:iam::000000000000:role/eks-auto-node"},
-                 "StorageConfig": {"BlockStorage": {"Enabled": true}},
-                 "KubernetesNetworkConfig": {"ElasticLoadBalancing": {"Enabled": true}}}
-                """);
+        JsonNode before = props(PROD_ROLE + AUTO_MODE + "}");
         provisioner.provision(r, before, ctx());
         created.setComputeConfig(new ComputeConfig(true, List.of("general-purpose", "system"),
-                "arn:aws:iam::000000000000:role/eks-auto-node"));
+                NODE_ROLE));
         created.setStorageConfig(new StorageConfig(new BlockStorage(true)));
         KubernetesNetworkConfig network = new KubernetesNetworkConfig();
         network.setElasticLoadBalancing(new ElasticLoadBalancing(true));
         created.setKubernetesNetworkConfig(network);
         when(eks.describeCluster("prod")).thenReturn(created);
-        JsonNode after = props("""
-                {"Name": "prod", "RoleArn": "arn:aws:iam::000000000000:role/eks",
-                 "ComputeConfig": {"Enabled": true, "NodePools": ["system", "general-purpose"]},
-                 "StorageConfig": {"BlockStorage": {"Enabled": true}},
-                 "KubernetesNetworkConfig": {"ElasticLoadBalancing": {"Enabled": true}}}
-                """);
+        // The same pools in another order, and no node role: the live one is kept.
+        JsonNode after = props(PROD_ROLE + AUTO_MODE.replace("[\"general-purpose\", \"system\"], \"NodeRoleArn\": \""
+                + NODE_ROLE + "\"", "[\"system\", \"general-purpose\"]") + "}");
         ProvisionContext update = new ProvisionContext(ctx().engine(), "us-east-1", "000000000000", "my-stack",
                 "prod", event -> { }, before, PropertyChanges.between("AWS::EKS::Cluster", true, before, after));
 
         provisioner.provision(r, after, update);
 
         verify(eks, never()).updateClusterConfig(any(), any());
+    }
+
+    @Test
+    void anUpdateChangingTheNodePoolsWithoutTheNodeRoleSendsTheLiveRole() throws Exception {
+        StackResource r = autoModeCluster();
+        JsonNode before = props(PROD_ROLE + AUTO_MODE + "}");
+        JsonNode after = props(PROD_ROLE + AUTO_MODE.replace("[\"general-purpose\", \"system\"], \"NodeRoleArn\": \""
+                + NODE_ROLE + "\"", "[\"general-purpose\"]") + "}");
+
+        provisioner.provision(r, after, update(before, after));
+
+        ArgumentCaptor<UpdateClusterConfigRequest> request = ArgumentCaptor.forClass(UpdateClusterConfigRequest.class);
+        verify(eks).updateClusterConfig(eq("prod"), request.capture());
+        assertEquals(new ComputeConfig(true, List.of("general-purpose"), NODE_ROLE), request.getValue().computeConfig());
+    }
+
+    @Test
+    void aNetworkChangeOtherThanLoadBalancingLeavesAutoModeTheStackNeverDeclaredAlone() throws Exception {
+        // Auto Mode was turned on outside the stack, whose template never declares it.
+        StackResource r = autoModeCluster();
+        JsonNode before = props(PROD_ROLE + "\"KubernetesNetworkConfig\": {\"IpFamily\": \"ipv6\"}}");
+        JsonNode after = props(PROD_ROLE + "\"KubernetesNetworkConfig\": {\"IpFamily\": \"ipv6\", "
+                + "\"ServiceIpv6Cidr\": \"fd00::/108\"}}");
+
+        provisioner.provision(r, after, update(before, after));
+
+        verify(eks, never()).updateClusterConfig(any(), any());
+    }
+
+    /** A cluster the stack created, now running EKS Auto Mode with both built-in pools. */
+    private StackResource autoModeCluster() throws Exception {
+        Cluster created = new Cluster();
+        created.setName("prod");
+        created.setArn("arn:aws:eks:us-east-1:000000000000:cluster/prod");
+        when(eks.createCluster(any(CreateClusterRequest.class))).thenReturn(created);
+        StackResource r = resource("AWS::EKS::Cluster", "Control");
+        provisioner.provision(r, props(PROD_ROLE + AUTO_MODE + "}"), ctx());
+        created.setComputeConfig(new ComputeConfig(true, List.of("general-purpose", "system"), NODE_ROLE));
+        created.setStorageConfig(new StorageConfig(new BlockStorage(true)));
+        KubernetesNetworkConfig network = new KubernetesNetworkConfig();
+        network.setElasticLoadBalancing(new ElasticLoadBalancing(true));
+        created.setKubernetesNetworkConfig(network);
+        when(eks.describeCluster("prod")).thenReturn(created);
+        return r;
     }
 
     @Test

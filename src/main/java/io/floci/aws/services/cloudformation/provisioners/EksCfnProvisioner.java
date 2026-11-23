@@ -32,6 +32,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.function.Consumer;
@@ -459,7 +460,7 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
     private static AutoModeChange autoModeChange(JsonNode props, ProvisionContext ctx, PropertyChanges changes,
                                                  Cluster live) {
         if (!changed(changes, "ComputeConfig") && !changed(changes, "StorageConfig")
-                && !changed(changes, "KubernetesNetworkConfig")) {
+                && !loadBalancingChanged(changes)) {
             return null;
         }
         ComputeConfig compute = createSetting(props, "ComputeConfig", ctx, new TypeReference<>() { });
@@ -469,6 +470,13 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         ElasticLoadBalancing loadBalancing = declaredNetwork == null || declaredNetwork.getElasticLoadBalancing() == null
                 ? new ElasticLoadBalancing(false) : declaredNetwork.getElasticLoadBalancing();
         compute = compute == null ? new ComputeConfig(false, null, null) : compute;
+        ComputeConfig liveCompute = live.getComputeConfig();
+        if (Boolean.TRUE.equals(compute.enabled()) && liveCompute != null && Boolean.TRUE.equals(liveCompute.enabled())
+                && (compute.nodeRoleArn() == null || compute.nodeRoleArn().isEmpty())) {
+            // The role can't change while compute stays on, so a template that leaves it out keeps the live one, and
+            // names it: node pools are refused without one.
+            compute = new ComputeConfig(true, compute.nodePools(), liveCompute.nodeRoleArn());
+        }
         storage = storage == null || storage.blockStorage() == null ? new StorageConfig(new BlockStorage(false)) : storage;
         KubernetesNetworkConfig liveNetwork = live.getKubernetesNetworkConfig();
         if (autoModeOn(compute, storage, loadBalancing).equals(autoModeOn(live.getComputeConfig(), live.getStorageConfig(),
@@ -479,6 +487,21 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         KubernetesNetworkConfig network = new KubernetesNetworkConfig();
         network.setElasticLoadBalancing(loadBalancing);
         return new AutoModeChange(compute, storage, network);
+    }
+
+    /**
+     * Whether KubernetesNetworkConfig's ElasticLoadBalancing is what changed. Its other members are create-only
+     * (IpFamily, ServiceIpv4Cidr) or not applied (ServiceIpv6Cidr), so a change to one of them asks for no Auto Mode
+     * change, and doesn't turn off Auto Mode a cluster got outside the stack.
+     */
+    private static boolean loadBalancingChanged(PropertyChanges changes) {
+        if (!changed(changes, "KubernetesNetworkConfig")) {
+            return false;
+        }
+        PropertyChanges.PropertyChange change = changes.byName().get("KubernetesNetworkConfig");
+        JsonNode prior = change.prior() == null ? null : change.prior().get("ElasticLoadBalancing");
+        JsonNode current = change.current() == null ? null : change.current().get("ElasticLoadBalancing");
+        return !Objects.equals(prior, current);
     }
 
     private static List<Boolean> autoModeOn(ComputeConfig compute, StorageConfig storage,
