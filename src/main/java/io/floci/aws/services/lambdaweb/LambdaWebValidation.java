@@ -87,9 +87,9 @@ final class LambdaWebValidation {
         boolean bad = map.keySet().stream()
                 .anyMatch(k -> k.length() < min || k.length() > max || !pattern.matcher(k).matches());
         if (bad) {
-            errors.add("Value at '" + path + "' failed to satisfy constraint: Map keys must satisfy constraint: ["
-                    + lengthConstraints(min, max) + ", Member must satisfy regular expression pattern: "
-                    + pattern.pattern() + "]");
+            errors.add(SmithyValidationErrors.Violations.WITHOUT_VALUES.mapKeys(path, null, List.of(
+                    lengthConstraints(min, max),
+                    "Member must satisfy regular expression pattern: " + pattern.pattern())));
         }
         return this;
     }
@@ -110,9 +110,9 @@ final class LambdaWebValidation {
     LambdaWebValidation sensitiveMapKeys(String path, Map<String, ?> map, int min, Pattern pattern) {
         boolean bad = map.keySet().stream().anyMatch(k -> k.length() < min || !pattern.matcher(k).matches());
         if (bad) {
-            errors.add("Value at '" + path + "' failed to satisfy constraint: Map keys must satisfy constraint: ["
-                    + "Member must have length greater than or equal to " + min
-                    + ", Member must satisfy regular expression pattern: " + pattern.pattern() + "]");
+            errors.add(SmithyValidationErrors.Violations.WITHOUT_VALUES.mapKeys(path, null, List.of(
+                    "Member must have length greater than or equal to " + min,
+                    "Member must satisfy regular expression pattern: " + pattern.pattern())));
         }
         return this;
     }

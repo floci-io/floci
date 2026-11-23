@@ -4458,11 +4458,9 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         for (String key : tags.keySet()) {
             if (key.isEmpty() || key.codePointCount(0, key.length()) > MAX_TAG_KEY_LENGTH
                     || !TAG_KEY_PATTERN.matcher(key).matches()) {
-                throw SmithyValidationErrors.validationException("Value '" + tags
-                        + "' at 'tags' failed to satisfy constraint: Map keys must satisfy constraint: [Member"
-                        + " must have length less than or equal to " + MAX_TAG_KEY_LENGTH + ", Member must have"
-                        + " length greater than or equal to 1, Member must satisfy regular expression pattern: "
-                        + TAG_KEY_PATTERN.pattern() + "]");
+                throw SmithyValidationErrors.validationException(SmithyValidationErrors.Violations.QUOTED
+                        .mapKeys("tags", tags.toString(), SmithyValidationErrors.constraintSet(
+                                1, MAX_TAG_KEY_LENGTH, TAG_KEY_PATTERN.pattern(), null)));
             }
         }
     }
