@@ -161,20 +161,7 @@ public class CloudFrontController {
                     maxItems, Distribution::getId);
             int totalDistributions =
                     service.listDistributions(null, Integer.MAX_VALUE).size();
-
-            XmlBuilder xml = new XmlBuilder()
-                    .start("DistributionList", NS)
-                    .elem("Marker", marker != null ? marker : "")
-                    .elem("NextMarker", page.nextMarker())
-                    .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", page.truncated())
-                    .elem("Quantity", totalDistributions)
-                    .start("Items");
-            for (Distribution d : page.items()) {
-                xml.raw(xmlDistributionSummary(d));
-            }
-            xml.end("Items").end("DistributionList");
-            return Response.ok(xml.build(), XML).build();
+            return distributionListResponse(page, totalDistributions, marker, maxItems);
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
@@ -190,6 +177,156 @@ public class CloudFrontController {
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
+    }
+
+    // ── Connection groups ─────────────────────────────────────────────────────
+
+    @POST
+    @Path("/connection-group")
+    public Response createConnectionGroup(String body) {
+        try {
+            Map<String, String> request = XmlParser.extractGroups(body, "CreateConnectionGroupRequest")
+                    .stream().findFirst().orElse(Map.of());
+            ConnectionGroup group = service.createConnectionGroup(
+                    request.get("Name"),
+                    blankToNull(request.get("AnycastIpListId")),
+                    xmlBoolean(request.get("Enabled")),
+                    xmlBoolean(request.get("Ipv6Enabled")),
+                    viewerFallbackDistributionId(body),
+                    parseTags(body));
+            return Response.created(URI.create("/2020-05-31/connection-group/" + group.getId()))
+                    .type(XML)
+                    .header("ETag", group.getEtag())
+                    .entity(xmlConnectionGroup(group, "ConnectionGroup"))
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/connection-group/{Identifier}")
+    public Response getConnectionGroup(@PathParam("Identifier") String identifier) {
+        try {
+            ConnectionGroup group = service.getConnectionGroup(identifier);
+            return Response.ok(xmlConnectionGroup(group, "ConnectionGroup"), XML)
+                    .header("ETag", group.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/connection-group")
+    public Response getConnectionGroupByRoutingEndpoint(@QueryParam("RoutingEndpoint") String endpoint) {
+        try {
+            ConnectionGroup group = service.getConnectionGroupByRoutingEndpoint(endpoint);
+            return Response.ok(xmlConnectionGroup(group, "ConnectionGroup"), XML)
+                    .header("ETag", group.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @PUT
+    @Path("/connection-group/{Id}")
+    public Response updateConnectionGroup(@PathParam("Id") String id,
+                                          @HeaderParam("If-Match") String ifMatch,
+                                          String body) {
+        try {
+            Map<String, String> request = XmlParser.extractGroups(body, "UpdateConnectionGroupRequest")
+                    .stream().findFirst().orElse(Map.of());
+            ConnectionGroup group = service.updateConnectionGroup(id, ifMatch,
+                    blankToNull(request.get("AnycastIpListId")),
+                    xmlBoolean(request.get("Enabled")),
+                    xmlBoolean(request.get("Ipv6Enabled")),
+                    viewerFallbackDistributionId(body));
+            return Response.ok(xmlConnectionGroup(group, "ConnectionGroup"), XML)
+                    .header("ETag", group.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @DELETE
+    @Path("/connection-group/{Id}")
+    public Response deleteConnectionGroup(@PathParam("Id") String id,
+                                          @HeaderParam("If-Match") String ifMatch) {
+        try {
+            service.deleteConnectionGroup(id, ifMatch);
+            return Response.noContent().build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @POST
+    @Path("/connection-groups")
+    public Response listConnectionGroups(String body) {
+        try {
+            Map<String, String> request = XmlParser.extractGroups(body, "ListConnectionGroupsRequest")
+                    .stream().findFirst().orElse(Map.of());
+            String marker = request.get("Marker");
+            Integer maxItems = parseMaxItems(request.get("MaxItems"));
+            String anycastIpListId = null;
+            for (Map<String, String> filter : XmlParser.extractGroups(body, "ConnectionGroupAssociationFilter")) {
+                anycastIpListId = blankToNull(filter.get("AnycastIpListId"));
+            }
+            int pageSize = maxItems == null ? 100 : maxItems;
+            Page<ConnectionGroup> page = page(
+                    service.listConnectionGroups(marker, paginationFetchLimit(pageSize), anycastIpListId),
+                    pageSize, ConnectionGroup::getName);
+            XmlBuilder xml = new XmlBuilder()
+                    .start("ListConnectionGroupsResult", NS)
+                    .start("ConnectionGroups");
+            for (ConnectionGroup group : page.items()) {
+                xml.raw(xmlConnectionGroup(group, "ConnectionGroupSummary"));
+            }
+            xml.end("ConnectionGroups")
+                    .elem("NextMarker", page.nextMarker())
+                    .end("ListConnectionGroupsResult");
+            return Response.ok(xml.build(), XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/distributionsByConnectionMode/{ConnectionMode}")
+    public Response listDistributionsByConnectionMode(@PathParam("ConnectionMode") String connectionMode,
+                                                      @QueryParam("Marker") String marker,
+                                                      @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
+        try {
+            Page<Distribution> page = page(
+                    service.listDistributionsByConnectionMode(connectionMode, marker,
+                            paginationFetchLimit(maxItems)),
+                    maxItems, Distribution::getId);
+            int totalDistributions = service
+                    .listDistributionsByConnectionMode(connectionMode, null, Integer.MAX_VALUE).size();
+            return distributionListResponse(page, totalDistributions, marker, maxItems);
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response distributionListResponse(Page<Distribution> page, int totalDistributions,
+                                              String marker, int maxItems) {
+        XmlBuilder xml = new XmlBuilder()
+                .start("DistributionList", NS)
+                .elem("Marker", marker != null ? marker : "")
+                .elem("NextMarker", page.nextMarker())
+                .elem("MaxItems", maxItems)
+                .elem("IsTruncated", page.truncated())
+                .elem("Quantity", totalDistributions)
+                .start("Items");
+        for (Distribution d : page.items()) {
+            xml.raw(xmlDistributionSummary(d));
+        }
+        xml.end("Items").end("DistributionList");
+        return Response.ok(xml.build(), XML).build();
     }
 
     // ── Invalidations ─────────────────────────────────────────────────────────
@@ -3995,5 +4132,69 @@ public class CloudFrontController {
             }
         }
         return tags;
+    }
+
+    private String xmlConnectionGroup(ConnectionGroup group, String root) {
+        XmlBuilder xml = new XmlBuilder().start(root, NS);
+        if ("ConnectionGroupSummary".equals(root)) {
+            xml.elem("ETag", group.getEtag());
+        }
+        xml.elem("Id", group.getId())
+                .elem("Arn", group.getArn())
+                .elem("Name", group.getName())
+                .elem("AnycastIpListId", group.getAnycastIpListId())
+                .elem("RoutingEndpoint", group.getRoutingEndpoint())
+                .elem("Status", group.getStatus())
+                .elem("Enabled", group.getEnabled())
+                .elem("Ipv6Enabled", group.getIpv6Enabled())
+                .elem("IsDefault", group.getIsDefault())
+                .elem("CreatedTime", group.getCreatedTime() != null ? group.getCreatedTime().toString() : "")
+                .elem("LastModifiedTime",
+                        group.getLastModifiedTime() != null ? group.getLastModifiedTime().toString() : "");
+        if (group.getViewerFallbackDistributionId() != null) {
+            xml.start("ViewerFallback")
+                    .elem("DistributionId", group.getViewerFallbackDistributionId())
+                    .end("ViewerFallback");
+        }
+        if (group.getTags() != null && !group.getTags().isEmpty()) {
+            xml.start("Tags").start("Items");
+            for (Map.Entry<String, String> tag : group.getTags().entrySet()) {
+                xml.start("Tag")
+                        .elem("Key", tag.getKey())
+                        .elem("Value", tag.getValue())
+                        .end("Tag");
+            }
+            xml.end("Items").end("Tags");
+        }
+        return xml.end(root).build();
+    }
+
+    private static String blankToNull(String value) {
+        return value != null && !value.isBlank() ? value : null;
+    }
+
+    private static Boolean xmlBoolean(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return "true".equalsIgnoreCase(value.strip()) || "1".equals(value.strip());
+    }
+
+    private static Integer parseMaxItems(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value.strip());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidArgument", "The MaxItems specified is not valid.", 400);
+        }
+    }
+
+    private static String viewerFallbackDistributionId(String body) {
+        for (Map<String, String> fallback : XmlParser.extractGroups(body, "ViewerFallback")) {
+            return blankToNull(fallback.get("DistributionId"));
+        }
+        return null;
     }
 }

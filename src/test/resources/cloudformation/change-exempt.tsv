@@ -44,6 +44,7 @@ AWS::CertificateManager::Certificate	update not yet on the engine's changes (#66
 AWS::CloudFormation::CustomResource	update not yet on the engine's changes (#6606)
 AWS::CloudFormation::StackSet	update not yet on the engine's changes (#6606)
 AWS::CloudFront::CachePolicy	update not yet on the engine's changes (#6606)
+AWS::CloudFront::ConnectionGroup	update not yet on the engine's changes (#6606)
 AWS::CloudFront::Distribution	update not yet on the engine's changes (#6606)
 AWS::CloudFront::Function	update not yet on the engine's changes (#6606)
 AWS::CloudFront::KeyGroup	update not yet on the engine's changes (#6606)

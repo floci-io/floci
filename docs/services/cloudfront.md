@@ -25,7 +25,33 @@ OPTIONS, POST, PUT, PATCH and DELETE).
 | `UpdateDistribution` | PUT | `/2020-05-31/distribution/{Id}/config` |
 | `DeleteDistribution` | DELETE | `/2020-05-31/distribution/{Id}` |
 | `ListDistributions` | GET | `/2020-05-31/distribution` |
+| `ListDistributionsByConnectionMode` | GET | `/2020-05-31/distributionsByConnectionMode/{ConnectionMode}` |
 | `AssociateAlias` | PUT | `/2020-05-31/distribution/{TargetDistributionId}/associate-alias` |
+
+### Connection Groups
+
+Multi-tenant distributions (`ConnectionMode: tenant-only`) are served through a connection group.
+The account's default group is created automatically with the first `tenant-only` distribution, as
+the [Developer Guide](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/custom-connection-group.html)
+documents, and it can never be deleted. A group is addressable by its id, name or ARN wherever the
+API takes an `Identifier`.
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateConnectionGroup` | POST | `/2020-05-31/connection-group` |
+| `GetConnectionGroup` | GET | `/2020-05-31/connection-group/{Identifier}` |
+| `GetConnectionGroupByRoutingEndpoint` | GET | `/2020-05-31/connection-group?RoutingEndpoint` |
+| `UpdateConnectionGroup` | PUT | `/2020-05-31/connection-group/{Id}` |
+| `DeleteConnectionGroup` | DELETE | `/2020-05-31/connection-group/{Id}` |
+| `ListConnectionGroups` | POST | `/2020-05-31/connection-groups` |
+
+`CreateConnectionGroup` requires a unique `Name` and answers `EntityAlreadyExists` otherwise. A
+connection group's `RoutingEndpoint` reads like a distribution's domain name and is derived from
+the partition's DNS suffix. `UpdateConnectionGroup` and `DeleteConnectionGroup` require `If-Match`
+and answer `InvalidIfMatchVersion` without it, `PreconditionFailed` on a stale value, and
+`ResourceNotDisabled` on a delete of a group that is still enabled. `ListConnectionGroups` takes
+`Marker`, `MaxItems` and an optional `AssociationFilter.AnycastIpListId`, and returns
+`ConnectionGroupSummary` items carrying the group's `ETag`.
 
 ### Invalidations
 
