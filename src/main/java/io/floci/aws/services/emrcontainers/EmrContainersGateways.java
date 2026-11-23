@@ -20,14 +20,16 @@ import java.util.Map;
 /**
  * What runs a managed endpoint's Jupyter Enterprise Gateway in the docker runner mode. "The interactive endpoint is
  * backed by a Jupyter Enterprise Gateway that provides the remote kernel lifecycle management capability that
- * interactive clients need", with the kernels "Python 3" and "PySpark on Kubernetes" (EMR on EKS Development Guide,
- * "Overview of interactive endpoints"), which run in the release's {@code notebook-spark} image ("the base image URI
- * in your Docker file must use notebook-spark in place of spark", "Custom kernel image with interactive endpoint").
- * That image holds jupyter_server and ipykernel but no Enterprise Gateway, so a Python program of Floci's own serves
- * the gateway's kernels API on jupyter_server in a container of it, its kernels in the same container: the image's
- * {@code python3} kernel, and a {@code spark-python-kubernetes} one, the name the guide's
- * {@code jupyter-kernel-overrides} example gives the PySpark kernel, whose {@code spark} and {@code sc} are a Spark
- * session in Spark's local mode, on Floci's S3, with the endpoint's execution role's credentials.
+ * interactive clients need", with the kernels "Python 3", "PySpark on Kubernetes" and "Apache Spark with Scala" (EMR
+ * on EKS Development Guide, "Overview of interactive endpoints"), which run in the release's {@code notebook-spark}
+ * image ("the base image URI in your Docker file must use notebook-spark in place of spark", "Custom kernel image with
+ * interactive endpoint"). That image holds jupyter_server and ipykernel but no Enterprise Gateway, so a Python
+ * program of Floci's own serves the gateway's kernels API on jupyter_server in a container of it, its kernels in the
+ * same container: the image's {@code python3} kernel; a {@code spark-python-kubernetes} one, the name the guide's
+ * {@code jupyter-kernel-overrides} example gives the PySpark kernel; and a {@code spark-scala-kubernetes} one, a name
+ * of Floci's beside it, as the guide gives the Scala kernel none, which runs the image's Apache Toree, beside Jupyter
+ * Enterprise Gateway's Scala launcher. The Spark kernels' {@code spark} and {@code sc} are a Spark session in Spark's
+ * local mode, on Floci's S3, with the endpoint's execution role's credentials.
  *
  * <p>As Jupyter Enterprise Gateway does, a kernel gets the {@code KERNEL_} variables of the {@code env} its start
  * request carries, as a Jupyter client sends those of its own environment: {@code KERNEL_EXTRA_SPARK_OPTS}, "additional
@@ -115,6 +117,8 @@ final class EmrContainersGateways {
             SESSION_HEADER = "@SESSION_HEADER@"
             # The image's %%configure magic, beside Jupyter Enterprise Gateway's kernel launchers.
             MAGICS = "/usr/local/bin/kernel-launchers/python/scripts"
+            # The image's Apache Toree, which Jupyter Enterprise Gateway's Scala launcher runs.
+            TOREE = "/usr/local/bin/kernel-launchers/scala/lib/toree-assembly-*.jar"
             # Where the magic posts its cell's settings when no ENDPOINT_IP names its gateway: its own host's port.
             CONFIGURE_PORT = 18888
             # The magic's signature of a post: the SHA-256 of its body, encrypted with its kernel's AES key.
@@ -154,6 +158,15 @@ final class EmrContainersGateways {
                          + '/pyspark_kernel.py -f "$0"',
                          "{connection_file}"],
                 "env": {"PYTHONPATH": MAGICS},
+            }))
+            # As Toree's own kernel spec starts it, its connection file its profile.
+            write(HOME + "/kernels/spark-scala-kubernetes/kernel.json", json.dumps({
+                "display_name": "Apache Spark with Scala",
+                "language": "scala",
+                "argv": ["/bin/bash", "-c",
+                         'exec "$SPARK_HOME/bin/spark-submit" $KERNEL_EXTRA_SPARK_OPTS --class org.apache.toree.Main '
+                         + TOREE + ' --profile "$0"',
+                         "{connection_file}"],
             }))
 
 
@@ -349,6 +362,7 @@ final class EmrContainersGateways {
                 "--ServerApp.allow_remote_access=True",
                 "--KernelSpecManager.allowed_kernelspecs=python3",
                 "--KernelSpecManager.allowed_kernelspecs=spark-python-kubernetes",
+                "--KernelSpecManager.allowed_kernelspecs=spark-scala-kubernetes",
             ] + sys.argv[1:], kernel_manager_class=RemoteMappingKernelManager))
             """.replace("@HOME@", HOME).replace("@PORT@", String.valueOf(PORT))
             .replace("@PROGRAM_VARIABLE@", PROGRAM_VARIABLE).replace("@SESSION_HEADER@", SESSION_HEADER);
