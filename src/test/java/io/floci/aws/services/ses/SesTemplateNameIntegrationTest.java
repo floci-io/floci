@@ -87,9 +87,7 @@ class SesTemplateNameIntegrationTest {
             .body("__type", equalTo("BadRequestException"))
             .body("message", equalTo(message));
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("{\"TemplateContent\": {\"Subject\": \"S\", \"Text\": \"t\"}}")
         .when()
             .put("/v2/email/templates/{name}", name)
@@ -116,9 +114,7 @@ class SesTemplateNameIntegrationTest {
             .body("__type", equalTo("BadRequestException"))
             .body("message", equalTo(message));
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("{\"TemplateData\": \"{}\"}")
         .when()
             .post("/v2/email/templates/{name}/render", name)
@@ -143,9 +139,7 @@ class SesTemplateNameIntegrationTest {
             .statusCode(400)
             .body("ErrorResponse.Error.Message", equalTo(notAllowed("name probe")));
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("{\"TemplateName\": \"name probe\", \"TemplateContent\": {\"Text\": \"t\"}}")
         .when()
             .post("/v2/email/templates")
@@ -168,9 +162,7 @@ class SesTemplateNameIntegrationTest {
             .statusCode(400)
             .body("ErrorResponse.Error.Message", equalTo(notAllowed("name0x0009probe0x0001")));
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("{\"TemplateName\": \"name\\tprobe\", \"TemplateContent\": {\"Subject\": \"S\", \"Text\": \"t\"}}")
         .when()
             .post("/v2/email/templates")

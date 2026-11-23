@@ -37,9 +37,7 @@ class SesSendAddressLengthIntegrationTest {
 
     @Test
     void v2SendEmail_fromOverLimit_returnsBadRequestException() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("""
                 {
                     "FromEmailAddress": "%s",
@@ -75,9 +73,7 @@ class SesSendAddressLengthIntegrationTest {
 
     @Test
     void v2SendEmail_feedbackForwardingOverLimit_returnsBadRequestException() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",
@@ -99,9 +95,7 @@ class SesSendAddressLengthIntegrationTest {
         String raw = Base64.getEncoder().encodeToString(
                 "From: sender@example.com\r\nTo: success@simulator.amazonses.com\r\nSubject: s\r\n\r\nb"
                         .getBytes(StandardCharsets.UTF_8));
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("""
                 {
                     "Destination": {"ToAddresses": ["success@simulator.amazonses.com"], "CcAddresses": ["%s"]},
@@ -118,9 +112,7 @@ class SesSendAddressLengthIntegrationTest {
 
     @Test
     void v2SendBulkEmail_fromOverLimit_returnsInvalidEmailAddress() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("""
                 {
                     "FromEmailAddress": "%s",
