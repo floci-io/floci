@@ -34,6 +34,9 @@
 - **Intentional deviation:** real Comprehend enforces a maximum input size on `Text`
   and returns `TextSizeLimitExceededException` when exceeded. This is not enforced
   here — any non-empty `Text` is accepted regardless of length.
+- **IAM enforcement:** each action is checked on the resources the AWS Service Authorization
+  Reference lists for it, read from the request. The detection actions Floci serves act on no
+  resource type, so they are checked on `*`, as AWS authorizes them.
 
 ## Configuration
 

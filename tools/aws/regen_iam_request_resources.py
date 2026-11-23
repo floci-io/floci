@@ -353,6 +353,7 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs", "cloudwatch",
+              "comprehend",
               "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms", "dynamodb", "iam")
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -595,7 +596,6 @@ NOT_COVERED: dict[str, str] = {
                   "arn:aws:codedeploy:region:account-id:instance/instance-ID and AWS's GetOnPremisesInstance example "
                   "answers instance/<name>_<id>, an id the service mints after the name; reading it needs that format "
                   "corrected",
-    "comprehend": _LATER,
     "config": _LATER,
     "connect": _REST,
     "detective": _REST,
