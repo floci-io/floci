@@ -300,4 +300,16 @@ class ApplicationDefaultsTest {
         assertEquals("false", EmulatorConfig.DockerConfig.class.getMethod("logDriverMode")
                 .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
     }
+
+    // Catches: the log listener's port made ephemeral again, so a container created in the log-driver
+    // mode can no longer start after Floci restarts, or the yml and the @WithDefault disagreeing.
+    @Test
+    void productionConfigFixesTheLogDriverPort() throws IOException, NoSuchMethodException {
+        JsonNode port = productionConfig().path("floci").path("docker").path("log-driver-port");
+
+        assertFalse(port.isMissingNode(), "log-driver-port should be declared in application.yml");
+        assertEquals(12201, port.asInt());
+        assertEquals("12201", EmulatorConfig.DockerConfig.class.getMethod("logDriverPort")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+    }
 }

@@ -14,7 +14,6 @@ import io.floci.aws.config.NetworkExposureGuard;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.floci.aws.services.lambda.launcher.ImageCacheService;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 
 import java.util.ArrayList;
@@ -54,21 +53,28 @@ public class ContainerBuilder {
     private final EmbeddedDnsServer embeddedDnsServer;
     private final CurrentContainerNetworkResolver currentContainerNetworkResolver;
     private final ContainerEngineDetector containerEngineDetector;
-
-    /** Resolved only in the opt-in log-driver mode; unset when the builder is constructed by hand. */
-    @Inject
-    Instance<GelfLogListener> gelfLogListener;
+    private final GelfLogListener gelfLogListener;
 
     @Inject
     public ContainerBuilder(EmulatorConfig config, DockerHostResolver dockerHostResolver,
                             EmbeddedDnsServer embeddedDnsServer,
                             CurrentContainerNetworkResolver currentContainerNetworkResolver,
-                            ContainerEngineDetector containerEngineDetector) {
+                            ContainerEngineDetector containerEngineDetector,
+                            GelfLogListener gelfLogListener) {
         this.config = config;
         this.dockerHostResolver = dockerHostResolver;
         this.embeddedDnsServer = embeddedDnsServer;
         this.currentContainerNetworkResolver = currentContainerNetworkResolver;
         this.containerEngineDetector = containerEngineDetector;
+        this.gelfLogListener = gelfLogListener;
+    }
+
+    public ContainerBuilder(EmulatorConfig config, DockerHostResolver dockerHostResolver,
+                            EmbeddedDnsServer embeddedDnsServer,
+                            CurrentContainerNetworkResolver currentContainerNetworkResolver,
+                            ContainerEngineDetector containerEngineDetector) {
+        this(config, dockerHostResolver, embeddedDnsServer, currentContainerNetworkResolver,
+                containerEngineDetector, GelfLogListener.disabled());
     }
 
     public ContainerBuilder(EmulatorConfig config, DockerHostResolver dockerHostResolver,
@@ -91,16 +97,10 @@ public class ContainerBuilder {
     public Builder newContainer(String image) {
         Builder builder = new Builder(resolveImage(image), config, dockerHostResolver, embeddedDnsServer,
                 currentContainerNetworkResolver, containerEngineDetector);
-        builder.logDriver = logDriver();
-        return builder;
-    }
-
-    private GelfLogListener logDriver() {
-        if (gelfLogListener == null || config == null || config.docker() == null || !config.docker().logDriverMode()
-                || !gelfLogListener.isResolvable()) {
-            return null;
+        if (gelfLogListener.enabled()) {
+            builder.logDriver = gelfLogListener;
         }
-        return gelfLogListener.get();
+        return builder;
     }
 
     /**

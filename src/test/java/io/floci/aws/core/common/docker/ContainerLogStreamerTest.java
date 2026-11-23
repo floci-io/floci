@@ -12,7 +12,6 @@ import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.StreamType;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.testutil.LogCapture;
-import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -157,15 +156,9 @@ class ContainerLogStreamerTest {
         return docker;
     }
 
-    @SuppressWarnings("unchecked")
     private static ContainerLogStreamer streamerWith(DockerClient docker, CloudWatchLogsService cloudWatch,
                                                      GelfLogListener listener) {
-        ContainerLogStreamer streamer = new ContainerLogStreamer(docker, docker, cloudWatch, Duration.ofHours(1));
-        Instance<GelfLogListener> instance = mock(Instance.class);
-        when(instance.isResolvable()).thenReturn(true);
-        when(instance.get()).thenReturn(listener);
-        streamer.gelfLogListener = instance;
-        return streamer;
+        return new ContainerLogStreamer(docker, docker, cloudWatch, Duration.ofHours(1), listener);
     }
 
     // Catches: a container tagged for the log-driver mode not claimed by the listener, so its pushed log

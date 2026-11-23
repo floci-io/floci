@@ -4,12 +4,12 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.StreamType;
 import io.floci.aws.config.EmulatorConfig;
-import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -93,21 +93,25 @@ class GelfLogListenerTest {
         assertEquals(List.of("later up"), lines);
     }
 
-    // Catches: a container kept across a restart of Floci, which still dials the old listener's port,
-    // attached to a listener on another port, so its log never arrives.
+    // Catches: a container kept across a restart of Floci dialing a port the new listener does not take,
+    // so it cannot start and its log never arrives; or one created for another port being claimed.
     @Test
-    void aRestartedListenerTakesBackThePortAnExistingContainerDials() throws IOException {
+    void aRestartedListenerTakesTheSamePortAndClaimsOnlyContainersDialingIt() throws IOException {
         int port;
         try (ServerSocket free = new ServerSocket(0)) {
             port = free.getLocalPort();
         }
-        restarted = new GelfLogListener(mock(DockerClient.class), true, "127.0.0.1");
+        GelfLogListener before = new GelfLogListener(mock(DockerClient.class), true, "127.0.0.1", port, 8);
+        String created = before.logConfigFor("token-a", ROTATION).getConfig().get("gelf-address");
+        before.close();
 
-        assertTrue(restarted.listensAt("tcp://127.0.0.1:" + port), "a listener not started yet binds that port");
-        assertEquals("127.0.0.1:" + port, restarted.ensureStarted());
+        restarted = new GelfLogListener(mock(DockerClient.class), true, "127.0.0.1", port, 8);
+        assertFalse(restarted.started());
+        assertTrue(restarted.listensAt(created), "the restarted listener takes the port the container dials");
+        assertTrue(restarted.started());
 
         String elsewhere = listener.logConfigFor("token-b", ROTATION).getConfig().get("gelf-address");
-        assertFalse(restarted.listensAt(elsewhere), "a started listener answers only for its own address");
+        assertFalse(restarted.listensAt(elsewhere), "a listener answers only for its own address");
         assertFalse(restarted.listensAt(null));
     }
 
@@ -134,7 +138,6 @@ class GelfLogListenerTest {
     // Catches: the mode switching a container nobody attaches (a Flink TaskManager, an ephemeral RDS
     // instance, a Lambda) to the gelf driver, or leaving an attached one on json-file without its tag.
     @Test
-    @SuppressWarnings("unchecked")
     void onlyContainersMarkedForPushedLogsGetTheGelfDriverAndATag() {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
@@ -142,11 +145,7 @@ class GelfLogListenerTest {
         when(docker.logDriverMode()).thenReturn(true);
         when(docker.logMaxSize()).thenReturn("10m");
         when(docker.logMaxFile()).thenReturn("3");
-        ContainerBuilder builder = new ContainerBuilder(config, null, null);
-        Instance<GelfLogListener> instance = mock(Instance.class);
-        when(instance.isResolvable()).thenReturn(true);
-        when(instance.get()).thenReturn(listener);
-        builder.gelfLogListener = instance;
+        ContainerBuilder builder = new ContainerBuilder(config, null, null, null, null, listener);
 
         ContainerSpec jobManager = builder.newContainer("flink:1.20")
                 .withLabels(Map.of(ContainerStorageHelper.SERVICE_LABEL, "kinesisanalytics"))
@@ -165,6 +164,32 @@ class GelfLogListenerTest {
         assertEquals(LogConfig.LoggingType.JSON_FILE, taskManager.logConfig().getType());
         assertNull(taskManager.labels().get(GelfLogListener.LOG_TOKEN_LABEL));
         assertFalse(taskManager.labels().containsKey(GelfLogListener.LOG_TOKEN_LABEL));
+    }
+
+    // Catches: a local process holding connections open until the daemon's own connections are refused,
+    // or a closed connection never returning its place.
+    @Test
+    void connectionsOverTheLimitAreClosedAndAClosedOneFreesItsPlace() throws Exception {
+        restarted = new GelfLogListener(mock(DockerClient.class), true, "127.0.0.1", 0, 1);
+        String address = restarted.logConfigFor("token-a", ROTATION).getConfig().get("gelf-address");
+        int port = Integer.parseInt(address.substring(address.lastIndexOf(':') + 1));
+        restarted.register("token-a", (stream, line) -> lines.add(line));
+
+        try (Socket held = new Socket("127.0.0.1", port)) {
+            try (Socket refused = new Socket("127.0.0.1", port); InputStream in = refused.getInputStream()) {
+                refused.setSoTimeout(5000);
+                assertEquals(-1, in.read(), "the listener closes a connection over its limit");
+            }
+            held.getOutputStream().write(messages("{\"short_message\":\"held\",\"_tag\":\"token-a\"}"));
+            await().until(() -> lines.contains("held"));
+        }
+
+        await().untilAsserted(() -> {
+            try (Socket next = new Socket("127.0.0.1", port); OutputStream out = next.getOutputStream()) {
+                out.write(messages("{\"short_message\":\"next\",\"_tag\":\"token-a\"}"));
+            }
+            assertTrue(lines.contains("next"));
+        });
     }
 
     // Catches: the lines a container writes between its start and its attach, its startup banner, lost.

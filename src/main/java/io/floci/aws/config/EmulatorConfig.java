@@ -4624,6 +4624,14 @@ public interface EmulatorConfig {
         Optional<String> logDriverHost();
 
         /**
+         * The port Floci's log listener takes in the log-driver mode. It is fixed because Docker keeps the
+         * address in each container's log configuration and dials it on every start, including a start of a
+         * container Floci adopts after a restart. The default is GELF's standard port.
+         */
+        @WithDefault("12201")
+        int logDriverPort();
+
+        /**
          * Optional namespace inserted into Floci-managed child container and volume names.
          * Useful when multiple Floci processes share one Docker daemon.
          */

@@ -258,7 +258,9 @@ With `log-driver-mode` on, the long-lived service containers whose logs Floci fo
 
 Docker opens that connection itself, from wherever the daemon runs, so the mode only works when the daemon can reach Floci: Docker Desktop, which dials `host.docker.internal`, or a daemon on Floci's own host, which dials `127.0.0.1`. It does not work with Podman (which has no `gelf` driver), Docker-in-Docker, a remote daemon, or Floci running in a container whose port the daemon cannot reach, and when the daemon cannot connect, the container fails to start.
 
-The daemon's local copy of the log (dual logging, on by default since Docker Engine 20.10) is what `docker logs`, the RDS log-file APIs and the fallback below read, so keep it on; `log-max-size` and `log-max-file` bound it. A container kept across a restart of Floci still dials the previous listener's port: Floci listens on that port again when it is free, and otherwise logs a warning and reads that container's log on a timer from the local copy.
+The daemon's local copy of the log (dual logging, on by default since Docker Engine 20.10) is what `docker logs`, the RDS log-file APIs and the fallback below read, so keep it on; `log-max-size` and `log-max-file` bound it.
+
+Docker keeps the listener's address in each container's log configuration and dials it every time the container starts, so the listener takes a fixed port, `log-driver-port` (12201, GELF's standard port), and Floci opens it before it starts any container. A stopped container that Floci adopts after a restart therefore starts again. The port must be free on Floci's host. A container created with another `log-driver-port` or `log-driver-host` keeps dialing the old address: Floci reads its log on a timer from the local copy and logs a warning, and once stopped it starts again only after the setting is restored or the resource is recreated.
 
 `log-driver-host` overrides the host the daemon dials. When it names an address of Floci's own host (Floci's address on a Docker network, for example), the listener binds that address instead of loopback; the listener has no authentication beyond each container's random tag, so only point it at a network you trust:
 
@@ -267,9 +269,10 @@ floci:
   docker:
     log-driver-mode: true
     log-driver-host: host.docker.internal
+    log-driver-port: 12201
 ```
 
-Environment variables: `FLOCI_DOCKER_LOG_DRIVER_MODE`, `FLOCI_DOCKER_LOG_DRIVER_HOST`
+Environment variables: `FLOCI_DOCKER_LOG_DRIVER_MODE`, `FLOCI_DOCKER_LOG_DRIVER_HOST`, `FLOCI_DOCKER_LOG_DRIVER_PORT`
 
 
 Configure log rotation for all containers spawned by Floci:
@@ -463,6 +466,7 @@ caller keeps its existing failure handling after retries are exhausted.
 | `FLOCI_DOCKER_LOG_POLL_INTERVAL_MILLIS` | `1000` | Milliseconds between the reads of a long-lived service container's log (databases, caches, brokers, the ECR registry, the EKS API server), read on a timer instead of followed; at least 100 |
 | `FLOCI_DOCKER_LOG_DRIVER_MODE` | `false` | Long-lived service containers push their logs to Floci through Docker's `gelf` driver; needs a daemon that can reach Floci |
 | `FLOCI_DOCKER_LOG_DRIVER_HOST` | _(unset)_ | Host the daemon dials for the log-driver mode; `host.docker.internal` on Docker Desktop, `127.0.0.1` otherwise |
+| `FLOCI_DOCKER_LOG_DRIVER_PORT` | `12201` | Fixed port of Floci's log listener in the log-driver mode; Docker dials it on every start of a container created in the mode |
 | `FLOCI_DOCKER_LOG_MAX_SIZE` | `10m` | Max container log file size before rotation |
 | `FLOCI_DOCKER_LOG_MAX_FILE` | `3` | Number of rotated log files to retain |
 | `FLOCI_DOCKER_EXTRA_LABELS_0__KEY` | _(unset)_ | Label key for extra-label entry 0, applied to every Floci-created container and volume (increment the index for more) |

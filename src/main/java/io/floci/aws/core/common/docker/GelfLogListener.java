@@ -27,6 +27,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Semaphore;
 import java.util.function.BiConsumer;
 
 /**
@@ -51,6 +52,8 @@ public class GelfLogListener {
     private static final int STDERR_LEVEL = 3;
     private static final int MAX_PENDING_LINES = 1000;
     private static final Duration UNCLAIMED_EXPIRY = Duration.ofMinutes(10);
+    // The daemon holds one connection per container; this bounds what any other local process can open.
+    private static final int MAX_CONNECTIONS = 1024;
 
     /** Label carrying a container's tag, so its log can be claimed when it is attached. */
     static final String LOG_TOKEN_LABEL = "io.floci.log-token";
@@ -58,22 +61,40 @@ public class GelfLogListener {
     private final DockerClient dockerClient;
     private final boolean enabled;
     private final String configuredHost;
+    private final int port;
     private final Map<String, BiConsumer<StreamType, String>> sinks = new ConcurrentHashMap<>();
     /** Lines of containers that started but are not attached yet, by the tag this listener issued them. */
     private final Map<String, Pending> pending = new ConcurrentHashMap<>();
+    private final int maxConnections;
+    private final Semaphore connections;
     private final Object startLock = new Object();
     private ServerSocket server;
     private volatile String address;
 
     @Inject
     public GelfLogListener(DockerClient dockerClient, EmulatorConfig config) {
-        this(dockerClient, config.docker().logDriverMode(), config.docker().logDriverHost().orElse(null));
+        this(dockerClient, config.docker().logDriverMode(), config.docker().logDriverHost().orElse(null),
+                config.docker().logDriverPort(), MAX_CONNECTIONS);
     }
 
+    /** A listener on an ephemeral port, for tests. */
     GelfLogListener(DockerClient dockerClient, boolean enabled, String configuredHost) {
+        this(dockerClient, enabled, configuredHost, 0, MAX_CONNECTIONS);
+    }
+
+    GelfLogListener(DockerClient dockerClient, boolean enabled, String configuredHost, int port,
+                    int maxConnections) {
         this.dockerClient = dockerClient;
         this.enabled = enabled;
         this.configuredHost = configuredHost;
+        this.port = port;
+        this.maxConnections = maxConnections;
+        this.connections = new Semaphore(maxConnections);
+    }
+
+    /** A listener for the mode switched off, for the builder and streamer constructed outside CDI. */
+    static GelfLogListener disabled() {
+        return new GelfLogListener(null, false, null);
     }
 
     public boolean enabled() {
@@ -117,32 +138,24 @@ public class GelfLogListener {
     }
 
     /**
-     * Whether a container created with {@code gelfAddress} reaches this listener. After a restart of Floci
-     * the listener is not started yet, so it first tries the port an existing container still dials.
+     * Whether a container created with {@code gelfAddress} reaches this listener, starting it if needed. A
+     * container created before {@code log-driver-port} or {@code log-driver-host} changed dials elsewhere.
      */
     boolean listensAt(String gelfAddress) {
         if (gelfAddress == null || !gelfAddress.startsWith("tcp://")) {
             return false;
         }
-        synchronized (startLock) {
-            if (address == null) {
-                int port;
-                try {
-                    port = Integer.parseInt(gelfAddress.substring(gelfAddress.lastIndexOf(':') + 1));
-                } catch (NumberFormatException e) {
-                    LOG.debugv("Unreadable GELF address {0}: {1}", gelfAddress, e.getMessage());
-                    return false;
-                }
-                try {
-                    start(port);
-                } catch (IllegalStateException e) {
-                    LOG.warnv("Could not listen again on {0}, the address an existing container sends its log to: {1}",
-                            gelfAddress, e.getCause() == null ? e.getMessage() : e.getCause().getMessage());
-                    return false;
-                }
-            }
-            return gelfAddress.equals("tcp://" + address);
+        try {
+            return gelfAddress.equals("tcp://" + ensureStarted());
+        } catch (IllegalStateException e) {
+            LOG.warnv("Docker log-driver listener is not up, so {0} is not reached: {1}", gelfAddress,
+                    e.getCause() == null ? e.getMessage() : e.getCause().getMessage());
+            return false;
         }
+    }
+
+    boolean started() {
+        return address != null;
     }
 
     void register(String token, BiConsumer<StreamType, String> sink) {
@@ -172,21 +185,22 @@ public class GelfLogListener {
     String ensureStarted() {
         synchronized (startLock) {
             if (address == null) {
-                start(0);
+                start();
             }
             return address;
         }
     }
 
     // Called holding startLock.
-    private void start(int port) {
+    private void start() {
         String host = configuredHost != null ? configuredHost : daemonFacingHost();
         try {
             ServerSocket socket = new ServerSocket();
             socket.bind(new InetSocketAddress(bindAddress(), port));
             server = socket;
         } catch (IOException e) {
-            throw new IllegalStateException("Could not open the Docker log-driver listener", e);
+            throw new IllegalStateException("Could not open the Docker log-driver listener on port " + port
+                    + " (floci.docker.log-driver-port)", e);
         }
         address = host + ":" + server.getLocalPort();
         Thread.ofVirtual().name("floci-gelf-accept").start(this::acceptLoop);
@@ -227,7 +241,19 @@ public class GelfLogListener {
         while (!socket.isClosed()) {
             try {
                 Socket connection = socket.accept();
-                Thread.ofVirtual().name("floci-gelf-connection").start(() -> read(connection));
+                if (!connections.tryAcquire()) {
+                    LOG.warnv("Docker log-driver listener refused a connection from {0}: {1} are already open",
+                            connection.getRemoteSocketAddress(), maxConnections);
+                    connection.close();
+                    continue;
+                }
+                Thread.ofVirtual().name("floci-gelf-connection").start(() -> {
+                    try {
+                        read(connection);
+                    } finally {
+                        connections.release();
+                    }
+                });
             } catch (IOException e) {
                 if (!socket.isClosed()) {
                     LOG.debugv("Docker log-driver listener could not accept a connection: {0}", e.getMessage());

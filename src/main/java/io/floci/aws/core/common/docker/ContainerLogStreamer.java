@@ -12,7 +12,6 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -62,9 +61,7 @@ public class ContainerLogStreamer {
     private final CloudWatchLogsService cloudWatchLogsService;
     private final Duration pollInterval;
 
-    /** Resolved only in the opt-in log-driver mode; unset when the streamer is constructed by hand. */
-    @Inject
-    Instance<GelfLogListener> gelfLogListener;
+    private final GelfLogListener gelfLogListener;
 
     // Log-follow attaches hold their connection open for the whole container lifetime, so
     // this class is the primary consumer of the streaming pool: sharing the control-plane
@@ -73,9 +70,11 @@ public class ContainerLogStreamer {
     // control-plane calls instead, and holds no connection between reads.
     @Inject
     public ContainerLogStreamer(@StreamingDocker DockerClient dockerClient, DockerClient pollingDockerClient,
-                                CloudWatchLogsService cloudWatchLogsService, EmulatorConfig config) {
+                                CloudWatchLogsService cloudWatchLogsService, EmulatorConfig config,
+                                GelfLogListener gelfLogListener) {
         this(dockerClient, pollingDockerClient, cloudWatchLogsService,
-                Duration.ofMillis(validateLogPollIntervalMillis(config.docker().logPollIntervalMillis())));
+                Duration.ofMillis(validateLogPollIntervalMillis(config.docker().logPollIntervalMillis())),
+                gelfLogListener);
     }
 
     public ContainerLogStreamer(DockerClient dockerClient, CloudWatchLogsService cloudWatchLogsService) {
@@ -84,6 +83,13 @@ public class ContainerLogStreamer {
 
     ContainerLogStreamer(DockerClient dockerClient, DockerClient pollingDockerClient,
                          CloudWatchLogsService cloudWatchLogsService, Duration pollInterval) {
+        this(dockerClient, pollingDockerClient, cloudWatchLogsService, pollInterval, GelfLogListener.disabled());
+    }
+
+    ContainerLogStreamer(DockerClient dockerClient, DockerClient pollingDockerClient,
+                         CloudWatchLogsService cloudWatchLogsService, Duration pollInterval,
+                         GelfLogListener gelfLogListener) {
+        this.gelfLogListener = gelfLogListener;
         this.dockerClient = dockerClient;
         this.pollingDockerClient = pollingDockerClient;
         this.cloudWatchLogsService = cloudWatchLogsService;
@@ -211,10 +217,10 @@ public class ContainerLogStreamer {
      * address of a listener this Floci no longer has is read on a timer instead, from the daemon's local copy.
      */
     private Closeable attachPushed(String containerId, BiConsumer<StreamType, String> sink) {
-        if (gelfLogListener == null || !gelfLogListener.isResolvable() || !gelfLogListener.get().enabled()) {
+        if (!gelfLogListener.enabled()) {
             return null;
         }
-        GelfLogListener listener = gelfLogListener.get();
+        GelfLogListener listener = gelfLogListener;
         InspectContainerResponse inspect;
         try {
             inspect = pollingDockerClient.inspectContainerCmd(containerId).exec();
