@@ -315,8 +315,14 @@ public class KinesisService implements ResourceProvider {
         String consumerArn = streamArn + "/consumer/" + consumerName + ":" + System.currentTimeMillis();
         KinesisConsumer consumer = new KinesisConsumer(consumerName, consumerArn, streamArn);
         consumer.getTags().putAll(tags);
-        synchronized (consumerStore) {
-            consumerStore.put(regionKey(region, consumerArn), consumer);
+        // Same lock order as deleteStream (stream monitor, then consumerStore), so a registration
+        // cannot land between a delete's consumer sweep and its removal of the stream.
+        String streamKey = regionKey(region, streamNameFromTagArn(streamArn));
+        synchronized (lockFor(streamKey)) {
+            describeStreamByArn(streamArn, region);
+            synchronized (consumerStore) {
+                consumerStore.put(regionKey(region, consumerArn), consumer);
+            }
         }
         LOG.infov("Registered Kinesis consumer: {0} for stream {1}", consumerName, streamArn);
         return consumer;
@@ -355,11 +361,35 @@ public class KinesisService implements ResourceProvider {
     }
 
     public void deleteStream(String streamName, String region) {
+        // Internal callers (CloudFormation delete) treat an already-gone stream as deleted.
+        deleteStream(streamName, true, true, region);
+    }
+
+    public void deleteStream(String streamName, boolean enforceConsumerDeletion, String region) {
+        deleteStream(streamName, enforceConsumerDeletion, false, region);
+    }
+
+    private void deleteStream(String streamName, boolean enforceConsumerDeletion, boolean missingIsDeleted,
+                              String region) {
         String storageKey = regionKey(region, streamName);
         // Delete under the per-stream monitor every writer takes, so the delete is serialized with
         // any in-flight append, split, merge or metadata write on this stream. See lockFor for why
         // the monitor is deliberately left in the map.
         synchronized (lockFor(storageKey)) {
+            if (missingIsDeleted && store.get(storageKey).isEmpty()) {
+                return;
+            }
+            KinesisStream stream = resolveStream(streamName, region);
+            synchronized (consumerStore) {
+                List<KinesisConsumer> consumers = listStreamConsumers(stream.getStreamArn(), region);
+                if (!consumers.isEmpty() && !enforceConsumerDeletion) {
+                    throw new AwsException("ResourceInUseException",
+                            "Stream " + streamName + " has registered consumers", 400);
+                }
+                for (KinesisConsumer consumer : consumers) {
+                    consumerStore.delete(regionKey(region, consumer.getConsumerArn()));
+                }
+            }
             store.delete(storageKey);
         }
         LOG.infov("Deleted Kinesis stream: {0}", streamName);

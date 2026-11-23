@@ -77,6 +77,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -380,6 +381,35 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final String CREDENTIAL_REPORT_KEY = "credential-report";
     /** AWS generates a fresh report only if the most recent one is older than this. */
     private static final Duration CREDENTIAL_REPORT_MAX_AGE = Duration.ofHours(4);
+    /**
+     * The sentences AWS answers a blocked delete with, each of them entirely fixed text: no
+     * entity name, no count, nothing taken from the request. A cleanup routine reads the sentence
+     * to choose its next step (detach a managed policy, delete an inline one, or remove a role
+     * from its instance profile), so the wording is what names the dependency; one that describes
+     * the blocker instead sends the caller after the wrong remedy.
+     */
+    private static final String MUST_DETACH_POLICIES_FIRST =
+            "Cannot delete entity, must detach all policies first.";
+    private static final String MUST_DELETE_POLICIES_FIRST =
+            "Cannot delete entity, must delete policies first.";
+    private static final String MUST_REMOVE_PROFILE_ROLES_FIRST =
+            "Cannot delete entity, must remove roles from instance profile first.";
+    /**
+     * What a managed policy's own delete is refused with while a version other than its default
+     * is still stored, three sentences of entirely fixed text: no ARN, no version id, no count.
+     * The last of them tells the caller what not to go looking for, the default version being
+     * the one version a delete takes with it and the one {@code DeletePolicyVersion} refuses.
+     */
+    private static final String MUST_DELETE_POLICY_VERSIONS_FIRST =
+            "This policy has more than one version. Before you delete a policy, you must delete"
+                    + " the policy's versions. The default version is deleted with the policy.";
+    /**
+     * What a managed policy delete answers while an entity still has it attached, Floci's own
+     * wording rather than a recording. It is also what clearing the policy's other versions
+     * answers, since the clearing is only ever on the way to the delete.
+     */
+    private static final String POLICY_STILL_ATTACHED =
+            "Cannot delete a policy attached to entities. Detach it first.";
     public static final String FEATURE_ROOT_CREDENTIALS = "RootCredentialsManagement";
     public static final String FEATURE_ROOT_SESSIONS = "RootSessions";
 
@@ -494,6 +524,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // Undo handles retain their ownership keys; completed attempts leave no permanent history.
     // Both keys and values are weak because each owner itself holds its canonical key.
     private final Map<InlinePolicyKey, WeakReference<InlinePolicyOwner>> inlinePolicyOwners = new WeakHashMap<>();
+    /**
+     * Which instance profiles hold each role, by storage scope then role name: the reverse of the
+     * list each profile carries, so a role delete asks a map instead of reading every profile in
+     * the account. The profiles stay the record and this is only an index into them, kept true by
+     * being written in the same two places a pairing is, both under {@code resourceNameLock},
+     * which is also the only lock under which it may be read. A scope is filled from storage the
+     * first time it is asked about, so profiles that were already there, from a restart or a
+     * store this process did not write, are in it before the first answer.
+     */
+    private final Map<String, Map<String, Set<String>>> profilesByRole = new HashMap<>();
     /**
      * Guards every check-then-write on a login profile. ChangePassword is the reason it has to
      * exist: it reads the profile to compare the old password, then writes the new one, so two
@@ -1015,8 +1055,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         synchronized (resourceNameLock) {
             IamUser user = getUser(userName);
             if (!user.getAttachedPolicyArns().isEmpty()) {
-                throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must detach all policies first.", 409);
+                throw new AwsException("DeleteConflict", MUST_DETACH_POLICIES_FIRST, 409);
             }
             if (!user.getGroupNames().isEmpty()) {
                 throw new AwsException("DeleteConflict",
@@ -1027,8 +1066,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         "Cannot delete entity, must delete login profile first.", 409);
             }
             if (!user.getInlinePolicies().isEmpty()) {
-                throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must delete policies first.", 409);
+                throw new AwsException("DeleteConflict", MUST_DELETE_POLICIES_FIRST, 409);
             }
             // The credential locks are held across the delete rather than just the checks:
             // CreateAccessKey, UploadSigningCertificate and EnableMFADevice each confirm the user
@@ -1284,9 +1322,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void deleteGroup(String groupName) {
         synchronized (resourceNameLock) {
             IamGroup group = getGroup(groupName);
-            if (!group.getAttachedPolicyArns().isEmpty() || !group.getInlinePolicies().isEmpty()) {
-                throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must detach all policies first.", 409);
+            if (!group.getAttachedPolicyArns().isEmpty()) {
+                throw new AwsException("DeleteConflict", MUST_DETACH_POLICIES_FIRST, 409);
+            }
+            if (!group.getInlinePolicies().isEmpty()) {
+                throw new AwsException("DeleteConflict", MUST_DELETE_POLICIES_FIRST, 409);
             }
             if (!group.getUserNames().isEmpty()) {
                 throw new AwsException("DeleteConflict",
@@ -1603,19 +1643,108 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         deleteRole(roleName, null);
     }
 
-    /** A service cleanup must not delete a different role that has since taken the name. */
+    /**
+     * A service cleanup must not delete a different role that has since taken the name.
+     *
+     * <p>One dependency is named at a time, and which one comes first is part of what AWS was
+     * recorded answering: a role both held by an instance profile and carrying attached policies
+     * is refused for the profile. Attached policies ahead of inline ones is the order
+     * {@link #deleteUser} already answers; which of those two AWS reports first is not recorded.
+     */
     public void deleteRole(String roleName, String expectedRoleId) {
         synchronized (resourceNameLock) {
             validateRoleName(roleName);
             IamRole role = getRole(roleName);
             requireSameRole(role, roleName, expectedRoleId);
             requireNotServiceLinked(role, roleName);
-            if (!role.getAttachedPolicyArns().isEmpty() || !role.getInlinePolicies().isEmpty()) {
-                throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must detach all policies first.", 409);
+            if (heldByAnInstanceProfile(roleName)) {
+                throw new AwsException("DeleteConflict", MUST_REMOVE_PROFILE_ROLES_FIRST, 409);
+            }
+            if (!role.getAttachedPolicyArns().isEmpty()) {
+                throw new AwsException("DeleteConflict", MUST_DETACH_POLICIES_FIRST, 409);
+            }
+            if (!role.getInlinePolicies().isEmpty()) {
+                throw new AwsException("DeleteConflict", MUST_DELETE_POLICIES_FIRST, 409);
             }
             roles.delete(roleName);
             LOG.infov("Deleted IAM role: {0}", roleName);
+        }
+    }
+
+    /**
+     * Whether any instance profile still holds the role. The role itself is not re-read, since
+     * the caller resolved it already and a delete must not answer that a role it just found is
+     * missing; the membership read takes the profile's own monitor, the one the pairing writes
+     * hold. It is reached under {@code resourceNameLock}, which the attach path now takes outside
+     * that monitor, so no pairing can land between this answer and the delete that asked for it.
+     */
+    /**
+     * Refuses up front what {@link #deleteRole} refuses for an instance profile. A caller that
+     * clears a role's own policies before deleting it asks first: otherwise a role held by a
+     * profile it does not own is stripped of its permissions and then cannot be deleted, which
+     * leaves it live and weaker than it was. The pairing can still be made after this answers,
+     * and such a caller is no worse off then than it was before the delete checked at all.
+     */
+    public void requireNotHeldByAnInstanceProfile(String roleName) {
+        synchronized (resourceNameLock) {
+            if (heldByAnInstanceProfile(roleName)) {
+                throw new AwsException("DeleteConflict", MUST_REMOVE_PROFILE_ROLES_FIRST, 409);
+            }
+        }
+    }
+
+    private boolean heldByAnInstanceProfile(String roleName) {
+        return !profilesHolding(roleName).isEmpty();
+    }
+
+    /** The profile names holding the role, in this request's storage scope. */
+    private Set<String> profilesHolding(String roleName) {
+        return pairingIndex().getOrDefault(roleName, Set.of());
+    }
+
+    /**
+     * The pairing index for the scope this request reads profiles in, filled from those profiles
+     * the first time the scope comes up. Callers hold {@code resourceNameLock}: the maps are
+     * plain ones, and what they hold has to agree with a storage write taken under that lock.
+     */
+    private Map<String, Set<String>> pairingIndex() {
+        return profilesByRole.computeIfAbsent(instanceProfileScope(), scope -> {
+            Map<String, Set<String>> index = new HashMap<>();
+            for (InstanceProfile profile : instanceProfiles.scan(k -> true)) {
+                List<String> roleNames = profile.getRoleNames();
+                synchronized (roleNames) {
+                    for (String roleName : roleNames) {
+                        index.computeIfAbsent(roleName, name -> new HashSet<>())
+                                .add(profile.getInstanceProfileName());
+                    }
+                }
+            }
+            return index;
+        });
+    }
+
+    /**
+     * The account profiles are read in, or the empty string outside account-aware storage. The
+     * index is scoped exactly as {@code instanceProfiles} is, so one account's pairings are never
+     * read as another's.
+     */
+    private String instanceProfileScope() {
+        if (instanceProfiles instanceof AccountAwareStorageBackend<InstanceProfile> aware) {
+            String accountId = aware.accountId();
+            return accountId == null ? "" : accountId;
+        }
+        return "";
+    }
+
+    private void indexPairing(String instanceProfileName, String roleName) {
+        pairingIndex().computeIfAbsent(roleName, name -> new HashSet<>()).add(instanceProfileName);
+    }
+
+    private void unindexPairing(String instanceProfileName, String roleName) {
+        Map<String, Set<String>> index = pairingIndex();
+        Set<String> holding = index.get(roleName);
+        if (holding != null && holding.remove(instanceProfileName) && holding.isEmpty()) {
+            index.remove(roleName);
         }
     }
 
@@ -2066,15 +2195,93 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
     }
 
+    /**
+     * Deletes a customer-managed policy, which AWS does only once nothing is left on it: no
+     * entity attached to it, and no version beside the default one the delete takes with it. A
+     * policy an update published a new document for still holds the document before it, and that
+     * is enough to refuse the delete, so whoever wants the policy gone clears those versions
+     * first; {@link #clearNonDefaultPolicyVersions} is what Floci's own stacks do it with.
+     *
+     * <p>Which dependency a policy carrying both is told about follows the order AWS's own steps
+     * for deleting a managed policy are written in, the attachments and then the versions. That
+     * order is a reading rather than a recording, and {@code docs/services/iam.md} says so.
+     *
+     * <p>Both reads and the delete they decide are under {@code resourceNameLock}, which every
+     * write to a policy's versions and attachments takes as well: a version published between the
+     * count and the delete would otherwise be deleted along with the policy it was added to.
+     */
     public void deletePolicy(String policyArn) {
-        rejectIfAwsManaged(policyArn);
-        IamPolicy policy = getPolicy(policyArn);
-        if (policy.getAttachmentCount() > 0) {
-            throw new AwsException("DeleteConflict",
-                    "Cannot delete a policy attached to entities. Detach it first.", 409);
+        synchronized (resourceNameLock) {
+            rejectIfAwsManaged(policyArn);
+            IamPolicy policy = getPolicy(policyArn);
+            if (policy.getAttachmentCount() > 0) {
+                throw new AwsException("DeleteConflict", POLICY_STILL_ATTACHED, 409);
+            }
+            if (hasAVersionBesideItsDefault(policy)) {
+                throw new AwsException("DeleteConflict", MUST_DELETE_POLICY_VERSIONS_FIRST, 409);
+            }
+            policies.delete(policyArn);
+            LOG.infov("Deleted IAM policy: {0}", policyArn);
         }
-        policies.delete(policyArn);
-        LOG.infov("Deleted IAM policy: {0}", policyArn);
+    }
+
+    /**
+     * Whether the policy holds anything besides the version a delete would take with it. Every
+     * policy carries a default version from the moment it is created and nothing can delete that
+     * one on its own, so a second version is exactly what an unfinished cleanup leaves behind.
+     */
+    private static boolean hasAVersionBesideItsDefault(IamPolicy policy) {
+        Map<String, PolicyVersion> versions = policy.getVersions();
+        synchronized (versions) {
+            return versions.size() > 1;
+        }
+    }
+
+    /**
+     * Drops every version of a managed policy but its default, the work AWS leaves to whoever
+     * wants the policy deleted: {@link #deletePolicy} refuses while another version is stored and
+     * no IAM operation clears them in one go. Floci's CloudFormation provisioners own the
+     * policies their stacks created and publish a new default version on every update, so this is
+     * how such a stack takes its own policy down. It is refused while an entity still has the
+     * policy attached, with the sentence that delete would answer: the history is worth keeping
+     * for a delete that cannot go through anyway, and AWS's own steps detach before they clear.
+     *
+     * <p>The whole of it is under {@code resourceNameLock}, as the delete it leads to and every
+     * write to a policy's versions are, so the write back cannot resurrect a policy another
+     * caller deleted in between. The default is read and the rest dropped under the version map's
+     * own monitor as well, so a version published while this runs is either kept as the new
+     * default or dropped with the old ones, never deleted as a leftover of a default it has
+     * itself replaced.
+     */
+    public void clearNonDefaultPolicyVersions(String policyArn) {
+        synchronized (resourceNameLock) {
+            rejectIfAwsManaged(policyArn);
+            IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
+            // Asked before a single version goes. The delete this clears the way for is refused
+            // while anything still has the policy attached, a principal the caller never recorded
+            // included, and a clearing that ran first would have spent the history on a delete
+            // that was never going to happen. It is the published order too: detach, then the
+            // versions, then the policy.
+            if (policy.getAttachmentCount() > 0) {
+                throw new AwsException("DeleteConflict", POLICY_STILL_ATTACHED, 409);
+            }
+            Map<String, PolicyVersion> versions = policy.getVersions();
+            boolean cleared;
+            synchronized (versions) {
+                String defaultVersionId = policy.getDefaultVersionId();
+                // No default recorded at all: a policy from a store this version of Floci did not
+                // write. Dropping every version would leave the policy with no document to serve.
+                if (defaultVersionId == null) {
+                    return;
+                }
+                cleared = versions.keySet()
+                        .removeIf(versionId -> !versionId.equals(defaultVersionId));
+            }
+            if (cleared) {
+                policies.put(policyArn, policy);
+                LOG.infov("Cleared the non-default versions of IAM policy: {0}", policyArn);
+            }
+        }
     }
 
     /** The roles, users and groups a managed policy is currently attached to. */
@@ -2229,46 +2436,50 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (heldToBeingAPolicy) {
             IamPolicyDocuments.checkManagedPolicy(document);
         }
-        rejectIfAwsManaged(policyArn);
-        IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
-        Map<String, PolicyVersion> versions = policy.getVersions();
-        PolicyVersion version;
-        synchronized (versions) {
-            if (versions.size() >= 5) {
-                throw new AwsException("LimitExceeded",
-                        "A managed policy can have up to 5 versions.", 409);
+        synchronized (resourceNameLock) {
+            // Under the lock a policy delete reads the version count with, so a version
+            // cannot be added between that read and the delete it decides.
+            rejectIfAwsManaged(policyArn);
+            IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
+            Map<String, PolicyVersion> versions = policy.getVersions();
+            PolicyVersion version;
+            synchronized (versions) {
+                if (versions.size() >= 5) {
+                    throw new AwsException("LimitExceeded",
+                            "A managed policy can have up to 5 versions.", 409);
+                }
+                // AWS version ids are monotonic and never reissued after a DeletePolicyVersion.
+                // The live keys' own max is only a floor, not the source of truth: deleting the
+                // highest-numbered surviving version would otherwise let a "derive from what's left"
+                // computation reissue its id. The stored high-water mark is the real counter.
+                int highestSurviving = versions.keySet().stream()
+                        .mapToInt(id -> Integer.parseInt(id.substring(1)))
+                        .max().orElse(0);
+                int nextVersionNum;
+                if (policy.getNextVersionNumber() == null) {
+                    // A policy persisted before this field existed: the live-key floor alone can't
+                    // reveal a version deleted before this field was ever recorded (e.g. v1-v4 live
+                    // after a pre-migration DeletePolicyVersion("v5")). Since a policy can never hold
+                    // more than 5 concurrent versions, no more than 5 stacked deletions could have
+                    // happened at the top between two persists; jump the counter past that worst
+                    // case rather than trust the live keys' max + 1 for an unknown history.
+                    nextVersionNum = highestSurviving + 1 + 5;
+                } else {
+                    nextVersionNum = Math.max(policy.getNextVersionNumber(), highestSurviving + 1);
+                }
+                String versionId = "v" + nextVersionNum;
+                version = new PolicyVersion(versionId, document, setAsDefault);
+                if (setAsDefault) {
+                    versions.values().forEach(v -> v.setDefaultVersion(false));
+                    policy.setDefaultVersionId(versionId);
+                }
+                versions.put(versionId, version);
+                policy.setNextVersionNumber(nextVersionNum + 1);
             }
-            // AWS version ids are monotonic and never reissued after a DeletePolicyVersion.
-            // The live keys' own max is only a floor, not the source of truth: deleting the
-            // highest-numbered surviving version would otherwise let a "derive from what's left"
-            // computation reissue its id. The stored high-water mark is the real counter.
-            int highestSurviving = versions.keySet().stream()
-                    .mapToInt(id -> Integer.parseInt(id.substring(1)))
-                    .max().orElse(0);
-            int nextVersionNum;
-            if (policy.getNextVersionNumber() == null) {
-                // A policy persisted before this field existed: the live-key floor alone can't
-                // reveal a version deleted before this field was ever recorded (e.g. v1-v4 live
-                // after a pre-migration DeletePolicyVersion("v5")). Since a policy can never hold
-                // more than 5 concurrent versions, no more than 5 stacked deletions could have
-                // happened at the top between two persists; jump the counter past that worst
-                // case rather than trust the live keys' max + 1 for an unknown history.
-                nextVersionNum = highestSurviving + 1 + 5;
-            } else {
-                nextVersionNum = Math.max(policy.getNextVersionNumber(), highestSurviving + 1);
-            }
-            String versionId = "v" + nextVersionNum;
-            version = new PolicyVersion(versionId, document, setAsDefault);
-            if (setAsDefault) {
-                versions.values().forEach(v -> v.setDefaultVersion(false));
-                policy.setDefaultVersionId(versionId);
-            }
-            versions.put(versionId, version);
-            policy.setNextVersionNumber(nextVersionNum + 1);
+            policy.setUpdateDate(Instant.now());
+            policies.put(policyArn, policy);
+            return version;
         }
-        policy.setUpdateDate(Instant.now());
-        policies.put(policyArn, policy);
-        return version;
     }
 
     public PolicyVersion getPolicyVersion(String policyArn, String versionId) {
@@ -2282,20 +2493,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void deletePolicyVersion(String policyArn, String versionId) {
-        rejectIfAwsManaged(policyArn);
-        IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
-        if (versionId.equals(policy.getDefaultVersionId())) {
-            throw new AwsException("DeleteConflict",
-                    "Cannot delete the default version of a policy.", 409);
-        }
-        Map<String, PolicyVersion> versions = policy.getVersions();
-        synchronized (versions) {
-            if (!versions.containsKey(versionId)) {
-                throw PolicyNotFound.ATTACHABLE.of(policyArn, versionId);
+        synchronized (resourceNameLock) {
+            rejectIfAwsManaged(policyArn);
+            IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
+            if (versionId.equals(policy.getDefaultVersionId())) {
+                throw new AwsException("DeleteConflict",
+                        "Cannot delete the default version of a policy.", 409);
             }
-            versions.remove(versionId);
+            Map<String, PolicyVersion> versions = policy.getVersions();
+            synchronized (versions) {
+                if (!versions.containsKey(versionId)) {
+                    throw PolicyNotFound.ATTACHABLE.of(policyArn, versionId);
+                }
+                versions.remove(versionId);
+            }
+            policies.put(policyArn, policy);
         }
-        policies.put(policyArn, policy);
     }
 
     public List<PolicyVersion> listPolicyVersions(String policyArn) {
@@ -2307,18 +2520,23 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void setDefaultPolicyVersion(String policyArn, String versionId) {
-        rejectIfAwsManaged(policyArn);
-        IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
-        Map<String, PolicyVersion> versions = policy.getVersions();
-        synchronized (versions) {
-            if (!versions.containsKey(versionId)) {
-                throw PolicyNotFound.ATTACHABLE.of(policyArn, versionId);
+        synchronized (resourceNameLock) {
+            rejectIfAwsManaged(policyArn);
+            IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
+            Map<String, PolicyVersion> versions = policy.getVersions();
+            synchronized (versions) {
+                if (!versions.containsKey(versionId)) {
+                    throw PolicyNotFound.ATTACHABLE.of(policyArn, versionId);
+                }
+                versions.values().forEach(v -> v.setDefaultVersion(false));
+                versions.get(versionId).setDefaultVersion(true);
+                // Inside the monitor with the flags: a clearing of the other versions reads this
+                // id to decide what to keep, and between the two writes it would read the one
+                // this call has just replaced and drop the version it just made default.
+                policy.setDefaultVersionId(versionId);
             }
-            versions.values().forEach(v -> v.setDefaultVersion(false));
-            versions.get(versionId).setDefaultVersion(true);
+            policies.put(policyArn, policy);
         }
-        policy.setDefaultVersionId(versionId);
-        policies.put(policyArn, policy);
     }
 
     public void tagPolicy(String policyArn, Map<String, String> newTags) {
@@ -2961,12 +3179,18 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void deleteInstanceProfile(String instanceProfileName) {
-        InstanceProfile profile = getInstanceProfile(instanceProfileName);
-        if (!profile.getRoleNames().isEmpty()) {
-            throw new AwsException("DeleteConflict",
-                    "Cannot delete instance profile with associated roles.", 409);
+        // Decided under the lock the attach path takes, so a role cannot be paired between the
+        // membership read and the delete; the profile's own monitor guards the read itself.
+        synchronized (resourceNameLock) {
+            InstanceProfile profile = getInstanceProfile(instanceProfileName);
+            List<String> roleNames = profile.getRoleNames();
+            synchronized (roleNames) {
+                if (!roleNames.isEmpty()) {
+                    throw new AwsException("DeleteConflict", MUST_REMOVE_PROFILE_ROLES_FIRST, 409);
+                }
+                instanceProfiles.delete(instanceProfileName);
+            }
         }
-        instanceProfiles.delete(instanceProfileName);
     }
 
     public List<InstanceProfile> listInstanceProfiles(String pathPrefix) {
@@ -2977,39 +3201,52 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void addRoleToInstanceProfile(String instanceProfileName, String roleName) {
-        validateRoleName(roleName);
-        InstanceProfile profile = getInstanceProfile(instanceProfileName);
-        requireNotServiceLinked(getRole(roleName), roleName);
-        List<String> roleNames = profile.getRoleNames();
-        synchronized (roleNames) {
-            if (!roleNames.contains(roleName)) {
-                if (!roleNames.isEmpty()) {
-                    // The quota name is what says which of the operation's limits fired, and it is
-                    // this one rather than a roles-per-profile quota, which AWS publishes nowhere.
-                    throw new AwsException("LimitExceeded",
-                            "Cannot exceed quota for InstanceSessionsPerInstanceProfile: 1", 409);
+        // The lock DeleteRole and DeleteInstanceProfile decide under, taken outside the profile's
+        // own monitor as every path here does, so this cannot pair a role with a profile while
+        // either delete is between reading the pairing and acting on what it read.
+        synchronized (resourceNameLock) {
+            validateRoleName(roleName);
+            InstanceProfile profile = getInstanceProfile(instanceProfileName);
+            requireNotServiceLinked(getRole(roleName), roleName);
+            List<String> roleNames = profile.getRoleNames();
+            synchronized (roleNames) {
+                if (!roleNames.contains(roleName)) {
+                    if (!roleNames.isEmpty()) {
+                        // The quota name is what says which of the operation's limits fired, and
+                        // it is this one rather than a roles-per-profile quota, which AWS
+                        // publishes nowhere.
+                        throw new AwsException("LimitExceeded",
+                                "Cannot exceed quota for InstanceSessionsPerInstanceProfile: 1", 409);
+                    }
+                    roleNames.add(roleName);
+                    instanceProfiles.put(instanceProfileName, profile);
+                    indexPairing(instanceProfileName, roleName);
                 }
-                roleNames.add(roleName);
-                instanceProfiles.put(instanceProfileName, profile);
             }
         }
     }
 
     public void removeRoleFromInstanceProfile(String instanceProfileName, String roleName) {
-        validateRoleName(roleName);
-        InstanceProfile profile = getInstanceProfile(instanceProfileName);
-        // Tolerates an already-deleted role that the profile still lists, so guard only what is
-        // still there; what the profile never held is a different case and AWS refuses it.
-        roles.get(roleName).ifPresent(role -> requireNotServiceLinked(role, roleName));
-        List<String> roleNames = profile.getRoleNames();
-        // Whether the pairing is there and the removal of it are one decision, taken on the
-        // monitor the attach path holds, so a concurrent attach cannot land between them.
-        synchronized (roleNames) {
-            if (!roleNames.remove(roleName)) {
-                throw new AwsException("NoSuchEntity", "Role " + roleName + " in Instance Profile "
-                        + instanceProfileName + " cannot be found.", 404);
+        // The lock the attach and the two deletes decide under, outside the profile's own monitor
+        // as they all take it: the pairing index is written here and read by DeleteRole, and both
+        // have to see the same thing the profile's own list says.
+        synchronized (resourceNameLock) {
+            validateRoleName(roleName);
+            InstanceProfile profile = getInstanceProfile(instanceProfileName);
+            // Tolerates an already-deleted role that the profile still lists, so guard only what
+            // is still there; what the profile never held is a different case and AWS refuses it.
+            roles.get(roleName).ifPresent(role -> requireNotServiceLinked(role, roleName));
+            List<String> roleNames = profile.getRoleNames();
+            // Whether the pairing is there and the removal of it are one decision, taken on the
+            // monitor the attach path holds, so a concurrent attach cannot land between them.
+            synchronized (roleNames) {
+                if (!roleNames.remove(roleName)) {
+                    throw new AwsException("NoSuchEntity", "Role " + roleName + " in Instance Profile "
+                            + instanceProfileName + " cannot be found.", 404);
+                }
+                instanceProfiles.put(instanceProfileName, profile);
+                unindexPairing(instanceProfileName, roleName);
             }
-            instanceProfiles.put(instanceProfileName, profile);
         }
     }
 
@@ -3311,6 +3548,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * prevented from reusing", with no value meaning "IAM users are not prevented from reusing
      * previous passwords", so the window is that many superseded passwords.
      *
+     * <p>The sentence is this package's own and stays that way: AWS publishes no wording for a
+     * reused password and nothing records one, where the five rules of {@link PasswordRule} carry
+     * two recordings between them. A recording moves this one site.
+     *
      * <p>The password the profile currently holds is refused alongside them, which the reference
      * does not spell out. Reading it the other way makes a window of 1 refuse nothing a user
      * would attempt: it would leave setting a password to the value it already has allowed, and
@@ -3371,27 +3612,61 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
     }
 
+    /**
+     * One rule of the account password policy, named the way AWS names it. A refusal carries one
+     * of these and no more, even where the password breaks several, so the rules are checked in
+     * the order a refusal names them: the length first, then the character classes in the order
+     * the policy declares them.
+     *
+     * <p>Two of the five are captured from a real account, both {@code PasswordPolicyViolation}
+     * 400 with a sender fault and both on {@code CreateLoginProfile}: the length on 2026-10-29,
+     * with the policy's own minimum substituted, and the symbol on 2026-11-11, which is wholly
+     * fixed text and names no symbol set. The three character classes left carry no recording and
+     * take the same shape, which is this emulator's reading rather than a measurement, and so is
+     * the order above. Neither recorded sentence ends in a period.
+     */
+    private enum PasswordRule {
+        MINIMUM_LENGTH,
+        UPPERCASE,
+        LOWERCASE,
+        NUMBER,
+        SYMBOL;
+
+        private String sentenceFor(AccountPasswordPolicy policy) {
+            return switch (this) {
+                case MINIMUM_LENGTH -> "a minimum length of " + policy.getMinimumPasswordLength();
+                case UPPERCASE -> "at least one uppercase letter";
+                case LOWERCASE -> "at least one lowercase letter";
+                case NUMBER -> "at least one number";
+                case SYMBOL -> "at least one symbol";
+            };
+        }
+
+        private boolean isBrokenBy(String password, AccountPasswordPolicy policy) {
+            return switch (this) {
+                case MINIMUM_LENGTH -> password.length() < policy.getMinimumPasswordLength();
+                case UPPERCASE -> policy.isRequireUppercaseCharacters()
+                        && password.chars().noneMatch(Character::isUpperCase);
+                case LOWERCASE -> policy.isRequireLowercaseCharacters()
+                        && password.chars().noneMatch(Character::isLowerCase);
+                case NUMBER -> policy.isRequireNumbers()
+                        && password.chars().noneMatch(Character::isDigit);
+                case SYMBOL -> policy.isRequireSymbols()
+                        && password.chars().allMatch(Character::isLetterOrDigit);
+            };
+        }
+
+        private AwsException refusal(AccountPasswordPolicy policy) {
+            return new AwsException("PasswordPolicyViolation",
+                    "Password should have " + sentenceFor(policy), 400);
+        }
+    }
+
     private void checkPasswordAgainstPolicy(String password, AccountPasswordPolicy policy) {
-        List<String> violations = new ArrayList<>();
-        if (password.length() < policy.getMinimumPasswordLength()) {
-            violations.add("a minimum length of " + policy.getMinimumPasswordLength());
-        }
-        if (policy.isRequireUppercaseCharacters() && password.chars().noneMatch(Character::isUpperCase)) {
-            violations.add("at least one uppercase letter");
-        }
-        if (policy.isRequireLowercaseCharacters() && password.chars().noneMatch(Character::isLowerCase)) {
-            violations.add("at least one lowercase letter");
-        }
-        if (policy.isRequireNumbers() && password.chars().noneMatch(Character::isDigit)) {
-            violations.add("at least one number");
-        }
-        if (policy.isRequireSymbols() && password.chars().allMatch(Character::isLetterOrDigit)) {
-            violations.add("at least one non-alphanumeric character");
-        }
-        if (!violations.isEmpty()) {
-            throw new AwsException("PasswordPolicyViolation",
-                    "Password does not conform to the account password policy. It must contain: "
-                            + String.join(", ", violations) + ".", 400);
+        for (PasswordRule rule : PasswordRule.values()) {
+            if (rule.isBrokenBy(password, policy)) {
+                throw rule.refusal(policy);
+            }
         }
     }
 
@@ -3488,10 +3763,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private String accountPropertyNamespace(String key) {
         int separator = key == null ? -1 : key.indexOf('/');
         if (separator <= 0 || separator != key.lastIndexOf('/') || separator == key.length() - 1) {
+            // AWS's own fixed text for this refusal, carrying the key exactly as the request
+            // sent it, so nothing here may reword it or trim the key. Which spellings reach it is
+            // this package's reading: no slash, several, and a trailing one share the sentence.
+            // The IAM page carries the recording behind it and what it does and does not cover.
             throw new AwsException("InvalidInput",
-                    "The property key '" + key + "' is not Namespace/PropertyName: a key has "
-                            + "exactly one forward slash, and neither a leading nor a trailing "
-                            + "one.", 400);
+                    "Property key must be in format Namespace/PropertyName: " + key, 400);
         }
         return key.substring(0, separator);
     }
@@ -4232,6 +4509,31 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .toList();
     }
 
+    /** The user an SSH public key of that id belongs to, when one is stored, for callers that must not throw. */
+    public Optional<String> findSshPublicKeyOwner(String keyId) {
+        return keyId == null ? Optional.empty() : sshPublicKeys.get(keyId).map(SshPublicKey::getUserName);
+    }
+
+    /** The user a service-specific credential of that id belongs to, when one is stored, without throwing. */
+    public Optional<String> findServiceSpecificCredentialOwner(String credentialId) {
+        return credentialId == null ? Optional.empty()
+                : serviceCredentials.get(credentialId).map(ServiceSpecificCredential::getUserName);
+    }
+
+    /**
+     * The ARN of the service-linked role a deletion task of that id deleted, in the request's partition and account:
+     * the role's path and name as the id {@link #deleteServiceLinkedRole} minted holds them
+     * ({@code task/aws-service-role/<service-principal-name>/<role-name>/<task-uuid>}); empty when no such task is
+     * held.
+     */
+    public Optional<String> findServiceLinkedRoleDeletionArn(String deletionTaskId) {
+        if (deletionTaskId == null || serviceLinkedRoleDeletions.get(deletionTaskId).isEmpty()) {
+            return Optional.empty();
+        }
+        String pathAndName = deletionTaskId.substring("task".length(), deletionTaskId.lastIndexOf('/'));
+        return Optional.of(regionResolver.buildGlobalArn("iam", "role" + pathAndName));
+    }
+
     // Service-specific credentials
     // =========================================================================
 
@@ -4854,6 +5156,35 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         sessions.get(sessionAccessKeyId).ifPresent(session -> {
             session.setMfaAuthenticatedAt(authenticatedAt);
+            sessions.put(sessionAccessKeyId, session);
+        });
+    }
+
+    /**
+     * Records the session tags {@code sessionAccessKeyId} was minted with, which its requests then
+     * publish as {@code aws:PrincipalTag/<key>}: "when you request a session, you can specify
+     * principal tags as the session tags. The tags apply to requests that you make using the
+     * session's credentials." Where they came from is the operation's business, a request member
+     * on one, a SAML assertion's attributes or a web identity token's claims on another, and what
+     * reaches here is the pairs themselves.
+     *
+     * <p>Two of those pairs whose keys differ only in case are one tag, the later winning, which is
+     * what a tag key is on an identity as well: "you cannot have separate Department and department
+     * tag keys", and a second such tag "replaces the first tag. A second tag is not added." Stored
+     * as two they would reach a policy as one key with the other's value dropped, and a Deny keyed
+     * on that value would stop matching.
+     */
+    public void recordSessionTags(String sessionAccessKeyId, Map<String, String> tags) {
+        if (sessionAccessKeyId == null || tags == null || tags.isEmpty()) {
+            return;
+        }
+        Map<String, String> oneTagPerKey = new LinkedHashMap<>();
+        tags.forEach((key, value) -> {
+            oneTagPerKey.keySet().removeIf(stored -> stored.equalsIgnoreCase(key));
+            oneTagPerKey.put(key, value);
+        });
+        sessions.get(sessionAccessKeyId).ifPresent(session -> {
+            session.setSessionTags(oneTagPerKey);
             sessions.put(sessionAccessKeyId, session);
         });
     }
@@ -5523,6 +5854,18 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void registerLambdaExecutionRoleSession(String accountId, String sessionAccessKeyId,
                                                    String secretAccessKey, String sessionToken, String roleArn,
                                                    String roleSessionName, String assumedRoleId) {
+        registerLambdaExecutionRoleSession(accountId, sessionAccessKeyId, secretAccessKey, sessionToken, roleArn,
+                roleSessionName, assumedRoleId, null);
+    }
+
+    /**
+     * Stores a non-expiring execution-role session with its session token, assumed role ID and an inline session
+     * policy, which scopes it as an assumed role's session policy does; null for none.
+     */
+    public void registerLambdaExecutionRoleSession(String accountId, String sessionAccessKeyId,
+                                                   String secretAccessKey, String sessionToken, String roleArn,
+                                                   String roleSessionName, String assumedRoleId,
+                                                   String sessionPolicyDocument) {
         if (accountId == null || accountId.isBlank()) {
             throw new IllegalArgumentException("Lambda function account ID must not be blank");
         }
@@ -5531,6 +5874,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         session.setLambdaExecutionRole(true);
         session.setRoleSessionName(roleSessionName);
         session.setAssumedRoleId(assumedRoleId);
+        session.setSessionPolicyDocument(sessionPolicyDocument);
         issuedNow(session);
         if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
             aware.putForAccount(accountId, sessionAccessKeyId, session);
@@ -6187,8 +6531,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * @param userName      the request's {@code aws:username}, which only an IAM user has
      * @param permissionsBoundary whether a permissions boundary is attached to the user, or to the
      *                      role a session assumed, which a Deny's {@code NotPrincipal} never spares
-     * @param principalTags the stored user's or assumed role's tags, snapshotted for this request;
-     *                      STS session tags are not yet recorded
+     * @param principalTags the tags this request publishes, snapshotted for it: the stored user's
+     *                      or assumed role's, with the session tags its credentials were minted
+     *                      with over them
      * @param sessionMfa    what the credentials the request was signed with say about multi-factor
      *                      authentication, or null when they publish neither key
      * @param organization  the organization the principal's account belongs to, whose three keys go
@@ -6497,11 +6842,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return delegatedApproverArns(session);
         }
         if (isFederatedUserSession(session)) {
-            // A federated user has no aws:username at all, only the account:name userid.
+            // A federated user has no aws:username at all, only the account:name userid. Its
+            // principal tags are both halves the guide names: "the session principal tags include
+            // the user tags and the passed session tags".
             String federatedArn = session.getRoleArn();
             return Optional.of(new CallerArns(federatedArn, federatedArn,
                     CallerArns.TYPE_FEDERATED_USER,
-                    sessionUserId(session).orElse(null), null));
+                    sessionUserId(session).orElse(null), null, false,
+                    withSessionTags(issuingUser(session).map(IamUser::getTags).orElse(Map.of()),
+                            session.getSessionTags())));
         }
         String roleArn = session.getRoleArn();
         if (roleArn == null) {
@@ -6529,7 +6878,35 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return Optional.of(new CallerArns(sessionArn, roleArn, CallerArns.TYPE_ASSUMED_ROLE,
                 sessionUserId(session).orElse(null), null,
                 role.map(IamRole::getPermissionsBoundaryArn).isPresent(),
-                role.map(IamRole::getTags).orElse(Map.of())));
+                withSessionTags(role.map(IamRole::getTags).orElse(Map.of()), session.getSessionTags())));
+    }
+
+    /**
+     * The principal tags a session's requests publish: the tags of the identity it acts as, with
+     * its own session tags over them. The guide gives the order and the collision rule both. The
+     * principal tags of a session "come from any new session tags, the inherited transitive
+     * session tags, and the role tags", a session tag "overrides the role" tag of the same key,
+     * and a new session tag replaces an existing one "regardless of character case", which is how
+     * IAM compares a tag key on a user or a role as well: "tag key values for IAM users and roles
+     * are not case sensitive, but case is preserved", so the session's own spelling is the one
+     * published and the identity's tag of that key in any other spelling is the one dropped.
+     */
+    private static Map<String, String> withSessionTags(Map<String, String> identityTags,
+                                                       Map<String, String> sessionTags) {
+        if (sessionTags.isEmpty()) {
+            return identityTags;
+        }
+        Set<String> replaced = sessionTags.keySet().stream()
+                .map(key -> key.toLowerCase(Locale.ROOT))
+                .collect(Collectors.toSet());
+        Map<String, String> tags = new LinkedHashMap<>();
+        identityTags.forEach((key, value) -> {
+            if (!replaced.contains(key.toLowerCase(Locale.ROOT))) {
+                tags.put(key, value);
+            }
+        });
+        tags.putAll(sessionTags);
+        return tags;
     }
 
     /**

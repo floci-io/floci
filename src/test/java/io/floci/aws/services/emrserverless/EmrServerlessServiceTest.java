@@ -12,6 +12,7 @@ import io.floci.aws.services.emrserverless.model.CreateApplicationRequest;
 import io.floci.aws.services.emrserverless.model.ImageConfiguration;
 import io.floci.aws.services.emrserverless.model.InitialCapacityConfig;
 import io.floci.aws.services.emrserverless.model.MaximumCapacity;
+import io.floci.aws.services.emrserverless.model.SchedulerConfiguration;
 import io.floci.aws.services.emrserverless.model.UpdateApplicationRequest;
 import io.floci.aws.services.emrserverless.model.WorkerTypeSpecification;
 import io.floci.aws.testing.InMemoryStorageFactory;
@@ -400,7 +401,9 @@ class EmrServerlessServiceTest {
             }
             UpdateApplicationRequest other = new UpdateApplicationRequest();
             other.setMaximumCapacity(capacity("200 vCPU"));
-            setter.invoke(other, someValue(setter.getParameterTypes()[0]));
+            // An architecture in the model's enum, which a value outside it would be refused for first.
+            setter.invoke(other, "setArchitecture".equals(setter.getName()) ? "ARM64"
+                    : someValue(setter.getParameterTypes()[0]));
             AwsException refusal = assertThrows(AwsException.class,
                     () -> service.updateApplication(applicationId, other), setter.getName());
             assertEquals("ValidationException", refusal.getErrorCode());
@@ -412,6 +415,86 @@ class EmrServerlessServiceTest {
         Application unchanged = service.getApplication(applicationId);
         assertEquals("100 vCPU", unchanged.getMaximumCapacity().getCpu());
         assertEquals("emr-7.5.0", unchanged.getReleaseLabel());
+    }
+
+    /**
+     * As Terraform's acceptance tests found AWS keeping it: a member left out takes its default, or here keeps the one
+     * set, and an empty configuration turns queuing off, the application returning none.
+     */
+    @Test
+    void aSchedulerConfigurationFillsWhatItLeavesOutAndAnEmptyOneRemovesIt() {
+        EmrServerlessService service = service();
+        CreateApplicationRequest create = createRequest();
+        create.setSchedulerConfiguration(scheduler(Map.of("maxConcurrentRuns", 5)));
+        String applicationId = service.createApplication(create).getApplicationId();
+        assertEquals(Map.of("maxConcurrentRuns", 5, "queueTimeoutMinutes", 360),
+                service.getApplication(applicationId).getSchedulerConfiguration().getProperties());
+
+        UpdateApplicationRequest timeout = new UpdateApplicationRequest();
+        timeout.setSchedulerConfiguration(scheduler(Map.of("queueTimeoutMinutes", 60)));
+        service.updateApplication(applicationId, timeout);
+        assertEquals(Map.of("maxConcurrentRuns", 5, "queueTimeoutMinutes", 60),
+                service.getApplication(applicationId).getSchedulerConfiguration().getProperties());
+
+        UpdateApplicationRequest off = new UpdateApplicationRequest();
+        off.setSchedulerConfiguration(new SchedulerConfiguration());
+        assertNull(service.updateApplication(applicationId, off).getSchedulerConfiguration());
+
+        for (Map<String, Object> outOfRange : List.<Map<String, Object>>of(Map.of("maxConcurrentRuns", 0),
+                Map.of("maxConcurrentRuns", 1001), Map.of("queueTimeoutMinutes", 14),
+                Map.of("queueTimeoutMinutes", 721), Map.of("maxConcurrentRuns", "5"))) {
+            UpdateApplicationRequest refused = new UpdateApplicationRequest();
+            refused.setSchedulerConfiguration(scheduler(outOfRange));
+            AwsException error = assertThrows(AwsException.class,
+                    () -> service.updateApplication(applicationId, refused), outOfRange::toString);
+            assertEquals("ValidationException", error.getErrorCode());
+        }
+    }
+
+    @Test
+    void anUpdateRefusedForItsSchedulerConfigurationChangesNothingElse() {
+        EmrServerlessService service = service();
+        CreateApplicationRequest create = createRequest();
+        create.setMaximumCapacity(capacity("100 vCPU"));
+        String applicationId = service.createApplication(create).getApplicationId();
+        UpdateApplicationRequest update = new UpdateApplicationRequest();
+        update.setMaximumCapacity(capacity("200 vCPU"));
+        update.setSchedulerConfiguration(scheduler(Map.of("maxConcurrentRuns", 0)));
+
+        assertThrows(AwsException.class, () -> service.updateApplication(applicationId, update));
+
+        Application unchanged = service.getApplication(applicationId);
+        assertEquals("100 vCPU", unchanged.getMaximumCapacity().getCpu());
+        assertNull(unchanged.getSchedulerConfiguration());
+    }
+
+    @Test
+    void aStartedApplicationTakesANewMaxConcurrentRunsButNoOtherSchedulerChange() {
+        EmrServerlessService service = service();
+        CreateApplicationRequest create = createRequest();
+        create.setSchedulerConfiguration(scheduler(Map.of("maxConcurrentRuns", 5, "queueTimeoutMinutes", 60)));
+        String applicationId = service.createApplication(create).getApplicationId();
+        service.startApplication(applicationId);
+
+        UpdateApplicationRequest concurrency = new UpdateApplicationRequest();
+        concurrency.setSchedulerConfiguration(scheduler(Map.of("maxConcurrentRuns", 8)));
+        assertEquals(Map.of("maxConcurrentRuns", 8, "queueTimeoutMinutes", 60),
+                service.updateApplication(applicationId, concurrency).getSchedulerConfiguration().getProperties());
+        for (Map<String, Object> other : List.<Map<String, Object>>of(Map.of("queueTimeoutMinutes", 30),
+                Map.of("maxConcurrentRuns", 8, "queueTimeoutMinutes", 60), Map.of())) {
+            UpdateApplicationRequest refused = new UpdateApplicationRequest();
+            refused.setSchedulerConfiguration(scheduler(other));
+            AwsException error = assertThrows(AwsException.class,
+                    () -> service.updateApplication(applicationId, refused), other::toString);
+            assertEquals("Application must be in a stopped or created state in order to be updated.",
+                    error.getMessage());
+        }
+    }
+
+    static SchedulerConfiguration scheduler(Map<String, Object> members) {
+        SchedulerConfiguration scheduler = new SchedulerConfiguration();
+        members.forEach(scheduler::setProperty);
+        return scheduler;
     }
 
     @Test

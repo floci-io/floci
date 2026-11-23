@@ -26,7 +26,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 /**
  * API Gateway authorizes a management call as its HTTP method on the path it names,
  * {@code arn:<partition>:apigateway:<region>::<path>}, with no account and without the {@code /v2} of an HTTP
- * API path, so a grant or a deny of {@code apigateway:GET} on a path covers that path's reads and no others.
+ * API path, so a grant or a deny of {@code apigateway:GET} on a path covers that path's reads and no others. The
+ * generated table of request resources reads it from the developer guide's ARN reference, and for a path the guide
+ * gives no row, from its ARN format with the path as the resource path.
  */
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -160,6 +162,58 @@ class ApiGatewayPathArnEnforcementIntegrationTest {
         send(user, "PUT", "/tags/" + restArn, tags).statusCode(204);
         refused("apigateway:POST", send(user, "POST", "/tags", bare));
         refused("apigateway:POST", send(user, "POST", "/v2/tags/" + httpArn, tags));
+    }
+
+    /**
+     * A path the developer guide gives no row is checked on its ARN format with that path as the resource path: a
+     * usage plan's usage is {@code /usageplans/<id>/usage}, which a grant on the plan does not cover.
+     */
+    @Test
+    void getUsageIsCheckedOnItsOwnPath() {
+        String planId = createUsagePlan();
+        String usage = "/usageplans/" + planId + "/usage?startDate=2026-01-01&endDate=2026-01-02";
+        String user = user("apigw-usage");
+
+        policy(user, allow("apigateway:GET", "arn:aws:apigateway:*::/usageplans/" + planId + "/usage"));
+        get(user, usage).statusCode(200);
+
+        policy(user, allow("apigateway:GET", "arn:aws:apigateway:*::/usageplans/" + planId));
+        refused(get(user, usage));
+
+        policy(user, allow("apigateway:*", "*") + ","
+                + deny("apigateway:GET", "arn:aws:apigateway:*::/usageplans/" + planId + "/usage"));
+        refused(get(user, usage));
+    }
+
+    /**
+     * An operation several actions authorize, CreateRestApi by POST and PUT and by UpdateRestApiPolicy for a policy,
+     * is checked as its route's method on that route's path.
+     */
+    @Test
+    void createRestApiIsCheckedAsItsMethodOnTheRestApisPath() {
+        String user = user("apigw-create");
+        String body = "{\"name\":\"apigw-path-" + suffix() + "\"}";
+
+        policy(user, allow("apigateway:POST", "arn:aws:apigateway:*::/restapis/*"));
+        refused("apigateway:POST", send(user, "POST", "/restapis", body));
+
+        policy(user, allow("apigateway:POST", "arn:aws:apigateway:*::/restapis"));
+        String apiId = send(user, "POST", "/restapis", body).statusCode(201).extract().path("id");
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, "apigateway"))
+                .delete("/restapis/" + apiId));
+    }
+
+    private String createUsagePlan() {
+        String planId = given()
+                .header("Authorization", auth(ADMIN, "apigateway"))
+                .contentType("application/json")
+                .body("{\"name\":\"apigw-path-" + suffix() + "\"}")
+        .when().post("/usageplans")
+        .then().statusCode(201)
+                .extract().path("id");
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, "apigateway"))
+                .delete("/usageplans/" + planId));
+        return planId;
     }
 
     private String createHttpApiWithDefaultStage() {

@@ -16,6 +16,7 @@ import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Info;
 import com.github.dockerjava.api.model.NetworkSettings;
 import io.floci.aws.config.EmulatorConfig;
@@ -32,6 +33,7 @@ import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
+import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.common.docker.PortAllocator;
@@ -45,7 +47,10 @@ import io.floci.aws.services.ec2.Ec2ImageCatalog;
 import io.floci.aws.services.ec2.Ec2InstanceTypeCatalog;
 import io.floci.aws.services.ec2.Ec2MetadataServer;
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.model.GroupIdentifier;
 import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.ec2.model.InstanceNetworkInterface;
+import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import io.floci.aws.services.ec2.model.Placement;
 import io.floci.aws.services.ec2.net.VpcNetworkManager;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
@@ -88,6 +93,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -116,6 +122,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
@@ -456,7 +463,7 @@ class EksClusterManagerTest {
         when(regionResolver.buildGlobalArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
                 "arn:aws:" + invocation.getArgument(0) + "::" + invocation.getArgument(1) + ":" + invocation.getArgument(2));
 
-        EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
+        EksClusterManager manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                 Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                 config, regionResolver);
@@ -474,7 +481,8 @@ class EksClusterManagerTest {
                 "io.floci.region", "us-east-1",
                 "io.floci.eks.node-capacity", "m5.large:unbounded",
                 "io.floci.eks.default-storage-class", "false",
-                "io.floci.eks.shared-mounts", "true"));
+                "io.floci.eks.shared-mounts", "true",
+                "io.floci.eks.pod-network", "flannel"));
     }
 
     @ParameterizedTest
@@ -492,7 +500,7 @@ class EksClusterManagerTest {
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
         when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
-        EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
+        EksClusterManager manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                 Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                 config, new RegionResolver("us-east-1", "000000000000"));
@@ -524,7 +532,7 @@ class EksClusterManagerTest {
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
         when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
-        EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
+        EksClusterManager manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                 Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                 config, new RegionResolver("us-east-1", "000000000000"));
@@ -558,7 +566,7 @@ class EksClusterManagerTest {
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
         when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
-        EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
+        EksClusterManager manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                 Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                 config, new RegionResolver("us-east-1", "000000000000"));
@@ -581,9 +589,42 @@ class EksClusterManagerTest {
     }
 
     // Container's getters are final, so survivors are built from JSON instead of mocked.
+    @Test
+    void theVpcPodNetworkEntrypointSetsUpTheNodeBeforeStartingK3s() {
+        String script = EksClusterManager.VPC_POD_NETWORK_ENTRYPOINT.get(2);
+
+        assertEquals(List.of("sh", "-c"), EksClusterManager.VPC_POD_NETWORK_ENTRYPOINT.subList(0, 2));
+        assertTrue(script.contains("ln -sf /bin/cni /opt/cni/bin/$plugin"), script);
+        assertTrue(script.contains("> /etc/cni/net.d/10-floci-vpc.conflist"), script);
+        assertTrue(script.contains("ip addr add \"$gateway\" dev cni0"), script);
+        assertTrue(script.contains("echo 1 > \"/proc/sys/net/ipv4/conf/$iface/proxy_arp\""), script);
+        assertTrue(script.contains("-s \"$prefix\" ! -d \"$FLOCI_VPC_CIDR\" -j MASQUERADE"), script);
+        // It ends as every node's entrypoint does, sharing the mounts and starting k3s.
+        assertTrue(script.endsWith(EksClusterManager.RSHARE_ENTRYPOINT.get(2)), script);
+    }
+
+    @Test
+    void thePodCniConfigurationGivesEachPrefixItsOwnGatewayOnTheBridge() {
+        // The bridge plugin gives a bridge one subnet's gateway, so the node puts each prefix's on cni0 itself.
+        assertEquals("{\"cniVersion\": \"1.0.0\", \"name\": \"floci-vpc\", \"plugins\": [{\"type\": \"bridge\","
+                        + " \"bridge\": \"cni0\", \"isGateway\": false, \"ipMasq\": false, \"hairpinMode\": true,"
+                        + " \"ipam\": {\"type\": \"host-local\", \"ranges\": [[{\"subnet\": \"10.0.1.224/28\","
+                        + " \"gateway\": \"10.0.1.225\"}, {\"subnet\": \"10.0.1.208/28\", \"gateway\": \"10.0.1.209\"}]],"
+                        + " \"routes\": [{\"dst\": \"0.0.0.0/0\"}]}}, {\"type\": \"portmap\","
+                        + " \"capabilities\": {\"portMappings\": true}}]}",
+                EksClusterManager.podCniConfig(List.of("10.0.1.224/28", "10.0.1.208/28")));
+    }
+
     private static Container survivingContainer(String id) {
         return containerFromJson("{\"Id\":\"" + id + "\","
                 + "\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\",\"io.floci.eks.shared-mounts\":\"true\"}}");
+    }
+
+    /** A surviving node started on the VPC pod network with {@code prefixes}. */
+    private static Container survivingVpcPodNode(String id, String prefixes) {
+        return containerFromJson("{\"Id\":\"" + id + "\","
+                + "\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\",\"io.floci.eks.shared-mounts\":\"true\","
+                + "\"io.floci.eks.pod-network\":\"vpc:" + prefixes + "\"}}");
     }
 
     private static Container containerFromJson(String json) {
@@ -636,7 +677,7 @@ class EksClusterManagerTest {
             when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
 
             containerDetector = Mockito.mock(ContainerDetector.class);
-            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+            manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                     containerDetector, portAllocator,
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                     config, Mockito.mock(RegionResolver.class));
@@ -1657,7 +1698,7 @@ class EksClusterManagerTest {
 
             DockerHostResolver dockerHostResolver = Mockito.mock(DockerHostResolver.class);
             when(dockerHostResolver.resolve()).thenReturn("floci");
-            manager = new EksClusterManager(
+            manager = EksClusterManagers.create(
                     Mockito.mock(ContainerBuilder.class), lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     dockerHostResolver, registryManager, config,
@@ -1822,7 +1863,7 @@ class EksClusterManagerTest {
             when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
             when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
 
-            manager = new EksClusterManager(
+            manager = EksClusterManagers.create(
                     Mockito.mock(ContainerBuilder.class), lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
@@ -1955,7 +1996,7 @@ class EksClusterManagerTest {
             when(containerResponse.getNetworkSettings()).thenReturn(netSettings);
             when(netSettings.getIpAddress()).thenReturn("172.17.0.2");
 
-            manager = new EksClusterManager(
+            manager = EksClusterManagers.create(
                     Mockito.mock(ContainerBuilder.class), lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     dockerHostResolver, Mockito.mock(EcrRegistryManager.class),
@@ -2112,6 +2153,28 @@ class EksClusterManagerTest {
                     capturedCmds.get(0));
 
             assertNotNull(manager.getRegisteredClusterNodeInstance(cluster));
+        }
+
+        @Test
+        void onTheVpcPodNetworkThePodRulesMatchTheNodesPrefixes() {
+            when(eks.imdsPodNetwork()).thenReturn(true);
+            when(eks.vpcPodNetwork()).thenReturn(true);
+            Ec2Service ec2 = Mockito.mock(Ec2Service.class);
+            when(ec2.effectiveVpcCidr(anyString(), anyString(), eq("vpc-1"))).thenReturn(Optional.of("10.0.0.0/16"));
+            manager.setEc2Service(ec2);
+            Cluster cluster = new Cluster();
+            cluster.setName("test-cluster");
+            ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+            vpcConfig.setVpcId("vpc-1");
+            vpcConfig.setSubnetIds(List.of("subnet-1"));
+            cluster.setResourcesVpcConfig(vpcConfig);
+            cluster.setNodePrivateIp("10.0.1.25");
+            cluster.setNodePodPrefixes(List.of("10.0.1.224/28", "10.0.1.208/28"));
+
+            manager.configureLinkLocalMetadataEndpoint(cluster, "container-42");
+
+            assertArrayEquals(EksPodNetworkRouting.buildImdsForwardCommand("10.0.1.224/28,10.0.1.208/28", true,
+                    "floci-host", 9169), capturedCmds.get(0));
         }
 
         @Test
@@ -2557,7 +2620,7 @@ class EksClusterManagerTest {
             addons = Mockito.mock(EksAddonService.class);
             when(addons.isInstalled(any(), eq(EksPodIdentityWebhook.POD_IDENTITY_ADDON))).thenReturn(true);
 
-            manager = new EksClusterManager(
+            manager = EksClusterManagers.create(
                     Mockito.mock(ContainerBuilder.class), lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     dockerHostResolver, Mockito.mock(EcrRegistryManager.class),
@@ -2800,7 +2863,7 @@ class EksClusterManagerTest {
                     "https://oidc.eks.us-east-1.amazonaws.com/id/TESTISSUER12345678901234567890");
 
             nodeGroupStorage = new InMemoryStorage<>();
-            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+            manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                     config, regionResolver, null, oidcService, null, null, nodeGroupStorage);
@@ -3528,7 +3591,39 @@ class EksClusterManagerTest {
         }
 
         @Test
-        void nodegroupReleaseVersionUsedAsImageId() {
+        void nodegroupImageLabelIsTheCustomAmiOfALaunchTemplateInTheClustersRegion() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Nodegroup nodegroup = new Nodegroup();
+            nodegroup.setNodegroupName("custom-ami-group");
+            nodegroup.setVersion("1.30");
+            nodegroup.setAmiType("AL2_x86_64");
+            nodegroup.setLaunchTemplate(Map.of("id", "lt-0123456789abcdef0", "version", "2"));
+            nodeGroupStorage.put("us-west-2::prod-cluster/custom-ami-group", nodegroup);
+
+            LaunchTemplateData launchTemplate = new LaunchTemplateData();
+            launchTemplate.setImageId("ami-0fedcba9876543210");
+            Ec2Service ec2 = Mockito.mock(Ec2Service.class);
+            when(ec2.resolveLaunchTemplateData("us-west-2", "lt-0123456789abcdef0", null, "2")).thenReturn(launchTemplate);
+            manager.setEc2Service(ec2);
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            String nodeLabelsArg = cmdCaptor.getValue().stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=node-labels="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-labels arg missing"));
+            assertEquals("ami-0fedcba9876543210", parseNodeLabels(nodeLabelsArg).get("eks.amazonaws.com/nodegroup-image"));
+        }
+
+        @Test
+        void nodegroupImageLabelIsTheRecommendedAmiOfItsVersionAndAmiTypeNotItsReleaseVersion() {
             Cluster cluster = new Cluster();
             cluster.setName("prod-cluster");
             cluster.setAccountId("123456789012");
@@ -3536,7 +3631,9 @@ class EksClusterManagerTest {
 
             Nodegroup nodegroup = new Nodegroup();
             nodegroup.setNodegroupName("versioned-group");
-            nodegroup.setReleaseVersion("1.30.2-20240703");
+            nodegroup.setVersion("1.30");
+            nodegroup.setAmiType("AL2_x86_64");
+            nodegroup.setReleaseVersion("1.30.10-20230404");
             nodeGroupStorage.put("us-west-2::prod-cluster/versioned-group", nodegroup);
 
             manager.startCluster(cluster);
@@ -3551,7 +3648,7 @@ class EksClusterManagerTest {
                     .findFirst()
                     .orElseThrow(() -> new AssertionError("node-labels arg missing"));
             Map<String, String> labels = parseNodeLabels(nodeLabelsArg);
-            assertEquals("1.30.2-20240703", labels.get("eks.amazonaws.com/nodegroup-image"));
+            assertEquals("ami-0abcdef1234567890", labels.get("eks.amazonaws.com/nodegroup-image"));
         }
 
         private static Map<String, String> parseNodeLabels(String nodeLabelsArg) {
@@ -3712,7 +3809,7 @@ class EksClusterManagerTest {
             when(regionResolver.buildGlobalArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
                     "arn:aws:" + invocation.getArgument(0) + "::" + invocation.getArgument(1) + ":" + invocation.getArgument(2));
 
-            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+            manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                     Mockito.mock(ContainerDetector.class), portAllocator,
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                     config, regionResolver, null, Mockito.mock(EksOidcService.class));
@@ -4017,7 +4114,10 @@ class EksClusterManagerTest {
         private EmulatorConfig.EksServiceConfig eks;
         private EmulatorConfig.TlsConfig tls;
         private ContainerLifecycleManager lifecycleManager;
+        private DockerClient dockerClient;
         private CopyArchiveToContainerCmd copyCmd;
+        private ContainerBuilder containerBuilder;
+        private ContainerReachableEndpoint reachableEndpoint;
         private EksClusterManager manager;
 
         @BeforeEach
@@ -4039,7 +4139,7 @@ class EksClusterManagerTest {
             when(tls.enabled()).thenReturn(true);
 
             lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
-            DockerClient dockerClient = Mockito.mock(DockerClient.class);
+            dockerClient = Mockito.mock(DockerClient.class);
             copyCmd = Mockito.mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
             when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
             when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
@@ -4047,7 +4147,7 @@ class EksClusterManagerTest {
             when(lifecycleManager.startCreated(any(), any()))
                     .thenReturn(new ContainerInfo("container-1", Map.of()));
 
-            ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+            containerBuilder = Mockito.mock(ContainerBuilder.class);
             ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
             when(builder.build()).thenReturn(new ContainerSpec("test-image"));
@@ -4064,11 +4164,56 @@ class EksClusterManagerTest {
             FlociCertificateAuthority certificateAuthority = inlineMock(FlociCertificateAuthority.class);
             when(certificateAuthority.caPem()).thenReturn(CA_PEM);
 
+            reachableEndpoint = EksTestEndpoints.dockerHostEndpoint();
+
             manager = new EksClusterManager(
                     containerBuilder, lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     dockerHostResolver, Mockito.mock(EcrRegistryManager.class), config,
-                    regionResolver, null, null, certificateAuthority);
+                    regionResolver, null, null, certificateAuthority, null, null, 0L, new Ec2ImageCatalog(),
+                    reachableEndpoint);
+        }
+
+        private String writtenManifest() throws Exception {
+            return Files.readString(tempDir.resolve("webhook/000000000000/us-east-1/demo")
+                    .resolve("floci-eks-pod-identity.yaml"));
+        }
+
+        private String writtenCaBundle() throws Exception {
+            String encoded = writtenManifest().split("caBundle: \"")[1].split("\"")[0];
+            return new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
+        }
+
+        private void assertTheWebhookIsRemoved(String containerId) throws Exception {
+            verify(dockerClient).copyArchiveToContainerCmd(containerId);
+            verify(copyCmd).withRemotePath("/var/lib/rancher/k3s");
+            assertEquals(EksClusterManager.POD_IDENTITY_MANIFEST_REMOVED, writtenManifest());
+        }
+
+        private Cluster adoptSurvivingCluster() {
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(containerFromJson(
+                    "{\"Id\":\"cid-1\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\","
+                            + "\"io.floci.eks.shared-mounts\":\"true\"}}")));
+            when(lifecycleManager.adopt("cid-1", List.of(6443), Optional.empty()))
+                    .thenReturn(new ContainerInfo("cid-1", Map.of(), Map.of(6443, 6512)));
+            Cluster cluster = cluster();
+            cluster.setDockerName("floci-eks-demo");
+            manager.restoreCluster(cluster);
+            return cluster;
+        }
+
+        private void flocisDnsServerIsUp() {
+            when(eks.embeddedDns()).thenReturn(true);
+            when(containerBuilder.embeddedDnsServerIpReachableOn(Optional.empty())).thenReturn(Optional.of("172.18.0.2"));
+            when(reachableEndpoint.httpsBaseUrl(true)).thenReturn(Optional.of("https://localhost.floci.io:4566"));
+        }
+
+        private void survivingNodeResolvesThrough(String... resolvers) {
+            InspectContainerCmd inspect = Mockito.mock(InspectContainerCmd.class);
+            InspectContainerResponse response = Mockito.mock(InspectContainerResponse.class);
+            when(dockerClient.inspectContainerCmd("cid-1")).thenReturn(inspect);
+            when(inspect.exec()).thenReturn(response);
+            when(response.getHostConfig()).thenReturn(HostConfig.newHostConfig().withDns(resolvers));
         }
 
         private Cluster cluster() {
@@ -4123,12 +4268,120 @@ class EksClusterManagerTest {
         }
 
         @Test
-        void skipsWithAWarningWhenTlsIsDisabled() {
+        void theApiServerCallsFlociByItsHostnameWhenTheNodeResolvesThroughFlocisDns() throws Exception {
+            // Floci's own certificate names its hostname but not the container IP the Docker host is
+            // in a container, and the node finds the hostname through Floci's DNS server.
+            when(eks.embeddedDns()).thenReturn(true);
+            when(containerBuilder.embeddedDnsServerIpReachableOn(Optional.empty())).thenReturn(Optional.of("172.18.0.2"));
+            when(reachableEndpoint.httpsBaseUrl(true)).thenReturn(Optional.of("https://localhost.floci.io:4566"));
+
+            manager.registerPodIdentityWebhook("container-1", cluster());
+
+            assertTrue(writtenManifest().contains("url: \"https://localhost.floci.io:4566"
+                    + "/_floci/eks/clusters/demo/pod-identity-webhook/scope/000000000000/us-east-1\""));
+        }
+
+        @Test
+        void theApiServerCallsTheDockerHostWhenTheClusterCannotReachFlocisDns() throws Exception {
+            when(eks.embeddedDns()).thenReturn(true);
+            when(containerBuilder.embeddedDnsServerIpReachableOn(Optional.empty())).thenReturn(Optional.empty());
+            when(reachableEndpoint.httpsBaseUrl(true)).thenReturn(Optional.of("https://localhost.floci.io:4566"));
+
+            manager.registerPodIdentityWebhook("container-1", cluster());
+
+            assertTrue(writtenManifest().contains("url: \"https://host.docker.internal:4566/"));
+        }
+
+        @Test
+        void theApiServerCallsTheDockerHostWhenTheNodeIsNotGivenFlocisDns() throws Exception {
+            when(eks.embeddedDns()).thenReturn(false);
+            when(containerBuilder.embeddedDnsServerIpReachableOn(Optional.empty())).thenReturn(Optional.of("172.18.0.2"));
+            when(reachableEndpoint.httpsBaseUrl(true)).thenReturn(Optional.of("https://localhost.floci.io:4566"));
+
+            manager.registerPodIdentityWebhook("container-1", cluster());
+
+            assertTrue(writtenManifest().contains("url: \"https://host.docker.internal:4566/"));
+        }
+
+        @Test
+        void aCertificateThatDoesNotNameTheHostRemovesTheWebhook() throws Exception {
+            // The API server checks the host against Floci's certificate, so it would refuse every call, and the
+            // cluster's data volume may hold a webhook registered under an earlier certificate.
+            when(reachableEndpoint.httpsBaseUrl(false)).thenReturn(Optional.empty());
+
+            manager.registerPodIdentityWebhook("container-1", cluster());
+
+            assertTheWebhookIsRemoved("container-1");
+        }
+
+        @Test
+        void theManifestThatRemovesTheWebhookHoldsNoObjects() {
+            // k3s prunes what an earlier version of a manifest created when the new one no longer holds it.
+            assertTrue(EksClusterManager.POD_IDENTITY_MANIFEST_REMOVED.lines()
+                    .allMatch(line -> line.isBlank() || line.startsWith("#")));
+        }
+
+        @Test
+        void theCaBundleTrustsAConfiguredCertificateAndKeepsTheLocalCa() throws Exception {
+            FlociCertificateAuthority configured = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("configured"));
+            when(tls.certPath()).thenReturn(Optional.of(configured.certificatePath().toString()));
+            when(tls.keyPath()).thenReturn(Optional.of(tempDir.resolve("server.key").toString()));
+
+            manager.registerPodIdentityWebhook("container-1", cluster());
+
+            assertEquals(configured.caPem() + CA_PEM, writtenCaBundle());
+        }
+
+        @Test
+        void adoptingASurvivingClusterRewritesItsManifest() throws Exception {
+            // The manifest written at creation names the address and certificate Floci had then.
+            Cluster cluster = adoptSurvivingCluster();
+
+            assertEquals("cid-1", cluster.getContainerId());
+            verify(lifecycleManager, never()).create(any());
+            verify(dockerClient).copyArchiveToContainerCmd("cid-1");
+            assertTrue(writtenManifest().contains("url: \"https://host.docker.internal:4566"
+                    + "/_floci/eks/clusters/demo/pod-identity-webhook/scope/000000000000/us-east-1\""));
+        }
+
+        @Test
+        void anAdoptedNodeCreatedWithFlocisDnsCallsFlociByItsHostname() throws Exception {
+            flocisDnsServerIsUp();
+            survivingNodeResolvesThrough("172.18.0.2", "8.8.8.8");
+
+            adoptSurvivingCluster();
+
+            assertTrue(writtenManifest().contains("url: \"https://localhost.floci.io:4566/"));
+        }
+
+        @Test
+        void anAdoptedNodeCreatedWithoutFlocisDnsCallsTheDockerHost() throws Exception {
+            // A container keeps the resolvers it was created with, so the node cannot find Floci's hostname
+            // through a DNS server that was not up, or had another address, when it was created.
+            flocisDnsServerIsUp();
+            survivingNodeResolvesThrough("172.18.0.9");
+
+            adoptSurvivingCluster();
+
+            assertTrue(writtenManifest().contains("url: \"https://host.docker.internal:4566/"));
+        }
+
+        @Test
+        void tlsOffRemovesTheWebhook() throws Exception {
             when(tls.enabled()).thenReturn(false);
 
             manager.registerPodIdentityWebhook("container-1", cluster());
 
-            verify(lifecycleManager, never()).getDockerClient();
+            assertTheWebhookIsRemoved("container-1");
+        }
+
+        @Test
+        void adoptingAClusterOnceTlsIsOffRemovesItsWebhook() throws Exception {
+            when(tls.enabled()).thenReturn(false);
+
+            adoptSurvivingCluster();
+
+            assertTheWebhookIsRemoved("cid-1");
         }
 
         @Test
@@ -4211,12 +4464,12 @@ class EksClusterManagerTest {
 
             logStreamer = Mockito.mock(ContainerLogStreamer.class);
             mockHandle = Mockito.mock(Closeable.class);
-            when(logStreamer.attachForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
+            when(logStreamer.attachPolledForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                     .thenReturn(mockHandle);
-            when(logStreamer.attachFromNowForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
+            when(logStreamer.attachPolledFromNowForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                     .thenReturn(mockHandle);
 
-            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+            manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                     Mockito.mock(ContainerDetector.class), portAllocator,
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                     config, regionResolver, null, null, logStreamer);
@@ -4232,7 +4485,7 @@ class EksClusterManagerTest {
 
             manager.setUpGuest(cluster);
 
-            verify(logStreamer).attachForAccount(
+            verify(logStreamer).attachPolledForAccount(
                     eq("000000000000"),
                     eq("container-id-123456789012345678901234567890"),
                     eq("/aws/eks/prod-cluster/cluster"),
@@ -4281,7 +4534,7 @@ class EksClusterManagerTest {
 
         @Test
         void attachmentFailureLogsWarningAndContinuesWithoutAborting() {
-            when(logStreamer.attachForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
+            when(logStreamer.attachPolledForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                     .thenThrow(new RuntimeException("Docker attach connection failed"));
 
             Cluster cluster = new Cluster();
@@ -4317,7 +4570,7 @@ class EksClusterManagerTest {
             manager.startCluster(stale);
             manager.setUpGuest(stale);
             Closeable freshHandle = Mockito.mock(Closeable.class);
-            when(logStreamer.attachForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
+            when(logStreamer.attachPolledForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                     .thenReturn(freshHandle);
             Cluster recreated = new Cluster();
             recreated.setName("prod-cluster");
@@ -4440,7 +4693,7 @@ class EksClusterManagerTest {
 
             manager.setUpGuest(cluster);
 
-            verify(logStreamer).attachFromNowForAccount(
+            verify(logStreamer).attachPolledFromNowForAccount(
                     eq("000000000000"),
                     eq("adopted-container-id-12345678901234567890"),
                     eq("/aws/eks/prod-cluster/cluster"),
@@ -4656,7 +4909,7 @@ class EksClusterManagerTest {
             when(regionResolver.buildGlobalArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
                     "arn:aws:" + invocation.getArgument(0) + "::" + invocation.getArgument(1) + ":" + invocation.getArgument(2));
 
-            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+            manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                     config, regionResolver);
@@ -4777,7 +5030,7 @@ class EksClusterManagerTest {
                     Mockito.mock(EcrRegistryManager.class), config, new RegionResolver("us-east-1", "000000000000"),
                     Mockito.mock(Ec2MetadataServer.class), Mockito.mock(EksOidcService.class),
                     inlineMock(FlociCertificateAuthority.class), Mockito.mock(ContainerLogStreamer.class),
-                    new InMemoryStorage<>(), 0, new Ec2ImageCatalog(config)));
+                    new InMemoryStorage<>(), 0, new Ec2ImageCatalog(config), EksTestEndpoints.dockerHostEndpoint()));
         }
 
         private Cluster clusterNamed(String name, String containerId) {
@@ -4985,6 +5238,9 @@ class EksClusterManagerTest {
     @Nested
     class VpcNodePrivateIp {
 
+        /** Numbers the clusters {@link #survivorReplaced} restores, so each has its own name. */
+        private int survivors;
+
         private EmulatorConfig config;
         private ContainerLifecycleManager lifecycleManager;
         private ContainerBuilder containerBuilder;
@@ -5032,7 +5288,7 @@ class EksClusterManagerTest {
             ec2Service = Mockito.mock(Ec2Service.class);
             when(ec2Service.attachContainerToVpc(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                     .thenReturn(Optional.of("floci-vpc-1"));
-            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+            manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                     Mockito.mock(ContainerDetector.class), portAllocator,
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                     config, regionResolver);
@@ -5048,6 +5304,67 @@ class EksClusterManagerTest {
             vpcConfig.setSubnetIds(subnetIds);
             cluster.setResourcesVpcConfig(vpcConfig);
             return cluster;
+        }
+
+        @Test
+        void aNodeInASubnetHasAPrimaryInterfaceHoldingTheClusterSecurityGroup() {
+            Cluster cluster = vpcCluster("eni-cluster", "vpc-1", List.of("subnet-1", "subnet-2"));
+            cluster.getResourcesVpcConfig().setClusterSecurityGroupId("sg-cluster");
+            cluster.setNodePrivateIp("10.0.1.25");
+            when(ec2Service.securityGroupName("000000000000", "us-east-1", "sg-cluster"))
+                    .thenReturn(Optional.of("eks-cluster-sg-eni-cluster-0123abcd"));
+
+            Instance node = manager.synthesizeClusterNodeInstance(cluster, "172.17.0.2", "us-east-1", "000000000000");
+
+            assertEquals(List.of("sg-cluster:eks-cluster-sg-eni-cluster-0123abcd"), groupsOf(node.getSecurityGroups()));
+            assertEquals(1, node.getNetworkInterfaces().size());
+            InstanceNetworkInterface eni = node.getNetworkInterfaces().getFirst();
+            assertEquals(manager.deriveClusterNodeNetworkInterfaceId(cluster, "us-east-1", "000000000000"),
+                    eni.getNetworkInterfaceId());
+            assertTrue(eni.getNetworkInterfaceId().matches("eni-[0-9a-f]{17}"), eni.getNetworkInterfaceId());
+            assertTrue(eni.getAttachmentId().matches("eni-attach-[0-9a-f]{17}"), eni.getAttachmentId());
+            assertEquals(0, eni.getDeviceIndex());
+            assertEquals("subnet-1", eni.getSubnetId());
+            assertEquals("vpc-1", eni.getVpcId());
+            assertEquals("000000000000", eni.getOwnerId());
+            assertEquals("10.0.1.25", eni.getPrivateIpAddress());
+            assertEquals(node.getPrivateDnsName(), eni.getPrivateDnsName());
+            assertEquals(List.of("sg-cluster:eks-cluster-sg-eni-cluster-0123abcd"), groupsOf(eni.getGroups()));
+            // The ids are the cluster's, so the node keeps them across a restart.
+            InstanceNetworkInterface again = manager.synthesizeClusterNodeInstance(
+                    cluster, "172.17.0.3", "us-east-1", "000000000000").getNetworkInterfaces().getFirst();
+            assertEquals(eni.getNetworkInterfaceId(), again.getNetworkInterfaceId());
+            assertEquals(eni.getAttachmentId(), again.getAttachmentId());
+        }
+
+        @Test
+        void aNodeWithoutASubnetAddressHasNoInterfaceAndANodeWhoseGroupIsGoneHasNoGroup() {
+            Cluster noSubnet = new Cluster();
+            noSubnet.setName("no-subnet");
+            Instance bare = manager.synthesizeClusterNodeInstance(noSubnet, "172.17.0.2", "us-east-1", "000000000000");
+            assertTrue(bare.getNetworkInterfaces().isEmpty());
+            assertTrue(bare.getSecurityGroups().isEmpty());
+
+            // No address leased in the subnet: the node's own address is its container's, on another network.
+            Cluster unleased = vpcCluster("unleased", "vpc-1", List.of("subnet-1"));
+            unleased.getResourcesVpcConfig().setClusterSecurityGroupId("sg-cluster");
+            Instance fallback = manager.synthesizeClusterNodeInstance(unleased, "172.17.0.2", "us-east-1", "000000000000");
+            assertEquals("172.17.0.2", fallback.getPrivateIpAddress());
+            assertTrue(fallback.getNetworkInterfaces().isEmpty());
+            assertTrue(fallback.getSecurityGroups().isEmpty());
+
+            Cluster groupGone = vpcCluster("group-gone", "vpc-1", List.of("subnet-1"));
+            groupGone.setNodePrivateIp("10.0.1.26");
+            groupGone.getResourcesVpcConfig().setClusterSecurityGroupId("sg-gone");
+            when(ec2Service.securityGroupName("000000000000", "us-east-1", "sg-gone")).thenReturn(Optional.empty());
+            Instance node = manager.synthesizeClusterNodeInstance(groupGone, "172.17.0.2", "us-east-1", "000000000000");
+            assertEquals(1, node.getNetworkInterfaces().size());
+            assertTrue(node.getNetworkInterfaces().getFirst().getGroups().isEmpty());
+            assertTrue(node.getSecurityGroups().isEmpty());
+        }
+
+        private List<String> groupsOf(List<GroupIdentifier> groups) {
+            return groups.stream().map(group -> group.getGroupId() + ":" + group.getGroupName()).toList();
         }
 
         @Test
@@ -5193,6 +5510,29 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void aFirstLaunchThatFallsBackToTheBridgeGivesItsPrefixesBackWithItsAddress() {
+            when(config.services().eks().vpcPodNetwork()).thenReturn(true);
+            when(config.services().eks().vpcPodPrefixes()).thenReturn(1);
+            when(portAllocator.allocate(6440, 6499)).thenReturn(6440);
+            when(lifecycleManager.create(any())).thenReturn("cid-vpc", "cid-bridge");
+            when(lifecycleManager.startCreated(eq("cid-bridge"), any()))
+                    .thenReturn(new ContainerInfo("cid-bridge", Map.of()));
+            when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-1"))
+                    .thenReturn(Optional.of("10.0.1.25"));
+            when(ec2Service.allocateVpcPrefixes("000000000000", "us-east-1", "subnet-1", 1))
+                    .thenReturn(List.of("10.0.1.224/28"));
+            when(ec2Service.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-1", "cid-vpc", "10.0.1.25"))
+                    .thenReturn(Optional.empty());
+            Cluster cluster = vpcCluster("prefix-fallback", "vpc-1", List.of("subnet-1"));
+
+            manager.startCluster(cluster);
+
+            assertNull(cluster.getNodePrivateIp());
+            assertNull(cluster.getNodePodPrefixes());
+            verify(ec2Service).releaseVpcPrefix("000000000000", "us-east-1", "subnet-1", "10.0.1.224/28");
+        }
+
+        @Test
         void restoreClusterFailsStartAndRetainsNodeIpWhenVpcAttachFails() {
             when(lifecycleManager.findByName("floci-eks-restore-attach-fail")).thenReturn(Optional.empty());
             when(portAllocator.allocate(6440, 6499)).thenReturn(6440);
@@ -5213,6 +5553,335 @@ class EksClusterManagerTest {
             verify(lifecycleManager).removeIfExistsStrict("floci-aws-eks-restore-attach-fail", true);
             verify(lifecycleManager, Mockito.times(1)).create(any());
             verify(lifecycleManager, never()).startCreated(anyString(), any());
+        }
+
+        @Test
+        void withVpcPodNetworkANodeLeasesItsPrefixesListsThemOnItsInterfaceAndReleasesThemOnStop() {
+            when(config.services().eks().vpcPodNetwork()).thenReturn(true);
+            when(config.services().eks().vpcPodPrefixes()).thenReturn(2);
+            when(portAllocator.allocate(6440, 6499)).thenReturn(6440);
+            when(lifecycleManager.create(any())).thenReturn("cid-1");
+            when(lifecycleManager.startCreated(eq("cid-1"), any())).thenReturn(new ContainerInfo("cid-1", Map.of()));
+            when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-1"))
+                    .thenReturn(Optional.of("10.0.1.25"));
+            when(ec2Service.allocateVpcPrefixes("000000000000", "us-east-1", "subnet-1", 2))
+                    .thenReturn(List.of("10.0.1.224/28", "10.0.1.208/28"));
+            Cluster cluster = vpcCluster("prefix-cluster", "vpc-1", List.of("subnet-1"));
+
+            manager.startCluster(cluster);
+
+            assertEquals(List.of("10.0.1.224/28", "10.0.1.208/28"), cluster.getNodePodPrefixes());
+            Instance node = manager.synthesizeClusterNodeInstance(cluster, "172.17.0.2", "us-east-1", "000000000000");
+            assertEquals(List.of("10.0.1.224/28", "10.0.1.208/28"),
+                    node.getNetworkInterfaces().getFirst().getIpv4Prefixes());
+
+            manager.stopCluster(cluster);
+            verify(ec2Service).releaseVpcPrefix("000000000000", "us-east-1", "subnet-1", "10.0.1.224/28");
+            verify(ec2Service).releaseVpcPrefix("000000000000", "us-east-1", "subnet-1", "10.0.1.208/28");
+            // Kept with the cluster, as its address is, for the next start to reserve.
+            assertEquals(List.of("10.0.1.224/28", "10.0.1.208/28"), cluster.getNodePodPrefixes());
+        }
+
+        @Test
+        void aRestartReservesTheNodesPrefixesAndLeasesOnlyTheOnesItLost() {
+            when(config.services().eks().vpcPodNetwork()).thenReturn(true);
+            when(config.services().eks().vpcPodPrefixes()).thenReturn(2);
+            when(lifecycleManager.findByName("floci-eks-recreated")).thenReturn(Optional.empty());
+            when(portAllocator.allocate(6440, 6499)).thenReturn(6440);
+            when(lifecycleManager.create(any())).thenReturn("cid-recreated");
+            when(lifecycleManager.startCreated(eq("cid-recreated"), any()))
+                    .thenReturn(new ContainerInfo("cid-recreated", Map.of()));
+            when(ec2Service.reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-1", "10.0.1.25")).thenReturn(true);
+            when(ec2Service.reserveVpcPrefixes("000000000000", "us-east-1", "subnet-1",
+                    List.of("10.0.1.224/28", "10.0.1.208/28"))).thenReturn(List.of("10.0.1.224/28"));
+            when(ec2Service.allocateVpcPrefixes("000000000000", "us-east-1", "subnet-1", 1))
+                    .thenReturn(List.of("10.0.1.192/28"));
+            Cluster cluster = vpcCluster("recreated", "vpc-1", List.of("subnet-1"));
+            cluster.setNodePrivateIp("10.0.1.25");
+            cluster.setNodePodPrefixes(List.of("10.0.1.224/28", "10.0.1.208/28"));
+
+            manager.restoreCluster(cluster);
+
+            assertEquals(List.of("10.0.1.224/28", "10.0.1.192/28"), cluster.getNodePodPrefixes());
+        }
+
+        @Test
+        void anAdoptedNodeKeepsThePrefixesItCanReserveAndLeasesNoOthers() {
+            when(config.services().eks().vpcPodNetwork()).thenReturn(true);
+            when(config.services().eks().vpcPodPrefixes()).thenReturn(2);
+            when(ec2Service.effectiveVpcCidr("000000000000", "us-east-1", "vpc-1")).thenReturn(Optional.of("10.0.0.0/16"));
+            when(lifecycleManager.findByName("floci-eks-survivor"))
+                    .thenReturn(Optional.of(survivingVpcPodNode("cid-survivor", "10.0.1.224/28")));
+            when(lifecycleManager.adopt(eq("cid-survivor"), eq(List.of(6443)), any()))
+                    .thenReturn(new ContainerInfo("cid-survivor", Map.of(), Map.of(6443, 6440)));
+            when(ec2Service.reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-1", "10.0.1.25")).thenReturn(true);
+            when(ec2Service.reserveVpcPrefixes("000000000000", "us-east-1", "subnet-1", List.of("10.0.1.224/28")))
+                    .thenReturn(List.of("10.0.1.224/28"));
+            Cluster cluster = vpcCluster("survivor", "vpc-1", List.of("subnet-1"));
+            cluster.setNodePrivateIp("10.0.1.25");
+            cluster.setNodePodPrefixes(List.of("10.0.1.224/28"));
+
+            manager.restoreCluster(cluster);
+
+            // Its pods keep the addresses it handed out; a prefix it did not start with would not be in its config.
+            assertEquals(List.of("10.0.1.224/28"), cluster.getNodePodPrefixes());
+            verify(ec2Service, never()).allocateVpcPrefixes(anyString(), anyString(), anyString(), anyInt());
+        }
+
+        @Test
+        void aContainerReplacingAnAdoptedNodeLeasesThePrefixesTheNodeLacks() {
+            when(config.services().eks().vpcPodNetwork()).thenReturn(true);
+            when(config.services().eks().vpcPodPrefixes()).thenReturn(2);
+            when(ec2Service.effectiveVpcCidr("000000000000", "us-east-1", "vpc-1")).thenReturn(Optional.of("10.0.0.0/16"));
+            when(lifecycleManager.findByName("floci-eks-survivor"))
+                    .thenReturn(Optional.of(survivingVpcPodNode("cid-survivor", "10.0.1.224/28")));
+            when(lifecycleManager.adopt(eq("cid-survivor"), eq(List.of(6443)), any()))
+                    .thenReturn(new ContainerInfo("cid-survivor", Map.of(), Map.of(6443, 6440)));
+            when(ec2Service.reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-1", "10.0.1.25")).thenReturn(true);
+            when(ec2Service.reserveVpcPrefixes("000000000000", "us-east-1", "subnet-1", List.of("10.0.1.224/28")))
+                    .thenReturn(List.of("10.0.1.224/28"));
+            when(ec2Service.allocateVpcPrefixes("000000000000", "us-east-1", "subnet-1", 1))
+                    .thenReturn(List.of("10.0.1.192/28"));
+            when(lifecycleManager.create(any())).thenReturn("cid-new");
+            when(lifecycleManager.startCreated(eq("cid-new"), any())).thenReturn(new ContainerInfo("cid-new", Map.of()));
+            Cluster cluster = vpcCluster("survivor", "vpc-1", List.of("subnet-1"));
+            cluster.setDockerName("floci-eks-survivor");
+            cluster.setNodePrivateIp("10.0.1.25");
+            cluster.setNodePodPrefixes(List.of("10.0.1.224/28"));
+            manager.restoreCluster(cluster);
+            assertEquals(List.of("10.0.1.224/28"), cluster.getNodePodPrefixes());
+
+            assertTrue(manager.restartForNodeCapacity(cluster, "m5.large"));
+
+            assertEquals(List.of("10.0.1.224/28", "10.0.1.192/28"), cluster.getNodePodPrefixes());
+            verify(ec2Service, Mockito.times(1)).reserveVpcPrefixes(anyString(), anyString(), anyString(), anyList());
+        }
+
+        private void vpcPodNetworkOn() {
+            when(config.services().eks().vpcPodNetwork()).thenReturn(true);
+            when(config.services().eks().vpcPodPrefixes()).thenReturn(2);
+            when(ec2Service.effectiveVpcCidr("000000000000", "us-east-1", "vpc-1")).thenReturn(Optional.of("10.0.0.0/16"));
+        }
+
+        @SuppressWarnings("unchecked")
+        private Map<String, String> startedLabels() {
+            ArgumentCaptor<Map<String, String>> labels = ArgumentCaptor.forClass(Map.class);
+            verify(builder).withLabels(labels.capture());
+            return labels.getValue();
+        }
+
+        @Test
+        void onTheVpcPodNetworkANodeStartsWithoutFlannelAndHandsOutItsPrefixes() {
+            vpcPodNetworkOn();
+            when(portAllocator.allocate(6440, 6499)).thenReturn(6440);
+            when(lifecycleManager.create(any())).thenReturn("cid-1");
+            when(lifecycleManager.startCreated(eq("cid-1"), any())).thenReturn(new ContainerInfo("cid-1", Map.of()));
+            when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-1"))
+                    .thenReturn(Optional.of("10.0.1.25"));
+            when(ec2Service.allocateVpcPrefixes("000000000000", "us-east-1", "subnet-1", 2))
+                    .thenReturn(List.of("10.0.1.224/28", "10.0.1.208/28"));
+
+            manager.startCluster(vpcCluster("vpc-pods", "vpc-1", List.of("subnet-1")));
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmd = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmd.capture());
+            assertTrue(cmd.getValue().containsAll(EksClusterManager.VPC_POD_NETWORK_SERVER_ARGS), cmd.getValue().toString());
+            assertTrue(cmd.getValue().contains("--cluster-cidr=10.0.0.0/16"), cmd.getValue().toString());
+            verify(builder).withEntrypoint(EksClusterManager.VPC_POD_NETWORK_ENTRYPOINT);
+            verify(builder).withEnv("FLOCI_NODE_IP", "10.0.1.25");
+            verify(builder).withEnv("FLOCI_VPC_CIDR", "10.0.0.0/16");
+            verify(builder).withEnv("FLOCI_POD_PREFIXES", "10.0.1.224/28 10.0.1.208/28");
+            verify(builder).withEnv("FLOCI_POD_GATEWAYS", "10.0.1.225/28 10.0.1.209/28");
+            verify(builder).withEnv("FLOCI_POD_CNI_CONFIG",
+                    EksClusterManager.podCniConfig(List.of("10.0.1.224/28", "10.0.1.208/28")));
+            assertEquals("vpc:10.0.1.224/28,10.0.1.208/28", startedLabels().get("io.floci.eks.pod-network"));
+        }
+
+        @Test
+        void disableCniKeepsANodeOnK3sOwnNetworkEvenWithTheVpcPodNetworkOn() {
+            vpcPodNetworkOn();
+            when(config.services().eks().disableCni()).thenReturn(true);
+            when(portAllocator.allocate(6440, 6499)).thenReturn(6440);
+            when(lifecycleManager.create(any())).thenReturn("cid-1");
+            when(lifecycleManager.startCreated(eq("cid-1"), any())).thenReturn(new ContainerInfo("cid-1", Map.of()));
+            when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-1"))
+                    .thenReturn(Optional.of("10.0.1.25"));
+            when(ec2Service.allocateVpcPrefixes("000000000000", "us-east-1", "subnet-1", 2))
+                    .thenReturn(List.of("10.0.1.224/28", "10.0.1.208/28"));
+
+            manager.startCluster(vpcCluster("own-cni", "vpc-1", List.of("subnet-1")));
+
+            verify(builder).withEntrypoint(EksClusterManager.RSHARE_ENTRYPOINT);
+            verify(builder, never()).withEnv(eq("FLOCI_POD_PREFIXES"), anyString());
+            assertEquals("flannel", startedLabels().get("io.floci.eks.pod-network"));
+        }
+
+        @Test
+        void aNodeOnK3sOwnNetworkStartsAsBefore() {
+            when(portAllocator.allocate(6440, 6499)).thenReturn(6440);
+            when(lifecycleManager.create(any())).thenReturn("cid-1");
+            when(lifecycleManager.startCreated(eq("cid-1"), any())).thenReturn(new ContainerInfo("cid-1", Map.of()));
+
+            manager.startCluster(vpcCluster("flannel-pods", "vpc-1", List.of("subnet-1")));
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmd = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmd.capture());
+            assertTrue(cmd.getValue().stream().noneMatch(EksClusterManager.VPC_POD_NETWORK_SERVER_ARGS::contains));
+            assertTrue(cmd.getValue().contains("--cluster-cidr=10.42.0.0/16"), cmd.getValue().toString());
+            verify(builder).withEntrypoint(EksClusterManager.RSHARE_ENTRYPOINT);
+            assertEquals("flannel", startedLabels().get("io.floci.eks.pod-network"));
+        }
+
+        @Test
+        void aSurvivorKeepsRunningOnlyWhenItRunsThePodNetworkItShould() {
+            vpcPodNetworkOn();
+            when(ec2Service.reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-1", "10.0.1.25")).thenReturn(true);
+            when(ec2Service.reserveVpcPrefixes(eq("000000000000"), eq("us-east-1"), eq("subnet-1"), anyList()))
+                    .thenAnswer(call -> call.getArgument(3));
+
+            // Started with the prefixes it still holds: kept.
+            assertFalse(survivorReplaced("vpc:10.0.1.224/28,10.0.1.208/28",
+                    List.of("10.0.1.224/28", "10.0.1.208/28")));
+            // Started on k3s's own network while the VPC pod network is on: replaced.
+            assertTrue(survivorReplaced("flannel", List.of("10.0.1.224/28", "10.0.1.208/28")));
+            // Started with a prefix it no longer holds: replaced.
+            assertTrue(survivorReplaced("vpc:10.0.1.192/28,10.0.1.208/28", List.of("10.0.1.224/28", "10.0.1.208/28")));
+            when(config.services().eks().vpcPodNetwork()).thenReturn(false);
+            // Started on the VPC while it is off: replaced.
+            assertTrue(survivorReplaced("vpc:10.0.1.224/28,10.0.1.208/28", null));
+            // A survivor from before the label runs k3s's network: kept.
+            assertFalse(survivorReplaced(null, null));
+        }
+
+        @Test
+        void aNodeOnK3sOwnNetworkIsReplacedOnlyWhenItsReplacementWouldRunTheVpcs() {
+            vpcPodNetworkOn();
+            when(ec2Service.reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-1", "10.0.1.25")).thenReturn(true);
+            when(ec2Service.reserveVpcPrefixes(eq("000000000000"), eq("us-east-1"), eq("subnet-1"), anyList()))
+                    .thenAnswer(call -> call.getArgument(3));
+
+            // The setting was turned on: replaced, on the prefixes leased for it.
+            when(ec2Service.allocateVpcPrefixes("000000000000", "us-east-1", "subnet-1", 2))
+                    .thenReturn(List.of("10.0.1.224/28", "10.0.1.208/28"));
+            assertTrue(survivorReplaced("flannel", null));
+            // The subnet has no free /28, so a replacement would fall back again: kept.
+            when(ec2Service.allocateVpcPrefixes("000000000000", "us-east-1", "subnet-1", 2)).thenReturn(List.of());
+            assertFalse(survivorReplaced("flannel", null));
+            // The VPC has no Docker network range: kept, and it gives back the prefixes it holds.
+            when(ec2Service.effectiveVpcCidr("000000000000", "us-east-1", "vpc-1")).thenReturn(Optional.empty());
+            assertFalse(survivorReplaced("flannel", List.of("10.0.1.192/28", "10.0.1.176/28")));
+            verify(ec2Service).releaseVpcPrefix("000000000000", "us-east-1", "subnet-1", "10.0.1.192/28");
+            verify(ec2Service).releaseVpcPrefix("000000000000", "us-east-1", "subnet-1", "10.0.1.176/28");
+        }
+
+        @Test
+        void aNodeThatFallsBackToTheBridgeStartsOnK3sOwnNetwork() {
+            vpcPodNetworkOn();
+            when(portAllocator.allocate(6440, 6499)).thenReturn(6440);
+            when(lifecycleManager.create(any())).thenReturn("cid-vpc", "cid-bridge");
+            when(lifecycleManager.startCreated(eq("cid-bridge"), any()))
+                    .thenReturn(new ContainerInfo("cid-bridge", Map.of()));
+            when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-1"))
+                    .thenReturn(Optional.of("10.0.1.25"));
+            when(ec2Service.allocateVpcPrefixes("000000000000", "us-east-1", "subnet-1", 2))
+                    .thenReturn(List.of("10.0.1.224/28", "10.0.1.208/28"));
+            when(ec2Service.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-1", "cid-vpc", "10.0.1.25"))
+                    .thenReturn(Optional.empty());
+
+            manager.startCluster(vpcCluster("pods-fallback", "vpc-1", List.of("subnet-1")));
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmd = ArgumentCaptor.forClass(List.class);
+            verify(builder, Mockito.times(2)).withCmd(cmd.capture());
+            assertTrue(cmd.getAllValues().getFirst().contains("--cluster-cidr=10.0.0.0/16"), cmd.getAllValues().toString());
+            List<String> bridge = cmd.getValue();
+            assertTrue(bridge.contains("--cluster-cidr=10.42.0.0/16"), bridge.toString());
+            assertFalse(bridge.contains("--cluster-cidr=10.0.0.0/16"), bridge.toString());
+            assertTrue(EksClusterManager.VPC_POD_NETWORK_SERVER_ARGS.stream().noneMatch(bridge::contains), bridge.toString());
+            InOrder order = Mockito.inOrder(builder);
+            order.verify(builder).withEntrypoint(EksClusterManager.VPC_POD_NETWORK_ENTRYPOINT);
+            order.verify(builder).withEntrypoint(EksClusterManager.RSHARE_ENTRYPOINT);
+            for (String variable : List.of("FLOCI_NODE_IP", "FLOCI_VPC_CIDR", "FLOCI_POD_PREFIXES", "FLOCI_POD_GATEWAYS",
+                    "FLOCI_POD_CNI_CONFIG")) {
+                verify(builder).withoutEnv(variable);
+            }
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<Map<String, String>> labels = ArgumentCaptor.forClass(Map.class);
+            verify(builder, Mockito.times(2)).withLabels(labels.capture());
+            assertEquals("flannel", labels.getValue().get("io.floci.eks.pod-network"));
+        }
+
+        @Test
+        void aFailedReplacementGivesBackThePrefixesLeasedForItAndTheSurvivorKeepsItsOwn() {
+            vpcPodNetworkOn();
+            when(lifecycleManager.findByName("floci-eks-survivor"))
+                    .thenReturn(Optional.of(survivingVpcPodNode("cid-survivor", "10.0.1.224/28")));
+            when(lifecycleManager.adopt(eq("cid-survivor"), eq(List.of(6443)), any()))
+                    .thenReturn(new ContainerInfo("cid-survivor", Map.of(), Map.of(6443, 6440)));
+            when(ec2Service.reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-1", "10.0.1.25")).thenReturn(true);
+            when(ec2Service.reserveVpcPrefixes("000000000000", "us-east-1", "subnet-1", List.of("10.0.1.224/28")))
+                    .thenReturn(List.of("10.0.1.224/28"));
+            when(ec2Service.allocateVpcPrefixes("000000000000", "us-east-1", "subnet-1", 1))
+                    .thenReturn(List.of("10.0.1.192/28"));
+            when(lifecycleManager.create(any())).thenReturn("cid-new");
+            when(lifecycleManager.startCreated(eq("cid-new"), any())).thenThrow(new RuntimeException("replacement failed"));
+            Cluster cluster = vpcCluster("survivor", "vpc-1", List.of("subnet-1"));
+            cluster.setDockerName("floci-eks-survivor");
+            cluster.setNodePrivateIp("10.0.1.25");
+            cluster.setNodePodPrefixes(List.of("10.0.1.224/28"));
+            manager.restoreCluster(cluster);
+
+            assertFalse(manager.restartForNodeCapacity(cluster, "m5.large"));
+
+            assertEquals("cid-survivor", cluster.getContainerId());
+            assertEquals(List.of("10.0.1.224/28"), cluster.getNodePodPrefixes());
+            verify(ec2Service).releaseVpcPrefix("000000000000", "us-east-1", "subnet-1", "10.0.1.192/28");
+            verify(ec2Service, never()).releaseVpcPrefix("000000000000", "us-east-1", "subnet-1", "10.0.1.224/28");
+        }
+
+        /** Restores a cluster whose surviving node carries {@code podNetwork}; whether it was replaced. */
+        private boolean survivorReplaced(String podNetwork, List<String> prefixes) {
+            Mockito.clearInvocations(lifecycleManager);
+            String name = "survivor-" + (++survivors);
+            Map<String, String> labels = new HashMap<>(survivingContainer("cid-" + name).getLabels());
+            if (podNetwork != null) {
+                labels.put("io.floci.eks.pod-network", podNetwork);
+            }
+            Container survivor = Mockito.mock(Container.class);
+            when(survivor.getId()).thenReturn("cid-" + name);
+            when(survivor.getLabels()).thenReturn(labels);
+            when(lifecycleManager.findByName("floci-eks-" + name)).thenReturn(Optional.of(survivor));
+            when(lifecycleManager.adopt(eq("cid-" + name), eq(List.of(6443)), any()))
+                    .thenReturn(new ContainerInfo("cid-" + name, Map.of(), Map.of(6443, 6440)));
+            when(lifecycleManager.create(any())).thenReturn("cid-new-" + name);
+            when(lifecycleManager.startCreated(eq("cid-new-" + name), any()))
+                    .thenReturn(new ContainerInfo("cid-new-" + name, Map.of()));
+            Cluster cluster = vpcCluster(name, "vpc-1", List.of("subnet-1"));
+            cluster.setDockerName("floci-eks-" + name);
+            cluster.setNodePrivateIp("10.0.1.25");
+            cluster.setNodePodPrefixes(prefixes);
+            manager.restoreCluster(cluster);
+            return Mockito.mockingDetails(lifecycleManager).getInvocations().stream()
+                    .anyMatch(invocation -> invocation.getMethod().getName().equals("create"));
+        }
+
+        @Test
+        void withoutVpcPodNetworkANodeHoldsNoPrefixes() {
+            when(portAllocator.allocate(6440, 6499)).thenReturn(6440);
+            when(lifecycleManager.create(any())).thenReturn("cid-1");
+            when(lifecycleManager.startCreated(eq("cid-1"), any())).thenReturn(new ContainerInfo("cid-1", Map.of()));
+            when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-1"))
+                    .thenReturn(Optional.of("10.0.1.25"));
+            Cluster cluster = vpcCluster("plain-cluster", "vpc-1", List.of("subnet-1"));
+            cluster.setNodePodPrefixes(List.of("10.0.1.224/28"));
+
+            manager.startCluster(cluster);
+
+            assertNull(cluster.getNodePodPrefixes());
+            verify(ec2Service, never()).allocateVpcPrefixes(anyString(), anyString(), anyString(), anyInt());
+            verify(ec2Service, never()).reserveVpcPrefixes(anyString(), anyString(), anyString(), anyList());
         }
 
         @Test

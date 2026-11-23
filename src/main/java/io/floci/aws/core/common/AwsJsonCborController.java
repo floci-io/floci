@@ -576,10 +576,7 @@ public class AwsJsonCborController {
         if (request == null || !request.isObject()) {
             throw new AwsException("SerializationException", "Request body must be a structure", 400);
         }
-        String authorization = headers.getHeaderString("Authorization");
-        if (authorization == null || authorization.isBlank()) {
-            authorization = IamEnforcementFilter.requestAuthorization(null, uriInfo.getQueryParameters());
-        }
+        String authorization = AwsJson11Controller.requestAuthorization(headers, uriInfo);
         Response response = json11Controller.dispatch(target, request, region, authorization, uriInfo.getBaseUri());
         return response != null ? response : jsonController.dispatch(target, request, region, null);
     }

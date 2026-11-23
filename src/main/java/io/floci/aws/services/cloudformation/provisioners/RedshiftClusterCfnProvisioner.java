@@ -8,6 +8,7 @@ import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.redshift.RedshiftService;
 import io.floci.aws.services.redshift.model.Cluster;
 import io.floci.aws.services.redshift.model.ClusterParameterGroup;
+import io.floci.aws.services.redshift.model.ClusterSubnetGroup;
 import io.floci.aws.services.redshift.model.Parameter;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -193,15 +194,13 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         }
 
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
-        if (!tags.isEmpty()) {
-            try {
-                redshiftService.createTags(id, tags);
-            } catch (RuntimeException failure) {
-                if (snapshotIdentifier != null && !ctx.reusesPriorEntity(id)) {
-                    cleanupRestoredCluster(id, failure);
-                }
-                throw failure;
+        try {
+            reconcileTags(redshiftService.clusterArn(id), cluster.getTags(), tags);
+        } catch (RuntimeException failure) {
+            if (snapshotIdentifier != null && !ctx.reusesPriorEntity(id)) {
+                cleanupRestoredCluster(id, failure);
             }
+            throw failure;
         }
 
         r.setPhysicalId(id);
@@ -300,12 +299,22 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
             redshiftService.modifyClusterParameterGroup(id, parameters);
         }
 
-        Map<String, String> tags = ctx.resolveTags(props, "Tags");
-        if (!tags.isEmpty()) {
-            redshiftService.createTags(id, tags);
-        }
+        reconcileTags(redshiftService.parameterGroupArn(id),
+                redshiftService.getClusterParameterGroup(id).map(ClusterParameterGroup::getTags).orElse(null),
+                ctx.resolveTags(props, "Tags"));
 
         r.setPhysicalId(id);
+    }
+
+    /** Drives the stored tags to the template's, since CreateTags alone never removes a key. */
+    private void reconcileTags(String resourceArn, Map<String, String> current, Map<String, String> desired) {
+        List<String> stale = ProvisionContext.staleTagKeys(current, desired);
+        if (!stale.isEmpty()) {
+            redshiftService.deleteTags(resourceArn, stale);
+        }
+        if (!desired.isEmpty()) {
+            redshiftService.createTags(resourceArn, desired);
+        }
     }
 
     private ClusterParameterGroup findExistingParameterGroup(String parameterGroupName) {
@@ -336,11 +345,13 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         String id = ctx.stablePhysicalName(explicitName, r.getLogicalId(), METADATA_NAME_MAX_LENGTH, false);
         String description = ctx.resolveOptional(props, "Description");
         List<String> subnetIds = ctx.resolveStringList(props, "SubnetIds");
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
 
         if (ctx.reusesPriorEntity(id)) {
-            redshiftService.modifyClusterSubnetGroup(id, description, subnetIds);
+            ClusterSubnetGroup group = redshiftService.modifyClusterSubnetGroup(id, description, subnetIds);
+            reconcileTags(redshiftService.subnetGroupArn(id), group.getTags(), tags);
         } else {
-            redshiftService.createClusterSubnetGroup(id, description, null, subnetIds);
+            redshiftService.createClusterSubnetGroup(id, description, null, subnetIds, tags);
         }
 
         r.setPhysicalId(id);

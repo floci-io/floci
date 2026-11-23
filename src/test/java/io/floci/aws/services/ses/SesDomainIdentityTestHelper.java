@@ -20,9 +20,7 @@ final class SesDomainIdentityTestHelper {
     }
 
     static String createVerified(String domain, String sesAuthorization) {
-        List<String> tokens = given()
-            .contentType("application/json")
-            .header("Authorization", sesAuthorization)
+        List<String> tokens = SesV2Requests.v2(sesAuthorization)
             .body("{\"EmailIdentity\": \"" + domain + "\"}")
         .when()
             .post("/v2/email/identities")

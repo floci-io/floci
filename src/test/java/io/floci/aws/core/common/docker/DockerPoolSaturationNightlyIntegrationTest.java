@@ -94,7 +94,7 @@ class DockerPoolSaturationNightlyIntegrationTest {
         // Two streams per container, the log follow and the wait, and not one connection more.
         streamingTransport = DockerClientProducer.newHttpClient(clientConfig, 2 * CONTAINERS, RESPONSE_TIMEOUT,
                 LEASE_TIMEOUT);
-        streaming = DockerClientImpl.getInstance(clientConfig,
+        streaming = DockerClientProducer.newDockerClient(clientConfig,
                 DockerClientProducer.wrapForRole(streamingTransport, "streaming", RESPONSE_TIMEOUT));
         dockerAvailable = DockerAvailability.answers(control);
         Assumptions.assumeTrue(dockerAvailable, "Docker daemon is unavailable");
@@ -164,7 +164,7 @@ class DockerPoolSaturationNightlyIntegrationTest {
         FlociDockerHttpClient.PoolGauges quiet = streamingTransport.gauges();
         assertEquals(2 * CONTAINERS, quiet.leased(), "every container should hold both of its streams: " + quiet);
         assertEquals(Map.of("logs", CONTAINERS, "wait", CONTAINERS), quiet.openStreams());
-        // docker-java reads each stream on a thread of its own, so the threads grow with the streams too.
+        // Each stream is read on a virtual thread of its own, counted while its callback runs.
         int streamThreads = DockerPoolGaugeLogger.countStreamThreads();
         assertTrue(streamThreads >= 2 * CONTAINERS, "one docker-java stream thread per open stream, counted "
                 + streamThreads);

@@ -110,6 +110,27 @@ class CloudTrailManagementEventTest {
         assertTrue(service.emitManagementEvent(event("cn-north-1")).isEmpty());
     }
 
+    /**
+     * A global service's event, such as IAM's, reaches only a trail that includes global service events: "Setting
+     * this value to true only delivers global service events to the trail" (botocore, IncludeGlobalServiceEvents).
+     */
+    @Test
+    void aGlobalServiceEventReachesOnlyTheTrailsThatIncludeGlobalServiceEvents() {
+        trail(false);
+        service.createTrail(REGION, "global-trail", "example-audit-logs", null, null, true, false, false, false);
+        service.startLogging(REGION, "management-trail");
+        service.startLogging(REGION, "global-trail");
+
+        service.emitManagementEvent(new CloudTrailService.ManagementEventInput("iam.amazonaws.com", "CreateUser",
+                REGION, "test", MAPPER.createObjectNode().put("userName", "alice"), null, false, null, null, null,
+                null, null, true, null)).orElseThrow();
+
+        assertEquals(0, service.pendingRecordCount(new CloudTrailService.TrailKey(REGION, "management-trail", REGION)));
+        assertEquals(1, service.pendingRecordCount(new CloudTrailService.TrailKey(REGION, "global-trail", REGION)));
+        service.emitManagementEvent(event(REGION)).orElseThrow();
+        assertEquals(1, service.pendingRecordCount(new CloudTrailService.TrailKey(REGION, "management-trail", REGION)));
+    }
+
     @Test
     void multipleTrailsRecordTheSameEventIdAndKeepIndependentCopies() {
         trail(false);

@@ -8,7 +8,9 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.stream.Stream;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.ses.SesV2Requests.DESTINATION;
+import static io.floci.aws.services.ses.SesV2Requests.ENTRY;
+import static io.floci.aws.services.ses.SesV2Requests.post;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
@@ -20,24 +22,9 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 class SesInlineTemplateRequiredFieldsIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String UNVERIFIED = "sender@unverified-inline-template.floci.test";
-    private static final String TO = "success@simulator.amazonses.com";
-    private static final String DESTINATION = "\"Destination\": {\"ToAddresses\": [\"" + TO + "\"]}";
-    private static final String ENTRY = "{" + DESTINATION + "}";
     private static final String SUBJECT_ONLY = "{\"Subject\": \"s\"}";
     private static final String MESSAGE = "Template is missing required fields.";
-
-    private static ValidatableResponse post(String path, String body) {
-        return given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
-            .body(body)
-        .when()
-            .post(path)
-        .then();
-    }
 
     private static String template(String templateContent) {
         return "{\"Template\": {\"TemplateContent\": " + templateContent + ", \"TemplateData\": \"{}\"}}";

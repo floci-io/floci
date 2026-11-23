@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_apigateway_shapes.py",
-    "botocore": "botocore 1.43.118 (local/aws/botocore)"
+    "botocore": "botocore 1.44.9 (local/aws/botocore)"
   },
   "operations": {
     "CreateApiKey": "CreateApiKeyRequest",
@@ -195,7 +195,8 @@
         "authorizerCredentials": "String",
         "identitySource": "String",
         "identityValidationExpression": "String",
-        "authorizerResultTtlInSeconds": "NullableInteger"
+        "authorizerResultTtlInSeconds": "NullableInteger",
+        "jwtConfiguration": "JwtConfigurationInput"
       }
     },
     "CreateBasePathMappingRequest": {
@@ -706,6 +707,36 @@
     "IpAddressType": {
       "type": "string"
     },
+    "JwtAdditionalClaim": {
+      "type": "structure",
+      "members": {
+        "claimName": "String",
+        "format": "JwtClaimFormat",
+        "required": "Boolean",
+        "expectedValues": "ListOfString"
+      }
+    },
+    "JwtClaimFormat": {
+      "type": "string"
+    },
+    "JwtConfigurationInput": {
+      "type": "structure",
+      "members": {
+        "issuers": "ListOfJwtIssuerInput",
+        "defaultAlgorithms": "ListOfJwtSigningAlgorithm"
+      }
+    },
+    "JwtIssuerInput": {
+      "type": "structure",
+      "members": {
+        "issuer": "String",
+        "audiences": "ListOfString",
+        "additionalClaims": "ListOfJwtAdditionalClaim"
+      }
+    },
+    "JwtSigningAlgorithm": {
+      "type": "string"
+    },
     "ListOfARNs": {
       "type": "list",
       "member": "ProviderARN"
@@ -717,6 +748,18 @@
     "ListOfEndpointType": {
       "type": "list",
       "member": "EndpointType"
+    },
+    "ListOfJwtAdditionalClaim": {
+      "type": "list",
+      "member": "JwtAdditionalClaim"
+    },
+    "ListOfJwtIssuerInput": {
+      "type": "list",
+      "member": "JwtIssuerInput"
+    },
+    "ListOfJwtSigningAlgorithm": {
+      "type": "list",
+      "member": "JwtSigningAlgorithm"
     },
     "ListOfPatchOperation": {
       "type": "list",

@@ -563,9 +563,12 @@ final class ExpressionEvaluator {
         }
     }
 
+    private static AwsException invalidExpression(String exprType, String message) {
+        return new AwsException("ValidationException", "Invalid " + exprType + ": " + message, 400);
+    }
+
     private static AwsException incorrectOperandType(String exprType, String operator, String type) {
-        return new AwsException("ValidationException", "Invalid " + exprType + ": "
-                + DynamoDbPartiQLParser.incorrectOperandType(operator, type), 400);
+        return invalidExpression(exprType, DynamoDbPartiQLParser.incorrectOperandType(operator, type));
     }
 
     // AWS rejects a BETWEEN whose bounds are the wrong way round when it parses the
@@ -632,6 +635,15 @@ final class ExpressionEvaluator {
     private static void validateFunction(FunctionCallExpr f, String exprType,
                                          JsonNode names, JsonNode values) {
         String name = f.functionName().toLowerCase();
+        if (name.equals("attribute_exists") || name.equals("attribute_not_exists")) {
+            if (f.args().size() != 1) {
+                throw invalidExpression(exprType,
+                        DynamoDbPartiQLParser.incorrectOperandCount(f.functionName(), f.args().size()));
+            }
+            if (!(f.args().getFirst() instanceof PathOperand)) {
+                throw invalidExpression(exprType, DynamoDbPartiQLParser.documentPathRequired(f.functionName()));
+            }
+        }
         if (name.equals("contains") && f.args().size() >= 2
                 && operandsIdentical(f.args().get(0), f.args().get(1), names)) {
             throw new AwsException("ValidationException",

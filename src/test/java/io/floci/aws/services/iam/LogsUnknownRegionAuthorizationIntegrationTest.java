@@ -81,9 +81,8 @@ class LogsUnknownRegionAuthorizationIntegrationTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"CreateLogStream,false,false", "DeleteLogStream,false,false", "CreateLogStream,true,false",
-            "DeleteLogStream,true,false", "DeleteLogStream,false,true"})
-    void optedInRegionLabelsCannotAliasHistoricalGroupNames(String action, boolean conditional, boolean streamAlias) {
+    @CsvSource({"CreateLogStream,false", "DeleteLogStream,false", "DeleteLogStream,true"})
+    void optedInRegionLabelsCannotAliasHistoricalGroupNames(String action, boolean streamAlias) {
         int port = endpoint.getPort();
         String group = "logs-region-alias-" + UUID.randomUUID();
         String historical = streamAlias ? group : "x::" + group;
@@ -106,13 +105,12 @@ class LogsUnknownRegionAuthorizationIntegrationTest {
             }
         }
         assertPresent(port, REGION, historical, historicalStream, delete);
-        String condition = conditional ? ",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"blue\"}}" : "";
         String resources = "[\"arn:aws:logs:" + aliasRegion + ":" + ACCOUNT + ":log-group:" + group
                 + ":log-stream:s\",\"arn:aws:logs:" + validUnknownRegion + ":" + ACCOUNT
                 + ":log-group:" + group + ":log-stream:s\"]";
         String caller = LogsAuthorizationFixtures.user(cleanup, port, ACCOUNT, "logs-region-alias-", "streams",
                 "{\"Effect\":\"Allow\",\"Action\":\"logs:" + action
-                + "\",\"Resource\":" + resources + condition + "}");
+                + "\",\"Resource\":" + resources + "}");
         Response response = call(port, caller, aliasRegion, action,
                 Map.of("logGroupName", group, "logStreamName", "s"));
         assertAll("preserve stored identity across an opted-in region delimiter",

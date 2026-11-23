@@ -47,6 +47,7 @@ public class RdsAuthProxy {
     private final Semaphore connectionPermits;
     private final RdsBackendGate backendGate;
     private final BooleanSupplier forceSsl;
+    private final HandoverLoginResolver handoverLoginResolver;
 
     private volatile boolean running;
     private ServerSocket serverSocket;
@@ -143,6 +144,24 @@ public class RdsAuthProxy {
                         MySqlProtocolHandler.IamUserChecker iamUserChecker,
                         RdsBackendGate backendGate, EndpointKind endpointKind,
                         BooleanSupplier forceSsl) {
+        this(instanceId, backendHost, backendPort, backendEndpointResolver, backendRuntimeId,
+                engine, iamEnabled, masterUsername, masterPassword, dbName, sigV4,
+                tlsCertificates, passwordValidator, handshakeTimeoutMillis,
+                backendConnectTimeoutMillis, maxConnections, binding, iamUserChecker,
+                backendGate, endpointKind, forceSsl, () -> null);
+    }
+
+    public RdsAuthProxy(String instanceId, String backendHost, int backendPort,
+                        BackendEndpointResolver backendEndpointResolver, String backendRuntimeId,
+                        DatabaseEngine engine, boolean iamEnabled,
+                        String masterUsername, String masterPassword, String dbName,
+                        RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
+                        MasterPasswordCheck passwordValidator,
+                        int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
+                        int maxConnections, RdsProxyBinding binding,
+                        MySqlProtocolHandler.IamUserChecker iamUserChecker,
+                        RdsBackendGate backendGate, EndpointKind endpointKind,
+                        BooleanSupplier forceSsl, HandoverLoginResolver handoverLoginResolver) {
         if (backendRuntimeId == null || backendRuntimeId.isBlank()) {
             throw new IllegalArgumentException("RDS backend runtime ID is required");
         }
@@ -167,6 +186,7 @@ public class RdsAuthProxy {
         this.connectionPermits = new Semaphore(Math.max(1, maxConnections));
         this.backendGate = backendGate;
         this.forceSsl = forceSsl;
+        this.handoverLoginResolver = handoverLoginResolver;
     }
 
     public void start(int proxyPort) throws IOException {
@@ -290,7 +310,8 @@ public class RdsAuthProxy {
                                     client, connector, masterUsername, masterPassword, dbName,
                                     iamEnabled, sigV4, binding, tlsCertificates, authAdapter,
                                     handshakeTimeoutMillis, true, endpointKind == EndpointKind.DATABASE,
-                                    (user, database, parameters) -> { }, null, forceSsl.getAsBoolean());
+                                    (user, database, parameters) -> { }, null, forceSsl.getAsBoolean(),
+                                    handoverLoginResolver.resolve());
                     if (session != null) {
                         PostgresProtocolHandler.bridge(session);
                     }
@@ -358,5 +379,14 @@ public class RdsAuthProxy {
     @FunctionalInterface
     public interface MasterPasswordCheck {
         boolean validate(String username, String password);
+    }
+
+    /**
+     * The login a PostgreSQL IAM session is opened as before it is handed over to the token's role, read for each
+     * connection since the backend may have restarted since; null to use the master user's.
+     */
+    @FunctionalInterface
+    public interface HandoverLoginResolver {
+        PostgresProtocolHandler.BackendLogin resolve();
     }
 }

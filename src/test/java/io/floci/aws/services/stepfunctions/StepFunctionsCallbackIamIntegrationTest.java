@@ -1,7 +1,6 @@
 package io.floci.aws.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.model.AccessKey;
 import io.floci.aws.services.sqs.SqsService;
@@ -241,14 +240,7 @@ class StepFunctionsCallbackIamIntegrationTest {
     }
 
     private AccessKey foreignUser(String name, String policy) {
-        String account = "111111111111";
-        RequestScopes.runAs(account, () -> iam.createUser(name, "/"));
-        cleanup.register(() -> RequestScopes.runAs(account, () -> iam.deleteUser(name)));
-        RequestScopes.runAs(account, () -> iam.putUserPolicy(name, "callback", policy));
-        cleanup.register(() -> RequestScopes.runAs(account, () -> iam.deleteUserPolicy(name, "callback")));
-        AccessKey key = RequestScopes.callAs(account, () -> iam.createAccessKey(name));
-        cleanup.register(() -> RequestScopes.runAs(account, () -> iam.deleteAccessKey(name, key.getAccessKeyId())));
-        return key;
+        return SignedIamUsers.createUser(iam, cleanup, "111111111111", name, "callback", policy);
     }
 
     private SfnClient client(String access, String secret) {

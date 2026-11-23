@@ -24,6 +24,7 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.ec2.Ec2ImageCatalog;
+import io.floci.aws.services.eks.EksAmiReleaseVersions;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
@@ -65,6 +66,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
             "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended";
     private static final String ECS_AL2023_ARM64_RECOMMENDED =
             "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended";
+    private static final String EKS_RECOMMENDED_RELEASE_VERSION = "/recommended/release_version";
     private static final DateTimeFormatter SOURCE_RESULT_DATE =
             DateTimeFormatter.ofPattern("MMM d, yyyy, h:mm:ss a", Locale.US).withZone(ZoneOffset.UTC);
     static final String SECRET_REFERENCE_PREFIX = "/aws/reference/secretsmanager/";
@@ -651,6 +653,12 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
         if (imageCatalog == null || name == null || !name.startsWith(PUBLIC_PARAMETER_PREFIX)) {
             return Optional.empty();
         }
+        boolean eksReleaseVersion = name.startsWith(EksAmiReleaseVersions.OPTIMIZED_AMI_PARAMETER_PREFIX)
+                && name.endsWith(EKS_RECOMMENDED_RELEASE_VERSION);
+        // A custom catalog may name a Kubernetes version Floci has no node image for, and so no patch version.
+        if (eksReleaseVersion && !EksAmiReleaseVersions.supports(eksKubernetesVersion(name))) {
+            return Optional.empty();
+        }
         return imageCatalog.findByPublicParameterName(name).map(image -> {
             String value = image.imageId;
             if (name.startsWith(ECS_AL2023_RECOMMENDED)
@@ -668,11 +676,18 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
                 value = name.equals(recommendedName) ? metadata.toString()
                         : metadata.required(name.substring(recommendedName.length() + 1)).asText();
             }
+            if (eksReleaseVersion) {
+                value = EksAmiReleaseVersions.of(eksKubernetesVersion(name), image.creationDate);
+            }
             Parameter parameter = new Parameter(name, value, "String");
             parameter.setArn(AwsArnUtils.Arn.of("ssm", region, "", parameterResource(name)).toString());
             parameter.setLastModifiedDate(Instant.parse(image.creationDate));
             return parameter;
         });
+    }
+
+    private static String eksKubernetesVersion(String name) {
+        return name.substring(EksAmiReleaseVersions.OPTIMIZED_AMI_PARAMETER_PREFIX.length()).split("/")[0];
     }
 
     public List<Parameter> getParametersByPath(String path, boolean recursive,

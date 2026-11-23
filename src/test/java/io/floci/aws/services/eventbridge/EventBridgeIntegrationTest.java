@@ -141,7 +141,7 @@ class EventBridgeIntegrationTest {
 
         String expectedMessage = "\\{\"version\":\"0\",\"id\":\"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\",\"source\":\"com.mycompany.myapp\"," +
                 "\"detail-type\":\"myDetailType\",\"account\":\"000000000000\",\"time\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\"," +
-                "\"region\":\"us-east-1\",\"resources\":\\[\"resource1\",\"resource2\"],\"detail\":\\{\"key1\":\"value1\",\"key2\":\"value2\"},\"event-bus-name\":\"default\"}";
+                "\"region\":\"us-east-1\",\"resources\":\\[\"resource1\",\"resource2\"],\"detail\":\\{\"key1\":\"value1\",\"key2\":\"value2\"}}";
 
         given()
             .contentType(SQS_CONTENT_TYPE)

@@ -513,7 +513,7 @@ public class Route53Controller {
                .elem("IsTruncated", String.valueOf(truncated));
             if (truncated) {
                 ResourceRecordSet next = fetched.get(maxItems);
-                xml.elem("NextRecordName", next.getName())
+                xml.elem("NextRecordName", Route53Service.normalizeRecordName(next.getName()))
                    .elem("NextRecordType", next.getType());
             }
             xml.elem("MaxItems", String.valueOf(maxItems))
@@ -866,7 +866,7 @@ public class Route53Controller {
     private String xmlResourceRecordSet(ResourceRecordSet rrs) {
         XmlBuilder xml = new XmlBuilder()
                 .start("ResourceRecordSet")
-                .elem("Name", rrs.getName())
+                .elem("Name", Route53Service.normalizeRecordName(rrs.getName()))
                 .elem("Type", rrs.getType());
         if (rrs.getSetIdentifier() != null) xml.elem("SetIdentifier", rrs.getSetIdentifier());
         if (rrs.getWeight() != null) xml.elem("Weight", rrs.getWeight());

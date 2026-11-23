@@ -151,6 +151,17 @@ public class TableDefinition {
     public List<AttributeDefinition> getAttributeDefinitions() { return attributeDefinitions; }
     public void setAttributeDefinitions(List<AttributeDefinition> attributeDefinitions) { this.attributeDefinitions = attributeDefinitions; }
 
+    public String attributeType(String attributeName) {
+        if (attributeDefinitions == null) {
+            return null;
+        }
+        return attributeDefinitions.stream()
+                .filter(definition -> attributeName.equals(definition.getAttributeName()))
+                .map(AttributeDefinition::getAttributeType)
+                .findFirst()
+                .orElse(null);
+    }
+
     public String getTableStatus() { return tableStatus; }
     public void setTableStatus(String tableStatus) { this.tableStatus = tableStatus; }
 

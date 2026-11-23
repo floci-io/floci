@@ -1147,6 +1147,40 @@ class IamRequestResourceEnforcementIntegrationTest {
         return name;
     }
 
+    /**
+     * EC2 Instance Connect's SendSSHPublicKey and SendSerialConsoleSSHPublicKey are checked on the instance their
+     * {@code InstanceId} names, under the ARN EC2 gives it, so a grant on one instance does not reach another.
+     */
+    @Test
+    void anInstanceConnectKeyIsCheckedOnTheInstanceItIsSentTo() {
+        String instanceId = admin("ec2").formParam("Action", "RunInstances").formParam("Version", "2016-11-15")
+                .formParam("ImageId", "ami-0abcdef1234567890").formParam("InstanceType", "t3.micro")
+                .formParam("MinCount", "1").formParam("MaxCount", "1").post("/").then().statusCode(200).extract()
+                .path("RunInstancesResponse.instancesSet.item.instanceId");
+        cleanup.register(() -> admin("ec2").formParam("Action", "TerminateInstances").formParam("Version", "2016-11-15")
+                .formParam("InstanceId.1", instanceId).post("/").then().statusCode(200));
+        // Mock mode settles a launch on the first DescribeInstances; a key needs a running instance.
+        admin("ec2").formParam("Action", "DescribeInstances").formParam("Version", "2016-11-15")
+                .formParam("InstanceId.1", instanceId).post("/").then().statusCode(200);
+        String instance = "arn:aws:ec2:" + REGION + ":" + ACCOUNT + ":instance/";
+
+        User user = user("res-instance-connect");
+        user.policy(allowOn("ec2-instance-connect:SendSSHPublicKey", instance + instanceId) + ","
+                + allowOn("ec2-instance-connect:SendSerialConsoleSSHPublicKey", instance + instanceId));
+        sendSshPublicKey(user, "SendSSHPublicKey", instanceId).statusCode(200);
+        refusedJson(sendSshPublicKey(user, "SendSSHPublicKey", "i-0000000000000000f"),
+                "ec2-instance-connect:SendSSHPublicKey");
+        refusedJson(sendSshPublicKey(user, "SendSerialConsoleSSHPublicKey", "i-0000000000000000f"),
+                "ec2-instance-connect:SendSerialConsoleSSHPublicKey");
+    }
+
+    private static ValidatableResponse sendSshPublicKey(User user, String operation, String instanceId) {
+        return user.json("ec2-instance-connect", "AWSEC2InstanceConnectService." + operation, "1.1")
+                .body("{\"InstanceId\":\"" + instanceId + "\",\"InstanceOSUser\":\"ec2-user\",\"SSHPublicKey\":"
+                        + "\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl "
+                        + "user@host\"}").post("/").then();
+    }
+
     @Test
     void aCloudMapNamespaceAndServiceAreCheckedOnTheArnsTheirIdsGive() {
         String namespaceId = cloudMapNamespace("res-ns-" + suffix());
@@ -1756,6 +1790,35 @@ class IamRequestResourceEnforcementIntegrationTest {
                 "{\"identifier\":\"" + id + "\"}").statusCode(200);
         refusedJson(send(user, "bcm-pricing-calculator", "AWSBCMPricingCalculator.GetWorkloadEstimate", "1.0",
                 "{\"identifier\":\"" + UUID.randomUUID() + "\"}"), "bcm-pricing-calculator:GetWorkloadEstimate");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Pricing Calculator holds on the workload estimate a request
+     * names by its id, the ones it was created with, so an allow on one team's tag lets the caller read that team's
+     * estimate and not another's.
+     */
+    @Test
+    void aPricingCalculatorResourceTagConditionReadsTheTagsOfTheWorkloadEstimate() {
+        String tagged = workloadEstimate("data");
+        String other = workloadEstimate("web");
+
+        User user = user("res-estimate-team");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"bcm-pricing-calculator:GetWorkloadEstimate\","
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "bcm-pricing-calculator", "AWSBCMPricingCalculator.GetWorkloadEstimate", "1.0",
+                "{\"identifier\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(send(user, "bcm-pricing-calculator", "AWSBCMPricingCalculator.GetWorkloadEstimate", "1.0",
+                "{\"identifier\":\"" + other + "\"}"), "bcm-pricing-calculator:GetWorkloadEstimate");
+    }
+
+    /** A workload estimate an administrator creates, tagged with {@code team}, deleted after the test; its id. */
+    private String workloadEstimate(String team) {
+        String id = adminJson("bcm-pricing-calculator", "AWSBCMPricingCalculator.CreateWorkloadEstimate", "1.0")
+                .body("{\"name\":\"res-estimate-" + team + "\",\"clientToken\":\"" + suffix() + "\",\"tags\":"
+                        + "{\"team\":\"" + team + "\"}}").post("/").then().statusCode(200).extract().path("id");
+        cleanup.register(() -> adminJson("bcm-pricing-calculator", "AWSBCMPricingCalculator.DeleteWorkloadEstimate",
+                "1.0").body("{\"identifier\":\"" + id + "\"}").post("/").then().statusCode(200));
+        return id;
     }
 
     /**
@@ -3187,6 +3250,63 @@ class IamRequestResourceEnforcementIntegrationTest {
                 "{\"Name\":\"" + workflow + "-other\",\"RunId\":\"wr_0\"}"), "glue:GetWorkflowRun");
         send(user, "glue", "AWSGlue.GetWorkflowRun", "1.1", "{\"Name\":\"" + workflow + "\",\"RunId\":\"wr_0\"}")
                 .body(not(containsString("AccessDeniedException")));
+    }
+
+    /**
+     * A CloudWatch alarm is checked on the ARN CloudWatch mints for it, {@code alarm:<name>}: a grant on one alarm lets
+     * the caller create it and not another, and a deny on one alarm refuses a request whose list names it, while the
+     * same request naming another alarm goes through.
+     */
+    @Test
+    void aCloudWatchAlarmIsCheckedOnTheArnCloudWatchGivesIt() {
+        String alarm = "res-alarm-" + suffix();
+        String other = alarm + "-other";
+        String alarmArn = "arn:aws:cloudwatch:" + REGION + ":" + ACCOUNT + ":alarm:" + alarm;
+        cleanup.register(() -> admin("monitoring").formParam("Action", "DeleteAlarms").formParam("Version", "2010-08-01")
+                .formParam("AlarmNames.member.1", alarm).formParam("AlarmNames.member.2", other).post("/"));
+        User user = user("res-cw-alarm");
+        user.policy(allowOn("cloudwatch:PutMetricAlarm", alarmArn));
+        putMetricAlarm(user.query("monitoring", "PutMetricAlarm"), alarm).statusCode(200);
+        refused(putMetricAlarm(user.query("monitoring", "PutMetricAlarm"), other), "cloudwatch:PutMetricAlarm");
+
+        putMetricAlarm(admin("monitoring").formParam("Action", "PutMetricAlarm"), other).statusCode(200);
+        user.policy(allowOn("cloudwatch:DisableAlarmActions", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"cloudwatch:DisableAlarmActions\",\"Resource\":\"" + alarmArn + "\"}");
+        refused(user.query("monitoring", "DisableAlarmActions").formParam("Version", "2010-08-01")
+                .formParam("AlarmNames.member.1", other).formParam("AlarmNames.member.2", alarm).post("/").then(),
+                "cloudwatch:DisableAlarmActions");
+        user.query("monitoring", "DisableAlarmActions").formParam("Version", "2010-08-01")
+                .formParam("AlarmNames.member.1", other).post("/").then().statusCode(200);
+    }
+
+    /**
+     * A CloudWatch dashboard is checked on its ARN, which has no Region, as AWS gives it and CloudWatch mints it, so a
+     * grant on one dashboard lets the caller write and read it and not another.
+     */
+    @Test
+    void aCloudWatchDashboardIsCheckedOnItsArnWithoutARegion() {
+        String dashboard = "res-dash-" + suffix();
+        cleanup.register(() -> admin("monitoring").formParam("Action", "DeleteDashboards")
+                .formParam("Version", "2010-08-01").formParam("DashboardNames.member.1", dashboard).post("/"));
+        User user = user("res-cw-dash");
+        user.policy(allowOn("cloudwatch:PutDashboard", "arn:aws:cloudwatch::" + ACCOUNT + ":dashboard/" + dashboard)
+                + "," + allowOn("cloudwatch:GetDashboard", "arn:aws:cloudwatch::" + ACCOUNT + ":dashboard/" + dashboard));
+        putDashboard(user, dashboard).statusCode(200);
+        refused(putDashboard(user, dashboard + "-other"), "cloudwatch:PutDashboard");
+        user.query("monitoring", "GetDashboard").formParam("Version", "2010-08-01").formParam("DashboardName", dashboard)
+                .post("/").then().statusCode(200).body(containsString(":dashboard/" + dashboard));
+    }
+
+    private static ValidatableResponse putMetricAlarm(RequestSpecification request, String name) {
+        return request.formParam("Version", "2010-08-01").formParam("AlarmName", name).formParam("Namespace", "Res")
+                .formParam("MetricName", "Requests").formParam("Statistic", "Sum").formParam("Period", "60")
+                .formParam("EvaluationPeriods", "1").formParam("Threshold", "1")
+                .formParam("ComparisonOperator", "GreaterThanThreshold").post("/").then();
+    }
+
+    private static ValidatableResponse putDashboard(User user, String name) {
+        return user.query("monitoring", "PutDashboard").formParam("Version", "2010-08-01")
+                .formParam("DashboardName", name).formParam("DashboardBody", "{\"widgets\":[]}").post("/").then();
     }
 
     private static ValidatableResponse glue(String operation, String body) {

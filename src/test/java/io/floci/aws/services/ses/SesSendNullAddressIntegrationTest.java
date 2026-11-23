@@ -17,8 +17,6 @@ import static org.hamcrest.Matchers.nullValue;
 @QuarkusTest
 class SesSendNullAddressIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     // A verified sender of its own: an identity under example.com would outlive this class and
     // reach the other SES classes that share the application.
     private static final String SENDER = "null-address-sender@floci.test";
@@ -30,22 +28,13 @@ class SesSendNullAddressIntegrationTest {
     private static final String NULL_ADDRESS = "Invalid email address null.";
     private static final String EMPTY_DESTINATION = "Destination cannot be empty";
 
-    private static ValidatableResponse post(String path, String body) {
-        return given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
-            .body(body)
-        .when()
-            .post(path)
-        .then();
-    }
-
     private static ValidatableResponse send(String body) {
-        return post("/v2/email/outbound-emails", body);
+        return SesV2Requests.post("/v2/email/outbound-emails", body);
     }
 
     private static ValidatableResponse bulk(String members, String entries) {
-        return post("/v2/email/outbound-bulk-emails", "{\"FromEmailAddress\": \"" + SENDER + "\", " + members
+        return SesV2Requests.post("/v2/email/outbound-bulk-emails",
+                "{\"FromEmailAddress\": \"" + SENDER + "\", " + members
                 + "\"DefaultContent\": " + INLINE_TEMPLATE + ", \"BulkEmailEntries\": [" + entries + "]}");
     }
 
@@ -57,7 +46,7 @@ class SesSendNullAddressIntegrationTest {
     void verifySender() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "VerifyEmailIdentity")
             .formParam("EmailAddress", SENDER)
         .when()

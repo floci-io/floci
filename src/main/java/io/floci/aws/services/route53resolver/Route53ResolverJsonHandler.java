@@ -78,6 +78,9 @@ public class Route53ResolverJsonHandler {
                         request, region, accountId));
                 case "GetResolverDnssecConfig" -> dnssecConfigResponse(service.getResolverDnssecConfig(
                         text(request, "ResourceId"), region));
+                case "ListResolverDnssecConfigs" -> Response.ok(service.listResolverDnssecConfigs(
+                        request.get("Filters"), request.get("MaxResults"), text(request, "NextToken"),
+                        region)).build();
 
                 case "TagResource" -> {
                     service.tagResource(text(request, "ResourceArn"), request.get("Tags"), region, accountId);

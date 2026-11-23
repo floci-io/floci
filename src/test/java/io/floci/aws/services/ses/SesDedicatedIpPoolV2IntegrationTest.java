@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -18,19 +20,16 @@ import static org.hamcrest.Matchers.hasItem;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesDedicatedIpPoolV2IntegrationTest {
 
-    private static final String AUTH_HEADER =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
-
     @Test
     @Order(1)
     void createDedicatedIpPool_defaultScalingMode() {
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        v2()
             .body("{\"PoolName\": \"v2-pool-alpha\"}")
         .when().post("/v2/email/dedicated-ip-pools")
         .then().statusCode(200);
 
         // Default ScalingMode is STANDARD.
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/dedicated-ip-pools/v2-pool-alpha")
         .then().statusCode(200)
             .body("DedicatedIpPool.PoolName", equalTo("v2-pool-alpha"))
@@ -40,12 +39,12 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(2)
     void createDedicatedIpPool_managedScalingMode() {
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        v2()
             .body("{\"PoolName\": \"v2-pool-managed\", \"ScalingMode\": \"MANAGED\"}")
         .when().post("/v2/email/dedicated-ip-pools")
         .then().statusCode(200);
 
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/dedicated-ip-pools/v2-pool-managed")
         .then().statusCode(200)
             .body("DedicatedIpPool.ScalingMode", equalTo("MANAGED"));
@@ -54,7 +53,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(3)
     void createDedicatedIpPool_invalidScalingMode_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        v2()
             .body("{\"PoolName\": \"v2-pool-bad\", \"ScalingMode\": \"NONSENSE\"}")
         .when().post("/v2/email/dedicated-ip-pools")
         .then().statusCode(400)
@@ -65,7 +64,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(4)
     void createDedicatedIpPool_duplicate_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        v2()
             .body("{\"PoolName\": \"v2-pool-alpha\"}")
         .when().post("/v2/email/dedicated-ip-pools")
         .then().statusCode(400)
@@ -76,7 +75,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(5)
     void getDedicatedIpPool_unknown_returns404() {
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/dedicated-ip-pools/v2-pool-ghost")
         .then().statusCode(404)
             .body("__type", equalTo("NotFoundException"))
@@ -86,7 +85,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(6)
     void listDedicatedIpPools() {
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/dedicated-ip-pools")
         .then().statusCode(200)
             .body("DedicatedIpPools", hasItem("v2-pool-alpha"))
@@ -96,11 +95,11 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(7)
     void deleteDedicatedIpPool() {
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().delete("/v2/email/dedicated-ip-pools/v2-pool-alpha")
         .then().statusCode(200);
 
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/dedicated-ip-pools/v2-pool-alpha")
         .then().statusCode(404);
     }
@@ -108,7 +107,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(8)
     void deleteDedicatedIpPool_unknown_returns404() {
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().delete("/v2/email/dedicated-ip-pools/v2-pool-ghost")
         .then().statusCode(404)
             .body("__type", equalTo("NotFoundException"))
@@ -118,7 +117,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(9)
     void createDedicatedIpPool_emptyBody_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        v2()
             .body("")
         .when().post("/v2/email/dedicated-ip-pools")
         .then().statusCode(400)
@@ -129,7 +128,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(10)
     void createDedicatedIpPool_missingPoolName_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        v2()
             .body("{}")
         .when().post("/v2/email/dedicated-ip-pools")
         .then().statusCode(400)
@@ -140,7 +139,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(11)
     void createDedicatedIpPool_nullPoolName_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        v2()
             .body("{\"PoolName\": null}")
         .when().post("/v2/email/dedicated-ip-pools")
         .then().statusCode(400)
@@ -153,7 +152,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     void createDedicatedIpPool_nonTextualScalingMode_returns400() {
         // A present-but-non-string ScalingMode must be rejected, not coerced to
         // "" and silently defaulted to STANDARD.
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        v2()
             .body("{\"PoolName\": \"v2-pool-objsm\", \"ScalingMode\": {}}")
         .when().post("/v2/email/dedicated-ip-pools")
         .then().statusCode(400)

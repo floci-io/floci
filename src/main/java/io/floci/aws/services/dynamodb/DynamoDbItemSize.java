@@ -10,7 +10,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -30,19 +29,6 @@ final class DynamoDbItemSize {
     /** What a vector index reads per vector component, whatever the written decimal text costs. */
     static final int VECTOR_COMPONENT_BYTES = 4;
 
-    // An UpdateExpression is also measured as a statement: these per action, the target paths
-    // with a shared prefix counted once, and every operand a SET reads or an ADD writes.
-    // Every other surface, AttributeUpdates included, measures only the finished item.
-    private static final int UPDATE_COST = 3;
-    private static final int SET_OR_ADD_COST = 19;
-    private static final int REMOVE_OR_DELETE_COST = 1;
-    private static final int TARGET_CONTAINER_COST = 4;
-    private static final int OPERAND_PATH_COST = 1;
-    private static final int OPERAND_PATH_ELEMENT_COST = 14;
-    private static final int PLUS_COST = 34;
-    private static final int MINUS_COST = 37;
-    private static final int LIST_APPEND_COST = 37;
-    private static final int IF_NOT_EXISTS_COST = 39;
     private static final int CONTAINER_COST = 3;
     private static final int MAX_NUMBER_PAIRS = 20;
 
@@ -68,13 +54,15 @@ final class DynamoDbItemSize {
     }
 
     /**
-     * The size of an UpdateExpression statement, or empty when an action lacks the assignment or the
-     * value its clause needs, or leaves a parenthesis open. The update parser refuses such a statement.
+     * The size UpdateItem and TransactWriteItems measure an UpdateExpression statement at, besides the
+     * finished item: for every SET and ADD action, the UTF-8 bytes of the names in its target path (a
+     * list index counts 0) plus the size of each :value its operand uses, once per use. Empty when an
+     * action lacks the assignment or the value its clause needs, or leaves a parenthesis open. The
+     * update parser refuses such a statement.
      */
     static OptionalInt updateStatementSize(String expression, Function<String, List<Object>> paths,
                                            JsonNode values) {
-        int size = UPDATE_COST;
-        PathTree targets = new PathTree();
+        int size = 0;
         String remaining = expression.trim().replaceAll("\\s+", " ");
         while (!remaining.isEmpty()) {
             String keyword = remaining.substring(0, Math.max(remaining.indexOf(' '), 0)).toUpperCase(Locale.ROOT);
@@ -88,11 +76,11 @@ final class DynamoDbItemSize {
                 if (!readable(keyword, action)) {
                     return OptionalInt.empty();
                 }
-                size += actionSize(keyword, action, targets, paths, values);
+                size += actionSize(keyword, action, paths, values);
                 actions = comma < 0 ? "" : actions.substring(comma + 1);
             }
         }
-        return OptionalInt.of(size + targets.size());
+        return OptionalInt.of(size);
     }
 
     private static boolean readable(String clause, String action) {
@@ -119,87 +107,59 @@ final class DynamoDbItemSize {
         return open > 0;
     }
 
-    private static int actionSize(String clause, String action, PathTree targets,
+    private static int actionSize(String clause, String action,
                                   Function<String, List<Object>> paths, JsonNode values) {
         return switch (clause) {
             case "SET" -> {
                 int assignment = action.indexOf('=');
-                targets.add(paths.apply(action.substring(0, assignment)));
-                yield SET_OR_ADD_COST + operandSize(action.substring(assignment + 1), paths, values);
+                yield targetSize(paths.apply(action.substring(0, assignment)))
+                        + operandSize(action.substring(assignment + 1), values);
             }
             case "ADD" -> {
                 String[] parts = action.split(" ", 2);
-                targets.add(paths.apply(parts[0]));
-                yield SET_OR_ADD_COST + operandSize(parts[1], paths, values);
+                yield targetSize(paths.apply(parts[0])) + operandSize(parts[1], values);
             }
-            default -> {
-                targets.add(paths.apply(action.split(" ", 2)[0]));
-                yield REMOVE_OR_DELETE_COST;
-            }
+            default -> 0;
         };
     }
 
-    private static int operandSize(String operand, Function<String, List<Object>> paths, JsonNode values) {
+    private static int targetSize(List<Object> path) {
+        int size = 0;
+        for (Object element : path) {
+            if (element instanceof String name) {
+                size += utf8Length(name);
+            }
+        }
+        return size;
+    }
+
+    private static int operandSize(String operand, JsonNode values) {
         String expr = DynamoDbService.stripOuterParens(operand);
         int operator = DynamoDbService.findArithmeticOperator(expr);
         if (operator >= 0) {
-            return (expr.charAt(operator) == '+' ? PLUS_COST : MINUS_COST)
-                    + operandSize(expr.substring(0, operator), paths, values)
-                    + operandSize(expr.substring(operator + 1), paths, values);
+            return operandSize(expr.substring(0, operator), values)
+                    + operandSize(expr.substring(operator + 1), values);
         }
         String lower = expr.toLowerCase(Locale.ROOT);
-        if (DynamoDbService.startsWithFunctionCall(lower, "list_append")) {
-            return LIST_APPEND_COST + argumentsSize(expr, paths, values);
-        }
-        if (DynamoDbService.startsWithFunctionCall(lower, "if_not_exists")) {
-            return IF_NOT_EXISTS_COST + argumentsSize(expr, paths, values);
+        if (DynamoDbService.startsWithFunctionCall(lower, "list_append")
+                || DynamoDbService.startsWithFunctionCall(lower, "if_not_exists")) {
+            return argumentsSize(expr, values);
         }
         if (expr.startsWith(":")) {
             return values == null ? 0 : attributeValueSize(values.get(expr));
         }
-        int size = OPERAND_PATH_COST;
-        for (Object element : paths.apply(expr)) {
-            size += OPERAND_PATH_ELEMENT_COST + pathElementSize(element);
-        }
-        return size;
+        return 0;
     }
 
-    private static int argumentsSize(String call, Function<String, List<Object>> paths, JsonNode values) {
+    private static int argumentsSize(String call, JsonNode values) {
         String arguments = call.substring(call.indexOf('(') + 1, call.lastIndexOf(')'));
         int size = 0;
         while (!arguments.isBlank()) {
             int comma = DynamoDbService.findNextComma(arguments);
-            size += operandSize(comma < 0 ? arguments : arguments.substring(0, comma), paths, values);
+            size += operandSize(comma < 0 ? arguments : arguments.substring(0, comma), values);
             arguments = comma < 0 ? "" : arguments.substring(comma + 1);
         }
         return size;
-    }
-
-    // A list index counts its decimal digits.
-    private static int pathElementSize(Object element) {
-        return element instanceof Long index ? Long.toString(index).length() : utf8Length((String) element);
-    }
-
-    private static final class PathTree {
-
-        private final Map<Object, PathTree> children = new LinkedHashMap<>();
-
-        void add(List<Object> path) {
-            PathTree node = this;
-            for (Object element : path) {
-                node = node.children.computeIfAbsent(element, ignored -> new PathTree());
-            }
-        }
-
-        int size() {
-            int size = 0;
-            for (Map.Entry<Object, PathTree> child : children.entrySet()) {
-                PathTree nested = child.getValue();
-                size += pathElementSize(child.getKey())
-                        + (nested.children.isEmpty() ? 0 : TARGET_CONTAINER_COST + nested.size());
-            }
-            return size;
-        }
     }
 
     static int billedItemSize(TableDefinition table, JsonNode item) {

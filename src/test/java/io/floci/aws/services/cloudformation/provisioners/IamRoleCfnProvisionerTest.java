@@ -648,6 +648,33 @@ class IamRoleCfnProvisionerTest {
         order.verify(iam).deleteRole("app-role");
     }
 
+    /**
+     * A role an instance profile still holds refuses the delete, and that refusal reaches the
+     * stack rather than being swallowed: AWS answers the same way, and taking a role out of a
+     * profile this stack may not own is not the provisioner's to do. It is asked before anything
+     * is cleared, so the role that stays keeps the policies it had rather than being emptied by a
+     * delete that could not finish.
+     */
+    @Test
+    void deleteLetsAnInstanceProfileConflictReachTheStackWithNothingCleared() {
+        IamRole role = new IamRole("AROAheld-role", "held-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/held-role", EMPTY_TRUST);
+        role.getAttachedPolicyArns().add("arn:aws:iam::aws:policy/ReadOnlyAccess");
+        role.getInlinePolicies().put("bucket-read", EMPTY_TRUST);
+        when(iam.getRole("held-role")).thenReturn(role);
+        doThrow(new AwsException("DeleteConflict",
+                "Cannot delete entity, must remove roles from instance profile first.", 409))
+                .when(iam).requireNotHeldByAnInstanceProfile("held-role");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> provisioner.delete("AWS::IAM::Role", "held-role", "us-east-1"));
+
+        assertEquals("DeleteConflict", refused.getErrorCode());
+        verify(iam, never()).detachRolePolicy(anyString(), anyString());
+        verify(iam, never()).deleteRolePolicy(anyString(), anyString());
+        verify(iam, never()).deleteRole(anyString());
+    }
+
     @Test
     void deleteTreatsAnAlreadyMissingRoleAsDeleted() {
         when(iam.getRole("gone-role")).thenThrow(new AwsException("NoSuchEntity", "gone", 404));

@@ -8,6 +8,7 @@ import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.redshift.RedshiftService;
 import io.floci.aws.services.redshift.model.Cluster;
 import io.floci.aws.services.redshift.model.ClusterParameterGroup;
+import io.floci.aws.services.redshift.model.ClusterSubnetGroup;
 import io.floci.aws.services.redshift.model.Endpoint;
 import io.floci.aws.services.redshift.model.Parameter;
 import org.junit.jupiter.api.Test;
@@ -16,6 +17,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -44,6 +46,16 @@ import static org.mockito.Mockito.when;
 class RedshiftClusterCfnProvisionerTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final String ARN_PREFIX = "arn:aws:redshift:us-east-1:000000000000:";
+
+    /** A mocked service that mints the ARNs the tag calls take, as the real one does. */
+    private static RedshiftService service() {
+        RedshiftService service = mock(RedshiftService.class);
+        when(service.clusterArn(anyString())).thenAnswer(i -> ARN_PREFIX + "cluster:" + i.getArgument(0));
+        when(service.parameterGroupArn(anyString())).thenAnswer(i -> ARN_PREFIX + "parametergroup:" + i.getArgument(0));
+        when(service.subnetGroupArn(anyString())).thenAnswer(i -> ARN_PREFIX + "subnetgroup:" + i.getArgument(0));
+        return service;
+    }
 
     private ProvisionContext ctx(String priorPhysicalId) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -80,7 +92,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void resourceTypesCoversAllFour() {
-        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(mock(RedshiftService.class));
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service());
         assertEquals(Set.of("AWS::Redshift::Cluster", "AWS::Redshift::ClusterParameterGroup",
                 "AWS::Redshift::ClusterSubnetGroup", "AWS::Redshift::ClusterSecurityGroup"),
                 p.resourceTypes());
@@ -88,7 +100,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void provisionThrowsOnUnknownResourceType() {
-        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(mock(RedshiftService.class));
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service());
         StackResource r = new StackResource();
         r.setResourceType("AWS::Redshift::UnknownType");
         r.setLogicalId("Unknown");
@@ -97,7 +109,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void provisionParameterGroupMapsToService() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
         StackResource r = new StackResource();
         r.setResourceType("AWS::Redshift::ClusterParameterGroup");
@@ -112,7 +124,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void provisionParameterGroupWithGeneratedNameAndTags() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
         StackResource r = new StackResource();
         r.setResourceType("AWS::Redshift::ClusterParameterGroup");
@@ -124,12 +136,12 @@ class RedshiftClusterCfnProvisionerTest {
 
         assertNotNull(r.getPhysicalId());
         verify(service).createClusterParameterGroup(eq(r.getPhysicalId()), eq("redshift-1.0"), eq("d"));
-        verify(service).createTags(r.getPhysicalId(), Map.of("env", "test"));
+        verify(service).createTags(ARN_PREFIX + "parametergroup:" + r.getPhysicalId(), Map.of("env", "test"));
     }
 
     @Test
     void provisionParameterGroupReusesPriorEntityWithoutCallingCreate() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         ClusterParameterGroup existing = new ClusterParameterGroup("pg1", "redshift-1.0", "d");
         when(service.getClusterParameterGroup("pg1")).thenReturn(Optional.of(existing));
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
@@ -152,7 +164,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void provisionParameterGroupAppliesParametersOnCreate() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
         StackResource r = new StackResource();
         r.setResourceType("AWS::Redshift::ClusterParameterGroup");
@@ -172,7 +184,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void changingParameterGroupDescriptionTriggersReplacement() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         ClusterParameterGroup existing = new ClusterParameterGroup("pg1", "redshift-1.0", "old description");
         when(service.getClusterParameterGroup("pg1")).thenReturn(Optional.of(existing));
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
@@ -194,7 +206,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void changingParameterGroupFamilyTriggersReplacement() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         ClusterParameterGroup existing = new ClusterParameterGroup("pg1", "redshift-1.0", "d");
         when(service.getClusterParameterGroup("pg1")).thenReturn(Optional.of(existing));
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
@@ -214,7 +226,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void deleteParameterGroupToleratesNotFound() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         doThrow(new AwsException("ClusterParameterGroupNotFound", "gone", 404))
                 .when(service).deleteClusterParameterGroup("pg1");
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
@@ -224,7 +236,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void deleteParameterGroupAndSubnetGroupTolerateFaultSuffix() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         doThrow(new AwsException("ClusterParameterGroupNotFoundFault", "gone", 404))
                 .when(service).deleteClusterParameterGroup("pg1");
         doThrow(new AwsException("ClusterSubnetGroupNotFoundFault", "gone", 404))
@@ -237,7 +249,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void deleteParameterGroupPropagatesUnexpectedError() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         doThrow(new AwsException("InternalFailure", "boom", 500))
                 .when(service).deleteClusterParameterGroup("pg1");
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
@@ -248,7 +260,9 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void provisionSubnetGroupMapsToServiceAndReconcilesOnUpdate() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
+        when(service.modifyClusterSubnetGroup("sg1", "d2", List.of("subnet-a")))
+                .thenReturn(new ClusterSubnetGroup("sg1", "d2", "vpc-1", List.of("subnet-a")));
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
         StackResource r = new StackResource();
         r.setResourceType("AWS::Redshift::ClusterSubnetGroup");
@@ -256,7 +270,7 @@ class RedshiftClusterCfnProvisionerTest {
 
         p.provision(r, json("""
             {"ClusterSubnetGroupName":"sg1","Description":"d","SubnetIds":["subnet-a","subnet-b"]}"""), ctx(null));
-        verify(service).createClusterSubnetGroup("sg1", "d", null, List.of("subnet-a", "subnet-b"));
+        verify(service).createClusterSubnetGroup("sg1", "d", null, List.of("subnet-a", "subnet-b"), Map.of());
         assertEquals("sg1", r.getPhysicalId());
         assertEquals("sg1", r.getAttributes().get("ClusterSubnetGroupName"));
 
@@ -266,9 +280,73 @@ class RedshiftClusterCfnProvisionerTest {
         assertEquals("sg1", r.getPhysicalId());
     }
 
+    /** A subnet group's Tags are created with it, and an update tags it by its ARN, as the other Redshift resources. */
+    @Test
+    void provisionSubnetGroupAppliesItsTags() {
+        RedshiftService service = service();
+        ClusterSubnetGroup stored = new ClusterSubnetGroup("sg1", "d", "vpc-1", List.of("subnet-a"));
+        stored.setTags(new LinkedHashMap<>(Map.of("env", "dev", "team", "data")));
+        when(service.modifyClusterSubnetGroup("sg1", "d", List.of("subnet-a"))).thenReturn(stored);
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::ClusterSubnetGroup");
+        r.setLogicalId("Subnets");
+
+        p.provision(r, json("""
+            {"ClusterSubnetGroupName":"sg1","Description":"d","SubnetIds":["subnet-a"],
+             "Tags":[{"Key":"env","Value":"dev"}]}"""), ctx(null));
+        verify(service).createClusterSubnetGroup("sg1", "d", null, List.of("subnet-a"), Map.of("env", "dev"));
+
+        p.provision(r, json("""
+            {"ClusterSubnetGroupName":"sg1","Description":"d","SubnetIds":["subnet-a"],
+             "Tags":[{"Key":"env","Value":"prod"}]}"""), ctx("sg1"));
+        verify(service).deleteTags(ARN_PREFIX + "subnetgroup:sg1", List.of("team"));
+        verify(service).createTags(ARN_PREFIX + "subnetgroup:sg1", Map.of("env", "prod"));
+    }
+
+    @Test
+    void anUpdateWithoutTagsUntagsTheParameterGroup() {
+        RedshiftService service = service();
+        ClusterParameterGroup stored = new ClusterParameterGroup("pg1", "redshift-1.0", "d");
+        stored.setTags(new LinkedHashMap<>(Map.of("env", "dev")));
+        when(service.getClusterParameterGroup("pg1")).thenReturn(Optional.of(stored));
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::ClusterParameterGroup");
+        r.setLogicalId("Params");
+
+        p.provision(r, json("""
+            {"ParameterGroupName":"pg1","ParameterGroupFamily":"redshift-1.0","Description":"d"}"""), ctx("pg1"));
+
+        verify(service).deleteTags(ARN_PREFIX + "parametergroup:pg1", List.of("env"));
+        verify(service, never()).createTags(anyString(), any());
+    }
+
+    @Test
+    void anUpdateDroppingATagKeyUntagsItOnTheCluster() {
+        RedshiftService service = service();
+        Cluster stored = availableCluster("warehouse");
+        stored.setMasterUsername("admin");
+        stored.setTags(new LinkedHashMap<>(Map.of("env", "dev", "team", "data")));
+        when(service.describeClusters("warehouse")).thenReturn(List.of(stored));
+        when(service.modifyCluster(eq("warehouse"), eq("ra3.large"), isNull(), any(), isNull(), anyList()))
+                .thenReturn(stored);
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::Cluster");
+        r.setLogicalId("Warehouse");
+
+        p.provision(r, json("""
+            {"ClusterIdentifier":"warehouse","NodeType":"ra3.large","MasterUsername":"admin",
+             "MasterUserPassword":"Passw0rd!","Tags":[{"Key":"env","Value":"prod"}]}"""), ctx("warehouse"));
+
+        verify(service).deleteTags(ARN_PREFIX + "cluster:warehouse", List.of("team"));
+        verify(service).createTags(ARN_PREFIX + "cluster:warehouse", Map.of("env", "prod"));
+    }
+
     @Test
     void provisionSubnetGroupWithGeneratedName() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
         StackResource r = new StackResource();
         r.setResourceType("AWS::Redshift::ClusterSubnetGroup");
@@ -279,12 +357,12 @@ class RedshiftClusterCfnProvisionerTest {
 
         assertNotNull(r.getPhysicalId());
         assertEquals(r.getPhysicalId(), r.getAttributes().get("ClusterSubnetGroupName"));
-        verify(service).createClusterSubnetGroup(eq(r.getPhysicalId()), eq("d"), isNull(), eq(List.of("subnet-1")));
+        verify(service).createClusterSubnetGroup(eq(r.getPhysicalId()), eq("d"), isNull(), eq(List.of("subnet-1")), eq(Map.of()));
     }
 
     @Test
     void deleteSubnetGroupToleratesNotFound() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         doThrow(new AwsException("ClusterSubnetGroupNotFound", "gone", 404))
                 .when(service).deleteClusterSubnetGroup("sg1");
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
@@ -294,7 +372,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void deleteSubnetGroupPropagatesUnexpectedError() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         doThrow(new AwsException("InternalFailure", "boom", 500))
                 .when(service).deleteClusterSubnetGroup("sg1");
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
@@ -305,7 +383,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void provisionSecurityGroupIsAcceptOnly() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
         StackResource r = new StackResource();
         r.setResourceType("AWS::Redshift::ClusterSecurityGroup");
@@ -322,7 +400,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void snapshotPrivateAttributesUseHiddenKeys() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, false, null, "us-east-1"))
                 .thenReturn(availableCluster("restored"));
         RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
@@ -345,7 +423,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void snapshotCreateRestoresWithoutMasterPasswordAndSetsReferences() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, false, null, "us-east-1"))
                 .thenReturn(availableCluster("restored"));
         RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
@@ -361,13 +439,13 @@ class RedshiftClusterCfnProvisionerTest {
         assertEquals("host-restored", resource.getAttributes().get("Endpoint.Address"));
         assertEquals("5439", resource.getAttributes().get("Endpoint.Port"));
         assertTrue(resource.getAttributes().get("ClusterNamespaceArn").contains(":namespace:"));
-        verify(service).createTags("restored", Map.of("env", "restore"));
+        verify(service).createTags(ARN_PREFIX + "cluster:restored", Map.of("env", "restore"));
         verify(service, never()).createCluster(any(), any(), any(), any(), any(), anyList());
     }
 
     @Test
     void unchangedSnapshotUpdatesWithoutRestoringAgain() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, false, null, "us-east-1"))
                 .thenReturn(availableCluster("restored"));
         when(service.modifyCluster(eq("restored"), eq("ra3.large"), isNull(), isNull(), isNull(), anyList()))
@@ -388,7 +466,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void changedSnapshotReplacesAndRollbackRestoresPriorSnapshot() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.restoreFromClusterSnapshot(anyString(), anyString(), eq("ra3.large"), isNull(), eq(false), isNull(), eq("us-east-1")))
                 .thenAnswer(invocation -> availableCluster(invocation.getArgument(0)));
         RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
@@ -428,7 +506,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void missingSnapshotPropagatesWithoutAssigningPhysicalId() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.restoreFromClusterSnapshot("restored", "missing", "ra3.large", null, false, null, "us-east-1"))
                 .thenThrow(new AwsException("ClusterSnapshotNotFound", "Snapshot missing not found", 404));
         RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
@@ -445,7 +523,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void snapshotCreateForwardsManagedPasswordAndSubnetSettings() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         Cluster restored = availableCluster("restored");
         restored.setMasterPasswordSecretArn("secret-arn");
         when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", "restore-subnets",
@@ -466,7 +544,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void snapshotCreateCleansUpWhenConfigurationFails() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, false, null, "us-east-1"))
                 .thenReturn(availableCluster("restored"));
         when(service.modifyCluster(eq("restored"), eq("ra3.large"), isNull(), isNull(), eq("params"), anyList()))
@@ -486,7 +564,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void blankSnapshotIsRejectedBeforeCreatingACluster() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
         StackResource resource = new StackResource();
         resource.setResourceType("AWS::Redshift::Cluster");
@@ -501,7 +579,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void unchangedTemplateAfterSnapshotReplacementKeepsTheReplacement() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.restoreFromClusterSnapshot(anyString(), anyString(), anyString(), isNull(),
                 eq(false), isNull(), eq("us-east-1")))
                 .thenAnswer(invocation -> availableCluster(invocation.getArgument(0)));
@@ -528,7 +606,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void removingSnapshotReplacesWithFreshCluster() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.createCluster(anyString(), eq("ra3.large"), eq("admin"), eq("Secret123"), isNull(), anyList()))
                 .thenAnswer(invocation -> availableCluster(invocation.getArgument(0)));
         RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
@@ -549,11 +627,11 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void snapshotCreateCleansUpWhenTaggingFails() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, false, null, "us-east-1"))
                 .thenReturn(availableCluster("restored"));
         doThrow(new AwsException("InternalFailure", "tag storage failed", 500))
-                .when(service).createTags("restored", Map.of("env", "restore"));
+                .when(service).createTags(ARN_PREFIX + "cluster:restored", Map.of("env", "restore"));
         RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
         StackResource resource = new StackResource();
         resource.setResourceType("AWS::Redshift::Cluster");
@@ -569,7 +647,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void managedSnapshotCreateRejectsAnExplicitPassword() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
         StackResource resource = new StackResource();
         resource.setResourceType("AWS::Redshift::Cluster");
@@ -585,7 +663,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void provisionCreatesClusterAndSetsRefAndEndpointAttributes() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.createCluster(eq("my-cluster"), eq("ra3.large"), eq("admin"), eq("Secret123"),
                 isNull(), anyList())).thenReturn(availableCluster("my-cluster"));
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
@@ -610,7 +688,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void provisionGeneratesLowercaseIdentifierWhenAbsent() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.createCluster(anyString(), anyString(), anyString(), anyString(), any(), anyList()))
                 .thenAnswer(inv -> availableCluster(inv.getArgument(0)));
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
@@ -628,7 +706,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void provisionSupportsManageMasterPassword() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.createClusterWithManagedMasterPassword(anyString(), anyString(), anyString(), isNull(),
                 anyList(), anyList(), any(), anyString())).thenAnswer(inv -> {
             Cluster cluster = availableCluster(inv.getArgument(0));
@@ -652,7 +730,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void provisionRejectsMissingMasterPassword() {
-        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(mock(RedshiftService.class));
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service());
         StackResource r = new StackResource();
         r.setResourceType("AWS::Redshift::Cluster");
         r.setLogicalId("W");
@@ -664,7 +742,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void provisionAppliesTags() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.createCluster(anyString(), anyString(), anyString(), anyString(), any(), anyList()))
                 .thenReturn(availableCluster("my-cluster"));
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
@@ -676,12 +754,12 @@ class RedshiftClusterCfnProvisionerTest {
             {"ClusterIdentifier":"my-cluster","NodeType":"ra3.large","MasterUsername":"admin",
              "MasterUserPassword":"Secret123","Tags":[{"Key":"env","Value":"dev"}]}"""), ctx(null));
 
-        verify(service).createTags("my-cluster", Map.of("env", "dev"));
+        verify(service).createTags(ARN_PREFIX + "cluster:my-cluster", Map.of("env", "dev"));
     }
 
     @Test
     void deleteCallsDeleteClusterAndToleratesNotFound() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         doThrow(new AwsException("ClusterNotFound", "gone", 404)).when(service).deleteCluster("my-cluster");
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
 
@@ -690,7 +768,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void deletePropagatesUnexpectedError() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         doThrow(new AwsException("InternalFailure", "boom", 500)).when(service).deleteCluster("my-cluster");
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
 
@@ -700,7 +778,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void updateInPlaceCallsModifyCluster() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.modifyCluster(eq("my-cluster"), eq("ra3.4xlarge"), isNull(), eq("NewSecret9"),
                 isNull(), anyList())).thenReturn(availableCluster("my-cluster"));
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
@@ -719,7 +797,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void replacementCreatesNewClusterAndReportsOldIdForCleanup() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.createCluster(eq("new-name"), anyString(), anyString(), anyString(), any(), anyList()))
                 .thenReturn(availableCluster("new-name"));
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
@@ -744,7 +822,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void replacementCleanupToleratesAlreadyDeletedOldCluster() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.createCluster(anyString(), anyString(), anyString(), anyString(), any(), anyList()))
                 .thenReturn(availableCluster("new-name"));
         doThrow(new AwsException("ClusterNotFound", "gone", 404)).when(service).deleteCluster("old-name");
@@ -762,7 +840,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void clearUpdateDropsCleanupRecord() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.createCluster(eq("new-name"), anyString(), anyString(), anyString(), any(), anyList()))
                 .thenReturn(availableCluster("new-name"));
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
@@ -783,7 +861,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void rollbackUpdateRestoresPriorPhysicalIdAndDeletesReplacement() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.createCluster(eq("new-name"), anyString(), anyString(), anyString(), any(), anyList()))
                 .thenReturn(availableCluster("new-name"));
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
@@ -806,7 +884,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void changingMasterUsernameTriggersReplacement() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         Cluster existing = availableCluster("my-cluster");
         existing.setMasterUsername("admin");
         when(service.describeClusters("my-cluster")).thenReturn(List.of(existing));
@@ -834,7 +912,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void changingClusterSubnetGroupTriggersReplacement() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         Cluster existing = availableCluster("my-cluster");
         existing.setMasterUsername("admin");
         existing.setClusterSubnetGroupName("subnet-group-1");
@@ -858,7 +936,7 @@ class RedshiftClusterCfnProvisionerTest {
     @ParameterizedTest
     @ValueSource(strings = {"__FlociUsesRedshiftDBName", "Floci::DBName"})
     void changingDBNameTriggersReplacement(String dbNameKey) {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         Cluster existing = availableCluster("my-cluster");
         existing.setMasterUsername("admin");
         when(service.describeClusters("my-cluster")).thenReturn(List.of(existing));
@@ -887,7 +965,7 @@ class RedshiftClusterCfnProvisionerTest {
 
     @Test
     void unrelatedUpdateOnSnapshotRestoredClusterPreservesInheritedPassword() {
-        RedshiftService service = mock(RedshiftService.class);
+        RedshiftService service = service();
         when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, false, null, "us-east-1"))
                 .thenReturn(availableCluster("restored"));
         when(service.modifyCluster(eq("restored"), eq("ra3.xlplus"), isNull(), isNull(), isNull(), anyList()))

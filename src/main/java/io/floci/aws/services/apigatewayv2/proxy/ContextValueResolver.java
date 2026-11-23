@@ -108,7 +108,15 @@ public class ContextValueResolver {
     }
 
     private String bodyPath(RequestContext ctx, String path) {
-        String body = bodyText(ctx);
+        return jsonPath(bodyText(ctx), path);
+    }
+
+    /**
+     * The value a JSONPath selects from a JSON document, relative to its root: a scalar as its text
+     * and an object or array as its JSON. Null when the document is empty, is not JSON, or has
+     * nothing at the path.
+     */
+    public String jsonPath(String body, String path) {
         if (body == null || body.isBlank()) {
             return null;
         }

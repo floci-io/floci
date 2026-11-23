@@ -54,6 +54,10 @@ starts() {
 # The image a test constant pins, or empty (and a log line) when the constant cannot be read.
 # TestImages is found by name rather than by its package path, which a package rename changes.
 TEST_IMAGES="$(find src/test/java -path '*/testing/TestImages.java' -print -quit)"
+if starts Ec2PublishedConnectionNightlyIntegrationTest; then
+    ecr public.ecr.aws/docker/library/alpine:latest
+    pull alpine/socat
+fi
 test_image() {
     image="$(grep -oE "$1 *= *\"[^\"]+\"" "${TEST_IMAGES:-/dev/null}" | grep -oE '"[^"]+"' | tr -d '"')"
     [ -n "$image" ] || echo "$(date -u +%H:%M:%S) prefetch skipped: TestImages.$1 not readable" >> "$PREFETCH_LOG"
@@ -139,6 +143,13 @@ starts EmrServerlessSparkConnectNightlyIntegrationTest EmrServerlessDashboardNig
 # The nightly EmrSessionServerNightlyIntegrationTest runs an EMR session's Spark Connect server on an emr-spark-8.1.0
 # cluster, Spark 4, sessions needing the AWS runtime for Apache Spark, and its client in that image.
 starts EmrSessionServerNightlyIntegrationTest && ecr public.ecr.aws/emr-serverless/spark4/emr-spark-8.1.0:latest
+# The nightly EmrContainersSparkNightlyIntegrationTest runs EMR on EKS job runs in the emr-7.5.0 release's EMR on EKS
+# base image, about 5 GB.
+starts EmrContainersSparkNightlyIntegrationTest && ecr public.ecr.aws/emr-on-eks/spark/emr-7.5.0:latest
+# The nightly EmrContainersGatewayNightlyIntegrationTest runs an EMR on EKS managed endpoint's gateway and a PySpark
+# kernel in the emr-7.5.0 release's notebook-spark image, about 6 GB.
+starts EmrContainersGatewayNightlyIntegrationTest \
+    && ecr public.ecr.aws/emr-on-eks/notebook-spark/emr-7.5.0:latest
 
 # package token in shard.txt -> images its tests are known to launch
 # (measured inline pulls; update alongside image-catalog changes)

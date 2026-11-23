@@ -1,7 +1,8 @@
 package io.floci.aws.testing;
 
 /**
- * Policy documents for tests whose subject is not the document.
+ * Policy documents for tests whose subject is not the document, and the one grant a service's IAM test gives its
+ * caller ({@link #allow}).
  *
  * <p>Every IAM write that takes one holds it to being a policy document, so a test that needs a
  * role, a managed policy or an inline policy to exist cannot hand in a placeholder like
@@ -39,6 +40,15 @@ public final class IamTestPolicies {
     public static String policyDocument(Object marker) {
         return "{\"Statement\":[{\"Sid\":\"s" + marker + "\",\"Effect\":\"Allow\","
                 + "\"Action\":\"s3:Get\",\"Resource\":\"*\"}]}";
+    }
+
+    /**
+     * An identity policy that allows {@code actions}, one action as a JSON string or several as a JSON array, on
+     * {@code resource}: the grant an IAM test of a service gives its caller.
+     */
+    public static String allow(String actions, String resource) {
+        return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":" + actions
+                + ",\"Resource\":\"" + resource + "\"}]}";
     }
 
     private IamTestPolicies() {

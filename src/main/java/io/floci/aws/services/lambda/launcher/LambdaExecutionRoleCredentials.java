@@ -58,6 +58,16 @@ public class LambdaExecutionRoleCredentials {
 
     /** A session for {@code roleArn} assumed on behalf of {@code functionName} in {@code functionAccountId}. */
     public Optional<SessionCreds> forRole(String roleArn, String functionAccountId, String functionName) {
+        return forRole(roleArn, functionAccountId, functionName, null);
+    }
+
+    /**
+     * A session for {@code roleArn} assumed on behalf of {@code functionName} in {@code functionAccountId}, its
+     * permissions scoped by the inline {@code sessionPolicy} as an assumed role's are by the one it is assumed with;
+     * none where it is null.
+     */
+    public Optional<SessionCreds> forRole(String roleArn, String functionAccountId, String functionName,
+                                          String sessionPolicy) {
         if (roleArn == null || roleArn.isBlank()
                 || functionAccountId == null || functionAccountId.isBlank()) {
             return Optional.empty();
@@ -90,7 +100,7 @@ public class LambdaExecutionRoleCredentials {
         String assumedRoleId = role.get().getRoleId() != null ? role.get().getRoleId() + ":" + functionName : null;
         iamService.registerLambdaExecutionRoleSession(
                 functionAccountId, credentials.accessKeyId(), credentials.secretAccessKey(),
-                credentials.sessionToken(), roleArn, functionName, assumedRoleId);
+                credentials.sessionToken(), roleArn, functionName, assumedRoleId, sessionPolicy);
         return Optional.of(credentials);
     }
 

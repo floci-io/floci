@@ -58,6 +58,13 @@ class StsQueryHandlerTest {
     private static final Pattern SESSION_TOKEN =
             Pattern.compile("<SessionToken>([^<]+)</SessionToken>");
 
+    private static final Pattern SESSION_TOKEN_SIZE =
+            Pattern.compile("<SessionTokenSize>([^<]+)</SessionTokenSize>");
+    private static final Pattern SESSION_TOKEN_UTILIZATION =
+            Pattern.compile("<SessionTokenUtilization>([^<]+)</SessionTokenUtilization>");
+    private static final Pattern PACKED_POLICY_SIZE =
+            Pattern.compile("<PackedPolicySize>([^<]+)</PackedPolicySize>");
+
     private static final Pattern ARN = Pattern.compile("<Arn>([^<]+)</Arn>");
     private static final Pattern EXPIRATION = Pattern.compile("<Expiration>([^<]+)</Expiration>");
 
@@ -374,6 +381,107 @@ class StsQueryHandlerTest {
         String shorter = (String) newHandler().handle(action, under).getEntity();
 
         assertEquals(200, extract(SESSION_TOKEN, shorter).length());
+    }
+
+    /**
+     * What a session cost is published as the two members that replace the deprecated one: the
+     * size the token comes to in bytes, and that size as the percentage of the 4,096-byte limit it
+     * consumes. A token asked to be 1024 characters is a quarter of the limit, and the pair is
+     * asked of each operation on its own so one that stopped publishing it is caught here. The two
+     * this harness cannot reach are pinned where their requests can be built, as the token length
+     * above is.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"GetSessionToken", "AssumeRole", "AssumeRoleWithWebIdentity",
+            "GetFederationToken"})
+    void theSizeMembersReportTheTokenAndItsShareOfTheLimit(String action) {
+        MultivaluedMap<String, String> params = sessionRequest(action);
+        params.putSingle("MinimumSessionTokenSize", "1024");
+
+        String body = (String) newHandler().handle(action, params).getEntity();
+
+        assertEquals("1024", extract(SESSION_TOKEN_SIZE, body));
+        assertEquals("25", extract(SESSION_TOKEN_UTILIZATION, body));
+    }
+
+    /**
+     * The member AWS deprecated is published where its response still declares it, carrying the
+     * same percentage as the member that replaces it, and nowhere else: a session minted out of
+     * the caller's own credentials never packed anything, and its response declares neither that
+     * member nor the refusal.
+     */
+    @Test
+    void theDeprecatedMemberIsPublishedOnlyWhereItsResponseDeclaresIt() {
+        String assumed = (String) newHandler()
+                .handle("AssumeRole", sessionRequest("AssumeRole")).getEntity();
+
+        assertEquals(extract(SESSION_TOKEN_UTILIZATION, assumed), extract(PACKED_POLICY_SIZE, assumed));
+
+        String longTerm = (String) newHandler()
+                .handle("GetSessionToken", sessionRequest("GetSessionToken")).getEntity();
+
+        assertFalse(PACKED_POLICY_SIZE.matcher(longTerm).find(), longTerm);
+    }
+
+    /**
+     * What a session's size counts is the state the operation declares, read from the generated
+     * request shapes rather than named per operation in the handler. These are the declarations
+     * the measure turns on, so a regenerated file that stopped carrying an operation is caught
+     * here rather than by a session quietly reporting its token alone.
+     */
+    @Test
+    void theGeneratedShapesDeclareTheStateEachSessionCarries() {
+        assertTrue(StsRequestShapes.hasMember("AssumeRole", "Policy"));
+        assertTrue(StsRequestShapes.hasMember("AssumeRole", "PolicyArns"));
+        assertTrue(StsRequestShapes.hasMember("AssumeRole", "Tags"));
+        assertTrue(StsRequestShapes.hasMember("GetFederationToken", "Policy"));
+        assertTrue(StsRequestShapes.hasMember("GetFederationToken", "Tags"));
+        assertTrue(StsRequestShapes.hasMember("AssumeRoleWithSAML", "Policy"));
+        assertTrue(StsRequestShapes.hasMember("AssumeRoleWithWebIdentity", "Policy"));
+
+        // A session tag reaches these two inside the assertion or the token rather than as a
+        // member of the request, and the two below carry no state into their token at all.
+        assertFalse(StsRequestShapes.hasMember("AssumeRoleWithSAML", "Tags"));
+        assertFalse(StsRequestShapes.hasMember("AssumeRoleWithWebIdentity", "Tags"));
+        assertFalse(StsRequestShapes.hasMember("GetSessionToken", "Policy"));
+        assertFalse(StsRequestShapes.hasMember("GetSessionToken", "Tags"));
+        assertFalse(StsRequestShapes.hasMember("AssumeRoot", "Policy"));
+        assertFalse(StsRequestShapes.hasMember("AssumeRoot", "Tags"));
+    }
+
+    /**
+     * The tags the request's own {@code Tags} member carries are recorded on the session the
+     * operation mints, which is what its requests then publish as {@code aws:PrincipalTag}. An
+     * operation that declares no such member records nothing: the long-term session mints from the
+     * caller's own credentials and takes no tags at all.
+     */
+    @Test
+    void theTagsAnOperationDeclaresAreRecordedOnTheSessionItMints() {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        IamService assumed = mock(IamService.class);
+        when(assumed.findRole(anyString(), anyString())).thenReturn(Optional.of(role));
+        MultivaluedMap<String, String> params = sessionRequest("AssumeRole");
+        params.putSingle("Tags.member.1.Key", "Project");
+        params.putSingle("Tags.member.1.Value", "atlas");
+
+        Response response = newHandler(assumed, new RegionResolver(REGION, "000000000000"))
+                .handle("AssumeRole", params);
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
+        verify(assumed).recordSessionTags(anyString(), eq(Map.of("Project", "atlas")));
+
+        IamService longTerm = mock(IamService.class);
+        MultivaluedMap<String, String> untagged = sessionRequest("GetSessionToken");
+        untagged.putSingle("Tags.member.1.Key", "Project");
+        untagged.putSingle("Tags.member.1.Value", "atlas");
+
+        Response longTermResponse = newHandler(longTerm, new RegionResolver(REGION, "000000000000"))
+                .handle("GetSessionToken", untagged);
+
+        assertEquals(200, longTermResponse.getStatus(), (String) longTermResponse.getEntity());
+        verify(longTerm, never()).recordSessionTags(anyString(), anyMap());
     }
 
     /** The least a request needs to reach issuance on an operation that models a token size. */
@@ -938,7 +1046,8 @@ class StsQueryHandlerTest {
      * A role and its account's OIDC provider are IAM resources of one partition, so a trust policy
      * naming the provider ARN CreateOpenIDConnectProvider returned keeps matching and the session
      * lands in the stored role's partition, whatever region AssumeRoleWithWebIdentity is signed for
-     * and whichever partition its RoleArn names.
+     * and whichever partition its RoleArn names. The session tags the token passed are recorded on
+     * it as well, this operation taking them from the token rather than from a request member.
      */
     @Test
     void webIdentityMatchesTheProviderAndMintsTheSessionInTheRolesPartition() throws Exception {
@@ -961,11 +1070,14 @@ class StsQueryHandlerTest {
         when(verifier.peekIssuer("jwt0")).thenReturn(Optional.of(issuer));
         when(verifier.verify(eq("jwt0"), any(), eq(issuer), anyString()))
                 .thenReturn(new WebIdentityToken(issuer, "system:serviceaccount:default:app",
-                        List.of("sts.amazonaws.com")));
+                        List.of("sts.amazonaws.com"), Map.of("Project", "atlas")));
         OidcIssuerKeyLookup keys = mock(OidcIssuerKeyLookup.class);
         when(keys.findVerificationKey(issuer)).thenReturn(Optional.of(mock(RSAPublicKey.class)));
         WebIdentityTrustPolicyEvaluator trust = mock(WebIdentityTrustPolicyEvaluator.class);
-        when(trust.allows(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap())).thenReturn(true);
+        when(trust.allows(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap(), eq("app"))).thenReturn(true);
+        // The token passes a session tag, which the trust policy has to permit as well.
+        when(trust.allowsTagging(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap(), eq("app")))
+                .thenReturn(true);
 
         StsQueryHandler handler = new StsQueryHandler(iamService, mock(AccountResolver.class),
                 new RegionResolver(REGION, "000000000000"), config, mock(AssumeRolePolicyEvaluator.class),
@@ -980,9 +1092,13 @@ class StsQueryHandlerTest {
         Response response = handler.handle("AssumeRoleWithWebIdentity", params);
 
         assertEquals(200, response.getStatus(), (String) response.getEntity());
-        verify(trust).allows(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap());
+        verify(trust).allows(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap(), eq("app"));
         assertEquals("arn:aws-cn:sts::000000000000:assumed-role/web-role/app",
                 extract(ARN, (String) response.getEntity()));
+        verify(iamService).recordSessionTags(anyString(), eq(Map.of("Project", "atlas")));
+        // The token's tags are state its session carries, so they count with the token itself.
+        assertEquals(Integer.toString(200 + "Project".length() + "atlas".length()),
+                extract(SESSION_TOKEN_SIZE, (String) response.getEntity()));
     }
 
     /** A session keeps its role's partition even when AssumeRole is signed for another one. */

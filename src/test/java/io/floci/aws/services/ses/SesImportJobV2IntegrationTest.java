@@ -31,8 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesImportJobV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-west-3/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("eu-west-3");
     private static final String BUCKET = "ses-import-job-it";
     private static final String LIST = "import-job-list";
 

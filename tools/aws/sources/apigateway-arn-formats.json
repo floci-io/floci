@@ -1,0 +1,348 @@
+{
+  "_source": {
+    "pages": [
+      "https://docs.aws.amazon.com/apigateway/latest/developerguide/security_iam_service-with-iam.html",
+      "https://docs.aws.amazon.com/apigateway/latest/developerguide/arn-format-reference.html"
+    ],
+    "fetcher": "tools/aws/fetch_apigateway_arn_formats.py",
+    "retrieved": "2026-11-22",
+    "note": "The IAM page's action sentence with the actions it names, its resource sentence with the ARN format after it, and each table of the ARN reference under its heading, each row's resource and ARN, copied as they stand, each variable the pages mark written {name}."
+  },
+  "action": {
+    "sentence": "The API-managing Action expression has the format apigateway:{action}, where {action} is one of the following API Gateway actions: GET, POST, PUT, DELETE, PATCH (to update resources), or *, which is all of the previous actions.",
+    "actions": [
+      "GET",
+      "POST",
+      "PUT",
+      "DELETE",
+      "PATCH",
+      "*"
+    ]
+  },
+  "resource": {
+    "sentence": "API Gateway resources have the following ARN format:",
+    "format": "arn:aws:apigateway:{region}::{resource-path-specifier}"
+  },
+  "tables": [
+    {
+      "heading": "HTTP API and WebSocket API resources",
+      "rows": [
+        {
+          "resource": "AccessLogSettings",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/stages/{stage-name}/accesslogsettings"
+        },
+        {
+          "resource": "Api",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}"
+        },
+        {
+          "resource": "Apis",
+          "arn": "arn:{partition}:apigateway:{region}::/apis"
+        },
+        {
+          "resource": "Authorizer",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/authorizers/{id}"
+        },
+        {
+          "resource": "Authorizers",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/authorizers"
+        },
+        {
+          "resource": "Cors",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/cors"
+        },
+        {
+          "resource": "Deployment",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/deployments/{id}"
+        },
+        {
+          "resource": "Deployments",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/deployments"
+        },
+        {
+          "resource": "ExportedAPI",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/exports/{specification}"
+        },
+        {
+          "resource": "Integration",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/integrations/{integration-id}"
+        },
+        {
+          "resource": "Integrations",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/integrations"
+        },
+        {
+          "resource": "IntegrationResponse",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/integrationresponses/{integration-response}"
+        },
+        {
+          "resource": "IntegrationResponses",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/integrationresponses"
+        },
+        {
+          "resource": "Model",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/models/{id}"
+        },
+        {
+          "resource": "Models",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/models"
+        },
+        {
+          "resource": "ModelTemplate",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/models/{id}/template"
+        },
+        {
+          "resource": "Route",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/routes/{id}"
+        },
+        {
+          "resource": "Routes",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/routes"
+        },
+        {
+          "resource": "RouteRequestParameter",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/routes/{id}/requestparameters/{key}"
+        },
+        {
+          "resource": "RouteResponse",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/routes/{id}/routeresponses/{id}"
+        },
+        {
+          "resource": "RouteResponses",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/routes/{id}/routeresponses"
+        },
+        {
+          "resource": "RouteSettings",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/stages/{stage-name}/routesettings/{route-key}"
+        },
+        {
+          "resource": "Stage",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/stages/{stage-name}"
+        },
+        {
+          "resource": "Stages",
+          "arn": "arn:{partition}:apigateway:{region}::/apis/{api-id}/stages"
+        },
+        {
+          "resource": "VpcLink",
+          "arn": "arn:{partition}:apigateway:{region}::/vpclinks/{vpclink-id}"
+        },
+        {
+          "resource": "VpcLinks",
+          "arn": "arn:{partition}:apigateway:{region}::/vpclinks"
+        }
+      ]
+    },
+    {
+      "heading": "REST API resources",
+      "rows": [
+        {
+          "resource": "Account",
+          "arn": "arn:{partition}:apigateway:{region}::/account"
+        },
+        {
+          "resource": "ApiKey",
+          "arn": "arn:{partition}:apigateway:{region}::/apikeys/{id}"
+        },
+        {
+          "resource": "ApiKeys",
+          "arn": "arn:{partition}:apigateway:{region}::/apikeys"
+        },
+        {
+          "resource": "Authorizer",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/authorizers/{id}"
+        },
+        {
+          "resource": "Authorizers",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/authorizers"
+        },
+        {
+          "resource": "ClientCertificate",
+          "arn": "arn:{partition}:apigateway:{region}::/clientcertificates/{id}"
+        },
+        {
+          "resource": "ClientCertificates",
+          "arn": "arn:{partition}:apigateway:{region}::/clientcertificates"
+        },
+        {
+          "resource": "Deployment",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/deployments/{id}"
+        },
+        {
+          "resource": "Deployments",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/deployments"
+        },
+        {
+          "resource": "DocumentationPart",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/documentation/parts/{id}"
+        },
+        {
+          "resource": "DocumentationParts",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/documentation/parts"
+        },
+        {
+          "resource": "DocumentationVersion",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/documentation/versions/{version}"
+        },
+        {
+          "resource": "DocumentationVersions",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/documentation/versions"
+        },
+        {
+          "resource": "GatewayResponse",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/gatewayresponses/{response-type}"
+        },
+        {
+          "resource": "GatewayResponses",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/gatewayresponses"
+        },
+        {
+          "resource": "Integration",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/resources/{resource-id}/methods/{http-method}/integration"
+        },
+        {
+          "resource": "IntegrationResponse",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/resources/{resource-id}/methods/{http-method}/integration/responses/{status-code}"
+        },
+        {
+          "resource": "Method",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/resources/{resource-id}/methods/{http-method}"
+        },
+        {
+          "resource": "MethodResponse",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/resources/{resource-id}/methods/{http-method}/responses/{status-code}"
+        },
+        {
+          "resource": "Model",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/models/{model-name}"
+        },
+        {
+          "resource": "Models",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/models"
+        },
+        {
+          "resource": "RequestValidator",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/requestvalidators/{id}"
+        },
+        {
+          "resource": "RequestValidators",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/requestvalidators"
+        },
+        {
+          "resource": "Resource",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/resources/{id}"
+        },
+        {
+          "resource": "Resources",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/resources"
+        },
+        {
+          "resource": "RestApi",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}"
+        },
+        {
+          "resource": "RestApis",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis"
+        },
+        {
+          "resource": "Stage",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/stages/{stage-name}"
+        },
+        {
+          "resource": "Stages",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/{api-id}/stages"
+        },
+        {
+          "resource": "Tags",
+          "arn": "arn:{partition}:apigateway:{region}::/tags/{url-encoded-resource-arn}"
+        },
+        {
+          "resource": "Template",
+          "arn": "arn:{partition}:apigateway:{region}::/restapis/models/{model-name}/template"
+        },
+        {
+          "resource": "UsagePlan",
+          "arn": "arn:{partition}:apigateway:{region}::/usageplans/{usageplan-id}"
+        },
+        {
+          "resource": "UsagePlans",
+          "arn": "arn:{partition}:apigateway:{region}::/usageplans"
+        },
+        {
+          "resource": "UsagePlanKey",
+          "arn": "arn:{partition}:apigateway:{region}::/usageplans/{usageplan-id}/keys/{id}"
+        },
+        {
+          "resource": "UsagePlanKeys",
+          "arn": "arn:{partition}:apigateway:{region}::/usageplans/{usageplan-id}/keys"
+        },
+        {
+          "resource": "VpcLink",
+          "arn": "arn:{partition}:apigateway:{region}::/vpclinks/{vpclink-id}"
+        },
+        {
+          "resource": "VpcLinks",
+          "arn": "arn:{partition}:apigateway:{region}::/vpclinks"
+        }
+      ]
+    },
+    {
+      "heading": "Domain names resources",
+      "rows": [
+        {
+          "resource": "ApiMapping",
+          "arn": "arn:{partition}:apigateway:{region}::/domainnames/{domain-name}/apimappings/{id}"
+        },
+        {
+          "resource": "ApiMappings",
+          "arn": "arn:{partition}:apigateway:{region}::/domainnames/{domain-name}/apimappings"
+        },
+        {
+          "resource": "BasePathMapping",
+          "arn": "arn:{partition}:apigateway:{region}::/domainnames/{domain-name}/basepathmappings/{basepath}"
+        },
+        {
+          "resource": "BasePathMappings",
+          "arn": "arn:{partition}:apigateway:{region}::/domainnames/{domain-name}/basepathmappings"
+        },
+        {
+          "resource": "DomainName",
+          "arn": "arn:{partition}:apigateway:{region}::/domainnames/{domain-name}"
+        },
+        {
+          "resource": "DomainNameAccessAssociation",
+          "arn": "arn:{partition}:apigateway:{region}:{account-id}:/domainnameaccessassociations/domainname/{domain-name}/vpcesource/{vpce-source-id}"
+        },
+        {
+          "resource": "DomainNameAccessAssociations",
+          "arn": "arn:{partition}:apigateway:{region}:{account-id}:/domainnameaccessassociations"
+        },
+        {
+          "resource": "DomainNames",
+          "arn": "arn:{partition}:apigateway:{region}::/domainnames"
+        },
+        {
+          "resource": "RoutingRule",
+          "arn": "arn:{partition}:apigateway:{region}:{account-id}:/domainnames/{domain-name}/routingrules/{routing-rule-id}"
+        }
+      ]
+    },
+    {
+      "heading": "execute-api (HTTP APIs, WebSocket APIs, and REST APIs)",
+      "rows": [
+        {
+          "resource": "WebSocket API endpoint",
+          "arn": "arn:{partition}:execute-api:{region}:{account-id}:{api-id}/{stage}/{route-key}"
+        },
+        {
+          "resource": "HTTP API and REST API endpoint *",
+          "arn": "arn:{partition}:execute-api:{region}:{account-id}:{api-id}/{stage}/{http-method}/{resource-path}"
+        },
+        {
+          "resource": "Lambda authorizer **",
+          "arn": "arn:{partition}:execute-api:{region}:{account-id}:{api-id}/authorizers/{authorizer-id}"
+        }
+      ]
+    }
+  ]
+}

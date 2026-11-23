@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.floci.aws.testing.CborTestUtils.tagOf;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -229,14 +230,4 @@ class AwsJsonCborTypedShapesIntegrationTest {
         throw new AssertionError("Missing CBOR member: " + member);
     }
 
-    private static int tagOf(byte[] body, String member) throws Exception {
-        try (CBORParser parser = (CBORParser) CBOR.getFactory().createParser(body)) {
-            while (parser.nextToken() != null) {
-                if (member.equals(parser.currentName()) && parser.currentToken().isScalarValue()) {
-                    return parser.getCurrentTag();
-                }
-            }
-        }
-        throw new AssertionError("Missing CBOR member: " + member);
-    }
 }

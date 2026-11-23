@@ -28,7 +28,6 @@ import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -312,21 +311,14 @@ public class S3ControlController {
     }
 
     /**
-     * The bucket ARN a tagging route names, decoded and parsed the one way every reader of it
+     * The bucket ARN a tagging route names, decoded once and parsed the one way every reader of it
      * shares: the handler here, the IAM resource the request is checked against, and the bucket
      * policy lookup. The regional form carries the account and region of the bucket it names, and
      * the global form the caller's own account, so a request naming another account's bucket acts
      * on that account's bucket, never on the caller's same-named one.
      */
     private static AwsArnUtils.Arn taggedBucketArn(String resourceArn) {
-        Optional<AwsArnUtils.Arn> arn;
-        try {
-            arn = S3ControlArnUtils.parse(resourceArn);
-        } catch (IllegalArgumentException e) {
-            throw new AwsException("InvalidRequest",
-                    "Malformed percent-encoding in resource ARN: " + e.getMessage(), 400);
-        }
-        return arn.filter(S3ControlArnUtils::namesBucket)
+        return S3ControlArnUtils.parse(resourceArn).filter(S3ControlArnUtils::namesBucket)
                 .orElseThrow(() -> new AwsException("InvalidRequest",
                         "Unsupported resource type. Only S3 bucket ARNs are supported " +
                         "(arn:aws:s3:<region>:<account>:bucket/<name> or arn:aws:s3:::<name>).", 400)); // partition-literal: AWS's message text

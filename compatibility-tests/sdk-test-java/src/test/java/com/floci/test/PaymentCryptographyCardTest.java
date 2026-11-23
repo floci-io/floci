@@ -134,8 +134,7 @@ class PaymentCryptographyCardTest {
     @Test
     void aCardVerificationValueThatDoesNotVerifyIsRefused() {
         String value = generateCardVerificationValue().validationData();
-        String differentFirstDigit = value.startsWith("0") ? "1" : "0";
-        String invalidValue = differentFirstDigit + value.substring(1);
+        String invalidValue = PaymentCryptographyValues.withAnotherFirstDigit(value);
 
         assertThatThrownBy(() -> client.verifyCardValidationData(r -> r
                 .keyIdentifier(cardVerificationKeyArn)

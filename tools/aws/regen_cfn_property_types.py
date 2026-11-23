@@ -51,7 +51,12 @@ FETCH_TIMEOUT_SECONDS = 60
 
 # The resource types whose provisioners read their properties through CfnPropertyTypes.
 RESOURCE_TYPES = ["AWS::AutoScaling::LaunchConfiguration", "AWS::DSQL::Cluster", "AWS::EC2::Instance",
-                  "AWS::EC2::LaunchTemplate", "AWS::ECS::TaskDefinition", "AWS::EKS::Cluster", "AWS::Events::Rule",
+                  "AWS::EC2::LaunchTemplate", "AWS::ECS::TaskDefinition", "AWS::EKS::Cluster",
+                  "AWS::EMR::Cluster", "AWS::EMR::InstanceFleetConfig", "AWS::EMR::InstanceGroupConfig",
+                  "AWS::EMR::SecurityConfiguration", "AWS::EMR::Step", "AWS::EMR::Studio",
+                  "AWS::EMR::StudioSessionMapping",
+                  "AWS::EMRContainers::VirtualCluster", "AWS::EMRServerless::Application",
+                  "AWS::Events::Connection", "AWS::Events::Rule",
                   "AWS::Lambda::Function", "AWS::Lambda::LayerVersion",
                   "AWS::SES::ConfigurationSetEventDestination"]
 

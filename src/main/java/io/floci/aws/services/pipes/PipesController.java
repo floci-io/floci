@@ -70,9 +70,7 @@ public class PipesController {
 
             return Response.ok(buildPipeResponse(pipe)).build();
         } catch (AwsException e) {
-            return Response.status(e.getHttpStatus())
-                    .entity(new AwsErrorResponse(e.getErrorCode(), e.getMessage()))
-                    .build();
+            throw e;
         } catch (Exception e) {
             LOG.errorv("Error creating pipe: {0}", e.getMessage());
             return Response.status(500)
@@ -119,9 +117,7 @@ public class PipesController {
 
             return Response.ok(buildPipeResponse(pipe)).build();
         } catch (AwsException e) {
-            return Response.status(e.getHttpStatus())
-                    .entity(new AwsErrorResponse(e.getErrorCode(), e.getMessage()))
-                    .build();
+            throw e;
         } catch (Exception e) {
             LOG.errorv("Error updating pipe: {0}", e.getMessage());
             return Response.status(500)

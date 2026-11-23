@@ -77,8 +77,8 @@ class AwsPartitionsTest {
     }
 
     @Test
-    void theCommercialPartitionPublishesThirtyFourRegionsAndChinaTwo() {
-        assertEquals(34, AwsPartitions.commercial().regions().size());
+    void theCommercialPartitionPublishesThirtySixRegionsAndChinaTwo() {
+        assertEquals(36, AwsPartitions.commercial().regions().size());
         assertEquals(List.of("cn-north-1", "cn-northwest-1"), AwsPartitions.byId("aws-cn").regionIds());
         assertEquals(List.of("us-gov-east-1", "us-gov-west-1"), AwsPartitions.byId("aws-us-gov").regionIds());
     }
@@ -225,7 +225,7 @@ class AwsPartitionsTest {
         assertFalse(aws.region("ap-east-1").orElseThrow().s3WebsiteDashForm());
         assertTrue(AwsPartitions.byId("aws-us-gov").region("us-gov-west-1").orElseThrow().s3WebsiteDashForm());
         assertFalse(AwsPartitions.byId("aws-cn").region("cn-north-1").orElseThrow().optIn());
-        assertEquals(17, aws.regions().stream().filter(AwsPartition.Region::optIn).count());
+        assertEquals(19, aws.regions().stream().filter(AwsPartition.Region::optIn).count());
     }
 
     @ParameterizedTest

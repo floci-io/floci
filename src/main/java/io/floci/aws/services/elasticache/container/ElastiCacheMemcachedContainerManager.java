@@ -146,7 +146,7 @@ public class ElastiCacheMemcachedContainerManager {
         String logGroup = "/aws/elasticache/cluster/" + clusterId + "/engine-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
 
-        Closeable logHandle = logStreamer.attach(
+        Closeable logHandle = logStreamer.attachPolled(
                 info.containerId(), logGroup, logStream, effectiveRegion, "elasticache-memcached:" + clusterId);
         handle.setLogStream(logHandle);
 

@@ -156,17 +156,57 @@ class S3ObjectOperationsIamEnforcementIntegrationTest {
         f.select("a/rows.csv").statusCode(200);
     }
 
+    /**
+     * SelectObjectContent is POST ?select&select-type=2, as botocore routes it: a request naming ?select alone is the
+     * object's other POST route, checked as s3:PutObject, and S3 runs no query on it, so a caller allowed to write but
+     * not to read gets none of the object.
+     */
     @Test
-    void selectingFromAVersionNeedsGetObjectVersion() {
-        // S3Controller selects from the version named, so it is checked as reading that version.
-        Fixture f = new Fixture("select-version", true);
-        String versionId = f.seedVersion("a/rows.csv");
+    void aSelectWithoutItsTypeReadsNothing() {
+        Fixture f = new Fixture("select-untyped", false);
+        f.seed("a/rows.csv");
+
+        f.policy(f.allow("s3:PutObject"));
+        ValidatableResponse response = f.user().queryParam("select", "")
+                .contentType("application/xml")
+                .body("""
+                        <SelectObjectContentRequest>
+                          <Expression>SELECT * FROM S3Object</Expression>
+                          <ExpressionType>SQL</ExpressionType>
+                          <InputSerialization><CSV><FileHeaderInfo>USE</FileHeaderInfo></CSV></InputSerialization>
+                          <OutputSerialization><CSV/></OutputSerialization>
+                        </SelectObjectContentRequest>
+                        """)
+                .when().post(f.path("a/rows.csv")).then();
+        response.statusCode(not(200)).body(not(containsString("1,one")));
+    }
+
+    /**
+     * Botocore gives SelectObjectContent's request no version, and the S3 user guide requires s3:GetObject for it alone,
+     * so it reads the current version whatever versionId it names: a caller allowed s3:GetObject reads no older one.
+     */
+    @Test
+    void aSelectReadsTheCurrentVersionWhateverItNames() {
+        Fixture f = new Fixture("select-current", true);
+        String old = f.admin().body("id,name\n1,old\n").when().put(f.path("a/rows.csv"))
+                .then().statusCode(200).extract().header("x-amz-version-id");
+        f.admin().body("id,name\n2,new\n").when().put(f.path("a/rows.csv")).then().statusCode(200);
 
         f.policy(f.allow("s3:GetObject"));
-        denied(f.select("a/rows.csv", versionId), "s3:GetObjectVersion");
+        f.select("a/rows.csv", old).statusCode(200)
+                .body(containsString("2,new")).body(not(containsString("1,old")));
+    }
 
-        f.policy(f.allow("s3:GetObjectVersion"));
-        f.select("a/rows.csv", versionId).statusCode(200);
+    /**
+     * A request naming two of a bucket's sub-resources is taken alike by both their routes, and runs as whichever S3's
+     * handler picks, so it is refused even for a caller allowed both actions.
+     */
+    @Test
+    void aRequestNamingTwoSubresourcesIsRefused() {
+        Fixture f = new Fixture("two-subresources", false);
+        f.policy(f.allowOnBucket("s3:PutBucketCORS", "s3:PutBucketPolicy"));
+        f.user().queryParam("cors", "").queryParam("policy", "").body("{}")
+                .when().put("/" + f.bucket).then().statusCode(403).body(containsString("AccessDenied"));
     }
 
     @Test
@@ -230,6 +270,22 @@ class S3ObjectOperationsIamEnforcementIntegrationTest {
         f.policy(f.allow("s3:DeleteObjectVersion", "s3:BypassGovernanceRetention"));
         f.user().header("x-amz-bypass-governance-retention", "true").queryParam("versionId", versionId)
                 .when().delete(f.path("a/governed")).then().statusCode(204);
+    }
+
+    /**
+     * A key of slashes alone, "/" sent as "/bucket//", is that object, checked as the object operation on it, not as
+     * the bucket its path would name without them.
+     */
+    @Test
+    void aKeyOfOnlySlashesIsCheckedAsThatObject() {
+        Fixture f = new Fixture("slash-only", false);
+        f.policy(f.allow("s3:PutObject", "s3:GetObject", "s3:DeleteObject"));
+        HttpResponse<String> put = f.raw("PUT", "/", null, f.accessKeyId, Map.of(), "one slash");
+        assertEquals(200, put.statusCode(), put.body());
+        HttpResponse<String> get = f.raw("GET", "/", null, f.accessKeyId, Map.of(), null);
+        assertEquals(200, get.statusCode(), get.body());
+        assertEquals("one slash", get.body());
+        assertEquals(204, f.raw("DELETE", "/", null, f.accessKeyId, Map.of(), null).statusCode());
     }
 
     @Test
@@ -494,22 +550,6 @@ class S3ObjectOperationsIamEnforcementIntegrationTest {
         f.user().header("x-amz-object-lock-mode", "GOVERNANCE")
                 .header("x-amz-object-lock-retain-until-date", "2031-01-01T00:00:00Z").body("locked")
                 .when().put(f.path("a/created")).then().statusCode(200);
-    }
-
-    @Test
-    void aRequestNamingTwoSubresourcesIsCheckedAsTheOneThatRuns() {
-        // S3 serves ?tagging before ?acl, so this request returns the object's tags.
-        Fixture f = new Fixture("order", false);
-        f.seed("a/tagged");
-
-        f.policy(f.allow("s3:GetObjectAcl"));
-        denied(f.user().queryParam("acl", "").queryParam("tagging", "").when().get(f.path("a/tagged")).then(),
-                "s3:GetObjectTagging");
-
-        f.policy(f.allow("s3:GetObjectTagging"));
-        f.user().queryParam("acl", "").queryParam("tagging", "").when().get(f.path("a/tagged")).then()
-                .statusCode(200)
-                .body(containsString("<Tagging"));
     }
 
     @Test

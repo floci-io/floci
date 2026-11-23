@@ -25,7 +25,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -41,7 +40,7 @@ public class DynamoDbStreamService {
 
     /** The first shard of every stream, which a stream with one shard that never rolls over keeps for good. */
     static final String SHARD_ID = shardId(1, 0);
-    /** The most records a stream keeps across its shards; the oldest goes first. */
+    /** The most records a stream keeps across its shards unless configured otherwise; the oldest goes first. */
     static final int MAX_RECORDS = 1000;
     /** How long a shard iterator can be used when iterator expiry is on, as on AWS. */
     static final Duration ITERATOR_LIFETIME = Duration.ofMinutes(15);
@@ -56,9 +55,11 @@ public class DynamoDbStreamService {
 
     /**
      * How the native engine shapes its streams: the open shards each has, how long a shard stays open before a child
-     * takes its keys (null for good), and whether iterators expire and records age out as on AWS.
+     * takes its keys (null for good), whether iterators expire and records age out as on AWS, and how many records a
+     * stream keeps.
      */
-    record Settings(int shardCount, Duration shardRollover, boolean iteratorExpiry, boolean retention) {
+    record Settings(int shardCount, Duration shardRollover, boolean iteratorExpiry, boolean retention,
+                    int maxRecords) {
 
         static final Settings DEFAULTS = new Settings(1, null, false, false);
 
@@ -69,12 +70,19 @@ public class DynamoDbStreamService {
             if (shardRollover != null && (shardRollover.isZero() || shardRollover.isNegative())) {
                 shardRollover = null;
             }
+            if (maxRecords < 1) {
+                throw new IllegalArgumentException("A DynamoDB stream keeps at least one record, not " + maxRecords);
+            }
+        }
+
+        Settings(int shardCount, Duration shardRollover, boolean iteratorExpiry, boolean retention) {
+            this(shardCount, shardRollover, iteratorExpiry, retention, MAX_RECORDS);
         }
 
         static Settings from(EmulatorConfig.DynamoDbServiceConfig config) {
             long rollover = config.streamShardRolloverSeconds();
             return new Settings(config.streamShardCount(), rollover > 0 ? Duration.ofSeconds(rollover) : null,
-                    config.streamIteratorExpiryEnabled(), config.streamRetentionEnabled());
+                    config.streamIteratorExpiryEnabled(), config.streamRetentionEnabled(), config.streamMaxRecords());
         }
     }
 
@@ -277,7 +285,7 @@ public class DynamoDbStreamService {
             shard.records.addLast(record);
             shard.lastSequence = record.getSequenceNumber();
             state.retained++;
-            while (state.retained > MAX_RECORDS) {
+            while (state.retained > settings.maxRecords()) {
                 state.trimOldest();
             }
         }
@@ -445,12 +453,12 @@ public class DynamoDbStreamService {
         if (shard.trimmedThrough != null && requested.compareTo(new BigInteger(shard.trimmedThrough)) <= 0) {
             throw trimmed();
         }
-        for (DynamoDbStreamRecord record : shard.records) {
-            if (requested.compareTo(new BigInteger(record.getSequenceNumber())) == 0) {
-                return;
-            }
+        int index = shard.records.firstIndexWhere(
+                record -> new BigInteger(record.getSequenceNumber()).compareTo(requested) >= 0);
+        if (index == shard.records.size()
+                || new BigInteger(shard.records.get(index).getSequenceNumber()).compareTo(requested) != 0) {
+            throw invalidSequenceNumber();
         }
-        throw invalidSequenceNumber();
     }
 
     GetRecordsResult getRecords(String shardIterator, Integer limit) {
@@ -482,23 +490,34 @@ public class DynamoDbStreamService {
                     throw trimmed();
                 }
             }
-            List<DynamoDbStreamRecord> held = new ArrayList<>(shard.records);
-            int position = held.size();
-            for (int i = 0; i < held.size(); i++) {
-                int againstCursor = held.get(i).getSequenceNumber().compareTo(cursor.sequence());
-                if (cursor.inclusive() ? againstCursor >= 0 : againstCursor > 0) {
-                    position = i;
-                    break;
-                }
-            }
-            int effectiveLimit = limit != null ? limit : 100;
-            page = new ArrayList<>(held.subList(position, Math.min(position + effectiveLimit, held.size())));
+            page = readFrom(shard.records, cursor, limit != null ? limit : 100);
             next = page.isEmpty() ? cursor : new Cursor(page.getLast().getSequenceNumber(), false);
             // A closed shard read to its end has no next iterator, which is how a reader learns it is done.
-            ended = !shard.open() && position >= held.size();
+            ended = !shard.open() && page.isEmpty();
         }
         return new GetRecordsResult(page, ended ? null
                 : encodeIterator(new IteratorToken(iterator.streamArn(), iterator.shardId(), next, now)));
+    }
+
+    /**
+     * Up to {@code limit} of {@code records}, oldest first, from where {@code cursor} reads. Records are kept in
+     * sequence order, so a binary search finds the first one without walking or copying the shard.
+     */
+    private static List<DynamoDbStreamRecord> readFrom(RingBuffer<DynamoDbStreamRecord> records, Cursor cursor,
+                                                       int limit) {
+        int from = records.firstIndexWhere(record -> reads(cursor, record));
+        int to = from + Math.min(limit, records.size() - from);
+        List<DynamoDbStreamRecord> page = new ArrayList<>(to - from);
+        for (int i = from; i < to; i++) {
+            page.add(records.get(i));
+        }
+        return page;
+    }
+
+    /** Whether {@code record} is at or past where {@code cursor} reads from. */
+    private static boolean reads(Cursor cursor, DynamoDbStreamRecord record) {
+        int againstCursor = record.getSequenceNumber().compareTo(cursor.sequence());
+        return cursor.inclusive() ? againstCursor >= 0 : againstCursor > 0;
     }
 
     /**
@@ -621,7 +640,7 @@ public class DynamoDbStreamService {
     private static final class StreamState {
         final List<Shard> shards = new ArrayList<>();
         final AtomicLong counter;
-        /** Records kept across every shard, held to {@link #MAX_RECORDS}. */
+        /** Records kept across every shard, held to {@link Settings#maxRecords()}. */
         int retained;
 
         StreamState(AtomicLong counter) {
@@ -686,7 +705,7 @@ public class DynamoDbStreamService {
         final int slot;
         final String startingSequenceNumber;
         final Instant openedAt;
-        final ArrayDeque<DynamoDbStreamRecord> records = new ArrayDeque<>();
+        final RingBuffer<DynamoDbStreamRecord> records = new RingBuffer<>();
         /** The sequence number of the newest record ever added, or null. */
         String lastSequence;
         /** The sequence number of the newest record trimmed away, or null: a cursor at or before it lost records. */

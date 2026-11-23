@@ -62,6 +62,89 @@ class ExternalStatementParserTest {
     }
 
     @Test
+    void parsesCreateExternalSchemaFromMsk() {
+        String clusterArn = "arn:aws:kafka:us-east-1:000000000000:cluster/orders/abc-123";
+        ExternalStatement.CreateMskSchema schema = (ExternalStatement.CreateMskSchema) parser.parse(
+                "CREATE EXTERNAL SCHEMA Msk FROM MSK IAM_ROLE 'arn:aws:iam::000000000000:role/R' "
+                        + "AUTHENTICATION iam CLUSTER_ARN '" + clusterArn + "';").orElseThrow();
+        assertThat(schema.schemaName(), equalTo("msk"));
+        assertThat(schema.iamRoleArn(), equalTo("arn:aws:iam::000000000000:role/R"));
+        assertThat(schema.authentication(), equalTo("IAM"));
+        assertThat(schema.clusterArn(), equalTo(clusterArn));
+        assertThat(schema.ifNotExists(), equalTo(false));
+    }
+
+    @Test
+    void parsesMskSchemaWithIfNotExistsAuthNoneAndReorderedClauses() {
+        String clusterArn = "arn:aws-us-gov:kafka:us-gov-west-1:000000000000:cluster/orders/abc-123";
+        ExternalStatement.CreateMskSchema schema = (ExternalStatement.CreateMskSchema) parser.parse(
+                "create external schema if not exists \"Msk\"\nfrom msk\n"
+                        + "cluster_arn '" + clusterArn + "'\n"
+                        + "authentication none\n"
+                        + "iam_role 'arn:aws-us-gov:iam::000000000000:role/R'").orElseThrow();
+        assertThat(schema.schemaName(), equalTo("Msk"));
+        assertThat(schema.authentication(), equalTo("NONE"));
+        assertThat(schema.clusterArn(), equalTo(clusterArn));
+        assertThat(schema.ifNotExists(), equalTo(true));
+    }
+
+    @Test
+    void parsesMskSchemaWithCommentsAndEscapedQuotes() {
+        ExternalStatement.CreateMskSchema schema = (ExternalStatement.CreateMskSchema) parser.parse(
+                "-- leading comment\nCREATE EXTERNAL SCHEMA msk FROM MSK /* inline */\n"
+                        + "IAM_ROLE 'arn:aws-us-gov:iam::000000000000:role/O''Brien'\n"
+                        + "AUTHENTICATION IAM\n"
+                        + "CLUSTER_ARN 'arn:aws-us-gov:kafka:us-gov-west-1:000000000000:cluster/c''1/1' /* tail */;")
+                .orElseThrow();
+        assertThat(schema.iamRoleArn(), equalTo("arn:aws-us-gov:iam::000000000000:role/O'Brien"));
+        assertThat(schema.clusterArn(), equalTo("arn:aws-us-gov:kafka:us-gov-west-1:000000000000:cluster/c'1/1"));
+    }
+
+    @Test
+    void rejectsUnsupportedMskClausesAndOptions() {
+        String role = "'arn:aws:iam::000000000000:role/R'";
+        String cluster = "'arn:aws:kafka:us-east-1:000000000000:cluster/c/1'";
+        for (String sql : List.of(
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE default AUTHENTICATION iam CLUSTER_ARN " + cluster,
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION mtls CLUSTER_ARN " + cluster,
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam URI 'localhost:9092'",
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam AUTHENTICATION_ARN 'arn:aws:acm:us-east-1:000000000000:certificate/1' CLUSTER_ARN " + cluster,
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam SECRET_ARN 'arn:aws:secretsmanager:us-east-1:000000000000:secret:s' CLUSTER_ARN " + cluster,
+                "CREATE EXTERNAL SCHEMA kfk FROM KAFKA IAM_ROLE " + role + " AUTHENTICATION none URI 'localhost:9092'")) {
+            SpectrumSqlException error = assertThrows(SpectrumSqlException.class, () -> parser.parse(sql));
+            assertThat(sql, error.sqlState(), equalTo("0A000"));
+        }
+    }
+
+    @Test
+    void rejectsMalformedOrIncompleteMskSchemas() {
+        String role = "'arn:aws:iam::000000000000:role/R'";
+        String cluster = "'arn:aws:kafka:us-east-1:000000000000:cluster/c/1'";
+        for (String sql : List.of(
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam",
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " CLUSTER_ARN " + cluster,
+                "CREATE EXTERNAL SCHEMA msk FROM MSK AUTHENTICATION iam CLUSTER_ARN " + cluster,
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE '' AUTHENTICATION iam CLUSTER_ARN " + cluster,
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN ''",
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN",
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN unquoted",
+                "CREATE EXTERNAL SCHEMA msk FROM MSK PARTITION 'aws' IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN " + cluster,
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION scram CLUSTER_ARN " + cluster,
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam AUTHENTICATION none CLUSTER_ARN " + cluster,
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN " + cluster,
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN " + cluster + " CLUSTER_ARN " + cluster,
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN " + cluster + " EXTRA 'x'",
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN " + cluster + " URI2 'x'",
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN " + cluster + " URI=localhost:9092",
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE2 " + role + " AUTHENTICATION iam CLUSTER_ARN " + cluster,
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN " + cluster + "; DROP TABLE x",
+                "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN 'unterminated")) {
+            SpectrumSqlException error = assertThrows(SpectrumSqlException.class, () -> parser.parse(sql));
+            assertThat(sql, error.sqlState(), equalTo("42601"));
+        }
+    }
+
+    @Test
     void parsesCreateTableWithNestedTypesAndFormat() {
         ExternalStatement.CreateTable table = (ExternalStatement.CreateTable) parser.parse(
                 "CREATE EXTERNAL TABLE analytics.events (id BIGINT, tags array<string>) STORED AS PARQUET LOCATION 's3://bucket/events/'").orElseThrow();
@@ -157,7 +240,7 @@ class ExternalStatementParserTest {
     @Test
     void otherCreateExternalStatementsAreReportedAsUnsupported() {
         SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
-                () -> parser.parse("CREATE EXTERNAL FUNCTION f(int) RETURNS int LAMBDA 'x' IAM_ROLE 'r'"));
+                () -> parser.parse("CREATE EXTERNAL MODEL m FROM 's3://bucket/model'"));
         assertThat(error.sqlState(), equalTo("0A000"));
         assertThat(error.getMessage().contains("unsupported"), equalTo(true));
     }

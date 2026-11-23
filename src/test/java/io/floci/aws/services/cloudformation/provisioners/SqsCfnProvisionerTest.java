@@ -11,6 +11,7 @@ import io.floci.aws.services.sqs.model.Queue;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -24,6 +25,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -69,6 +71,16 @@ class SqsCfnProvisionerTest {
         when(engine.resolveJsonAttribute(any())).thenAnswer(inv -> {
             JsonNode resolved = engine.resolveNode(inv.getArgument(0));
             return resolved != null && resolved.isTextual() ? resolved.asText() : resolved.toString();
+        });
+        when(engine.resolveStringList(any())).thenAnswer(inv -> {
+            JsonNode node = inv.getArgument(0);
+            List<String> out = new ArrayList<>();
+            if (node != null && node.isArray()) {
+                for (JsonNode item : node) {
+                    out.add(item.asText());
+                }
+            }
+            return out;
         });
         return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
     }
@@ -401,20 +413,67 @@ class SqsCfnProvisionerTest {
         verify(sqs, never()).setQueueAttributes(anyString(), any(), anyString());
     }
 
-    @Test
-    void aQueuePolicyKeepsItsIdAcrossUpdates() {
-        StackResource r = resource("AWS::SQS::QueuePolicy", "MyPolicy");
-        provisioner.provision(r, mapper.createObjectNode(), updateCtx("queue-policy-1a2b3c4d"));
-        assertEquals("queue-policy-1a2b3c4d", r.getPhysicalId());
-        verifyNoInteractions(sqs);
+    private ObjectNode queuePolicyProps(List<String> queueUrls, String version) {
+        ObjectNode props = mapper.createObjectNode();
+        queueUrls.forEach(props.putArray("Queues")::add);
+        props.putObject("PolicyDocument").put("Version", version);
+        return props;
     }
 
     @Test
-    void queuePolicyGetsAPhysicalId() {
+    void aQueuePolicyKeepsItsIdAcrossUpdatesAndClearsDroppedQueues() {
+        String queueA = "http://localhost:4566/000000000000/queue-a";
+        String queueB = "http://localhost:4566/000000000000/queue-b";
         StackResource r = resource("AWS::SQS::QueuePolicy", "MyPolicy");
-        provisioner.provision(r, mapper.createObjectNode(), ctx());
+        provisioner.provision(r, queuePolicyProps(List.of(queueA), "2012-10-17"), ctx());
+        String priorId = r.getPhysicalId();
+
+        provisioner.provision(r, queuePolicyProps(List.of(queueB), "2012-10-17"), updateCtx(priorId));
+
+        assertEquals(priorId, r.getPhysicalId());
+        verify(sqs).setQueueAttributes(queueA, Map.of("Policy", "{\"Version\":\"2012-10-17\"}"), "us-east-1");
+        verify(sqs).setQueueAttributes(queueB, Map.of("Policy", "{\"Version\":\"2012-10-17\"}"), "us-east-1");
+        verify(sqs).setQueueAttributes(queueA, Map.of("Policy", ""), "us-east-1");
+    }
+
+    @Test
+    void queuePolicySetsPolicyOnEveryListedQueueAndGetsAPhysicalId() {
+        String queueA = "http://localhost:4566/000000000000/queue-a";
+        String queueB = "http://localhost:4566/000000000000/queue-b";
+        StackResource r = resource("AWS::SQS::QueuePolicy", "MyPolicy");
+
+        provisioner.provision(r, queuePolicyProps(List.of(queueA, queueB), "2012-10-17"), ctx());
+
         assertNotNull(r.getPhysicalId());
         assertTrue(r.getPhysicalId().startsWith("queue-policy-"));
+        verify(sqs).setQueueAttributes(queueA, Map.of("Policy", "{\"Version\":\"2012-10-17\"}"), "us-east-1");
+        verify(sqs).setQueueAttributes(queueB, Map.of("Policy", "{\"Version\":\"2012-10-17\"}"), "us-east-1");
+    }
+
+    @Test
+    void queuePolicyRequiresQueuesAndPolicyDocument() {
+        StackResource r = resource("AWS::SQS::QueuePolicy", "MyPolicy");
+        ObjectNode noQueues = mapper.createObjectNode();
+        noQueues.putObject("PolicyDocument").put("Version", "2012-10-17");
+
+        AwsException emptyQueuesError = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, noQueues, ctx()));
+        assertEquals("ValidationError", emptyQueuesError.getErrorCode());
+
+        ObjectNode blankQueues = mapper.createObjectNode();
+        blankQueues.putArray("Queues").add(" ");
+        blankQueues.putObject("PolicyDocument").put("Version", "2012-10-17");
+
+        AwsException blankQueuesError = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, blankQueues, ctx()));
+        assertEquals("ValidationError", blankQueuesError.getErrorCode());
+
+        ObjectNode noPolicy = mapper.createObjectNode();
+        noPolicy.putArray("Queues").add("http://localhost:4566/000000000000/queue-a");
+
+        AwsException missingPolicyError = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, noPolicy, ctx()));
+        assertEquals("ValidationError", missingPolicyError.getErrorCode());
         verifyNoInteractions(sqs);
     }
 
@@ -425,9 +484,18 @@ class SqsCfnProvisionerTest {
     }
 
     @Test
-    void deleteQueuePolicyIsNoOp() {
-        provisioner.delete("AWS::SQS::QueuePolicy", "queue-policy-abc", "us-east-1");
-        verifyNoInteractions(sqs);
+    void deleteQueuePolicyClearsPoliciesAndSkipsMissingQueues() {
+        String goneQueue = "http://localhost:4566/000000000000/gone";
+        String liveQueue = "http://localhost:4566/000000000000/live";
+        StackResource r = resource("AWS::SQS::QueuePolicy", "MyPolicy");
+        provisioner.provision(r, queuePolicyProps(List.of(goneQueue, liveQueue), "2012-10-17"), ctx());
+        doThrow(new AwsException("AWS.SimpleQueueService.NonExistentQueue", "gone", 400))
+                .when(sqs).setQueueAttributes(goneQueue, Map.of("Policy", ""), "us-east-1");
+
+        provisioner.delete(r, "us-east-1");
+
+        verify(sqs).setQueueAttributes(goneQueue, Map.of("Policy", ""), "us-east-1");
+        verify(sqs).setQueueAttributes(liveQueue, Map.of("Policy", ""), "us-east-1");
     }
 
     @Test

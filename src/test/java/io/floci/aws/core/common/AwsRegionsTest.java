@@ -122,7 +122,7 @@ class AwsRegionsTest {
 
     @Test
     void advertisedListsArePerPartition() {
-        assertEquals(34, AwsRegions.advertised("aws").size());
+        assertEquals(36, AwsRegions.advertised("aws").size());
         assertEquals(List.of("cn-north-1", "cn-northwest-1"), AwsRegions.advertised("aws-cn"));
         assertTrue(AwsRegions.KNOWN_IDS.contains("eusc-de-east-1"));
         assertTrue(AwsRegions.KNOWN_IDS.contains("us-isof-south-1"));

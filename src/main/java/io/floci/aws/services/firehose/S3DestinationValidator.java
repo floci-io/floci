@@ -228,12 +228,13 @@ public final class S3DestinationValidator {
             valueViolation |= !isMappingValueValid(mapping.getValue());
         }
         if (keyViolation) {
-            violations.add(violation(shapeName, member,
-                    "Map keys must satisfy constraint: " + constraintSet(NO_WHITESPACE_PATTERN)));
+            violations.add(SmithyValidationErrors.Violations.WITHOUT_VALUES.mapKeys(
+                    shapeName + "." + member, null,
+                    SmithyValidationErrors.constraintSet(1, MAPPING_MAX_LENGTH, NO_WHITESPACE_PATTERN, null)));
         }
         if (valueViolation) {
-            violations.add(violation(shapeName, member,
-                    "Map value must satisfy constraint: " + constraintSet(NOT_BLANK_PATTERN)));
+            violations.add(SmithyValidationErrors.Violations.WITHOUT_VALUES.mapValues(shapeName + "." + member,
+                    null, SmithyValidationErrors.constraintSet(1, MAPPING_MAX_LENGTH, NOT_BLANK_PATTERN, null)));
         }
     }
 
@@ -247,12 +248,6 @@ public final class S3DestinationValidator {
 
     private static boolean lengthInRange(String value) {
         return !value.isEmpty() && value.length() <= MAPPING_MAX_LENGTH;
-    }
-
-    private static String constraintSet(String pattern) {
-        return "[Member must have length less than or equal to " + MAPPING_MAX_LENGTH
-                + ", Member must have length greater than or equal to 1"
-                + ", Member must satisfy regular expression pattern: " + pattern + "]";
     }
 
     private static Serializer serializer(S3Destination config) {

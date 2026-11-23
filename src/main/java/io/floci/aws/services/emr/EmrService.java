@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
@@ -40,7 +41,7 @@ import io.floci.aws.services.emr.model.EmrSession;
 import io.floci.aws.services.emr.model.EmrStep;
 import io.floci.aws.services.emr.model.SecurityConfiguration;
 import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
-import io.floci.aws.services.emrserverless.SparkConnectServers;
+import io.floci.aws.services.emrserverless.SessionServers;
 import io.floci.aws.services.emrserverless.SparkConnectSession;
 import io.floci.aws.services.emrserverless.SparkConnectSessionOwner;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
@@ -54,6 +55,7 @@ import jakarta.inject.Inject;
 import jakarta.inject.Provider;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
@@ -62,6 +64,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -72,6 +75,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.PrimitiveIterator;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -187,7 +191,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private final Set<String> primaryNodeStarts = ConcurrentHashMap.newKeySet();
     private final AtomicLong primaryNodeStartCount = new AtomicLong();
     // The Spark Connect servers of the sessions, in the docker runner mode, and the tokens given for every session.
-    private final SparkConnectServers sessionServers;
+    private final SessionServers sessionServers;
     private final SessionOwner sessionOwner = new SessionOwner();
     private final IamService iamService;
     // Where a step's driver runs: image-template, with the release label for %s, and docker-network; null when
@@ -230,15 +234,24 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
 
     private static final Set<String> COMPUTE_LIMITS_UNIT_TYPES = Set.of("InstanceFleetUnits", "Instances", "VCPU");
     private static final Set<String> SCALING_STRATEGIES = Set.of("DEFAULT", "ADVANCED");
+    private static final int MIN_PERFORMANCE_INDEX = 1;
+    private static final int MAX_PERFORMANCE_INDEX = 100;
+    private static final List<Integer> PERFORMANCE_INDEXES = List.of(1, 25, 50, 75, 100);
+    private static final String MERGE = "MERGE";
+    private static final List<String> RECONFIGURATION_TYPES = List.of("OVERWRITE", MERGE);
     private static final long MIN_IDLE_TIMEOUT_SECONDS = 60;
     private static final long MAX_IDLE_TIMEOUT_SECONDS = 604_800;
     // StepConcurrencyLevel: "You can specify a minimum of 1 step and a maximum of 256 steps" (ModifyCluster), "The
     // maximum value is 256" (RunJobFlow). And "only 256 steps can be RUNNING or PENDING at any given time" (Management
-    // Guide), and "A maximum of 256 steps are allowed in each CancelSteps request". No source gives AWS's answer to
-    // any of them, so their words are Floci's.
+    // Guide), and "With Amazon EMR releases 7.14.0 and later, the maximum number of steps you can cancel per request
+    // is 100. With earlier releases, the maximum is 256 steps per request" ("Cancel steps"). No source gives AWS's
+    // answer to any of them, so their words are Floci's.
     private static final int MAX_STEP_CONCURRENCY = 256;
     private static final int MAX_ACTIVE_STEPS = 256;
     private static final int MAX_CANCELLED_STEPS = 256;
+    private static final int MAX_CANCELLED_STEPS_FROM_7_14 = 100;
+    private static final String TERMINATE_PROCESS = "TERMINATE_PROCESS";
+    private static final List<String> STEP_CANCELLATION_OPTIONS = List.of("SEND_INTERRUPT", TERMINATE_PROCESS);
     // A release label's major, minor and patch versions.
     private static final Pattern RELEASE_VERSION = Pattern.compile("emr-(\\d{1,6})\\.(\\d{1,6})\\.(\\d{1,6})");
     private static final int MAX_PORT = 65_535;
@@ -319,10 +332,10 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 RUNNER_DOCKER.equalsIgnoreCase(config.services().emr().runnerMode()) ? releaseImages : null,
                 Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-step-", 0).factory()),
                 iamService,
-                new SparkConnectServers(
+                new SessionServers(SessionServers.Kind.SPARK_CONNECT,
                         RUNNER_DOCKER.equalsIgnoreCase(config.services().emr().runnerMode()) ? sparkRunner : null,
                         Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-session-", 0).factory()),
-                        SparkConnectServers.checkThread("emr-session-checks"), SparkConnectServers.probe(proxy),
+                        SessionServers.checkThread("emr-session-checks"), SessionServers.sparkConnectProbe(proxy),
                         Clock.systemUTC()));
     }
 
@@ -338,13 +351,14 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                Executor stepExecutor, IamService iamService) {
         this(storageFactory, config, regionResolver, eventPublisher, clock, wakeups, sparkRunner, bootstrapRunner,
                 clusterStorage, releaseImages, stepExecutor, iamService,
-                new SparkConnectServers(sparkRunner, stepExecutor, null, (host, port) -> "not probed", clock));
+                new SessionServers(SessionServers.Kind.SPARK_CONNECT, sparkRunner, stepExecutor, null,
+                        (host, port) -> "not probed", clock));
     }
 
     EmrService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                EmrEventPublisher eventPublisher, Clock clock, Wakeups wakeups, SparkJobRunner sparkRunner,
                BootstrapRunner bootstrapRunner, ClusterStorage clusterStorage, ReleaseImages releaseImages,
-               Executor stepExecutor, IamService iamService, SparkConnectServers sessionServers) {
+               Executor stepExecutor, IamService iamService, SessionServers sessionServers) {
         this.sessionServers = sessionServers;
         this.clusterStore = storageFactory.create("emr", "emr-clusters.json",
                 new TypeReference<Map<String, EmrCluster>>() {});
@@ -527,6 +541,13 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             cluster.setClusterArn(regionResolver.buildArn("elasticmapreduce", region, "cluster/" + id));
             if (cluster.getReleaseLabel() == null) {
                 cluster.setReleaseLabel(defaultReleaseLabel);
+            }
+            // RunJobFlow "uses the latest validated Amazon Linux release" where none is asked for, and DescribeCluster
+            // shows it: the latest its release lists, or none where Floci's catalog lists none for it.
+            if (cluster.getOsReleaseLabel() == null) {
+                cluster.setOsReleaseLabel(EmrReleaseCatalog.release(cluster.getReleaseLabel())
+                        .map(EmrReleaseCatalog.Release::osReleases).filter(labels -> !labels.isEmpty())
+                        .map(List::getFirst).orElse(null));
             }
             cluster.setInstanceCollectionType(cluster.getInstanceFleets().isEmpty()
                     ? "INSTANCE_GROUP" : "INSTANCE_FLEET");
@@ -723,6 +744,19 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     public record CancelStepInfo(String stepId, String status, String reason) {}
 
     public List<CancelStepInfo> cancelSteps(String clusterId, List<String> stepIds) {
+        return cancelSteps(clusterId, stepIds, null);
+    }
+
+    /**
+     * Cancels the steps with {@code option}, SEND_INTERRUPT (the default, for null) or TERMINATE_PROCESS, the model's
+     * StepCancellationOption ({@link EmrClusterLifecycle#cancel}).
+     */
+    public List<CancelStepInfo> cancelSteps(String clusterId, List<String> stepIds, String option) {
+        if (option != null && !STEP_CANCELLATION_OPTIONS.contains(option)) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notInEnum(option, "stepCancellationOption", STEP_CANCELLATION_OPTIONS));
+        }
+        boolean terminateProcess = TERMINATE_PROCESS.equals(option);
         return call(() -> {
             EmrCluster cluster = requireCluster(clusterId);
             // CancelSteps is "Available only in Amazon EMR versions 4.8.0 and later, excluding version 5.0.0".
@@ -730,15 +764,17 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 throw invalid("CancelSteps is available only in Amazon EMR versions 4.8.0 and later, excluding"
                         + " version 5.0.0, and cluster " + clusterId + " runs " + cluster.getReleaseLabel() + ".");
             }
-            if (stepIds.size() > MAX_CANCELLED_STEPS) {
-                throw invalid("A CancelSteps request can cancel at most " + MAX_CANCELLED_STEPS + " steps, and this"
-                        + " one names " + stepIds.size() + ".");
+            int most = releaseAtLeast(cluster.getReleaseLabel(), 7, 14, 0)
+                    ? MAX_CANCELLED_STEPS_FROM_7_14 : MAX_CANCELLED_STEPS;
+            if (stepIds.size() > most) {
+                throw invalid("A CancelSteps request can cancel at most " + most + " steps on release "
+                        + cluster.getReleaseLabel() + ", and this one names " + stepIds.size() + ".");
             }
             List<CancelStepInfo> result = new ArrayList<>();
             for (String stepId : stepIds) {
                 EmrStep step = stepOf(cluster, stepId).orElse(null);
                 String refusal = step == null ? "Step does not exist."
-                        : lifecycle.cancel(cluster, step, now(), regionOf(cluster));
+                        : lifecycle.cancel(cluster, step, now(), regionOf(cluster), terminateProcess);
                 result.add(refusal == null
                         ? new CancelStepInfo(stepId, "SUBMITTED", null)
                         : new CancelStepInfo(stepId, "FAILED", refusal));
@@ -872,7 +908,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         });
     }
 
-    /** Where a Spark Connect call carrying {@code token} goes: a session's server, {@link SparkConnectServers}. */
+    /** Where a Spark Connect call carrying {@code token} goes: a session's server, {@link SessionServers}. */
     @Override
     public Optional<Route> route(String token) {
         return sessionServers.route(token, sessionOwner);
@@ -1272,6 +1308,14 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         return parameters.toString();
     }
 
+    private static boolean isJsonObject(String json) {
+        try {
+            return SNAPSHOT_MAPPER.readTree(json).isObject();
+        } catch (JsonProcessingException notJson) {
+            return false;
+        }
+    }
+
     private static JsonNode rawJson(String json) {
         if (json == null) {
             return null;
@@ -1357,6 +1401,20 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             sessionStore.put(stored.getId(), stored);
         }
 
+        /**
+         * The session's ServerUrl, "The Spark Connect server URL for the session", which a client uses "with the
+         * Credentials returned by GetSessionEndpoint to connect directly to the session": Floci's own address in Spark
+         * Connect's {@code sc://} form, where {@link SparkConnectProxy} takes a call carrying GetSessionEndpoint's token
+         * on to the session's server, so that no client reaches the server without one. The model gives no example of
+         * AWS's.
+         */
+        @Override
+        protected void ready(EmrSession stored) {
+            URI base = URI.create(baseUrl);
+            int port = base.getPort() != -1 ? base.getPort() : "https".equals(base.getScheme()) ? 443 : 80;
+            stored.setServerUrl("sc://" + base.getHost() + ":" + port);
+        }
+
         // The reason it has, as TerminateSession or its cluster's end gave it.
         @Override
         protected String endReason(EmrSession stored, SparkJobRunner.Outcome outcome) {
@@ -1408,13 +1466,36 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         });
     }
 
-    /** One InstanceGroupModifyConfig: a null count or configurations leaves that setting as it is. */
-    public record InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations) {}
+    /**
+     * One InstanceGroupModifyConfig: a null count or configurations leaves that setting as it is, a null
+     * reconfiguration type is OVERWRITE, and {@code instancesToTerminate} are EC2InstanceIdsToTerminate, none for null.
+     */
+    public record InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations,
+                                            String reconfigurationType, List<String> instancesToTerminate,
+                                            JsonNode shrinkPolicy) {
+
+        public InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations) {
+            this(instanceGroupId, instanceCount, configurations, null, null, null);
+        }
+
+        public InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations,
+                                         String reconfigurationType) {
+            this(instanceGroupId, instanceCount, configurations, reconfigurationType, null, null);
+        }
+
+        public InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations,
+                                         String reconfigurationType, List<String> instancesToTerminate) {
+            this(instanceGroupId, instanceCount, configurations, reconfigurationType, instancesToTerminate, null);
+        }
+    }
 
     /**
      * Resizes or reconfigures instance groups in place. ClusterId is optional in the request, so
      * without it each group is looked up across the account's clusters in the Region. Every modification is
-     * checked before any is applied.
+     * checked before any is applied. A group's EC2InstanceIdsToTerminate end those of its instances: "After you
+     * terminate the instances, the instance group will not return to its original requested size", so its requested
+     * count goes down by as many, and the others keep their ids, addresses and nodes. An InstanceCount beside them is
+     * the group's size after that.
      */
     public void modifyInstanceGroups(String clusterId, String region, List<InstanceGroupModification> modifications) {
         run(() -> {
@@ -1423,7 +1504,10 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             }
             Map<String, EmrCluster> touched = new LinkedHashMap<>();
             List<EmrInstanceGroup> groups = new ArrayList<>();
-            for (InstanceGroupModification mod : modifications) {
+            List<List<Integer>> terminations = new ArrayList<>();
+            Map<String, Set<Integer>> endings = new HashMap<>();
+            for (int position = 1; position <= modifications.size(); position++) {
+                InstanceGroupModification mod = modifications.get(position - 1);
                 EmrCluster found = clusterId != null
                         ? requireCluster(clusterId) : clusterOwning(region, mod.instanceGroupId());
                 // AWS's answer here, recorded by Terraform users
@@ -1435,6 +1519,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 // One copy per cluster, so two groups of the same cluster are changed and stored together.
                 EmrCluster cluster = touched.computeIfAbsent(found.getId(), id -> found);
                 EmrInstanceGroup group = requireInstanceGroup(cluster, mod.instanceGroupId());
+                checkReconfigurationType(mod.reconfigurationType(), position, cluster.getReleaseLabel());
                 if (mod.instanceCount() != null) {
                     if (mod.instanceCount() < 0) {
                         throw invalid("InstanceCount must not be negative.");
@@ -1444,23 +1529,234 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         throw invalid("The instance count of a master instance group cannot be modified.");
                     }
                 }
+                List<Integer> named = ordinalsToTerminate(cluster, group, mod.instancesToTerminate());
+                List<Integer> ending = new ArrayList<>(named);
+                // What the request's earlier entries for the same group end, so a shrink counts from what they leave.
+                Set<Integer> endingOfGroup = endings.computeIfAbsent(cluster.getId() + "/" + group.getId(),
+                        key -> new LinkedHashSet<>());
+                endingOfGroup.addAll(named);
+                if (mod.instanceCount() != null && mod.shrinkPolicy() != null) {
+                    List<Integer> shrink = shrinkOrdinals(cluster, group, mod.instanceCount(), mod.shrinkPolicy(),
+                            endingOfGroup);
+                    ending.addAll(shrink);
+                    endingOfGroup.addAll(shrink);
+                }
+                terminations.add(ending);
                 groups.add(group);
             }
             for (int i = 0; i < modifications.size(); i++) {
                 InstanceGroupModification mod = modifications.get(i);
                 EmrInstanceGroup group = groups.get(i);
+                // Those another entry for the same group has not ended already.
+                List<Integer> ended = terminations.get(i).stream()
+                        .filter(ordinal -> !group.getTerminatedOrdinals().contains(ordinal)).toList();
+                if (!ended.isEmpty()) {
+                    List<Integer> ordinals = new ArrayList<>(group.getTerminatedOrdinals());
+                    ordinals.addAll(ended);
+                    Collections.sort(ordinals);
+                    group.setTerminatedOrdinals(ordinals);
+                    group.setRequestedInstanceCount(Math.max(0, group.getRequestedInstanceCount() - ended.size()));
+                    group.setRunningInstanceCount(Math.max(0, group.getRunningInstanceCount() - ended.size()));
+                }
                 if (mod.instanceCount() != null) {
                     group.setRequestedInstanceCount(mod.instanceCount());
                     group.setRunningInstanceCount(mod.instanceCount());
                 }
+                if (mod.shrinkPolicy() != null) {
+                    group.setShrinkPolicy(mod.shrinkPolicy().toString());
+                }
                 if (mod.configurations() != null) {
-                    group.setConfigurations(mod.configurations());
+                    group.setConfigurations(MERGE.equals(mod.reconfigurationType())
+                            ? mergedConfigurations(group.getConfigurations(), mod.configurations())
+                            : mod.configurations());
                     group.setConfigurationsVersion(group.getConfigurationsVersion() + 1);
                 }
             }
             touched.forEach(clusterStore::put);
             touched.values().forEach(this::resizeNodes);
         });
+    }
+
+    /**
+     * The ordinals of the group's instances that {@code instanceIds} name, each one of its instances now as
+     * ListInstances gives it; none for no ids. A master group's are refused as its count is, and an id that is not one
+     * of the group's instances with ValidationException, as ModifyInstanceGroups' other refusals are recorded; no
+     * source gives AWS's wording, so it is Floci's.
+     */
+    private static List<Integer> ordinalsToTerminate(EmrCluster cluster, EmrInstanceGroup group,
+                                                     List<String> instanceIds) {
+        if (instanceIds == null || instanceIds.isEmpty()) {
+            return List.of();
+        }
+        if ("MASTER".equals(group.getInstanceGroupType())) {
+            throw invalid("The instance count of a master instance group cannot be modified.");
+        }
+        Map<String, Integer> current = runningOrdinals(cluster, group);
+        List<Integer> ordinals = new ArrayList<>();
+        for (String instanceId : new LinkedHashSet<>(instanceIds)) {
+            Integer ordinal = current.get(instanceId);
+            if (ordinal == null) {
+                throw new AwsException("ValidationException", "Instance " + instanceId
+                        + " is not a running instance of instance group " + group.getId() + ".", 400);
+            }
+            ordinals.add(ordinal);
+        }
+        return ordinals;
+    }
+
+    /** The group's instances as ListInstances gives them now: each EC2 instance id and its ordinal, in that order. */
+    private static Map<String, Integer> runningOrdinals(EmrCluster cluster, EmrInstanceGroup group) {
+        List<EmrHandler.ListedInstances> listed = EmrHandler.listedInstances(cluster, false);
+        Map<String, Integer> current = new LinkedHashMap<>();
+        for (EmrHandler.ListedInstances set : listed) {
+            if (group.getId().equals(set.groupId())) {
+                long first = firstIndex(listed, set);
+                PrimitiveIterator.OfLong ordinals = set.ordinalsFrom(1);
+                for (long k = 1; k <= set.count(); k++) {
+                    long ordinal = ordinals.nextLong();
+                    current.put(ec2InstanceId(first + ordinal - 1), (int) ordinal);
+                }
+            }
+        }
+        return current;
+    }
+
+    /**
+     * The ordinals a shrink to {@code count} ends under a ShrinkPolicy's InstanceResizePolicy, beyond those already
+     * {@code ending}, by EC2InstanceIdsToTerminate or the request's earlier entries for the group: first its "Specific
+     * list of instances to be terminated when shrinking an instance group", then the group's last instances, passing
+     * its "Specific list of instances to be protected when shrinking an instance group". Ended this way, as named
+     * instances are, their ids are not taken again. An id to terminate that is not one of the group's running
+     * instances is refused, as EC2InstanceIdsToTerminate refuses it, and so is a shrink the protected instances leave
+     * short, rather than ending one of them. No source gives AWS's answer to either, so the wording is Floci's.
+     */
+    private static List<Integer> shrinkOrdinals(EmrCluster cluster, EmrInstanceGroup group, int count,
+                                                JsonNode shrinkPolicy, Set<Integer> ending) {
+        Map<String, Integer> running = runningOrdinals(cluster, group);
+        int shrinkBy = running.size() - ending.size() - count;
+        JsonNode resize = shrinkPolicy.path("InstanceResizePolicy");
+        if (shrinkBy <= 0 || !resize.isObject()) {
+            return List.of();
+        }
+        Set<String> protect = new HashSet<>();
+        resize.path("InstancesToProtect").forEach(id -> protect.add(id.asText()));
+        List<Integer> chosen = new ArrayList<>();
+        for (JsonNode id : resize.path("InstancesToTerminate")) {
+            Integer ordinal = running.get(id.asText());
+            if (ordinal == null) {
+                throw new AwsException("ValidationException", "Instance " + id.asText()
+                        + " is not a running instance of instance group " + group.getId() + ".", 400);
+            }
+            if (chosen.size() < shrinkBy && !ending.contains(ordinal) && !chosen.contains(ordinal)) {
+                chosen.add(ordinal);
+            }
+        }
+        List<Map.Entry<String, Integer>> fromTheEnd = new ArrayList<>(running.entrySet());
+        Collections.reverse(fromTheEnd);
+        for (Map.Entry<String, Integer> instance : fromTheEnd) {
+            if (chosen.size() >= shrinkBy) {
+                break;
+            }
+            Integer ordinal = instance.getValue();
+            if (!protect.contains(instance.getKey()) && !ending.contains(ordinal) && !chosen.contains(ordinal)) {
+                chosen.add(ordinal);
+            }
+        }
+        if (chosen.size() < shrinkBy) {
+            throw new AwsException("ValidationException", "Instance group " + group.getId() + " cannot shrink to "
+                    + count + " instances without ending one its shrink policy protects.", 400);
+        }
+        return chosen;
+    }
+
+    /**
+     * The index, in the cluster's instance numbering, of the first place {@code set} takes: 1 for the primary node's
+     * group or fleet, and after the places of those before it for the others.
+     */
+    static long firstIndex(List<EmrHandler.ListedInstances> listed, EmrHandler.ListedInstances set) {
+        EmrHandler.ListedInstances primary = listed.stream().filter(other -> other.number() == 0).findFirst()
+                .orElse(null);
+        if (set == primary) {
+            return 1;
+        }
+        long next = primary == null ? 1 : 1 + primary.span();
+        for (EmrHandler.ListedInstances other : listed) {
+            if (other == set) {
+                return next;
+            }
+            if (other != primary) {
+                next += other.span();
+            }
+        }
+        throw new IllegalArgumentException("The instances are not the cluster's");
+    }
+
+    /**
+     * A reconfiguration type is OVERWRITE or MERGE, the model's enum. MERGE is "supported for Amazon EMR releases
+     * 5.35.0 and 6.6.0 and later", and OVERWRITE is "the only one available in Amazon EMR releases earlier than 5.35.0
+     * and 6.6.0" (Release Guide, "Reconfigure an instance group in a running cluster"). No source gives AWS's refusal
+     * of MERGE on an earlier release, so its wording is Floci's.
+     */
+    private static void checkReconfigurationType(String type, int position, String releaseLabel) {
+        if (type == null) {
+            return;
+        }
+        if (!RECONFIGURATION_TYPES.contains(type)) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(type,
+                    "instanceGroups." + position + ".member.reconfigurationType", RECONFIGURATION_TYPES));
+        }
+        boolean merges = releaseAtLeast(releaseLabel, 6, 6, 0)
+                || (releaseAtLeast(releaseLabel, 5, 35, 0) && !releaseAtLeast(releaseLabel, 6, 0, 0));
+        if (MERGE.equals(type) && !merges) {
+            throw new AwsException("ValidationException", "MERGE reconfiguration is supported for Amazon EMR releases"
+                    + " 5.35.0 and 6.6.0 and later, and the cluster runs " + releaseLabel + ".", 400);
+        }
+    }
+
+    /**
+     * An instance group's configurations after a MERGE reconfiguration: it "merges the newly submitted configurations
+     * with configurations that already exist on the cluster. This option only adds or modifies the new configurations
+     * that you submit. It preserves existing configurations." A classification it names takes its properties over the
+     * existing ones of that classification, and its nested configurations merged the same way; one it does not name
+     * stays, and a new one is added.
+     */
+    static String mergedConfigurations(String existing, String added) {
+        try {
+            ArrayNode merged = existing != null && SNAPSHOT_MAPPER.readTree(existing) instanceof ArrayNode held
+                    ? held : SNAPSHOT_MAPPER.createArrayNode();
+            return merged(merged, (ArrayNode) SNAPSHOT_MAPPER.readTree(added)).toString();
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Stored configurations are not JSON", e);
+        }
+    }
+
+    private static ArrayNode merged(ArrayNode existing, ArrayNode added) {
+        ArrayNode merged = existing.deepCopy();
+        for (JsonNode configuration : added) {
+            String classification = configuration.path("Classification").asText(null);
+            ObjectNode match = null;
+            for (JsonNode held : merged) {
+                if (classification != null && held instanceof ObjectNode object
+                        && classification.equals(held.path("Classification").asText(null))) {
+                    match = object;
+                }
+            }
+            if (match == null || !configuration.isObject()) {
+                merged.add(configuration.deepCopy());
+                continue;
+            }
+            if (configuration.path("Properties").isObject()) {
+                JsonNode properties = match.path("Properties");
+                ObjectNode into = properties.isObject() ? (ObjectNode) properties : match.putObject("Properties");
+                into.setAll((ObjectNode) configuration.get("Properties").deepCopy());
+            }
+            if (configuration.path("Configurations").isArray()) {
+                JsonNode nested = match.path("Configurations");
+                match.set("Configurations", merged(nested.isArray() ? (ArrayNode) nested
+                        : SNAPSHOT_MAPPER.createArrayNode(), (ArrayNode) configuration.get("Configurations")));
+            }
+        }
+        return merged;
     }
 
     @Override
@@ -1515,9 +1811,40 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         });
     }
 
+    /**
+     * What a ModifyInstanceFleet request changes, each member null when it leaves it as it is: the target capacities,
+     * the ResizeSpecifications, the InstanceTypeConfigs (raw JSON) with their instance types, and the Context.
+     */
+    public record InstanceFleetModification(Integer targetOnDemandCapacity, Integer targetSpotCapacity,
+                                            String resizeSpecifications, String instanceTypeConfigs,
+                                            List<String> instanceTypes, String context) {
+    }
+
+    /**
+     * The instance types of {@code types} that {@code named} leaves out, each once, in their order: those a
+     * ModifyInstanceFleet request must still name, or that it adds to a fleet's own.
+     */
+    public static List<String> instanceTypesLeftOut(List<String> types, List<String> named) {
+        return types.stream().filter(type -> !named.contains(type)).distinct().toList();
+    }
+
     /** Resizes an instance fleet; a null target leaves that capacity as it is. */
     public void modifyInstanceFleet(String clusterId, String instanceFleetId,
                                     Integer targetOnDemandCapacity, Integer targetSpotCapacity) {
+        modifyInstanceFleet(clusterId, instanceFleetId, new InstanceFleetModification(targetOnDemandCapacity,
+                targetSpotCapacity, null, null, null, null));
+    }
+
+    /**
+     * Changes a fleet's target capacities, and the ResizeSpecifications, InstanceTypeConfigs and Context the request
+     * gives, which ListInstanceFleets gives back. The configs replace the fleet's own, as the Management Guide's
+     * "Reconfiguring instance fleets" has it: "Not including fields can result in overwriting specifications you
+     * declared at launch". They must name every instance type the fleet has: "You must include all instance types
+     * that are part of your instance fleet in the modify request". A type they add joins the fleet's after its own.
+     */
+    public void modifyInstanceFleet(String clusterId, String instanceFleetId, InstanceFleetModification modification) {
+        Integer targetOnDemandCapacity = modification.targetOnDemandCapacity();
+        Integer targetSpotCapacity = modification.targetSpotCapacity();
         run(() -> {
             EmrCluster cluster = requireCluster(clusterId);
             if (instanceFleetId == null) {
@@ -1549,10 +1876,30 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                     && (onDemand != fleet.getTargetOnDemandCapacity() || spot != fleet.getTargetSpotCapacity())) {
                 throw invalid("The target capacity of a master instance fleet cannot be modified.");
             }
+            List<String> instanceTypes = null;
+            if (modification.instanceTypes() != null) {
+                List<String> missing = instanceTypesLeftOut(fleet.getInstanceTypes(), modification.instanceTypes());
+                if (!missing.isEmpty()) {
+                    throw invalid("The instance type configs must include every instance type of instance fleet "
+                            + instanceFleetId + "; missing " + String.join(", ", missing) + ".");
+                }
+                instanceTypes = new ArrayList<>(fleet.getInstanceTypes());
+                instanceTypes.addAll(instanceTypesLeftOut(modification.instanceTypes(), fleet.getInstanceTypes()));
+            }
             fleet.setTargetOnDemandCapacity(onDemand);
             fleet.setTargetSpotCapacity(spot);
             fleet.setProvisionedOnDemandCapacity(onDemand);
             fleet.setProvisionedSpotCapacity(spot);
+            if (modification.resizeSpecifications() != null) {
+                fleet.setResizeSpecifications(modification.resizeSpecifications());
+            }
+            if (instanceTypes != null) {
+                fleet.setInstanceTypeConfigs(modification.instanceTypeConfigs());
+                fleet.setInstanceTypes(instanceTypes);
+            }
+            if (modification.context() != null) {
+                fleet.setContext(modification.context());
+            }
             clusterStore.put(clusterId, cluster);
             resizeNodes(cluster);
         });
@@ -1576,6 +1923,11 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     public SecurityConfiguration createSecurityConfiguration(String name, String json, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidRequestException", "Name is required.", 400);
+        }
+        if (json != null && !isJsonObject(json)) {
+            // A configuration that is no JSON object could not be read when a cluster names it; no source gives AWS's
+            // refusal, so the wording is Floci's.
+            throw new AwsException("InvalidRequestException", "SecurityConfiguration must be a JSON object.", 400);
         }
         String key = securityConfigurationKey(region, name);
         if (secConfigStore.get(key).isPresent()) {
@@ -1717,22 +2069,23 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private static final int INSTANCE_TYPE_PAGE = 50;
 
     /**
-     * The catalogue's releases, newest first. Floci's configured default release label is always
+     * The catalogue's releases, in ListReleaseLabels' order. Floci's configured default release label is always
      * among them, with no applications when the catalogue does not describe it, so a non-default
-     * setting never makes Floci's own default unknown.
+     * setting never makes Floci's own default unknown. A blank setting names no release, so it adds none.
      */
     List<EmrReleaseCatalog.Release> releases() {
-        if (EmrReleaseCatalog.release(defaultReleaseLabel).isPresent()) {
+        if (defaultReleaseLabel == null || defaultReleaseLabel.isBlank()
+                || EmrReleaseCatalog.release(defaultReleaseLabel).isPresent()) {
             return EmrReleaseCatalog.RELEASES;
         }
         List<EmrReleaseCatalog.Release> all = new ArrayList<>(EmrReleaseCatalog.RELEASES);
         all.add(new EmrReleaseCatalog.Release(defaultReleaseLabel, List.of(), List.of()));
-        all.sort((a, b) -> EmrReleaseCatalog.NEWEST_FIRST.compare(a.label(), b.label()));
+        all.sort((a, b) -> EmrReleaseCatalog.LISTING_ORDER.compare(a.label(), b.label()));
         return all;
     }
 
     /**
-     * Release labels, newest first, narrowed by {@code prefix} (such as {@code emr-6}) and by
+     * Release labels, in the catalogue's order, narrowed by {@code prefix} (such as {@code emr-6}) and by
      * {@code application}, a name or {@code name@version} (such as {@code spark@3.5.2}) matched
      * without regard to case. A token belongs to the filters it was issued for, so one replayed
      * with other filters, or altered, is refused.
@@ -1763,32 +2116,35 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 nextToken, namespace, EmrService::invalidToken);
     }
 
-    /** A release's applications and OS releases; no label means the latest release. */
+    /** A release's applications and OS releases; no label means the newest numbered release, the first listed. */
     public EmrReleaseCatalog.Release describeReleaseLabel(String label) {
-        return label == null || label.isBlank() ? releases().get(0) : requireRelease(label);
+        if (label == null || label.isBlank()) {
+            return releases().get(0);
+        }
+        // AWS's recorded answer: InvalidRequestException with this ErrorCode and a message naming no label.
+        return findRelease(label).orElseThrow(() -> new AwsException("InvalidRequestException",
+                "The release label isn't valid.", 400, Map.of("ErrorCode", "InvalidInputParameter")));
     }
 
     public PaginatedResult<EmrReleaseCatalog.InstanceType> listSupportedInstanceTypes(String label, String marker) {
-        if (label == null || label.isBlank()) {
-            throw new AwsException("InvalidRequestException", "ReleaseLabel is required.", 400);
+        // AWS's recorded answer, a missing label reading "null"; its ErrorCode and wording differ from
+        // DescribeReleaseLabel's.
+        if (label == null || label.isBlank() || findRelease(label).isEmpty()) {
+            throw new AwsException("InvalidRequestException", "The supplied release label is invalid: " + label + ".",
+                    400, Map.of("ErrorCode", "INVALID_RELEASE_LABEL"));
         }
-        requireRelease(label);
         List<EmrReleaseCatalog.InstanceType> types = EmrReleaseCatalog.INSTANCE_TYPES;
         return Pagination.paginate(types, positionIn(types), INSTANCE_TYPE_PAGE, marker,
                 "ListSupportedInstanceTypes|" + label, EmrService::invalidToken);
     }
 
-    private EmrReleaseCatalog.Release requireRelease(String label) {
-        return releases().stream()
-                .filter(r -> r.label().equals(label))
-                .findFirst()
-                .orElseThrow(() -> new AwsException("InvalidRequestException",
-                        "The specified release label " + label + " is not valid.", 400));
+    private Optional<EmrReleaseCatalog.Release> findRelease(String label) {
+        return releases().stream().filter(r -> r.label().equals(label)).findFirst();
     }
 
     /**
      * A cursor that keeps the catalogue's own order: {@link Pagination} sorts by cursor, and the
-     * catalogue is newest first rather than alphabetical.
+     * catalogue is in ListReleaseLabels' order rather than alphabetical.
      */
     private static <T> Function<T, String> positionIn(List<T> items) {
         Map<T, String> positions = new HashMap<>();
@@ -2037,6 +2393,31 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         JsonNode strategy = policy.path("ScalingStrategy");
         if (!strategy.isMissingNode() && !SCALING_STRATEGIES.contains(strategy.asText(""))) {
             throw invalid("ScalingStrategy must be one of " + SCALING_STRATEGIES + ".");
+        }
+        checkUtilizationPerformanceIndex(policy.path("UtilizationPerformanceIndex"));
+    }
+
+    /**
+     * The model bounds UtilizationPerformanceIndex to 1 to 100, and of those "Possible values are 1, 25, 50, 75 and
+     * 100. If you set the index to values other than these, it results in a validation error" (Management Guide,
+     * "Advanced Scaling for Amazon EMR"). The guide gives no message for the latter, so its wording is Floci's.
+     */
+    private static void checkUtilizationPerformanceIndex(JsonNode index) {
+        if (index.isMissingNode() || index.isNull()) {
+            return;
+        }
+        String path = "managedScalingPolicy.utilizationPerformanceIndex";
+        if (!index.isIntegralNumber() || !index.canConvertToInt()) {
+            throw invalid("ManagedScalingPolicy.UtilizationPerformanceIndex must be an integer.");
+        }
+        String range = SmithyValidationErrors.outOfRange(path, index.intValue(), MIN_PERFORMANCE_INDEX,
+                MAX_PERFORMANCE_INDEX);
+        if (range != null) {
+            throw SmithyValidationErrors.validationException(range);
+        }
+        if (!PERFORMANCE_INDEXES.contains(index.intValue())) {
+            throw new AwsException("ValidationException", "UtilizationPerformanceIndex must be one of "
+                    + PERFORMANCE_INDEXES + ".", 400);
         }
     }
 
@@ -2662,6 +3043,18 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 .filter(step -> EmrClusterLifecycle.RUNNING.equals(step.getState())).isPresent();
     }
 
+    /**
+     * Whether a step's driver may go on, in its reset: RUNNING, or, once its driver runs, interrupted and free to end
+     * on its own. One interrupted before its driver started has no process to signal, so it does not start.
+     */
+    private synchronized boolean mayGoOn(StepLaunch launch, boolean driverStarted) {
+        return launch.launchedIn() == generation && clusterStore.get(launch.clusterId())
+                .flatMap(cluster -> stepOf(cluster, launch.stepId()))
+                .filter(step -> EmrClusterLifecycle.RUNNING.equals(step.getState()) || (driverStarted
+                        && EmrClusterLifecycle.CANCEL_PENDING.equals(step.getState()) && step.isInterrupted()))
+                .isPresent();
+    }
+
     // Whether a command's cluster still runs, in the reset it was handed off in.
     private synchronized boolean commandGoing(CommandLaunch launch) {
         return launch.launchedIn() == generation && clusterStore.get(launch.clusterId())
@@ -2751,7 +3144,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         executionRole(cluster, step, accountId), Map.of(), hive.arguments(), hive.runner(),
                         Duration.ZERO, EmrSparkSteps.logFolder(cluster, step), null,
                         EmrSparkSteps.hiveEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER), List.of(),
-                        storage, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), null);
+                        storage, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), null).asInterruptible();
             } else if (application == null && command == null) {
                 job = null;
             } else {
@@ -2766,19 +3159,24 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         EmrSparkSteps.sparkLog4j2(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                         EmrSparkSteps.mapredSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                         EmrSparkSteps.hadoopLog4j(cluster.getConfigurations(), SNAPSHOT_MAPPER),
-                        EmrSparkSteps.hadoopEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER), null);
+                        EmrSparkSteps.hadoopEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER), null)
+                        .asInterruptible();
             }
             StepLaunch launch = new StepLaunch(accountId, region, cluster.getId(), step.getId(), generation,
                     teardowns.get());
             executing.add(stepKey(accountId, step.getId()));
-            String containerLogs = yarn ? EmrSparkSteps.containerLogFolder(cluster) : null;
+            String containerLogs = yarn ? EmrSparkSteps.containerLogFolder(cluster, step) : null;
             stepExecutor.execute(() -> runStep(job, launch, onCluster.releaseImage(), onCluster.hdfs(), containerLogs,
                     onCluster.primary()));
         }
 
         @Override
-        public void stop(EmrStep step) {
-            sparkRunner.stop(step.getId());
+        public void stop(EmrStep step, boolean terminateProcess) {
+            if (terminateProcess) {
+                sparkRunner.stop(step.getId());
+            } else {
+                sparkRunner.interrupt(step.getId());
+            }
         }
     }
 
@@ -2789,7 +3187,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
      * the job then runs on. A job a cancel, its cluster's end or a reset has passed makes none of it. Afterwards the
      * image may go once a newer one of its kind is made, and the metadata address to another.
      */
-    private final class ClusterPreparation implements SparkConnectServers.Preparation {
+    private final class ClusterPreparation implements SessionServers.Preparation {
 
         private final String clusterId;
         private final String accountId;
@@ -3006,7 +3404,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         long coreNodes = nodes.stream().filter(ClusterStorage.Node::core).count();
         return nodeManager.withHadoopFolder(EmrReleaseImages.hadoopFolder(cluster.getReleaseLabel()))
                 .onNodes(nodes, (int) Math.max(1, Math.min(replication(cluster), coreNodes)),
-                        EmrSparkSteps.containerLogFolder(cluster))
+                        EmrSparkSteps.nodeLogFolder(cluster))
                 .withPrimaryWorking(cluster.getProvisionedCoreNodes() == 0 || coreNodes == 0)
                 .withSparkHistory(EmrSparkSteps.names(cluster.getApplications(), SNAPSHOT_MAPPER, "Spark"))
                 .withHistories(timeline, timeline && tezImage
@@ -3049,40 +3447,49 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     // A cluster's core and task nodes as containers: "Core nodes run the Data Node daemon" and "a core node runs YARN
     // NodeManager daemons", and "Task nodes don't run the Data Node daemon". No more than the setting allows, core
     // nodes first, as they hold HDFS, and no fewer core nodes than HDFS keeps copies, as "Amazon EMR will not allow
-    // clusters to scale core nodes below dfs.replication". A fleet's unit of capacity is one node.
-    private List<ClusterStorage.Node> workerNodes(EmrCluster cluster) {
+    // clusters to scale core nodes below dfs.replication". A fleet's unit of capacity is one node. Neither kind is
+    // built past the setting, however many a cluster asks for.
+    List<ClusterStorage.Node> workerNodes(EmrCluster cluster) {
         int floor = Math.min(cluster.getProvisionedCoreNodes(), replication(cluster));
         List<ClusterStorage.Node> core = new ArrayList<>();
         List<ClusterStorage.Node> task = new ArrayList<>();
+        long asked = 0;
         for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
             boolean isCore = "CORE".equals(group.getInstanceGroupType());
             if (isCore || "TASK".equals(group.getInstanceGroupType())) {
                 int count = group.getRequestedInstanceCount();
-                addNodes(cluster, groupNumber(cluster.getInstanceGroups(), group), isCore ? Math.max(count, floor) : count,
-                        isCore, isCore ? core : task);
+                count = isCore ? Math.max(count, floor) : count;
+                asked += Math.max(count, 0);
+                addNodes(cluster, groupNumber(cluster.getInstanceGroups(), group), count, isCore, isCore ? core : task,
+                        maxWorkerNodes, group.getTerminatedOrdinals());
             }
         }
         for (EmrInstanceFleet fleet : cluster.getInstanceFleets()) {
             int number = fleetNumber(cluster.getInstanceFleets(), fleet);
             if (number > 0) {
                 boolean isCore = "CORE".equals(fleet.getInstanceFleetType());
-                int count = fleet.getTargetOnDemandCapacity() + fleet.getTargetSpotCapacity();
-                addNodes(cluster, number, isCore ? Math.max(count, floor) : count, isCore, isCore ? core : task);
+                long capacity = (long) fleet.getTargetOnDemandCapacity() + fleet.getTargetSpotCapacity();
+                long count = isCore ? Math.max(capacity, floor) : capacity;
+                asked += Math.max(count, 0);
+                addNodes(cluster, number, count, isCore, isCore ? core : task, maxWorkerNodes, List.of());
             }
         }
         List<ClusterStorage.Node> nodes = new ArrayList<>(core);
         nodes.addAll(task);
-        if (nodes.size() > maxWorkerNodes) {
+        if (asked > maxWorkerNodes) {
             LOG.infov("EMR cluster {0} asks for {1} core and task nodes, and runs the first {2}, as yarn-max-worker-nodes"
-                    + " says", cluster.getId(), nodes.size(), maxWorkerNodes);
-            return List.copyOf(nodes.subList(0, maxWorkerNodes));
+                    + " says", cluster.getId(), asked, maxWorkerNodes);
+            return List.copyOf(nodes.subList(0, Math.min(nodes.size(), maxWorkerNodes)));
         }
         return nodes;
     }
 
-    private static void addNodes(EmrCluster cluster, int group, int count, boolean core,
-                                 List<ClusterStorage.Node> nodes) {
-        for (int ordinal = 1; ordinal <= count; ordinal++) {
+    // Up to count nodes of the group, as long as the list holds fewer than limit, none at an ordinal terminated holds.
+    private static void addNodes(EmrCluster cluster, int group, long count, boolean core,
+                                 List<ClusterStorage.Node> nodes, int limit, List<Integer> terminated) {
+        PrimitiveIterator.OfLong ordinals = ordinalsFrom(terminated, 1);
+        for (long k = 1; k <= count && nodes.size() < limit; k++) {
+            long ordinal = ordinals.nextLong();
             String id = group + "-" + ordinal;
             nodes.add(new ClusterStorage.Node(id,
                     AwsRegions.ec2PrivateIpDnsName(privateIpAddress(group, ordinal), cluster.getRegion()), core,
@@ -3631,7 +4038,75 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
 
     /** The public DNS name ListInstances gives a cluster's instance {@code index}, counted from 1, in a Region. */
     static String publicDnsName(long index, String region) {
-        return AwsEndpoints.ec2PublicDns("203.0.113." + index, region);
+        return AwsEndpoints.ec2PublicDns(publicIpAddress(index), region);
+    }
+
+    /**
+     * The public address ListInstances gives a cluster's instance {@code index}, counted from 1, the one its public DNS
+     * name names: in 203.0.113.0/24, RFC 5737's documentation range, for the first 254, and past them in
+     * 100.64.0.0/10, RFC 6598's shared address space, so no instance gets an address someone else holds.
+     */
+    static String publicIpAddress(long index) {
+        if (index <= 254) {
+            return "203.0.113." + index;
+        }
+        long n = index - 255;
+        return "100." + (64 + n / (254 * 256)) + "." + (n / 254) % 256 + "." + (n % 254 + 1);
+    }
+
+    /**
+     * The id ListInstances gives the {@code device}-th EBS volume, counted from 0, of cluster {@code clusterId}'s
+     * instance {@code index}: 17 hex digits, as EC2's are, the first 8 from the cluster, so two clusters' volumes
+     * differ.
+     */
+    static String ebsVolumeId(String clusterId, long index, int device) {
+        return "vol-" + String.format("%08x%09x", clusterId.hashCode(), index * 100 + device + 1);
+    }
+
+    /**
+     * The ordinal, counted from 1, of a group's {@code k}-th instance, when EC2InstanceIdsToTerminate has ended its
+     * instances {@code terminated} (ascending): the {@code k}-th ordinal that is not one of them, so an instance keeps
+     * its ordinal, and with it its id and addresses, while another of its group is ended.
+     */
+    static long ordinalAt(List<Integer> terminated, long k) {
+        long ordinal = k;
+        for (int gone : terminated) {
+            if (gone > ordinal) {
+                break;
+            }
+            ordinal++;
+        }
+        return ordinal;
+    }
+
+    /**
+     * A group's instance ordinals from its {@code k}-th on, in order, as {@link #ordinalAt} gives each: the terminated
+     * ones before the {@code k}-th are passed once, and each later one as the walk reaches it, so a page of instances
+     * costs its own length and not that times the group's terminations.
+     */
+    static PrimitiveIterator.OfLong ordinalsFrom(List<Integer> terminated, long k) {
+        long first = ordinalAt(terminated, k);
+        return new PrimitiveIterator.OfLong() {
+            private long next = first;
+            // The terminated ordinals passed so far: as many as the first ordinal is past k.
+            private int passed = (int) (first - k);
+
+            @Override
+            public boolean hasNext() {
+                return true;
+            }
+
+            @Override
+            public long nextLong() {
+                long current = next;
+                next = current + 1;
+                while (passed < terminated.size() && terminated.get(passed) == next) {
+                    next++;
+                    passed++;
+                }
+                return current;
+            }
+        };
     }
 
     /**
@@ -3680,18 +4155,20 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
      */
     Instance nodeInstance(EmrCluster cluster, String accountId, int group, long ordinal) {
         List<EmrHandler.ListedInstances> listed = EmrHandler.listedInstances(cluster, false);
-        EmrHandler.ListedInstances primary = listed.stream().filter(set -> set.number() == 0).findFirst().orElse(null);
-        long next = primary == null ? 1 : 1 + primary.count();
         long index = ordinal;
         String instanceType = null;
+        String imageId = cluster.getCustomAmiId();
         for (EmrHandler.ListedInstances set : listed) {
-            long first = set == primary ? 1 : next;
-            if (set != primary) {
-                next += set.count();
-            }
             if (set.number() == group) {
-                index = first + ordinal - 1;
+                index = firstIndex(listed, set) + ordinal - 1;
                 instanceType = set.instanceType();
+                // A group's own CustomAmiId is the one its instances run, over the cluster's.
+                for (EmrInstanceGroup instanceGroup : cluster.getInstanceGroups()) {
+                    if (set.groupId() != null && set.groupId().equals(instanceGroup.getId())
+                            && instanceGroup.getCustomAmiId() != null) {
+                        imageId = instanceGroup.getCustomAmiId();
+                    }
+                }
                 break;
             }
         }
@@ -3699,11 +4176,12 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         instance.setInstanceId(ec2InstanceId(index));
         instance.setOwnerId(accountId);
         instance.setInstanceType(instanceType);
-        instance.setImageId(cluster.getCustomAmiId());
+        instance.setImageId(imageId);
         String address = privateIpAddress(group, ordinal);
         instance.setPrivateIpAddress(address);
         instance.setPrivateDnsName(AwsRegions.ec2PrivateIpDnsName(address, cluster.getRegion()));
         instance.setPublicDnsName(publicDnsName(index, cluster.getRegion()));
+        instance.setPublicIpAddress(publicIpAddress(index));
         instance.setPlacement(new Placement(availabilityZone(cluster)));
         instance.setRegion(cluster.getRegion());
         instance.setState(InstanceState.running());
@@ -3788,7 +4266,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         @Override
         public boolean cancelled() {
             return teardowns.get() != launch.teardownsBefore()
-                    || !RequestScopes.callAs(launch.accountId(), launch.region(), () -> stillRunning(launch));
+                    || !RequestScopes.callAs(launch.accountId(), launch.region(),
+                            () -> mayGoOn(launch, driverStarted));
         }
     }
 

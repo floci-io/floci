@@ -272,6 +272,12 @@ public class ContainerLifecycleManager {
         return create(spec, resolvedImage, null);
     }
 
+    /** Creates a container Docker removes as soon as its process exits. */
+    public String createAutoRemoving(ContainerSpec spec) {
+        String resolvedImage = imageCacheService.ensureImageExists(spec.image());
+        return create(spec, resolvedImage, null, true, true);
+    }
+
     /**
      * Creates a container for a specific Docker platform.
      *
@@ -289,7 +295,12 @@ public class ContainerLifecycleManager {
     }
 
     private String create(ContainerSpec spec, String resolvedImage, String platform, boolean removeAnonymousVolumes) {
-        String containerId = createWithCaBundle(spec, resolvedImage, platform, removeAnonymousVolumes);
+        return create(spec, resolvedImage, platform, removeAnonymousVolumes, false);
+    }
+
+    private String create(ContainerSpec spec, String resolvedImage, String platform, boolean removeAnonymousVolumes,
+                          boolean autoRemove) {
+        String containerId = createWithCaBundle(spec, resolvedImage, platform, removeAnonymousVolumes, autoRemove);
         if (spec.hasNetworkConfiguration()) {
             try {
                 attachNetworkBeforeStart(containerId, spec);
@@ -312,11 +323,14 @@ public class ContainerLifecycleManager {
     }
 
     private String createWithCaBundle(ContainerSpec spec, String resolvedImage, String platform,
-                                      boolean removeAnonymousVolumes) {
+                                      boolean removeAnonymousVolumes, boolean autoRemove) {
         LOG.debugv("Creating container from spec: image={0}, name={1}", spec.image(), spec.name());
 
         // Built once: a dynamic port binding allocates its host port here.
         HostConfig hostConfig = buildHostConfig(spec);
+        if (autoRemove) {
+            hostConfig.withAutoRemove(true);
+        }
         Optional<Path> caBundle = ContainerCaBundle.hostPath(config);
         if (caBundle.isEmpty()) {
             return createContainer(spec, resolvedImage, platform, hostConfig, spec.env());
@@ -376,7 +390,12 @@ public class ContainerLifecycleManager {
         if (spec.workingDir() != null && !spec.workingDir().isBlank()) {
             createCmd.withWorkingDir(spec.workingDir());
         }
-        if (spec.exposedPorts() != null && !spec.exposedPorts().isEmpty()) {
+        // A container sharing a network namespace (host, none, container:<id>) has no endpoint
+        // of its own for Docker to expose a port on, and the daemon refuses an exposed port
+        // together with container:<id> ("conflicting options: port exposing and the container
+        // type network mode"). The spec keeps the ports: resolveEndpoints still answers them
+        // through the namespace's owner.
+        if (spec.exposedPorts() != null && !spec.exposedPorts().isEmpty() && !spec.sharesNetworkNamespace()) {
             ExposedPort[] exposed = spec.exposedPorts().stream()
                     .map(ExposedPort::tcp)
                     .toArray(ExposedPort[]::new);
@@ -391,18 +410,39 @@ public class ContainerLifecycleManager {
         labels.put(CREATE_ATTEMPT_LABEL, createAttemptId);
         createCmd.withLabels(labels);
 
+        String budgetedService = serviceBudget(labels);
+        if (budgetedService != null) {
+            DockerServiceBudget.reserve(budgetedService, config.docker().serviceMaxContainers().get(budgetedService));
+        }
         String containerId;
         try {
             containerId = createWithConflictRecovery(createCmd, spec, createAttemptId);
+            DockerContainerServices.record(containerId, spec.name(), labels);
         } catch (DockerException e) {
             if (ContainerRejectedException.isRejection(e)) {
                 throw new ContainerRejectedException(e);
             }
             throw e;
+        } finally {
+            if (budgetedService != null) {
+                DockerServiceBudget.release(budgetedService);
+            }
         }
-        DockerContainerServices.record(containerId, spec.name(), labels);
         LOG.infov("Created container {0} (name={1}, not yet started)", containerId, spec.name());
         return containerId;
+    }
+
+    /** The service of a container to create when {@code floci.docker.service-max-containers} gives it a budget. */
+    private String serviceBudget(Map<String, String> labels) {
+        if (config == null || config.docker() == null) {
+            return null;
+        }
+        Map<String, Integer> budgets = config.docker().serviceMaxContainers();
+        if (budgets == null || budgets.isEmpty()) {
+            return null;
+        }
+        String service = ContainerStorageHelper.labelValue(labels, ContainerStorageHelper.SERVICE_LABEL);
+        return service != null && budgets.containsKey(service) ? service : null;
     }
 
     /**
@@ -712,6 +752,7 @@ public class ContainerLifecycleManager {
      */
     public void stopAndRemove(String containerId, Closeable logStream, int stopTimeoutSeconds) {
         boolean stoppedOrMissing = stop(containerId, stopTimeoutSeconds);
+        readLastLogLines(logStream);
 
         // Force removal is the recovery path when Docker could not stop the container cleanly. It also
         // terminates the follow-log transport, allowing its terminal callback to drain the final tail.
@@ -730,6 +771,25 @@ public class ContainerLifecycleManager {
         if (logStream != null && (stoppedOrMissing || removedOrMissing)) {
             closeLogStreamAfterContainerStop(logStream);
         }
+    }
+
+    /**
+     * A log read on a timer ({@link ContainerLogStreamer#attachPolled}) has not seen what the container
+     * wrote since its last read, and cannot once the container is removed, so read it between the stop
+     * and the removal. A follow stream needs nothing: the removal ends it and it drains its own tail.
+     */
+    private static void readLastLogLines(Closeable logStream) {
+        if (logStream instanceof PolledLogHandle polled) {
+            polled.drainBeforeRemove();
+        }
+    }
+
+    /**
+     * Reads what a polled log has not seen yet, for a caller that force-removes its container itself
+     * instead of going through {@link #stopAndRemove}: once the container is gone its log cannot be read.
+     */
+    public void readLogBeforeRemoval(Closeable logStream) {
+        readLastLogLines(logStream);
     }
 
     /**
@@ -824,6 +884,7 @@ public class ContainerLifecycleManager {
             stopFailure = e;
             LOG.warnv("Error stopping container {0}: {1}", containerId, e.getMessage());
         }
+        readLastLogLines(logStream);
 
         try {
             RemoveContainerCmd remove = dockerClient.removeContainerCmd(containerId).withForce(true);

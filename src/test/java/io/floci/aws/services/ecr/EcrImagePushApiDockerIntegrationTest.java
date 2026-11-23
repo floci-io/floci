@@ -7,6 +7,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
 import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
@@ -37,6 +38,7 @@ import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.hasSize;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Pushes an image through the ECR API alone, as SDK-based copy tools do: a layer uploaded in parts,
@@ -53,6 +55,7 @@ class EcrImagePushApiDockerIntegrationTest {
     private static final String PREFIX = "AmazonEC2ContainerRegistry_V20150921.";
     private static final int MIB = 1024 * 1024;
     private static final String DOCKER_MANIFEST = "application/vnd.docker.distribution.manifest.v2+json";
+    private static final String OTHER_ACCOUNT = "111111111111";
 
     private final String repo = "push-api/" + UUID.randomUUID().toString().substring(0, 8);
     private final String immutableRepo = repo + "-immutable";
@@ -338,29 +341,88 @@ class EcrImagePushApiDockerIntegrationTest {
         call("DeleteRepository", "{\"repositoryName\":\"" + untaggedRepo + "\"}").statusCode(200);
     }
 
-    /** Last, since every class on this profile shares one registry. */
     @Test
     @Order(12)
+    void aRepositoryOfAnotherAccountTakesPushesAtItsOwnRegistryAndKeepsItsTagsImmutable() throws Exception {
+        String otherRepo = repo + "-other-account";
+        callAs(OTHER_ACCOUNT, "CreateRepository", "{\"repositoryName\":\"" + otherRepo
+                + "\",\"imageTagMutability\":\"IMMUTABLE\"}").statusCode(200);
+        try {
+            String upload = initiate(OTHER_ACCOUNT, otherRepo);
+            part(OTHER_ACCOUNT, otherRepo, upload, 0, config).statusCode(200);
+            complete(OTHER_ACCOUNT, otherRepo, upload, configDigest).statusCode(200);
+            String first = """
+                    {
+                      "schemaVersion": 2,
+                      "mediaType": "%s",
+                      "config": {"mediaType": "application/vnd.docker.container.image.v1+json", "size": %d, "digest": "%s"},
+                      "layers": []
+                    }""".formatted(DOCKER_MANIFEST, config.length, configDigest);
+            String host = OTHER_ACCOUNT + ".dkr.ecr.us-east-1.localhost";
+            String path = "/v2/" + otherRepo + "/manifests/v1";
+
+            assertEquals(201, registryRequest(host, path, HttpMethod.PUT, null, first).statusCode());
+            Fetched rewritten = registryRequest(host, path, HttpMethod.PUT, null, first.replace("[]", "[ ]"));
+
+            assertEquals(400, rewritten.statusCode());
+            assertTrue(rewritten.body().toString().contains("TAG_INVALID"), rewritten.body().toString());
+        } finally {
+            callAs(OTHER_ACCOUNT, "DeleteRepository", "{\"repositoryName\":\"" + otherRepo + "\",\"force\":true}")
+                    .statusCode(200);
+        }
+    }
+
+    @Test
+    @Order(13)
+    void aRepositoryNobodyCreatedIsUnknownToTheRegistry() throws Exception {
+        String host = "000000000000.dkr.ecr.us-east-1.localhost";
+        String path = "/v2/" + repo + "-never-created/manifests/1";
+
+        Fetched pulled = registryGet(host, path, DOCKER_MANIFEST);
+        Fetched pushed = registryRequest(host, path, HttpMethod.PUT, null, manifest);
+
+        assertEquals(404, pulled.statusCode());
+        assertTrue(pulled.body().toString().contains("NAME_UNKNOWN"), pulled.body().toString());
+        assertEquals(404, pushed.statusCode());
+        assertTrue(pushed.body().toString().contains("NAME_UNKNOWN"), pushed.body().toString());
+    }
+
+    /** Last, since every class on this profile shares one registry. */
+    @Test
+    @Order(14)
     void cleanUp() {
         call("DeleteRepository", "{\"repositoryName\":\"" + repo + "\",\"force\":true}").statusCode(200);
         call("DeleteRepository", "{\"repositoryName\":\"" + immutableRepo + "\",\"force\":true}").statusCode(200);
     }
 
     private String initiate(String repository) {
-        return call("InitiateLayerUpload", "{\"repositoryName\":\"" + repository + "\"}")
+        return initiate(null, repository);
+    }
+
+    private String initiate(String account, String repository) {
+        return callAs(account, "InitiateLayerUpload", "{\"repositoryName\":\"" + repository + "\"}")
                 .statusCode(200)
                 .body("partSize", equalTo(10 * MIB))
                 .extract().path("uploadId");
     }
 
     private static ValidatableResponse part(String repository, String uploadId, long first, byte[] bytes) {
-        return call("UploadLayerPart", "{\"repositoryName\":\"" + repository + "\",\"uploadId\":\"" + uploadId
+        return part(null, repository, uploadId, first, bytes);
+    }
+
+    private static ValidatableResponse part(String account, String repository, String uploadId, long first,
+                                            byte[] bytes) {
+        return callAs(account, "UploadLayerPart", "{\"repositoryName\":\"" + repository + "\",\"uploadId\":\"" + uploadId
                 + "\",\"partFirstByte\":" + first + ",\"partLastByte\":" + (first + bytes.length - 1)
                 + ",\"layerPartBlob\":\"" + Base64.getEncoder().encodeToString(bytes) + "\"}");
     }
 
     private static ValidatableResponse complete(String repository, String uploadId, String digest) {
-        return call("CompleteLayerUpload", "{\"repositoryName\":\"" + repository + "\",\"uploadId\":\"" + uploadId
+        return complete(null, repository, uploadId, digest);
+    }
+
+    private static ValidatableResponse complete(String account, String repository, String uploadId, String digest) {
+        return callAs(account, "CompleteLayerUpload", "{\"repositoryName\":\"" + repository + "\",\"uploadId\":\"" + uploadId
                 + "\",\"layerDigests\":[\"" + digest + "\"]}");
     }
 
@@ -404,13 +466,20 @@ class EcrImagePushApiDockerIntegrationTest {
     private record Fetched(int statusCode, String digest, Buffer body) {}
 
     private static ValidatableResponse call(String action, String body) {
-        return given()
+        return callAs(null, action, body);
+    }
+
+    /** A call as {@code account}, which a 12-digit access key selects, or as the default account when null. */
+    private static ValidatableResponse callAs(String account, String action, String body) {
+        RequestSpecification request = given()
                 .header("X-Amz-Target", PREFIX + action)
                 .contentType(CT)
-                .body(body)
-            .when()
-                .post("/")
-            .then();
+                .body(body);
+        if (account != null) {
+            request.header("Authorization", "AWS4-HMAC-SHA256 Credential=" + account
+                    + "/20261121/us-east-1/ecr/aws4_request");
+        }
+        return request.when().post("/").then();
     }
 
     private static byte[] randomBytes(int size) {

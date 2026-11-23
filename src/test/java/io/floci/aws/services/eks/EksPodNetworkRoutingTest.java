@@ -59,6 +59,18 @@ class EksPodNetworkRoutingTest {
     private static final Path IMDS_RELAY_PID_FILE = Path.of("/tmp/floci-imds-proxy.pid");
 
     @Test
+    void podRulesTakeSeveralSourceRangesSeparatedByCommas() {
+        String script = EksPodNetworkRouting.buildImdsForwardCommand("10.0.1.224/28,10.0.1.208/28", true,
+                "10.0.0.5", 9169)[2];
+
+        assertTrue(script.contains("-s 10.0.1.224/28,10.0.1.208/28 "), script);
+        assertThrows(IllegalArgumentException.class, () ->
+                EksPodNetworkRouting.buildImdsForwardCommand("10.0.1.224/28,bogus", true, "10.0.0.5", 9169));
+        assertThrows(IllegalArgumentException.class, () ->
+                EksPodNetworkRouting.buildImdsForwardCommand("10.0.1.224/28,", true, "10.0.0.5", 9169));
+    }
+
+    @Test
     void linkLocalEndpointValidatesInput() {
         assertThrows(NullPointerException.class, () -> new LinkLocalEndpoint(null, 80));
         assertThrows(IllegalArgumentException.class, () -> new LinkLocalEndpoint("", 80));
