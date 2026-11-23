@@ -4270,8 +4270,9 @@ public interface EmulatorConfig {
         /**
          * When true (and ECR is enabled), each new k3s cluster gets a generated
          * {@code /etc/rancher/k3s/registries.yaml} that mirrors every ECR repository URI the
-         * emulator can mint to the registry container's in-network endpoint, so pods can pull
-         * images pushed to Floci ECR without any manual containerd configuration.
+         * emulator can mint, and the cluster's and default account's registry hosts as AWS names
+         * them, to the registry container's in-network endpoint, so pods can pull images pushed to
+         * Floci ECR without any manual containerd configuration.
          */
         @WithDefault("true")
         boolean ecrRegistryMirror();

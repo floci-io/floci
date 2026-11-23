@@ -259,11 +259,13 @@ class EksClusterManagerTest {
         for (String region : AwsRegions.advertised("aws")) {
             assertTrue(yaml.contains("\"000000000000.dkr.ecr." + region + ".localhost:4566\":"),
                     "should mirror the " + region + " hostname");
+            assertTrue(yaml.contains("\"000000000000.dkr.ecr." + region + ".amazonaws.com\":"),
+                    "should mirror the account's " + region + " registry host as AWS names it");
         }
         assertTrue(yaml.contains("\"localhost:4566\":"), "should mirror the path-style form");
         assertFalse(yaml.contains("\"*\""), "must not catch-all public registries");
         long endpoints = yaml.lines().filter(l -> l.contains("- \"http://floci:4566\"")).count();
-        assertEquals(AwsRegions.advertised("aws").size() + 1, endpoints,
+        assertEquals(2L * AwsRegions.advertised("aws").size() + 1, endpoints,
                 "every mirror should point at Floci's in-network data plane");
     }
 
@@ -286,16 +288,17 @@ class EksClusterManagerTest {
         for (String region : AwsRegions.advertised("aws")) {
             assertTrue(yaml.contains("\"111122223333.dkr.ecr." + region + ".localhost:4577\":"));
             assertTrue(yaml.contains("\"111122223333.dkr.ecr." + region + ".localhost.floci.io:4577\":"));
+            assertTrue(yaml.contains("\"111122223333.dkr.ecr." + region + ".amazonaws.com\":"));
         }
         assertTrue(yaml.contains("\"localhost:4577\":"));
         assertTrue(yaml.contains("\"localhost.floci.io:4577\":"));
         assertFalse(yaml.contains("*"), "mirrors must not intercept unrelated registries");
-        assertFalse(yaml.contains("amazonaws.com"));
+        assertFalse(yaml.contains("amazonaws.com:"), "the AWS registry host carries no port");
         assertFalse(yaml.contains("docker.io"));
         assertFalse(yaml.contains("ghcr.io"));
         assertFalse(yaml.contains("https://"), "internal pulls still use the HTTP data plane");
         long endpoints = yaml.lines().filter(line -> line.contains("- \"" + endpoint + "\"")).count();
-        assertEquals(2L * (AwsRegions.advertised("aws").size() + 1), endpoints);
+        assertEquals(3L * AwsRegions.advertised("aws").size() + 2, endpoints);
     }
 
     @Test
@@ -316,11 +319,12 @@ class EksClusterManagerTest {
 
         for (String region : AwsRegions.advertised("aws-cn")) {
             assertTrue(yaml.contains("\"000000000000.dkr.ecr." + region + ".localhost:4566\":"), region);
+            assertTrue(yaml.contains("\"000000000000.dkr.ecr." + region + ".amazonaws.com.cn\":"), region);
         }
         assertTrue(yaml.contains("\"000000000000.dkr.ecr.cn-north-1.localhost:4566\":"));
         assertFalse(yaml.contains(".us-east-1."));
-        assertFalse(yaml.contains("amazonaws"), "repository URIs are Floci's localhost hosts in every partition");
-        assertEquals(AwsRegions.advertised("aws-cn").size() + 1,
+        assertFalse(yaml.contains(".amazonaws.com\""), "the China regions' registry hosts are under amazonaws.com.cn");
+        assertEquals(2L * AwsRegions.advertised("aws-cn").size() + 1,
                 yaml.lines().filter(line -> line.contains("- \"http://floci:4566\"")).count());
     }
 
@@ -330,12 +334,19 @@ class EksClusterManagerTest {
                 EksClusterManager.mirrorAccounts("111122223333", "000000000000"),
                 List.of("eu-central-1"), 4566, "http://floci:4566", false);
 
+        // Only these two accounts: another account's registry, such as the ones EKS add-on images come from, stays AWS's.
         assertEquals("""
                 mirrors:
                   "111122223333.dkr.ecr.eu-central-1.localhost:4566":
                     endpoint:
                       - "http://floci:4566"
+                  "111122223333.dkr.ecr.eu-central-1.amazonaws.com":
+                    endpoint:
+                      - "http://floci:4566"
                   "000000000000.dkr.ecr.eu-central-1.localhost:4566":
+                    endpoint:
+                      - "http://floci:4566"
+                  "000000000000.dkr.ecr.eu-central-1.amazonaws.com":
                     endpoint:
                       - "http://floci:4566"
                   "localhost:4566":
@@ -345,13 +356,16 @@ class EksClusterManagerTest {
     }
 
     @Test
-    void registriesYamlKeepsTheExistingOutputWhenTlsUrisAreDisabled() {
+    void registriesYamlHasNoTlsAliasesWhenTlsUrisAreDisabled() {
         String yaml = EksClusterManager.buildRegistriesYaml(
                 "111122223333", List.of("eu-central-1"), 4566, "http://floci:4566", false);
 
         assertEquals("""
                 mirrors:
                   "111122223333.dkr.ecr.eu-central-1.localhost:4566":
+                    endpoint:
+                      - "http://floci:4566"
+                  "111122223333.dkr.ecr.eu-central-1.amazonaws.com":
                     endpoint:
                       - "http://floci:4566"
                   "localhost:4566":
@@ -647,6 +661,7 @@ class EksClusterManagerTest {
         private ContainerBuilder containerBuilder;
         private ContainerBuilder.Builder builder;
         private ContainerDetector containerDetector;
+        private EcrRegistryManager registryManager;
         private EksClusterManager manager;
 
         @BeforeEach
@@ -677,9 +692,10 @@ class EksClusterManagerTest {
             when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
 
             containerDetector = Mockito.mock(ContainerDetector.class);
+            registryManager = Mockito.mock(EcrRegistryManager.class);
             manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                     containerDetector, portAllocator,
-                    Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
+                    Mockito.mock(DockerHostResolver.class), registryManager,
                     config, Mockito.mock(RegionResolver.class));
         }
 
@@ -874,6 +890,60 @@ class EksClusterManagerTest {
             verify(dockerClient).stopContainerCmd("cid-old");
             // The replacement is started behind the entrypoint that shares the node's mounts.
             verify(containerBuilder.newContainer("rancher/k3s:v1.30.0-k3s1")).withEntrypoint(EksClusterManager.RSHARE_ENTRYPOINT);
+        }
+
+        @Test
+        void replacesASurvivorStartedWithAnotherRegistryMirrorAndLabelsItsReplacement(@TempDir Path dataPath) {
+            Cluster cluster = mirroredCluster(dataPath);
+            String older = EksClusterManager.buildRegistriesYaml("000000000000", List.of("us-east-1"), 4566,
+                    "http://floci:4566");
+            restoreSurvivorWithMirror(EksClusterManager.registryMirrorLabel(older));
+            stubFreshStart("cid-new", 6440);
+
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<Map<String, String>> labels = ArgumentCaptor.forClass(Map.class);
+            verify(builder).withLabels(labels.capture());
+            assertEquals(EksClusterManager.registryMirrorLabel(manager.registriesYaml(cluster)),
+                    labels.getValue().get("io.floci.eks.registry-mirror"));
+        }
+
+        @Test
+        void keepsASurvivorStartedWithTheRegistryMirrorFlociGivesItNow(@TempDir Path dataPath) {
+            Cluster cluster = mirroredCluster(dataPath);
+            restoreSurvivorWithMirror(EksClusterManager.registryMirrorLabel(manager.registriesYaml(cluster)));
+
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-old", cluster.getContainerId());
+            verify(lifecycleManager, never()).create(any());
+        }
+
+        /** The cluster, with the registry mirror on and ECR enabled. */
+        private Cluster mirroredCluster(Path dataPath) {
+            EmulatorConfig.EcrServiceConfig ecr = Mockito.mock(EmulatorConfig.EcrServiceConfig.class);
+            when(config.services().ecr()).thenReturn(ecr);
+            when(ecr.enabled()).thenReturn(true);
+            when(config.services().eks().ecrRegistryMirror()).thenReturn(true);
+            when(config.services().eks().dataPath()).thenReturn(dataPath.toString());
+            when(config.port()).thenReturn(4566);
+            when(registryManager.advertisedPort()).thenReturn(4566);
+            Cluster cluster = cluster();
+            cluster.setAccountId("000000000000");
+            cluster.setArn("arn:aws:eks:us-east-1:000000000000:cluster/demo");
+            cluster.setDockerName("floci-eks-demo");
+            return cluster;
+        }
+
+        private void restoreSurvivorWithMirror(String mirrorLabel) {
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(containerFromJson(
+                    "{\"Id\":\"cid-old\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\","
+                            + "\"io.floci.eks.shared-mounts\":\"true\",\"io.floci.eks.registry-mirror\":\""
+                            + mirrorLabel + "\"}}")));
+            when(lifecycleManager.adopt(eq("cid-old"), eq(List.of(6443)), any()))
+                    .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
         }
 
         @Test
@@ -1717,10 +1787,14 @@ class EksClusterManagerTest {
             return cluster;
         }
 
+        /** Injects the mirror a node created now gets, as a launch does. */
+        private void inject(Cluster cluster) {
+            manager.injectEcrRegistryMirror("container-1", cluster, manager.startingRegistriesYaml(cluster));
+        }
+
         @Test
         void aDefaultCommercialClusterKeepsTheDeploymentWideMirror() throws Exception {
-            manager.injectEcrRegistryMirror("container-1",
-                    clusterWithArn("arn:aws:eks:us-east-1:000000000000:cluster/demo"));
+            inject(clusterWithArn("arn:aws:eks:us-east-1:000000000000:cluster/demo"));
 
             assertEquals(EksClusterManager.buildRegistriesYaml("000000000000", AwsRegions.advertised("aws"),
                     4566, "http://floci:4566"), Files.readString(tempDir.resolve("registries/000000000000/us-east-1/demo/registries.yaml")));
@@ -1728,8 +1802,7 @@ class EksClusterManagerTest {
 
         @Test
         void aChinaClusterInACommercialDeploymentMirrorsItsOwnPartitionsRegions() throws Exception {
-            manager.injectEcrRegistryMirror("container-1",
-                    clusterWithArn("arn:aws-cn:eks:cn-north-1:000000000000:cluster/demo"));
+            inject(clusterWithArn("arn:aws-cn:eks:cn-north-1:000000000000:cluster/demo"));
 
             String yaml = Files.readString(tempDir.resolve("registries/000000000000/cn-north-1/demo/registries.yaml"));
             assertTrue(yaml.contains("\"000000000000.dkr.ecr.cn-north-1.localhost:4566\":"));
@@ -1742,7 +1815,7 @@ class EksClusterManagerTest {
             Cluster cluster = clusterWithArn("arn:aws:eks:eu-west-1:111122223333:cluster/demo");
             cluster.setAccountId("111122223333");
 
-            manager.injectEcrRegistryMirror("container-1", cluster);
+            inject(cluster);
 
             String yaml = Files.readString(tempDir.resolve("registries/111122223333/eu-west-1/demo/registries.yaml"));
             assertTrue(yaml.contains("\"111122223333.dkr.ecr.eu-west-1.localhost:4566\":"));
@@ -1751,7 +1824,7 @@ class EksClusterManagerTest {
 
         @Test
         void injectsTheMirrorIntoTheContainer() throws Exception {
-            manager.injectEcrRegistryMirror("container-1", demoCluster());
+            inject(demoCluster());
 
             verify(registryManager).ensureStarted();
             verify(copyCmd).withRemotePath("/etc");
@@ -1767,7 +1840,7 @@ class EksClusterManagerTest {
             // k3s still reaches Floci on its own port inside the Docker network.
             when(registryManager.advertisedPort()).thenReturn(54321);
 
-            manager.injectEcrRegistryMirror("container-1", demoCluster());
+            inject(demoCluster());
 
             String yaml = Files.readString(manager.localClusterFile(demoCluster(), "registries", "registries.yaml"));
             assertTrue(yaml.contains("\"000000000000.dkr.ecr.us-east-1.localhost:54321\":"));
@@ -1784,7 +1857,7 @@ class EksClusterManagerTest {
             when(tls.enabled()).thenReturn(true);
             when(ecr.tlsUri()).thenReturn(true);
 
-            manager.injectEcrRegistryMirror("container-1", demoCluster());
+            inject(demoCluster());
 
             String yaml = Files.readString(manager.localClusterFile(demoCluster(), "registries", "registries.yaml"));
             assertTrue(yaml.contains("\"000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566\":"));
@@ -1800,7 +1873,7 @@ class EksClusterManagerTest {
             when(config.tls()).thenReturn(tls);
             when(ecr.tlsUri()).thenReturn(true);
 
-            manager.injectEcrRegistryMirror("container-1", demoCluster());
+            inject(demoCluster());
 
             String yaml = Files.readString(manager.localClusterFile(demoCluster(), "registries", "registries.yaml"));
             assertFalse(yaml.contains("localhost.floci.io"));
@@ -1812,7 +1885,7 @@ class EksClusterManagerTest {
         void skipsWhenTheKnobIsOff() {
             when(eks.ecrRegistryMirror()).thenReturn(false);
 
-            manager.injectEcrRegistryMirror("container-1", demoCluster());
+            inject(demoCluster());
 
             verifyNoInteractions(registryManager);
             verify(lifecycleManager, never()).getDockerClient();
@@ -1822,7 +1895,7 @@ class EksClusterManagerTest {
         void skipsWhenEcrIsDisabled() {
             when(ecr.enabled()).thenReturn(false);
 
-            manager.injectEcrRegistryMirror("container-1", demoCluster());
+            inject(demoCluster());
 
             verifyNoInteractions(registryManager);
             verify(lifecycleManager, never()).getDockerClient();
@@ -1832,7 +1905,7 @@ class EksClusterManagerTest {
         void registryStartupFailureSkipsTheMirrorWithoutAborting() {
             Mockito.doThrow(new RuntimeException("no docker")).when(registryManager).ensureStarted();
 
-            manager.injectEcrRegistryMirror("container-1", demoCluster());
+            inject(demoCluster());
 
             verify(lifecycleManager, never()).getDockerClient();
         }
@@ -1841,9 +1914,36 @@ class EksClusterManagerTest {
         void copyFailureDoesNotAbortClusterCreation() {
             when(copyCmd.exec()).thenThrow(new RuntimeException("copy failed"));
 
-            manager.injectEcrRegistryMirror("container-1", demoCluster());
+            inject(demoCluster());
 
             verify(copyCmd).exec();
+        }
+
+        @Test
+        void aSurvivorIsReplacedWhenItRunsAnotherMirrorThanFlociGivesItNow() {
+            Cluster cluster = demoCluster();
+            String current = manager.registriesYaml(cluster);
+
+            // Started with the mirror Floci gives it now: kept.
+            assertFalse(manager.registryMirrorChanged(cluster,
+                    Map.of("io.floci.eks.registry-mirror", EksClusterManager.registryMirrorLabel(current))));
+            // Started with one written before the mirror set grew: replaced.
+            String older = EksClusterManager.buildRegistriesYaml("000000000000", List.of("us-east-1"), 4566,
+                    "http://floci:4566");
+            assertTrue(manager.registryMirrorChanged(cluster,
+                    Map.of("io.floci.eks.registry-mirror", EksClusterManager.registryMirrorLabel(older))));
+            // Started before the label, or without a mirror: replaced, to get it.
+            assertTrue(manager.registryMirrorChanged(cluster, Map.of()));
+            assertTrue(manager.registryMirrorChanged(cluster, null));
+        }
+
+        @Test
+        void aSurvivorIsKeptWhenItsReplacementWouldGetNoMirrorEither() {
+            Mockito.doThrow(new RuntimeException("no docker")).when(registryManager).ensureStarted();
+            assertFalse(manager.registryMirrorChanged(demoCluster(), Map.of()), "the registry is unavailable");
+
+            when(eks.ecrRegistryMirror()).thenReturn(false);
+            assertFalse(manager.registryMirrorChanged(demoCluster(), Map.of()), "the mirror is off");
         }
     }
 

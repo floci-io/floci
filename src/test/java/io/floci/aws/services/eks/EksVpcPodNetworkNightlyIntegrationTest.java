@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.io.IOException;
 import java.net.URI;
@@ -40,8 +41,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * arguments, on a network standing in for Floci's and a second standing in for the VPC's: its pods take addresses from
  * both of its prefixes, and those answer another container on the VPC network and, on Linux, this JVM, the way Floci's
  * health checks and load balancers dial a {@code TargetType ip} target. It pulls k3s and busybox and runs fourteen pods,
- * so it runs nightly rather than in the pull request shards.
+ * so it runs with the nightly checks ({@code -Dnightly.checks.enabled=true}) rather than in the pull request shards.
  */
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class EksVpcPodNetworkNightlyIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(EksVpcPodNetworkNightlyIntegrationTest.class);

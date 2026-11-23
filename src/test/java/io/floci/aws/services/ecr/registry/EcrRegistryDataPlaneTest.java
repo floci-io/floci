@@ -117,6 +117,39 @@ class EcrRegistryDataPlaneTest {
     }
 
     @Test
+    void aMirrorRequestForAnAccountsAwsRegistryHostIsServedFromThatAccountsRepository() {
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor("172.17.0.1:4566",
+                "/v2/team/app/manifests/v1", "ns=111122223333.dkr.ecr.eu-west-1.amazonaws.com", "hostname").orElseThrow();
+
+        assertEquals("111122223333", request.accountId());
+        assertEquals("eu-west-1", request.region());
+        assertEquals("team/app", request.repositoryName());
+        assertEquals("111122223333/eu-west-1/team/app", request.storageRepositoryName());
+        assertEquals("v1", request.tag());
+        assertEquals("/v2/111122223333/eu-west-1/team/app/manifests/v1", request.backendUri());
+
+        EcrRegistryDataPlane.RegistryRequest china = EcrRegistryDataPlane.requestFor("172.17.0.1:4566",
+                "/v2/app/blobs/sha256:abc", "ns=111122223333.dkr.ecr.cn-north-1.amazonaws.com.cn", "hostname").orElseThrow();
+        assertEquals("cn-north-1", china.region());
+        assertEquals("/v2/111122223333/cn-north-1/app/blobs/sha256:abc", china.backendUri());
+    }
+
+    @Test
+    void anAwsRegistryHostIsServedOnlyAsAMirrorRequestsNamespaceInItsRegionsPartition() {
+        // A region under another partition's suffix names no registry.
+        assertFalse(EcrRegistryDataPlane.requestFor("172.17.0.1:4566", "/v2/app/manifests/v1",
+                "ns=111122223333.dkr.ecr.cn-north-1.amazonaws.com", "hostname").isPresent());
+        assertFalse(EcrRegistryDataPlane.requestFor("172.17.0.1:4566", "/v2/app/manifests/v1",
+                "ns=111122223333.dkr.ecr.us-east-1.amazonaws.com.cn", "hostname").isPresent());
+        // Another registry's namespace, such as a public registry's, is not Floci's.
+        assertFalse(EcrRegistryDataPlane.requestFor("172.17.0.1:4566", "/v2/library/nginx/manifests/1",
+                "ns=docker.io", "hostname").isPresent());
+        // A request sent to the AWS host itself is not a mirror request.
+        assertFalse(EcrRegistryDataPlane.requestFor("111122223333.dkr.ecr.us-east-1.amazonaws.com",
+                "/v2/app/manifests/v1", null, "hostname").isPresent());
+    }
+
+    @Test
     void malformedAccountOrNonEcrHostIsRejected() {
         // Less than 12 digits
         assertFalse(EcrRegistryDataPlane.requestFor(
