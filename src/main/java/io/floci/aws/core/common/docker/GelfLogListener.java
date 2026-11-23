@@ -17,13 +17,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
@@ -53,10 +54,6 @@ public class GelfLogListener {
 
     /** Label carrying a container's tag, so its log can be claimed when it is attached. */
     static final String LOG_TOKEN_LABEL = "io.floci.log-token";
-
-    /** Services whose containers run until deleted, the ones whose logs Floci reads rather than follows. */
-    static final Set<String> LONG_LIVED_SERVICES = Set.of("rds", "docdb", "neptune", "elasticache", "memorydb",
-            "msk", "redshift", "amazonmq", "kinesisanalytics", "ecr");
 
     private final DockerClient dockerClient;
     private final boolean enabled;
@@ -91,18 +88,65 @@ public class GelfLogListener {
     /**
      * The {@code gelf} log configuration that sends a container's log here under {@code token}. The daemon
      * sends from the moment the container starts, before its owner attaches, so the lines that arrive
-     * first are held (up to {@value #MAX_PENDING_LINES}) until it does.
+     * first are held (up to {@value #MAX_PENDING_LINES}) until it does. The json-file rotation the container
+     * would have had ({@code max-size}, {@code max-file}) bounds the daemon's local copy of the log instead.
      */
-    LogConfig logConfigFor(String token) {
+    LogConfig logConfigFor(String token, Map<String, String> jsonFileOptions) {
+        expireUnclaimed();
+        pending.put(token, new Pending(System.nanoTime(), new ArrayDeque<>()));
+        Map<String, String> options = new HashMap<>();
+        options.put("gelf-address", "tcp://" + ensureStarted());
+        options.put("tag", token);
+        if (jsonFileOptions != null) {
+            copyOption(jsonFileOptions, "max-size", options, "cache-max-size");
+            copyOption(jsonFileOptions, "max-file", options, "cache-max-file");
+        }
+        return new LogConfig(LogConfig.LoggingType.GELF, options);
+    }
+
+    private static void copyOption(Map<String, String> from, String key, Map<String, String> to, String as) {
+        String value = from.get(key);
+        if (value != null && !value.isBlank()) {
+            to.put(as, value);
+        }
+    }
+
+    private void expireUnclaimed() {
         long now = System.nanoTime();
         pending.values().removeIf(waiting -> now - waiting.issuedAt() > UNCLAIMED_EXPIRY.toNanos());
-        pending.put(token, new Pending(now, new ArrayDeque<>()));
-        return new LogConfig(LogConfig.LoggingType.GELF, Map.of(
-                "gelf-address", "tcp://" + ensureStarted(),
-                "tag", token));
+    }
+
+    /**
+     * Whether a container created with {@code gelfAddress} reaches this listener. After a restart of Floci
+     * the listener is not started yet, so it first tries the port an existing container still dials.
+     */
+    boolean listensAt(String gelfAddress) {
+        if (gelfAddress == null || !gelfAddress.startsWith("tcp://")) {
+            return false;
+        }
+        synchronized (startLock) {
+            if (address == null) {
+                int port;
+                try {
+                    port = Integer.parseInt(gelfAddress.substring(gelfAddress.lastIndexOf(':') + 1));
+                } catch (NumberFormatException e) {
+                    LOG.debugv("Unreadable GELF address {0}: {1}", gelfAddress, e.getMessage());
+                    return false;
+                }
+                try {
+                    start(port);
+                } catch (IllegalStateException e) {
+                    LOG.warnv("Could not listen again on {0}, the address an existing container sends its log to: {1}",
+                            gelfAddress, e.getCause() == null ? e.getMessage() : e.getCause().getMessage());
+                    return false;
+                }
+            }
+            return gelfAddress.equals("tcp://" + address);
+        }
     }
 
     void register(String token, BiConsumer<StreamType, String> sink) {
+        expireUnclaimed();
         Pending waiting = pending.get(token);
         if (waiting == null) {
             sinks.put(token, sink);
@@ -117,30 +161,58 @@ public class GelfLogListener {
         }
     }
 
-    void unregister(String token) {
-        sinks.remove(token);
-        pending.remove(token);
+    /** Removes {@code sink}, unless a later attach of the same container has replaced it. */
+    void unregister(String token, BiConsumer<StreamType, String> sink) {
+        if (sinks.remove(token, sink)) {
+            pending.remove(token);
+        }
     }
 
     /** Starts listening on first use and returns the {@code host:port} the daemon dials. */
     String ensureStarted() {
         synchronized (startLock) {
-            if (address != null) {
-                return address;
+            if (address == null) {
+                start(0);
             }
-            String host = configuredHost != null ? configuredHost : daemonFacingHost();
-            try {
-                ServerSocket socket = new ServerSocket();
-                socket.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0));
-                server = socket;
-            } catch (IOException e) {
-                throw new IllegalStateException("Could not open the Docker log-driver listener", e);
-            }
-            address = host + ":" + server.getLocalPort();
-            Thread.ofVirtual().name("floci-gelf-accept").start(this::acceptLoop);
-            LOG.infov("Long-lived service containers send their logs to Floci over GELF at {0}", address);
             return address;
         }
+    }
+
+    // Called holding startLock.
+    private void start(int port) {
+        String host = configuredHost != null ? configuredHost : daemonFacingHost();
+        try {
+            ServerSocket socket = new ServerSocket();
+            socket.bind(new InetSocketAddress(bindAddress(), port));
+            server = socket;
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not open the Docker log-driver listener", e);
+        }
+        address = host + ":" + server.getLocalPort();
+        Thread.ofVirtual().name("floci-gelf-accept").start(this::acceptLoop);
+        LOG.infov("Long-lived service containers send their logs to Floci over GELF at {0}", address);
+    }
+
+    /**
+     * Loopback, unless {@code log-driver-host} names an address of this host (Floci's address on a Docker
+     * network, say), which the listener then binds so the daemon's connection reaches it.
+     */
+    private InetAddress bindAddress() {
+        InetAddress loopback = InetAddress.getLoopbackAddress();
+        if (configuredHost == null) {
+            return loopback;
+        }
+        try {
+            InetAddress configured = InetAddress.getByName(configuredHost);
+            if (configured.isLoopbackAddress() || NetworkInterface.getByInetAddress(configured) != null) {
+                return configured;
+            }
+        } catch (IOException e) {
+            LOG.debugv("Could not resolve log-driver-host {0}: {1}", configuredHost, e.getMessage());
+        }
+        LOG.warnv("log-driver-host {0} is not an address of this host, so the log-driver listener stays on "
+                + "loopback; the daemon reaches it only if {0} forwards to this host's loopback", configuredHost);
+        return loopback;
     }
 
     // Docker Desktop's daemon runs in a VM and reaches the host through host.docker.internal; a daemon on
@@ -211,6 +283,11 @@ public class GelfLogListener {
         if (sink == null) {
             Pending waiting = pending.get(token);
             if (waiting == null) {
+                // register may have moved the pending lines to the sink between the two reads.
+                sink = sinks.get(token);
+                if (sink != null) {
+                    sink.accept(stream, line);
+                }
                 return;
             }
             synchronized (waiting) {

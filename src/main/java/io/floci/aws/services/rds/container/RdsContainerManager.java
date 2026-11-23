@@ -389,6 +389,10 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     .withLogRotation()
                     .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                             "rds", instanceId, runtimeIdentity.accountId(), runtimeIdentity.region()));
+            if (!ephemeral) {
+                // Only a container whose log is attached below gets it pushed; an ephemeral one is never read.
+                specBuilder.withPushedLogs();
+            }
 
             if (!containerDetector.isRunningInContainer()) {
                 specBuilder.withDynamicPort(enginePort);

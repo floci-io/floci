@@ -2,8 +2,11 @@ package io.floci.aws.core.common.docker;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.LogContainerCmd;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.StreamType;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
@@ -204,30 +207,42 @@ public class ContainerLogStreamer {
     /**
      * In the log-driver mode, a container created with Floci's {@code gelf} log configuration pushes its
      * log, so it is claimed by its tag instead of read; null when the mode is off or the container was not
-     * created for it (one started before the mode was turned on).
+     * created for it (one started before the mode was turned on). A container that still sends to the
+     * address of a listener this Floci no longer has is read on a timer instead, from the daemon's local copy.
      */
     private Closeable attachPushed(String containerId, BiConsumer<StreamType, String> sink) {
         if (gelfLogListener == null || !gelfLogListener.isResolvable() || !gelfLogListener.get().enabled()) {
             return null;
         }
         GelfLogListener listener = gelfLogListener.get();
-        String token;
+        InspectContainerResponse inspect;
         try {
-            Map<String, String> labels = pollingDockerClient.inspectContainerCmd(containerId).exec()
-                    .getConfig().getLabels();
-            token = labels == null ? null : labels.get(GelfLogListener.LOG_TOKEN_LABEL);
+            inspect = pollingDockerClient.inspectContainerCmd(containerId).exec();
+        } catch (NotFoundException e) {
+            LOG.debugv("Container {0} is gone before its log was attached: {1}", containerId, e.getMessage());
+            return null;
         } catch (RuntimeException e) {
-            LOG.debugv("Could not read the log tag of container {0}; reading its log instead: {1}",
-                    containerId, e.getMessage());
+            LOG.warnv("Could not read the log tag of container {0}; reading its log on a timer instead, which "
+                    + "needs the daemon's local copy of a pushed log: {1}", containerId, e.getMessage());
             return null;
         }
+        Map<String, String> labels = inspect.getConfig() == null ? null : inspect.getConfig().getLabels();
+        String token = labels == null ? null : labels.get(GelfLogListener.LOG_TOKEN_LABEL);
         if (token == null) {
+            return null;
+        }
+        LogConfig logConfig = inspect.getHostConfig() == null ? null : inspect.getHostConfig().getLogConfig();
+        String gelfAddress = logConfig == null || logConfig.getConfig() == null
+                ? null : logConfig.getConfig().get("gelf-address");
+        if (!listener.listensAt(gelfAddress)) {
+            LOG.warnv("Container {0} sends its log to {1}, where this Floci does not listen; reading its log on a "
+                    + "timer instead, from the daemon's local copy", containerId, gelfAddress);
             return null;
         }
         listener.register(token, sink);
         // The daemon may still be sending the last lines when the container's owner closes the handle.
         return () -> CompletableFuture.delayedExecutor(LogReassemblyCallback.DEFAULT_CLOSE_GRACE_MILLIS,
-                TimeUnit.MILLISECONDS).execute(() -> listener.unregister(token));
+                TimeUnit.MILLISECONDS).execute(() -> listener.unregister(token, sink));
     }
 
     /**

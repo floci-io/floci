@@ -167,6 +167,7 @@ public class FlinkContainerManager {
                 .withHostDockerInternalOnLinux()
                 .withEmbeddedDns()
                 .withLogRotation()
+                .withPushedLogs()
                 .withJavaTrustStore()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "kinesisanalytics", app.getApplicationName(),

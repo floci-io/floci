@@ -267,6 +267,7 @@ public class ContainerBuilder {
         private String dnsName;
         private final List<String> joinedNetworks = new ArrayList<>();
         private GelfLogListener logDriver;
+        private boolean pushedLogs;
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
                 EmbeddedDnsServer embeddedDnsServer,
@@ -620,6 +621,16 @@ public class ContainerBuilder {
         }
 
         /**
+         * Marks a container whose owner attaches its log with one of the {@code attachPolled} methods of
+         * {@link ContainerLogStreamer}. In the opt-in log-driver mode the daemon then pushes that log to Floci
+         * instead of Floci reading it on a timer; a container nobody attaches keeps its json-file log.
+         */
+        public Builder withPushedLogs() {
+            this.pushedLogs = true;
+            return this;
+        }
+
+        /**
          * Sets a custom log configuration.
          */
         public Builder withLogConfig(LogConfig logConfig) {
@@ -878,14 +889,13 @@ public class ContainerBuilder {
         public ContainerSpec build() {
             LogConfig effectiveLogConfig = logConfig;
             Map<String, String> effectiveLabels = labels;
-            String service = labels.get(ContainerStorageHelper.SERVICE_LABEL);
-            if (logDriver != null && logConfig != null && logConfig.getType() == LogConfig.LoggingType.JSON_FILE
-                    && service != null && GelfLogListener.LONG_LIVED_SERVICES.contains(service)) {
-                // The opt-in log-driver mode: the daemon pushes this service container's log to Floci.
+            if (pushedLogs && logDriver != null && logConfig != null
+                    && logConfig.getType() == LogConfig.LoggingType.JSON_FILE) {
+                // The opt-in log-driver mode: the daemon pushes this container's log to Floci.
                 String token = GelfLogListener.newToken();
                 effectiveLabels = new HashMap<>(labels);
                 effectiveLabels.put(GelfLogListener.LOG_TOKEN_LABEL, token);
-                effectiveLogConfig = logDriver.logConfigFor(token);
+                effectiveLogConfig = logDriver.logConfigFor(token, logConfig.getConfig());
             }
             return new ContainerSpec(
                     image,

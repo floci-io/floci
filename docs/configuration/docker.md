@@ -254,7 +254,13 @@ Environment variable: `FLOCI_DOCKER_LOG_POLL_INTERVAL_MILLIS` (at least 100)
 
 ### Log-driver mode (opt-in)
 
-With `log-driver-mode` on, the long-lived service containers of RDS, DocumentDB, Neptune, ElastiCache, MemoryDB, MSK, Redshift, Amazon MQ, Managed Flink and the ECR registry are started with Docker's `gelf` log driver pointed at a listener in Floci, so the daemon pushes each line as it is written: no reads on a timer and no Docker connection held for the container's log. Docker opens that connection itself, from wherever the daemon runs, so the mode only works when the daemon can reach Floci: Docker Desktop, which dials `host.docker.internal`, or a daemon on Floci's own host, which dials `127.0.0.1`. It does not work with Docker-in-Docker, a remote daemon, or Floci running in a container whose port the daemon cannot reach, and when the daemon cannot connect, the container fails to start. `docker logs` on these containers keeps working only where the daemon keeps a local copy (dual logging, on by default since Docker Engine 20.10). `log-driver-host` overrides the host the daemon dials:
+With `log-driver-mode` on, the long-lived service containers whose logs Floci forwards (RDS, DocumentDB, Neptune, ElastiCache, MemoryDB, MSK, Redshift, Amazon MQ, the Managed Flink JobManager and the ECR registry) are started with Docker's `gelf` log driver pointed at a listener in Floci, so the daemon pushes each line as it is written: no reads on a timer and no Docker connection held for the container's log. Containers whose log Floci never reads, such as Flink TaskManagers and ephemeral RDS instances, keep the `json-file` driver.
+
+Docker opens that connection itself, from wherever the daemon runs, so the mode only works when the daemon can reach Floci: Docker Desktop, which dials `host.docker.internal`, or a daemon on Floci's own host, which dials `127.0.0.1`. It does not work with Podman (which has no `gelf` driver), Docker-in-Docker, a remote daemon, or Floci running in a container whose port the daemon cannot reach, and when the daemon cannot connect, the container fails to start.
+
+The daemon's local copy of the log (dual logging, on by default since Docker Engine 20.10) is what `docker logs`, the RDS log-file APIs and the fallback below read, so keep it on; `log-max-size` and `log-max-file` bound it. A container kept across a restart of Floci still dials the previous listener's port: Floci listens on that port again when it is free, and otherwise logs a warning and reads that container's log on a timer from the local copy.
+
+`log-driver-host` overrides the host the daemon dials. When it names an address of Floci's own host (Floci's address on a Docker network, for example), the listener binds that address instead of loopback; the listener has no authentication beyond each container's random tag, so only point it at a network you trust:
 
 ```yaml
 floci:

@@ -2,35 +2,46 @@ package io.floci.aws.core.common.docker;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.InspectContainerCmd;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.LogContainerCmd;
+import com.github.dockerjava.api.model.ContainerConfig;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.HostConfig;
+import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.StreamType;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.testutil.LogCapture;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
+import java.io.ByteArrayInputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
+import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -129,6 +140,80 @@ class ContainerLogStreamerTest {
 
         verify(cloudWatchLogsService).putLogEventsForAccount(
                 eq("555555555555"), eq("/aws/lambda/example"), eq("stream"), anyList(), eq("us-east-1"));
+    }
+
+    private static DockerClient dockerWithLogTag(String containerId, String token, String gelfAddress) {
+        DockerClient docker = mock(DockerClient.class);
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse response = mock(InspectContainerResponse.class);
+        ContainerConfig containerConfig = mock(ContainerConfig.class);
+        when(docker.inspectContainerCmd(containerId)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(response);
+        when(response.getConfig()).thenReturn(containerConfig);
+        when(containerConfig.getLabels()).thenReturn(Map.of(GelfLogListener.LOG_TOKEN_LABEL, token));
+        when(response.getHostConfig()).thenReturn(new HostConfig().withLogConfig(
+                new LogConfig(LogConfig.LoggingType.GELF, Map.of("gelf-address", gelfAddress))));
+        when(docker.logContainerCmd(containerId)).thenReturn(mock(LogContainerCmd.class, RETURNS_SELF));
+        return docker;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ContainerLogStreamer streamerWith(DockerClient docker, CloudWatchLogsService cloudWatch,
+                                                     GelfLogListener listener) {
+        ContainerLogStreamer streamer = new ContainerLogStreamer(docker, docker, cloudWatch, Duration.ofHours(1));
+        Instance<GelfLogListener> instance = mock(Instance.class);
+        when(instance.isResolvable()).thenReturn(true);
+        when(instance.get()).thenReturn(listener);
+        streamer.gelfLogListener = instance;
+        return streamer;
+    }
+
+    // Catches: a container tagged for the log-driver mode not claimed by the listener, so its pushed log
+    // never reaches CloudWatch Logs.
+    @Test
+    void aTaggedContainerDialingThisListenerHasItsLogPushed() throws IOException {
+        GelfLogListener listener = new GelfLogListener(mock(DockerClient.class), true, "127.0.0.1");
+        try {
+            String address = listener.logConfigFor("token-a", Map.of()).getConfig().get("gelf-address");
+            CloudWatchLogsService cloudWatch = mock(CloudWatchLogsService.class);
+            ContainerLogStreamer streamer = streamerWith(
+                    dockerWithLogTag("container-1", "token-a", address), cloudWatch, listener);
+
+            Closeable handle = streamer.attachPolled("container-1", "/aws/rds/instance/db/error", "stream",
+                    "us-east-1", "rds:db");
+            listener.readMessages(new ByteArrayInputStream(
+                    utf8("{\"short_message\":\"ready\",\"level\":6,\"_tag\":\"token-a\"}\0")));
+
+            assertFalse(handle instanceof PolledLogHandle, "the log is pushed, not read on a timer");
+            verify(cloudWatch).putLogEventsForAccount(any(), eq("/aws/rds/instance/db/error"), eq("stream"),
+                    argThat(events -> "ready".equals(events.getFirst().get("message"))), eq("us-east-1"));
+        } finally {
+            listener.close();
+        }
+    }
+
+    // Catches: a container kept across a restart of Floci, which still dials the old listener's address,
+    // attached to a listener that never hears from it, instead of being read on a timer with a warning.
+    @Test
+    void aContainerDialingAnotherListenerIsReadOnATimerWithAWarning() throws IOException {
+        GelfLogListener listener = new GelfLogListener(mock(DockerClient.class), true, "127.0.0.1");
+        try {
+            listener.ensureStarted();
+            ContainerLogStreamer streamer = streamerWith(
+                    dockerWithLogTag("container-1", "token-a", "tcp://127.0.0.1:1"),
+                    mock(CloudWatchLogsService.class), listener);
+            List<Closeable> handles = new ArrayList<>();
+
+            List<LogRecord> records = LogCapture.capture(ContainerLogStreamer.class, () -> handles.add(
+                    streamer.attachPolled("container-1", "/aws/rds/instance/db/error", "stream", "us-east-1",
+                            "rds:db")));
+
+            assertInstanceOf(PolledLogHandle.class, handles.getFirst());
+            assertTrue(records.stream().anyMatch(record -> record.getLevel().intValue() >= Level.WARNING.intValue()), records.toString());
+            handles.getFirst().close();
+        } finally {
+            listener.close();
+        }
     }
 
     @Test
