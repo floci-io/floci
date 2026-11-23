@@ -264,7 +264,7 @@ public class SpectrumQueryPreparation {
             rejectTransaction(session);
             List<KinesisViewBinding> dependents = views.overSchema(session, schema.schemaName());
             dropStreamingSchema(schema, kinesis.get(schema.schemaName()), kinesisSchemas,
-                    dependents.stream().map(dependent -> KinesisStreamingViews.dropSql(dependent, true, true)).toList(),
+                    dependents.stream().map(dependent -> StreamingViewSupport.dropSql(dependent.viewSchema(), dependent.viewName(), true, true)).toList(),
                     () -> dependents.forEach(views::unbindIfCurrent), session, backend);
             return true;
         }
@@ -275,7 +275,7 @@ public class SpectrumQueryPreparation {
             mskViews.exclusivelyOnSchema(session, schema.schemaName(), () -> {
                 List<MskViewBinding> dependents = mskViews.overSchema(session, schema.schemaName());
                 dropStreamingSchema(schema, msk.get(schema.schemaName()), mskSchemas,
-                        dependents.stream().map(dependent -> MskStreamingViews.dropSql(dependent, true, true)).toList(),
+                        dependents.stream().map(dependent -> StreamingViewSupport.dropSql(dependent.viewSchema(), dependent.viewName(), true, true)).toList(),
                         () -> dependents.forEach(mskViews::unbindIfCurrent), session, backend);
             });
             return true;

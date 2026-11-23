@@ -42,6 +42,9 @@ import java.util.Optional;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static io.floci.aws.services.redshift.spectrum.StreamingViewSupport.schemaOrDefault;
+import static io.floci.aws.services.redshift.spectrum.StreamingViewSupport.table;
+
 /**
  * Streaming materialized views over Amazon MSK topics. A view is a PostgreSQL table, and the topic's relation of
  * its external schema is a staging table of Redshift's eight Kafka metadata columns. A refresh reads each
@@ -60,8 +63,6 @@ public class MskStreamingViews {
 
     private static final Logger LOG = Logger.getLogger(MskStreamingViews.class);
 
-    /** The schema an unqualified view name is created in. */
-    static final String DEFAULT_VIEW_SCHEMA = "public";
     static final String GROUP_PREFIX = "floci-redshift-msk-";
     static final Duration POLL_TIMEOUT = Duration.ofSeconds(1);
     /**
@@ -72,7 +73,6 @@ public class MskStreamingViews {
 
     private static final String REDSHIFT_PRINCIPAL = ServicePrincipals.of("redshift");
     private static final String BROKER_UNAVAILABLE = "58030";
-    private static final int BATCH_BYTES = 4 * 1024 * 1024;
     private static final String EARLIEST = "earliest";
     private static final String TIMESTAMP_CREATE_TIME = "C";
     private static final String TIMESTAMP_UNKNOWN = "U";
@@ -85,7 +85,7 @@ public class MskStreamingViews {
     private final KafkaRestClient restClient;
     private final ServiceRoleAuthorizer authorizer;
     private final Clock clock;
-    private final Map<String, Object> topicLocks = new ConcurrentHashMap<>();
+    private final StreamingViewSupport<MskViewBinding> support;
     private final Map<String, Object> schemaLocks = new ConcurrentHashMap<>();
 
     @Inject
@@ -97,6 +97,8 @@ public class MskStreamingViews {
         this.restClient = restClient;
         this.authorizer = authorizer;
         this.clock = clock;
+        this.support = new StreamingViewSupport<>(registry, MskViewBinding::viewSchema, MskViewBinding::viewName,
+                MskViewBinding::topicSchema, MskViewBinding::topicName);
     }
 
     public Optional<MskViewBinding> find(SpectrumSession session, String viewSchema, String viewName) {
@@ -115,57 +117,17 @@ public class MskStreamingViews {
     }
 
     public void unbind(MskViewBinding view) {
-        registry.unbind(view.accountId(), view.clusterKey(), view.databaseName(), view.bindingName());
+        support.unbind(view);
     }
 
     /** Unbinds a view captured earlier, unless a view of the same name over another topic has replaced it. */
     public void unbindIfCurrent(MskViewBinding captured) {
-        synchronized (topicLock(captured.accountId(), captured.clusterKey(), captured.databaseName(),
-                captured.topicSchema(), captured.topicName())) {
-            registry.find(captured.accountId(), captured.clusterKey(), captured.databaseName(),
-                    captured.bindingName()).filter(current -> readsSameTopic(current, captured))
-                    .ifPresent(this::unbind);
-        }
+        support.unbindIfCurrent(captured);
     }
 
-    private static boolean readsSameTopic(MskViewBinding first, MskViewBinding second) {
-        return first.topicSchema().equals(second.topicSchema()) && first.topicName().equals(second.topicName());
-    }
-
-    /** The SQL that drops a view's table, for the statement that drops a schema it reads from. */
-    static String dropSql(MskViewBinding view, boolean ifExists, boolean cascade) {
-        return "DROP TABLE " + (ifExists ? "IF EXISTS " : "") + table(view.viewSchema(), view.viewName())
-                + (cascade ? " CASCADE" : " RESTRICT");
-    }
-
-    /**
-     * Drops a view's table and its binding, and the topic's staging table once no other view reads the topic.
-     * Without that, a plain DROP SCHEMA of the topic's schema would keep failing on the leftover table.
-     */
+    /** Drops a view's table and its binding, and the topic's staging table once no other view reads the topic. */
     public void drop(MskViewBinding named, boolean ifExists, boolean cascade, BackendSql backend) {
-        synchronized (topicLock(named.accountId(), named.clusterKey(), named.databaseName(), named.topicSchema(),
-                named.topicName())) {
-            // the binding read before the lock may be gone or replaced by a view of the same name since
-            Optional<MskViewBinding> registered = registry.find(named.accountId(), named.clusterKey(),
-                    named.databaseName(), named.bindingName());
-            if (registered.isEmpty() || !readsSameTopic(registered.get(), named)) {
-                if (ifExists) {
-                    return;
-                }
-                throw new SpectrumSqlException("42P01", "materialized view \"" + named.viewSchema() + "."
-                        + named.viewName() + "\" does not exist");
-            }
-            MskViewBinding view = registered.get();
-            boolean lastReader = registry.list(view.accountId(), view.clusterKey(), view.databaseName()).stream()
-                    .noneMatch(other -> !other.bindingName().equals(view.bindingName())
-                            && readsSameTopic(other, view));
-            String sql = dropSql(view, ifExists, cascade);
-            if (lastReader) {
-                sql += "; DROP TABLE IF EXISTS " + table(view.topicSchema(), view.topicName());
-            }
-            backend.execute(sql);
-            unbind(view);
-        }
+        support.drop(named, ifExists, cascade, backend);
     }
 
     /**
@@ -195,7 +157,7 @@ public class MskStreamingViews {
     private void createLocked(ExternalStatement.CreateStreamingView statement, String topicName,
                               MskSchemaBinding schema, SpectrumSession session, BackendSql backend) {
         String viewSchema = schemaOrDefault(statement.viewSchema());
-        synchronized (topicLock(session.accountId(), session.clusterKey(), session.databaseName(),
+        synchronized (support.lock(session.accountId(), session.clusterKey(), session.databaseName(),
                 schema.schemaName(), topicName)) {
             if (find(session, viewSchema, statement.viewName()).isPresent()) {
                 throw new SpectrumSqlException("42P07", "relation \"" + viewSchema + "." + statement.viewName()
@@ -226,13 +188,12 @@ public class MskStreamingViews {
     /** Loads what the topic holds past each partition's checkpoint into the view; returns the records loaded. */
     public long refresh(MskViewBinding view, MskSchemaBinding schema, BackendSql backend) {
         // refreshes of the views over one topic share its staging table, so they run one at a time
-        synchronized (topicLock(view.accountId(), view.clusterKey(), view.databaseName(), view.topicSchema(),
-                view.topicName())) {
+        synchronized (support.lock(view)) {
             // the binding read before the lock may be stale: a refresh ahead of this one moved the checkpoints
             MskViewBinding latest = registry.find(view.accountId(), view.clusterKey(), view.databaseName(),
                     view.bindingName()).orElseThrow(() -> new SpectrumSqlException("42P01",
                             "relation \"" + view.viewSchema() + "." + view.viewName() + "\" does not exist"));
-            if (!readsSameTopic(latest, view)) {
+            if (!support.readsSameSource(latest, view)) {
                 // dropped and created again over another topic while this refresh waited: that view has its own
                 // topic's lock, and this call holds another one
                 throw new SpectrumSqlException("42P01", "materialized view \"" + view.viewSchema() + "."
@@ -246,12 +207,6 @@ public class MskStreamingViews {
     static String groupOf(MskViewBinding view) {
         return GROUP_PREFIX + Digests.sha256Hex(String.join("\u001f", view.accountId(), view.clusterKey(),
                 view.databaseName(), view.viewSchema(), view.viewName())).substring(0, 16);
-    }
-
-    private Object topicLock(String accountId, String clusterKey, String database, String topicSchema,
-                             String topicName) {
-        return topicLocks.computeIfAbsent(String.join("\u001f", accountId, clusterKey, database, topicSchema,
-                topicName), key -> new Object());
     }
 
     private Object schemaLock(String accountId, String clusterKey, String database, String schemaName) {
@@ -327,7 +282,8 @@ public class MskStreamingViews {
                 continue;
             }
             idlePolls = 0;
-            for (List<KafkaRecordDto> batch : batches(records)) {
+            for (List<KafkaRecordDto> batch : StreamingViewSupport.batches(records,
+                    record -> length(record.key()) + length(record.value()))) {
                 backend.execute(loadSql(view, batch, refreshTime));
                 Map<Integer, Long> lastLoaded = new TreeMap<>();
                 for (KafkaRecordDto record : batch) {
@@ -462,25 +418,6 @@ public class MskStreamingViews {
         return error;
     }
 
-    /** Splits a poll so no statement carries more than about {@value #BATCH_BYTES} bytes of record data. */
-    private static List<List<KafkaRecordDto>> batches(List<KafkaRecordDto> records) {
-        List<List<KafkaRecordDto>> batches = new ArrayList<>();
-        List<KafkaRecordDto> batch = new ArrayList<>();
-        long bytes = 0;
-        for (KafkaRecordDto record : records) {
-            long size = length(record.key()) + length(record.value());
-            if (!batch.isEmpty() && bytes + size > BATCH_BYTES) {
-                batches.add(batch);
-                batch = new ArrayList<>();
-                bytes = 0;
-            }
-            batch.add(record);
-            bytes += size;
-        }
-        batches.add(batch);
-        return batches;
-    }
-
     private static long length(byte[] bytes) {
         return bytes == null ? 0 : bytes.length;
     }
@@ -534,13 +471,5 @@ public class MskStreamingViews {
 
     private static String timestamp(Instant instant) {
         return "TIMESTAMP '" + TIMESTAMP.format(instant.atOffset(ZoneOffset.UTC)) + "'";
-    }
-
-    private static String schemaOrDefault(String schema) {
-        return schema == null ? DEFAULT_VIEW_SCHEMA : schema;
-    }
-
-    private static String table(String schema, String name) {
-        return ExternalTableMaterializer.quote(schema) + "." + ExternalTableMaterializer.quote(name);
     }
 }

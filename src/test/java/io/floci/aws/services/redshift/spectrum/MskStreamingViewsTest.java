@@ -549,7 +549,11 @@ class MskStreamingViewsTest {
         dropping.await();
         Thread create = Thread.ofVirtual().start(() -> views.create(createStatement(), "orders", SCHEMA, SESSION, backend));
 
-        create.join(300);
+        // the create is parked on the schema lock the drop holds, which is what keeps the view from existing yet
+        while (create.getState() != Thread.State.BLOCKED) {
+            assertThat(create.isAlive(), is(true));
+            Thread.onSpinWait();
+        }
 
         assertThat(create.isAlive(), is(true));
         assertThat(registry.list(ACCOUNT, SESSION.clusterKey(), "dev"), hasSize(0));
