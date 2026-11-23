@@ -240,7 +240,7 @@ class SpectrumMskSchemaPreparationTest {
     }
 
     @Test
-    void refusesCreateExternalTableAndStreamingMaterializedViewsOverAnMskSchema() {
+    void refusesCreateExternalTableOverAnMskSchema() {
         preparation.prepare(CREATE, SESSION, backend);
         String createTable = "CREATE EXTERNAL TABLE msk.orders (id INT) STORED AS TEXTFILE LOCATION 's3://bucket/orders/'";
         assertThat(preparation.handlesDdl(createTable, SESSION), equalTo(true));
@@ -248,13 +248,6 @@ class SpectrumMskSchemaPreparationTest {
                 () -> preparation.prepare(createTable, SESSION, backend));
         assertThat(tableError.sqlState(), equalTo("0A000"));
         assertThat(tableError.getMessage(), containsString("CREATE EXTERNAL TABLE"));
-
-        String createMv = "CREATE MATERIALIZED VIEW mv AS SELECT * FROM msk.orders";
-        assertThat(preparation.handlesDdl(createMv, SESSION), equalTo(true));
-        SpectrumSqlException mvError = assertThrows(SpectrumSqlException.class,
-                () -> preparation.prepare(createMv, SESSION, backend));
-        assertThat(mvError.sqlState(), equalTo("0A000"));
-        assertThat(mvError.getMessage(), containsString("Streaming materialized views over MSK"));
     }
 
     @Test
@@ -269,7 +262,7 @@ class SpectrumMskSchemaPreparationTest {
                 () -> preparation.prepare(mixed, SESSION, backend));
 
         assertThat(error.sqlState(), equalTo("0A000"));
-        assertThat(error.getMessage(), containsString("Streaming materialized views over MSK"));
+        assertThat(error.getMessage(), containsString("exactly one stream or topic"));
         verifyNoInteractions(kinesisService, backend);
     }
 

@@ -109,6 +109,31 @@ public class KafkaRestClient {
         return partitions;
     }
 
+    /**
+     * The first and next offset of one partition ({@code GET /topics/{topic}/partitions/{id}/offsets}), so a
+     * caller can read exactly up to where the partition ends now. A missing topic raises
+     * {@link KafkaTopicNotFoundException}; Karapace answers a missing partition with 40402, which stays a
+     * {@link KafkaRestClientException}.
+     */
+    public KafkaPartitionOffsets partitionOffsets(URI restBaseUri, String topic, int partition) {
+        JsonNode response;
+        try {
+            response = send("GET", restBaseUri.resolve("topics/" + urlEncode(topic) + "/partitions/" + partition
+                    + "/offsets"), null);
+        } catch (KafkaRestClientException e) {
+            if (e.getStatusCode() == 404 && isTopicNotFoundError(e.getResponseBody())) {
+                throw new KafkaTopicNotFoundException(topic, e);
+            }
+            throw e;
+        }
+        if (!response.path("beginning_offset").isIntegralNumber() || !response.path("end_offset").isIntegralNumber()) {
+            throw new KafkaRestClientException("GET", "topics/" + topic + "/partitions/" + partition + "/offsets",
+                    200, "no beginning_offset and end_offset in " + response);
+        }
+        return new KafkaPartitionOffsets(response.path("beginning_offset").asLong(),
+                response.path("end_offset").asLong());
+    }
+
     private boolean isTopicNotFoundError(String responseBody) {
         if (responseBody == null || responseBody.isBlank()) {
             return false;
