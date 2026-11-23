@@ -1711,13 +1711,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     var req = rc.request();
                     if (req != null) {
                         userAgent = req.getHeader("User-Agent");
-                        String fwd = req.getHeader("X-Forwarded-For");
-                        if (fwd != null && !fwd.isBlank()) {
-                            int comma = fwd.indexOf(',');
-                            sourceIp = (comma > 0 ? fwd.substring(0, comma) : fwd).trim();
-                        } else if (req.remoteAddress() != null) {
-                            sourceIp = req.remoteAddress().host();
-                        }
+                        sourceIp = RequestSourceAddress.of(req);
                     }
                 }
             } catch (Exception e) {

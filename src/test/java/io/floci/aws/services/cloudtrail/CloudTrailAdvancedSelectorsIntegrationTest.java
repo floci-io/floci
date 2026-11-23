@@ -2,7 +2,6 @@ package io.floci.aws.services.cloudtrail;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -11,6 +10,7 @@ import java.io.ByteArrayInputStream;
 import java.util.UUID;
 import java.util.zip.GZIPInputStream;
 
+import static io.floci.aws.services.cloudtrail.CloudTrailRequests.invokeCloudTrail;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -30,9 +30,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @QuarkusTest
 class CloudTrailAdvancedSelectorsIntegrationTest {
-
-    private static final String CT_TARGET = "CloudTrail_20131101.";
-    private static final String JSON11 = "application/x-amz-json-1.1";
 
     @Inject
     CloudTrailLogWriter writer;
@@ -160,14 +157,6 @@ class CloudTrailAdvancedSelectorsIntegrationTest {
     }
 
     // --- Helpers ---
-
-    private static Response invokeCloudTrail(String action, String body) {
-        return given()
-                .header("X-Amz-Target", CT_TARGET + action)
-                .contentType(JSON11)
-                .body(body)
-                .when().post("/");
-    }
 
     private static void createBucket(String name) {
         given().when().put("/" + name).then().statusCode(200);
