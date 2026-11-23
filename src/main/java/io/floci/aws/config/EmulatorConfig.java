@@ -3827,9 +3827,11 @@ public interface EmulatorConfig {
             /**
              * Seconds a Lambda pod the scheduler marks Unschedulable may stay that way before
              * its cold start is failed, so a cluster autoscaler has time to add a node. The
-             * grace is measured from the PodScheduled condition's lastTransitionTime, and
-             * {@code 0}, the default, keeps failing the cold start the moment the pod is
-             * reported Unschedulable.
+             * grace is measured from when this launcher first observes the Unschedulable
+             * reason (the PodScheduled condition's lastTransitionTime records status
+             * transitions only, so a SchedulingGated to Unschedulable flip keeps the older
+             * timestamp), and {@code 0}, the default, keeps failing the cold start the
+             * moment the pod is reported Unschedulable.
              *
              * Env var: FLOCI_SERVICES_LAMBDA_KUBERNETES_UNSCHEDULABLE_GRACE_SECONDS
              */

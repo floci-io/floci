@@ -347,6 +347,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_TOLERATIONS` | _(none)_ | Pod tolerations as comma-separated taints in `kubectl taint` syntax: `key=value:Effect` (operator `Equal`) or `key:Effect` (operator `Exists`); leave out `:Effect` to tolerate every effect |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS` | _(none)_ | Host/IP Lambda pods use to reach Floci; auto-detected when Floci runs in-cluster |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_INIT_IMAGE` | `busybox:1.36` | Init-container image that downloads function code into the pod (needs `sh`, `wget`, `unzip`) |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_UNSCHEDULABLE_GRACE_SECONDS` | `0` | Seconds a pod the scheduler reports Unschedulable may wait while a cluster autoscaler adds a node, measured from when Floci first observes the reason; `0` fails the cold start immediately |
 
 ### API Gateway
 

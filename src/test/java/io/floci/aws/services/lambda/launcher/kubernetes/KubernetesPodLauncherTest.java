@@ -5,9 +5,11 @@ import io.fabric8.kubernetes.api.model.EnvVar;
 import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.PodBuilder;
 import io.fabric8.kubernetes.api.model.PodConditionBuilder;
+import io.fabric8.kubernetes.api.model.PodStatus;
 import io.fabric8.kubernetes.api.model.PodStatusBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
+import io.fabric8.kubernetes.client.server.mock.KubernetesMockServer;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.TlsConfigSource;
 import io.floci.aws.core.common.AwsException;
@@ -77,6 +79,8 @@ import static org.mockito.Mockito.when;
 @EnableKubernetesMockClient(crud = true)
 class KubernetesPodLauncherTest {
     KubernetesClient client;
+
+    KubernetesMockServer mockServer;
 
     @TempDir
     Path tempDir;
@@ -168,7 +172,7 @@ class KubernetesPodLauncherTest {
         fn.setAccountId(account);
         fn.setFunctionArn("arn:aws:lambda:" + region + ":" + account + ":function:my-fn");
         fn.setLayers(List.of((defaultAccount.equals(account) ? defaultLayer : ownerLayer).getLayerVersionArn()));
-        markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
+        markPodPhaseInBackground("Running");
 
         ContainerHandle handle = CompletableFuture.supplyAsync(() -> backgroundLauncher.launch(fn))
                 .get(10, TimeUnit.SECONDS);
@@ -219,24 +223,27 @@ class KubernetesPodLauncherTest {
         return fn;
     }
 
-    /** Plays the kubelet: waits for a pod with the given name prefix, then sets its phase. */
-    private void markPodPhaseInBackground(String namePrefix, String phase) {
-        CompletableFuture.runAsync(() -> {
-            Awaitility.await().atMost(Duration.ofSeconds(5)).until(
-                    () -> client.pods().inNamespace("default").list().getItems().stream()
-                            .anyMatch(p -> p.getMetadata().getName().startsWith(namePrefix)));
-            Pod pod = client.pods().inNamespace("default").list().getItems().stream()
-                    .filter(p -> p.getMetadata().getName().startsWith(namePrefix))
-                    .findFirst().orElseThrow();
-            pod.setStatus(new PodStatusBuilder().withPhase(phase).build());
+    /**
+     * Plays the kubelet for the launcher's pod: waits for it, writes {@code status}, and
+     * completes once the mock server has accepted the write.
+     */
+    private CompletableFuture<Void> markPodInBackground(PodStatus status) {
+        return CompletableFuture.runAsync(() -> {
+            awaitFlociLambdaPod();
+            Pod pod = flociLambdaPod();
+            pod.setStatus(status);
             client.pods().inNamespace("default").resource(pod).updateStatus();
         });
+    }
+
+    private void markPodPhaseInBackground(String phase) {
+        markPodInBackground(new PodStatusBuilder().withPhase(phase).build());
     }
 
     @ParameterizedTest
     @CsvSource({"$LATEST, $$LATEST", "1, 1", "7, 7"})
     void launchExposesTheExecutingVersionInThePodAndRuntimeApi(String version, String podValue) {
-        markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
+        markPodPhaseInBackground("Running");
         LambdaFunction fn = function();
         fn.setVersion(version);
         fn.setEnvironment(Map.of("AWS_LAMBDA_FUNCTION_VERSION", "user-override"));
@@ -254,7 +261,7 @@ class KubernetesPodLauncherTest {
 
     @Test
     void launchPassesTheLoggingConfigToTheRuntime() {
-        markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
+        markPodPhaseInBackground("Running");
         LambdaFunction fn = function();
         fn.setLogFormat("JSON");
         fn.setApplicationLogLevel("DEBUG");
@@ -274,7 +281,7 @@ class KubernetesPodLauncherTest {
         // A pod-launched Lambda is subject to the same placeholder-credential bug as a
         // Docker-launched one: without the owning account it resolves to the emulator's
         // default account and reads the wrong partition.
-        markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
+        markPodPhaseInBackground("Running");
         LambdaFunction fn = function();
         fn.setAccountId("222222222222");
         fn.setFunctionArn("arn:aws:lambda:us-east-1:222222222222:function:my-fn");
@@ -291,7 +298,7 @@ class KubernetesPodLauncherTest {
         // owner-account/placeholder baseline. If the function's own Environment config defines
         // only AWS_ACCESS_KEY_ID (no matching secret or session token), that partial value must
         // not override just the baseline's access key and leave its secret/token in place.
-        markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
+        markPodPhaseInBackground("Running");
         lenient().when(awsEnv.sdkBaselineEnv(anyString(), any(), anyString(), any(), anyString()))
                 .thenReturn(List.of(
                         "AWS_ACCESS_KEY_ID=000000000000",
@@ -311,7 +318,7 @@ class KubernetesPodLauncherTest {
 
     @Test
     void launchCreatesPodAndReturnsHandle() {
-        markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
+        markPodPhaseInBackground("Running");
 
         ContainerHandle handle = launcher.launch(function());
 
@@ -340,7 +347,7 @@ class KubernetesPodLauncherTest {
         LambdaFunction fn = function();
         fn.setAccountId("111122223333");
         fn.setFunctionArn("arn:aws:lambda:us-east-1:111122223333:function:my-fn");
-        markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
+        markPodPhaseInBackground("Running");
 
         ContainerHandle handle = launcher.launch(fn);
 
@@ -356,7 +363,7 @@ class KubernetesPodLauncherTest {
 
     @Test
     void launchFailureReleasesPortAndDeletesPod() {
-        markPodPhaseInBackground("floci-lambda-my-fn-", "Failed");
+        markPodPhaseInBackground("Failed");
 
         assertThatThrownBy(() -> launcher.launch(function()))
                 .isInstanceOf(RuntimeException.class)
@@ -379,7 +386,7 @@ class KubernetesPodLauncherTest {
         KubernetesPodLauncher failingLauncher = new KubernetesPodLauncher(failingApiClient, config, regionResolver,
                 runtimeApiServerFactory, imageResolver, addressResolver, awsEnv, layerService,
                 new LambdaPodSpecFactory(config), logStreamer, s3Service, presignGenerator);
-        markPodPhaseInBackground("floci-lambda-my-fn-", "Failed");
+        markPodPhaseInBackground("Failed");
 
         assertThatThrownBy(() -> failingLauncher.launch(function()))
                 .isInstanceOf(RuntimeException.class);
@@ -395,7 +402,7 @@ class KubernetesPodLauncherTest {
     void podThatExitsCleanlyIsTerminalNotATimeout() {
         // A runtime that exits before serving parks the pod in Succeeded; the launch
         // must fail fast instead of blocking for the full startup timeout.
-        markPodPhaseInBackground("floci-lambda-my-fn-", "Succeeded");
+        markPodPhaseInBackground("Succeeded");
 
         assertThatThrownBy(() -> launcher.launch(function()))
                 .isInstanceOf(RuntimeException.class)
@@ -452,33 +459,42 @@ class KubernetesPodLauncherTest {
     }
 
     /** Reports the pod Unschedulable since {@code since}, the shape Karpenter's cluster leaves. */
-    private void markUnschedulableInBackground(Instant since) {
+    /** The Unschedulable status Karpenter's cluster leaves, reported since {@code since}. */
+    private static PodStatus unschedulableStatus(Instant since) {
+        return new PodStatusBuilder()
+                .withPhase("Pending")
+                .withConditions(new PodConditionBuilder()
+                        .withType("PodScheduled")
+                        .withStatus("False")
+                        .withReason("Unschedulable")
+                        .withMessage("Insufficient memory")
+                        .withLastTransitionTime(since.toString())
+                        .build())
+                .build();
+    }
+
+    private CompletableFuture<Void> markUnschedulableInBackground(Instant since) {
+        return markPodInBackground(unschedulableStatus(since));
+    }
+
+    /**
+     * Reports the pod Unschedulable since {@code since}, then Running once the launcher has
+     * read that status: the mock server's request count rising past the write proves the
+     * launcher's poll observed Unschedulable, so the grace is anchored before the node joins,
+     * without a fixed sleep.
+     */
+    private void markUnschedulableThenRunningInBackground(Instant since) {
         CompletableFuture.runAsync(() -> {
-            awaitFlociLambdaPod();
-            Pod pod = flociLambdaPod();
-            pod.setStatus(new PodStatusBuilder()
-                    .withPhase("Pending")
-                    .withConditions(new PodConditionBuilder()
-                            .withType("PodScheduled")
-                            .withStatus("False")
-                            .withReason("Unschedulable")
-                            .withMessage("Insufficient memory")
-                            .withLastTransitionTime(since.toString())
-                            .build())
-                    .build());
-            client.pods().inNamespace("default").resource(pod).updateStatus();
+            markUnschedulableInBackground(since).join();
+            awaitLauncherPodRead();
+            markPodInBackground(new PodStatusBuilder().withPhase("Running").build());
         });
     }
 
-    private void markUnschedulableThenRunningInBackground(Instant since) {
-        CompletableFuture.runAsync(() -> {
-            markUnschedulableInBackground(since);
-            Awaitility.await().pollDelay(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(10)).until(
-                    () -> !flociLambdaPod().getStatus().getConditions().isEmpty());
-            Pod pod = flociLambdaPod();
-            pod.setStatus(new PodStatusBuilder().withPhase("Running").build());
-            client.pods().inNamespace("default").resource(pod).updateStatus();
-        });
+    private void awaitLauncherPodRead() {
+        int readsAfterWrite = mockServer.getRequestCount();
+        Awaitility.await().atMost(Duration.ofSeconds(10)).until(
+                () -> mockServer.getRequestCount() > readsAfterWrite);
     }
 
     /** The pod this launcher created for {@code my-fn}, by its managed name prefix. */
@@ -621,7 +637,7 @@ class KubernetesPodLauncherTest {
                 runtimeApiServerFactory, imageResolver, addressResolver, awsEnv, layerService,
                 new LambdaPodSpecFactory(config), logStreamer, s3Service, presignGenerator);
 
-        markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
+        markPodPhaseInBackground("Running");
         ContainerHandle handle = retryingLauncher.launch(function());
         assertThat(client.pods().inNamespace("default").withName("floci-lambda-old-fn-dead1234").get())
                 .as("orphan survives the failed sweep")
@@ -647,7 +663,7 @@ class KubernetesPodLauncherTest {
     @Test
     void tlsOnPublishesTheCaBundleAsAConfigMapAndTheFunctionEnvWins() throws Exception {
         String bundlePem = enableTlsWithBundle();
-        markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
+        markPodPhaseInBackground("Running");
         LambdaFunction fn = function();
         fn.setEnvironment(Map.of("SSL_CERT_FILE", "/my/own.pem"));
 
