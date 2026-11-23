@@ -239,4 +239,25 @@ class AccountPropertiesStateTest {
         assertEquals(Map.of("RoleManager/Kept", "yes"), service.getAccountProperties(),
                 "neither key of the rejected request may have landed");
     }
+
+    /**
+     * A namespace AWS does not recognise is refused with AWS's own sentence, and the account keeps
+     * exactly what it held: this is the state half of that refusal, which the wire test cannot
+     * reach past the response, and the divergence it exists to stop is permanent. One accepted bad
+     * write leaves every later read reporting a key AWS would never have stored.
+     */
+    @Test
+    void anUnrecognisedNamespaceWritesNothing() {
+        IamService service = inMemory(ACCOUNT_A);
+        service.putAccountProperties(Map.of("RoleManager/Kept", "yes"));
+
+        AwsException refused = assertThrows(AwsException.class, () ->
+                service.putAccountProperties(Map.of("NotARealProperty/Enabled", "true")));
+
+        assertEquals("InvalidInput", refused.getErrorCode());
+        assertEquals(400, refused.getHttpStatus());
+        assertEquals("Unsupported namespace: NotARealProperty", refused.getMessage());
+        assertEquals(Map.of("RoleManager/Kept", "yes"), service.getAccountProperties(),
+                "the refused key may not have landed");
+    }
 }

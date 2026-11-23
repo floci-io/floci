@@ -221,6 +221,18 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
     /** globalEndpointTokenVersion's only two values. */
     private static final Set<String> GLOBAL_ENDPOINT_TOKEN_VERSIONS = Set.of("v1Token", "v2Token");
+    /**
+     * The account property namespaces AWS recognises, as its own pages name them.
+     *
+     * <p>Only {@code RoleManager} is named anywhere: in the API Reference's example for
+     * {@code PutAccountProperties}, in the user guide's role manager page, which has the feature
+     * "controlled by the account-level property RoleManager/Enabled", and in the guide's policy
+     * example for {@code iam:AccountPropertyNamespaces}. Each of the three introduces it as an
+     * example, so the whole set is published nowhere, and a namespace AWS recognises but has not
+     * written down is refused here until this names it. That is the cost of answering the refusal
+     * AWS was recorded giving at all; see {@link #putAccountProperties}.
+     */
+    private static final Set<String> ACCOUNT_PROPERTY_NAMESPACES = Set.of("RoleManager");
     /** AWS-documented bounds for the account password policy's numeric fields. */
     /**
      * AWS's documented {@code passwordType} pattern for Create/UpdateLoginProfile: printable
@@ -3714,11 +3726,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
-     * Sets account properties, all of which must be in one namespace.
+     * Sets account properties, all of which must be in one namespace AWS recognises.
      *
      * <p>The key is {@code Namespace/PropertyName}: AWS requires exactly one {@code /}, forbids a
      * leading or trailing one, and states that "all keys must belong to the same namespace". A
      * request mixing namespaces is rejected whole rather than partly applied.
+     *
+     * <p>The one namespace left is then held to the set AWS recognises, which it refuses with
+     * {@code Unsupported namespace: <namespace>}, and the rejected write leaves every stored
+     * property as it was. Storing the property instead left the account holding a key AWS never
+     * accepted, with the caller never told, and a later read reporting it.
+     *
+     * <p>The two refusals are in that order, so a request naming two namespaces is answered for
+     * mixing them whether or not either is recognised: a request names one namespace before there
+     * is a namespace to look up. Which one AWS answers first is not recorded, so the order is this
+     * package's reading, and it is the one that leaves every request already being refused with
+     * the answer it already had.
      */
     public void putAccountProperties(Map<String, String> properties) {
         if (properties == null || properties.isEmpty()) {
@@ -3734,6 +3757,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         "All property keys must belong to the same namespace, but the request "
                                 + "names both " + namespace + " and " + keyNamespace + ".", 400);
             }
+        }
+        if (!ACCOUNT_PROPERTY_NAMESPACES.contains(namespace)) {
+            // AWS's own fixed text for this refusal, carrying the namespace half of the key as
+            // the request spelled it, so nothing here may reword it or fold its case: which
+            // spellings reach it is this package's reading, since only the one namespace is
+            // published and nothing says how AWS reads its case.
+            throw new AwsException("InvalidInput", "Unsupported namespace: " + namespace, 400);
         }
         synchronized (accountPropertiesLock) {
             for (Map.Entry<String, String> entry : properties.entrySet()) {
