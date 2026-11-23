@@ -4328,9 +4328,27 @@ public class DynamoDbService {
         }
     }
 
-    private void setValueAtPath(ObjectNode item, String path, JsonNode value, JsonNode exprAttrNames) {
+    private static void setAndSort(ObjectNode map, String attr, JsonNode value) {
+        map.set(attr, value);
+        DynamoDbMapOrder.sortKeys(map);
+    }
+
+    private static void removeAndSort(ObjectNode map, String attr) {
+        map.remove(attr);
+        DynamoDbMapOrder.sortKeys(map);
+    }
+
+    private static void sortWalked(List<ObjectNode> maps) {
+        for (ObjectNode map : maps) {
+            DynamoDbMapOrder.sortKeys(map);
+        }
+    }
+
+    private void setValueAtPath(ObjectNode item, String path, JsonNode source, JsonNode exprAttrNames) {
         List<Object> tokens = parsePath(path, exprAttrNames);
         if (tokens.isEmpty()) return;
+        // A map sorted later in place must not be shared with another attribute or a request value.
+        JsonNode value = source.deepCopy();
 
         if (tokens.size() == 1) {
             if (tokens.get(0) instanceof String attrName) {
@@ -4340,6 +4358,7 @@ public class DynamoDbService {
         }
 
         JsonNode container = item;
+        List<ObjectNode> walked = new ArrayList<>();
 
         for (int i = 0; i < tokens.size() - 1; i++) {
             Object tok = tokens.get(i);
@@ -4361,7 +4380,8 @@ public class DynamoDbService {
                                     "The document path provided in the update expression is invalid for update",
                                     400);
                         }
-                        ((ObjectNode) child.get("M")).set(finalAttr, value);
+                        setAndSort((ObjectNode) child.get("M"), finalAttr, value);
+                        sortWalked(walked);
                     } else if (nextTok instanceof Long finalIdx) {
                         if (child == null || !child.has("L")) {
                             throw new AwsException(
@@ -4371,6 +4391,7 @@ public class DynamoDbService {
                         }
 
                         setOrAppend((ArrayNode) child.get("L"), finalIdx, value);
+                        sortWalked(walked);
                     }
 
                     return;
@@ -4384,6 +4405,7 @@ public class DynamoDbService {
                                 400);
                     }
                     container = child.get("M");
+                    walked.add((ObjectNode) container);
 
                 } else if (nextTok instanceof Long) {
                     if (child == null || !child.has("L")) {
@@ -4417,7 +4439,8 @@ public class DynamoDbService {
                                     400);
                         }
 
-                        ((ObjectNode) element.get("M")).set(finalAttr, value);
+                        setAndSort((ObjectNode) element.get("M"), finalAttr, value);
+                        sortWalked(walked);
 
                     } else if (nextTok instanceof Long finalIdx) {
                         if (!element.has("L")) {
@@ -4428,6 +4451,7 @@ public class DynamoDbService {
                         }
 
                         setOrAppend((ArrayNode) element.get("L"), finalIdx, value);
+                        sortWalked(walked);
                     }
 
                     return;
@@ -4442,6 +4466,7 @@ public class DynamoDbService {
                     }
 
                     container = element.get("M");
+                    walked.add((ObjectNode) container);
 
                 } else if (nextTok instanceof Long) {
                     if (!element.has("L")) {
@@ -4514,6 +4539,7 @@ public class DynamoDbService {
         }
 
         JsonNode container = item;
+        List<ObjectNode> walked = new ArrayList<>();
 
         for (int i = 0; i < tokens.size() - 1; i++) {
             Object tok = tokens.get(i);
@@ -4528,7 +4554,8 @@ public class DynamoDbService {
                 if (last) {
                     if (nextTok instanceof String finalAttr) {
                         if (child == null || !child.has("M")) return;
-                        ((ObjectNode) child.get("M")).remove(finalAttr);
+                        removeAndSort((ObjectNode) child.get("M"), finalAttr);
+                        sortWalked(walked);
                     } else if (nextTok instanceof Long finalIdx) {
                         if (child == null || !child.has("L")) return;
 
@@ -4536,6 +4563,7 @@ public class DynamoDbService {
                         if (finalIdx < lArr.size()) {
                             lArr.remove(finalIdx.intValue());
                         }
+                        sortWalked(walked);
                     }
                     return;
                 }
@@ -4543,6 +4571,7 @@ public class DynamoDbService {
                 if (nextTok instanceof String) {
                     if (child == null || !child.has("M")) return;
                     container = child.get("M");
+                    walked.add((ObjectNode) container);
                 } else if (nextTok instanceof Long) {
                     if (child == null || !child.has("L")) return;
                     container = child.get("L");
@@ -4557,7 +4586,8 @@ public class DynamoDbService {
                 if (last) {
                     if (nextTok instanceof String finalAttr) {
                         if (!element.has("M")) return;
-                        ((ObjectNode) element.get("M")).remove(finalAttr);
+                        removeAndSort((ObjectNode) element.get("M"), finalAttr);
+                        sortWalked(walked);
                     } else if (nextTok instanceof Long finalIdx) {
                         if (!element.has("L")) return;
 
@@ -4565,6 +4595,7 @@ public class DynamoDbService {
                         if (finalIdx < lArr.size()) {
                             lArr.remove(finalIdx.intValue());
                         }
+                        sortWalked(walked);
                     }
                     return;
                 }
@@ -4572,6 +4603,7 @@ public class DynamoDbService {
                 if (nextTok instanceof String) {
                     if (!element.has("M")) return;
                     container = element.get("M");
+                    walked.add((ObjectNode) container);
                 } else if (nextTok instanceof Long) {
                     if (!element.has("L")) return;
                     container = element.get("L");

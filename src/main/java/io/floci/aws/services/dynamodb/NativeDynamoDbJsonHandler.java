@@ -858,9 +858,9 @@ public class NativeDynamoDbJsonHandler {
 
         Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, item, false, expected,
                 conditionalOperator, returnValuesOnConditionCheckFailure);
-        JsonNode previousItem = withShuffledFailureItem(() -> dynamoDbService.putItem(tableName, item,
-                conditionExpression, exprAttrNames, exprAttrValues, region, returnValuesOnConditionCheckFailure,
-                expectedCheck));
+        JsonNode previousItem = withShuffledFailureItem(() -> dynamoDbService.putItem(tableName,
+                DynamoDbMapOrder.sortedItem(item), conditionExpression, exprAttrNames, exprAttrValues, region,
+                returnValuesOnConditionCheckFailure, expectedCheck));
 
         ObjectNode response = objectMapper.createObjectNode();
         if ("ALL_OLD".equals(returnValues) && previousItem != null) {
@@ -1101,8 +1101,9 @@ public class NativeDynamoDbJsonHandler {
         Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, key, true, expectedUpd,
                 conditionalOperatorUpd, returnValuesOnConditionCheckFailure);
         DynamoDbService.UpdateResult result = withShuffledFailureItem(() -> dynamoDbService.updateItem(
-                tableName, key, updateData, updateExpression, exprAttrNames, exprAttrValues,
-                returnValues, conditionExpression, region, returnValuesOnConditionCheckFailure, expectedCheck));
+                tableName, key, DynamoDbMapOrder.sortedAttributeUpdates(updateData), updateExpression,
+                exprAttrNames, DynamoDbMapOrder.sortedItem(exprAttrValues), returnValues, conditionExpression, region,
+                returnValuesOnConditionCheckFailure, expectedCheck));
 
         ObjectNode response = objectMapper.createObjectNode();
         if ("ALL_NEW" .equals(returnValues) && result.newItem() != null) {
@@ -1827,7 +1828,7 @@ public class NativeDynamoDbJsonHandler {
             }
         }
 
-        dynamoDbService.batchWriteItem(items, region);
+        dynamoDbService.batchWriteItem(withSortedPutItems(items), region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("UnprocessedItems", objectMapper.createObjectNode());
@@ -1840,6 +1841,18 @@ public class NativeDynamoDbJsonHandler {
             response.set("ConsumedCapacity", ccArray);
         }
         return Response.ok(response).build();
+    }
+
+    private static Map<String, List<JsonNode>> withSortedPutItems(Map<String, List<JsonNode>> items) {
+        Map<String, List<JsonNode>> sorted = new LinkedHashMap<>();
+        for (Map.Entry<String, List<JsonNode>> entry : items.entrySet()) {
+            List<JsonNode> writes = new ArrayList<>(entry.getValue().size());
+            for (JsonNode writeReq : entry.getValue()) {
+                writes.add(DynamoDbMapOrder.withSortedMember(writeReq, "PutRequest", "Item"));
+            }
+            sorted.put(entry.getKey(), writes);
+        }
+        return sorted;
     }
 
     private Response handleBatchGetItem(JsonNode request, String region) {
@@ -2977,13 +2990,24 @@ public class NativeDynamoDbJsonHandler {
 
         try {
             DynamoDbService.TransactWriteResult result =
-                    dynamoDbService.transactWriteItems(transactItems, region, clientRequestToken, request);
+                    dynamoDbService.transactWriteItems(withSortedMaps(transactItems), region,
+                            clientRequestToken, request);
             ObjectNode response = objectMapper.createObjectNode();
             addTransactWriteConsumedCapacity(response, request, result);
             return Response.ok(response).build();
         } catch (TransactionCanceledException e) {
             return transactWriteCanceled(e);
         }
+    }
+
+    private static List<JsonNode> withSortedMaps(List<JsonNode> transactItems) {
+        List<JsonNode> sorted = new ArrayList<>(transactItems.size());
+        for (JsonNode txItem : transactItems) {
+            sorted.add(DynamoDbMapOrder.withSortedMember(
+                    DynamoDbMapOrder.withSortedMember(txItem, "Put", "Item"),
+                    "Update", "ExpressionAttributeValues"));
+        }
+        return sorted;
     }
 
     // DynamoDB reads an action with more than one operation as the first one in this order.
