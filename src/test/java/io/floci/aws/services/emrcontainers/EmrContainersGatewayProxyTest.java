@@ -1,5 +1,6 @@
 package io.floci.aws.services.emrcontainers;
 
+import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.ServiceConfigAccess;
 import io.floci.aws.core.common.SparkConnectTargets;
 import io.floci.aws.core.common.WebSocketUpgrades;
@@ -73,6 +74,7 @@ class EmrContainersGatewayProxyTest {
                     .putHeader("content-type", "application/json")
                     .end(new JsonObject().put("method", request.method().name()).put("uri", request.uri())
                             .put("authorization", request.getHeader("Authorization"))
+                            .put("session", request.getHeader(EmrContainersGateways.SESSION_HEADER))
                             .put("body", body.toString()).encode()));
         }).listen(0, "127.0.0.1"));
         service = mock(EmrContainersService.class);
@@ -110,6 +112,17 @@ class EmrContainersGatewayProxyTest {
         // The token is Floci's to check, so the gateway never sees it.
         assertNull(gotByHeader.getString("authorization"));
         awaitCount(requestsEnded, 2);
+    }
+
+    @Test
+    void gatewayKnowsTheSessionTokenByItsDigestAlone() throws Exception {
+        // Floci's digest replaces one the client sends, which would let it list another token's kernels.
+        Answer answer = request(HttpMethod.GET, BASE + "/api/kernels", "token " + TOKEN, null,
+                Digests.sha256Hex("another-session-token"));
+
+        assertEquals(201, answer.status);
+        assertEquals(Digests.sha256Hex(TOKEN), new JsonObject(answer.body).getString("session"));
+        awaitCount(requestsEnded, 1);
     }
 
     @Test
@@ -189,10 +202,18 @@ class EmrContainersGatewayProxyTest {
     }
 
     private Answer request(HttpMethod method, String uri, String authorization, String body) throws Exception {
+        return request(method, uri, authorization, body, null);
+    }
+
+    private Answer request(HttpMethod method, String uri, String authorization, String body, String session)
+            throws Exception {
         RequestOptions options = new RequestOptions().setMethod(method).setHost("127.0.0.1")
                 .setPort(floci.actualPort()).setURI(uri);
         if (authorization != null) {
             options.addHeader("Authorization", authorization);
+        }
+        if (session != null) {
+            options.addHeader(EmrContainersGateways.SESSION_HEADER, session);
         }
         // The answer's body is read as its head arrives, on the event loop: asked for later, it may have gone by.
         return await(client.request(options)

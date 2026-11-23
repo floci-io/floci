@@ -1,5 +1,6 @@
 package io.floci.aws.services.emrcontainers;
 
+import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.ServiceConfigAccess;
 import io.floci.aws.core.common.SparkConnectTargets;
 import io.floci.aws.core.common.WebSocketUpgrades;
@@ -42,7 +43,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * carries a token given for that endpoint and not yet expired, as Jupyter Enterprise Gateway 2.6.0 takes one: a
  * {@code token} parameter, or an {@code Authorization: token <token>} header. One without such a token gets that
  * gateway's answer, 401 with {@code {"reason": "Unauthorized", "message": ""}}; one whose endpoint is not ACTIVE,
- * 503, its message saying why.
+ * 503, its message saying why. The gateway gets the token's SHA-256 in place of the token, in
+ * {@link EmrContainersGateways#SESSION_HEADER}, to list a session token's kernels by.
  */
 @ApplicationScoped
 public class EmrContainersGatewayProxy {
@@ -51,11 +53,11 @@ public class EmrContainersGatewayProxy {
 
     private static final String TOKEN_PREFIX = "token ";
     private static final String TOKEN_PARAMETER = "token";
-    // What the gateway never gets: the connection's own headers, which the upgrade puts back where it is one, and the
-    // token.
+    // What the gateway never gets: the connection's own headers, which the upgrade puts back where it is one, the
+    // token, and a session header the client sent, as only Floci gives one.
     private static final Set<String> NOT_FORWARDED = Set.of("host", "connection", "keep-alive", "proxy-connection",
             "proxy-authorization", "proxy-authenticate", "te", "trailer", "transfer-encoding", "upgrade",
-            "authorization");
+            "authorization", EmrContainersGateways.SESSION_HEADER.toLowerCase(Locale.ROOT));
 
     private final EmrContainersService service;
     private final ServiceConfigAccess serviceConfigAccess;
@@ -111,7 +113,7 @@ public class EmrContainersGatewayProxy {
                             refuse(request, 503, "Service Unavailable", refused.refusal());
                         }
                     } else {
-                        forward(request, path + query(request), routed.result().get());
+                        forward(request, path + query(request), Digests.sha256Hex(token), routed.result().get());
                     }
                 });
     }
@@ -160,7 +162,7 @@ public class EmrContainersGatewayProxy {
         }
     }
 
-    private void forward(HttpServerRequest request, String uri, SparkConnectTargets.Route route) {
+    private void forward(HttpServerRequest request, String uri, String session, SparkConnectTargets.Route route) {
         AtomicBoolean over = new AtomicBoolean();
         Runnable ended = () -> {
             if (over.compareAndSet(false, true)) {
@@ -177,6 +179,7 @@ public class EmrContainersGatewayProxy {
                 options.addHeader(header.getKey(), header.getValue());
             }
         }
+        options.addHeader(EmrContainersGateways.SESSION_HEADER, session);
         client.request(options).onComplete(opened -> {
             if (opened.failed()) {
                 refuse(request, 502, "Bad Gateway",

@@ -239,9 +239,12 @@ remote kernel lifecycle management capability that interactive clients need" (EM
   virtualenv on, and `spark-submit` makes one on YARN and Kubernetes alone. As Jupyter Enterprise
   Gateway does, a kernel gets the `KERNEL_` variables of its start request's `env`, which a Jupyter client sends from
   its own environment; `KERNEL_EXTRA_SPARK_OPTS`, "additional Spark configurations for the Spark kernels", goes to
-  the PySpark kernel's `spark-submit`.
+  the PySpark kernel's `spark-submit`. Listing the kernels (`GET /api/kernels`) answers with those started with the
+  request's session token alone, as the guide's "Monitoring interactive endpoints" has ListKernels "list the kernels
+  that have been previously started using the same session token", whether the kernels API or the sessions API
+  (`POST /api/sessions`) started them, and listing the sessions (`GET /api/sessions`) answers with those holding such
+  kernels; any of the endpoint's tokens reaches a kernel or a session by its id.
 * **Not emulated yet**: the "Apache Spark with Scala" kernel, `%%configure`, `jupyter-kernel-overrides` images,
-  `jeg-config`'s culling settings, and listing only the kernels a session token started. A browser's CORS preflight
-  (`OPTIONS`), which Jupyter Enterprise Gateway takes without a token, needs one here. Every kernel runs with
-  the endpoint's execution role, whichever role its session token was asked for with. `certificateArn` is kept,
-  and the `serverUrl` is plain HTTP on Floci's port.
+  and `jeg-config`'s culling settings. A browser's CORS preflight (`OPTIONS`), which Jupyter Enterprise Gateway
+  takes without a token, needs one here. Every kernel runs with the endpoint's execution role, whichever role its
+  session token was asked for with. `certificateArn` is kept, and the `serverUrl` is plain HTTP on Floci's port.

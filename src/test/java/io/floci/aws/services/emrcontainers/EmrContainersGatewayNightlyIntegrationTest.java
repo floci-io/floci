@@ -35,6 +35,8 @@ import java.net.http.HttpResponse;
 import java.net.http.WebSocket;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
@@ -51,7 +53,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * An EMR on EKS managed endpoint, run for real in the {@code docker} runner mode: it runs a Jupyter Enterprise Gateway
  * in its release's {@code notebook-spark} image from Amazon ECR Public, and a Jupyter client reaches it at its
- * {@code serverUrl} with a session token, starts a PySpark kernel there, and runs code on Floci's S3 over the kernel's
+ * {@code serverUrl} with a session token, starts a PySpark kernel there, and a session with a kernel of its own, which
+ * the kernels and sessions listings show that token alone, and runs code on Floci's S3 over the PySpark kernel's
  * WebSocket, as the guide's "Example: Deploy a JupyterLab notebook" does through {@code JUPYTER_GATEWAY_URL}.
  *
  * <p>A nightly check: the release's notebook image is about 6 GB.
@@ -128,12 +131,7 @@ class EmrContainersGatewayNightlyIntegrationTest {
         String path = URI.create(serverUrl).getPath();
         assertEquals(EmrContainersService.GATEWAY_PATH + endpointId, path);
         String gateway = "http://localhost:" + RestAssured.port + path;
-        String token = emr().body("""
-                        {"executionRoleArn": "%s", "credentialType": "TOKEN"}
-                        """.formatted(ROLE))
-                .post("/virtualclusters/" + virtualClusterId + "/endpoints/" + endpointId + "/credentials")
-                .then().statusCode(200)
-                .extract().path("credentials.token");
+        String token = sessionToken(virtualClusterId, endpointId);
 
         HttpClient http = HttpClient.newHttpClient();
         assertEquals(401, http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/kernelspecs")).build(),
@@ -152,6 +150,25 @@ class EmrContainersGatewayNightlyIntegrationTest {
                         """)).build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(201, started.statusCode(), started.body());
         String kernelId = JSON.readTree(started.body()).path("id").textValue();
+        // ListKernels lists the kernels started with the same session token, through the sessions API too, and the
+        // sessions listing the sessions holding them.
+        HttpResponse<String> created = http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/sessions"))
+                .header("Authorization", "token " + token)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("""
+                        {"path": "nightly.ipynb", "type": "notebook", "kernel": {"name": "python3"}}
+                        """)).build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(201, created.statusCode(), created.body());
+        JsonNode notebook = JSON.readTree(created.body());
+        assertEquals(List.of(kernelId, notebook.at("/kernel/id").textValue()), ids(http, gateway + "/api/kernels",
+                token));
+        assertEquals(List.of(notebook.path("id").textValue()), ids(http, gateway + "/api/sessions", token));
+        String another = sessionToken(virtualClusterId, endpointId);
+        assertEquals(List.of(), ids(http, gateway + "/api/kernels", another), "another session token of the endpoint");
+        assertEquals(List.of(), ids(http, gateway + "/api/sessions", another), "another session token of the endpoint");
+        assertEquals(204, http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/sessions/"
+                + notebook.path("id").textValue())).header("Authorization", "token " + token).DELETE().build(),
+                HttpResponse.BodyHandlers.discarding()).statusCode());
 
         Messages messages = new Messages();
         WebSocket socket = http.newWebSocketBuilder().header("Authorization", "token " + token)
@@ -201,6 +218,25 @@ class EmrContainersGatewayNightlyIntegrationTest {
             }
         }
         return null;
+    }
+
+    // The ids the listing at url answers a request carrying token with.
+    private static List<String> ids(HttpClient http, String url, String token) throws Exception {
+        HttpResponse<String> listed = http.send(HttpRequest.newBuilder(URI.create(url))
+                .header("Authorization", "token " + token).build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, listed.statusCode(), listed.body());
+        List<String> ids = new ArrayList<>();
+        JSON.readTree(listed.body()).forEach(kernel -> ids.add(kernel.path("id").textValue()));
+        return ids;
+    }
+
+    private static String sessionToken(String virtualClusterId, String endpointId) {
+        return emr().body("""
+                        {"executionRoleArn": "%s", "credentialType": "TOKEN"}
+                        """.formatted(ROLE))
+                .post("/virtualclusters/" + virtualClusterId + "/endpoints/" + endpointId + "/credentials")
+                .then().statusCode(200)
+                .extract().path("credentials.token");
     }
 
     private String virtualCluster() {

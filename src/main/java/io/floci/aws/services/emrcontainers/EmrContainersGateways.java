@@ -32,6 +32,12 @@ import java.util.Map;
  * request carries, as a Jupyter client sends those of its own environment: {@code KERNEL_EXTRA_SPARK_OPTS}, "additional
  * Spark configurations for the Spark kernels" ("Example: Deploy a JupyterLab notebook"), goes to the PySpark kernel's
  * {@code spark-submit}. jupyter_server alone starts a kernel with its name and path only.
+ *
+ * <p>ListKernels is "Request that the interactive endpoint list the kernels that have been previously started using
+ * the same session token" ("Monitoring interactive endpoints"), so the program lists only the kernels started with
+ * the session token of the request asking, which it knows by the digest of it Floci passes in
+ * {@link #SESSION_HEADER}, whether the kernels API or the sessions API started them. It lists sessions the same way,
+ * as a session holds its kernel's model.
  */
 final class EmrContainersGateways {
 
@@ -42,6 +48,8 @@ final class EmrContainersGateways {
     static final int PORT = 8888;
     // Where the program goes in the container, from the variable it comes in.
     static final String PROGRAM_VARIABLE = "FLOCI_GATEWAY";
+    /** The header in which the gateway gets a digest of the session token a request carries. */
+    static final String SESSION_HEADER = "X-Floci-Session";
     private static final String HOME = "/tmp/floci-gateway";
     private static final Duration PROBE_TIMEOUT = Duration.ofSeconds(5);
     // The image's spark-defaults.conf turns it on, and spark-submit refuses it outside YARN and Kubernetes.
@@ -58,8 +66,10 @@ final class EmrContainersGateways {
     static final SessionServers.Kind KIND = new SessionServers.Kind("Jupyter Enterprise Gateway", "Endpoint",
             "GetManagedEndpointSessionCredentials");
 
-    // Python 3.9's, the image's; jupyter_server 2's kernels API, its handler replaced by one that passes on the env.
+    // Python 3.9's, the image's; jupyter_server 2's kernels and sessions APIs, their handlers replaced by ones that
+    // pass on the env and list by session token, and its kernel manager by one that records each kernel's token.
     static final String PROGRAM = """
+            import contextvars
             import json
             import os
             import sys
@@ -68,11 +78,18 @@ final class EmrContainersGateways {
             from jupyter_core.utils import ensure_async
             from jupyter_server.auth.decorator import authorized
             from jupyter_server.serverapp import ServerApp
-            from jupyter_server.services.kernels import handlers
+            from jupyter_server.services.kernels import handlers as kernel_handlers
+            from jupyter_server.services.kernels.kernelmanager import AsyncMappingKernelManager
+            from jupyter_server.services.sessions import handlers as session_handlers
             from jupyter_server.utils import url_escape, url_path_join
             from tornado import web
 
             HOME = "@HOME@"
+            SESSION_HEADER = "@SESSION_HEADER@"
+            # The session token of the request being served, by the digest of it Floci passes on.
+            SESSION = contextvars.ContextVar("session", default=None)
+            # The session token each running kernel was started with, by that digest.
+            STARTED_WITH = {}
 
             PYSPARK_KERNEL = '''
             import sys
@@ -102,7 +119,41 @@ final class EmrContainersGateways {
             }))
 
 
-            class MainKernelHandler(handlers.MainKernelHandler):
+            # Whether the request being served carries the session token the kernel was started with.
+            def mine(kernel_id):
+                return SESSION.get() is not None and STARTED_WITH.get(kernel_id) == SESSION.get()
+
+
+            # Records the session token of a kernel the kernels API or the sessions API starts, and forgets it once
+            # the kernel goes, whether a request, the culler or the kernel's death removes it.
+            class KernelManager(AsyncMappingKernelManager):
+
+                async def start_kernel(self, *, kernel_id=None, **kwargs):
+                    starts = kernel_id is None or kernel_id not in self
+                    kernel_id = await super().start_kernel(kernel_id=kernel_id, **kwargs)
+                    if starts:
+                        STARTED_WITH[kernel_id] = SESSION.get()
+                    return kernel_id
+
+                def remove_kernel(self, kernel_id):
+                    STARTED_WITH.pop(kernel_id, None)
+                    return super().remove_kernel(kernel_id)
+
+
+            class WithSession:
+
+                def prepare(self, *args, **kwargs):
+                    SESSION.set(self.request.headers.get(SESSION_HEADER))
+                    return super().prepare(*args, **kwargs)
+
+
+            class MainKernelHandler(WithSession, kernel_handlers.MainKernelHandler):
+
+                @web.authenticated
+                @authorized
+                async def get(self):
+                    kernels = await ensure_async(self.kernel_manager.list_kernels())
+                    self.finish(json.dumps([kernel for kernel in kernels if mine(kernel["id"])], default=json_default))
 
                 @web.authenticated
                 @authorized
@@ -121,8 +172,28 @@ final class EmrContainersGateways {
                     self.finish(json.dumps(kernel, default=json_default))
 
 
-            handlers.default_handlers = [(path, MainKernelHandler if handler is handlers.MainKernelHandler else handler)
-                                         for path, handler in handlers.default_handlers]
+            # Sessions list as kernels do: a session holds its kernel's model.
+            class SessionRootHandler(WithSession, session_handlers.SessionRootHandler):
+
+                @web.authenticated
+                @authorized
+                async def get(self):
+                    sessions = await ensure_async(self.session_manager.list_sessions())
+                    self.finish(json.dumps([session for session in sessions if mine(session["kernel"]["id"])],
+                                           default=json_default))
+
+
+            # Its PATCH starts a kernel when it names a kernel spec.
+            class SessionHandler(WithSession, session_handlers.SessionHandler):
+                pass
+
+
+            REPLACED = {kernel_handlers.MainKernelHandler: MainKernelHandler,
+                        session_handlers.SessionRootHandler: SessionRootHandler,
+                        session_handlers.SessionHandler: SessionHandler}
+            for module in (kernel_handlers, session_handlers):
+                module.default_handlers = [(path, REPLACED.get(handler, handler))
+                                           for path, handler in module.default_handlers]
             os.environ["JUPYTER_PATH"] = HOME
             sys.exit(ServerApp.launch_instance(argv=[
                 "--ServerApp.ip=0.0.0.0", "--ServerApp.port=@PORT@", "--ServerApp.port_retries=0",
@@ -131,9 +202,9 @@ final class EmrContainersGateways {
                 "--ServerApp.allow_remote_access=True",
                 "--KernelSpecManager.allowed_kernelspecs=python3",
                 "--KernelSpecManager.allowed_kernelspecs=spark-python-kubernetes",
-            ]))
+            ], kernel_manager_class=KernelManager))
             """.replace("@HOME@", HOME).replace("@PORT@", String.valueOf(PORT))
-            .replace("@PROGRAM_VARIABLE@", PROGRAM_VARIABLE);
+            .replace("@PROGRAM_VARIABLE@", PROGRAM_VARIABLE).replace("@SESSION_HEADER@", SESSION_HEADER);
 
     private EmrContainersGateways() {
     }
