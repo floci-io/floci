@@ -38,6 +38,16 @@ import java.util.Map;
  * the session token of the request asking, which it knows by the digest of it Floci passes in
  * {@link #SESSION_HEADER}, whether the kernels API or the sessions API started them. It lists sessions the same way,
  * as a session holds its kernel's model.
+ *
+ * <p>The PySpark kernel loads the image's {@code %%configure} magic ({@code configure_magic.py}, beside Jupyter
+ * Enterprise Gateway's kernel launchers), with which "you can adjust the Spark configuration associated with a
+ * PySpark session" ("Modifying PySpark session parameters"). The magic turns its cell's settings into
+ * {@code KERNEL_EXTRA_SPARK_OPTS} and posts them, signed with the AES key the program gives its kernel, to its own
+ * host's port 18888 when no {@code ENDPOINT_IP} names its gateway. The program serves that port in the container
+ * alone: it restarts the kernel, keeping its id, with those options in place of the ones it started with, and, once
+ * the restarted kernel answers, ends the cell with the replies the magic prepared, as the restart takes the kernel
+ * down before it can; a kernel that dies first, or does not answer in jupyter_server's time for a restart, ends it
+ * with an error. A kernel's requests take their turn.
  */
 final class EmrContainersGateways {
 
@@ -67,29 +77,49 @@ final class EmrContainersGateways {
             "GetManagedEndpointSessionCredentials");
 
     // Python 3.9's, the image's; jupyter_server 2's kernels and sessions APIs, their handlers replaced by ones that
-    // pass on the env and list by session token, and its kernel manager by one that records each kernel's token.
+    // pass on the env and list by session token, its kernel manager by one that records each kernel's token and
+    // launch, and beside it the %%configure magic's endpoint.
     static final String PROGRAM = """
+            import asyncio
+            import base64
             import contextvars
             import json
             import os
+            import secrets
             import sys
+            import uuid
 
+            from Cryptodome.Cipher import AES
+            from Cryptodome.Hash import SHA256
+            from Cryptodome.Util.Padding import unpad
             from jupyter_client.jsonutil import json_default
             from jupyter_core.utils import ensure_async
             from jupyter_server.auth.decorator import authorized
             from jupyter_server.serverapp import ServerApp
             from jupyter_server.services.kernels import handlers as kernel_handlers
+            from jupyter_server.services.kernels.connection.base import serialize_msg_to_ws_v1
+            from jupyter_server.services.kernels.connection.channels import ZMQChannelsWebsocketConnection
             from jupyter_server.services.kernels.kernelmanager import AsyncMappingKernelManager
             from jupyter_server.services.sessions import handlers as session_handlers
             from jupyter_server.utils import url_escape, url_path_join
-            from tornado import web
+            from tornado import httpserver, web
+            from tornado.websocket import WebSocketClosedError
 
             HOME = "@HOME@"
             SESSION_HEADER = "@SESSION_HEADER@"
+            # The image's %%configure magic, beside Jupyter Enterprise Gateway's kernel launchers.
+            MAGICS = "/usr/local/bin/kernel-launchers/python/scripts"
+            # Where the magic posts its cell's settings when no ENDPOINT_IP names its gateway: its own host's port.
+            CONFIGURE_PORT = 18888
+            # The magic's signature of a post: the SHA-256 of its body, encrypted with its kernel's AES key.
+            FINGERPRINT_HEADER = "EMR-Containers-FPAuthorization"
+            V1_PROTOCOL = "v1.kernel.websocket.jupyter.org"
             # The session token of the request being served, by the digest of it Floci passes on.
             SESSION = contextvars.ContextVar("session", default=None)
             # The session token each running kernel was started with, by that digest.
             STARTED_WITH = {}
+            # Each running kernel's launch.
+            LAUNCHED = {}
 
             PYSPARK_KERNEL = '''
             import sys
@@ -98,7 +128,8 @@ final class EmrContainersGateways {
             from pyspark.sql import SparkSession
 
             spark = SparkSession.builder.getOrCreate()
-            IPKernelApp.launch_instance(argv=sys.argv[1:], user_ns={"spark": spark, "sc": spark.sparkContext})
+            IPKernelApp.launch_instance(argv=sys.argv[1:], user_ns={"spark": spark, "sc": spark.sparkContext},
+                                        extensions=["configure_magic"])
             '''
 
 
@@ -116,6 +147,7 @@ final class EmrContainersGateways {
                          'exec "$SPARK_HOME/bin/spark-submit" $KERNEL_EXTRA_SPARK_OPTS ' + HOME
                          + '/pyspark_kernel.py -f "$0"',
                          "{connection_file}"],
+                "env": {"PYTHONPATH": MAGICS},
             }))
 
 
@@ -124,20 +156,91 @@ final class EmrContainersGateways {
                 return SESSION.get() is not None and STARTED_WITH.get(kernel_id) == SESSION.get()
 
 
-            # Records the session token of a kernel the kernels API or the sessions API starts, and forgets it once
-            # the kernel goes, whether a request, the culler or the kernel's death removes it.
+            # Whether fingerprint is the magic's signature of body with key.
+            def signed(key, body, fingerprint):
+                try:
+                    encrypted, tag, nonce = (base64.b64decode(part) for part in fingerprint.split(" "))
+                    cipher = AES.new(bytes.fromhex(key), AES.MODE_GCM, nonce=nonce)
+                    return unpad(cipher.decrypt_and_verify(encrypted, tag), 16) == SHA256.new(body).digest()
+                except ValueError:
+                    return False
+
+
+            # Sends the messages to each client connected to the kernel, as jupyter_server sends its own status ones.
+            def send(kernel_id, messages):
+                for connection in list(ZMQChannelsWebsocketConnection._open_sockets):
+                    if connection.kernel_id != kernel_id:
+                        continue
+                    for message in messages:
+                        try:
+                            if connection.subprotocol == V1_PROTOCOL:
+                                connection.write_message(serialize_msg_to_ws_v1(message, message["channel"],
+                                                                                connection.session.pack), binary=True)
+                            else:
+                                connection.write_message(json.dumps(message, default=json_default))
+                        except WebSocketClosedError:
+                            break
+
+
+            # The replies that end the cell with reason, in place of the ones the magic prepared for its success.
+            def failed(replies, reason):
+                error, reply, idle = (replies.get(name) for name in ("error_reply", "exec_reply", "idle_reply"))
+                if error:
+                    error["content"]["evalue"] = reason
+                if reply:
+                    reply["content"].update({"status": "error", "ename": "MagicExecutionError", "evalue": reason,
+                                             "traceback": []})
+                return [message for message in (error, reply, idle) if message]
+
+
+            # A kernel's AES key, which only it and the program hold, its launch environment, and the lock its
+            # %%configure requests take in turn.
+            class Launch:
+
+                def __init__(self, key, env):
+                    self.key = key
+                    self.env = env
+                    self.lock = asyncio.Lock()
+
+
+            # Records the session token of a kernel the kernels API or the sessions API starts, and gives the kernel
+            # the KERNEL_ID and the AES key the magic reads, as Jupyter Enterprise Gateway's launcher does; forgets
+            # both once the kernel goes, whether a request, the culler or the kernel's death removes it.
             class KernelManager(AsyncMappingKernelManager):
 
                 async def start_kernel(self, *, kernel_id=None, **kwargs):
-                    starts = kernel_id is None or kernel_id not in self
-                    kernel_id = await super().start_kernel(kernel_id=kernel_id, **kwargs)
-                    if starts:
-                        STARTED_WITH[kernel_id] = SESSION.get()
+                    if kernel_id is not None and kernel_id in self:
+                        return await super().start_kernel(kernel_id=kernel_id, **kwargs)
+                    kernel_id = kernel_id or str(uuid.uuid4())
+                    key = secrets.token_hex(32)
+                    env = dict(kwargs.pop("env", None) or os.environ)
+                    env.pop("@PROGRAM_VARIABLE@", None)
+                    # The image's launcher sets it to its gateway's address; the magic posts to its own host without.
+                    env.pop("ENDPOINT_IP", None)
+                    env.update({"KERNEL_ID": kernel_id, "ADDITIONAL_INFO": json.dumps({"AES_KEY": key})})
+                    kernel_id = await super().start_kernel(kernel_id=kernel_id, env=env, **kwargs)
+                    STARTED_WITH[kernel_id] = SESSION.get()
+                    LAUNCHED[kernel_id] = Launch(key, env)
                     return kernel_id
 
                 def remove_kernel(self, kernel_id):
                     STARTED_WITH.pop(kernel_id, None)
+                    LAUNCHED.pop(kernel_id, None)
                     return super().remove_kernel(kernel_id)
+
+                # Restarts the kernel, keeping its id, with env over its launch environment, and waits until it
+                # answers, within the time jupyter_server gives a kernel it restarts.
+                async def configure(self, kernel_id, env):
+                    launch = LAUNCHED[kernel_id]
+                    launch.env.update(env)
+                    kernel = self.get_kernel(kernel_id)
+                    await kernel.restart_kernel(now=True, env=launch.env)
+                    client = kernel.client()
+                    client.start_channels()
+                    try:
+                        await client.wait_for_ready(timeout=self.kernel_info_timeout)
+                    finally:
+                        client.stop_channels()
 
 
             class WithSession:
@@ -161,7 +264,6 @@ final class EmrContainersGateways {
                     km = self.kernel_manager
                     model = self.get_json_body() or {}
                     env = dict(os.environ)
-                    env.pop("@PROGRAM_VARIABLE@", None)
                     env.update({key: str(value) for key, value in (model.get("env") or {}).items()
                                 if key.startswith("KERNEL_")})
                     kernel_id = await ensure_async(km.start_kernel(
@@ -188,6 +290,44 @@ final class EmrContainersGateways {
                 pass
 
 
+            # A kernel's %%configure: the magic posts the env its cell's settings make, signed with the kernel's key,
+            # and the replies that end its cell, which the restart keeps the kernel from sending.
+            class ConfigureHandler(web.RequestHandler):
+
+                def initialize(self, kernel_manager):
+                    self.kernel_manager = kernel_manager
+
+                async def post(self, kernel_id):
+                    launch = LAUNCHED.get(kernel_id)
+                    if launch is None or not signed(launch.key, self.request.body,
+                                                    self.request.headers.get(FINGERPRINT_HEADER, "")):
+                        self.set_status(403)
+                        self.finish({"message": "The request is not signed by kernel " + kernel_id + "."})
+                        return
+                    payload = json.loads(self.request.body)
+                    replies = payload.get("zmq_messages") or {}
+                    async with launch.lock:
+                        try:
+                            await self.kernel_manager.configure(kernel_id, payload.get("env") or {})
+                        except Exception as e:
+                            send(kernel_id, failed(replies, str(e)))
+                            self.set_status(500)
+                            self.finish({"message": str(e)})
+                            return
+                        send(kernel_id, [replies[name] for name in ("stream_reply", "exec_reply", "idle_reply")
+                                         if replies.get(name)])
+                    self.finish({})
+
+
+            class GatewayApp(ServerApp):
+
+                def init_webapp(self):
+                    super().init_webapp()
+                    httpserver.HTTPServer(web.Application([(r"/api/kernels/configure/([^/]+)", ConfigureHandler,
+                                                            {"kernel_manager": self.kernel_manager})])
+                                          ).listen(CONFIGURE_PORT, "127.0.0.1")
+
+
             REPLACED = {kernel_handlers.MainKernelHandler: MainKernelHandler,
                         session_handlers.SessionRootHandler: SessionRootHandler,
                         session_handlers.SessionHandler: SessionHandler}
@@ -195,7 +335,7 @@ final class EmrContainersGateways {
                 module.default_handlers = [(path, REPLACED.get(handler, handler))
                                            for path, handler in module.default_handlers]
             os.environ["JUPYTER_PATH"] = HOME
-            sys.exit(ServerApp.launch_instance(argv=[
+            sys.exit(GatewayApp.launch_instance(argv=[
                 "--ServerApp.ip=0.0.0.0", "--ServerApp.port=@PORT@", "--ServerApp.port_retries=0",
                 "--ServerApp.open_browser=False", "--ServerApp.allow_origin=*", "--ServerApp.root_dir=/home/hadoop",
                 "--IdentityProvider.token=", "--ServerApp.disable_check_xsrf=True",
