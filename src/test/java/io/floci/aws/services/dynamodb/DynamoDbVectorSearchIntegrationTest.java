@@ -1096,7 +1096,7 @@ class DynamoDbVectorSearchIntegrationTest {
             {":t": {"S": "t1"}, ":u": {"S": "t2"}, ":z": {"S": "zz"}, ":a": {"S": "a"},
              ":c": {"S": "c1"}, ":c1": {"S": "c1"}, ":c2": {"S": "c2"}, ":s": {"S": "s"},
              ":p": {"N": "3"}, ":n2": {"N": "2"}, ":n3": {"N": "3"}, ":n4": {"N": "4"},
-             ":bb": {"B": "AAEC"}}""";
+             ":bb": {"B": "AAEC"}, ":bool": {"BOOL": true}}""";
 
     // AWS refuses a value the expression does not use, so each request sends only its own.
     private static String valuesFor(String expression) throws Exception {
@@ -1128,6 +1128,19 @@ class DynamoDbVectorSearchIntegrationTest {
     private static String function(String name) {
         return "Invalid SearchConditionExpression: The function is not allowed in a search "
                 + "condition; function: " + name;
+    }
+
+    private static final String EXISTS_NEEDS_PATH = "Invalid SearchConditionExpression: Operator or "
+            + "function requires a document path; operator or function: attribute_exists";
+
+    private static String operandCount(String function) {
+        return "Invalid SearchConditionExpression: Incorrect number of operands for operator or "
+                + "function; operator or function: " + function + ", number of operands: 2";
+    }
+
+    private static String operandType(String op, String type) {
+        return "Invalid SearchConditionExpression: Incorrect operand type for operator or function; "
+                + "operator or function: " + op + ", operand type: " + type;
     }
 
     private static String notInSchema(String attribute) {
@@ -1243,6 +1256,20 @@ class DynamoDbVectorSearchIntegrationTest {
                         function("attribute_type")),
                 Arguments.of("full", "tenant = :t AND size(category) < :p", function("size")),
                 Arguments.of("full", "tenant = :t AND category[0] = :c", NESTED),
+                Arguments.of("full", "tenant < :bool", operandType("<", "BOOL")),
+                Arguments.of("full", "tenant = :t AND begins_with(category, :p)", operandType("begins_with", "N")),
+                Arguments.of("full", "tenant = :t AND attribute_exists(price, :p)", operandCount("attribute_exists")),
+                Arguments.of("full", "tenant = :t AND NOT attribute_not_exists(price, :p)",
+                        operandCount("attribute_not_exists")),
+                Arguments.of("full", "attribute_exists(price, :p)", operandCount("attribute_exists")),
+                Arguments.of("full", "tenant < :t AND attribute_exists(price, :p)", operandCount("attribute_exists")),
+                Arguments.of("full", "tenant = :t AND begins_with(category, :c) AND attribute_exists(price, :p)",
+                        operandCount("attribute_exists")),
+                Arguments.of("full", "tenant = :t AND attribute_exists(zz, :p)", operandCount("attribute_exists")),
+                Arguments.of("full", "tenant = :t AND category < :bool AND attribute_exists(price, :p)",
+                        operandType("<", "BOOL")),
+                Arguments.of("full", "tenant = :t AND attribute_exists(:p)", EXISTS_NEEDS_PATH),
+                Arguments.of("full", "tenant = :t AND attribute_exists(size(price))", EXISTS_NEEDS_PATH),
                 Arguments.of("full", "tenant = :t AND tenant = :u AND zz = :z", HASH_ONCE),
                 Arguments.of("full", "zz = :z AND tenant = :t AND tenant = :u", HASH_ONCE),
                 Arguments.of("full", "tenant = :t AND tenant = :p", HASH_ONCE),

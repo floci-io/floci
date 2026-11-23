@@ -220,13 +220,11 @@ final class DynamoDbUpdateExpressionSyntax {
         }
         List<Operand> arguments = call.arguments();
         if (arguments.size() != 2) {
-            throw invalid("Incorrect number of operands for operator or function; operator or function: "
-                    + function + ", number of operands: " + arguments.size());
+            throw invalid(DynamoDbPartiQLParser.incorrectOperandCount(function, arguments.size()));
         }
         if ("if_not_exists".equals(function)) {
             if (!isPath(arguments.getFirst())) {
-                throw invalid("Operator or function requires a document path; operator or function: "
-                        + function);
+                throw invalid(DynamoDbPartiQLParser.documentPathRequired(function));
             }
             return;
         }
