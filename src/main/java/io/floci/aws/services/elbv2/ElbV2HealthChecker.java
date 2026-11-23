@@ -84,7 +84,7 @@ public class ElbV2HealthChecker implements Resettable {
         return Objects.equals(a.getId(), b.getId()) && effectivePort(a, tg) == effectivePort(b, tg);
     }
 
-    public void startMonitoring(TargetGroup tg) {
+    public synchronized void startMonitoring(TargetGroup tg) {
         if (config.services().elbv2().mock()) {
             return;
         }
@@ -95,11 +95,18 @@ public class ElbV2HealthChecker implements Resettable {
         states.computeIfAbsent(tgArn, k -> new ConcurrentHashMap<>());
 
         long intervalMs = (tg.getHealthCheckIntervalSeconds() != null ? tg.getHealthCheckIntervalSeconds() : 30) * 1000L;
-        long timerId = vertx.setPeriodic(intervalMs, id -> probeAll(tgArn, tg));
-        timers.put(tgArn, timerId);
+        long timerId = vertx.setPeriodic(intervalMs, id -> {
+            if (Objects.equals(timers.get(tgArn), id)) {
+                probeAll(tgArn, tg);
+            }
+        });
+        Long previous = timers.put(tgArn, timerId);
+        if (previous != null) {
+            vertx.cancelTimer(previous);
+        }
     }
 
-    public void stopMonitoring(String tgArn) {
+    public synchronized void stopMonitoring(String tgArn) {
         Long timerId = timers.remove(tgArn);
         if (timerId != null) {
             vertx.cancelTimer(timerId);
@@ -107,7 +114,7 @@ public class ElbV2HealthChecker implements Resettable {
         states.remove(tgArn);
     }
 
-    public void clear() {
+    public synchronized void clear() {
         timers.values().forEach(vertx::cancelTimer);
         timers.clear();
         states.clear();
