@@ -3751,6 +3751,7 @@ public class DynamoDbService {
     private void evaluateCondition(JsonNode existingItem, String conditionExpression,
                                     JsonNode exprAttrNames, JsonNode exprAttrValues, String returnValuesOnConditionCheckFailure) {
         DynamoDbReservedWords.check(conditionExpression, "ConditionExpression");
+        ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
         if (!matchesFilterExpression(existingItem, conditionExpression, exprAttrNames, exprAttrValues)) {
             if ("ALL_OLD".equals(returnValuesOnConditionCheckFailure)){
                 throw new ConditionalCheckFailedException(existingItem);

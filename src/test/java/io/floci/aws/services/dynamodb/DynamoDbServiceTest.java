@@ -492,6 +492,19 @@ class DynamoDbServiceTest {
         assertThrows(AwsException.class, () -> service.describeTable("NonExistent", "eu-west-1"));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            nope(userId)             | nope
+            ATTRIBUTE_EXISTS(userId) | ATTRIBUTE_EXISTS
+            """)
+    void putItemRefusesAnUnknownConditionFunctionWithoutTheHandler(String condition, String function) {
+        createUsersTable("us-east-1");
+        AwsException exception = assertThrows(AwsException.class, () -> service.putItem("Users",
+                item("userId", "u1"), condition, null, null, "us-east-1", "NONE"));
+        assertEquals("Invalid ConditionExpression: Invalid function name; function: " + function,
+                exception.getMessage());
+    }
+
     @Test
     void applyReplicaUpdatesRejectsBlankRegion() {
         createUsersTable("us-east-1");
