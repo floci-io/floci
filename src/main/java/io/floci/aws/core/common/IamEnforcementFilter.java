@@ -17,6 +17,7 @@ import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.IamService.CallerArns;
 import io.floci.aws.services.iam.IamService.PresignedScope;
 import io.floci.aws.services.iam.PassedRoleLookup;
+import io.floci.aws.services.iam.PrincipalOrganization;
 import io.floci.aws.services.iam.RequestPrincipal;
 import io.floci.aws.services.iam.ResourceArnBuilder;
 import io.floci.aws.services.iam.ResourcePolicyProvider;
@@ -1007,7 +1008,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
             LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, connector);
             String user = callerArns != null ? callerArns.callerArn()
-                    : AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "user/" + akid).toString();
+                    : keyUserArn(accountId, akid);
             String reason = AccessDeniedMessages.firstRefusal(evaluator, caller,
                     iamService.heldPolicies(akid).orElse(null), action, connector, effectiveContext);
             ctx.abortWith(Response.status(403).type(MediaType.APPLICATION_JSON)
@@ -1274,13 +1275,20 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     continue;
                 }
                 LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
-                String denyMessage = "User: " + AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "user/" + akid)
-                        + " is not authorized to perform: " + action
-                        + " on resource: \"" + resource + "\""
-                        + " " + PolicyType.IDENTITY_BASED_POLICY.noAllow(action);
-                emitS3DenialIfApplicable(akid, operationAction, resource, ctx, region, denyMessage);
-                abortIamAware(ctx, accessDeniedForRequest(action, credentialScope, ctx, resource), akid, action,
-                        credentialScope, region);
+                // S3 answers the refusal with the caller, the resource and the policy that refused it, and
+                // CloudTrail records the message S3 answered; S3 Control keeps its own envelope and wording.
+                boolean s3Request = "s3".equals(credentialScope)
+                        && !IamActionRegistry.isS3ControlRequest(credentialScope, ctx);
+                String s3Message = s3Request
+                        ? refusalMessage(caller, caller.principalArn(), akid, accountId, resourceOwnerAccountId, action,
+                                resource, resourcePolicyDecision, effectiveContext)
+                        : null;
+                emitS3DenialIfApplicable(akid, operationAction, resource, ctx, region,
+                        s3Message != null ? s3Message : accessDeniedMessage(action));
+                abortIamAware(ctx, s3Message != null
+                                ? s3XmlAccessDenied(s3Message, formatS3ResourcePath(resource))
+                                : accessDeniedForRequest(action, credentialScope, ctx, resource),
+                        akid, action, credentialScope, region);
                 return true;
             }
         }
@@ -1511,16 +1519,17 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
             String region = requestContext.getRegion() == null
                     ? config.defaultRegion() : requestContext.getRegion();
-            Decision decision = decideAs(caller, accountId, region, action, resource, conditionContext,
-                    resourcePolicyDecision, resourceOwnerAccountId).decision();
-            if (decision != Decision.DENY) {
+            Decided decided = decideAs(caller, accountId, region, action, resource, conditionContext,
+                    resourcePolicyDecision, resourceOwnerAccountId);
+            if (decided.decision() != Decision.DENY) {
                 return;
             }
             LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
-            String denyMessage = "User: " + AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "user/" + akid)
-                    + " is not authorized to perform: " + action
-                    + " on resource: \"" + resource + "\""
-                    + " " + PolicyType.IDENTITY_BASED_POLICY.noAllow(action);
+            // The owner and the resource policy decision as the decision resolved them: a presigned POST names
+            // neither, and a caller outside the owner's organization is told Access Denied alone.
+            String denyMessage = refusalMessage(caller.context(), caller.arns().map(CallerArns::callerArn).orElse(null),
+                    akid, accountId, decided.resourceOwnerAccountId(), action, resource,
+                    decided.resourcePolicyDecision(), decided.context());
             if (deniedEvent != null) {
                 emitS3Denial(akid, deniedEvent.name(), resource, deniedEvent.region(), denyMessage);
             }
@@ -1567,7 +1576,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}, which its service makes as the caller",
                     akid, request.action(), request.resource());
             String user = caller.arns().map(CallerArns::callerArn).orElseGet(() ->
-                    AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "user/" + akid).toString());
+                    keyUserArn(accountId, akid));
             String reason = AccessDeniedMessages.firstRefusal(evaluator, caller.context(),
                     iamService.heldPolicies(akid).orElse(null), request.action(), request.resource(),
                     decided.context());
@@ -1581,7 +1590,50 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     /** A decision and the condition context it was made in. */
-    private record Decided(Decision decision, Map<String, List<String>> context) {
+    /**
+     * A decision, the context it was made in, and the resource's owner and resource policy decision as the decision
+     * resolved them, which a refusal names.
+     */
+    private record Decided(Decision decision, Map<String, List<String>> context, String resourceOwnerAccountId,
+                           ResourcePolicyDecision resourcePolicyDecision) {
+    }
+
+    /**
+     * The access denied message for {@code action} on {@code resource}: the caller, the action, the resource and
+     * the policy that refused it, as S3's guide gives them for a caller in the resource's account or organization
+     * ("This context includes the type of policy that denied access, the reason for denial, and information about
+     * the IAM user or role that requested access to the resource", S3 User Guide, "Troubleshoot access denied (403
+     * Forbidden) errors"). Across organizations S3 answers {@code Access Denied} alone: "Cross-account requests
+     * outside of the same organization return a generic Access Denied message". A bucket policy's explicit deny is
+     * named as a resource-based policy's; otherwise the caller's own policies name the refusal, and a refusal none
+     * of them makes is the resource-based policy's missing allow.
+     */
+    private String refusalMessage(CallerContext caller, String callerArn, String akid, String accountId,
+                                  String resourceOwnerAccountId, String action, String resource,
+                                  ResourcePolicyDecision resourcePolicyDecision, Map<String, List<String>> context) {
+        if (action.startsWith("s3:") && resourceOwnerAccountId != null && !resourceOwnerAccountId.equals(accountId)
+                && !sameOrganization(accountId, resourceOwnerAccountId)) {
+            return "Access Denied";
+        }
+        String reason = resourcePolicyDecision == ResourcePolicyDecision.EXPLICIT_DENY
+                ? PolicyType.RESOURCE_BASED_POLICY.explicitDeny()
+                : AccessDeniedMessages.firstRefusal(evaluator, caller, iamService.heldPolicies(akid).orElse(null),
+                        action, resource, context);
+        return AccessDeniedMessages.notAuthorized(callerArn != null ? callerArn : keyUserArn(accountId, akid), action,
+                "\"" + resource + "\"", reason != null ? reason : PolicyType.RESOURCE_BASED_POLICY.noAllow(action));
+    }
+
+    /** Whether both accounts belong to one organization. */
+    private boolean sameOrganization(String accountId, String otherAccountId) {
+        Optional<String> organization = iamService.organizationContextOf(accountId)
+                .map(PrincipalOrganization.OrganizationContext::organizationId);
+        return organization.isPresent() && organization.equals(iamService.organizationContextOf(otherAccountId)
+                .map(PrincipalOrganization.OrganizationContext::organizationId));
+    }
+
+    /** The user ARN a message names a caller by when IAM resolves no ARN for its key: the key in the user's place. */
+    private String keyUserArn(String accountId, String akid) {
+        return AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "user/" + akid).toString();
     }
 
     /**
@@ -1655,7 +1707,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         Decision decision = evaluator.evaluateResolvedResourcePolicy(
                 caller.context(), effectiveDecision, accountRelationship,
                 action, resource, effectiveContext);
-        return new Decided(decision, effectiveContext);
+        return new Decided(decision, effectiveContext, effectiveOwnerAccountId, effectiveDecision);
     }
 
     /**
