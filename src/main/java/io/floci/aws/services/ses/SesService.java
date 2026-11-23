@@ -12,6 +12,7 @@ import io.floci.aws.services.ses.address.SesAddressLength;
 import io.floci.aws.services.ses.address.SesAddressSyntax;
 import io.floci.aws.services.ses.mime.SesContentScan;
 import io.floci.aws.services.ses.mime.SesMimeParser;
+import io.floci.aws.services.ses.mime.SesRawMessage;
 import io.floci.aws.services.ses.model.BulkEmailEntry;
 import io.floci.aws.services.ses.model.BulkEmailEntryResult;
 import io.floci.aws.services.ses.model.ConfigurationSet;
@@ -360,7 +361,7 @@ public class SesService {
     // Whether AWS still checks a Return-Path header that the request's return path overrides has
     // not been probed; every address present is checked.
     private static List<SendingAddress> rawSendingAddresses(SendEmailRequest request, EmailContent.Raw raw,
-                                                            SmtpRelay.RawMessageHeaders headers) {
+                                                            SesRawMessage.Headers headers) {
         String sourceArn = firstNonBlank(request.sourceArn(), headers.sourceArn());
         String fromArn = firstNonBlank(request.fromArn(), headers.fromArn(), sourceArn);
         String returnPathArn = firstNonBlank(request.returnPathArn(), headers.returnPathArn(), sourceArn);
@@ -537,15 +538,15 @@ public class SesService {
         // X-SES-CONFIGURATION-SET header alone, so the message is read for it only on that path.
         Tenant tenant = requireSendingTenant(request.tenantName(), region, null,
                 () -> firstNonBlank(request.configurationSetName(),
-                        SmtpRelay.parseRawHeaders(raw.data()).configurationSet()));
+                        SesRawMessage.parseRawHeaders(raw.data()).configurationSet()));
         if (raw.data() == null || raw.data().isBlank()) {
             throw new AwsException("InvalidParameterValue", "RawMessage.Data is required.", 400);
         }
         // The MIME headers are always parsed: X-SES-CONFIGURATION-SET can name the configuration
         // set that decides whether events are published at all, so the configuration set cannot be
         // resolved before the message has been read.
-        SmtpRelay.ParsedRawMessage parsed = SmtpRelay.parseRawMessage(raw.data());
-        SmtpRelay.RawMessageHeaders headers = parsed.headers();
+        SesRawMessage.Parsed parsed = SesRawMessage.parseRawMessage(raw.data());
+        SesRawMessage.Headers headers = parsed.headers();
         SesAddressSyntax.requireRaw(request, raw, parsed.message());
         // AWS accepts the configuration set either as a request field or as the
         // X-SES-CONFIGURATION-SET header on the message itself; the request field wins.
