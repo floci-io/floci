@@ -8,6 +8,7 @@ import io.floci.aws.services.cloudwatch.metrics.OtlpMetricsController;
 import io.floci.aws.services.iam.AccessDeniedMessages;
 import io.floci.aws.services.iam.AccessDeniedMessages.PolicyType;
 import io.floci.aws.services.iam.IamActionRegistry;
+import io.floci.aws.services.iam.IamCloudTrailEvents;
 import io.floci.aws.services.iam.IamPolicyEvaluator;
 import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
 import io.floci.aws.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
@@ -35,6 +36,7 @@ import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.ResourceInfo;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
@@ -481,7 +483,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         Optional<String> sessionTokenRefusal = iamService.sessionTokenRefusal(akid, action);
         if (sessionTokenRefusal.isPresent()) {
             LOG.debugv("Rejecting {0} signed with a session token that cannot reach it: {1}", action, akid);
-            ctx.abortWith(queryXmlAccessDenied(sessionTokenRefusal.get()));
+            abortIamAware(ctx, queryXmlAccessDenied(sessionTokenRefusal.get()), akid, action, credentialScope,
+                    region);
             return;
         }
 
@@ -1276,7 +1279,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                         + " on resource: \"" + resource + "\""
                         + " " + PolicyType.IDENTITY_BASED_POLICY.noAllow(action);
                 emitS3DenialIfApplicable(akid, operationAction, resource, ctx, region, denyMessage);
-                ctx.abortWith(accessDeniedForRequest(action, credentialScope, ctx, resource));
+                abortIamAware(ctx, accessDeniedForRequest(action, credentialScope, ctx, resource), akid, action,
+                        credentialScope, region);
                 return true;
             }
         }
@@ -1694,6 +1698,29 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             // The request is refused either way; a record that could not be written is logged, not raised.
             LOG.warnv(e, "CloudTrail denial emission failed for {0} on {1}", action, resource);
         }
+    }
+
+    /**
+     * Refuses the request with {@code refusal}, recording an IAM API call as the CloudTrail management event
+     * IAM records for the calls it runs, with the code, message and request ID the refusal answers with.
+     */
+    private void abortIamAware(ContainerRequestContext ctx, Response refusal, String akid, String action,
+                               String credentialScope, String region) {
+        if ("iam".equals(credentialScope)) {
+            try {
+                MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+                IamConditionContextResolver.formParameters(ctx).forEach(params::putSingle);
+                CloudTrailService.ManagementEventInput event = IamCloudTrailEvents.denied(params, akid, region,
+                        currentVertxRequest.getCurrent(), refusal);
+                if (event != null) {
+                    cloudTrailService.emitManagementEvent(event);
+                }
+            } catch (RuntimeException e) {
+                // The request is refused either way; a record that could not be written is logged, not raised.
+                LOG.warnv(e, "CloudTrail denial emission failed for {0}", action);
+            }
+        }
+        ctx.abortWith(refusal);
     }
 
     /** Records an S3 request IAM refused as a CloudTrail data event named {@code eventName}. */
