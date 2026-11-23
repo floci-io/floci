@@ -2713,14 +2713,16 @@ public class EksClusterManager
     /**
      * Installs the EKS Auto Mode block storage provisioner while the cluster's {@code storageConfig.blockStorage} is
      * enabled: claims of a StorageClass naming {@code ebs.csi.eks.amazonaws.com} are then provisioned from the
-     * node's disk. Otherwise replaces it with {@link #BLOCK_STORAGE_MANIFEST_REMOVED}, as the Pod Identity webhook's
-     * removal does: the manifest lives on the cluster's data volume, which outlives a restart and Floci's own copy
-     * of it, and k3s prunes what an earlier version created.
+     * node's disk. Otherwise, if it was installed before, replaces it with {@link #BLOCK_STORAGE_MANIFEST_REMOVED}:
+     * the manifest lives on the cluster's data volume, which outlives a restart, and k3s prunes what it created.
      */
     void applyBlockStorage(String containerId, Cluster cluster) {
         boolean enabled = cluster.getStorageConfig() != null && cluster.getStorageConfig().blockStorage() != null
                 && Boolean.TRUE.equals(cluster.getStorageConfig().blockStorage().enabled());
         try {
+            if (!enabled && !Files.exists(localClusterFile(cluster, "auto-mode", BLOCK_STORAGE_MANIFEST_FILE))) {
+                return;
+            }
             installManifest(containerId, cluster, "auto-mode", BLOCK_STORAGE_MANIFEST_FILE,
                     BLOCK_STORAGE_MANIFEST_TAR_ENTRY, enabled ? blockStorageManifest() : BLOCK_STORAGE_MANIFEST_REMOVED);
             if (enabled) {

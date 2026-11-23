@@ -53,6 +53,7 @@ import io.floci.aws.services.ec2.model.Placement;
 import io.floci.aws.services.ec2.net.VpcNetworkManager;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
+import io.floci.aws.services.eks.model.BlockStorage;
 import io.floci.aws.services.eks.model.CertificateAuthority;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
@@ -62,6 +63,7 @@ import io.floci.aws.services.eks.model.Logging;
 import io.floci.aws.services.eks.model.Nodegroup;
 import io.floci.aws.services.eks.model.OidcIdentity;
 import io.floci.aws.services.eks.model.ResourcesVpcConfig;
+import io.floci.aws.services.eks.model.StorageConfig;
 import io.floci.aws.testing.ThreadStates;
 import io.floci.aws.testutil.LogCapture;
 import jakarta.ws.rs.core.Response;
@@ -126,7 +128,6 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -4134,6 +4135,45 @@ class EksClusterManagerTest {
                     reachableEndpoint);
         }
 
+        @Test
+        void aClusterThatHadTheBlockStorageProvisionerGetsTheEmptyManifestOnceBlockStorageIsOff() throws Exception {
+            Path localCopy = blockStorageCopy();
+            Files.createDirectories(localCopy.getParent());
+            Files.writeString(localCopy, "kind: Deployment\n");
+
+            manager.applyBlockStorage("container-1", cluster());
+
+            verify(dockerClient).copyArchiveToContainerCmd("container-1");
+            verify(copyCmd).withRemotePath("/var/lib/rancher/k3s");
+            assertEquals(EksClusterManager.BLOCK_STORAGE_MANIFEST_REMOVED, Files.readString(localCopy));
+        }
+
+        @Test
+        void aClusterThatNeverHadTheBlockStorageProvisionerGetsNoCopy() {
+            manager.applyBlockStorage("container-1", cluster());
+
+            verify(dockerClient, never()).copyArchiveToContainerCmd(anyString());
+            assertFalse(Files.exists(blockStorageCopy()));
+        }
+
+        @Test
+        void aClusterWithBlockStorageGetsTheProvisioner() throws Exception {
+            when(eks.blockStorageProvisionerImage()).thenReturn("rancher/local-path-provisioner:v0.0.35");
+            when(eks.blockStorageHelperImage()).thenReturn("rancher/mirrored-library-busybox:1.37.0");
+            Cluster cluster = cluster();
+            cluster.setStorageConfig(new StorageConfig(new BlockStorage(true)));
+
+            manager.applyBlockStorage("container-1", cluster);
+
+            verify(dockerClient).copyArchiveToContainerCmd("container-1");
+            assertEquals(manager.blockStorageManifest(), Files.readString(blockStorageCopy()));
+        }
+
+        private Path blockStorageCopy() {
+            return tempDir.resolve("auto-mode/000000000000/us-east-1/demo")
+                    .resolve(EksClusterManager.BLOCK_STORAGE_MANIFEST_FILE);
+        }
+
         private String writtenManifest() throws Exception {
             return Files.readString(tempDir.resolve("webhook/000000000000/us-east-1/demo")
                     .resolve("floci-eks-pod-identity.yaml"));
@@ -4299,8 +4339,7 @@ class EksClusterManagerTest {
 
             assertEquals("cid-1", cluster.getContainerId());
             verify(lifecycleManager, never()).create(any());
-            // The webhook's manifest, and the block storage one with no objects.
-            verify(dockerClient, times(2)).copyArchiveToContainerCmd("cid-1");
+            verify(dockerClient).copyArchiveToContainerCmd("cid-1");
             assertTrue(writtenManifest().contains("url: \"https://host.docker.internal:4566"
                     + "/_floci/eks/clusters/demo/pod-identity-webhook/scope/000000000000/us-east-1\""));
         }
@@ -4342,9 +4381,7 @@ class EksClusterManagerTest {
 
             adoptSurvivingCluster();
 
-            // Two copies into the node: the webhook's manifest, and the block storage one with no objects.
-            verify(dockerClient, times(2)).copyArchiveToContainerCmd("cid-1");
-            assertEquals(EksClusterManager.POD_IDENTITY_MANIFEST_REMOVED, writtenManifest());
+            assertTheWebhookIsRemoved("cid-1");
         }
 
         @Test
