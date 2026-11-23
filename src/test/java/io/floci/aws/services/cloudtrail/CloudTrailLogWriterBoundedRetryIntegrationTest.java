@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -22,6 +21,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 
+import static io.floci.aws.testing.CloudTrailRequests.invokeCloudTrail;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -30,8 +30,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class CloudTrailLogWriterBoundedRetryIntegrationTest {
 
-    private static final String CT_TARGET = "CloudTrail_20131101.";
-    private static final String JSON11 = "application/x-amz-json-1.1";
     private static final int RETRY_RECORD_LIMIT = 1024;
     private static final int PRODUCED_EVENTS = RETRY_RECORD_LIMIT + 80;
 
@@ -269,14 +267,6 @@ class CloudTrailLogWriterBoundedRetryIntegrationTest {
                 .then().statusCode(200)
                 .extract().asString();
         return new ObjectMapper().readTree(body);
-    }
-
-    private static Response invokeCloudTrail(String action, String body) {
-        return given()
-                .header("X-Amz-Target", CT_TARGET + action)
-                .contentType(JSON11)
-                .body(body)
-                .when().post("/");
     }
 
     private static void createBucket(String name) {

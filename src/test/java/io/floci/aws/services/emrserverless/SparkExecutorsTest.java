@@ -288,12 +288,33 @@ class SparkExecutorsTest {
     }
 
     @Test
+    void eachExecutorsWorkerIsTimedFromItsStartToItsEnd() {
+        driver.settings(IMAGE_DEFAULTS);
+        driver.target(2);
+        SparkExecutors executors = new SparkExecutors(TWO, driver, containers, capacity, nanos::get);
+        executors.follow();
+
+        driver.target(1);
+        driver.coresUsed(Map.of("10.0.0.1", 4, "10.0.0.2", 0));
+        advance(SparkExecutors.LOOK_INTERVAL);
+        executors.follow();
+        advance(Duration.ofSeconds(10));
+        executors.removeAll();
+
+        assertEquals(List.of(SparkExecutors.LOOK_INTERVAL, SparkExecutors.LOOK_INTERVAL.plusSeconds(10)),
+                executors.lifetimes());
+    }
+
+    @Test
     void sizesReadAsSparkReadsThem() {
         assertEquals(14 * 1024, SparkExecutors.mebibytes("14G", 0));
         assertEquals(14 * 1024, SparkExecutors.mebibytes("14gb", 0));
         assertEquals(512, SparkExecutors.mebibytes("512m", 0));
         assertEquals(2048, SparkExecutors.mebibytes("2048", 0));
         assertEquals(7, SparkExecutors.mebibytes("not a size", 7));
+        // Too large for a long, as written or once in MiB.
+        assertEquals(7, SparkExecutors.mebibytes("99999999999999999999g", 7));
+        assertEquals(7, SparkExecutors.mebibytes("9007199254740993p", 7));
         assertEquals(20, SparkExecutors.gigabytes(null));
         assertEquals(200, SparkExecutors.gigabytes("200G"));
     }

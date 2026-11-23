@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -107,6 +108,27 @@ class SsoPermissionSetRoleProvisionerTest {
 
         assertSame(policyFailure, thrown);
         assertEquals(List.of(cleanupFailure), List.of(thrown.getSuppressed()));
+    }
+
+    /**
+     * Removing an assignment empties the role before deleting it, so a role an instance profile
+     * holds has to be refused before that: otherwise the delete it cannot finish would leave the
+     * assignment's role in place with nothing on it.
+     */
+    @Test
+    void anAssignmentWhoseRoleAProfileHoldsKeepsItsPolicies() {
+        PermissionSetProvisioning provisioning = new PermissionSetProvisioning("permission-set", ACCOUNT, STATUS,
+                ARN, "role-id");
+        when(iam.findRole(ACCOUNT, NAME)).thenReturn(Optional.of(new IamRole("role-id", NAME, PATH, ARN, "{}")));
+        doThrow(new AwsException("DeleteConflict",
+                "Cannot delete entity, must remove roles from instance profile first.", 409))
+                .when(iam).requireNotHeldByAnInstanceProfile(NAME);
+
+        assertEquals("DeleteConflict", assertThrows(AwsException.class,
+                () -> provisioner.remove(provisioning, "us-east-1")).getErrorCode());
+
+        verify(iam, never()).replaceRolePolicies(anyString(), anyString(), any(), any(), any(), anyInt());
+        verify(iam, never()).deleteRole(anyString(), anyString());
     }
 
     @Test

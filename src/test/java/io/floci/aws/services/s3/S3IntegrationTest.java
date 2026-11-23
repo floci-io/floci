@@ -2058,7 +2058,7 @@ class S3IntegrationTest {
 
     @Test
     @Order(79)
-    void copyObjectPreservesServerSideEncryption() {
+    void copyObjectTakesTheDestinationBucketDefaultEncryptionUnlessTheRequestNamesOne() {
         given()
             .header("x-amz-copy-source", "/sse-bucket/encrypted.txt")
         .when()
@@ -2078,7 +2078,7 @@ class S3IntegrationTest {
             .statusCode(200)
             .header("x-amz-server-side-encryption", equalTo("AES256"));
 
-        String kmsKeyId = "arn:aws:kms:us-east-1:000000000000:key/test-key";
+        // The source is aws:kms, but sse-bucket has no default encryption configuration: the copy is SSE-S3.
         given()
             .header("x-amz-copy-source", "/sse-bucket/kms-encrypted.txt")
         .when()
@@ -2086,12 +2086,32 @@ class S3IntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("CopyObjectResult"))
+            .header("x-amz-server-side-encryption", equalTo("AES256"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", nullValue());
+
+        given()
+        .when()
+            .head("/sse-bucket/kms-encrypted-copy.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("AES256"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", nullValue());
+
+        String kmsKeyId = "arn:aws:kms:us-east-1:000000000000:key/test-key";
+        given()
+            .header("x-amz-copy-source", "/sse-bucket/encrypted.txt")
+            .header("x-amz-server-side-encryption", "aws:kms")
+            .header("x-amz-server-side-encryption-aws-kms-key-id", kmsKeyId)
+        .when()
+            .put("/sse-bucket/kms-requested-copy.txt")
+        .then()
+            .statusCode(200)
             .header("x-amz-server-side-encryption", equalTo("aws:kms"))
             .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeyId));
 
         given()
         .when()
-            .head("/sse-bucket/kms-encrypted-copy.txt")
+            .head("/sse-bucket/kms-requested-copy.txt")
         .then()
             .statusCode(200)
             .header("x-amz-server-side-encryption", equalTo("aws:kms"))
@@ -2332,6 +2352,7 @@ class S3IntegrationTest {
         given().delete("/sse-bucket/aes-with-kms-id.txt");
         given().delete("/sse-bucket/kms-encrypted.txt");
         given().delete("/sse-bucket/kms-encrypted-copy.txt");
+        given().delete("/sse-bucket/kms-requested-copy.txt");
         given().delete("/sse-bucket/sse-c.txt");
         given().delete("/sse-bucket/sse-c-copy.txt");
         given().delete("/sse-bucket");

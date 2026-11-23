@@ -19,20 +19,13 @@ import static org.hamcrest.Matchers.equalTo;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesCustomVerificationEmailTemplateV1IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
-    private static final String V2_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String FROM = "cvet-v1-sender@floci.test";
     private static final String NAME = "cvet-v1-a";
-
-    private static RequestSpecification query(String action) {
-        return given().contentType("application/x-www-form-urlencoded").header("Authorization", AUTH)
-                .formParam("Action", action);
-    }
+    private static final String MISSING_MESSAGE =
+            "Provided custom verification email template name does not exist.";
 
     private static RequestSpecification create(String name, String subject) {
-        return query("CreateCustomVerificationEmailTemplate")
+        return SesV1Requests.query("CreateCustomVerificationEmailTemplate")
                 .formParam("TemplateName", name)
                 .formParam("FromEmailAddress", FROM)
                 .formParam("TemplateSubject", subject)
@@ -44,17 +37,42 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
     @Test
     @Order(0)
     void setup_verifyFromIdentity() {
-        query("VerifyEmailIdentity").formParam("EmailAddress", FROM).when().post("/").then().statusCode(200);
+        SesV1Requests.query("VerifyEmailIdentity").formParam("EmailAddress", FROM).when().post("/").then().statusCode(200);
     }
 
     @Test
     @Order(10)
     void get_missing_returnsDoesNotExistOnV1() {
         // v1 returns CustomVerificationEmailTemplateDoesNotExist / 400 (verified against AWS), so the
-        // v1 SDK's typed exception fires — not the v2 NotFoundException / 404.
-        query("GetCustomVerificationEmailTemplate").formParam("TemplateName", "cvet-v1-ghost")
+        // v1 SDK's typed exception fires, not the v2 NotFoundException / 404. The message is a
+        // fixed sentence that does not name the template, unlike the v2 one.
+        SesV1Requests.query("GetCustomVerificationEmailTemplate").formParam("TemplateName", "cvet-v1-ghost")
         .when().post("/").then().statusCode(400)
-                .body(containsString("<Code>CustomVerificationEmailTemplateDoesNotExist</Code>"));
+                .body(containsString("<Code>CustomVerificationEmailTemplateDoesNotExist</Code>"))
+                .body(containsString("<Message>" + MISSING_MESSAGE + "</Message>"));
+    }
+
+    @Test
+    @Order(12)
+    void update_missing_returnsTheSameFixedSentenceOnV1() {
+        SesV1Requests.query("UpdateCustomVerificationEmailTemplate")
+                .formParam("TemplateName", "cvet-v1-ghost").formParam("FromEmailAddress", FROM)
+                .formParam("TemplateSubject", "Verify your email")
+                .formParam("TemplateContent", "<html><body>verify</body></html>")
+                .formParam("SuccessRedirectionURL", "https://example.com/ok")
+                .formParam("FailureRedirectionURL", "https://example.com/fail")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>CustomVerificationEmailTemplateDoesNotExist</Code>"))
+                .body(containsString("<Message>" + MISSING_MESSAGE + "</Message>"));
+    }
+
+    @Test
+    @Order(13)
+    void delete_missing_succeedsOnV1() {
+        // Probed: v1 answers 200 for a name the account does not hold, where v2 answers 404.
+        SesV1Requests.query("DeleteCustomVerificationEmailTemplate").formParam("TemplateName", "cvet-v1-ghost")
+        .when().post("/").then().statusCode(200)
+                .body(containsString("DeleteCustomVerificationEmailTemplateResponse"));
     }
 
     @Test
@@ -62,7 +80,7 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
     void create_unverifiedFromAddress_returnsFromEmailAddressNotVerifiedOnV1() {
         // An unverified FromEmailAddress is FromEmailAddressNotVerified / 400 on v1 (verified against
         // AWS), not the v2 NotFoundException / 404.
-        query("CreateCustomVerificationEmailTemplate")
+        SesV1Requests.query("CreateCustomVerificationEmailTemplate")
                 .formParam("TemplateName", "cvet-v1-unverified-from")
                 .formParam("FromEmailAddress", "cvet-v1-not-verified@floci.test")
                 .formParam("TemplateSubject", "Verify your email")
@@ -83,7 +101,7 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
     @Test
     @Order(2)
     void get() {
-        query("GetCustomVerificationEmailTemplate").formParam("TemplateName", NAME)
+        SesV1Requests.query("GetCustomVerificationEmailTemplate").formParam("TemplateName", NAME)
         .when().post("/").then().statusCode(200)
                 .body(containsString("<TemplateName>" + NAME + "</TemplateName>"))
                 .body(containsString("<FromEmailAddress>" + FROM + "</FromEmailAddress>"))
@@ -93,7 +111,7 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
     @Test
     @Order(3)
     void list() {
-        query("ListCustomVerificationEmailTemplates")
+        SesV1Requests.query("ListCustomVerificationEmailTemplates")
         .when().post("/").then().statusCode(200)
                 .body(containsString("<TemplateName>" + NAME + "</TemplateName>"));
     }
@@ -104,7 +122,7 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
         // create dup fails with the v1-native code (verified against AWS), not the v2 AlreadyExistsException
         create(NAME, "Updated via v1").when().post("/").then().statusCode(400)
                 .body(containsString("<Code>CustomVerificationEmailTemplateAlreadyExists</Code>"));
-        query("UpdateCustomVerificationEmailTemplate")
+        SesV1Requests.query("UpdateCustomVerificationEmailTemplate")
                 .formParam("TemplateName", NAME).formParam("FromEmailAddress", FROM)
                 .formParam("TemplateSubject", "Updated via v1")
                 .formParam("TemplateContent", "<html><body>verify</body></html>")
@@ -112,7 +130,7 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
                 .formParam("FailureRedirectionURL", "https://example.com/fail")
         .when().post("/").then().statusCode(200);
 
-        query("GetCustomVerificationEmailTemplate").formParam("TemplateName", NAME)
+        SesV1Requests.query("GetCustomVerificationEmailTemplate").formParam("TemplateName", NAME)
         .when().post("/").then().statusCode(200)
                 .body(containsString("<TemplateSubject>Updated via v1</TemplateSubject>"));
     }
@@ -120,7 +138,7 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
     @Test
     @Order(5)
     void delete() {
-        query("DeleteCustomVerificationEmailTemplate").formParam("TemplateName", NAME)
+        SesV1Requests.query("DeleteCustomVerificationEmailTemplate").formParam("TemplateName", NAME)
         .when().post("/").then().statusCode(200)
                 .body(containsString("DeleteCustomVerificationEmailTemplateResponse"));
     }
@@ -130,7 +148,7 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
     void create_missingRequiredField_returnsInvalidParameterValueOnV1() {
         // A required-field failure must surface the v1-native InvalidParameterValue code in the
         // Query XML (not the v2-style BadRequestException), consistent with requireParam.
-        query("CreateCustomVerificationEmailTemplate")
+        SesV1Requests.query("CreateCustomVerificationEmailTemplate")
                 .formParam("TemplateName", "cvet-v1-missing")
                 .formParam("FromEmailAddress", FROM)
                 // TemplateSubject omitted
@@ -147,7 +165,7 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
     void update_missingTemplateName_returnsInvalidParameterValueOnV1() {
         // TemplateName is validated before the existence check, so omitting it yields the required-field
         // InvalidParameterValue rather than a NotFoundException for a null-named template.
-        query("UpdateCustomVerificationEmailTemplate")
+        SesV1Requests.query("UpdateCustomVerificationEmailTemplate")
                 // TemplateName omitted
                 .formParam("FromEmailAddress", FROM)
                 .formParam("TemplateSubject", "Updated via v1")
@@ -164,7 +182,7 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
     void v1Template_isVisibleViaV2() {
         create("cvet-v1-shared", "Shared").when().post("/").then().statusCode(200);
 
-        given().header("Authorization", V2_AUTH)
+        given().header("Authorization", SesV2Requests.AUTH)
         .when().get("/v2/email/custom-verification-email-templates/cvet-v1-shared")
         .then().statusCode(200)
                 .body("TemplateSubject", equalTo("Shared"))
@@ -174,7 +192,7 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
     @Test
     @Order(9)
     void cleanup_deleteSharedTemplate() {
-        query("DeleteCustomVerificationEmailTemplate").formParam("TemplateName", "cvet-v1-shared")
+        SesV1Requests.query("DeleteCustomVerificationEmailTemplate").formParam("TemplateName", "cvet-v1-shared")
         .when().post("/").then().statusCode(200);
     }
 }

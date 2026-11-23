@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
+import io.floci.aws.core.common.JsonBooleanCoercion;
 import io.floci.aws.core.common.JsonNumberCoercion;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.services.ses.model.Tag;
@@ -15,7 +16,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.function.Predicate;
 
@@ -46,8 +46,7 @@ final class SesV2Json {
             case "InvalidParameterValue", "InvalidTemplate", "ValidationError",
                  "InvalidRenderingParameter", "MissingRenderingAttribute", "InvalidSNSDestination" ->
                     new AwsException("BadRequestException", e.getMessage(), 400);
-            case "TemplateDoesNotExist", "ConfigurationSetDoesNotExist",
-                 "CustomVerificationEmailTemplateDoesNotExist", "FromEmailAddressNotVerified" ->
+            case "TemplateDoesNotExist", "ConfigurationSetDoesNotExist", "FromEmailAddressNotVerified" ->
                     new AwsException("NotFoundException", e.getMessage(), 404);
             case "AlreadyExists", "ConfigurationSetAlreadyExists",
                  "CustomVerificationEmailTemplateAlreadyExists" ->
@@ -56,6 +55,26 @@ final class SesV2Json {
                     new AwsException("SendingPausedException", e.getMessage(), 400);
             default -> e;
         };
+    }
+
+    /**
+     * The v2 answer for a missing custom verification email template (probed). It names the
+     * template, unlike either v1 message, so callers restate it instead of remapping the v1 error.
+     */
+    static AwsException cvetNotFound(String templateName) {
+        return new AwsException("NotFoundException",
+                "Custom verification email template <" + templateName + "> does not exist", 404);
+    }
+
+    /**
+     * {@link #remapV1Exception} for an operation that names a custom verification email template:
+     * the service throws a v1 sentence for a missing one, which v2 restates around the requested name.
+     */
+    static AwsException remapCvetException(AwsException e, String templateName) {
+        if ("CustomVerificationEmailTemplateDoesNotExist".equals(e.getErrorCode())) {
+            return cvetNotFound(templateName);
+        }
+        return remapV1Exception(e);
     }
 
     /** A request body that is not a JSON object: AWS names a list and answers anything else without a message. */
@@ -146,12 +165,7 @@ final class SesV2Json {
             return node.booleanValue();
         }
         if (node.isTextual()) {
-            return switch (node.textValue().toLowerCase(Locale.ROOT)) {
-                case "true", "yes", "y", "t", "1" -> true;
-                case "false", "no", "n", "f", "0" -> false;
-                default -> throw new AwsException(SERIALIZATION_EXCEPTION,
-                        "STRING_VALUE can not be converted to an Boolean", 400);
-            };
+            return JsonBooleanCoercion.fromString(node.textValue());
         }
         if (node.isNull()) {
             throw new AwsException(SERIALIZATION_EXCEPTION, null, 400);
@@ -221,14 +235,12 @@ final class SesV2Json {
             return Map.of();
         }
         if (!keys.containsAll(filter.keySet())) {
-            throw SmithyValidationErrors.badRequest( "Value at 'filter' "
-                    + "failed to satisfy constraint: Map keys must satisfy constraint: "
-                    + "[Member must satisfy enum value set: [" + String.join(", ", keys) + "]]");
+            throw SmithyValidationErrors.badRequest(SmithyValidationErrors.Violations.WITHOUT_VALUES
+                    .mapKeys("filter", null, List.of("Member must satisfy enum value set: " + keys)));
         }
         if (filter.values().stream().anyMatch(v -> v != null && invalidValue.test(v))) {
-            throw SmithyValidationErrors.badRequest( "Value at 'filter' "
-                    + "failed to satisfy constraint: Map value must satisfy constraint: "
-                    + "[" + valueConstraint + "]");
+            throw SmithyValidationErrors.badRequest(SmithyValidationErrors.Violations.WITHOUT_VALUES
+                    .mapValues("filter", null, List.of(valueConstraint)));
         }
         Map<String, String> values = new LinkedHashMap<>();
         filter.forEach((key, value) -> {

@@ -5,7 +5,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.DelayedTaskScheduler;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.docker.DockerCapacityExceededException;
 import io.floci.aws.services.lambda.launcher.ContainerHandle;
 import io.floci.aws.services.lambda.launcher.LambdaInitException;
 import io.floci.aws.services.lambda.model.FunctionEventInvokeConfig;
@@ -27,6 +29,7 @@ import java.net.UnknownHostException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -55,14 +58,18 @@ public class LambdaExecutorService implements Resettable {
     private static final Logger LOG = Logger.getLogger(LambdaExecutorService.class);
     /** Extra time for a newly started runtime to request its first invocation. */
     private static final int RUNTIME_DISPATCH_GRACE_SECONDS = 2;
-    /** How long a retry that found the function's concurrency in use waits before asking again. */
-    private static final long THROTTLED_RETRY_POLL_MS = 1000;
+    /** How long an attempt that found the function's concurrency in use first waits before asking again. */
+    private static final long THROTTLED_RETRY_FIRST_WAIT_MS = 1000;
+    /** Each further wait of an attempt that keeps finding the concurrency in use doubles, up to this. */
+    static final Duration THROTTLED_RETRY_MAX_WAIT = Duration.ofSeconds(30);
     /**
      * Retries run on virtual threads rather than the pool: once the pool's queue is full its
      * caller-runs fallback would run a whole attempt on the JDK's shared delay thread, which also
      * fires the invocation timeouts that attempt may be waiting on.
      */
     private static final Executor RETRY_THREADS = task -> Thread.ofVirtual().name("lambda-async-retry").start(task);
+    private static final DelayedTaskScheduler DELAYED_RETRY_THREADS = (task, delayMs) ->
+            CompletableFuture.delayedExecutor(delayMs, TimeUnit.MILLISECONDS, RETRY_THREADS).execute(task);
 
     private final WarmPool warmPool;
     private final ObjectMapper objectMapper;
@@ -73,6 +80,8 @@ public class LambdaExecutorService implements Resettable {
     private final LambdaService directLambdaService;
     private final Clock clock;
     private final long asyncRetryDelayMs;
+    private final long throttledRetryMaxWaitMs;
+    private final DelayedTaskScheduler retryScheduler;
     private final boolean dockerExecutor;
     private final int initTimeoutSeconds;
     /** Moved on by a reset so that retries still waiting from before it are dropped. */
@@ -96,7 +105,7 @@ public class LambdaExecutorService implements Resettable {
         this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, lambdaServiceInstance, null, clock,
                 Duration.ofSeconds(config.services().lambda().asyncRetryDelaySeconds()),
                 "docker".equalsIgnoreCase(config.services().lambda().executor().trim()),
-                config.services().lambda().initTimeoutSeconds());
+                config.services().lambda().initTimeoutSeconds(), THROTTLED_RETRY_MAX_WAIT, DELAYED_RETRY_THREADS);
     }
 
     LambdaExecutorService(WarmPool warmPool,
@@ -105,7 +114,7 @@ public class LambdaExecutorService implements Resettable {
                           AsyncInvokeDestinationRouter destinationRouter,
                           LambdaService directLambdaService) {
         this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, null, directLambdaService,
-                Clock.systemUTC(), Duration.ZERO, true, 0);
+                Clock.systemUTC(), Duration.ZERO, true, 0, THROTTLED_RETRY_MAX_WAIT, DELAYED_RETRY_THREADS);
     }
 
     LambdaExecutorService(WarmPool warmPool,
@@ -116,7 +125,21 @@ public class LambdaExecutorService implements Resettable {
                           Clock clock,
                           Duration asyncRetryDelay) {
         this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, null, directLambdaService, clock,
-                asyncRetryDelay, true, 0);
+                asyncRetryDelay, true, 0, THROTTLED_RETRY_MAX_WAIT, DELAYED_RETRY_THREADS);
+    }
+
+    /** Package-private constructor for testing throttled waits. */
+    LambdaExecutorService(WarmPool warmPool,
+                          ObjectMapper objectMapper,
+                          LambdaConcurrencyLimiter concurrencyLimiter,
+                          AsyncInvokeDestinationRouter destinationRouter,
+                          LambdaService directLambdaService,
+                          Clock clock,
+                          Duration asyncRetryDelay,
+                          Duration throttledRetryMaxWait,
+                          DelayedTaskScheduler retryScheduler) {
+        this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, null, directLambdaService, clock,
+                asyncRetryDelay, true, 0, throttledRetryMaxWait, retryScheduler);
     }
 
     private LambdaExecutorService(WarmPool warmPool,
@@ -128,7 +151,9 @@ public class LambdaExecutorService implements Resettable {
                                   Clock clock,
                                   Duration asyncRetryDelay,
                                   boolean dockerExecutor,
-                                  int initTimeoutSeconds) {
+                                  int initTimeoutSeconds,
+                                  Duration throttledRetryMaxWait,
+                                  DelayedTaskScheduler retryScheduler) {
         this.warmPool = warmPool;
         this.objectMapper = objectMapper;
         this.concurrencyLimiter = concurrencyLimiter;
@@ -137,6 +162,8 @@ public class LambdaExecutorService implements Resettable {
         this.directLambdaService = directLambdaService;
         this.clock = clock;
         this.asyncRetryDelayMs = asyncRetryDelay.toMillis();
+        this.throttledRetryMaxWaitMs = throttledRetryMaxWait.toMillis();
+        this.retryScheduler = retryScheduler;
         this.dockerExecutor = dockerExecutor;
         this.initTimeoutSeconds = initTimeoutSeconds;
     }
@@ -146,7 +173,7 @@ public class LambdaExecutorService implements Resettable {
                           ObjectMapper objectMapper,
                           LambdaConcurrencyLimiter concurrencyLimiter) {
         this(warmPool, objectMapper, concurrencyLimiter, null, (Instance<LambdaService>) null, null,
-                Clock.systemUTC(), Duration.ZERO, true, 0);
+                Clock.systemUTC(), Duration.ZERO, true, 0, THROTTLED_RETRY_MAX_WAIT, DELAYED_RETRY_THREADS);
     }
 
     LambdaExecutorService(WarmPool warmPool,
@@ -154,7 +181,8 @@ public class LambdaExecutorService implements Resettable {
                           LambdaConcurrencyLimiter concurrencyLimiter,
                           AsyncInvokeDestinationRouter destinationRouter) {
         this(warmPool, objectMapper, concurrencyLimiter, destinationRouter,
-                (Instance<LambdaService>) null, null, Clock.systemUTC(), Duration.ZERO, true, 0);
+                (Instance<LambdaService>) null, null, Clock.systemUTC(), Duration.ZERO, true, 0,
+                THROTTLED_RETRY_MAX_WAIT, DELAYED_RETRY_THREADS);
     }
 
     LambdaExecutorService(WarmPool warmPool,
@@ -162,7 +190,8 @@ public class LambdaExecutorService implements Resettable {
                           LambdaConcurrencyLimiter concurrencyLimiter,
                           int initTimeoutSeconds) {
         this(warmPool, objectMapper, concurrencyLimiter, null, (Instance<LambdaService>) null, null,
-                Clock.systemUTC(), Duration.ZERO, true, initTimeoutSeconds);
+                Clock.systemUTC(), Duration.ZERO, true, initTimeoutSeconds,
+                THROTTLED_RETRY_MAX_WAIT, DELAYED_RETRY_THREADS);
     }
 
     public InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type) {
@@ -252,7 +281,6 @@ public class LambdaExecutorService implements Resettable {
         }
 
         LambdaService lambdaService = resolveLambdaService();
-        LambdaConcurrencyLimiter.Permit permit = acquire(lambdaService, fn);
 
         if (type == InvocationType.Event) {
             FunctionEventInvokeConfig eventInvokeConfig = null;
@@ -278,18 +306,13 @@ public class LambdaExecutorService implements Resettable {
             // again after it removes the function from the store. So either this check sees the function
             // gone, or the count moves after the event's snapshot and stale() drops the event.
             if (lambdaService != null && !lambdaService.isLive(fn)) {
-                permit.close();
                 return new InvokeResult(202, null, new byte[0], null, requestId);
             }
-            try {
-                asyncExecutor.submit(() -> attempt(event, 1, null, permit));
-            } catch (RuntimeException e) {
-                permit.close();
-                throw e;
-            }
+            asyncExecutor.submit(() -> attempt(event, 1, null, THROTTLED_RETRY_FIRST_WAIT_MS));
             return new InvokeResult(202, null, new byte[0], null, requestId);
         }
 
+        LambdaConcurrencyLimiter.Permit permit = concurrencyLimiter.acquire(latest(lambdaService, fn));
         try {
             return executeSync(fn, payload, requestId, clientContext, invokedQualifier, listener, traceId, logTail);
         } finally {
@@ -311,43 +334,55 @@ public class LambdaExecutorService implements Resettable {
      * Reserved concurrency is function-wide, so the permit is taken against the function's {@code $LATEST}
      * record, which holds the reservation, rather than a version's snapshot, which has none.
      */
-    private LambdaConcurrencyLimiter.Permit acquire(LambdaService lambdaService, LambdaFunction fn) {
-        LambdaFunction function = lambdaService != null ? lambdaService.findLatest(fn).orElse(fn) : fn;
-        return concurrencyLimiter.acquire(function);
+    private static LambdaFunction latest(LambdaService lambdaService, LambdaFunction fn) {
+        return lambdaService != null ? lambdaService.findLatest(fn).orElse(fn) : fn;
     }
 
     /**
      * Runs one attempt of an asynchronous event and either routes the outcome or schedules the next
      * attempt. Retry n waits n times the configured delay, never past the event's maximum age, and
      * the pending event of a function deleted meanwhile is dropped, whether it was waiting to retry
-     * or to expire. The concurrency permit covers only the attempt; {@code held} is the one the
-     * invoke itself took.
+     * or to expire. The concurrency permit covers only the attempt; one that finds the concurrency in
+     * use waits {@code throttledWaitMs} without spending an attempt.
      */
-    private void attempt(AsyncEvent event, int attempt, InvokeResult previous,
-                         LambdaConcurrencyLimiter.Permit held) {
+    private void attempt(AsyncEvent event, int attempt, InvokeResult previous, long throttledWaitMs) {
         if (stale(event) || clock.millis() >= event.expiresAtMs()) {
-            if (held != null) {
-                held.close();
-            }
             route(event, previous, attempt - 1);
             return;
         }
+        LambdaFunction function;
+        try {
+            function = latest(resolveLambdaService(), event.fn());
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not look up {0} for an async attempt: {1}", event.fn().getFunctionName(), e.getMessage());
+            route(event, previous != null ? previous : new InvokeResult(500, "Unhandled",
+                    buildErrorPayload("Error executing Lambda: " + e.getMessage(), "Lambda.UnknownError"),
+                    null, event.requestId()), attempt);
+            return;
+        }
         LambdaConcurrencyLimiter.Permit permit;
-        if (held != null) {
-            permit = held;
-        } else {
-            try {
-                permit = acquire(resolveLambdaService(), event.fn());
-            } catch (AwsException throttled) {
-                // ponytail: AWS backs a throttled retry off exponentially, up to five minutes; one
-                // fixed poll is enough locally, and the event still expires on time.
-                schedule(event, THROTTLED_RETRY_POLL_MS, attempt, previous);
+        try {
+            permit = concurrencyLimiter.acquire(function);
+        } catch (AwsException throttled) {
+            if (Objects.equals(function.getReservedConcurrentExecutions(), 0)) {
+                // This Floci-only placeholder covers an event a zero reservation turns away; AWS documents no payload.
+                route(event, previous != null ? previous : new InvokeResult(429, "Unhandled",
+                        buildErrorPayload(throttled.getMessage(), throttled.getErrorCode()), null,
+                        event.requestId()), attempt - 1);
                 return;
             }
+            // ponytail: AWS backs a throttled event off up to five minutes; a lower cap notices a freed
+            // permit sooner locally, and the event still expires on time.
+            schedule(event, throttledWaitMs, attempt, previous, Math.min(throttledWaitMs * 2, throttledRetryMaxWaitMs));
+            return;
         }
         InvokeResult result;
         try (permit) {
             result = executeSync(event.fn(), event.payload(), event.requestId(), null, event.invokedQualifier(), null, null, false);
+        } catch (DockerCapacityExceededException throttled) {
+            // Lambda's Docker budget is full: backed off like a throttled event, which it is to the caller.
+            schedule(event, throttledWaitMs, attempt, previous, Math.min(throttledWaitMs * 2, throttledRetryMaxWaitMs));
+            return;
         } catch (RuntimeException e) {
             LOG.warnv("Error in async Lambda execution for {0}: {1}", event.fn().getFunctionName(), e.getMessage());
             // Stops retrying, as upstream did: routes the previous attempt's result, or UnknownError when
@@ -361,20 +396,20 @@ public class LambdaExecutorService implements Resettable {
             route(event, result, attempt);
             return;
         }
-        schedule(event, asyncRetryDelayMs * attempt, attempt + 1, result);
+        schedule(event, asyncRetryDelayMs * attempt, attempt + 1, result, THROTTLED_RETRY_FIRST_WAIT_MS);
     }
 
     /**
      * Decides expiry up front, on the injected clock: the delay thread keeps its own time and may
-     * wake a hair early.
+     * wake a hair early. A wait that reaches the event's maximum age ends at it, and the event is
+     * routed then instead of attempted.
      */
-    private void schedule(AsyncEvent event, long delayMs, int attempt, InvokeResult previous) {
+    private void schedule(AsyncEvent event, long delayMs, int attempt, InvokeResult previous, long throttledWaitMs) {
         long remainingMs = event.expiresAtMs() - clock.millis();
         Runnable next = delayMs < remainingMs
-                ? () -> attempt(event, attempt, previous, null)
+                ? () -> attempt(event, attempt, previous, throttledWaitMs)
                 : () -> route(event, previous, attempt - 1);
-        CompletableFuture.delayedExecutor(Math.max(0, Math.min(delayMs, remainingMs)), TimeUnit.MILLISECONDS,
-                RETRY_THREADS).execute(next);
+        retryScheduler.schedule(next, Math.max(0, Math.min(delayMs, remainingMs)));
     }
 
     private void route(AsyncEvent event, InvokeResult result, int attempts) {
@@ -433,6 +468,11 @@ public class LambdaExecutorService implements Resettable {
                 handle = warmPool.acquire(fn);
             }
         } catch (Exception e) {
+            DockerCapacityExceededException overBudget = DockerCapacityExceededException.findIn(e);
+            if (overBudget != null) {
+                // Out of Floci's Docker budget for Lambda is AWS's throttle, not a function error.
+                throw overBudget;
+            }
             LOG.warnv("Failed to acquire container for function {0}: {1}", fn.getFunctionName(), e.getMessage());
             return new InvokeResult(200, "Unhandled",
                     buildErrorPayload(initFailureMessage(e, dockerExecutor), initFailureType(e)),

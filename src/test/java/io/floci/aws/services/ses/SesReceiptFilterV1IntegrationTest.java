@@ -7,7 +7,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.ses.SesV1Requests.query;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -23,19 +23,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesReceiptFilterV1IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-west-2/email/aws4_request";
-
-    private static RequestSpecification req(String action) {
-        return given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", AUTH)
-                .formParam("Action", action);
-    }
+    private static final String AUTH = SesV1Requests.authFor("us-west-2");
 
     private static RequestSpecification create(
             String name, String policy, String cidr) {
-        return req("CreateReceiptFilter")
+        return query(AUTH, "CreateReceiptFilter")
                 .formParam("Filter.Name", name)
                 .formParam("Filter.IpFilter.Policy", policy)
                 .formParam("Filter.IpFilter.Cidr", cidr);
@@ -50,7 +42,7 @@ class SesReceiptFilterV1IntegrationTest {
         create("floci-filter-allow", "Allow", "192.0.2.10")
         .when().post("/").then().statusCode(200);
 
-        String body = req("ListReceiptFilters")
+        String body = query(AUTH, "ListReceiptFilters")
         .when().post("/").then().statusCode(200)
                 .body(containsString("<Name>floci-filter-block</Name>"))
                 .body(containsString("<Policy>Block</Policy>"))
@@ -73,7 +65,7 @@ class SesReceiptFilterV1IntegrationTest {
     @Order(3)
     void bareCreate_returnsSingleFilterViolation() {
         // Probed: with no Filter member at all, the whole structure is the one violation.
-        req("CreateReceiptFilter")
+        query(AUTH, "CreateReceiptFilter")
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>ValidationError</Code>"))
                 .body(containsString("1 validation error detected"))
@@ -99,7 +91,7 @@ class SesReceiptFilterV1IntegrationTest {
                 .body(containsString("<Code>InvalidParameterValue</Code>"))
                 .body(containsString("Invalid CIDR block: not-a-cidr"));
 
-        req("CreateReceiptFilter").formParam("Filter.Name", "floci-filter-x")
+        query(AUTH, "CreateReceiptFilter").formParam("Filter.Name", "floci-filter-x")
         .when().post("/").then().statusCode(400)
                 .body(containsString("&apos;filter.ipFilter&apos;"))
                 .body(containsString("Member must not be null"));
@@ -108,21 +100,21 @@ class SesReceiptFilterV1IntegrationTest {
     @Test
     @Order(4)
     void deleteFilter_isIdempotent_andRequiresName() {
-        req("DeleteReceiptFilter").formParam("FilterName", "floci-filter-allow")
+        query(AUTH, "DeleteReceiptFilter").formParam("FilterName", "floci-filter-allow")
         .when().post("/").then().statusCode(200);
-        req("DeleteReceiptFilter").formParam("FilterName", "floci-filter-allow")
+        query(AUTH, "DeleteReceiptFilter").formParam("FilterName", "floci-filter-allow")
         .when().post("/").then().statusCode(200);
 
-        req("ListReceiptFilters")
+        query(AUTH, "ListReceiptFilters")
         .when().post("/").then().statusCode(200)
                 .body(not(containsString("floci-filter-allow")));
 
-        req("DeleteReceiptFilter")
+        query(AUTH, "DeleteReceiptFilter")
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>ValidationError</Code>"))
                 .body(containsString("&apos;filterName&apos;"));
 
-        req("DeleteReceiptFilter").formParam("FilterName", "floci-filter-block")
+        query(AUTH, "DeleteReceiptFilter").formParam("FilterName", "floci-filter-block")
         .when().post("/").then().statusCode(200);
     }
 }

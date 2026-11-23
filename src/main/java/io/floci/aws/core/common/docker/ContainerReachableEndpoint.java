@@ -7,6 +7,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
+import java.util.Optional;
+
 /**
  * Computes the Floci base URL reachable from <em>inside</em> a Docker container that Floci launches.
  *
@@ -24,7 +26,9 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  *       Lambda PUTs its result to</li>
  *   <li>{@code FlociDuckClient}, for the S3 endpoint the DuckDB sidecar calls</li>
  *   <li>{@code EksPodIdentityWebhook}, for the {@code AWS_ENDPOINT_URL} of EKS pods, through
- *       {@link #baseUrl(boolean)} without the embedded DNS server, which a pod cannot use</li>
+ *       {@link #baseUrl(boolean)} without the embedded DNS server, which a pod does not always resolve through</li>
+ *   <li>{@code EksClusterManager}, for the URL the k3s API server calls the Pod Identity admission webhook
+ *       on, through {@link #httpsBaseUrl(boolean)}</li>
  * </ul>
  *
  * <p>Lambda pods on Kubernetes do not use it: {@code KubernetesFlociAddressResolver} builds their
@@ -98,8 +102,17 @@ public class ContainerReachableEndpoint {
      * check where http works, so that URL stays http.
      */
     public String customResourceResponseBaseUrl() {
-        String host = host(true);
-        boolean https = tlsCertificates.serves(host);
-        return (https ? "https://" : "http://") + host + ":" + port();
+        return httpsBaseUrl(true).orElseGet(this::baseUrl);
+    }
+
+    /**
+     * {@link #baseUrl(boolean)} over https, when Floci serves TLS under a certificate that names its host, so
+     * a client that verifies the name accepts it. Empty otherwise: with TLS off, or for a host the certificate
+     * does not name, such as an IP from {@code docker-host-override}, the container-IP fallback, or a
+     * name a user-provided certificate was not issued for.
+     */
+    public Optional<String> httpsBaseUrl(boolean useEmbeddedDns) {
+        String host = host(useEmbeddedDns);
+        return tlsCertificates.serves(host) ? Optional.of("https://" + host + ":" + port()) : Optional.empty();
     }
 }

@@ -17,6 +17,10 @@ public class FinishedCrawl {
     private Instant startedAt;
     private Instant finishedAt;
     private String status;
+    private String errorMessage;
+    private int tablesCreated;
+    private int tablesUpdated;
+    private int tablesDeleted;
     private String crawlId;
     private String originRunId;
     private String workflowRunId;
@@ -43,6 +47,18 @@ public class FinishedCrawl {
 
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
+
+    public String getErrorMessage() { return errorMessage; }
+    public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
+
+    public int getTablesCreated() { return tablesCreated; }
+    public void setTablesCreated(int tablesCreated) { this.tablesCreated = tablesCreated; }
+
+    public int getTablesUpdated() { return tablesUpdated; }
+    public void setTablesUpdated(int tablesUpdated) { this.tablesUpdated = tablesUpdated; }
+
+    public int getTablesDeleted() { return tablesDeleted; }
+    public void setTablesDeleted(int tablesDeleted) { this.tablesDeleted = tablesDeleted; }
 
     public String getCrawlId() { return crawlId; }
     public void setCrawlId(String crawlId) { this.crawlId = crawlId; }

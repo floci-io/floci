@@ -9,13 +9,22 @@ import pytest
 import regen_iam_action_resources as r
 
 
-def reference(actions: dict[str, list[str]], types: list[str] | None = None) -> dict:
-    """A reference payload shaped like AWS's, with an ARN format for every type mentioned."""
+READ_ONLY = ("GetUser", "ListUsers", "SimulatePrincipalPolicy")
+
+
+def reference(actions: dict[str, list[str]], types: list[str] | None = None,
+              read_only: tuple[str, ...] = READ_ONLY) -> dict:
+    """A reference payload shaped like AWS's, with an ARN format for every type mentioned, and
+    every action not in `read_only` given the Write access level."""
     if types is None:
         types = sorted({t for names in actions.values() for t in names})
     return {
         "Name": "iam",
-        "Actions": [{"Name": name, "Resources": [{"Name": t} for t in resource_types]}
+        "Actions": [{"Name": name,
+                     "Annotations": {"Properties": {"IsList": False, "IsPermissionManagement": False,
+                                                    "IsTaggingOnly": False,
+                                                    "IsWrite": name not in read_only}},
+                     "Resources": [{"Name": t} for t in resource_types]}
                     for name, resource_types in actions.items()],
         "Resources": [{"Name": t,
                        "ARNFormats": ["arn:${Partition}:iam::${Account}:" + t + "/${Name}"]}
@@ -35,6 +44,10 @@ ANCHORED = {
     "DeactivateMFADevice": ["user"],
     "CreateUser": ["user"],
     "ListUsers": [],
+    "GetUser": ["user"],
+    "SimulatePrincipalPolicy": ["user"],
+    "PutUserPolicy": ["user"],
+    "TagUser": ["user"],
 }
 
 
@@ -150,6 +163,40 @@ def test_a_resource_type_with_no_arn_format_is_rejected():
     doc = document(ANCHORED)
     doc["actionResources"]["GetRole"] = ["role"]
     assert any("no ARN format" in problem for problem in r.validate(doc))
+
+
+def test_read_only_actions_are_those_with_no_mutating_access_level():
+    payload = reference({"GetUser": ["user"], "CreateUser": ["user"], "TagUser": ["user"],
+                         "PutUserPolicy": ["user"], "ListUsers": []}, read_only=("GetUser", "ListUsers"))
+    tagging = next(action for action in payload["Actions"] if action["Name"] == "TagUser")
+    tagging["Annotations"]["Properties"].update({"IsWrite": False, "IsTaggingOnly": True})
+    permissions = next(action for action in payload["Actions"] if action["Name"] == "PutUserPolicy")
+    permissions["Annotations"]["Properties"].update({"IsWrite": False, "IsPermissionManagement": True})
+    assert r.read_only_actions_from(payload) == ["GetUser", "ListUsers"]
+
+
+def test_an_action_without_access_level_properties_is_not_read_only():
+    payload = reference({"GetUser": ["user"]})
+    del payload["Actions"][0]["Annotations"]
+    assert r.read_only_actions_from(payload) == []
+
+
+def test_a_read_only_anchor_aws_calls_a_write_is_rejected():
+    doc = document(ANCHORED)
+    doc["readOnlyActions"] = sorted(doc["readOnlyActions"] + ["CreateUser"])
+    assert "'CreateUser' should not be read-only" in r.validate(doc)
+
+
+def test_a_read_only_action_the_file_does_not_carry_is_rejected():
+    doc = document(ANCHORED)
+    doc["readOnlyActions"] = sorted(doc["readOnlyActions"] + ["GetMadeUp"])
+    assert any("GetMadeUp" in problem for problem in r.validate(doc))
+
+
+def test_a_read_only_claim_aws_does_not_make_fails():
+    untrue, added = r.verify_read_only_against(["GetUser", "UpdateUser"], ["GetUser", "ListUsers"])
+    assert untrue == ["'UpdateUser' is not a read-only action AWS publishes"]
+    assert added == ["ListUsers (new read-only action)"]
 
 
 def test_an_empty_map_is_rejected():

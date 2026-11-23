@@ -12,6 +12,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -87,8 +89,16 @@ class AwsIncludeProcessorTest {
     }
 
     private JsonNode mergedSubstitutions(String templateYaml) throws Exception {
+        return mergedSubstitutions(templateYaml, Map.of(), "us-east-1", "000000000000", "", "", name -> null);
+    }
+
+    private JsonNode mergedSubstitutions(String templateYaml, Map<String, String> parameters,
+                                         String region, String accountId, String stackName, String stackId,
+                                         Function<String, String> importValueResolver) throws Exception {
         JsonNode template = new CloudFormationYamlParser(mapper).parse(templateYaml);
-        JsonNode merged = processor.mergeIncludes(template);
+        JsonNode merged = processor.mergeIncludes(template,
+                CloudFormationService.resolveDefaultParameters(template, parameters),
+                region, accountId, stackName, stackId, importValueResolver);
         return merged.at("/Resources/OrdersStateMachine/Properties/DefinitionSubstitutions");
     }
 
@@ -215,9 +225,135 @@ class AwsIncludeProcessorTest {
     }
 
     @Test
+    void fnSubLocationResolvesPseudoParametersAndTemplateParameters() throws Exception {
+        stubSnippet("snippets-eu-west-1", "prod/names.yaml", "orderTableName: orders-eu\n");
+        String template = """
+            Parameters:
+              Env:
+                Type: String
+                Default: dev
+            Resources:
+              OrdersStateMachine:
+                Type: AWS::StepFunctions::StateMachine
+                Properties:
+                  DefinitionSubstitutions:
+                    Fn::Transform:
+                      Name: AWS::Include
+                      Parameters:
+                        Location: !Sub s3://snippets-${AWS::Region}/${Env}/names.yaml
+            """;
+
+        JsonNode substitutions = mergedSubstitutions(template, Map.of("Env", "prod"),
+                "eu-west-1", "123456789012", "orders-stack",
+                "arn:aws:cloudformation:eu-west-1:123456789012:stack/orders-stack/1", name -> null);
+
+        assertEquals("orders-eu", substitutions.get("orderTableName").asText());
+        assertFalse(substitutions.has("Fn::Transform"));
+    }
+
+    @Test
+    void fnSubArrayLocationResolvesVariableMapAndDefaultParameters() throws Exception {
+        stubSnippet("snippets-us-east-1", "custom/names.yaml", "orderTableName: orders-custom\n");
+        String template = """
+            Parameters:
+              BucketPrefix:
+                Type: String
+                Default: snippets
+            Resources:
+              OrdersStateMachine:
+                Type: AWS::StepFunctions::StateMachine
+                Properties:
+                  DefinitionSubstitutions:
+                    Fn::Transform:
+                      Name: AWS::Include
+                      Parameters:
+                        Location:
+                          Fn::Sub:
+                            - s3://${BucketPrefix}-${AWS::Region}/${Folder}/names.yaml
+                            - Folder: custom
+            """;
+
+        JsonNode substitutions = mergedSubstitutions(template);
+
+        assertEquals("orders-custom", substitutions.get("orderTableName").asText());
+        assertFalse(substitutions.has("Fn::Transform"));
+    }
+
+    @Test
+    void fnSubLocationWithUnresolvedVariableIsRejected() {
+        String template = """
+            Resources:
+              OrdersStateMachine:
+                Type: AWS::StepFunctions::StateMachine
+                Properties:
+                  DefinitionSubstitutions:
+                    Fn::Transform:
+                      Name: AWS::Include
+                      Parameters:
+                        Location: !Sub s3://snippets-${Missing}/names.yaml
+            """;
+
+        AwsException e = assertThrows(AwsException.class, () -> mergedSubstitutions(template));
+        assertTrue(e.getMessage().contains("\"Fn::Sub\":\"s3://snippets-${Missing}/names.yaml\""),
+                "unresolved Fn::Sub variable must reject the Location node rather than substituting the variable name: "
+                        + e.getMessage());
+    }
+
+    @Test
+    void fnSubLocationWithImportValueResolvesExport() throws Exception {
+        stubSnippet("exported-snippets", "names.yaml", "orderTableName: orders-exported\n");
+        String template = """
+            Resources:
+              OrdersStateMachine:
+                Type: AWS::StepFunctions::StateMachine
+                Properties:
+                  DefinitionSubstitutions:
+                    Fn::Transform:
+                      Name: AWS::Include
+                      Parameters:
+                        Location:
+                          Fn::Sub:
+                            - s3://${Bucket}/names.yaml
+                            - Bucket: { Fn::ImportValue: SharedSnippetBucket }
+            """;
+
+        JsonNode substitutions = mergedSubstitutions(template, Map.of(), "us-east-1", "000000000000", "", "",
+                exportName -> "SharedSnippetBucket".equals(exportName) ? "exported-snippets" : null);
+
+        assertEquals("orders-exported", substitutions.get("orderTableName").asText());
+        assertFalse(substitutions.has("Fn::Transform"));
+    }
+
+    @Test
+    void refLocationResolvesTemplateParameter() throws Exception {
+        stubMeasuredFragment();
+        String template = """
+            Parameters:
+              InputValue:
+                Type: String
+                Default: %s
+            Resources:
+              OrdersStateMachine:
+                Type: AWS::StepFunctions::StateMachine
+                Properties:
+                  DefinitionSubstitutions:
+                    Fn::Transform:
+                      Name: AWS::Include
+                      Parameters:
+                        Location: { Ref: InputValue }
+            """.formatted(LOCATION);
+
+        JsonNode substitutions = mergedSubstitutions(template);
+
+        assertEquals(EXPAND_ITEMS, substitutions.path("expandItems").asText());
+        assertEquals("orders", substitutions.get("orderTableName").asText());
+        assertFalse(substitutions.has("Fn::Transform"));
+    }
+
+    @Test
     void locationAsAMappingNamesTheNodeInTheRejectionMessage() {
         // Location: {Ref: InputValue} is the form AWS's own Fn::Transform documentation uses in its
-        // only AWS::Include example. Ref resolution is not implemented; the node must still be named.
+        // AWS::Include example. When InputValue is not declared, the unresolved node is named.
         String template = """
             Resources:
               OrdersStateMachine:

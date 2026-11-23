@@ -18,6 +18,7 @@ import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.StripedLocks;
 import io.floci.aws.core.common.Totp;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -121,6 +122,7 @@ public class DynamoDbService {
     static final String DEFAULT_STREAM_VIEW_TYPE = "NEW_AND_OLD_IMAGES";
 
     private final StorageBackend<String, TableDefinition> tableStore;
+    private final StripedLocks tableControlLocks = new StripedLocks(256);
     private final StorageBackend<String, Map<String, JsonNode>> itemStore;
     private final StorageBackend<String, ExportDescription> exportStore;
     private final StorageBackend<String, ImportTableDescription> importStore;
@@ -182,6 +184,7 @@ public class DynamoDbService {
     private DynamoDbStreamService streamService;
     private KinesisStreamingForwarder kinesisForwarder;
     private S3Service s3Service;
+    private DynamoDbTransactionConflicts transactionConflicts = DynamoDbTransactionConflicts.OFF;
     private final int vectorIndexAllocationSeconds;
     private final int vectorIndexBackfillSeconds;
     private static final long MAX_DYNAMODB_LIST_INDEX = 4_294_967_294L;
@@ -208,6 +211,13 @@ public class DynamoDbService {
              config.services().dynamodb().vectorIndexAllocationSeconds(),
              config.services().dynamodb().vectorIndexBackfillSeconds(),
              config.services().dynamodb().latestRestorableLagSeconds(), Clock.systemUTC());
+        this.transactionConflicts = DynamoDbTransactionConflicts.of(
+                config.services().dynamodb().transactionConflictsEnabled());
+    }
+
+    /** Package-private for tests: the transaction conflict emulation this service applies. */
+    void useTransactionConflicts(DynamoDbTransactionConflicts transactionConflicts) {
+        this.transactionConflicts = transactionConflicts;
     }
 
     /** The item store the configured {@code item-layout} selects; package-private for tests. */
@@ -352,6 +362,7 @@ public class DynamoDbService {
     /** Emulator reset: drops the in-process item cache, locks and idempotency tokens, and stream state. */
     public void clearProcessState() {
         itemsByTable.clear();
+        transactionConflicts.clear();
         itemLocks.clear();
         txIdempotency.clear();
         pointInTimeRecovery.clear();
@@ -521,6 +532,21 @@ public class DynamoDbService {
                                         List<VectorIndexCreate> vectorIndexes,
                                         String billingMode,
                                         String region) {
+        return createTable(tableName, keySchema, attributeDefinitions, readCapacity, writeCapacity,
+                           gsis, lsis, vectorIndexes, billingMode, region, () -> { });
+    }
+
+    /** @param lastCheck runs after every other check, just before the table is stored */
+    TableDefinition createTable(String tableName,
+                                List<KeySchemaElement> keySchema,
+                                List<AttributeDefinition> attributeDefinitions,
+                                Long readCapacity, Long writeCapacity,
+                                List<GlobalSecondaryIndex> gsis,
+                                List<LocalSecondaryIndex> lsis,
+                                List<VectorIndexCreate> vectorIndexes,
+                                String billingMode,
+                                String region,
+                                Runnable lastCheck) {
         // Enforce at the service boundary: CreateTable persists its input as the
         // canonical table name and derives TableArn from it. An ARN-form input
         // would produce ARN-on-ARN TableArn values. Handler-layer rejection alone
@@ -702,6 +728,8 @@ public class DynamoDbService {
             }
             table.setVectorIndexes(created);
         }
+
+        lastCheck.run();
 
         synchronized (capacityLock) {
             if (!"PAY_PER_REQUEST".equals(billingMode)) {
@@ -1019,7 +1047,19 @@ public class DynamoDbService {
         return table;
     }
 
+    /** Serializes Kinesis destination mutations with deletion for the same account, Region and table. */
+    Object tableControlLock(String tableName, String region) {
+        String storageKey = regionKey(region, canonicalTableName(region, tableName));
+        return tableControlLocks.lockFor(scopedItemsKey(storageKey));
+    }
+
     public void deleteTable(String tableName, String region) {
+        synchronized (tableControlLock(tableName, region)) {
+            deleteTableLocked(tableName, region);
+        }
+    }
+
+    private void deleteTableLocked(String tableName, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
@@ -1135,7 +1175,7 @@ public class DynamoDbService {
         String canonicalTableName = canonicalTableName(region, tableName);
         requireActiveTable(regionKey(region, canonicalTableName));
         return putItemInternal(tableName, item, conditionExpression, exprAttrNames, exprAttrValues,
-                region, returnValuesOnConditionCheckFailure, true, null, null, existingItemCheck);
+                region, returnValuesOnConditionCheckFailure, true, null, null, existingItemCheck, true);
     }
 
     private JsonNode putItemInternal(String tableName, JsonNode item,
@@ -1154,7 +1194,7 @@ public class DynamoDbService {
                                   boolean shouldPersist,
                                   Consumer<Runnable> deferredStreamEvents) {
         return putItemInternal(tableName, item, conditionExpression, exprAttrNames, exprAttrValues,
-                region, returnValuesOnConditionCheckFailure, shouldPersist, deferredStreamEvents, null, null);
+                region, returnValuesOnConditionCheckFailure, shouldPersist, deferredStreamEvents, null, null, false);
     }
 
     private JsonNode putItemInternal(String tableName, JsonNode item,
@@ -1164,7 +1204,8 @@ public class DynamoDbService {
                                   boolean shouldPersist,
                                   Consumer<Runnable> deferredStreamEvents,
                                   Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems,
-                                  Consumer<JsonNode> existingItemCheck) {
+                                  Consumer<JsonNode> existingItemCheck,
+                                  boolean singleItemWrite) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
@@ -1177,6 +1218,9 @@ public class DynamoDbService {
         validateIndexKeyTypes(table, normalizedItem, false);
 
         return withItemLock(storageKey, itemKey, () -> {
+            if (singleItemWrite) {
+                transactionConflicts.rejectSingleItemWrite(scopedItemsKey(storageKey), itemKey);
+            }
             ConcurrentSkipListMap<String, JsonNode> tableItems = itemsFor(storageKey, stagedItems, true);
 
             JsonNode existing = tableItems.get(itemKey);
@@ -1259,7 +1303,7 @@ public class DynamoDbService {
                                 String region, String returnValuesOnConditionCheckFailure,
                                 Consumer<JsonNode> existingItemCheck) {
         return deleteItemInternal(tableName, key, conditionExpression, exprAttrNames, exprAttrValues,
-                region, returnValuesOnConditionCheckFailure, true, null, null, existingItemCheck);
+                region, returnValuesOnConditionCheckFailure, true, null, null, existingItemCheck, true);
     }
 
     private JsonNode deleteItemInternal(String tableName, JsonNode key,
@@ -1278,7 +1322,7 @@ public class DynamoDbService {
                                          boolean shouldPersist,
                                          Consumer<Runnable> deferredStreamEvents) {
         return deleteItemInternal(tableName, key, conditionExpression, exprAttrNames, exprAttrValues,
-                region, returnValuesOnConditionCheckFailure, shouldPersist, deferredStreamEvents, null, null);
+                region, returnValuesOnConditionCheckFailure, shouldPersist, deferredStreamEvents, null, null, false);
     }
 
     private JsonNode deleteItemInternal(String tableName, JsonNode key,
@@ -1288,7 +1332,8 @@ public class DynamoDbService {
                                          boolean shouldPersist,
                                          Consumer<Runnable> deferredStreamEvents,
                                          Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems,
-                                         Consumer<JsonNode> existingItemCheck) {
+                                         Consumer<JsonNode> existingItemCheck,
+                                         boolean singleItemWrite) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = requireActiveTable(storageKey);
@@ -1296,6 +1341,9 @@ public class DynamoDbService {
         String itemKey = buildItemKey(table, key, true);
 
         return withItemLock(storageKey, itemKey, () -> {
+            if (singleItemWrite) {
+                transactionConflicts.rejectSingleItemWrite(scopedItemsKey(storageKey), itemKey);
+            }
             ConcurrentSkipListMap<String, JsonNode> items = itemsFor(storageKey, stagedItems, false);
             if (existingItemCheck != null) {
                 existingItemCheck.accept(items == null ? null : items.get(itemKey));
@@ -1373,7 +1421,7 @@ public class DynamoDbService {
         return updateItemInternal(tableName, key, attributeUpdates, updateExpression,
                 expressionAttrNames, expressionAttrValues, returnValues,
                 conditionExpression, region, returnValuesOnConditionCheckFailure, true, null, null,
-                UpdateSizeRule.UPDATE_ITEM, existingItemCheck);
+                UpdateSizeRule.UPDATE_ITEM, existingItemCheck, true);
     }
 
     UpdateResult updateItem(String tableName, JsonNode key, JsonNode attributeUpdates,
@@ -1384,7 +1432,8 @@ public class DynamoDbService {
                                     UpdateSizeRule sizeRule) {
         return updateItemInternal(tableName, key, attributeUpdates, updateExpression,
                 expressionAttrNames, expressionAttrValues, returnValues,
-                conditionExpression, region, returnValuesOnConditionCheckFailure, true, sizeRule);
+                conditionExpression, region, returnValuesOnConditionCheckFailure, true, null, null, sizeRule,
+                null, true);
     }
 
     private UpdateResult updateItemInternal(String tableName, JsonNode key, JsonNode attributeUpdates,
@@ -1411,7 +1460,7 @@ public class DynamoDbService {
         return updateItemInternal(tableName, key, attributeUpdates, updateExpression,
                 expressionAttrNames, expressionAttrValues, returnValues,
                 conditionExpression, region, returnValuesOnConditionCheckFailure, shouldPersist,
-                deferredStreamEvents, null, sizeRule, null);
+                deferredStreamEvents, null, sizeRule, null, false);
     }
 
     private UpdateResult updateItemInternal(String tableName, JsonNode key, JsonNode attributeUpdates,
@@ -1423,7 +1472,8 @@ public class DynamoDbService {
                                              Consumer<Runnable> deferredStreamEvents,
                                              Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems,
                                              UpdateSizeRule sizeRule,
-                                             Consumer<JsonNode> existingItemCheck) {
+                                             Consumer<JsonNode> existingItemCheck,
+                                             boolean singleItemWrite) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = requireActiveTable(storageKey);
@@ -1437,6 +1487,9 @@ public class DynamoDbService {
         }
 
         return withItemLock(storageKey, itemKey, () -> {
+            if (singleItemWrite) {
+                transactionConflicts.rejectSingleItemWrite(scopedItemsKey(storageKey), itemKey);
+            }
             ConcurrentSkipListMap<String, JsonNode> items = itemsFor(storageKey, stagedItems, true);
 
             // Get existing item or create new one from key
@@ -2139,11 +2192,15 @@ public class DynamoDbService {
         }
 
         List<ReentrantLock> acquired = new ArrayList<>(toAcquire.size());
+        List<DynamoDbTransactionConflicts.Item> held = List.of();
+        long holdDeadline = 0;
+        boolean committed = false;
         try {
             for (ReentrantLock lock : toAcquire.values()) {
                 lock.lock();
                 acquired.add(lock);
             }
+            rejectHeldParticipants(memberParticipants);
 
             List<Runnable> pendingStreamEvents = new ArrayList<>();
             Set<String> affectedStorageKeys = new LinkedHashSet<>();
@@ -2178,6 +2235,10 @@ public class DynamoDbService {
             if (hasFailed) {
                 throw new TransactionCanceledException(cancellationReasons);
             }
+            held = toAcquire.keySet().stream()
+                    .map(p -> new DynamoDbTransactionConflicts.Item(scopedItemsKey(p.storageKey()), p.itemKey()))
+                    .toList();
+            holdDeadline = transactionConflicts.hold(held);
             List<JsonNode> oldImages = stagedImages(memberParticipants, staged);
             for (JsonNode transactItem : transactItems) {
                 if (transactItem.has("Put")) {
@@ -2185,14 +2246,14 @@ public class DynamoDbService {
                     String tableName = put.path("TableName").asText();
                     String storageKey = regionKey(region, canonicalTableName(region, tableName));
                     putItemInternal(tableName, put.get("Item"), null, null, null, region, "NONE", false,
-                            pendingStreamEvents::add, staged, null);
+                            pendingStreamEvents::add, staged, null, false);
                     affectedStorageKeys.add(storageKey);
                 } else if (transactItem.has("Delete")) {
                     JsonNode del = transactItem.get("Delete");
                     String tableName = del.path("TableName").asText();
                     String storageKey = regionKey(region, canonicalTableName(region, tableName));
                     deleteItemInternal(tableName, del.get("Key"), null, null, null, region, "NONE", false,
-                            pendingStreamEvents::add, staged, null);
+                            pendingStreamEvents::add, staged, null, false);
                     affectedStorageKeys.add(storageKey);
                 } else if (transactItem.has("Update")) {
                     JsonNode upd = transactItem.get("Update");
@@ -2203,7 +2264,7 @@ public class DynamoDbService {
                             upd.has("ExpressionAttributeNames") ? upd.get("ExpressionAttributeNames") : null,
                             upd.has("ExpressionAttributeValues") ? upd.get("ExpressionAttributeValues") : null,
                             "NONE", null, region, "NONE", false, pendingStreamEvents::add, staged,
-                            UpdateSizeRule.FINISHED_ITEM, null);
+                            UpdateSizeRule.FINISHED_ITEM, null, false);
                     affectedStorageKeys.add(storageKey);
                 }
             }
@@ -2241,11 +2302,39 @@ public class DynamoDbService {
             for (Runnable streamEvent : pendingStreamEvents) {
                 streamEvent.run();
             }
+            holdDeadline = transactionConflicts.settle(held, holdDeadline);
+            committed = true;
             return new AppliedTransactWrite(writeCapacity, replayCapacity);
         } finally {
             for (int i = acquired.size() - 1; i >= 0; i--) {
                 acquired.get(i).unlock();
             }
+            transactionConflicts.release(held, holdDeadline, committed);
+        }
+    }
+
+    /**
+     * With transaction conflicts emulated, cancels a write transaction one of whose items another write
+     * transaction holds, with {@code TransactionConflict} at that item, before any condition is evaluated.
+     */
+    private void rejectHeldParticipants(List<TransactParticipant> memberParticipants) {
+        if (!transactionConflicts.enabled()) {
+            return;
+        }
+        List<TransactionCanceledException.CancellationReason> reasons = new ArrayList<>();
+        boolean conflicted = false;
+        for (TransactParticipant participant : memberParticipants) {
+            if (participant != null
+                    && transactionConflicts.busy(scopedItemsKey(participant.storageKey()), participant.itemKey())) {
+                conflicted = true;
+                reasons.add(new TransactionCanceledException.CancellationReason(
+                        DynamoDbTransactionConflicts.REASON, null, DynamoDbTransactionConflicts.MESSAGE));
+            } else {
+                reasons.add(new TransactionCanceledException.CancellationReason("", null));
+            }
+        }
+        if (conflicted) {
+            throw new TransactionCanceledException(reasons);
         }
     }
 
@@ -2317,28 +2406,43 @@ public class DynamoDbService {
         return new TransactParticipant(storageKey, itemKey, tableName);
     }
 
-    // AWS checks every member's key against the table schema, in order, before it looks for
-    // duplicate items or evaluates a condition. The first mismatch cancels with that member's
-    // reason alone. An empty key value still fails the whole request.
-    void cancelOnKeySchemaMismatch(List<JsonNode> transactItems, String region) {
+    // AWS looks up every member's table first, in order. Then it walks the members in order.
+    // A Put checks its item size, then its key. Any other member checks its key, then an Update
+    // checks its statement size. A key mismatch cancels with that member's reason alone. An
+    // oversized item or statement fails the whole request. All of this runs before the duplicate
+    // item check and before any condition. An empty key value still fails the whole request.
+    void validateTransactMemberKeysAndSizes(List<JsonNode> transactItems, String region) {
+        for (JsonNode transactItem : transactItems) {
+            JsonNode target = transactTarget(transactItem);
+            if (target != null) {
+                requireActiveTable(regionKey(region, canonicalTableName(region, target.path("TableName").asText())));
+            }
+        }
         for (int i = 0; i < transactItems.size(); i++) {
             try {
-                validateTransactMemberKey(transactItems.get(i), region);
+                validateTransactMember(transactItems.get(i), region);
             } catch (KeySchemaMismatchException e) {
                 throw cancelledByMember(transactItems.size(), i, e.getMessage());
             }
         }
     }
 
-    private void validateTransactMemberKey(JsonNode transactItem, String region) {
-        boolean isPut = transactItem.has("Put");
-        JsonNode target = isPut ? transactItem.get("Put")
+    private static JsonNode transactTarget(JsonNode transactItem) {
+        return transactItem.has("Put") ? transactItem.get("Put")
                 : transactItem.has("Update") ? transactItem.get("Update")
                 : transactItem.has("Delete") ? transactItem.get("Delete")
                 : transactItem.get("ConditionCheck");
+    }
+
+    private void validateTransactMember(JsonNode transactItem, String region) {
+        boolean isPut = transactItem.has("Put");
+        JsonNode target = transactTarget(transactItem);
         JsonNode key = target == null ? null : target.get(isPut ? "Item" : "Key");
         if (key == null) {
             return;
+        }
+        if (isPut) {
+            DynamoDbItemSize.validateSize(DynamoDbNumberUtils.normalizeNumbersInItem(key));
         }
         String tableName = canonicalTableName(region, target.path("TableName").asText());
         TableDefinition table = requireActiveTable(regionKey(region, tableName));
@@ -2355,6 +2459,11 @@ public class DynamoDbService {
         buildItemKey(table, key, isPut ? KeySurface.ITEM_BODY : KeySurface.KEY_ARGUMENT);
         if (isPut) {
             validateIndexKeyTypes(table, key, false);
+        } else if (transactItem.has("Update") && target.has("UpdateExpression")) {
+            JsonNode names = target.get("ExpressionAttributeNames");
+            DynamoDbItemSize.updateStatementSize(target.get("UpdateExpression").asText(),
+                    path -> parsePath(path, names), target.get("ExpressionAttributeValues"))
+                    .ifPresent(DynamoDbService::requireUpdateStatementWithinSizeLimit);
         }
     }
 
@@ -2547,9 +2656,18 @@ public class DynamoDbService {
                 JsonNode key = get.get("Key");
                 try {
                     JsonNode item = getItem(tableName, key, region);
+                    TableDefinition table = requireTableForItemCall(tableName, region);
+                    String itemsKey = scopedItemsKey(regionKey(region, canonicalTableName(region, tableName)));
+                    if (transactionConflicts.busy(itemsKey, buildItemKey(table, key, true))) {
+                        hasCancelled = true;
+                        results.add(null);
+                        cancelReasons.add(new TransactionCanceledException.CancellationReason(
+                                DynamoDbTransactionConflicts.REASON, null, DynamoDbTransactionConflicts.MESSAGE));
+                        continue;
+                    }
                     results.add(projectTransactGet(item, get));
                     capacity.merge(canonicalTableName(region, tableName),
-                            DynamoDbTransactCapacity.read(requireTableForItemCall(tableName, region), item, null),
+                            DynamoDbTransactCapacity.read(table, item, null),
                             DynamoDbWriteCapacity.Cost::plus);
                     cancelReasons.add(new TransactionCanceledException.CancellationReason("", null));
                 } catch (AwsException e) {
@@ -4230,9 +4348,27 @@ public class DynamoDbService {
         }
     }
 
-    private void setValueAtPath(ObjectNode item, String path, JsonNode value, JsonNode exprAttrNames) {
+    private static void setAndSort(ObjectNode map, String attr, JsonNode value) {
+        map.set(attr, value);
+        DynamoDbMapOrder.sortKeys(map);
+    }
+
+    private static void removeAndSort(ObjectNode map, String attr) {
+        map.remove(attr);
+        DynamoDbMapOrder.sortKeys(map);
+    }
+
+    private static void sortWalked(List<ObjectNode> maps) {
+        for (ObjectNode map : maps) {
+            DynamoDbMapOrder.sortKeys(map);
+        }
+    }
+
+    private void setValueAtPath(ObjectNode item, String path, JsonNode source, JsonNode exprAttrNames) {
         List<Object> tokens = parsePath(path, exprAttrNames);
         if (tokens.isEmpty()) return;
+        // A map sorted later in place must not be shared with another attribute or a request value.
+        JsonNode value = source.deepCopy();
 
         if (tokens.size() == 1) {
             if (tokens.get(0) instanceof String attrName) {
@@ -4242,6 +4378,7 @@ public class DynamoDbService {
         }
 
         JsonNode container = item;
+        List<ObjectNode> walked = new ArrayList<>();
 
         for (int i = 0; i < tokens.size() - 1; i++) {
             Object tok = tokens.get(i);
@@ -4263,7 +4400,8 @@ public class DynamoDbService {
                                     "The document path provided in the update expression is invalid for update",
                                     400);
                         }
-                        ((ObjectNode) child.get("M")).set(finalAttr, value);
+                        setAndSort((ObjectNode) child.get("M"), finalAttr, value);
+                        sortWalked(walked);
                     } else if (nextTok instanceof Long finalIdx) {
                         if (child == null || !child.has("L")) {
                             throw new AwsException(
@@ -4273,6 +4411,7 @@ public class DynamoDbService {
                         }
 
                         setOrAppend((ArrayNode) child.get("L"), finalIdx, value);
+                        sortWalked(walked);
                     }
 
                     return;
@@ -4286,6 +4425,7 @@ public class DynamoDbService {
                                 400);
                     }
                     container = child.get("M");
+                    walked.add((ObjectNode) container);
 
                 } else if (nextTok instanceof Long) {
                     if (child == null || !child.has("L")) {
@@ -4319,7 +4459,8 @@ public class DynamoDbService {
                                     400);
                         }
 
-                        ((ObjectNode) element.get("M")).set(finalAttr, value);
+                        setAndSort((ObjectNode) element.get("M"), finalAttr, value);
+                        sortWalked(walked);
 
                     } else if (nextTok instanceof Long finalIdx) {
                         if (!element.has("L")) {
@@ -4330,6 +4471,7 @@ public class DynamoDbService {
                         }
 
                         setOrAppend((ArrayNode) element.get("L"), finalIdx, value);
+                        sortWalked(walked);
                     }
 
                     return;
@@ -4344,6 +4486,7 @@ public class DynamoDbService {
                     }
 
                     container = element.get("M");
+                    walked.add((ObjectNode) container);
 
                 } else if (nextTok instanceof Long) {
                     if (!element.has("L")) {
@@ -4416,6 +4559,7 @@ public class DynamoDbService {
         }
 
         JsonNode container = item;
+        List<ObjectNode> walked = new ArrayList<>();
 
         for (int i = 0; i < tokens.size() - 1; i++) {
             Object tok = tokens.get(i);
@@ -4430,7 +4574,8 @@ public class DynamoDbService {
                 if (last) {
                     if (nextTok instanceof String finalAttr) {
                         if (child == null || !child.has("M")) return;
-                        ((ObjectNode) child.get("M")).remove(finalAttr);
+                        removeAndSort((ObjectNode) child.get("M"), finalAttr);
+                        sortWalked(walked);
                     } else if (nextTok instanceof Long finalIdx) {
                         if (child == null || !child.has("L")) return;
 
@@ -4438,6 +4583,7 @@ public class DynamoDbService {
                         if (finalIdx < lArr.size()) {
                             lArr.remove(finalIdx.intValue());
                         }
+                        sortWalked(walked);
                     }
                     return;
                 }
@@ -4445,6 +4591,7 @@ public class DynamoDbService {
                 if (nextTok instanceof String) {
                     if (child == null || !child.has("M")) return;
                     container = child.get("M");
+                    walked.add((ObjectNode) container);
                 } else if (nextTok instanceof Long) {
                     if (child == null || !child.has("L")) return;
                     container = child.get("L");
@@ -4459,7 +4606,8 @@ public class DynamoDbService {
                 if (last) {
                     if (nextTok instanceof String finalAttr) {
                         if (!element.has("M")) return;
-                        ((ObjectNode) element.get("M")).remove(finalAttr);
+                        removeAndSort((ObjectNode) element.get("M"), finalAttr);
+                        sortWalked(walked);
                     } else if (nextTok instanceof Long finalIdx) {
                         if (!element.has("L")) return;
 
@@ -4467,6 +4615,7 @@ public class DynamoDbService {
                         if (finalIdx < lArr.size()) {
                             lArr.remove(finalIdx.intValue());
                         }
+                        sortWalked(walked);
                     }
                     return;
                 }
@@ -4474,6 +4623,7 @@ public class DynamoDbService {
                 if (nextTok instanceof String) {
                     if (!element.has("M")) return;
                     container = element.get("M");
+                    walked.add((ObjectNode) container);
                 } else if (nextTok instanceof Long) {
                     if (!element.has("L")) return;
                     container = element.get("L");
@@ -4788,7 +4938,7 @@ public class DynamoDbService {
             return;
         }
         validateAttributeValueShape(attr);
-        String expectedType = keyAttributeType(table, keyName);
+        String expectedType = table.attributeType(keyName);
         if (expectedType != null && !attr.has(expectedType)) {
             if (surface == KeySurface.ITEM_BODY) {
                 throw new KeySchemaMismatchException(
@@ -4803,16 +4953,6 @@ public class DynamoDbService {
         if (attr.has("B") && attr.get("B").asText().isEmpty()) {
             throw DynamoDbKeyValueErrors.emptyKeyValue("B", keyName);
         }
-    }
-
-    private String keyAttributeType(TableDefinition table, String keyName) {
-        if (table.getAttributeDefinitions() == null) {
-            return null;
-        }
-        return table.getAttributeDefinitions().stream()
-                .filter(def -> keyName.equals(def.getAttributeName()))
-                .map(AttributeDefinition::getAttributeType)
-                .findFirst().orElse(null);
     }
 
     // AWS validates GSI/LSI key attribute values on every write that produces the item,
@@ -4894,7 +5034,7 @@ public class DynamoDbService {
                 continue;
             }
             validateAttributeValueShape(attr);
-            String expectedType = keyAttributeType(table, attrName);
+            String expectedType = table.attributeType(attrName);
             if (expectedType != null && !attr.has(expectedType)) {
                 throw DynamoDbKeyValueErrors.indexKeyTypeMismatch(attrName, expectedType,
                         attr.fieldNames().next(), indexName);
@@ -5230,7 +5370,7 @@ public class DynamoDbService {
         return results;
     }
 
-    private AwsException resourceNotFoundException(String tableName) {
+    static AwsException resourceNotFoundException(String tableName) {
         return new AwsException("ResourceNotFoundException",
                 "Requested resource not found: Table: " + tableName + " not found", 400);
     }

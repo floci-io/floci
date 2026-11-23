@@ -109,13 +109,18 @@ public class ProvisionedConcurrencyPool implements Resettable {
         }
     }
 
+    /**
+     * Provisioned environments are not bounded by {@code warm-pool-max-total}, which bounds idle warm
+     * containers: as on AWS, their ceilings are the function's reserved concurrency and the region's
+     * concurrency, plus {@code warm-pool-max-per-function} locally.
+     */
     @Inject
     public ProvisionedConcurrencyPool(LambdaRuntimeLauncher launcher, LambdaFunctionStore functions,
                                      LambdaAliasStore aliases, StorageFactory storageFactory,
                                      EmulatorConfig config, Clock clock) {
         this(launcher, functions, aliases, storageFactory.create("lambda",
                         "lambda-provisioned-concurrency.json", new TypeReference<>() {}),
-                clock, WarmPool.resolveMaxPerFunction(config), WarmPool.resolveMaxTotal(config),
+                clock, WarmPool.resolveMaxPerFunction(config), 0,
                 config.services().lambda().ephemeral(), WarmPool.resolveDrainTimeout(config));
     }
 

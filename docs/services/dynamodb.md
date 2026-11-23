@@ -15,8 +15,29 @@ This resource matching was checked against live AWS with isolated role sessions.
 Pagination and ignored table selectors do not change the collection being authorized.
 Other DynamoDB operations retain their own authorization resources.
 The Service Reference lists no resource type for the action, so the collection comes from that
-measurement, the one thing the generated table of request resources states by hand. Other DynamoDB
-operations keep their existing resource builders, including batch, transaction and PartiQL table extraction.
+measurement, the one thing the generated table of request resources states by hand.
+
+## IAM enforcement
+
+With IAM enforcement enabled, every DynamoDB request is checked as AWS checks it, read from the generated
+tables like other services' requests. A request is checked on the table, index, stream, backup, export,
+import or global table it names, by name or ARN. A table ARN is checked as given and as the caller's own
+table of that name, the one DynamoDB acts on.
+
+- `BatchGetItem` and `BatchWriteItem` are checked on every table their `RequestItems` keys.
+- Each item of a `TransactWriteItems` or `TransactGetItems` is checked on its own table as the action the
+  developer guide's [transactions page](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis-iam.html)
+  gives its kind: `Put` as `dynamodb:PutItem`, `Update` as `dynamodb:UpdateItem`, `Delete` as
+  `dynamodb:DeleteItem`, `Get` as `dynamodb:GetItem` and `ConditionCheck` as `dynamodb:ConditionCheckItem`, with
+  `dynamodb:EnclosingOperation` naming the transaction.
+- Each PartiQL statement of an `ExecuteStatement`, `BatchExecuteStatement` or `ExecuteTransaction` is checked as
+  the action the [PartiQL IAM page](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/ql-iam.html)
+  gives its verb (`dynamodb:PartiQLSelect`, `PartiQLInsert`, `PartiQLUpdate`, `PartiQLDelete`) on the table or
+  index it names, as DynamoDB parses it; a transaction's with `dynamodb:EnclosingOperation` `ExecuteTransaction`.
+  An `EXISTS` statement is checked as the
+  [SELECT statement it evaluates](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/ql-functions.exists.html),
+  and the index of a statement with `?` placeholders is read before they are bound. A request naming nothing is
+  checked as its own operation on `*`; a state machine's task naming nothing is left to DynamoDB to answer.
 
 ## Supported Actions
 
@@ -64,6 +85,7 @@ operations keep their existing resource builders, including batch, transaction a
 | `RestoreTableFromBackup` | Create a new table from a backup |
 | `DescribeKinesisStreamingDestination` | List Kinesis streaming destinations |
 | `EnableKinesisStreamingDestination` | Enable Kinesis streaming for a table |
+| `UpdateKinesisStreamingDestination` | Update timestamp precision on an active Kinesis destination |
 | `DisableKinesisStreamingDestination` | Disable Kinesis streaming for a table |
 | `ExportTableToPointInTime` | Export table data, or the changes of a period, to S3 |
 | `CreateGlobalTable` | Make an existing table a global table (2017.11.29) |
@@ -179,9 +201,50 @@ Disabling a stream closes its open shards, each with an `EndingSequenceNumber`, 
 stays readable. A `GetRecords` call that reaches the end of a closed shard returns no
 `NextShardIterator`. `GetShardIterator` for a shard the stream does not have answers
 `ResourceNotFoundException`. The 1,000-record limit is for the whole stream: the oldest record goes
-first, whichever shard holds it. A closed shard that holds no records is dropped once the shard that
-replaced it has closed too, so a stream that rolls over lists at most two generations of shards while
-idle, and otherwise only the shards that still hold records.
+first, whichever shard holds it. AWS has no such limit, so if a consumer can fall more than 1,000
+records behind, for example one that starts at `LATEST` before a large seed, raise it with
+`FLOCI_SERVICES_DYNAMODB_STREAM_MAX_RECORDS`. A closed shard that holds no records is dropped once
+the shard that replaced it has closed too, so a stream that rolls over lists at most two generations
+of shards while idle, and otherwise only the shards that still hold records.
+
+## Transaction conflicts
+
+By default, transactions that touch the same items wait for each other and then all go through,
+one at a time. On AWS, a `TransactWriteItems` keeps its items busy until it commits, and requests
+that reach a busy item are rejected instead:
+
+- a `PutItem`, `UpdateItem` or `DeleteItem`, or a PartiQL `ExecuteStatement` that writes one item,
+  fails with `TransactionConflictException`;
+- another `TransactWriteItems`, or a `TransactGetItems`, is cancelled with
+  `TransactionCanceledException`, and the item gets the reason `TransactionConflict`
+  ("Transaction is ongoing for the item"). Its other items get `None`;
+- a `GetItem`, `Query` or `Scan` is not affected.
+
+To exercise code that handles those failures, such as a retry loop, set
+`FLOCI_SERVICES_DYNAMODB_TRANSACTION_CONFLICTS_ENABLED=true`. A `TransactWriteItems` then keeps its
+items busy from the moment its conditions hold until 10 milliseconds after it commits, about as long
+as a write transaction takes on AWS, and answers when that time is up. A client that waits for one transaction before it sends
+the next never sees a conflict; requests that overlap a transaction on its items do. A cancelled or
+rejected request changes nothing, so it can be retried as it was sent.
+
+The busy time is fixed, so the share of transactions that conflict under a given load is not AWS's.
+A `BatchWriteItem`, or a write that is not part of a transaction, does not make other requests
+conflict. The setting works with the native backend only; with the `local` backend Floci does not
+start.
+
+## Attribute order
+
+AWS returns the top-level attributes and every map key in a new random order on some operations.
+Floci does the same on the `ReturnValues` of `PutItem`, `UpdateItem` and `DeleteItem`, on the
+`Item` of a failed condition check, on `TransactGetItems`, and on the `Item` of a
+`TransactWriteItems` cancellation reason. Each map is shuffled on its own. Lists and sets keep their order.
+
+`GetItem`, `Query`, `Scan`, `BatchGetItem`, PartiQL and Streams return the same order on every call, as on AWS.
+As on AWS, a map written through `PutItem`, `BatchWriteItem`, `TransactWriteItems` or the values of `UpdateItem`
+is stored with its keys sorted by code point. A PartiQL literal keeps the order it is written in. An update sorts
+each map on its document path again and leaves the other maps as they are. A value copied from another attribute
+keeps the order of that attribute.
+Set `FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER=false` to turn the shuffle off. The setting works with the native backend only. With the `local` backend, responses keep the order DynamoDB Local returns.
 
 ## Time to Live
 
@@ -314,6 +377,9 @@ region is rejected.
 | `FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_ROLLOVER_SECONDS` | `0` | Seconds a stream shard stays open before a child shard takes its keys. `0` keeps shards open |
 | `FLOCI_SERVICES_DYNAMODB_STREAM_ITERATOR_EXPIRY_ENABLED` | `false` | Expire stream shard iterators 15 minutes after they are returned, as AWS does |
 | `FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED` | `false` | Keep stream records, and shards once closed, for 24 hours, as AWS does |
+| `FLOCI_SERVICES_DYNAMODB_STREAM_MAX_RECORDS` | `1000` | Most records each stream keeps across its shards; the oldest goes first. Must be at least `1` |
+| `FLOCI_SERVICES_DYNAMODB_TRANSACTION_CONFLICTS_ENABLED` | `false` | Reject requests that reach the items of a `TransactWriteItems` in flight, as AWS does, instead of making them wait. Native backend only. See [Transaction conflicts](#transaction-conflicts) |
+| `FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER` | `true` | Return attributes and map keys in a random order where AWS does. Native backend only. See [Attribute order](#attribute-order) |
 | `FLOCI_SERVICES_DYNAMODB_BACKEND` | `native` | Engine behind the DynamoDB API: `native` or `local`, case-insensitive. Any other value fails startup. See [DynamoDB Local backend](#dynamodb-local-backend) |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT` | *(none)* | Base URL of DynamoDB Local, for example `http://dynamodb-local:8000`. Required when the backend is `local`. Must be `http` or `https` with a host. AWS endpoints (hosts under `amazonaws.com`, `amazonaws.com.cn` or `api.aws`) are rejected |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS` | `2` | Seconds to wait for a connection to DynamoDB Local |
@@ -467,6 +533,11 @@ aws dynamodb search-vectors \
 first, `DOT_PRODUCT` the highest. The vector attribute is left out of a result unless
 `--projection-expression` names it, and when it is named the values returned are the index's own
 32 bit copies, so a `1` written to the table comes back as `1.0`.
+
+`--search-condition-expression` takes one `=` condition on the `HASH` attribute, joined to the rest
+with `AND`. An `INLINE_FILTER` attribute takes `=`, `<>`, `IN`, `attribute_exists`,
+`attribute_not_exists`, `AND`, `OR` and `NOT`. A Number one also takes `<`, `<=`, `>`, `>=` and
+`BETWEEN`.
 
 Deviations from AWS:
 
@@ -634,12 +705,20 @@ record as `dynamodb.ApproximateCreationDateTimePrecision`, and reported by
 `DescribeKinesisStreamingDestination` as well as in the `EnableKinesisStreamingConfiguration` member of
 the `EnableKinesisStreamingDestination` and `DisableKinesisStreamingDestination` responses.
 
+On the native backend, `UpdateKinesisStreamingDestination` changes an active destination's precision without stopping
+forwarding. Its response carries `UpdateKinesisStreamingConfiguration`, and subsequent item changes
+use the updated precision. Omitting the configuration or its precision retains the current value.
+The update accepts a table name or table ARN, persists across restarts, and rejects missing tables,
+missing destinations, inactive destinations, and precision values other than `MILLISECOND` or
+`MICROSECOND`.
+
 Enabling a Kinesis streaming destination does not change the table's DynamoDB Streams setting.
 Kinesis forwarding works whether or not `StreamSpecification.StreamEnabled` is set.
 
 Both calls take effect at once, so `EnableKinesisStreamingDestination` answers `ACTIVE` and
 `DisableKinesisStreamingDestination` answers `DISABLED`. AWS reports the transitional `ENABLING` and
 `DISABLING` first, because it enables and disables the destination in the background.
+Updates also apply at once and answer `ACTIVE`; AWS can report `UPDATING` while applying a change.
 
 ### Delivery contract
 

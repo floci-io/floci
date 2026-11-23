@@ -2,6 +2,7 @@ package io.floci.aws.services.lambda;
 
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.docker.DockerCapacityExceededException;
 import io.floci.aws.services.lambda.launcher.ContainerHandle;
 import io.floci.aws.services.lambda.launcher.LambdaRuntimeLauncher;
 import io.floci.aws.services.lambda.model.ContainerState;
@@ -1120,6 +1121,50 @@ class WarmPoolTest {
         verify(containerLauncher, never()).stop(b1);
         verify(containerLauncher, never()).stop(c1);
 
+        pool.shutdown();
+    }
+
+    // Catches: other functions' idle warm containers holding every slot of Lambda's Docker budget, so a
+    // new function is throttled while nothing runs, or the refusal surviving when an idle one could go.
+    @Test
+    void aFullDockerBudgetStopsTheLeastRecentlyUsedIdleContainerAndLaunchesAgain() {
+        WarmPool pool = buildPool();
+        pool.init();
+        LambdaFunction fnA = function("fn-a");
+        LambdaFunction fnB = function("fn-b");
+        ContainerHandle a1 = new ContainerHandle("cid-a1", "fn-a", null, ContainerState.WARM);
+        ContainerHandle a2 = new ContainerHandle("cid-a2", "fn-a", null, ContainerState.WARM);
+        ContainerHandle b1 = new ContainerHandle("cid-b1", "fn-b", null, ContainerState.WARM);
+        when(containerLauncher.launch(fnA)).thenReturn(a1, a2);
+        ContainerHandle leasedA1 = pool.acquire(fnA);
+        ContainerHandle leasedA2 = pool.acquire(fnA);
+        pool.release(leasedA1);
+        nextMillisecond();
+        pool.release(leasedA2);
+        when(containerLauncher.launch(fnB))
+                .thenThrow(new IllegalStateException("launch failed", new DockerCapacityExceededException("lambda", 2)))
+                .thenReturn(b1);
+
+        assertSame(b1, pool.acquire(fnB));
+
+        verify(containerLauncher).stop(a1);
+        verify(containerLauncher, never()).stop(a2);
+        verify(containerLauncher, times(2)).launch(fnB);
+        pool.shutdown();
+    }
+
+    // Catches: a budget refusal swallowed, or retried, when no idle container could make room.
+    @Test
+    void aFullDockerBudgetWithNothingIdleStillRefuses() {
+        WarmPool pool = buildPool();
+        pool.init();
+        LambdaFunction fnB = function("fn-b");
+        DockerCapacityExceededException full = new DockerCapacityExceededException("lambda", 2);
+        when(containerLauncher.launch(fnB)).thenThrow(full);
+
+        assertSame(full, assertThrows(DockerCapacityExceededException.class, () -> pool.acquire(fnB)));
+
+        verify(containerLauncher, times(1)).launch(fnB);
         pool.shutdown();
     }
 

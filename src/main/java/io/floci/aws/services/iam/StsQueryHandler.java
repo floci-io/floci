@@ -147,7 +147,7 @@ public class StsQueryHandler {
         // A session whose token will not fit is refused before anything is minted, on every
         // operation that carries state into the token it mints.
         if (PACKED_SESSION_OPERATIONS.contains(action)) {
-            AssembledSession session = assembledSession(params);
+            AssembledSession session = assembledSession(action, params);
             if (session.tooLarge()) {
                 return session.refusal();
             }
@@ -235,7 +235,7 @@ public class StsQueryHandler {
                   .elem("Arn", assumedRoleArn)
                   .elem("AssumedRoleId", assumedRoleId)
                 .end("AssumedRoleUser")
-                .elem("PackedPolicySize", assembledSession(params).utilization())
+                .raw(sessionSizeXml("AssumeRole", params))
                 .build();
         return Response.ok(AwsQueryResponse.envelope("AssumeRole", AwsNamespaces.STS, result)).build();
     }
@@ -249,7 +249,14 @@ public class StsQueryHandler {
      */
     private static final int SESSION_TOKEN_LIMIT = 4096;
 
-    /** The operations that carry state into the token they mint and model the refusal for it. */
+    /**
+     * The operations that carry state into the token they mint and model the refusal for it, which
+     * are the same four whose responses still declare the member AWS deprecated, both following
+     * from the state: a packed size was what carrying it cost. {@code GetDelegatedAccessToken}
+     * declares that member too and states it is not populated, carrying nothing into its token,
+     * while {@code GetSessionToken} and {@code AssumeRoot} carry none either and declare neither
+     * it nor the refusal.
+     */
     private static final Set<String> PACKED_SESSION_OPERATIONS = Set.of(
             "AssumeRole", "AssumeRoleWithSAML", "AssumeRoleWithWebIdentity", "GetFederationToken");
 
@@ -284,11 +291,12 @@ public class StsQueryHandler {
         }
 
         /**
-         * The member's own unit, truncated as AWS's own recorded pair reports it: a token of 2532
-         * bytes is published as 61.
+         * The member's own unit, truncated as AWS's own published pairs report it: session tokens
+         * of 1428, 1105 and 856 bytes are published as 34, 26 and 20, and the one pair recorded
+         * here reports 2532 bytes as 61.
          */
-        String utilization() {
-            return Integer.toString(bytes * 100 / SESSION_TOKEN_LIMIT);
+        int utilization() {
+            return bytes * 100 / SESSION_TOKEN_LIMIT;
         }
 
         Response refusal() {
@@ -305,22 +313,67 @@ public class StsQueryHandler {
      * value. {@code TransitiveTagKeys} names tags already counted, so it adds nothing of its own,
      * which is what AWS says of its own packing as well: "the transitive status of a session tag
      * does not impact its packed binary size".
+     *
+     * <p>Each of the three is counted only where the operation declares it, read from the
+     * generated request shapes rather than named per operation here: a session tag reaches
+     * {@code AssumeRoleWithSAML} inside the assertion rather than as a member of the request, and
+     * the two operations that mint a session out of the caller's own credentials declare no state
+     * at all, so a parameter STS would ignore cannot be made to cost a caller anything.
      */
-    private AssembledSession assembledSession(MultivaluedMap<String, String> params) {
+    private AssembledSession assembledSession(String action, MultivaluedMap<String, String> params) {
         StringBuilder state = new StringBuilder();
-        String document = params.getFirst("Policy");
-        if (document != null) {
-            state.append(document);
-        }
-        for (AwsQueryLists.IndexedMember arn : AwsQueryLists.members(params, "PolicyArns", null)) {
-            String value = params.getFirst(arn.prefix() + ".arn");
-            if (value != null) {
-                state.append(value);
+        if (StsRequestShapes.hasMember(action, "Policy")) {
+            String document = params.getFirst("Policy");
+            if (document != null) {
+                state.append(document);
             }
         }
-        tagClaims(params).forEach((key, value) -> state.append(key).append(value));
+        if (StsRequestShapes.hasMember(action, "PolicyArns")) {
+            for (AwsQueryLists.IndexedMember arn : AwsQueryLists.members(params, "PolicyArns", null)) {
+                String value = params.getFirst(arn.prefix() + ".arn");
+                if (value != null) {
+                    state.append(value);
+                }
+            }
+        }
+        if (StsRequestShapes.hasMember(action, "Tags")) {
+            tagClaims(params).forEach((key, value) -> state.append(key).append(value));
+        }
         return new AssembledSession(sessionTokenLength(params)
                 + state.toString().getBytes(StandardCharsets.UTF_8).length);
+    }
+
+    /**
+     * What the session a request minted cost, as the members that operation's response declares:
+     * the token's size in bytes, and that size as the percentage of the limit it consumes.
+     *
+     * <p>{@code SessionTokenSize} is "the size, in bytes, of the session token returned in the
+     * Credentials for this response" and {@code SessionTokenUtilization} "the percentage (0-100)
+     * of the maximum allowed session token size that the returned session token consumes", which
+     * is word for word what the member they arrived beside was defined as, and the guide tells a
+     * caller to read the percentage instead: "the SessionTokenUtilization response element shows
+     * what percentage of the size limit the token uses. The PackedPolicySize response element is
+     * deprecated." So one number is published twice over where all three are declared, which is
+     * what AWS's own example responses carry: 1428 bytes with 34 in both percentage members, 1105
+     * with 26, and 856 with 20 on the operation that declares no deprecated member at all. Their
+     * order is the published one too, the deprecated member first, then the size, then the
+     * percentage.
+     *
+     * <p>The size is the measure this emulator refuses a session by rather than the length of the
+     * string in {@code Credentials}. AWS packs the session's state into the token it hands back,
+     * so there the two are one number; this emulator mints an opaque token and keeps the state
+     * beside it, and a size read off that string would tell a caller a session cost nothing while
+     * the refusal read the same request as over the limit.
+     */
+    private String sessionSizeXml(String action, MultivaluedMap<String, String> params) {
+        AssembledSession session = assembledSession(action, params);
+        XmlBuilder members = new XmlBuilder();
+        if (PACKED_SESSION_OPERATIONS.contains(action)) {
+            members.elem("PackedPolicySize", session.utilization());
+        }
+        return members.elem("SessionTokenSize", session.bytes())
+                .elem("SessionTokenUtilization", session.utilization())
+                .build();
     }
 
     /**
@@ -548,7 +601,10 @@ public class StsQueryHandler {
         String sessionToken = sessionToken(params);
         Instant expiration = clock.instant().plusSeconds(durationSeconds);
 
-        String result = credentialsXml(accessKeyId, secretKey, sessionToken, expiration);
+        String result = new XmlBuilder()
+                .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
+                .raw(sessionSizeXml("GetSessionToken", params))
+                .build();
         // No role ARN: the credentials route back to the caller's account and act as the caller.
         iamService.registerIssuedSession(accessKeyId, secretKey, sessionToken, null, expiration, null,
                 regionResolver.getAccountId(), callerAccessKeyId());
@@ -579,7 +635,8 @@ public class StsQueryHandler {
         String callerAccountId = regionResolver.getAccountId();
         String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
 
-        WebIdentityOutcome outcome = verifyWebIdentityToken(webIdentityToken, roleName, accountId, roleArn);
+        WebIdentityOutcome outcome = verifyWebIdentityToken(webIdentityToken, roleName, accountId, roleArn,
+                sessionName);
         if (outcome.denial() != null) {
             return outcome.denial();
         }
@@ -622,7 +679,7 @@ public class StsQueryHandler {
                   .elem("Arn", assumedRoleArn)
                   .elem("AssumedRoleId", assumedRoleId)
                 .end("AssumedRoleUser")
-                .elem("PackedPolicySize", assembledSession(params).utilization())
+                .raw(sessionSizeXml("AssumeRoleWithWebIdentity", params))
                 .elem("Provider", provider)
                 .elem("Audience", audience)
                 .elem("SubjectFromWebIdentityToken", subject)
@@ -666,9 +723,12 @@ public class StsQueryHandler {
         }
     }
 
-    /** Inspects {@code token} and decides whether it may assume {@code roleArn}. */
+    /**
+     * Inspects {@code token} and decides whether it may assume {@code roleArn} as the session
+     * {@code sessionName}, which the trust policy reads as {@code sts:RoleSessionName}.
+     */
     private WebIdentityOutcome verifyWebIdentityToken(String token, String roleName, String roleAccountId,
-                                                      String roleArn) {
+                                                      String roleArn, String sessionName) {
         Optional<String> issuer = tokenVerifier.peekIssuer(token);
         if (issuer.isEmpty()) {
             return config.services().iam().enforcementEnabled()
@@ -714,7 +774,7 @@ public class StsQueryHandler {
                 "aud", claims.audiences());
 
         if (!webIdentityTrustEvaluator.allows(role.get().getAssumeRolePolicyDocument(),
-                oidcProviderArn, issuerKeyPrefix, conditionClaims)) {
+                oidcProviderArn, issuerKeyPrefix, conditionClaims, sessionName)) {
             LOG.debugv("Trust policy on role {0} denies web identity subject {1}",
                     roleArn, claims.subject());
             return WebIdentityOutcome.deny(accessDenied(roleArn));
@@ -793,7 +853,7 @@ public class StsQueryHandler {
                 "aud", List.of(STS_AUDIENCE),
                 "iss", List.of(verified.issuer()),
                 "sub", List.of(verified.subject()),
-                "namequalifier", List.of(verified.nameQualifier())))) {
+                "namequalifier", List.of(verified.nameQualifier())), verified.roleSessionName())) {
             throw new AwsException("AccessDenied", "Not authorized to perform sts:AssumeRoleWithSAML on resource: " + roleArn, 403);
         }
 
@@ -802,9 +862,14 @@ public class StsQueryHandler {
             return roleDurationError;
         }
 
-        String sessionName = verified.subject().replaceAll("[^A-Za-z0-9+=,.@_-]", "_");
-        if (sessionName.length() > 64) {
-            sessionName = sessionName.substring(0, 64);
+        String sessionName = verified.roleSessionName();
+        // AWS refuses an assertion without the attribute; Floci has always accepted one, naming the
+        // session after its subject, and keeps doing so.
+        if (sessionName == null) {
+            sessionName = verified.subject().replaceAll("[^A-Za-z0-9+=,.@_-]", "_");
+            if (sessionName.length() > 64) {
+                sessionName = sessionName.substring(0, 64);
+            }
         }
         Instant requestedExpiration = clock.instant().plusSeconds(durationSeconds);
         Instant expiration = verified.expiration().isBefore(requestedExpiration) ? verified.expiration() : requestedExpiration;
@@ -820,7 +885,8 @@ public class StsQueryHandler {
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
                 .start("AssumedRoleUser").elem("Arn", assumedRoleArn).elem("AssumedRoleId", assumedRoleId).end("AssumedRoleUser")
-                .elem("PackedPolicySize", assembledSession(params).utilization()).elem("Issuer", verified.issuer()).elem("Audience", "urn:amazon:webservices")
+                .raw(sessionSizeXml("AssumeRoleWithSAML", params)).elem("Issuer", verified.issuer())
+                .elem("Audience", "urn:amazon:webservices")
                 .elem("NameQualifier", verified.nameQualifier()).elem("SubjectType", verified.subjectType()).elem("Subject", verified.subject()).build();
         return Response.ok(AwsQueryResponse.envelope("AssumeRoleWithSAML", AwsNamespaces.STS, result)).build();
     }
@@ -876,7 +942,7 @@ public class StsQueryHandler {
                   .elem("FederatedUserId", federatedUserId)
                   .elem("Arn", federatedUserArn)
                 .end("FederatedUser")
-                .elem("PackedPolicySize", assembledSession(params).utilization())
+                .raw(sessionSizeXml("GetFederationToken", params))
                 .build();
         return Response.ok(AwsQueryResponse.envelope("GetFederationToken", AwsNamespaces.STS, result)).build();
     }
@@ -896,7 +962,8 @@ public class StsQueryHandler {
      * same way: the provider obtains the "approver's temporary credentials". The two differ in the
      * case {@code OnlySendByOwner} is for, where the owner could not approve and forwarded the
      * request on. {@code PackedPolicySize} is left out: the model deprecates it and states it is
-     * not populated for this operation.
+     * not populated for this operation, which declares neither of the two members that replace it
+     * either.
      */
     private Response handleGetDelegatedAccessToken(MultivaluedMap<String, String> params) {
         Response validation = validateDeclaredConstraints("GetDelegatedAccessToken", params);
@@ -1009,7 +1076,7 @@ public class StsQueryHandler {
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
-                .elem("SessionTokenSize", String.valueOf(sessionToken.length()))
+                .raw(sessionSizeXml("AssumeRoot", params))
                 .build();
         return Response.ok(AwsQueryResponse.envelope("AssumeRoot", AwsNamespaces.STS, result)).build();
     }
@@ -1179,6 +1246,16 @@ public class StsQueryHandler {
      * gone does not get one that speaks for the account. An unknown long-term key keeps the
      * stand-in, which is what {@code GetCallerIdentity} answers it.
      */
+    /**
+     * The refusals the GetWebIdentityToken reference states for its two subject members, in its own
+     * sentences: AWS's answer is a validation error, and no recording gives its text.
+     */
+    private static final String SCOPE_NEEDS_ORIGIN_IDENTITY = "You can specify Scope only when SubjectMode is"
+            + " OriginIdentity and you request exactly one audience.";
+    private static final String ORIGIN_IDENTITY_NEEDS_CONTEXT = "To use OriginIdentity, the trusted identity"
+            + " propagation context of the calling session must contain the aws:OriginIdentity/Subject key and"
+            + " either the aws:OriginIdentity/Issuer key or the aws:OriginIdentity/FederatedProviderArn key.";
+
     private Response handleGetWebIdentityToken(MultivaluedMap<String, String> params) {
         if (arrivedOnTheGlobalEndpoint()) {
             return AwsQueryResponse.error("ValidationError", "The global endpoint is not supported"
@@ -1194,6 +1271,10 @@ public class StsQueryHandler {
         if (validation != null) {
             return validation;
         }
+        boolean originIdentity = "OriginIdentity".equals(params.getFirst("SubjectMode"));
+        if (params.getFirst("Scope") != null && (!originIdentity || audiences(params).size() != 1)) {
+            return AwsQueryResponse.error("ValidationError", SCOPE_NEEDS_ORIGIN_IDENTITY, AwsNamespaces.STS, 400);
+        }
 
         String accessKeyId = callerAccessKeyId();
         Optional<Instant> sessionEnds = accessKeyId == null
@@ -1203,14 +1284,21 @@ public class StsQueryHandler {
             return AwsQueryResponse.error("ExpiredTokenException",
                     IamEnforcementFilter.EXPIRED_TOKEN, AwsNamespaces.STS, 403);
         }
+        if (originIdentity) {
+            // The mode reads the aws:OriginIdentity/Subject key of the calling session's trusted identity
+            // propagation context, and no session Floci hands out carries one.
+            return AwsQueryResponse.error("ValidationError", ORIGIN_IDENTITY_NEEDS_CONTEXT, AwsNamespaces.STS, 400);
+        }
 
         Optional<OutboundWebIdentityFederation> federation =
                 iamService.findEnabledOutboundWebIdentityFederation();
         if (federation.isEmpty()) {
+            // AWS's own fixed text for this refusal, which the model cannot supply: it states
+            // this error's code and its status and not its message, so a wording taken from the
+            // shape describes the error instead of answering with it. The IAM page carries the
+            // recording this sentence comes from.
             return AwsQueryResponse.error("OutboundWebIdentityFederationDisabledException",
-                    "The outbound web identity federation feature is not enabled for this account."
-                            + " To use this feature, you must first enable it through the AWS"
-                            + " Management Console or API.", AwsNamespaces.STS, 403);
+                    "OutboundWebIdentityFederation is disabled.", AwsNamespaces.STS, 403);
         }
         Instant issuedAt = clock.instant();
         Instant expiration = issuedAt.plusSeconds(

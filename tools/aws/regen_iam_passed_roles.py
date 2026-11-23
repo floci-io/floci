@@ -78,14 +78,14 @@ SERVICE_SUFFIX = ".amazonaws.com"
 # The IAM namespaces whose operations this file reads: those Floci serves over the JSON and Query
 # protocols and Smithy RPC v2 CBOR, and the REST ones whose routes Floci authorizes by operation.
 NAMESPACES = (
-    "application-autoscaling", "athena", "autoscaling", "budgets", "cloudformation", "cloudtrail",
+    "application-autoscaling", "aps", "athena", "autoscaling", "budgets", "cloudformation", "cloudtrail",
     "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito-identity", "cognito-idp",
     "comprehend", "config", "datasync", "dms", "dsql", "ec2", "ecr", "ecs", "eks", "elasticmapreduce",
     "emr-containers", "emr-serverless", "events", "firehose", "glue", "iam", "kinesis", "kinesisanalytics", "lambda",
     "logs", "pipes",
     "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups", "s3", "s3tables", "sagemaker",
     "scheduler", "secretsmanager", "servicecatalog", "ses", "sns", "ssm", "states", "swf", "textract",
-    "transcribe", "transfer", "translate",
+    "transcribe", "transfer", "translate", "wafv2",
 )
 
 # Namespaces Floci serves whose operations list iam:PassRole but are not read here yet, each with
@@ -96,7 +96,6 @@ NOT_COVERED = {
     "airflow": "REST routes no rule maps yet",
     "appconfig": "REST routes no rule maps yet",
     "appsync": "REST routes no rule maps yet",
-    "aps": "REST routes no rule maps yet",
     "aws-marketplace": "REST routes no rule maps yet",
     "backup": "REST routes no rule maps yet",
     "batch": "REST routes no rule maps yet",
@@ -249,6 +248,10 @@ NO_SUCH_OPERATION = "botocore's model has no such operation"
 # For an operation the reference lists that no model of the pinned botocore has, one AWS has shipped since the
 # pin. It lasts until a bump brings the operation in, when entry_for reads the role its request names.
 NOT_IN_BOTOCORE = "the pinned botocore does not have the operation yet, so its request cannot be read"
+# For an operation the pinned botocore has without the member that names its role, one AWS has added to the request
+# since the pin. NOT_READ wins over what the request names, so take the entry out with the bump that brings the
+# member in, and entry_for reads it.
+MEMBER_NOT_IN_BOTOCORE = "the pinned botocore does not have the member naming the role yet, so it cannot be read"
 RUNBOOK_PARAMETER = "the role is a parameter of the runbook it runs, not a member of the request"
 XML_BODY = "the request body is XML, which PassedRoles does not read"
 
@@ -258,7 +261,9 @@ NOT_READ = {
     "config:PutOrganizationConformancePack": NO_ROLE_MEMBER,
     "config:PutRemediationConfigurations": RUNBOOK_PARAMETER,
     "dms:CreateInstanceProfile": NO_ROLE_MEMBER,
+    "dms:CreateReplicationTask": NO_ROLE_MEMBER,
     "dms:ModifyInstanceProfile": NO_ROLE_MEMBER,
+    "dms:ModifyReplicationTask": NO_ROLE_MEMBER,
     "ec2:RequestSpotFleet": "the request names its roles in EC2's own protocol, one of them as an instance profile",
     "ecs:CreateDaemon": "the roles are the daemon task definition's, which only a lookup finds",
     "ecs:UpdateDaemon": "the roles are the daemon task definition's, which only a lookup finds",

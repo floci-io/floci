@@ -3,6 +3,7 @@ package io.floci.aws.services.lambda.launcher;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.docker.DockerExitEvents;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -34,7 +35,7 @@ class ContainerLauncherCopyRetryTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().lambda().codeVolumePopulateConcurrency()).thenReturn(Optional.empty());
         return new ContainerLauncher(null, null, null, null, null, null, null, config, null, null, null, null, null,
-                null);
+                null, mock(DockerExitEvents.class));
     }
 
     @Test

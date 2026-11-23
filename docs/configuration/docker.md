@@ -64,7 +64,7 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_MAX_CONNECTIONS`
 
-Streams that stay open for as long as a container or a command runs use a second, separate pool, so they can never starve create, start, stop and remove calls. Each Lambda container holds two of these (its log stream and the watcher that notices its runtime exiting) plus one per Lambda extension; other containers' log streams use it too, and so does the output of each long-running command: CodeBuild build phases, SSM run commands, ECS Exec sessions, EKS audit log followers, ECR garbage collection, EC2 and EKS user data and EMR bootstrap actions. The default of 3072 covers the 500 concurrent Lambda containers the default [Runtime API port range](../services/lambda.md#configuration) allows, with two extensions each (2000 connections), and leaves about 1000 for every other stream. Raise it if you widen that range, or run many builds, sessions or other containers at the same time. It follows the same rule (at least 1):
+Streams that stay open for as long as a container or a command runs use a second, separate pool, so they can never starve create, start, stop and remove calls. Each Lambda container holds two of these (its log stream and the watcher that notices its runtime exiting) plus one per Lambda extension; short-lived containers' log streams use it too (a long-lived service container's log is read on a timer instead, see [Container Log Settings](#container-log-settings)), and so does the output of each long-running command: CodeBuild build phases, SSM run commands, ECS Exec sessions, EKS audit log followers, ECR garbage collection, EC2 and EKS user data and EMR bootstrap actions. The default of 3072 covers the 500 concurrent Lambda containers the default [Runtime API port range](../services/lambda.md#configuration) allows, with two extensions each (2000 connections), and leaves about 1000 for every other stream. Raise it if you widen that range, or run many builds, sessions or other containers at the same time. It follows the same rule (at least 1):
 
 ```yaml
 floci:
@@ -112,6 +112,8 @@ Docker pools: control-plane leased=2 available=6 pending=0 max=1024; streaming l
 
 A stream is `unattributed` when it follows no container (an exec, an image pull or build, daemon events), or a container this Floci process did not start with a service label: one started before a restart, by a tool other than Floci, or by a Floci helper that labels no service.
 
+Each open stream is read on a virtual thread of its own, so `stream threads` counts the streams being read and costs no platform thread each. Virtual threads do not appear in a plain `jstack`; `jcmd <pid> Thread.dump_to_file -format=json <file>` lists them.
+
 A `pending` above 0 means calls are waiting for a connection, and a call that waits longer than `connection-request-timeout-seconds` fails. To turn the lines off, set the interval to 0:
 
 ```yaml
@@ -121,6 +123,57 @@ floci:
 ```
 
 Environment variable: `FLOCI_DOCKER_POOL_GAUGE_INTERVAL_SECONDS`
+
+### Unreachable daemon
+
+When the Docker daemon stops answering, Floci stops waiting on it. After `breaker-failure-threshold` attempts in a row (3 by default) fail before the daemon answers (a broken connection, a refused or missing socket, a call that times out), Floci pings the daemon. Each retry of a call is an attempt, so a single call that Floci retries can reach the threshold on its own; the ping is what keeps that from turning Docker off. If the ping fails too, every Docker call fails at once instead of waiting out its own connect, response and retry timeouts, so a container-backed request reports a missing daemon in about a second. Floci logs one warning when this starts, pings the daemon every `breaker-probe-interval-seconds` (5 by default), and logs one line when it answers again. An error status from the daemon (a 404, a 500) is an answer and never counts, for a call or for the ping, and a ping that never reaches the daemon (Floci shutting down) neither turns Docker off nor back on. The ping uses a connection of its own and gives up after 5 seconds. Set the threshold to 0 to turn this off:
+
+```yaml
+floci:
+  docker:
+    breaker-failure-threshold: 3
+    breaker-probe-interval-seconds: 5
+```
+
+Environment variables: `FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD`, `FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS`
+
+### Concurrent container launches
+
+Floci sends at most `max-concurrent-launches` container creates and starts to the daemon at once, so a burst of container work (a pipeline stage starting a dozen containers, a fan-out of Lambda cold starts) reaches it a few at a time instead of all at once. The rest wait up to `connection-request-timeout-seconds` for one to finish, and a launch that waits longer fails. The default, 0, means twice the CPUs Floci sees and at least 4. Image pulls, stops, removes and every other Docker call are not limited by it:
+
+```yaml
+floci:
+  docker:
+    max-concurrent-launches: 0
+```
+
+Environment variable: `FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES`
+
+### Per-service container budgets
+
+`service-max-containers` caps how many containers one service may run at once, keyed by the service's `io.floci.service` label, so one busy service cannot take every container the Docker host can hold. A request that would start one more fails at once with the capacity or limit error that service's API declares, so the SDK reports it the way it would on AWS: Lambda `Invoke` answers `TooManyRequestsException` (429, retried by the SDKs, and an asynchronous invocation is retried like a throttled one), RDS `InsufficientDBInstanceCapacity`, ElastiCache `InsufficientCacheClusterCapacity`, Redshift `InsufficientClusterCapacity`, MemoryDB `InsufficientClusterCapacityFault`, DocumentDB and Neptune `DBClusterQuotaExceededFault`, MSK `TooManyRequestsException`, OpenSearch `LimitExceededException`, CodeBuild `AccountLimitExceededException`, SageMaker `ResourceLimitExceeded` and Glue `ConcurrentRunsExceededException`; a service without such an error gets `ThrottlingException`. A job that starts its container after the request returns (a build, a training job, a Glue run, an ECS task) fails the job instead. A Lambda container left warm counts until a launch needs its slot: the least recently used idle container of any function is stopped first, and an invoke is throttled only when none is idle. The count is of the containers Floci created and has not removed, so one removed outside Floci (`docker rm`, a prune) keeps its slot until Floci restarts. No service is limited by default:
+
+```yaml
+floci:
+  docker:
+    service-max-containers:
+      lambda: 50
+      rds: 4
+```
+
+Environment variables: `FLOCI_DOCKER_SERVICE_MAX_CONTAINERS_<SERVICE>`, with the label in upper case (`FLOCI_DOCKER_SERVICE_MAX_CONTAINERS_LAMBDA=50`)
+
+### Container exits through Docker events
+
+Each running Lambda container holds a streaming connection whose only job is to notice its runtime exiting, so an invocation reports `Runtime.ExitError` at once instead of waiting out its timeout. With `events-exit-detection` on, Floci watches every Lambda container's exit through one Docker events subscription instead, which saves each container that connection and its thread. After the subscription drops (a daemon restart, a lost connection), Floci subscribes again and inspects every watched container, so an exit in the gap is still reported. It is off by default while it proves itself:
+
+```yaml
+floci:
+  docker:
+    events-exit-detection: false
+```
+
+Environment variable: `FLOCI_DOCKER_EVENTS_EXIT_DETECTION`
 
 ## Private Registry Authentication
 
@@ -188,6 +241,17 @@ The `server` field must match the registry hostname exactly as it appears in the
 Explicit credentials take precedence for registries they cover. For everything else, Floci falls back to the Docker config file (if `docker-config-path` is set) and then to an anonymous pull.
 
 ## Container Log Settings
+
+Floci forwards each container's output to the console and to CloudWatch Logs. A container that runs for one job or invocation (a Lambda function, a build, an ECS task) has its log followed as it is written. A long-lived service container (a database, cache or broker, the ECR registry, the EKS API server) instead has its log read every `log-poll-interval-millis` (1000 by default) with one short call, so it holds no Docker connection between reads. Its lines reach the console and CloudWatch Logs up to one interval later, and its last lines are read between its stop and its removal:
+
+```yaml
+floci:
+  docker:
+    log-poll-interval-millis: 1000
+```
+
+Environment variable: `FLOCI_DOCKER_LOG_POLL_INTERVAL_MILLIS` (at least 100)
+
 
 Configure log rotation for all containers spawned by Floci:
 
@@ -368,10 +432,16 @@ caller keeps its existing failure handling after retries are exhausted.
 | `FLOCI_DOCKER_DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon socket |
 | `FLOCI_DOCKER_DOCKER_CONFIG_PATH` | _(unset)_ | Path to directory containing Docker's `config.json` |
 | `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's short Docker calls |
+| `FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD` | `3` | Docker call attempts in a row (each retry counts) that fail before the daemon answers, after which a failed ping makes every Docker call fail at once until the daemon answers again; `0` turns this off |
+| `FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS` | `5` | Seconds between the pings that check whether an unreachable Docker daemon is back |
+| `FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES` | `0` | Most container creates and starts sent to the daemon at once; `0` means twice the CPUs Floci sees, at least 4 |
+| `FLOCI_DOCKER_SERVICE_MAX_CONTAINERS_<SERVICE>` | _(none)_ | Most containers one service runs at once, by its `io.floci.service` label; unset means unlimited |
+| `FLOCI_DOCKER_EVENTS_EXIT_DETECTION` | `false` | Watch Lambda containers' exits through one Docker events subscription instead of a wait stream per container |
 | `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS` | `3072` | Connection pool size for streams that last a container's lifetime or a long command's run. Each live Lambda container holds two (log stream and exit watcher) plus one per extension, and each CodeBuild phase, SSM command, ECS Exec session, EKS audit follower, user data script and EMR bootstrap action one |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__SERVER` | _(unset)_ | Registry hostname for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__USERNAME` | _(unset)_ | Username for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__PASSWORD` | _(unset)_ | Password for credential entry 0 |
+| `FLOCI_DOCKER_LOG_POLL_INTERVAL_MILLIS` | `1000` | Milliseconds between the reads of a long-lived service container's log (databases, caches, brokers, the ECR registry, the EKS API server), read on a timer instead of followed; at least 100 |
 | `FLOCI_DOCKER_LOG_MAX_SIZE` | `10m` | Max container log file size before rotation |
 | `FLOCI_DOCKER_LOG_MAX_FILE` | `3` | Number of rotated log files to retain |
 | `FLOCI_DOCKER_EXTRA_LABELS_0__KEY` | _(unset)_ | Label key for extra-label entry 0, applied to every Floci-created container and volume (increment the index for more) |

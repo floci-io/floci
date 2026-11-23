@@ -127,7 +127,8 @@ class S3AnnotationsIntegrationTest {
 
     @Test
     @Order(7)
-    void headObjectAnnotationMatchesGetStatus() {
+    void aHeadNamingAnAnnotationIsAHeadOfTheObject() {
+        // Botocore models no HEAD of an annotation, so the request is HeadObject, whichever annotation it names.
         given()
         .when()
             .head("/" + BUCKET + "/docs/report.txt?annotation&annotationName=labels")
@@ -138,7 +139,7 @@ class S3AnnotationsIntegrationTest {
         .when()
             .head("/" + BUCKET + "/docs/report.txt?annotation&annotationName=missing")
         .then()
-            .statusCode(404);
+            .statusCode(200);
     }
 
     @Test
@@ -211,13 +212,14 @@ class S3AnnotationsIntegrationTest {
 
     @Test
     @Order(13)
-    void emptyAnnotationNameDispatchesToList() {
+    void anEmptyAnnotationNameIsRefusedAsTheGetItNames() {
+        // A request naming annotationName is GetObjectAnnotation, as botocore reads it, so an empty one is refused.
         given()
         .when()
             .get("/" + BUCKET + "/docs/report.txt?annotation&annotationName=")
         .then()
-            .statusCode(200)
-            .body(containsString("<ListObjectAnnotationsOutput"));
+            .statusCode(400)
+            .body(containsString("<Code>InvalidAnnotationName</Code>"));
     }
 
     // ========== Versioned bucket behavior ==========

@@ -19,4 +19,9 @@ final class EmrContainersRequestShapes {
     static void check(String operation, JsonNode request) {
         CHECK.check(operation, request);
     }
+
+    /** Checks {@code value} against the model's shape {@code shape}, one member of a request. */
+    static void checkShape(String shape, JsonNode value) {
+        CHECK.checkShape(shape, value);
+    }
 }

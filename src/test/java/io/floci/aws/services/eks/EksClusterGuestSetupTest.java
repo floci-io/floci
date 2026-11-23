@@ -104,7 +104,7 @@ class EksClusterGuestSetupTest {
         when(lifecycleManager.create(any())).thenReturn(CONTAINER_ID);
         when(lifecycleManager.startCreated(any(), any())).thenReturn(new ContainerInfo(CONTAINER_ID, Map.of()));
 
-        manager = Mockito.spy(new EksClusterManager(containerBuilder, lifecycleManager,
+        manager = Mockito.spy(EksClusterManagers.create(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerDetector.class), portAllocator,
                 Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                 config, Mockito.mock(RegionResolver.class)));
@@ -352,7 +352,7 @@ class EksClusterGuestSetupTest {
         RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("000000000000");
         when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
-        EksClusterManager logging = Mockito.spy(new EksClusterManager(containerBuilder, lifecycleManager,
+        EksClusterManager logging = Mockito.spy(EksClusterManagers.create(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerDetector.class), portAllocator,
                 Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                 config, regionResolver, null, null, Mockito.mock(ContainerLogStreamer.class)));

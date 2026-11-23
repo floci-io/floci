@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_ecr_shapes.py",
-    "botocore": "botocore 1.43.118 (local/aws/botocore)"
+    "botocore": "botocore 1.44.9 (local/aws/botocore)"
   },
   "operations": {
     "GetAccountSetting": "GetAccountSettingRequest",
@@ -68,6 +68,18 @@
     "DeleteRegistryPolicyRequest": {
       "type": "structure",
       "members": {}
+    },
+    "DeleteReplication": {
+      "type": "structure",
+      "required": [
+        "enabled"
+      ],
+      "members": {
+        "enabled": "DeleteReplicationFlag"
+      }
+    },
+    "DeleteReplicationFlag": {
+      "type": "boolean"
     },
     "DeleteRepositoryCreationTemplateRequest": {
       "type": "structure",
@@ -406,7 +418,8 @@
       ],
       "members": {
         "destinations": "ReplicationDestinationList",
-        "repositoryFilters": "RepositoryFilterList"
+        "repositoryFilters": "RepositoryFilterList",
+        "deleteReplication": "DeleteReplication"
       }
     },
     "ReplicationRuleList": {

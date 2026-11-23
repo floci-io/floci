@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
 
+import static io.floci.aws.testing.IamTestPolicies.allow;
 import static io.floci.aws.testing.SignedRestRequests.denied;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -275,11 +276,6 @@ class S3TablesIamIntegrationTest {
             send(admin, "DELETE", "/namespaces/" + encoded(bucket) + "/" + namespace, null).then().statusCode(204);
         }
         send(admin, "DELETE", "/buckets/" + encoded(bucket), null).then().statusCode(204);
-    }
-
-    private static String allow(String actions, String resource) {
-        return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":" + actions
-                + ",\"Resource\":\"" + resource + "\"}]}";
     }
 
     private String createBucket() throws Exception {

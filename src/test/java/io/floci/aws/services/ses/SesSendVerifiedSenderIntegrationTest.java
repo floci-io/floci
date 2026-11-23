@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.everyItem;
@@ -28,10 +29,6 @@ import static org.hamcrest.Matchers.notNullValue;
 @QuarkusTest
 class SesSendVerifiedSenderIntegrationTest {
 
-    private static final String AUTH_V1 =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
-    private static final String AUTH_V2 =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String UNVERIFIED = "never-verified@unverified-sender.floci.test";
     private static final String VERIFIED = "verified@verified-sender.floci.test";
     private static final String NOT_VERIFIED_MESSAGE =
@@ -52,19 +49,8 @@ class SesSendVerifiedSenderIntegrationTest {
     private static final String DELEGATE_AUTH_V2 =
             "AWS4-HMAC-SHA256 Credential=" + DELEGATE_ACCOUNT + "/20260101/us-east-1/ses/aws4_request";
 
-    private static RequestSpecification query(String action) {
-        return query(AUTH_V1, action);
-    }
-
-    private static RequestSpecification query(String authorization, String action) {
-        return given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", authorization)
-                .formParam("Action", action);
-    }
-
     private static RequestSpecification sendEmail(String authorization, String source) {
-        return query(authorization, "SendEmail")
+        return SesV1Requests.query(authorization, "SendEmail")
                 .formParam("Source", source)
                 .formParam("Destination.ToAddresses.member.1", "to@example.com")
                 .formParam("Message.Subject.Data", "s")
@@ -72,13 +58,13 @@ class SesSendVerifiedSenderIntegrationTest {
     }
 
     private static RequestSpecification sendRawEmail(String authorization, String rawMessage) {
-        return query(authorization, "SendRawEmail")
+        return SesV1Requests.query(authorization, "SendRawEmail")
                 .formParam("Destinations.member.1", "to@example.com")
                 .formParam("RawMessage.Data", rawMessage);
     }
 
     private static RequestSpecification sendTemplatedEmail(String authorization, String source) {
-        return query(authorization, "SendTemplatedEmail")
+        return SesV1Requests.query(authorization, "SendTemplatedEmail")
                 .formParam("Source", source)
                 .formParam("Destination.ToAddresses.member.1", "to@example.com")
                 .formParam("Template", TEMPLATE)
@@ -95,27 +81,20 @@ class SesSendVerifiedSenderIntegrationTest {
                 """.formatted(from);
     }
 
-    private static RequestSpecification v2Request(String authorization, String body) {
-        return given()
-                .contentType("application/json")
-                .header("Authorization", authorization)
-                .body(body);
-    }
-
     private static void verifyEmailIdentity(String address) {
-        query("VerifyEmailIdentity").formParam("EmailAddress", address)
+        SesV1Requests.query("VerifyEmailIdentity").formParam("EmailAddress", address)
             .when().post("/").then().statusCode(200);
     }
 
     private static void verifyOwnerAddress() {
-        query("AWS4-HMAC-SHA256 Credential=" + OWNER_ACCOUNT + "/20260101/us-east-1/email/aws4_request",
+        SesV1Requests.query("AWS4-HMAC-SHA256 Credential=" + OWNER_ACCOUNT + "/20260101/us-east-1/email/aws4_request",
                 "VerifyEmailIdentity")
             .formParam("EmailAddress", OWNER_ADDRESS)
             .when().post("/").then().statusCode(200);
     }
 
     private static void createTemplate(String authorization) {
-        query(authorization, "CreateTemplate")
+        SesV1Requests.query(authorization, "CreateTemplate")
             .formParam("Template.TemplateName", TEMPLATE)
             .formParam("Template.SubjectPart", "s")
             .formParam("Template.TextPart", "b")
@@ -182,7 +161,7 @@ class SesSendVerifiedSenderIntegrationTest {
 
     @Test
     void v1SendEmail_unverifiedSource_returnsMessageRejected() {
-        assertMessageRejected(sendEmail(AUTH_V1, UNVERIFIED), UNVERIFIED);
+        assertMessageRejected(sendEmail(SesV1Requests.AUTH, UNVERIFIED), UNVERIFIED);
 
         assertNothingCapturedFrom(UNVERIFIED);
     }
@@ -191,12 +170,12 @@ class SesSendVerifiedSenderIntegrationTest {
     void v1SendEmail_displayNameSourceWithVerifiedAddress_succeeds() {
         verifyEmailIdentity(VERIFIED);
 
-        assertSent(sendEmail(AUTH_V1, "Verified Sender <" + VERIFIED + ">"), "SendEmail");
+        assertSent(sendEmail(SesV1Requests.AUTH, "Verified Sender <" + VERIFIED + ">"), "SendEmail");
     }
 
     @Test
     void v1SendRawEmail_unverifiedSource_returnsMessageRejected() {
-        assertMessageRejected(sendRawEmail(AUTH_V1, rawMessage(UNVERIFIED)).formParam("Source", UNVERIFIED),
+        assertMessageRejected(sendRawEmail(SesV1Requests.AUTH, rawMessage(UNVERIFIED)).formParam("Source", UNVERIFIED),
                 UNVERIFIED);
 
         assertNothingCapturedFrom(UNVERIFIED);
@@ -204,26 +183,26 @@ class SesSendVerifiedSenderIntegrationTest {
 
     @Test
     void v1SendRawEmail_withoutSource_unverifiedMimeFrom_returnsMessageRejected() {
-        assertMessageRejected(sendRawEmail(AUTH_V1, rawMessage(UNVERIFIED)), UNVERIFIED);
+        assertMessageRejected(sendRawEmail(SesV1Requests.AUTH, rawMessage(UNVERIFIED)), UNVERIFIED);
     }
 
     @Test
     void v1SendTemplatedEmail_unverifiedSource_returnsMessageRejected() {
-        createTemplate(AUTH_V1);
+        createTemplate(SesV1Requests.AUTH);
 
-        assertMessageRejected(sendTemplatedEmail(AUTH_V1, UNVERIFIED), UNVERIFIED);
+        assertMessageRejected(sendTemplatedEmail(SesV1Requests.AUTH, UNVERIFIED), UNVERIFIED);
     }
 
     @Test
     void v2SendEmail_simple_unverifiedFrom_returnsMessageRejected() {
-        assertMessageRejectedV2(v2Request(AUTH_V2, simpleBody(UNVERIFIED)), UNVERIFIED);
+        assertMessageRejectedV2(v2(SesV2Requests.AUTH).body(simpleBody(UNVERIFIED)), UNVERIFIED);
 
         assertNothingCapturedFrom(UNVERIFIED);
     }
 
     @Test
     void v2SendEmail_raw_unverifiedMimeFrom_returnsMessageRejected() {
-        assertMessageRejectedV2(v2Request(AUTH_V2, """
+        assertMessageRejectedV2(v2(SesV2Requests.AUTH).body("""
                 {
                     "Destination": {"ToAddresses": ["to@example.com"]},
                     "Content": {"Raw": {"Data": "%s"}}
@@ -233,19 +212,19 @@ class SesSendVerifiedSenderIntegrationTest {
 
     @Test
     void v2SendEmail_verifiedEmailIdentity_succeeds() {
-        v2Request(AUTH_V2, "{\"EmailIdentity\": \"v2-" + VERIFIED + "\"}")
+        v2(SesV2Requests.AUTH).body("{\"EmailIdentity\": \"v2-" + VERIFIED + "\"}")
         .when()
             .post("/v2/email/identities");
 
-        assertSentV2(v2Request(AUTH_V2, simpleBody("v2-" + VERIFIED)));
+        assertSentV2(v2(SesV2Requests.AUTH).body(simpleBody("v2-" + VERIFIED)));
     }
 
     @Test
     void v2SendEmail_addressUnderVerifiedDomain_succeeds() {
         String domain = "verified-domain.floci.test";
-        SesDomainIdentityTestHelper.createVerified(domain, AUTH_V2);
+        SesDomainIdentityTestHelper.createVerified(domain, SesV2Requests.AUTH);
 
-        assertSentV2(v2Request(AUTH_V2, simpleBody("anyone@" + domain)));
+        assertSentV2(v2(SesV2Requests.AUTH).body(simpleBody("anyone@" + domain)));
     }
 
     @Test
@@ -253,18 +232,18 @@ class SesSendVerifiedSenderIntegrationTest {
         // "if you create and verify an identity for example.com, you don't need to create separate
         // identities for a.example.com, a.b.example.com, user@example.com, user@a.example.com".
         String domain = "verified-parent.floci.test";
-        SesDomainIdentityTestHelper.createVerified(domain, AUTH_V2);
+        SesDomainIdentityTestHelper.createVerified(domain, SesV2Requests.AUTH);
 
-        assertSentV2(v2Request(AUTH_V2, simpleBody("anyone@a.b." + domain)));
+        assertSentV2(v2(SesV2Requests.AUTH).body(simpleBody("anyone@a.b." + domain)));
     }
 
     @Test
     void v1SendEmail_addressUnderADomainThatOnlyEndsLikeAVerifiedOne_returnsMessageRejected() {
         String domain = "verified-suffix.floci.test";
-        SesDomainIdentityTestHelper.createVerified(domain, AUTH_V2);
+        SesDomainIdentityTestHelper.createVerified(domain, SesV2Requests.AUTH);
         String lookalike = "anyone@not-" + domain;
 
-        assertMessageRejected(sendEmail(AUTH_V1, lookalike), lookalike);
+        assertMessageRejected(sendEmail(SesV1Requests.AUTH, lookalike), lookalike);
     }
 
     @Test
@@ -273,7 +252,7 @@ class SesSendVerifiedSenderIntegrationTest {
         String second = "second@unverified-sender.floci.test";
         verifyEmailIdentity(first);
 
-        assertMessageRejected(sendRawEmail(AUTH_V1, rawMessage(first + ", " + second)), second);
+        assertMessageRejected(sendRawEmail(SesV1Requests.AUTH, rawMessage(first + ", " + second)), second);
 
         assertNothingCapturedFrom(first);
     }
@@ -285,7 +264,7 @@ class SesSendVerifiedSenderIntegrationTest {
         verifyEmailIdentity(first);
         verifyEmailIdentity(second);
 
-        assertSent(sendRawEmail(AUTH_V1, rawMessage(first + ", " + second)), "SendRawEmail");
+        assertSent(sendRawEmail(SesV1Requests.AUTH, rawMessage(first + ", " + second)), "SendRawEmail");
     }
 
     @Test
@@ -293,10 +272,10 @@ class SesSendVerifiedSenderIntegrationTest {
         // A domain identity stays Pending until its DKIM records are published, and a pending
         // domain does not verify the addresses under it.
         String domain = "pending-domain.floci.test";
-        query("VerifyDomainIdentity").formParam("Domain", domain)
+        SesV1Requests.query("VerifyDomainIdentity").formParam("Domain", domain)
             .when().post("/").then().statusCode(200);
 
-        assertMessageRejected(sendEmail(AUTH_V1, "anyone@" + domain), "anyone@" + domain);
+        assertMessageRejected(sendEmail(SesV1Requests.AUTH, "anyone@" + domain), "anyone@" + domain);
     }
 
     @Test
@@ -305,7 +284,7 @@ class SesSendVerifiedSenderIntegrationTest {
         String returnPath = "bounces@unverified-sender.floci.test";
         verifyEmailIdentity(source);
 
-        assertMessageRejected(sendEmail(AUTH_V1, source).formParam("ReturnPath", returnPath), returnPath);
+        assertMessageRejected(sendEmail(SesV1Requests.AUTH, source).formParam("ReturnPath", returnPath), returnPath);
 
         assertNothingCapturedFrom(source);
     }
@@ -315,9 +294,9 @@ class SesSendVerifiedSenderIntegrationTest {
         String source = "rp-templated-" + VERIFIED;
         String returnPath = "templated-bounces@unverified-sender.floci.test";
         verifyEmailIdentity(source);
-        createTemplate(AUTH_V1);
+        createTemplate(SesV1Requests.AUTH);
 
-        assertMessageRejected(sendTemplatedEmail(AUTH_V1, source).formParam("ReturnPath", returnPath), returnPath);
+        assertMessageRejected(sendTemplatedEmail(SesV1Requests.AUTH, source).formParam("ReturnPath", returnPath), returnPath);
 
         assertNothingCapturedFrom(source);
     }
@@ -328,7 +307,7 @@ class SesSendVerifiedSenderIntegrationTest {
         String feedback = "v2-bounces@unverified-sender.floci.test";
         verifyEmailIdentity(source);
 
-        assertMessageRejectedV2(v2Request(AUTH_V2, """
+        assertMessageRejectedV2(v2(SesV2Requests.AUTH).body("""
                 {
                     "FromEmailAddress": "%s",
                     "FeedbackForwardingEmailAddress": "%s",
@@ -346,7 +325,7 @@ class SesSendVerifiedSenderIntegrationTest {
         String feedback = "v2-raw-bounces@unverified-sender.floci.test";
         verifyEmailIdentity(source);
 
-        assertMessageRejectedV2(v2Request(AUTH_V2, """
+        assertMessageRejectedV2(v2(SesV2Requests.AUTH).body("""
                 {
                     "FeedbackForwardingEmailAddress": "%s",
                     "Destination": {"ToAddresses": ["to@example.com"]},
@@ -362,7 +341,7 @@ class SesSendVerifiedSenderIntegrationTest {
         String source = "raw-source-" + VERIFIED;
         verifyEmailIdentity(source);
 
-        assertMessageRejected(sendRawEmail(AUTH_V1, rawMessage(UNVERIFIED)).formParam("Source", source), UNVERIFIED);
+        assertMessageRejected(sendRawEmail(SesV1Requests.AUTH, rawMessage(UNVERIFIED)).formParam("Source", source), UNVERIFIED);
 
         assertNothingCapturedFrom(source);
     }
@@ -373,7 +352,7 @@ class SesSendVerifiedSenderIntegrationTest {
         String source = "raw-v2-source-" + VERIFIED;
         verifyEmailIdentity(source);
 
-        assertSentV2(v2Request(AUTH_V2, """
+        assertSentV2(v2(SesV2Requests.AUTH).body("""
                 {
                     "FromEmailAddress": "%s",
                     "Destination": {"ToAddresses": ["to@example.com"]},
@@ -388,7 +367,7 @@ class SesSendVerifiedSenderIntegrationTest {
         String sender = "assistant@unverified-sender.floci.test";
         verifyEmailIdentity(from);
 
-        assertMessageRejected(sendRawEmail(AUTH_V1, rawMessage(from, "Sender: " + sender)), sender);
+        assertMessageRejected(sendRawEmail(SesV1Requests.AUTH, rawMessage(from, "Sender: " + sender)), sender);
 
         assertNothingCapturedFrom(from);
     }
@@ -399,7 +378,7 @@ class SesSendVerifiedSenderIntegrationTest {
         String returnPath = "raw-bounces@unverified-sender.floci.test";
         verifyEmailIdentity(from);
 
-        assertMessageRejected(sendRawEmail(AUTH_V1, rawMessage(from, "Return-Path: <" + returnPath + ">")),
+        assertMessageRejected(sendRawEmail(SesV1Requests.AUTH, rawMessage(from, "Return-Path: <" + returnPath + ">")),
                 returnPath);
 
         assertNothingCapturedFrom(from);
@@ -415,7 +394,7 @@ class SesSendVerifiedSenderIntegrationTest {
             verifyEmailIdentity(address);
         }
 
-        assertSent(sendRawEmail(AUTH_V1, rawMessage(from, "Sender: " + sender, "Return-Path: <" + returnPath + ">"))
+        assertSent(sendRawEmail(SesV1Requests.AUTH, rawMessage(from, "Sender: " + sender, "Return-Path: <" + returnPath + ">"))
                 .formParam("Source", source), "SendRawEmail");
     }
 
@@ -423,7 +402,7 @@ class SesSendVerifiedSenderIntegrationTest {
     void v1SendEmail_twoUnverifiedAddresses_oneErrorNamesBoth() {
         String returnPath = "both-bounces@unverified-sender.floci.test";
 
-        assertMessageRejected(sendEmail(AUTH_V1, UNVERIFIED).formParam("ReturnPath", returnPath),
+        assertMessageRejected(sendEmail(SesV1Requests.AUTH, UNVERIFIED).formParam("ReturnPath", returnPath),
                 UNVERIFIED + ", " + returnPath);
     }
 
@@ -530,7 +509,7 @@ class SesSendVerifiedSenderIntegrationTest {
     void v2SendEmail_fromAndFeedbackForwardingIdentityArnsOfAnotherAccount_succeeds() {
         verifyOwnerAddress();
 
-        assertSentV2(v2Request(DELEGATE_AUTH_V2, """
+        assertSentV2(v2(DELEGATE_AUTH_V2).body("""
                 {
                     "FromEmailAddress": "%s",
                     "FromEmailAddressIdentityArn": "%s",
@@ -548,7 +527,7 @@ class SesSendVerifiedSenderIntegrationTest {
         // X-SES-FROM-ARN headers specified in raw email message content."
         verifyOwnerAddress();
 
-        assertSentV2(v2Request(DELEGATE_AUTH_V2, """
+        assertSentV2(v2(DELEGATE_AUTH_V2).body("""
                 {
                     "FromEmailAddressIdentityArn": "%s",
                     "Destination": {"ToAddresses": ["to@example.com"]},
@@ -559,7 +538,7 @@ class SesSendVerifiedSenderIntegrationTest {
     }
 
     private static RequestSpecification sendBulkTemplatedEmail(String authorization, String source) {
-        return query(authorization, "SendBulkTemplatedEmail")
+        return SesV1Requests.query(authorization, "SendBulkTemplatedEmail")
                 .formParam("Source", source)
                 .formParam("Template", TEMPLATE)
                 .formParam("DefaultTemplateData", "{}")
@@ -593,7 +572,7 @@ class SesSendVerifiedSenderIntegrationTest {
 
     @Test
     void v2SendBulkEmail_unverifiedFrom_rejectsTheWholeCall() {
-        assertBulkMessageRejectedV2(v2Request(AUTH_V2, bulkBody(UNVERIFIED)), UNVERIFIED);
+        assertBulkMessageRejectedV2(v2(SesV2Requests.AUTH).body(bulkBody(UNVERIFIED)), UNVERIFIED);
 
         assertNothingCapturedFrom(UNVERIFIED);
     }
@@ -604,7 +583,7 @@ class SesSendVerifiedSenderIntegrationTest {
         String feedback = "bulk-bounces@unverified-sender.floci.test";
         verifyEmailIdentity(source);
 
-        assertBulkMessageRejectedV2(v2Request(AUTH_V2, bulkBody(source,
+        assertBulkMessageRejectedV2(v2(SesV2Requests.AUTH).body(bulkBody(source,
                 "\"FeedbackForwardingEmailAddress\": \"" + feedback + "\",",
                 "[{\"Destination\": {\"ToAddresses\": [\"to@example.com\"]}}]")), feedback);
 
@@ -614,7 +593,7 @@ class SesSendVerifiedSenderIntegrationTest {
     @Test
     void v2SendBulkEmail_noEntryHasARecipient_senderIsNotChecked() {
         // AWS fails each entry on its missing destination and never reaches the sender check.
-        v2Request(AUTH_V2, bulkBody(UNVERIFIED, "", "[{\"Destination\": {}}]"))
+        v2(SesV2Requests.AUTH).body(bulkBody(UNVERIFIED, "", "[{\"Destination\": {}}]"))
         .when()
             .post("/v2/email/outbound-bulk-emails")
         .then()
@@ -627,7 +606,7 @@ class SesSendVerifiedSenderIntegrationTest {
         String source = "bulk-" + VERIFIED;
         verifyEmailIdentity(source);
 
-        v2Request(AUTH_V2, bulkBody(source))
+        v2(SesV2Requests.AUTH).body(bulkBody(source))
         .when()
             .post("/v2/email/outbound-bulk-emails")
         .then()
@@ -639,7 +618,7 @@ class SesSendVerifiedSenderIntegrationTest {
     void v2SendBulkEmail_fromAndFeedbackForwardingIdentityArnsOfAnotherAccount_succeeds() {
         verifyOwnerAddress();
 
-        v2Request(DELEGATE_AUTH_V2, bulkBody(OWNER_ADDRESS,
+        v2(DELEGATE_AUTH_V2).body(bulkBody(OWNER_ADDRESS,
                 "\"FromEmailAddressIdentityArn\": \"" + OWNER_IDENTITY_ARN + "\","
                         + "\"FeedbackForwardingEmailAddress\": \"" + OWNER_ADDRESS + "\","
                         + "\"FeedbackForwardingEmailAddressIdentityArn\": \"" + OWNER_IDENTITY_ARN + "\",",
@@ -653,9 +632,9 @@ class SesSendVerifiedSenderIntegrationTest {
 
     @Test
     void v1SendBulkTemplatedEmail_unverifiedSource_returnsMessageRejected() {
-        createTemplate(AUTH_V1);
+        createTemplate(SesV1Requests.AUTH);
 
-        assertMessageRejected(sendBulkTemplatedEmail(AUTH_V1, UNVERIFIED), UNVERIFIED);
+        assertMessageRejected(sendBulkTemplatedEmail(SesV1Requests.AUTH, UNVERIFIED), UNVERIFIED);
 
         assertNothingCapturedFrom(UNVERIFIED);
     }

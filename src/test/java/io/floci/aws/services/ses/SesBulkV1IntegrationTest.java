@@ -33,9 +33,6 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesBulkV1IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
-
     // A sender of its own: an identity under example.com would outlive this class and reach the
     // other SES classes that share the application.
     private static final String SENDER = "bulk-v1@floci.test";
@@ -55,7 +52,7 @@ class SesBulkV1IntegrationTest {
     void createTemplate() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "VerifyEmailIdentity")
             .formParam("EmailAddress", SENDER)
         .when()
@@ -65,7 +62,7 @@ class SesBulkV1IntegrationTest {
 
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "CreateTemplate")
             .formParam("Template.TemplateName", "v1-bulk-welcome")
             .formParam("Template.SubjectPart", "Hello {{name}}")
@@ -82,7 +79,7 @@ class SesBulkV1IntegrationTest {
     void sendBulkTemplatedEmail_perDestinationReplacement() {
         String body = given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", SENDER)
             .formParam("Template", "v1-bulk-welcome")
@@ -134,7 +131,7 @@ class SesBulkV1IntegrationTest {
     void sendBulkTemplatedEmail_unknownTemplate() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", SENDER)
             .formParam("Template", "ghost")
@@ -152,7 +149,7 @@ class SesBulkV1IntegrationTest {
     void sendBulkTemplatedEmail_missingDestinations() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", SENDER)
             .formParam("Template", "v1-bulk-welcome")
@@ -170,7 +167,7 @@ class SesBulkV1IntegrationTest {
     void sendBulkTemplatedEmail_missingTemplate() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", SENDER)
             .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com")
@@ -190,7 +187,7 @@ class SesBulkV1IntegrationTest {
         // validation refuses for the whole request (probe-confirmed).
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", SENDER)
             .formParam("Template", "v1-bulk-welcome")
@@ -221,7 +218,7 @@ class SesBulkV1IntegrationTest {
 
             given()
                 .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", AUTH)
+                .header("Authorization", SesV1Requests.AUTH)
                 .formParam("Action", "SendBulkTemplatedEmail")
                 .formParam("Source", SENDER)
                 .formParam("Template", "v1-bulk-welcome")
@@ -248,7 +245,7 @@ class SesBulkV1IntegrationTest {
     void sendBulkTemplatedEmail_destinationsExceed50_isCountedBeforeTheTemplateLookup() {
         destinations(given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", SENDER)
             .formParam("Template", "ghost"), 51)
@@ -269,7 +266,7 @@ class SesBulkV1IntegrationTest {
         // not as Failed.
         String body = given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", SENDER)
             .formParam("Template", "v1-bulk-welcome")
@@ -395,7 +392,7 @@ class SesBulkV1IntegrationTest {
                                                                           String template) {
         RequestSpecification spec = given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", source)
             .formParam("Template", template)
@@ -471,7 +468,7 @@ class SesBulkV1IntegrationTest {
     private static RequestSpecification bulkSpec(String defaultTemplateData) {
         return given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", SENDER)
             .formParam("Template", "v1-bulk-welcome")
@@ -483,7 +480,7 @@ class SesBulkV1IntegrationTest {
     void sendBulkTemplatedEmail_fiftyDestinations_sendsEachDestination() {
         String body = destinations(given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", SENDER)
             .formParam("Template", "v1-bulk-welcome")
@@ -504,7 +501,7 @@ class SesBulkV1IntegrationTest {
         // for an unverified Source and a missing template (probe-confirmed).
         String body = given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", "bulk-v1-unverified@floci.test")
             .formParam("Template", "ghost")
@@ -528,7 +525,7 @@ class SesBulkV1IntegrationTest {
         // boto3 sends nothing for Destination={}, which leaves a gap in the member indexes.
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", SENDER)
             .formParam("Template", "v1-bulk-welcome")
@@ -548,7 +545,7 @@ class SesBulkV1IntegrationTest {
     void sendBulkTemplatedEmail_emptyEntryBesideRecipients_failsOnlyThatEntry() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", SENDER)
             .formParam("Template", "v1-bulk-welcome")
@@ -582,7 +579,7 @@ class SesBulkV1IntegrationTest {
                                                                    String message) {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParams(params)
         .when()

@@ -115,6 +115,12 @@ public class RedshiftQueryHandler {
             String region = regionResolver.resolveRegionFromAuth(authorizationHeader);
             String defaultIamRoleArn = params.getFirst("DefaultIamRoleArn");
             Integer automatedRetention = parseOptionalInteger(params, "AutomatedSnapshotRetentionPeriod");
+            String parameterGroupName = params.getFirst("ClusterParameterGroupName");
+            boolean hasParameterGroup = parameterGroupName != null && !parameterGroupName.isBlank();
+            if (hasParameterGroup) {
+                // Refused before the cluster is created, as Redshift refuses a CreateCluster naming no group.
+                service.describeClusterParameterGroups(parameterGroupName);
+            }
             Cluster cluster;
             if (manageMasterPassword) {
                 cluster = automatedRetention == null
@@ -131,12 +137,20 @@ public class RedshiftQueryHandler {
                         : service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
                                 clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn, automatedRetention);
             }
-            String parameterGroupName = params.getFirst("ClusterParameterGroupName");
             String multiAz = params.getFirst("MultiAZ");
-            boolean hasParameterGroup = parameterGroupName != null && !parameterGroupName.isBlank();
             if (hasParameterGroup || multiAz != null) {
-                cluster = service.modifyCluster(identifier, null, null, null, parameterGroupName, null,
-                        multiAz == null ? null : Boolean.parseBoolean(multiAz));
+                try {
+                    cluster = service.modifyCluster(identifier, null, null, null, parameterGroupName, null,
+                            multiAz == null ? null : Boolean.parseBoolean(multiAz));
+                } catch (AwsException refused) {
+                    // The group was deleted after the check above: the create fails as a whole, leaving no cluster.
+                    try {
+                        service.deleteCluster(identifier);
+                    } catch (RuntimeException cleanupFailure) {
+                        refused.addSuppressed(cleanupFailure);
+                    }
+                    throw refused;
+                }
             }
             String xml = new XmlBuilder()
                     .start("CreateClusterResponse")

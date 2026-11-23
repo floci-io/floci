@@ -8,6 +8,7 @@ import java.math.BigInteger;
 import java.math.MathContext;
 import java.math.RoundingMode;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -123,29 +124,59 @@ public class DynamoDbPartiQLParser {
         }
     }
 
+    /** A statement's verb and the table and index it acts on. */
+    public record StatementTarget(String verb, String table, String index) {
+    }
+
     /**
-     * The IAM action for a single statement, using the same keyword tokens as execution. A statement
-     * the tokenizer refuses has no action here, so it is authorized as ExecuteStatement and the
-     * handler reports why it is malformed, as {@link #extractTable} leaves it.
+     * The verb of a single statement and the table and index it names, as execution parses it once its FROM clause
+     * checks pass, before it binds the request's parameters or checks the statement's terms: {@code SELECT},
+     * {@code INSERT}, {@code UPDATE} or {@code DELETE}, and for an {@code EXISTS} statement those of "the SELECT
+     * statement that the function evaluates"
+     * (https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/ql-functions.exists.html). A statement whose
+     * FROM clause execution refuses is read from its keyword tokens, with no index (an update may lead with
+     * {@code FROM}). Empty for a statement the tokenizer refuses or of any other verb, or one naming no table, which
+     * the handler refuses after the credential and policy checks.
      */
-    public static String iamAction(String statement) {
+    public static Optional<StatementTarget> target(String statement) {
         if (statement == null || statement.isBlank()) {
-            return null;
+            return Optional.empty();
+        }
+        AtomicReference<Stmt> reached = new AtomicReference<>();
+        try {
+            parse(statement, List.of(), true, reached::set);
+        } catch (Exception ignored) {
+            // Execution checks the statement's terms against the request's parameters after its target, and reports a
+            // malformed statement after the credential and policy checks have run.
+        }
+        if (reached.get() != null) {
+            StatementTarget target = switch (reached.get()) {
+                case Stmt.Select select -> new StatementTarget("SELECT", select.table(), select.index());
+                case Stmt.Insert insert -> new StatementTarget("INSERT", insert.table(), null);
+                case Stmt.Update update -> new StatementTarget("UPDATE", update.table(), update.index());
+                case Stmt.Delete delete -> new StatementTarget("DELETE", delete.table(), delete.index());
+                case Stmt.Exists exists -> new StatementTarget("SELECT", exists.table(), exists.select().index());
+            };
+            return target.table() == null || target.table().isEmpty() ? Optional.empty()
+                    : Optional.of(new StatementTarget(target.verb(), target.table(),
+                            target.index() == null || target.index().isEmpty() ? null : target.index()));
         }
         List<Token> tokens;
         try {
             tokens = tokenize(statement.trim());
         } catch (Exception ignored) {
-            // Execution reports malformed statements after credential and policy checks have run.
-            return null;
+            return Optional.empty();
         }
-        return switch (tokens.getFirst().type()) {
-            case SELECT -> "dynamodb:PartiQLSelect";
-            case INSERT -> "dynamodb:PartiQLInsert";
-            case UPDATE, FROM -> "dynamodb:PartiQLUpdate";
-            case DELETE -> "dynamodb:PartiQLDelete";
+        String verb = switch (tokens.getFirst().type()) {
+            case SELECT -> "SELECT";
+            case INSERT -> "INSERT";
+            case UPDATE, FROM -> "UPDATE";
+            case DELETE -> "DELETE";
             default -> null;
         };
+        String table = extractTable(statement);
+        return verb == null || table == null || table.isEmpty() ? Optional.empty()
+                : Optional.of(new StatementTarget(verb, table, null));
     }
 
     /**
@@ -1212,6 +1243,15 @@ public class DynamoDbPartiQLParser {
                 + "operator or function: " + op + ", operand type: " + type;
     }
 
+    static String incorrectOperandCount(String function, int count) {
+        return "Incorrect number of operands for operator or function; operator or function: "
+                + function + ", number of operands: " + count;
+    }
+
+    static String documentPathRequired(String function) {
+        return "Operator or function requires a document path; operator or function: " + function;
+    }
+
     private Cond parseCond() {
         if (STATEMENT_STARTS.contains(peek().type())) {
             Token start = peek();
@@ -1417,8 +1457,7 @@ public class DynamoDbPartiQLParser {
 
     private void checkOperands(String function, List<Argument> operands) {
         if (operands.size() != CONDITION_FUNCTION_OPERANDS.getOrDefault(function, LIST_APPEND_OPERANDS)) {
-            deferExpression("Incorrect number of operands for operator or function; operator or function: "
-                    + function + ", number of operands: " + operands.size());
+            deferExpression(incorrectOperandCount(function, operands.size()));
             return;
         }
         Argument first = operands.getFirst();
@@ -1426,8 +1465,7 @@ public class DynamoDbPartiQLParser {
         switch (function) {
             case "attribute_exists", "attribute_not_exists" -> {
                 if (first.path() == null) {
-                    deferExpression("Operator or function requires a document path; operator or function: "
-                            + function);
+                    deferExpression(documentPathRequired(function));
                 }
             }
             case "size" -> {

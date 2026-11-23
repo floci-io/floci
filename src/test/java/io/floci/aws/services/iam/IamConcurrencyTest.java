@@ -201,6 +201,73 @@ class IamConcurrencyTest {
         }
     }
 
+    /**
+     * A policy delete and a version publish racing each other: one of them loses, and whichever
+     * does, the store is left consistent. A delete that reported success must leave nothing
+     * behind, where a version written back after it would have brought the policy with it.
+     */
+    @Test
+    void aDeletedPolicyIsNeverBroughtBackByAVersionPublish() throws Exception {
+        int trials = 300;
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            for (int trial = 0; trial < trials; trial++) {
+                IamService iam = newIamService();
+                IamPolicy p = iam.createPolicy("pol", "/", null, EMPTY_POLICY_DOCUMENT, null);
+                String arn = p.getArn();
+
+                CountDownLatch start = new CountDownLatch(1);
+                CountDownLatch done = new CountDownLatch(2);
+                AtomicBoolean deleted = new AtomicBoolean();
+                List<Throwable> errors = new CopyOnWriteArrayList<>();
+                pool.submit(tolerating(start, done, errors, "DeleteConflict", () -> {
+                    iam.deletePolicy(arn);
+                    deleted.set(true);
+                }));
+                pool.submit(tolerating(start, done, errors, "NoSuchEntity",
+                        () -> iam.createPolicyVersion(arn, policyDocument("v"), false)));
+                start.countDown();
+                assertTrue(done.await(30, TimeUnit.SECONDS), "policy delete workers stalled");
+
+                if (!errors.isEmpty()) {
+                    fail("policy delete trial " + trial + ": " + errors.get(0));
+                }
+                if (deleted.get() && !iam.listPolicies("Local", null).isEmpty()) {
+                    fail("policy delete trial " + trial + ": a deleted policy is still listed");
+                }
+                if (!deleted.get() && iam.listPolicyVersions(arn).size() != 2) {
+                    fail("policy delete trial " + trial + ": a refused delete lost a version");
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /**
+     * A worker that waits for the start signal, runs {@code work} and keeps only the failures
+     * that are not the one error the race is allowed to produce.
+     */
+    private static Runnable tolerating(CountDownLatch start, CountDownLatch done,
+                                       List<Throwable> errors, String tolerated, Runnable work) {
+        return () -> {
+            try {
+                start.await();
+                work.run();
+            } catch (AwsException e) {
+                if (!tolerated.equals(e.getErrorCode())) {
+                    errors.add(e);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (RuntimeException e) {
+                errors.add(e);
+            } finally {
+                done.countDown();
+            }
+        };
+    }
+
     @Test
     void policyVersionsStayRaceFree() throws Exception {
         int trials = 400;

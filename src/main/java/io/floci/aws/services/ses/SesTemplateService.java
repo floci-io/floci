@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -236,26 +237,71 @@ public class SesTemplateService implements SesTaggable {
     }
 
     /**
-     * Extracts the template name from an SES template ARN of the form
-     * {@code arn:aws:ses:<region>:<account>:template/<name>}. Region and
-     * account segments are not validated; only the {@code template/<name>}
-     * suffix is required.
+     * The template a send's {@code TemplateArn} names, on v1 and v2 alike. SES checks the ARN's
+     * partition, service, region and resource type, each with a message of its own, and not its
+     * account (probe-confirmed). The order among several mismatches at once is not probed.
      */
-    public static String templateNameFromArn(String arn) {
-        if (arn == null || arn.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "TemplateArn is required.", 400);
+    public static String templateNameFromArn(String arn, String region) {
+        if (!AwsArnUtils.looksLikeArn(arn)) {
+            throw new AwsException("InvalidParameterValue", "ARNs must start with 'arn:': " + arn, 400);
         }
-        int marker = arn.indexOf(":template/");
-        if (!AwsArnUtils.looksLikeArn(arn) || marker < 0) {
+        AwsArnUtils.Arn parsed;
+        try {
+            parsed = AwsArnUtils.parse(arn);
+        } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidParameterValue",
                     "TemplateArn is not a valid SES template ARN: " + arn, 400);
         }
-        String name = arn.substring(marker + ":template/".length());
-        if (name.isEmpty()) {
-            throw new AwsException("InvalidParameterValue",
-                    "TemplateArn is missing a template name: " + arn, 400);
+        String partition = AwsRegions.partitionFor(region);
+        if (!partition.equals(parsed.partition())) {
+            throw invalidTemplateArn(arn, "Partition should be <" + partition + ">");
         }
+        if (!"ses".equals(parsed.service())) {
+            throw invalidTemplateArn(arn, "Vendor should be <ses>");
+        }
+        if (!region.equals(parsed.region())) {
+            throw invalidTemplateArn(arn, "Template must be in region <" + region + ">");
+        }
+        if (!parsed.resource().startsWith("template/")) {
+            throw invalidTemplateArn(arn, "Relative ID should start with <template/>");
+        }
+        String name = parsed.resource().substring("template/".length());
+        if (name.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "The template name must be specified.", 400);
+        }
+        SesNames.requireAllowedCharacters(name, "InvalidParameterValue", "Template name");
         return name;
+    }
+
+    /**
+     * The name rule a send applies to the stored template it names, worded unlike the template
+     * operations' rule and checked just before the sender verification (probe-confirmed on the v1
+     * and v2 sends).
+     */
+    public static void requireSendTemplateName(String name) {
+        if (name.length() > SesNames.MAX_LENGTH) {
+            throw new AwsException("InvalidParameterValue",
+                    "Template name " + name + " exceeds maximum allowed length " + SesNames.MAX_LENGTH, 400);
+        }
+        if (!SesNames.hasOnlyAllowedCharacters(name)) {
+            throw new AwsException("InvalidParameterValue", "Template name " + name
+                    + " is only allowed to contain alphanumeric characters, underscore, and dash", 400);
+        }
+    }
+
+    /**
+     * A send may name its template beside a {@code TemplateArn} only when both name the same
+     * template; a malformed ARN is reported first (probe-confirmed on both protocols).
+     */
+    public static void requireNameAlignsWithArn(String name, String arn, String region) {
+        if (!name.equals(templateNameFromArn(arn, region))) {
+            throw new AwsException("InvalidParameterValue", "The SES resource '" + name
+                    + "' does not align with the given ARN '" + arn + "'.", 400);
+        }
+    }
+
+    private static AwsException invalidTemplateArn(String arn, String reason) {
+        return new AwsException("InvalidParameterValue", "Invalid template ARN <" + arn + ">. " + reason, 400);
     }
 
     /** The ARN-dispatched tag operations, sharing the store behind {@code CreateEmailTemplate.Tags}. */

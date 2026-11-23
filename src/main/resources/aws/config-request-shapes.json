@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_config_shapes.py",
-    "botocore": "botocore 1.43.118 (installed package)"
+    "botocore": "botocore 1.44.9 (local/aws/botocore)"
   },
   "operations": {
     "AssociateResourceTypes": "AssociateResourceTypesRequest",
@@ -525,7 +525,7 @@
     "ConformancePackInputParameters": {
       "type": "list",
       "min": 0,
-      "max": 60,
+      "max": 330,
       "member": "ConformancePackInputParameter"
     },
     "ConformancePackName": {
@@ -552,10 +552,48 @@
       "max": 5,
       "member": "ConformancePackName"
     },
+    "ConformancePackScope": {
+      "type": "structure",
+      "required": [
+        "TagKey"
+      ],
+      "members": {
+        "TagKey": "TagKey",
+        "TagValue": "TagValue"
+      }
+    },
+    "ConformancePackSource": {
+      "type": "structure",
+      "required": [
+        "SourceIdentifier"
+      ],
+      "members": {
+        "SourceIdentifier": "ConformancePackSourceIdentifier"
+      }
+    },
+    "ConformancePackSourceIdentifier": {
+      "type": "string",
+      "min": 1,
+      "max": 256
+    },
+    "ConformancePackType": {
+      "type": "string",
+      "enum": [
+        "CUSTOM",
+        "MANAGED"
+      ]
+    },
+    "ConformancePackTypeList": {
+      "type": "list",
+      "min": 1,
+      "max": 2,
+      "member": "ConformancePackType"
+    },
     "ConnectorConfiguration": {
       "type": "structure",
       "members": {
-        "azure": "AzureConnectorConfiguration"
+        "azure": "AzureConnectorConfiguration",
+        "gcp": "GcpConnectorConfiguration"
       }
     },
     "ConnectorFilter": {
@@ -923,14 +961,22 @@
       "type": "structure",
       "members": {
         "ConformancePackNames": "ConformancePackNamesList",
+        "Filters": "DescribeConformancePacksFilters",
         "Limit": "PageSizeLimit",
         "NextToken": "NextToken"
+      }
+    },
+    "DescribeConformancePacksFilters": {
+      "type": "structure",
+      "members": {
+        "Types": "ConformancePackTypeList"
       }
     },
     "DescribeConformancePacksRequest": {
       "type": "structure",
       "members": {
         "ConformancePackNames": "ConformancePackNamesList",
+        "Filters": "DescribeConformancePacksFilters",
         "Limit": "PageSizeLimit",
         "NextToken": "NextToken"
       }
@@ -1155,6 +1201,35 @@
       "min": 0,
       "max": 10,
       "member": "String"
+    },
+    "GcpConnectorConfiguration": {
+      "type": "structure",
+      "required": [
+        "serviceAccountEmail",
+        "workloadIdentityPoolProvider"
+      ],
+      "members": {
+        "gcpOrganizationId": "GcpOrganizationId",
+        "serviceAccountEmail": "GcpServiceAccountEmail",
+        "workloadIdentityPoolProvider": "GcpWorkloadIdentityPoolProvider"
+      }
+    },
+    "GcpOrganizationId": {
+      "type": "string",
+      "min": 1,
+      "max": 20
+    },
+    "GcpServiceAccountEmail": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": "^[a-z][a-z0-9\\-]*@[a-z][a-z0-9\\-]*[a-z0-9]\\.iam\\.gserviceaccount\\.com$"
+    },
+    "GcpWorkloadIdentityPoolProvider": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "^projects/[0-9]+/locations/global/workloadIdentityPools/[^/]+/providers/[^/]+$"
     },
     "GetAggregateComplianceDetailsByConfigRuleRequest": {
       "type": "structure",
@@ -1751,7 +1826,9 @@
         "DeliveryS3KeyPrefix": "DeliveryS3KeyPrefix",
         "ConformancePackInputParameters": "ConformancePackInputParameters",
         "TemplateSSMDocumentDetails": "TemplateSSMDocumentDetails",
-        "Tags": "TagsList"
+        "Tags": "TagsList",
+        "Source": "ConformancePackSource",
+        "Scope": "ConformancePackScope"
       }
     },
     "PutConnectorRequest": {

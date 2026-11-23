@@ -93,6 +93,19 @@ public final class RecordingDynamoDbBackend implements DynamoDbItemAccess, Dynam
     }
 
     @Override
+    public TableDefinition createTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
+                                       List<AttributeDefinition> attributeDefinitions, boolean onDemand,
+                                       ThroughputSpec throughput, List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                       List<LocalSecondaryIndex> localSecondaryIndexes) {
+        return record("createTable", scope);
+    }
+
+    @Override
+    public TableDefinition updateThroughput(Scope scope, String tableName, ThroughputChange change) {
+        return record("updateThroughput", scope);
+    }
+
+    @Override
     public TableDefinition createOnDemandTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
                                                List<AttributeDefinition> attributeDefinitions,
                                                List<GlobalSecondaryIndex> globalSecondaryIndexes,

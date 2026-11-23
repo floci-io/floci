@@ -7,6 +7,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.Optional;
 
 public final class PostgresBackendSession implements BackendSql {
     private static final String SQLSTATE_IO = "58030";
@@ -19,6 +20,32 @@ public final class PostgresBackendSession implements BackendSql {
     @Override
     public Object connectionKey() {
         return backend;
+    }
+
+    @Override
+    public Optional<String> queryString(String sql) {
+        try {
+            OutputStream output = backend.getOutputStream();
+            output.write(PostgresWireDecoder.encodeQuery(sql));
+            output.flush();
+            return awaitSingleString(new PostgresWireDecoder(backend.getInputStream()));
+        } catch (IOException exception) {
+            abandon(backend, exception);
+            throw new SpectrumReadException(SQLSTATE_IO, "Unable to run a statement on the Redshift backend", exception);
+        }
+    }
+
+    /**
+     * Closes a backend whose private exchange did not finish. Its replies may still arrive, and the response pump
+     * would forward them to the client as if the client had asked; a closed connection is the one state where
+     * nothing can be misattributed.
+     */
+    static void abandon(Socket backend, IOException cause) {
+        try {
+            backend.close();
+        } catch (IOException closeFailure) {
+            cause.addSuppressed(closeFailure);
+        }
     }
 
     @Override
@@ -124,6 +151,44 @@ public final class PostgresBackendSession implements BackendSql {
             message = decoder.nextMessage();
         }
         throw new IOException("PostgreSQL closed before ReadyForQuery");
+    }
+
+    private static Optional<String> awaitSingleString(PostgresWireDecoder decoder) throws IOException {
+        SpectrumReadException failure = null;
+        String value = null;
+        boolean seenRow = false;
+        PostgresWireDecoder.FrontendMessage message = decoder.nextMessage();
+        while (message != null) {
+            if (message.type() == 'D' && !seenRow) {
+                seenRow = true;
+                value = firstColumn(message.body());
+            } else if (message.type() == 'E') {
+                failure = toException(message.body());
+            } else if (message.type() == 'Z') {
+                if (failure != null) {
+                    throw failure;
+                }
+                return Optional.ofNullable(value);
+            }
+            message = decoder.nextMessage();
+        }
+        throw new IOException("PostgreSQL closed before ReadyForQuery");
+    }
+
+    static String firstColumn(byte[] body) {
+        if (body == null || body.length < 6) {
+            return null;
+        }
+        int columns = ((body[0] & 0xff) << 8) | (body[1] & 0xff);
+        if (columns < 1) {
+            return null;
+        }
+        int length = ((body[2] & 0xff) << 24) | ((body[3] & 0xff) << 16)
+                | ((body[4] & 0xff) << 8) | (body[5] & 0xff);
+        if (length < 0 || body.length < 6 + length) {
+            return null;
+        }
+        return new String(body, 6, length, StandardCharsets.UTF_8);
     }
 
     private static long rowCount(String tag) {

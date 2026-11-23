@@ -70,7 +70,7 @@ public class SesCvetService implements SesTaggable {
     }
 
     public CustomVerificationEmailTemplate getCustomVerificationEmailTemplate(String templateName, String region) {
-        return cvetStore.get(cvetKey(region, templateName)).orElseThrow(() -> cvetNotFound(templateName));
+        return cvetStore.get(cvetKey(region, templateName)).orElseThrow(SesCvetService::cvetNotFound);
     }
 
     public PaginatedResult<CustomVerificationEmailTemplate> listCustomVerificationEmailTemplates(
@@ -94,7 +94,7 @@ public class SesCvetService implements SesTaggable {
         // them and have the update resurrect the just-deleted template.
         synchronized (cvetMutationLock) {
             CustomVerificationEmailTemplate existing = cvetStore.get(key)
-                    .orElseThrow(() -> cvetNotFound(template.getTemplateName()));
+                    .orElseThrow(SesCvetService::cvetNotFound);
             // The update request has no Tags member — preserve the stored ones (copied, so the
             // two objects never share a list instance).
             template.setTags(new ArrayList<>(existing.getTags()));
@@ -104,17 +104,22 @@ public class SesCvetService implements SesTaggable {
                 template.getTemplateName(), region);
     }
 
-    public void deleteCustomVerificationEmailTemplate(String templateName, String region) {
+    /**
+     * Reports whether the template existed instead of throwing, because the two protocols disagree
+     * (probed): v1 answers 200 for an unknown name, v2 answers 404.
+     */
+    public boolean deleteCustomVerificationEmailTemplate(String templateName, String region) {
         String key = cvetKey(region, templateName);
         // Guard the check-then-delete on the same lock as create/update so the three mutations
         // serialize against each other.
         synchronized (cvetMutationLock) {
             if (cvetStore.get(key).isEmpty()) {
-                throw cvetNotFound(templateName);
+                return false;
             }
             cvetStore.delete(key);
         }
         LOG.infov("Deleted custom verification email template {0} in region {1}", templateName, region);
+        return true;
     }
 
     /**
@@ -174,11 +179,11 @@ public class SesCvetService implements SesTaggable {
                 "No CustomVerificationEmailTemplate present with name: " + templateName, 404);
     }
 
-    private static AwsException cvetNotFound(String templateName) {
-        // v1-native code (verified: CustomVerificationEmailTemplateDoesNotExist / 400).
-        // SesV2Json.remapV1Exception translates it to NotFoundException / 404 for the v2 boundary.
+    private static AwsException cvetNotFound() {
+        // v1-native code and message (probed: a fixed sentence that does not name the template).
+        // The v2 controller restates it as NotFoundException / 404 in the v2 wording.
         return new AwsException("CustomVerificationEmailTemplateDoesNotExist",
-                "Custom verification email template <" + templateName + "> does not exist", 400);
+                "Provided custom verification email template name does not exist.", 400);
     }
 
     private static String cvetKey(String region, String templateName) {

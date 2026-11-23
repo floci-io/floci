@@ -73,8 +73,10 @@ class S3ControlIamEnforcementIntegrationTest {
                   {"Effect":"Allow","Action":"s3:ListTagsForResource","Resource":"arn:aws:s3:::%1$s"}]}"""
                 .formatted(bucket));
 
+        // The Go SDK sends the ARN's colons percent-encoded once: RestAssured must not encode the % again.
         String encodedArn = "arn%3Aaws%3As3%3A%3A%3A" + bucket;
         given()
+                .urlEncodingEnabled(false)
                 .header("Authorization", auth(user, "s3"))
                 .header("x-amz-account-id", ACCOUNT)
         .when()
@@ -163,35 +165,63 @@ class S3ControlIamEnforcementIntegrationTest {
     }
 
     /**
-     * The regional ARN form, the one the tagging operation's own request pattern and the AWS
-     * CLI examples use, is the request's resource as written: a policy naming it authorizes the
-     * read, because the ARN is not rewritten into the global form a data-plane path mints.
+     * The ARN is decoded once, as the Go SDK encodes it once and IAM reads the route: one encoded twice names no ARN
+     * after that, so the handler refuses it rather than act on a bucket whose policy denies the call.
      */
     @Test
-    void listTagsForResourceIsAuthorizedByAPolicyOnTheRegionalArnForm() {
-        String bucket = bucketWithTags("control-regional");
+    void anArnEncodedTwiceNamesNoBucket() {
+        String bucket = bucketWithTags("control-double-encoded");
+        given()
+                .header("Authorization", auth("test", "s3"))
+                .contentType("application/json")
+                .body("""
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Deny","Principal":"*","Action":"s3:ListTagsForResource",
+                           "Resource":"arn:aws:s3:::%1$s"}]}"""
+                        .formatted(bucket))
+        .when()
+                .put("/" + bucket + "?policy")
+        .then()
+                .statusCode(200);
         String user = userWith("""
                 {"Version":"2012-10-17","Statement":[
-                  {"Effect":"Allow","Action":"s3:ListTagsForResource",
-                   "Resource":"arn:aws:s3:us-east-1:000000000000:bucket/%1$s"}]}"""
-                .formatted(bucket));
+                  {"Effect":"Allow","Action":"s3:ListTagsForResource","Resource":"*"}]}""");
 
         given()
+                .urlEncodingEnabled(false)
                 .header("Authorization", auth(user, "s3"))
                 .header("x-amz-account-id", ACCOUNT)
         .when()
-                .get("/v20180820/tags/arn:aws:s3:us-east-1:000000000000:bucket/" + bucket)
+                .get("/v20180820/tags/arn%253Aaws%253As3%253A%253A%253A" + bucket)
         .then()
-                .statusCode(200)
-                .body(containsString("<ListTagsForResourceResult"))
-                .body(containsString("<Key>Env</Key>"));
+                .statusCode(400)
+                .body(containsString("<Code>InvalidRequest</Code>"))
+                .body(not(containsString("<Key>Env</Key>")));
     }
 
     /**
-     * A bucket policy is resolved from the bucket the tagged ARN names, not from the bucket the
-     * data-plane reading of the ARN's resource part would find: the regional form's resource is
-     * {@code bucket/<name>}, and the real bucket's policy denying the control action must deny a
-     * caller whose identity policy allows it.
+     * A request matching an S3 Control route Floci does not serve reaches no handler: the router answers every path
+     * under {@code /v20180820} that S3ControlController does not serve with 404, so none runs as an object of a bucket
+     * named v20180820, whatever IAM checks it as.
+     */
+    @Test
+    void anS3ControlRouteFlociDoesNotServeRunsNothing() {
+        for (String[] call : new String[][] {{"PUT", "/v20180820/bucket/foo"}, {"DELETE", "/v20180820/bucket/foo"},
+                {"GET", "/v20180820/accesspoint/foo"}, {"PUT", "/v20180820"}}) {
+            given()
+                    .header("Authorization", auth("test", "s3"))
+                    .header("x-amz-account-id", ACCOUNT)
+                    .body("x")
+            .when()
+                    .request(call[0], call[1])
+            .then()
+                    .statusCode(404);
+        }
+    }
+
+    /**
+     * A bucket policy is resolved from the bucket the tagged ARN names: the bucket's policy denying
+     * the control action denies a caller whose identity policy allows it.
      */
     @Test
     void aBucketPolicyOnTheTaggedBucketDeniesTheControlRead() {
@@ -202,7 +232,7 @@ class S3ControlIamEnforcementIntegrationTest {
                 .body("""
                         {"Version":"2012-10-17","Statement":[
                           {"Effect":"Deny","Principal":"*","Action":"s3:ListTagsForResource",
-                           "Resource":"arn:aws:s3:us-east-1:000000000000:bucket/%1$s"}]}"""
+                           "Resource":"arn:aws:s3:::%1$s"}]}"""
                         .formatted(bucket))
         .when()
                 .put("/" + bucket + "?policy")
@@ -217,7 +247,7 @@ class S3ControlIamEnforcementIntegrationTest {
                 .header("Authorization", auth(user, "s3"))
                 .header("x-amz-account-id", ACCOUNT)
         .when()
-                .get("/v20180820/tags/arn:aws:s3:us-east-1:000000000000:bucket/" + bucket)
+                .get("/v20180820/tags/arn:aws:s3:::" + bucket)
         .then()
                 .statusCode(403)
                 .body(containsString("is not authorized to perform: s3:ListTagsForResource"));
@@ -389,91 +419,6 @@ class S3ControlIamEnforcementIntegrationTest {
         .then()
                 .statusCode(403)
                 .body(containsString("is not authorized to perform: s3:ListAccessPoints"));
-    }
-
-    /**
-     * The regional form names the account whose bucket it acts on, so a grant on
-     * {@code arn:aws:s3:us-east-1:222222222222:bucket/<name>} authorizes a caller in another
-     * account, whom the bucket's own policy admits, to read and change the tags of
-     * 222222222222's bucket, and never of its own same-named one, which the plain bucket name
-     * would otherwise resolve to. The bucket's policy is found in the account the ARN names,
-     * the same bucket the read and the write act on.
-     */
-    @Test
-    void aRegionalArnActsOnTheBucketOfTheAccountItNames() {
-        String bucket = "control-cross-account-" + UUID.randomUUID().toString().substring(0, 8);
-        String regionalArn = "arn:aws:s3:us-east-1:" + OTHER_ACCOUNT + ":bucket/" + bucket;
-        cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(),
-                auth(OTHER_ACCOUNT, "s3"), bucket));
-        cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(),
-                auth("test", "s3"), bucket));
-        createBucketWithTag(bucket, "Team", "other", auth(OTHER_ACCOUNT, "s3"));
-        createBucketWithTag(bucket, "Team", "own", auth("test", "s3"));
-
-        String userName = "s3-control-cross-" + UUID.randomUUID().toString().substring(0, 8);
-        EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(cleanup,
-                baseUri.getPort(), auth("test", "iam"), userName);
-        String userArn = "arn:aws:iam::" + ACCOUNT + ":user/" + userName;
-        String identityPolicy = """
-                {"Version":"2012-10-17","Statement":[
-                  {"Effect":"Allow","Action":["s3:ListTagsForResource","s3:TagResource"],
-                   "Resource":"%1$s"}]}"""
-                .formatted(regionalArn);
-        EnforcementFixtures.putUserPolicy(baseUri.getPort(), auth("test", "iam"), userName, "p",
-                identityPolicy);
-        String user = credentials.accessKeyId();
-
-        given()
-                .header("Authorization", auth(OTHER_ACCOUNT, "s3"))
-                .contentType("application/json")
-                .body("""
-                        {"Version":"2012-10-17","Statement":[
-                          {"Effect":"Allow","Principal":{"AWS":"%1$s"},
-                           "Action":["s3:ListTagsForResource","s3:TagResource"],
-                           "Resource":"%2$s"}]}"""
-                        .formatted(userArn, regionalArn))
-        .when()
-                .put("/" + bucket + "?policy")
-        .then()
-                .statusCode(200);
-
-        given()
-                .header("Authorization", auth(user, "s3"))
-                .header("x-amz-account-id", ACCOUNT)
-        .when()
-                .get("/v20180820/tags/" + regionalArn)
-        .then()
-                .statusCode(200)
-                .body(containsString("<Key>Team</Key>"))
-                .body(containsString("<Value>other</Value>"));
-
-        given()
-                .header("Authorization", auth(user, "s3"))
-                .header("x-amz-account-id", ACCOUNT)
-                .contentType("application/xml")
-                .body("<Tagging><Tags><Tag><Key>Owner</Key><Value>team</Value></Tag></Tags></Tagging>")
-        .when()
-                .post("/v20180820/tags/" + regionalArn)
-        .then()
-                .statusCode(204);
-
-        given()
-                .header("Authorization", auth(OTHER_ACCOUNT, "s3"))
-        .when()
-                .get("/" + bucket + "?tagging")
-        .then()
-                .statusCode(200)
-                .body(containsString("<Key>Owner</Key>"))
-                .body(not(containsString("<Value>own</Value>")));
-
-        given()
-                .header("Authorization", auth("test", "s3"))
-        .when()
-                .get("/" + bucket + "?tagging")
-        .then()
-                .statusCode(200)
-                .body(containsString("<Value>own</Value>"))
-                .body(not(containsString("<Key>Owner</Key>")));
     }
 
     /**

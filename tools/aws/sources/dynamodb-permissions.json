@@ -1,0 +1,66 @@
+{
+  "_source": {
+    "pages": [
+      "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/ql-iam.html",
+      "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis-iam.html"
+    ],
+    "fetcher": "tools/aws/fetch_dynamodb_permissions.py",
+    "retrieved": "2026-11-22",
+    "note": "The PartiQL page's list of required permissions and the transactions page's paragraph on the permissions of each kind of item, sentence by sentence, each with the names the page sets as code, copied as they stand."
+  },
+  "partiql": {
+    "page": "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/ql-iam.html",
+    "lead": "The following permissions are required:",
+    "items": [
+      {
+        "text": "To read items using PartiQL for DynamoDB, you must have dynamodb:PartiQLSelect permission on the table or index.",
+        "code": [
+          "dynamodb:PartiQLSelect"
+        ]
+      },
+      {
+        "text": "To insert items using PartiQL for DynamoDB, you must have dynamodb:PartiQLInsert permission on the table or index.",
+        "code": [
+          "dynamodb:PartiQLInsert"
+        ]
+      },
+      {
+        "text": "To update items using PartiQL for DynamoDB, you must have dynamodb:PartiQLUpdate permission on the table or index.",
+        "code": [
+          "dynamodb:PartiQLUpdate"
+        ]
+      },
+      {
+        "text": "To delete items using PartiQL for DynamoDB, you must have dynamodb:PartiQLDelete permission on the table or index.",
+        "code": [
+          "dynamodb:PartiQLDelete"
+        ]
+      }
+    ]
+  },
+  "transactions": {
+    "page": "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis-iam.html",
+    "sentences": [
+      {
+        "text": "Permissions for Put, Update, Delete, and Get actions are governed by the permissions used for the underlying PutItem, UpdateItem, DeleteItem, and GetItem operations.",
+        "code": [
+          "Put",
+          "Update",
+          "Delete",
+          "Get",
+          "PutItem",
+          "UpdateItem",
+          "DeleteItem",
+          "GetItem"
+        ]
+      },
+      {
+        "text": "For the ConditionCheck action, you can use the dynamodb:ConditionCheckItem permission in IAM policies.",
+        "code": [
+          "ConditionCheck",
+          "dynamodb:ConditionCheckItem"
+        ]
+      }
+    ]
+  }
+}

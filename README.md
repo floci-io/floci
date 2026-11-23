@@ -49,13 +49,13 @@ Floci is the AWS member of the [Floci](https://github.com/floci-io) emulator fam
 
 ## Quick Start
 
-The fastest way to run Floci is with the official [CLI](https://github.com/floci-io/floci-cli)
+The quickest way to start Floci is with the official [CLI](https://github.com/floci-io/floci-cli)
 
 ```bash
 floci start
 ```
 
-No Docker? Each [release](https://github.com/floci-io/floci/releases) also ships a standalone `floci-aws`
+Prefer not to use Docker? Each [release](https://github.com/floci-io/floci/releases) also ships a standalone `floci-aws`
 binary for Linux, macOS and Windows; see [Native binary](https://floci.io/floci/getting-started/installation/#native-binary).
 
 Export the AWS environment variables:
@@ -84,7 +84,7 @@ This short demo shows the CLI flow: start Floci, export the local AWS environmen
 
 https://github.com/user-attachments/assets/b55714dc-ef36-40ae-a734-cd2cadc288a8
 
-All AWS services are available at `http://localhost:4566`. Any [published AWS region](https://floci.io/floci/configuration/partitions/) works, in every partition. Credentials can be any non-empty values unless you explicitly enable stricter service-specific auth checks.
+Floci exposes its emulated AWS services at `http://localhost:4566`. Any [published AWS region](https://floci.io/floci/configuration/partitions/) works, in every partition. Credentials can be any non-empty values unless you explicitly enable stricter service-specific auth checks.
 
 <details>
 <summary>Prefer Docker Compose?</summary>
@@ -139,7 +139,7 @@ Floci ships a browser console for inspecting the resources in your local emulato
 
 **Open it at:** `http://localhost:4566/_floci/ui`
 
-Nothing runs at boot. The first request pulls the console image, starts it as a sidecar container on Floci's Docker network, hands it Floci's own reachable address plus the standard AWS environment, polls its health endpoint, and redirects the browser once it reports it can reach Floci. The sidecar's port is bound by Docker, so it needs no `ports:` entry of your own, and its logs are streamed into CloudWatch Logs under `/floci/ui`.
+The console does not start at boot. On the first request, Floci pulls the console image and starts it as a sidecar container on Floci's Docker network. It then provides the sidecar with Floci's reachable address and the standard AWS environment, checks the sidecar's health endpoint, and redirects the browser once the console can reach Floci. The sidecar's port is bound by Docker, so it needs no `ports:` entry of your own, and its logs are streamed into CloudWatch Logs under `/floci/ui`.
 
 Starting a container needs the Docker socket:
 
@@ -164,14 +164,14 @@ services:
 
 ### Running a different console
 
-The console is not fixed to the one Floci ships. Any console implementing the [Floci console contract](https://floci.io/floci/ui/console-contract/) runs with nothing but an image name: listen on the port in `PORT`, serve `GET /api/health`, talk to Floci at `AWS_ENDPOINT_URL`.
+You are not limited to the console image bundled with Floci. Any console implementing the [Floci console contract](https://floci.io/floci/ui/console-contract/) runs with nothing but an image name: listen on the port in `PORT`, serve `GET /api/health`, talk to Floci at `AWS_ENDPOINT_URL`.
 
 ```yaml
 environment:
   FLOCI_SERVICES_UI_IMAGE: acme/my-console:1.0
 ```
 
-A console that differs from the contract's defaults says so in its own `io.floci.console.*` image labels, so its operators do not have to. [StackPort](https://github.com/DaviReisVieira/stackport), for example, listens on 8080 rather than 4500; on an image that predates the labels, say it by hand:
+A console that uses settings different from the contract defaults can declare them through its own `io.floci.console.*` image labels, eliminating the need for operators to configure them manually. [StackPort](https://github.com/DaviReisVieira/stackport), for example, listens on 8080 rather than 4500; on an image that predates the labels, say it by hand:
 
 ```yaml
 environment:
@@ -409,7 +409,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 
 ## Real Docker Integration
 
-Floci uses real Docker containers when in-process emulation would reduce fidelity. This applies to stateful databases, connection-heavy protocols, runtimes, and build systems.
+Floci runs real Docker containers when in-process emulation would provide insufficient fidelity. This applies to stateful databases, connection-heavy protocols, runtimes, and build systems.
 
 | Service | Default image | What is real |
 |---|---|---|
@@ -475,7 +475,7 @@ See [Security Group Port Publishing](docs/services/ec2.md#security-group-port-pu
 
 ## Persistence and Storage Modes
 
-Floci can trade speed for durability depending on the workflow. Configure the default mode with `FLOCI_STORAGE_MODE`, or override storage per service.
+Floci lets you balance performance and durability to suit your workflow. Configure the default mode with `FLOCI_STORAGE_MODE`, or override storage per service.
 
 | Mode | Behavior | Best for | Durability |
 |---|---|---|:---:|
@@ -670,7 +670,7 @@ aws --endpoint-url http://localhost:4566 s3 ls
 
 ## Testcontainers
 
-Floci has Testcontainers modules for starting isolated Floci instances directly from tests. This avoids shared state, manual daemon setup, and port conflicts.
+Floci has Testcontainers modules for starting isolated Floci instances directly from tests. This approach avoids shared state, manual daemon setup, and port conflicts.
 
 For Testcontainers 1.x, use the versions as indicated in the table below.
 
@@ -805,7 +805,7 @@ The [`compatibility-tests`](./compatibility-tests/) directory validates Floci ac
 
 ## Migrating from LocalStack
 
-Floci is a drop-in replacement for LocalStack Community. The port, credentials, SDK configuration, and CLI endpoint pattern work the same way. Swap the image and keep going.
+Floci is a drop-in replacement for LocalStack Community. The port, credentials, SDK configuration, and CLI endpoint pattern remain the same. Swap the image and keep going.
 
 ```yaml
 # Before
@@ -834,7 +834,7 @@ See the [full migration guide](https://floci.io/floci/getting-started/migrate-fr
 
 ## Image Tags
 
-Every tag combines a variant and a channel.
+Each image tag combines a variant with a release channel.
 
 | Channel | Standard | Baseline (ARM64 only) | Compat with AWS CLI and boto3 |
 |---|---|---|---|
@@ -888,7 +888,7 @@ Full reference: [configuration docs](https://floci.io/floci/configuration/advanc
 
 ### Multi-container Docker Compose
 
-When your application runs in a different container, set `FLOCI_HOSTNAME` to the Floci service name so returned URLs, such as SQS `QueueUrl` values, resolve correctly.
+If your application runs in a separate container, set `FLOCI_HOSTNAME` to the Floci service name. This ensures that returned URLs, such as SQS `QueueUrl` values, resolve correctly.
 
 ```yaml
 services:
@@ -906,7 +906,7 @@ services:
       - floci
 ```
 
-Without this, services may return URLs using `localhost`, which points to the wrong container from the application container.
+Otherwise, services may return URLs containing `localhost`, which resolves to the application container rather than the Floci container.
 
 ### Kubernetes (Helm)
 
@@ -922,7 +922,7 @@ See [Kubernetes (Helm)](https://floci.io/floci/getting-started/kubernetes/) for 
 
 ## Community
 
-Join the Floci community on [Slack](https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw) or [GitHub Discussions](https://github.com/orgs/floci-io/discussions). Feature ideas, compatibility questions, design tradeoffs, and rough proposals are welcome.
+Join the Floci community on [Slack](https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw) or [GitHub Discussions](https://github.com/orgs/floci-io/discussions). Feature ideas, compatibility questions, design trade-offs, and early proposals are welcome.
 
 ## Sponsors
 

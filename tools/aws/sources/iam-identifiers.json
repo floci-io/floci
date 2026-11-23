@@ -1,0 +1,213 @@
+{
+  "_source": {
+    "pages": [
+      "https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_identifiers.html",
+      "https://docs.aws.amazon.com/IAM/latest/APIReference/API_Operations.html"
+    ],
+    "fetcher": "tools/aws/fetch_iam_identifiers.py",
+    "retrieved": "2026-11-23",
+    "note": "The identifiers page's ARN syntax and examples, each variable written {name}, and its sentences on paths given through the API; and each sentence of the description or of a request parameter of the API reference page of each operation the actions page lists that says the operation acts on the user who signs it, that the caller needs permission on the old and the new name, that a parameter's value is the resource's ARN, or the format of an identifier, copied as they stand."
+  },
+  "arns": {
+    "page": "https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_identifiers.html",
+    "syntax": [
+      "arn:aws:iam::{account}:root",
+      "arn:aws:iam::{account}:user/{user-name-with-path}",
+      "arn:aws:iam::{account}:group/{group-name-with-path}",
+      "arn:aws:iam::{account}:role/{role-name-with-path}",
+      "arn:aws:iam::{account}:policy/{policy-name-with-path}",
+      "arn:aws:iam::{account}:instance-profile/{instance-profile-name-with-path}",
+      "arn:aws:sts::{account}:federated-user/{user-name}",
+      "arn:aws:sts::{account}:assumed-role/{role-name}/{role-session-name}",
+      "arn:aws:sts::{account}:self",
+      "arn:aws:iam::{account}:mfa/{virtual-device-name-with-path}",
+      "arn:aws:iam::{account}:u2f/{u2f-token-id}",
+      "arn:aws:iam::{account}:server-certificate/{certificate-name-with-path}",
+      "arn:aws:iam::{account}:saml-provider/{provider-name}",
+      "arn:aws:iam::{account}:oidc-provider/{provider-name}",
+      "arn:aws:iam::aws:contextProvider/{context-provider-name}"
+    ],
+    "examples": [
+      "arn:aws:iam::123456789012:root",
+      "arn:aws:iam::123456789012:user/John",
+      "arn:aws:iam::123456789012:user/division_abc/subdivision_xyz/Jane",
+      "arn:aws:iam::123456789012:group/Developers",
+      "arn:aws:iam::123456789012:group/division_abc/subdivision_xyz/product_A/Developers",
+      "arn:aws:iam::123456789012:role/S3Access",
+      "arn:aws:iam::123456789012:role/application_abc/component_xyz/RDSAccess",
+      "arn:aws:iam::123456789012:role/aws-service-role/access-analyzer.amazonaws.com/AWSServiceRoleForAccessAnalyzer",
+      "arn:aws:iam::123456789012:role/service-role/QuickSightAction",
+      "arn:aws:iam::123456789012:policy/UsersManageOwnCredentials",
+      "arn:aws:iam::123456789012:policy/division_abc/subdivision_xyz/UsersManageOwnCredentials",
+      "arn:aws:iam::123456789012:instance-profile/Webserver",
+      "arn:aws:sts::123456789012:federated-user/John",
+      "arn:aws:sts::123456789012:assumed-role/Accounting-Role/Jane",
+      "arn:aws:sts::123456789012:self",
+      "arn:aws:iam::123456789012:mfa/JaneMFA",
+      "arn:aws:iam::123456789012:u2f/user/John/default (U2F security key)",
+      "arn:aws:iam::123456789012:server-certificate/ProdServerCert",
+      "arn:aws:iam::123456789012:server-certificate/division_abc/subdivision_xyz/ProdServerCert",
+      "arn:aws:iam::123456789012:saml-provider/ADFSProvider",
+      "arn:aws:iam::123456789012:oidc-provider/GoogleProvider",
+      "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-west-2.amazonaws.com/id/a1b2c3d4567890abcdefEXAMPLE11111",
+      "arn:aws:iam::123456789012:oidc-provider/server.example.org",
+      "arn:aws:iam::aws:contextProvider/IdentityCenter"
+    ],
+    "paths": [
+      "If you use the IAM API or AWS Command Line Interface (AWS CLI) to create IAM resources, you can add an optional path."
+    ]
+  },
+  "signingUser": [
+    {
+      "operation": "ChangePassword",
+      "parameter": null,
+      "sentence": "Changes the password of the IAM user who is calling this operation."
+    },
+    {
+      "operation": "CreateAccessKey",
+      "parameter": null,
+      "sentence": "If you do not specify a user name, IAM determines the user name implicitly based on the AWS access key ID signing the request."
+    },
+    {
+      "operation": "CreateLoginProfile",
+      "parameter": "UserName",
+      "sentence": "If no user name is included, it defaults to the principal making the request."
+    },
+    {
+      "operation": "DeactivateMFADevice",
+      "parameter": "UserName",
+      "sentence": "If no user name is included, it defaults to the principal making the request."
+    },
+    {
+      "operation": "DeleteAccessKey",
+      "parameter": null,
+      "sentence": "If you do not specify a user name, IAM determines the user name implicitly based on the AWS access key ID signing the request."
+    },
+    {
+      "operation": "DeleteLoginProfile",
+      "parameter": "UserName",
+      "sentence": "If no user name is included, it defaults to the principal making the request."
+    },
+    {
+      "operation": "DeleteServiceSpecificCredential",
+      "parameter": "UserName",
+      "sentence": "If this value is not specified, then the operation assumes the user whose credentials are used to call the operation."
+    },
+    {
+      "operation": "DeleteSigningCertificate",
+      "parameter": null,
+      "sentence": "If you do not specify a user name, IAM determines the user name implicitly based on the AWS access key ID signing the request."
+    },
+    {
+      "operation": "GetLoginProfile",
+      "parameter": "UserName",
+      "sentence": "If no user name is included, it defaults to the principal making the request."
+    },
+    {
+      "operation": "GetUser",
+      "parameter": null,
+      "sentence": "If you do not specify a user name, IAM determines the user name implicitly based on the AWS access key ID used to sign the request to this operation."
+    },
+    {
+      "operation": "GetUser",
+      "parameter": "UserName",
+      "sentence": "If it is not included, it defaults to the user making the request."
+    },
+    {
+      "operation": "ListAccessKeys",
+      "parameter": null,
+      "sentence": "If the UserName is not specified, the user name is determined implicitly based on the AWS access key ID used to sign the request."
+    },
+    {
+      "operation": "ListMFADevices",
+      "parameter": null,
+      "sentence": "If you do not specify a user name, IAM determines the user name implicitly based on the AWS access key ID signing the request for this operation."
+    },
+    {
+      "operation": "ListServiceSpecificCredentials",
+      "parameter": "UserName",
+      "sentence": "If this value is not specified, then the operation assumes the user whose credentials are used to call the operation."
+    },
+    {
+      "operation": "ListSigningCertificates",
+      "parameter": null,
+      "sentence": "If the UserName field is not specified, the user name is determined implicitly based on the AWS access key ID used to sign the request for this operation."
+    },
+    {
+      "operation": "ListSSHPublicKeys",
+      "parameter": "UserName",
+      "sentence": "If none is specified, the UserName field is determined implicitly based on the AWS access key used to sign the request."
+    },
+    {
+      "operation": "ResetServiceSpecificCredential",
+      "parameter": "UserName",
+      "sentence": "If this value is not specified, then the operation assumes the user whose credentials are used to call the operation."
+    },
+    {
+      "operation": "UpdateAccessKey",
+      "parameter": null,
+      "sentence": "If the UserName is not specified, the user name is determined implicitly based on the AWS access key ID used to sign the request."
+    },
+    {
+      "operation": "UpdateServiceSpecificCredential",
+      "parameter": "UserName",
+      "sentence": "If you do not specify this value, then the operation assumes the user whose credentials are used to call the operation."
+    },
+    {
+      "operation": "UpdateSigningCertificate",
+      "parameter": null,
+      "sentence": "If the UserName field is not specified, the user name is determined implicitly based on the AWS access key ID used to sign the request."
+    },
+    {
+      "operation": "UploadSigningCertificate",
+      "parameter": null,
+      "sentence": "If the UserName is not specified, the IAM user name is determined implicitly based on the AWS access key ID used to sign the request."
+    }
+  ],
+  "bothNames": [
+    {
+      "operation": "UpdateGroup",
+      "parameter": null,
+      "sentence": "The person making the request (the principal), must have permission to change the role group with the old name and the new name."
+    },
+    {
+      "operation": "UpdateServerCertificate",
+      "parameter": null,
+      "sentence": "The person making the request (the principal), must have permission to change the server certificate with the old name and the new name."
+    },
+    {
+      "operation": "UpdateUser",
+      "parameter": null,
+      "sentence": "To change a user name, the requester must have appropriate permissions on both the source object and the target object."
+    }
+  ],
+  "sameAsArn": [
+    {
+      "operation": "DeleteVirtualMFADevice",
+      "parameter": "SerialNumber",
+      "sentence": "For virtual MFA devices, the serial number is the same as the ARN."
+    },
+    {
+      "operation": "ListMFADeviceTags",
+      "parameter": "SerialNumber",
+      "sentence": "For virtual MFA devices, the serial number is the same as the ARN."
+    },
+    {
+      "operation": "TagMFADevice",
+      "parameter": "SerialNumber",
+      "sentence": "For virtual MFA devices, the serial number is the same as the ARN."
+    },
+    {
+      "operation": "UntagMFADevice",
+      "parameter": "SerialNumber",
+      "sentence": "For virtual MFA devices, the serial number is the same as the ARN."
+    }
+  ],
+  "formats": [
+    {
+      "operation": "GetServiceLinkedRoleDeletionStatus",
+      "parameter": "DeletionTaskId",
+      "sentence": "This identifier is returned by the DeleteServiceLinkedRole operation in the format task/aws-service-role/<service-principal-name>/<role-name>/<task-uuid> ."
+    }
+  ]
+}

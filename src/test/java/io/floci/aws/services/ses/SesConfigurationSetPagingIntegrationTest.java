@@ -28,8 +28,7 @@ import static org.hamcrest.Matchers.nullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesConfigurationSetPagingIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-west-1/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("us-west-1");
     private static final String V1_ROOT = "ListConfigurationSetsResponse.ListConfigurationSetsResult.";
 
     @Test

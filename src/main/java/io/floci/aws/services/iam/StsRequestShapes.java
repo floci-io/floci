@@ -38,6 +38,14 @@ final class StsRequestShapes {
     private StsRequestShapes() {
     }
 
+    /**
+     * Whether the operation's generated input shape declares the member, which is how a read of a
+     * request asks what that request is allowed to carry rather than naming the operations itself.
+     */
+    static boolean hasMember(String action, String member) {
+        return CHECK.hasMember(action, member);
+    }
+
     /** Every constraint the model declares for {@code action} that {@code params} breaks. */
     static List<String> violations(String action, MultivaluedMap<String, String> params) {
         return CHECK.violations(action, params);

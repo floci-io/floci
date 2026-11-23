@@ -61,4 +61,15 @@ class CloudFormationTemplateParserTest {
         String yaml = "Resources:\n  A:\n    Type: AWS::SNS::Topic\n  A:\n    Type: AWS::SNS::Topic\n";
         assertEquals("AWS::SNS::Topic", parser.parse(yaml).path("Resources").path("A").path("Type").asText());
     }
+
+    @Test
+    void jsonNestedBeyondTheStreamConstraintIsRefusedWithoutALocation() throws Exception {
+        assertEquals(1, parser.parse("{\"k\":".repeat(1000) + "1" + "}".repeat(1000)).path("k").size());
+
+        CloudFormationTemplateParser.TemplateFormatException refused = assertThrows(
+                CloudFormationTemplateParser.TemplateFormatException.class,
+                () -> parser.parse("{\"k\":".repeat(1001) + "1" + "}".repeat(1001)));
+
+        assertEquals("JSON not well-formed.", refused.getMessage());
+    }
 }
