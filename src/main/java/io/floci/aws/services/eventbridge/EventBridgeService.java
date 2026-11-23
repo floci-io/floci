@@ -2269,7 +2269,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             Connection c = connectionStore.get(k).orElse(null);
             return c != null && connectionArn.equals(c.getConnectionArn());
         }).stream().findFirst().orElseThrow(() -> verb == null
-                ? new AwsException("ResourceNotFoundException", "Connection " + connectionArn + " does not exist.", 400)
+                ? EventBridgeErrors.plainConnectionNotFound(connectionArn)
                 : EventBridgeErrors.apiDestinationConnectionNotFound(verb, connectionArn));
     }
 

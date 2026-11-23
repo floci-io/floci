@@ -86,6 +86,10 @@ final class EventBridgeErrors {
         return new AwsException("ValidationException", message, 400);
     }
 
+    static AwsException plainConnectionNotFound(String connectionArn) {
+        return notFound("Connection " + connectionArn + " does not exist.");
+    }
+
     private static String connectionMissing(String connection) {
         return "Connection '" + connection + "' does not exist.";
     }
