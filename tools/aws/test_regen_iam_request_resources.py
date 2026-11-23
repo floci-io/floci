@@ -1235,6 +1235,12 @@ def test_the_vendored_file_is_well_formed():
         {"type": "dashboard", "fill": {"DashboardName": "DashboardNames[]"}}]
     assert document["arnFormats"]["cloudwatch"]["dashboard"] == (
         "arn:${Partition}:cloudwatch::${Account}:dashboard/${DashboardName}")
+    # Comprehend is read whole; its detection actions act on no resource type, and a classifier's are read by ARN.
+    assert "comprehend" in document["namespaces"] and "comprehend" not in document["notCovered"]
+    assert operations["comprehend:DetectSentiment"] == {
+        "action": "comprehend:DetectSentiment", "types": [], "resources": []}
+    assert operations["comprehend:DescribeDocumentClassifier"]["resources"] == [
+        {"types": ["document-classifier"], "arn": "DocumentClassifierArn"}]
     # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
     assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]
