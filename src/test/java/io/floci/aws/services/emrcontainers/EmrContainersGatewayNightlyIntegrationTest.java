@@ -55,7 +55,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  * in its release's {@code notebook-spark} image from Amazon ECR Public, and a Jupyter client reaches it at its
  * {@code serverUrl} with a session token, starts a PySpark kernel there, and a session with a kernel of its own, which
  * the kernels and sessions listings show that token alone, and runs code on Floci's S3 over the PySpark kernel's
- * WebSocket, as the guide's "Example: Deploy a JupyterLab notebook" does through {@code JUPYTER_GATEWAY_URL}.
+ * WebSocket, as the guide's "Example: Deploy a JupyterLab notebook" does through {@code JUPYTER_GATEWAY_URL}, then
+ * changes its Spark session's settings with {@code %%configure}, as "Modifying PySpark session parameters" does.
  *
  * <p>A nightly check: the release's notebook image is about 6 GB.
  */
@@ -65,9 +66,9 @@ import static org.junit.jupiter.api.Assertions.fail;
 // One instance, so that the image is pulled once for the class.
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 // The endpoint's gateway answers within its five minutes, the kernel's WebSocket opens within its two, once its Spark
-// session is up, and each of its two cells answers within its two: eleven minutes, and one for the requests between.
-// With the image's pull of up to 21, 33 minutes, which the Nightly checks' docker-runner group counts.
-@Timeout(value = 12, unit = TimeUnit.MINUTES)
+// session is up, and each of its four cells answers within its two: fifteen minutes, and one for the requests
+// between. With the image's pull of up to 21, 37 minutes, which the Nightly checks' docker-runner group counts.
+@Timeout(value = 16, unit = TimeUnit.MINUTES)
 class EmrContainersGatewayNightlyIntegrationTest {
 
     private static final String ACCOUNT = "000000000000";
@@ -179,14 +180,29 @@ class EmrContainersGatewayNightlyIntegrationTest {
         assertEquals("3", execute(socket, messages, session,
                 "spark.read.text(\"s3://" + bucket + "/lines.txt\").count()"));
         assertEquals("'from-kernel-env'", execute(socket, messages, session, "spark.conf.get(\"spark.app.name\")"));
+        // The restart ends the cell and keeps the kernel's id; the next cell's session runs with its settings.
+        assertEquals("ok", run(socket, messages, session, """
+                %%configure -f
+                {"conf": {"spark.app.name": "from-configure"}, "executorMemory": "2g"}""", "execute_reply",
+                "/content/status"));
+        assertEquals("('from-configure', '2g')", execute(socket, messages, session,
+                "spark.conf.get(\"spark.app.name\"), spark.conf.get(\"spark.executor.memory\")"));
+        assertEquals(List.of(kernelId), ids(http, gateway + "/api/kernels", token));
         socket.sendClose(WebSocket.NORMAL_CLOSURE, "done").get(10, TimeUnit.SECONDS);
         assertEquals(204, http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/kernels/" + kernelId))
                 .header("Authorization", "token " + token).DELETE().build(),
                 HttpResponse.BodyHandlers.discarding()).statusCode());
     }
 
-    // Runs code in the kernel, as a Jupyter client sends an execute_request, and answers its result's text/plain.
+    // Runs code in the kernel and answers its result's text/plain.
     private static String execute(WebSocket socket, Messages messages, String session, String code) throws Exception {
+        return run(socket, messages, session, code, "execute_result", "/content/data/text~1plain");
+    }
+
+    // Runs code in the kernel, as a Jupyter client sends an execute_request, and answers the field at pointer of the
+    // first message of the type that answers it.
+    private static String run(WebSocket socket, Messages messages, String session, String code, String type,
+            String pointer) throws Exception {
         String messageId = UUID.randomUUID().toString();
         ObjectNode request = JSON.createObjectNode();
         request.putObject("header").put("msg_id", messageId).put("username", "nightly").put("session", session)
@@ -198,22 +214,23 @@ class EmrContainersGatewayNightlyIntegrationTest {
         request.putArray("buffers");
         request.put("channel", "shell");
         socket.sendText(JSON.writeValueAsString(request), true).get(10, TimeUnit.SECONDS);
-        return await("an execute_result for " + code).atMost(REPLY_TIMEOUT).pollInterval(Duration.ofMillis(100))
-                .until(() -> result(messages, messageId), Objects::nonNull);
+        return await("a " + type + " for " + code).atMost(REPLY_TIMEOUT).pollInterval(Duration.ofMillis(100))
+                .until(() -> answer(messages, messageId, type, pointer), Objects::nonNull);
     }
 
-    // The text/plain of the result of the request messageId among the messages come so far, or null until it comes.
-    private static String result(Messages messages, String messageId) throws Exception {
+    // The field at pointer of the first message of the type answering the request messageId among the messages come
+    // so far, or null until it comes.
+    private static String answer(Messages messages, String messageId, String type, String pointer) throws Exception {
         for (String text = messages.received.poll(); text != null; text = messages.received.poll()) {
             JsonNode message = JSON.readTree(text);
             if (!messageId.equals(message.at("/parent_header/msg_id").textValue())) {
                 continue;
             }
-            String type = message.at("/header/msg_type").textValue();
-            if ("execute_result".equals(type)) {
-                return message.at("/content/data/text~1plain").textValue();
+            String kind = message.at("/header/msg_type").textValue();
+            if (type.equals(kind)) {
+                return message.at(pointer).textValue();
             }
-            if ("error".equals(type)) {
+            if ("error".equals(kind)) {
                 fail("the kernel raised: " + message.path("content"));
             }
         }

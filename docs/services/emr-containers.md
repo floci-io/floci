@@ -244,7 +244,14 @@ remote kernel lifecycle management capability that interactive clients need" (EM
   that have been previously started using the same session token", whether the kernels API or the sessions API
   (`POST /api/sessions`) started them, and listing the sessions (`GET /api/sessions`) answers with those holding such
   kernels; any of the endpoint's tokens reaches a kernel or a session by its id.
-* **Not emulated yet**: the "Apache Spark with Scala" kernel, `%%configure`, `jupyter-kernel-overrides` images,
-  and `jeg-config`'s culling settings. A browser's CORS preflight (`OPTIONS`), which Jupyter Enterprise Gateway
-  takes without a token, needs one here. Every kernel runs with the endpoint's execution role, whichever role its
+* **`%%configure`**: the PySpark kernel loads the image's own `%%configure` magic, with which "you can adjust the
+  Spark configuration associated with a PySpark session" ("Modifying PySpark session parameters"). The magic turns
+  its cell's settings into `KERNEL_EXTRA_SPARK_OPTS` and posts them, signed with an AES key of its kernel's own, to
+  the gateway, which restarts the kernel, keeping its id, with them in place of those it started with. Once the
+  restarted kernel answers, the gateway ends the cell with the replies the magic prepared; if it dies first, or does
+  not answer within a minute, the cell ends with an error saying so. The magic itself refuses a reserved setting,
+  such as `spark.kubernetes.namespace`.
+* **Not emulated yet**: the "Apache Spark with Scala" kernel, `jupyter-kernel-overrides` images, and `jeg-config`'s
+  culling settings. A browser's CORS preflight (`OPTIONS`), which Jupyter Enterprise Gateway takes without a token,
+  needs one here. Every kernel runs with the endpoint's execution role, whichever role its
   session token was asked for with. `certificateArn` is kept, and the `serverUrl` is plain HTTP on Floci's port.
