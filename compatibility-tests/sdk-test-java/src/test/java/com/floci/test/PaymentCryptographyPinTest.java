@@ -134,8 +134,7 @@ class PaymentCryptographyPinTest {
                         .build()));
         String block = generated.encryptedPinBlock();
         String value = generated.pinData().verificationValue();
-        String differentFirstDigit = value.startsWith("0") ? "1" : "0";
-        String invalidValue = differentFirstDigit + value.substring(1);
+        String invalidValue = PaymentCryptographyValues.withAnotherFirstDigit(value);
 
         // The verification value is not the one over the PIN, so the verification fails.
         assertThatThrownBy(() -> client.verifyPinData(r -> r
