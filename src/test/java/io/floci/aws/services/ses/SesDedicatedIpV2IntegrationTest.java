@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -46,10 +47,10 @@ class SesDedicatedIpV2IntegrationTest {
     @Order(3)
     void putDedicatedIpInPool_ipNotFound() {
         // Even with an existing destination pool, the IP is checked first.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"PoolName\": \"dip-scaling-pool\"}")
         .when().post("/v2/email/dedicated-ip-pools").then().statusCode(200);
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"DestinationPoolName\": \"dip-scaling-pool\"}")
         .when().put("/v2/email/dedicated-ips/" + TEST_IP + "/pool")
         .then().statusCode(404)
@@ -60,7 +61,7 @@ class SesDedicatedIpV2IntegrationTest {
     @Test
     @Order(4)
     void putDedicatedIpWarmupAttributes_ipNotFound() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"WarmupPercentage\": 50}")
         .when().put("/v2/email/dedicated-ips/" + TEST_IP + "/warmup")
         .then().statusCode(404)
@@ -72,7 +73,7 @@ class SesDedicatedIpV2IntegrationTest {
     @Order(5)
     void putDedicatedIpPoolScalingAttributes_updatesPool() {
         // The pool from Order 3 starts STANDARD; switch it to MANAGED.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"ScalingMode\": \"MANAGED\"}")
         .when().put("/v2/email/dedicated-ip-pools/dip-scaling-pool/scaling")
         .then().statusCode(200);
@@ -85,7 +86,7 @@ class SesDedicatedIpV2IntegrationTest {
     @Test
     @Order(6)
     void putDedicatedIpPoolScalingAttributes_invalidMode_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"ScalingMode\": \"NONSENSE\"}")
         .when().put("/v2/email/dedicated-ip-pools/dip-scaling-pool/scaling")
         .then().statusCode(400)
@@ -96,7 +97,7 @@ class SesDedicatedIpV2IntegrationTest {
     @Test
     @Order(7)
     void putDedicatedIpPoolScalingAttributes_unknownPool_returns404() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"ScalingMode\": \"STANDARD\"}")
         .when().put("/v2/email/dedicated-ip-pools/dip-ghost-pool/scaling")
         .then().statusCode(404)
@@ -112,7 +113,7 @@ class SesDedicatedIpV2IntegrationTest {
         .then().statusCode(200)
             .body("DedicatedIpAutoWarmupEnabled", equalTo(true));
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"AutoWarmupEnabled\": false}")
         .when().put("/v2/email/account/dedicated-ips/warmup")
         .then().statusCode(200);
@@ -127,7 +128,7 @@ class SesDedicatedIpV2IntegrationTest {
     @Order(9)
     void putDedicatedIpInPool_missingDestinationPoolName_returns400() {
         // A missing required member is validated before the IP lookup.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{}")
         .when().put("/v2/email/dedicated-ips/" + TEST_IP + "/pool")
         .then().statusCode(400)
@@ -140,7 +141,7 @@ class SesDedicatedIpV2IntegrationTest {
     void putDedicatedIpPoolScalingAttributes_missingModeUnknownPool_returns400() {
         // ScalingMode is validated before the pool-existence check, so a missing mode on an
         // unknown pool is a BadRequestException, not NotFoundException.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{}")
         .when().put("/v2/email/dedicated-ip-pools/dip-ghost-pool/scaling")
         .then().statusCode(400)
@@ -152,7 +153,7 @@ class SesDedicatedIpV2IntegrationTest {
     @Order(11)
     void putDedicatedIpPoolScalingAttributes_managedToStandard_returns400() {
         // dip-scaling-pool was switched to MANAGED in Order 5; AWS forbids downgrading to STANDARD.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"ScalingMode\": \"STANDARD\"}")
         .when().put("/v2/email/dedicated-ip-pools/dip-scaling-pool/scaling")
         .then().statusCode(400)
@@ -163,7 +164,7 @@ class SesDedicatedIpV2IntegrationTest {
     @Test
     @Order(12)
     void putDedicatedIpWarmupAttributes_missingPercentage_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{}")
         .when().put("/v2/email/dedicated-ips/" + TEST_IP + "/warmup")
         .then().statusCode(400)
@@ -174,7 +175,7 @@ class SesDedicatedIpV2IntegrationTest {
     @Test
     @Order(13)
     void putDedicatedIpWarmupAttributes_outOfRange_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"WarmupPercentage\": 150}")
         .when().put("/v2/email/dedicated-ips/" + TEST_IP + "/warmup")
         .then().statusCode(400)
@@ -185,7 +186,7 @@ class SesDedicatedIpV2IntegrationTest {
     @Test
     @Order(14)
     void putDedicatedIpWarmupAttributes_nonInteger_returnsSerializationException() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"WarmupPercentage\": \"abc\"}")
         .when().put("/v2/email/dedicated-ips/" + TEST_IP + "/warmup")
         .then().statusCode(400)
@@ -196,7 +197,7 @@ class SesDedicatedIpV2IntegrationTest {
     @Order(15)
     void putAccountAutoWarmup_stringCoercesByText() {
         // SES v2 coerces a JSON string only when it names a boolean.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"AutoWarmupEnabled\": \"no\"}")
         .when().put("/v2/email/account/dedicated-ips/warmup")
         .then().statusCode(200);
@@ -205,7 +206,7 @@ class SesDedicatedIpV2IntegrationTest {
         .then().statusCode(200)
             .body("DedicatedIpAutoWarmupEnabled", equalTo(false));
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"AutoWarmupEnabled\": \"yes\"}")
         .when().put("/v2/email/account/dedicated-ips/warmup")
         .then().statusCode(200);
@@ -214,7 +215,7 @@ class SesDedicatedIpV2IntegrationTest {
         .then().statusCode(200)
             .body("DedicatedIpAutoWarmupEnabled", equalTo(true));
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"AutoWarmupEnabled\": \"nonsense\"}")
         .when().put("/v2/email/account/dedicated-ips/warmup")
         .then().statusCode(400)
@@ -226,7 +227,7 @@ class SesDedicatedIpV2IntegrationTest {
     @Order(16)
     void putAccountAutoWarmup_explicitNull_returnsSerializationException() {
         // Only an omitted member falls back to the @default(false); an explicit null does not.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"AutoWarmupEnabled\": null}")
         .when().put("/v2/email/account/dedicated-ips/warmup")
         .then().statusCode(400)
@@ -236,7 +237,7 @@ class SesDedicatedIpV2IntegrationTest {
     @Test
     @Order(17)
     void putAccountAutoWarmup_number_returnsSerializationException() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"AutoWarmupEnabled\": 1}")
         .when().put("/v2/email/account/dedicated-ips/warmup")
         .then().statusCode(400)

@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -22,7 +23,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(1)
     void createDedicatedIpPool_defaultScalingMode() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"PoolName\": \"v2-pool-alpha\"}")
         .when().post("/v2/email/dedicated-ip-pools")
         .then().statusCode(200);
@@ -38,7 +39,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(2)
     void createDedicatedIpPool_managedScalingMode() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"PoolName\": \"v2-pool-managed\", \"ScalingMode\": \"MANAGED\"}")
         .when().post("/v2/email/dedicated-ip-pools")
         .then().statusCode(200);
@@ -52,7 +53,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(3)
     void createDedicatedIpPool_invalidScalingMode_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"PoolName\": \"v2-pool-bad\", \"ScalingMode\": \"NONSENSE\"}")
         .when().post("/v2/email/dedicated-ip-pools")
         .then().statusCode(400)
@@ -63,7 +64,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(4)
     void createDedicatedIpPool_duplicate_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"PoolName\": \"v2-pool-alpha\"}")
         .when().post("/v2/email/dedicated-ip-pools")
         .then().statusCode(400)
@@ -116,7 +117,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(9)
     void createDedicatedIpPool_emptyBody_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("")
         .when().post("/v2/email/dedicated-ip-pools")
         .then().statusCode(400)
@@ -127,7 +128,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(10)
     void createDedicatedIpPool_missingPoolName_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{}")
         .when().post("/v2/email/dedicated-ip-pools")
         .then().statusCode(400)
@@ -138,7 +139,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     @Test
     @Order(11)
     void createDedicatedIpPool_nullPoolName_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"PoolName\": null}")
         .when().post("/v2/email/dedicated-ip-pools")
         .then().statusCode(400)
@@ -151,7 +152,7 @@ class SesDedicatedIpPoolV2IntegrationTest {
     void createDedicatedIpPool_nonTextualScalingMode_returns400() {
         // A present-but-non-string ScalingMode must be rejected, not coerced to
         // "" and silently defaulted to STANDARD.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
             .body("{\"PoolName\": \"v2-pool-objsm\", \"ScalingMode\": {}}")
         .when().post("/v2/email/dedicated-ip-pools")
         .then().statusCode(400)
