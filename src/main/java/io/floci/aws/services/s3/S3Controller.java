@@ -949,10 +949,12 @@ public class S3Controller {
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
                 Response.ResponseBuilder response = Response.ok().header("ETag", part.getETag());
                 // S3 echoes the part checksum only when the upload declared an algorithm.
-                ChecksumAlgorithm declared = s3Service.getMultipartUpload(bucket, key, uploadId).getChecksumAlgorithm();
+                MultipartUpload upload = s3Service.getMultipartUpload(bucket, key, uploadId);
+                ChecksumAlgorithm declared = upload.getChecksumAlgorithm();
                 if (declared != null) {
                     response.header(declared.headerName(), part.getChecksum().valueFor(declared));
                 }
+                appendServerSideEncryptionHeaders(response, upload);
                 appendSseCustomerHeaders(response,
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
@@ -1723,6 +1725,7 @@ public class S3Controller {
                     response.header("x-amz-checksum-algorithm", upload.getChecksumAlgorithm().name());
                     response.header("x-amz-checksum-type", upload.getChecksumType().name());
                 }
+                appendServerSideEncryptionHeaders(response, upload);
                 appendSseCustomerHeaders(response, upload);
                 return response.build();
             }
@@ -3260,6 +3263,15 @@ public class S3Controller {
         appendSseCustomerHeaders(resp, obj.getSseCustomerAlgorithm(), obj.getSseCustomerKeyMd5());
     }
 
+    private static void appendServerSideEncryptionHeaders(Response.ResponseBuilder response, MultipartUpload upload) {
+        if (upload.effectiveServerSideEncryption() != null) {
+            response.header("x-amz-server-side-encryption", upload.effectiveServerSideEncryption());
+        }
+        if (upload.effectiveSseKmsKeyId() != null) {
+            response.header("x-amz-server-side-encryption-aws-kms-key-id", upload.effectiveSseKmsKeyId());
+        }
+    }
+
     private void appendSseCustomerHeaders(Response.ResponseBuilder resp, MultipartUpload upload) {
         appendSseCustomerHeaders(resp, upload.getSseCustomerAlgorithm(), upload.getSseCustomerKeyMd5());
     }
@@ -3411,12 +3423,7 @@ public class S3Controller {
         }
         Response.ResponseBuilder response = Response.ok(xml.end("CopyPartResult").build())
                 .type(MediaType.APPLICATION_XML);
-        if (destinationUpload.getServerSideEncryption() != null) {
-            response.header("x-amz-server-side-encryption", destinationUpload.getServerSideEncryption());
-        }
-        if (destinationUpload.getSseKmsKeyId() != null) {
-            response.header("x-amz-server-side-encryption-aws-kms-key-id", destinationUpload.getSseKmsKeyId());
-        }
+        appendServerSideEncryptionHeaders(response, destinationUpload);
         appendSseCustomerHeaders(response,
                 httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                 httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));

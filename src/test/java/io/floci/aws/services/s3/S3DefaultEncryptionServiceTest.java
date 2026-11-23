@@ -156,6 +156,76 @@ class S3DefaultEncryptionServiceTest {
     }
 
     @Test
+    void aMultipartUploadTakesTheDefaultWhenItIsCreated() {
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
+        MultipartUpload upload = s3Service.initiateMultipartUpload(BUCKET, "created.bin",
+                "application/octet-stream", Map.of(), null, new PutObjectOptions());
+
+        assertEquals("aws:kms", upload.effectiveServerSideEncryption());
+        assertEquals(KMS_KEY, upload.effectiveSseKmsKeyId());
+        assertNull(upload.getServerSideEncryption());
+        assertEquals(Map.of("s3:x-amz-server-side-encryption", List.of("aws:kms"),
+                "s3:x-amz-server-side-encryption-aws-kms-key-id", List.of(KMS_KEY)),
+                s3Service.multipartEncryptionConditions(BUCKET, "created.bin", upload.getUploadId()));
+
+        s3Service.putBucketEncryption(BUCKET, configuration("AES256", null));
+        s3Service.uploadPart(BUCKET, "created.bin", upload.getUploadId(), 1, DATA);
+        S3Object completed = s3Service.completeMultipartUpload(BUCKET, "created.bin", upload.getUploadId(),
+                List.of(1), null, null);
+
+        assertEquals("aws:kms", completed.getServerSideEncryption());
+        assertEquals(KMS_KEY, completed.getSseKmsKeyId());
+    }
+
+    @Test
+    void aDualLayerKmsDefaultReachesAMultipartUploadWithItsKey() {
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms:dsse", KMS_KEY));
+        MultipartUpload upload = s3Service.initiateMultipartUpload(BUCKET, "dsse.bin",
+                "application/octet-stream", Map.of(), null, new PutObjectOptions());
+        s3Service.uploadPart(BUCKET, "dsse.bin", upload.getUploadId(), 1, DATA);
+        S3Object completed = s3Service.completeMultipartUpload(BUCKET, "dsse.bin", upload.getUploadId(),
+                List.of(1), null, null);
+
+        assertEquals("aws:kms:dsse", upload.effectiveServerSideEncryption());
+        assertEquals(KMS_KEY, upload.effectiveSseKmsKeyId());
+        assertEquals("aws:kms:dsse", completed.getServerSideEncryption());
+        assertEquals(KMS_KEY, completed.getSseKmsKeyId());
+    }
+
+    @Test
+    void anExplicitDualLayerHeaderKeepsItsKeyId() {
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
+        MultipartUpload upload = s3Service.initiateMultipartUpload(BUCKET, "explicit-dsse.bin",
+                "application/octet-stream", Map.of(), null,
+                new PutObjectOptions().withServerSideEncryption("aws:kms:dsse").withSseKmsKeyId(OTHER_KMS_KEY));
+        s3Service.uploadPart(BUCKET, "explicit-dsse.bin", upload.getUploadId(), 1, DATA);
+        S3Object completed = s3Service.completeMultipartUpload(BUCKET, "explicit-dsse.bin", upload.getUploadId(),
+                List.of(1), null, null);
+
+        assertEquals("aws:kms:dsse", upload.effectiveServerSideEncryption());
+        assertEquals(OTHER_KMS_KEY, upload.effectiveSseKmsKeyId());
+        assertEquals("aws:kms:dsse", completed.getServerSideEncryption());
+        assertEquals(OTHER_KMS_KEY, completed.getSseKmsKeyId());
+    }
+
+    @Test
+    void anUploadThatSendsItsOwnEncryptionRecordsNoDefault() throws Exception {
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
+
+        MultipartUpload explicit = s3Service.initiateMultipartUpload(BUCKET, "explicit.bin",
+                "application/octet-stream", Map.of(), null, new PutObjectOptions().withServerSideEncryption("AES256"));
+        MultipartUpload sseC = s3Service.initiateMultipartUpload(BUCKET, "sse-c.bin",
+                "application/octet-stream", Map.of(), null, customerKey(new PutObjectOptions()));
+
+        assertEquals("AES256", explicit.effectiveServerSideEncryption());
+        assertNull(explicit.effectiveSseKmsKeyId());
+        assertNull(explicit.getDefaultServerSideEncryption());
+        assertNull(sseC.effectiveServerSideEncryption());
+        assertNull(sseC.effectiveSseKmsKeyId());
+        assertNull(sseC.getDefaultServerSideEncryption());
+    }
+
+    @Test
     void aConfigurationWithoutAnAlgorithmFallsBackToSseS3() {
         s3Service.putBucketEncryption(BUCKET, "<ServerSideEncryptionConfiguration/>");
         assertEquals("AES256", put("empty-configuration.txt", new PutObjectOptions()).getServerSideEncryption());

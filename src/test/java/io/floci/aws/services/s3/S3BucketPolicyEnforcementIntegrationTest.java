@@ -936,11 +936,8 @@ class S3BucketPolicyEnforcementIntegrationTest {
 
     /**
      * A multipart upload under the same two statements. A part sends neither header, so it is judged
-     * by what its upload recorded. AWS does not document this; it was measured on S3 on 2026-10-30,
-     * each case here as S3 answered it. A case whose upload is opened before the policy stands uses a
-     * bucket with no default encryption: S3 records the bucket's default on an upload that asks for
-     * none, where Floci records only what the request asks for, so on a bucket defaulting to
-     * {@code aws:kms} such a part is admitted on S3 and refused here.
+     * by what its upload recorded, the bucket's default included for an upload that asked for none.
+     * AWS does not document this; it was measured on S3 on 2026-10-30, each case here as S3 answered it.
      */
     @Test
     void anUploadOpenedWithTheBucketsKeyHasItsPartsAdmittedAndStandsUnderThatKey() {
@@ -976,7 +973,7 @@ class S3BucketPolicyEnforcementIntegrationTest {
     }
 
     @Test
-    void aPartOfAnUploadThatRecordedNoEncryptionIsRefusedAndNoObjectStands() {
+    void aPartOfAnUploadThatRecordedTheSseS3DefaultIsRefusedAndNoObjectStands() {
         EncryptionFixture fixture = bucketWithoutDefaultEncryption();
         String uploadId = given().filter(fixture.user().signer()).post("/" + fixture.bucket() + "/plain.bin?uploads")
                 .then().statusCode(200)
@@ -988,6 +985,22 @@ class S3BucketPolicyEnforcementIntegrationTest {
 
         given().filter(fixture.owner()).head("/" + fixture.bucket() + "/plain.bin").then().statusCode(404);
         given().filter(fixture.owner()).delete("/" + fixture.bucket() + "/plain.bin?uploadId=" + uploadId)
+                .then().statusCode(204);
+    }
+
+    @Test
+    void aPartOfAnUploadOpenedWithNoEncryptionIsJudgedByTheDefaultItRecorded() {
+        String suffix = suffix();
+        EncryptionFixture fixture = encryptionBucket("kms-default-" + suffix,
+                encryptionUser("kms-default-user-" + suffix, ALLOW_S3_AND_KMS), suffix, true);
+        String uploadId = given().filter(fixture.user().signer()).post("/" + fixture.bucket() + "/default.bin?uploads")
+                .then().statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+        putKmsOnlyPolicy(fixture);
+
+        uploadPart(fixture.user().signer(), fixture, "default.bin", uploadId).then().statusCode(200);
+
+        given().filter(fixture.owner()).delete("/" + fixture.bucket() + "/default.bin?uploadId=" + uploadId)
                 .then().statusCode(204);
     }
 
