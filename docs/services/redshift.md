@@ -1160,7 +1160,9 @@ registration; a `DROP FUNCTION` of any function Floci does not track is left to 
   Lambda UDFs. `IAM_ROLE DEFAULT` is refused with `0A000`.
 - `MAX_BATCH_SIZE` takes `KB` or `MB` (`KB` when omitted) between 1 KB and 5 MB, and `MAX_BATCH_ROWS` is at least 1.
   The defaults are the documented 20000 ms, 2147483647 rows and 5 MB. The options are stored, and not applied yet.
-- An unqualified name is created in `public`. The role and the Lambda function are not checked at creation.
+- An unqualified name is created in the session's current schema (`search_path`), failing with `3F000` if no schema is
+  selected, and unqualified `DROP FUNCTION` resolves through `search_path`. The role and the Lambda function are not
+  checked at creation.
 - `CREATE EXTERNAL FUNCTION` and `DROP FUNCTION` of such a function inside an explicit transaction fail with SQLSTATE
   `25001`, because the registration is not part of the PostgreSQL transaction.
 - Privileges on `LANGUAGE exfunc` are not modeled: any user the backend lets create a function can create one.
