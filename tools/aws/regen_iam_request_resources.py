@@ -362,7 +362,7 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs", "cloudwatch",
-              "comprehend", "config", "dms", "elasticache", "identitystore",
+              "comprehend", "config", "dms", "elasticache", "identitystore", "memorydb",
               "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms", "dynamodb", "iam")
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -629,7 +629,6 @@ NOT_COVERED: dict[str, str] = {
     "iot": _LATER,
     "kafka": _REST,
     "lightsail": _LATER,
-    "memorydb": _LATER,
     "mq": _REST,
     "network-firewall": _LATER,
     "organizations": _LATER,
@@ -2112,6 +2111,44 @@ def with_lookup_find(resources: list[dict], types: list[str], formats: dict[str,
     return resources + added
 
 
+def with_type_named_members(resources: list[dict], types: list[str], formats: dict[str, str],
+                            members: dict[str, str]) -> list[dict]:
+    """The resources, a type of one variable of its own read from the one top-level member of the request named after
+    the type and ending in the variable's name (MemoryDB's `MultiRegionClusterName`, of its `multiregioncluster`,
+    `multiregioncluster/${ClusterName}`): read from it where no resource names the type yet (DeleteCluster's
+    `ClusterName`, of its `cluster`), and instead of a member named after something else where one fills it
+    (CreateCluster's `ClusterName`, the new regional cluster, which the multi-Region cluster's `${ClusterName}` would
+    otherwise take). Where another type the action acts on has a variable of that name, the member names this type only
+    when that one has a member named after it too: SSM's `InstanceId` may name an `instance` or a `managed-instance`,
+    and names neither alone."""
+    named_kinds = {kind for resource in resources for kind in _kinds(resource)}
+    found = [dict(resource) for resource in resources]
+
+    def own_members(kind: str, variable: str) -> list[str]:
+        return [member for member, path in members.items() if path == member and stem(member) == stem(kind)
+                and member.endswith(variable)]
+
+    for kind in types:
+        variables = [v for v in VARIABLE_RE.findall(formats.get(kind, "")) if v not in KNOWN_VARIABLES]
+        if len(variables) != 1:
+            continue
+        variable = variables[0]
+        own = own_members(kind, variable)
+        sharing = [other for other in types if other != kind
+                   and variable in VARIABLE_RE.findall(formats.get(other, ""))]
+        if len(own) != 1 or any(len(own_members(other, variable)) != 1 for other in sharing):
+            continue
+        if kind not in named_kinds:
+            found.append({"type": kind, "fill": {variable: own[0]}})
+            continue
+        for resource in found:
+            fill = resource.get("fill")
+            if resource.get("type") == kind and fill and list(fill) == [variable] and fill[variable] != own[0] \
+                    and "." not in fill[variable] and stem(fill[variable].removesuffix("[]")) != stem(kind):
+                resource["fill"] = {variable: own[0]}
+    return found
+
+
 def structure_name_fields(models: dict[str, dict], operation: str, types: list[str]) -> dict[str, str]:
     """By type, the `name` field of the operation's request's top-level structure member named after the type
     (PutConfigurationRecorder's `ConfigurationRecorder.name`), the name the structure gives the resource; a type with
@@ -2311,14 +2348,20 @@ def with_made(resources: list[dict], operation: str, formats: dict[str, str]) ->
     with an ARN format's leading resource word, related to the operation's name past its verb, or with its sole
     resource variable named after that operation's subject (`db:${DbInstanceName}`). A member that may hold
     an ARN of several types is made only when every one of them is: one that may name the parent too (a subscriber's
-    `EventBusArn`) names a resource the create does not make."""
+    `EventBusArn`) names a resource the create does not make. Where the namespace has a type named as the operation is
+    past its verb, that type, and any type whose format's leading resource word is that name, is what it makes:
+    MemoryDB's CreateCluster makes a `cluster`, not the `multiregioncluster` it may join, whose name merely ends in the
+    same word."""
     name = operation.split(":", 1)[1]
     if not CREATING_RE.match(name):
         return resources
     created = stem(CREATING_RE.sub("", name))
+    exact = {kind for kind in formats if stem(kind) == created}
 
     def is_created(kind: str) -> bool:
         word = RESOURCE_PART_RE.match(formats.get(kind, ""))
+        if exact:
+            return kind in exact or (word is not None and stem(word.group(1)) == created)
         variables = [variable for variable in VARIABLE_RE.findall(formats.get(kind, ""))
                      if variable not in KNOWN_VARIABLES]
         return (related(created, stem(kind)) or (word is not None and related(created, stem(word.group(1))))
@@ -2439,7 +2482,14 @@ def made_by_a_create_of_other_types(operation: str, types: list[str], formats: d
     (a top-level member named `Tags`, `TagList` or the like) and names every variable of it, as the rules name a type
     an action acts on and from the fields of a top-level structure its documentation reads; none otherwise."""
     name = operation.split(":", 1)[1]
-    if kind in types or any(related(stem(CREATING_RE.sub("", name)), stem(other)) for other in types) or not models:
+    created = stem(CREATING_RE.sub("", name))
+    # A type related to the create's name is the one it makes, unless the request names it by a member of its own,
+    # as a resource the create joins: MemoryDB's CreateCluster names the multi-Region cluster it may join by its
+    # `MultiRegionClusterName` and makes a `cluster`; RAM's CreatePermission names no customer managed permission and
+    # makes that one.
+    joined = {other for other in types if stem(kind) == created and stem(other) != created
+              and any(path == member and stem(member) == stem(other) for member, path in members.items())}
+    if kind in types or any(related(created, stem(other)) for other in types if other not in joined) or not models:
         return []
     shapes = member_shapes(models, name)
     if not any(stem(member) == "tag" for member in shapes):
@@ -3745,6 +3795,7 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
     resources = with_structure_account(resources, formats, structure_account_members(models, name, types))
     resources = with_structure_names(resources, formats, structure_name_fields(models, name, types))
     resources = with_change_lists(resources, types, formats, members)
+    resources = with_type_named_members(resources, types, formats, members)
     resources = with_arn_of(resources, formats, name_or_arn_members(models, name),
                             documented_name_or_arn_members(models, name))
     resources = with_default_pairs(resources, formats, optional)

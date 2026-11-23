@@ -2043,6 +2043,29 @@ class ResourceArnBuilderTest {
                 "AlternateIdentifier.UniqueAttribute.AttributeValue")), asked);
     }
 
+    // ── MemoryDB ────────────────────────────────────────────────────────────────
+
+    /**
+     * A MemoryDB request is checked on the cluster, ACL or user its name names, as {@code <type>/<name>}, the ARN
+     * MemoryDB mints. The Service Reference lists no {@code cluster} for CreateCluster but the multi-Region cluster it
+     * may join, named by its MultiRegionClusterName, not by the new cluster's ClusterName, though both formats call
+     * their variable {@code ${ClusterName}}; DeleteCluster is checked on the cluster its ClusterName names.
+     */
+    @Test
+    void memoryDbChecksTheResourceItsNameNamesAsTheGeneratedTableReadsIt() {
+        setJsonBody("{\"ClusterName\":\"cache\"}");
+        assertEquals(List.of("arn:aws:memorydb:us-east-1:000000000000:cluster/cache"),
+                builder.buildResources("memorydb", "memorydb:DescribeClusters", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ClusterName\":\"cache\",\"NodeType\":\"db.t4g.small\",\"ACLName\":\"open-access\","
+                + "\"MultiRegionClusterName\":\"global\"}");
+        assertEquals(List.of("arn:aws:memorydb:us-east-1:000000000000:acl/open-access",
+                        "arn:aws:memorydb::000000000000:multiregioncluster/global"),
+                builder.buildResources("memorydb", "memorydb:CreateCluster", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ClusterName\":\"cache\"}");
+        assertEquals(List.of("arn:aws:memorydb:us-east-1:000000000000:cluster/cache"),
+                builder.buildResources("memorydb", "memorydb:DeleteCluster", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
     // ── S3 and S3 Control ───────────────────────────────────────────────────────
 
     /** The resources an S3 or S3 Control request names, read from the generated table on the route it matches. */

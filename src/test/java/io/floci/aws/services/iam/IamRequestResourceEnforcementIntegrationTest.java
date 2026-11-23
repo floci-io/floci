@@ -3607,6 +3607,25 @@ class IamRequestResourceEnforcementIntegrationTest {
         return userId;
     }
 
+    /**
+     * A MemoryDB ACL is checked on the ARN its name gives, {@code acl/<name>}, the one MemoryDB mints, so a grant on one
+     * lets the caller describe it and not another.
+     */
+    @Test
+    void aMemoryDbAclIsCheckedOnTheArnItsNameGives() {
+        String acl = "res-acl-" + suffix();
+        adminJson("memorydb", "AmazonMemoryDB.CreateACL")
+                .body("{\"ACLName\":\"" + acl + "\",\"UserNames\":[\"default\"]}").post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("memorydb", "AmazonMemoryDB.DeleteACL")
+                .body("{\"ACLName\":\"" + acl + "\"}").post("/"));
+        User user = user("res-memorydb");
+        user.policy(allowOn("memorydb:DescribeAcls", "arn:aws:memorydb:" + REGION + ":" + ACCOUNT + ":acl/" + acl));
+        send(user, "memorydb", "AmazonMemoryDB.DescribeACLs", "1.1", "{\"ACLName\":\"" + acl + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "memorydb", "AmazonMemoryDB.DescribeACLs", "1.1",
+                "{\"ACLName\":\"" + acl + "-other\"}"), "memorydb:DescribeAcls");
+    }
+
     private static ValidatableResponse glue(String operation, String body) {
         return adminJson("glue", "AWSGlue." + operation).body(body).post("/").then();
     }
