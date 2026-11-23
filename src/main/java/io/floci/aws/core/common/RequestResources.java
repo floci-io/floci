@@ -207,7 +207,27 @@ public final class RequestResources {
         JsonNode body = sent.isEmpty() ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null;
         Map<String, String> form = ec2Query(table, operation, located(table, operation, sent, ctx, labels));
         return resources.isEmpty() ? List.of()
-                : named(operation, resources, formats(table, operation), form, body, partition, region, accountId, stored);
+                : named(operation, resources, formats(table, operation), form, body, partition, region, accountId,
+                        stored, signer(resources, ctx, stored));
+    }
+
+    /**
+     * The ARN of the user whose access key signs the request, as {@code stored} gives it, where a resource is that user
+     * ({@code signer}); null otherwise, and for a key of no user. The key is the one the request's
+     * {@code Authorization} header gives, or its query's credential where the header gives none, as the enforcement
+     * filter reads it.
+     */
+    private static String signer(List<RequestResourceMembers.Resource> resources, ContainerRequestContext ctx,
+                                 StoredResourceArns stored) {
+        if (stored == null || resources.stream().noneMatch(RequestResourceMembers.Resource::signer)) {
+            return null;
+        }
+        String authorization = ctx.getHeaderString("Authorization");
+        if (authorization == null || authorization.isBlank()) {
+            authorization = IamEnforcementFilter.requestAuthorization(null,
+                    ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters());
+        }
+        return SigV4CredentialScope.accessKeyId(authorization).flatMap(stored::signedBy).orElse(null);
     }
 
     /**
@@ -468,11 +488,22 @@ public final class RequestResources {
         return List.copyOf(arns);
     }
 
-    /** The ARNs of the resources the request names, as {@link #of} reads them. */
+    /** The ARNs of the resources the request names, as {@link #of} reads them, none of them the user signing it. */
     private static List<String> named(String operation, List<RequestResourceMembers.Resource> resources,
                                       Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,
                                       JsonNode body, String partition, String region, String accountId,
                                       StoredResourceArns stored) {
+        return named(operation, resources, formats, form, body, partition, region, accountId, stored, null);
+    }
+
+    /**
+     * The ARNs of the resources the request names, as {@link #of} reads them, {@code signer} being the user whose key
+     * signs it, or null for none.
+     */
+    private static List<String> named(String operation, List<RequestResourceMembers.Resource> resources,
+                                      Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,
+                                      JsonNode body, String partition, String region, String accountId,
+                                      StoredResourceArns stored, String signer) {
         Set<String> arns = new LinkedHashSet<>();
         for (RequestResourceMembers.Resource resource : resources) {
             if (!applies(resource, form, body, formats) || !onDefault(resource, form, body, formats, region, stored)) {
@@ -491,6 +522,13 @@ public final class RequestResources {
                 }
             } else if (resource.statement() != null) {
                 statement(arns, resource, formats, form, body, partition, region, accountId, stored);
+            } else if (resource.signer()) {
+                // The user whose key signs the request, as its service stores it; none for a key of no user.
+                if (signer != null) {
+                    arns.add(signer);
+                }
+            } else if (resource.path() != null) {
+                pathed(arns, resource, formats, form, body, partition, region, accountId, stored);
             } else if (resource.through() != null) {
                 through(arns, resource, formats, form, body, region, stored);
             } else if (!resource.find().isEmpty()) {
@@ -956,6 +994,64 @@ public final class RequestResources {
                         region, accountId, stored);
             }
         }
+    }
+
+    /**
+     * The ARN of a resource whose one variable is a name after its path ({@code user/<path><name>}): the name the
+     * member filling it gives, after the path its {@code path} member gives, the root {@code /} where it gives none, as
+     * a create names what it makes; none when the request gives no name. A resource the request {@code renames} is the
+     * one the member it names gives, as {@code stored} finds it in the caller's account, or under the root path where
+     * it finds none, with the name and the path the request gives each in place of its own, in that resource's
+     * partition and account; none when the request names no resource to rename.
+     */
+    private static void pathed(Set<String> arns, RequestResourceMembers.Resource resource,
+                               Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,
+                               JsonNode body, String partition, String region, String accountId,
+                               StoredResourceArns stored) {
+        String type = resource.types().getFirst();
+        RequestResourceMembers.ArnFormat format = formats.get(type);
+        Map.Entry<String, RequestResourceMembers.Member> variable = resource.fill().entrySet().iterator().next();
+        String name = firstGiven(form, body, variable.getValue());
+        String path = firstGiven(form, body, resource.path());
+        if (resource.renames() == null) {
+            if (name != null) {
+                arns.add(format.checked(render(format.format(), Map.of(variable.getKey(), underPath(path) + name),
+                        partition, region, accountId)));
+            }
+            return;
+        }
+        String renamed = firstGiven(form, body, resource.renames());
+        if (renamed == null) {
+            return;
+        }
+        String held = (stored == null ? Optional.<String>empty() : stored.find(type, List.of(renamed), region))
+                .filter(arn -> format.pattern().matcher(arn).matches())
+                .orElseGet(() -> format.checked(render(format.format(), Map.of(variable.getKey(), renamed), partition,
+                        region, accountId)));
+        AwsArnUtils.Arn source = AwsArnUtils.parse(held);
+        String own = format.variable(held);
+        String ownPath = own.endsWith("/" + renamed) ? "/" + own.substring(0, own.length() - renamed.length()) : "/";
+        arns.add(format.checked(render(format.format(), Map.of(variable.getKey(),
+                underPath(path == null ? ownPath : path) + (name == null ? renamed : name)), source.partition(), region,
+                source.accountId())));
+    }
+
+    /** The first value a request gives a member, none for a JSON null or an empty one. */
+    private static String firstGiven(Map<String, String> form, JsonNode body, RequestResourceMembers.Member member) {
+        return namingNoneWhenNull(form, body, member).stream().filter(value -> !value.isEmpty()).findFirst()
+                .orElse(null);
+    }
+
+    /**
+     * A path as it precedes a name in a variable holding both: without its leading {@code /} and with a trailing one,
+     * the root {@code /} as nothing ({@code /team/} as {@code team/}).
+     */
+    private static String underPath(String path) {
+        if (path == null || path.isBlank() || "/".equals(path)) {
+            return "";
+        }
+        String inner = path.startsWith("/") ? path.substring(1) : path;
+        return inner.endsWith("/") ? inner : inner + "/";
     }
 
     /**

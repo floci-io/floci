@@ -2508,8 +2508,8 @@ requests retain HTTP 403 XML `AccessDenied` responses, except SNS's, which retur
 `AuthorizationError`, the error every SNS operation lists for a caller denied access, whichever
 action is denied. The routed protocol determines the status, not just the request's content type.
 
-A request is checked against the resources it names. Floci builds their ARNs itself for S3,
-DynamoDB, SSM, KMS, IAM and API Gateway. For Secrets Manager, Elastic Load Balancing, ECR,
+A request is checked against the resources it names. For S3, DynamoDB, SSM, KMS, IAM, API Gateway,
+Secrets Manager, Elastic Load Balancing, ECR,
 Step Functions, EventBridge, EventBridge Scheduler, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
@@ -3372,10 +3372,10 @@ as the GetClusterCredentials API reference lists them. They are checked before t
 so a denied request gets `AccessDenied` even for a cluster that does not exist. The `dbname` resource
 that `DbName` needs is not checked.
 
-**IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
-from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, DynamoDB, Secrets
-Manager, SSM, KMS and IAM. Within IAM the resource type each action is evaluated against is the one
-the Service Authorization Reference gives it, so a statement naming a specific user, role, group,
+**IAM's own resources are named.** When enforcement evaluates an IAM request, the target resource
+comes from the generated request-resources table, as it does for every other service. Within IAM the
+resource type each action is evaluated against is the one the Service Authorization Reference gives
+it, so a statement naming a specific user, role, group,
 instance profile, managed policy, MFA device, identity provider or server certificate constrains
 it: a `Deny` on `arn:aws:iam::123456789012:user/bob` stops `DeleteUser` for Bob and leaves other
 users alone, and an `Allow` scoped to one role limits `DeleteRole` to it.
@@ -3383,17 +3383,19 @@ users alone, and an `Allow` scoped to one role limits `DeleteRole` to it.
 The resource type is not the parameter the action happens to take. `AddUserToGroup` and
 `RemoveUserFromGroup` are evaluated against the group, `AddRoleToInstanceProfile` and
 `RemoveRoleFromInstanceProfile` against the instance profile, and `EnableMFADevice`,
-`DeactivateMFADevice` and `ResyncMFADevice` against the user rather than the device. An action
-acting on something that already exists is checked against that resource's stored ARN, path and
-partition included; a create is checked against an ARN minted from the request's own `Path`, since
-reading a stored path would authorize a create into a path the policy does not name.
-
-When a named role is absent and the operation's generated input shape declares `RoleName`
-but no `Path`, the request is checked against `role/<name>` in the request account and partition.
-This lets an authorized `GetRole` probe receive `NoSuchEntity` and proceed with creation, and
-also applies to other role operations such as `DeleteRole` and `ListRolePolicies`. An injected
-`Path` cannot change this ARN. Once the role exists, its stored path and partition apply;
-creation still uses the path the request asks for.
+`DeactivateMFADevice` and `ResyncMFADevice` against the user rather than the device. The IAM User Guide's
+identifiers give a user's, group's, role's, policy's, instance profile's, MFA device's and server
+certificate's ARN as its name after its path (`user/division_abc/subdivision_xyz/Jane`), and say the
+API's creates take that path. An action on a user, group, role, instance profile or server certificate
+that already exists is checked against the ARN IAM stores it under, path and partition included; one IAM
+does not hold is checked against its name under the root path (`role/<name>`) in the request's account
+and partition, so an authorized `GetRole` probe receives `NoSuchEntity` and can proceed with creation. A
+create is checked against the name its request gives after the `Path` it gives, the root path when it
+gives none, since reading a stored path would authorize a create into a path the policy does not name.
+A `Path` sent to an operation that takes none changes nothing. `UpdateUser`, `UpdateGroup` and
+`UpdateServerCertificate` are checked on the resource under its current name and under the new name and
+path the request gives, each part it leaves out kept, as their API reference says the caller needs
+permission on both; an update that renames and moves nothing names one resource.
 
 `ec2:CreateVpc` is evaluated against `vpc/*` in the caller's partition, Region and account,
 so a VPC-scoped grant can authorize creation with `aws:RequestTag` conditions. When supplied,
@@ -3445,29 +3447,32 @@ and stop at the first missing list index. A list a type's ARN variable names, su
 `InstanceIds`, is the request's targets only when the request names nothing else the action acts
 on: a launch's `SecurityGroupIds` are read beside its image and subnet, each on its own ARN.
 
-Which type each action takes is vendored, not written out in Java:
-`src/main/resources/aws/iam-action-resources.json` is generated by
-`tools/aws/regen_iam_action_resources.py` from AWS's Service Reference Information for IAM, and
-carries every published action with the resource types it is authorized against, plus the ARN
-format of each type. `make iam-action-resources-check` gates its shape offline on every pull
-request and `make iam-action-resources-verify` checks every claim in it against AWS weekly, so a
-type that drifts from what AWS publishes fails in CI rather than authorizing against the wrong
-resource. What stays in Java is the half that is Floci's: the request parameter each type's name
-arrives in, the creates, the actions whose request carries an ARN, the four whose request names
-the resource some other way, and the resource types that belong only to actions Floci does not
-dispatch. `GenerateOrganizationsAccessReport` is one of the four: the reference spells its type as
-`access-report/${EntityPath}`, so the Organizations entity path goes into the ARN whole, its
-slashes being the organization's tree rather than an IAM path. `IamActionResourcesTest` checks the
-one against the other, so a regeneration that introduces a resource type nothing resolves fails a
-test naming
-it rather than quietly putting that action back on `*`.
+Nothing of this is written out in Java. The table gives each IAM operation its action, types and
+members from the Service Reference and botocore, as for any other service, and what neither says
+comes from the IAM User Guide's identifiers and the IAM API reference, which
+`tools/aws/fetch_iam_identifiers.py` vendors into `tools/aws/sources/iam-identifiers.json` as the pages
+stand: the ARN syntax with its paths, and each API reference sentence saying what an operation acts on
+where its request does not. `GenerateOrganizationsAccessReport` is checked on
+`access-report/${EntityPath}` with the Organizations entity path whole, its slashes being the
+organization's tree rather than an IAM path. A policy, an identity provider or a role template is
+named by the ARN the request carries, and so is a virtual MFA device, whose serial number the API
+reference gives as its ARN; a hardware device's serial names nothing. `GetAccessKeyLastUsed` and the
+access key, SSH public key and service-specific credential operations are checked on the user that
+owns the key or credential they name, in the caller's account, and `GetServiceLinkedRoleDeletionStatus`
+on the role its deletion task deleted. Where nothing says it, an operation is checked on what the table
+gives: `CreateServiceLinkedRole`, whose role AWS names after the service, on `role/*`;
+`CreateDelegationRequest`, whose id IAM mints, on `delegation-request/*`; and `CreateOpenIDConnectProvider`
+on `*`. `UpdateDelegationRequest`, which the Service Reference does not list, is checked on the request its
+`DelegationRequestId` names, as its API reference says "that owner gets a default permission to update the
+delegation request" and the IAM User Guide grants an owner permission to forward "that specific request".
+`make iam-request-resources-check` re-derives the table and `make iam-request-resources-verify` checks it and
+the vendored pages against AWS.
 
-The nineteen user actions whose `UserName` the model marks optional, `GetUser`, `ListAccessKeys` and
-`CreateAccessKey` among them, resolve to the user who signed the request when it is omitted, which
-is the user AWS acts on. The access key id in the credential names that identity, the same lookup
-`GetAccessKeyLastUsed` makes on a key passed as a parameter, and the user's stored ARN is then the
-resource. The wildcard still stands when the signer is not an IAM user: an account's root stand-in
-and a session credential have no user record to name.
+The operations whose API reference says that, when the request leaves out its `UserName`, they act on
+the user whose access key signs it (`GetUser`, `ListAccessKeys` and `CreateAccessKey` among twenty),
+and `ChangePassword`, which always does, are checked on that user's stored ARN, path included, or on the
+account root's ARN for a key of the root. A session credential names no user, so the request names
+nothing and is checked on `*`.
 
 What resolves to `*` is what the reference gives no resource type, such as `ListUsers`,
 `GetAccountSummary` and `SimulateCustomPolicy`. Every other mapped action takes its parameter as a

@@ -174,9 +174,9 @@ whose name matches an otherwise unfilled ARN variable (optionally ending in `Num
 `integerVariables` records these numeric identifiers so the reader canonicalizes leading zeroes even when the
 request gives the whole ARN; string identifiers retain their spelling.
 What a request names, this file alone says. A service only looks up what it holds where an entry asks it to
-(`StoredResourceArns`): the resource the members a `find` gives name, the ones a `through` member reaches, and the
+(`StoredResourceArns`): the resource the members a `find` gives name, the ones a `through` member reaches, the
 resource its handler uses for a member left out (Athena's `primary` workgroup, EventBridge's `default` bus, ECS's
-`default` cluster). No service says what an operation acts on.
+`default` cluster), and the user whose key signs a request (`signer`). No service says what an operation acts on.
 
 `MEASURED` holds what AWS checks where neither botocore nor the Service Reference says it, and nothing else. It
 is the only part of the file stated by hand, and an entry is admitted only with evidence from AWS
@@ -240,6 +240,19 @@ service's parser for (`statement_resources`, `statement`, `verb`, `names`); an o
 actions (`actions`) and is checked on each element of a list apart. A top-level map keyed by a shape named after a type,
 held by a member named as the type's one variable elsewhere, names that type by its keys (`with_map_keys`:
 BatchGetItem's `RequestItems{}`).
+IAM's user guide and API reference are granted the same way, its identifiers page and the API reference page of each
+operation vendored by their own script. A type the identifiers write with a name and its path
+(`user/{user-name-with-path}`) is named by a create by the name its request gives after the path it gives, as the
+identifiers say the API's creates take one (`with_paths`, `path`: CreateUser's `UserName` after its `Path`), and by
+any other operation by its name, the reader asking the service for the ARN it holds under it, path included. An
+operation whose API reference says the caller needs permission on its old and its new name also names the resource
+under the name and the path its request moves it to (`with_renames`, `renames`: UpdateGroup's `NewGroupName` and
+`NewPath`); one whose API reference says it acts on the user who signs it names that user when its request leaves out
+the member that would name another (`with_signing_user`, `signer`: GetUser with no `UserName`, ChangePassword always),
+which the reader asks the service that holds the signing key for; a member whose API reference says its value is the
+resource's ARN names the resource by it (`with_same_as_arn`: TagMFADevice's `SerialNumber`); and a type the format of a
+member's identifier names is named through that member (`with_formats`: GetServiceLinkedRoleDeletionStatus's
+`DeletionTaskId`, the role the task deleted).
 A qualified type the reference gives an action, one whose format is another type's and one more `:${...}` (Lambda's
 `function alias` and `function version`), which no member fills alone, is named by that type's member and the
 request's one member documented as naming the qualified types ("The version number or alias name"): Lambda's
@@ -308,6 +321,7 @@ from pathlib import Path
 import fetch_apigateway_arn_formats
 import fetch_athena_glue_ddl_permissions
 import fetch_dynamodb_permissions
+import fetch_iam_identifiers
 import fetch_kms_api_permissions
 from regen_iam_authorized_actions import (ROUTES as ROUTES_FILE, authorized_actions, fetch_references,
                                           load_s3_required, s3_query_parameters, s3_version_choices,
@@ -340,10 +354,10 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs",
-              "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms", "dynamodb")
+              "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms", "dynamodb", "iam")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
-HAND_BUILT = ("iam",)
+HAND_BUILT = ()
 
 # ---------------------------------------------------------------------------------------------------------------------
 # MEASURED: what AWS was measured to check where neither botocore nor the Service Reference says it.
@@ -427,6 +441,20 @@ MEASURED: dict[str, tuple[list[dict], str]] = {
        for operation in ("SendTaskSuccess", "SendTaskFailure", "SendTaskHeartbeat")},
     **{operation: ([{"action": "kms:Decrypt", "of": "snapshot"}], _SNAPSHOT_KEY_EVIDENCE)
        for operation in ("redshift:RestoreFromClusterSnapshot", "redshift-serverless:RestoreFromSnapshot")},
+    "iam:UpdateDelegationRequest": (
+        [{"type": "delegation-request", "fill": {"DelegationRequestId": "DelegationRequestId"}}],
+        "the IAM API reference, 'UpdateDelegationRequest' "
+        "(https://docs.aws.amazon.com/IAM/latest/APIReference/API_UpdateDelegationRequest.html): 'Once a delegation "
+        "request has an owner, that owner gets a default permission to update the delegation request', its "
+        "DelegationRequestId being 'The unique identifier of the delegation request to update'; and the IAM User "
+        "Guide, 'IAM temporary delegation' "
+        "(https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies-temporary-delegation.html): its permissions "
+        "table lists 'iam:UpdateDelegationRequest Forward a delegation request to an administrator for approval', and "
+        "'By default, IAM principals who initiate a delegation request are automatically granted permissions to manage "
+        "that specific request. They can associate it with their account, view request details, reject a request, "
+        "forward it to an administrator for approval, release the exchange token to the product provider after admin "
+        "approval, and list delegation requests that they own'; the Service Reference lists the other delegation "
+        "request actions on delegation-request and not this one"),
 }
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -477,17 +505,26 @@ PATH_SOURCES: dict[str, Path] = {
 # read items using PartiQL for DynamoDB, you must have dynamodb:PartiQLSelect permission on the table or index";
 # "Permissions for Put, Update, Delete, and Get actions are governed by the permissions used for the underlying
 # PutItem, UpdateItem, DeleteItem, and GetItem operations"); tools/aws/fetch_dynamodb_permissions.py vendors those
-# pages and `item_resources` and `statement_resources` read them. Each file is written by its own script from the
-# pages, unchanged, and the generator only reads it: nothing about an operation is stated here.
+# pages and `item_resources` and `statement_resources` read them. And granted for IAM: its identifiers give each
+# type's ARN with a name and its path ("arn:aws:iam::account:user/user-name-with-path"; "If you use the IAM API or AWS
+# Command Line Interface (AWS CLI) to create IAM resources, you can add an optional path") and its API reference what
+# an operation acts on where its request does not say ("If you do not specify a user name, IAM determines the user name
+# implicitly based on the AWS access key ID used to sign the request to this operation"; "must have permission to
+# change the role group with the old name and the new name"); tools/aws/fetch_iam_identifiers.py vendors those pages
+# and `with_paths`, `with_renames`, `with_signing_user`, `with_same_as_arn` and `with_formats` read them. Each file is
+# written by its own script from the pages, unchanged, and the generator only reads it: nothing about an operation is
+# stated here.
 # ---------------------------------------------------------------------------------------------------------------------
 PERMISSION_SOURCES: dict[str, Path] = {
     "kms": REPO_ROOT / "tools/aws/sources/kms-api-permissions.json",
     "dynamodb": REPO_ROOT / "tools/aws/sources/dynamodb-permissions.json",
+    "iam": REPO_ROOT / "tools/aws/sources/iam-identifiers.json",
 }
 # The script that writes each namespace's permission source, whose pages `verify_permission_sources` reads it against.
 PERMISSION_FETCHERS = {
     "kms": fetch_kms_api_permissions,
     "dynamodb": fetch_dynamodb_permissions,
+    "iam": fetch_iam_identifiers,
 }
 # A resource a permissions row's list names, after the action it is checked as when it names one: "kms:ReEncryptFrom
 # on the KMS key used to decrypt", "The alias (in an IAM policy)"; an action checked on no resource names none ("in an
@@ -2473,6 +2510,17 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
             if each:
                 resources = each
                 actions = {action: known[action] for action in dict.fromkeys(row["action"] for row in each)}
+        if source is not None and "arns" in source:
+            name = operation.split(":", 1)[1]
+
+            def of_operation(key: str) -> list[dict]:
+                return [found for found in source[key] if found["operation"] == name]
+
+            resources = with_paths(resources, operation, source["arns"], formats, models)
+            resources = with_renames(resources, operation, of_operation("bothNames"), source["arns"], formats, models)
+            resources = with_signing_user(resources, operation, types, of_operation("signingUser"), models)
+            resources = with_same_as_arn(resources, operation, types, of_operation("sameAsArn"), formats, models)
+            resources = with_formats(resources, operation, types, of_operation("formats"), models)
     uses = MEASURED.get(operation, (None, ""))[0]
     # An entry naming only another action AWS checks gives the operation no resources of its own.
     if uses is not None and not (uses and all("action" in use for use in uses)):
@@ -3225,6 +3273,165 @@ def statement_resources(operation: str, source: dict, known: dict[str, list[str]
                          "verb": action.split(":", 1)[1][len(shape_name) - 9:].upper(), "names": names,
                          "action": action})
     return rows
+
+
+def _name_words(phrase: str) -> list[str]:
+    """The words of a phrase or a member's name, lowercased, a name split where its case changes (`UserName`: `user`,
+    `name`; `VirtualMFADeviceName`: `virtual`, `mfa`, `device`, `name`)."""
+    return [word.lower() for word in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z0-9]+", phrase)]
+
+
+def path_types(arns: dict, formats: dict[str, str]) -> dict[str, tuple[list[str], str]]:
+    """The types whose ARN the vendored identifiers write with a name and its path, each with the words of that name and
+    the word naming the path: a type whose format's resource is a literal and one variable, as a line of the
+    identifiers' syntax of its namespace writes it with a variable ending `-with-path` ("arn:aws:iam::{account}:user/
+    {user-name-with-path}", the type `user` of `user/${UserNameWithPath}`: `user`, `name` and `path`)."""
+    found: dict[str, tuple[list[str], str]] = {}
+    for line in arns.get("syntax", []):
+        parts = line.split(":", 5)
+        match = re.fullmatch(r"(?P<literal>[^{]*)\{(?P<name>[a-z0-9-]+)-with-(?P<path>[a-z]+)}", parts[5]) \
+            if len(parts) == 6 else None
+        if match is None:
+            continue
+        for kind, arn in formats.items():
+            resource = _resource(arn)
+            if arn.split(":")[2] == parts[2] and ONE_VARIABLE_RE.match(resource) \
+                    and resource.split("${", 1)[0] == match.group("literal"):
+                found[kind] = (match.group("name").split("-"), match.group("path"))
+    return found
+
+
+def _named_member(words: list[str], members: list[str]) -> str | None:
+    """The one member whose name holds every word given (`user`, `name`: `UserName`; `virtual`, `device`, `name`:
+    `VirtualMFADeviceName`, beside its `mfa`) and is not named after another (`New...`)."""
+    named = [member for member in members
+             if set(words) <= set(_name_words(member)) and "new" not in _name_words(member)]
+    return named[0] if len(named) == 1 else None
+
+
+def with_paths(resources: list[dict], operation: str, arns: dict, formats: dict[str, str],
+               models: dict[str, dict]) -> list[dict]:
+    """The resources, a type the vendored identifiers write with a name and its path (`path_types`) taking both from
+    a request giving its path, as the identifiers say the API's creates do ("If you use the IAM API or AWS Command Line
+    Interface (AWS CLI) to create IAM resources, you can add an optional path"): its variable is the name the member
+    holding every word of the name gives (`UserName`), after the path the member named as the path gives (`Path`,
+    `path`), and is never looked up, the resource being one the request makes. CreateUser's `UserName` and `Path` name
+    `user/<path><name>`."""
+    if not any(re.search(r"\bcreate\b.*\bpath\b", sentence) for sentence in arns.get("paths", [])):
+        return resources
+    members = list(_request_shapes(models, operation.split(":", 1)[1]))
+    kinds = path_types(arns, formats)
+    found = []
+    for resource in resources:
+        kind = resource.get("type")
+        variables = [v for v in VARIABLE_RE.findall(formats.get(kind, "")) if v not in KNOWN_VARIABLES]
+        if kind not in kinds or len(variables) != 1 or "fill" not in resource \
+                or {"find", "default", "when", "unless"} & set(resource):
+            found.append(resource)
+            continue
+        words, path = kinds[kind]
+        path_member = path[:1].upper() + path[1:]
+        name = _named_member(words, members)
+        if path_member not in members or name is None:
+            found.append(resource)
+            continue
+        found.append(dict(resource, fill={variables[0]: name}, path=path_member))
+    return found
+
+
+def with_renames(resources: list[dict], operation: str, sentences: list[dict], arns: dict, formats: dict[str, str],
+                 models: dict[str, dict]) -> list[dict]:
+    """The resources, and the one an operation renames or moves, as its vendored API reference says the caller needs
+    permission on both ("must have permission to change the role group with the old name and the new name"; "on both
+    the source object and the target object"): of a type the identifiers write with a name and its path, it is the
+    resource its request names by the member filling that type's variable (`renames`, UpdateGroup's `GroupName`), with
+    the name the member of that name after `New` gives (`NewGroupName`) and the path the one named as the path after
+    `New` does (`NewPath`), each where the request gives it, and the resource's own otherwise."""
+    if not sentences:
+        return resources
+    members = list(_request_shapes(models, operation.split(":", 1)[1]))
+    kinds = path_types(arns, formats)
+    found = list(resources)
+    for resource in resources:
+        kind = resource.get("type")
+        fill = resource.get("fill") or {}
+        if kind not in kinds or len(fill) != 1 or set(resource) - {"type", "fill"}:
+            continue
+        (variable, member), = fill.items()
+        renamed, moved = "New" + member, "New" + kinds[kind][1][:1].upper() + kinds[kind][1][1:]
+        if renamed not in members or moved not in members:
+            raise ValueError(f"{operation}: its vendored API reference says it renames its {kind}, which its request "
+                             f"gives no {renamed} and {moved} of")
+        found.append({"type": kind, "fill": {variable: renamed}, "path": moved, "renames": member})
+    if found == resources:
+        raise ValueError(f"{operation}: its vendored API reference says it renames a resource its request names no "
+                         f"type of the identifiers' with a path of")
+    return found
+
+
+def with_signing_user(resources: list[dict], operation: str, types: list[str], sentences: list[dict],
+                      models: dict[str, dict]) -> list[dict]:
+    """The resources, and the user who signs the request, which the reader asks the service holding the key it is
+    signed with for (`signer`), as the operation's vendored API reference says it acts on ("If you do not specify a user
+    name, IAM determines the user name implicitly based on the AWS access key ID used to sign the request to this
+    operation"; "If this value is not specified, then the operation assumes the user whose credentials are used to
+    call the operation"; "Changes the password of the IAM user who is calling this operation"): `when` the request
+    leaves out the member the sentence is of, or that its words name (`UserName`, "user name"), and always where they
+    name none. The type is the one of the action's the sentences name by a word of theirs."""
+    if not sentences:
+        return resources
+    members = list(_request_shapes(models, operation.split(":", 1)[1]))
+    named: set[str | None] = set()
+    kinds: set[str] = set()
+    for sentence in sentences:
+        words = re.findall(r"[A-Za-z]+", sentence["sentence"])
+        member = sentence["parameter"] if sentence["parameter"] in members else next(
+            (joined for start in range(len(words)) for end in range(start + 1, min(start + 3, len(words)) + 1)
+             if (joined := "".join(word[:1].upper() + word[1:] for word in words[start:end])) in members), None)
+        named.add(member)
+        kinds |= {kind for kind in types if kind in set(_name_words(sentence["sentence"]))}
+    if len(named) != 1 or len(kinds) != 1:
+        raise ValueError(f"{operation}: its vendored API reference says it acts on the user signing it, when the "
+                         f"request leaves out {sorted(named, key=str)}, of the types {sorted(kinds)}, not one of each")
+    member = named.pop()
+    return resources + [{"types": [kinds.pop()], "signer": True, **({"when": {member: [None]}} if member else {})}]
+
+
+def with_same_as_arn(resources: list[dict], operation: str, types: list[str], sentences: list[dict],
+                     formats: dict[str, str], models: dict[str, dict]) -> list[dict]:
+    """The resources, and those a member names whose vendored API reference says its value is the resource's ARN ("For
+    virtual MFA devices, the serial number is the same as the ARN", of TagMFADevice's `SerialNumber`), of each type the
+    action acts on, each ARN read by its format."""
+    members = list(_request_shapes(models, operation.split(":", 1)[1]))
+    found = list(resources)
+    for sentence in sentences:
+        if sentence["parameter"] not in members:
+            raise ValueError(f"{operation}: its vendored API reference says {sentence['parameter']} holds an ARN, "
+                             f"which its request has no member of")
+        row = {"types": [kind for kind in types if kind in formats], "arn": sentence["parameter"]}
+        if row["types"] and row not in found:
+            found.append(row)
+    return found
+
+
+def with_formats(resources: list[dict], operation: str, types: list[str], sentences: list[dict],
+                 models: dict[str, dict]) -> list[dict]:
+    """The resources, and the type a member's vendored API reference gives the format of its identifier in, whose
+    variables are named by words a type the action acts on is named by ("This identifier is returned by the
+    DeleteServiceLinkedRole operation in the format task/aws-service-role/<service-principal-name>/<role-name>/
+    <task-uuid>", of GetServiceLinkedRoleDeletionStatus's `DeletionTaskId`, naming its `role`), named through that
+    member, which the reader asks the service for, where the rules read no resource of that type."""
+    members = list(_request_shapes(models, operation.split(":", 1)[1]))
+    found = list(resources)
+    for sentence in sentences:
+        given = re.search(r"\bin the format (?P<format>\S+)", sentence["sentence"])
+        placeholders = {word for name in re.findall(r"<([a-z-]+)>", given.group("format") if given else "")
+                        for word in name.split("-")}
+        kinds = [kind for kind in types if kind in placeholders
+                 and not any(kind in _kinds(resource) for resource in resources)]
+        if sentence["parameter"] in members and kinds:
+            found.append({"types": kinds, "through": sentence["parameter"]})
+    return found
 
 
 def read_resources(operation: str, types: list[str], formats: dict[str, str], models: dict[str, dict]) -> list[dict]:
@@ -4470,13 +4677,20 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
                 or not FILL_PATH_RE.match(resource["statement"]) or not re.fullmatch(r"[A-Z]+", str(resource["verb"])):
             return [f"{operation} names {resource!r}, which is no statement member, verb and types its action acts on"]
         return []
+    if isinstance(resource, dict) and "signer" in resource:
+        kinds = _kinds(resource)
+        if not {"types", "signer"} <= set(resource) <= {"types", "signer", "when"} or resource["signer"] is not True \
+                or len(kinds) != 1 or not all(kind in types and kind in formats for kind in kinds):
+            return [f"{operation} names {resource!r}, which is no type its action acts on signed for"]
+        return _conditions_problems(operation, kinds, resource)
     if not isinstance(resource, dict) or not ({"types", "arn"} <= set(resource) <= {"types", "arn", "made", "endpoint"}
                                               or {"types", "through"} <= set(resource) <= {"types", "through", "when",
                                                                                             "endpoint"}
                                               or {"type", "fill"} <= set(resource) <= {"type", "fill", "when", "unless", "arnOf", "account",
                                                                                        "fixed", "made", "find", "endpoint",
                                                                                        "default", "whenDefault", "unlessDefault",
-                                                                                       "defaults", "partialArn"}):
+                                                                                       "defaults", "partialArn", "path",
+                                                                                       "renames"}):
         return [f"{operation} names {resource!r}, which is neither an ARN member nor a type's variables"]
     for key in ("whenDefault", "unlessDefault"):
         pair = resource.get(key)
@@ -4543,6 +4757,14 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
     if account is not None and (not isinstance(account, str) or not PATH_RE.match(account) or account.endswith("[]")
                                 or "${Account}" not in formats[kinds[0]]):
         return [f"{operation} takes {kinds[0]}'s account from {account!r}, which is no member or no account of its ARN"]
+    for key in ("path", "renames"):
+        if key in resource and (not isinstance(resource[key], str) or not PATH_RE.match(resource[key])
+                                or resource[key].endswith("[]") or len(fill) != 1
+                                or set(resource) & {"find", "default", "when", "unless", "partialArn"}):
+            return [f"{operation} reads {kinds[0]}'s {key} from {resource[key]!r}, which is no member beside the one "
+                    f"filling its variable"]
+    if "renames" in resource and "path" not in resource:
+        return [f"{operation} renames {kinds[0]} with no member naming its path"]
     if resource.get("partialArn", True) is not True or ("partialArn" in resource and not fill):
         return [f"{operation} reads {kinds[0]} from a partial ARN {resource.get('partialArn')!r}, which is not true for a "
                 f"type filled by its members"]

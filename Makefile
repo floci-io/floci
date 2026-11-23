@@ -630,7 +630,8 @@ IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json
 	tools/aws/test_fetch_apigateway_arn_formats.py src/main/resources/aws/iam-authorized-actions.json \
 	tools/aws/sources/kms-api-permissions.json tools/aws/fetch_kms_api_permissions.py \
 	tools/aws/test_fetch_kms_api_permissions.py tools/aws/sources/dynamodb-permissions.json \
-	tools/aws/fetch_dynamodb_permissions.py tools/aws/test_fetch_dynamodb_permissions.py
+	tools/aws/fetch_dynamodb_permissions.py tools/aws/test_fetch_dynamodb_permissions.py \
+	tools/aws/sources/iam-identifiers.json tools/aws/fetch_iam_identifiers.py tools/aws/test_fetch_iam_identifiers.py
 
 iam-data-verify: ## CI gate (online): every vendored IAM file must still match AWS; CHANGED="<paths>" checks only the ones they cover
 	@# Every check runs even when an earlier one fails, so one file's drift cannot hide another's

@@ -789,6 +789,14 @@ public class IamQueryHandler {
     }
 
     private Response handleCreateOpenIDConnectProvider(MultivaluedMap<String, String> params) {
+        // The reference gives IdentityCenterInstanceArn as "The Amazon Resource Name (ARN) of the IAM Identity Center
+        // instance to associate with the OpenID Connect (OIDC) provider": any other ARN is a value IAM does not take,
+        // so no provider is made on it, as none is under the name of a provider it might otherwise name.
+        String identityCenterInstance = getParam(params, "IdentityCenterInstanceArn");
+        if (identityCenterInstance != null && !isIdentityCenterInstance(identityCenterInstance)) {
+            throw new AwsException("InvalidInput",
+                    "IdentityCenterInstanceArn must be the ARN of an IAM Identity Center instance.", 400);
+        }
         OpenIDConnectProvider provider = iamService.createOpenIDConnectProvider(
                 getParam(params, "Url"),
                 getMemberList(params, "ClientIDList"),
@@ -799,6 +807,16 @@ public class IamQueryHandler {
             xml.start("Tags").raw(tagsXml(provider.getTags())).end("Tags");
         }
         return Response.ok(AwsQueryResponse.envelope("CreateOpenIDConnectProvider", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /** Whether {@code arn} is an IAM Identity Center instance's ARN, {@code arn:<partition>:sso:::instance/<id>}. */
+    private static boolean isIdentityCenterInstance(String arn) {
+        if (!AwsArnUtils.isArn(arn)) {
+            return false;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return "sso".equals(parsed.service()) && parsed.resource().startsWith("instance/")
+                && parsed.resource().length() > "instance/".length();
     }
 
     // The response carries no ARN: AWS echoes back the scheme-less Url, and the caller already

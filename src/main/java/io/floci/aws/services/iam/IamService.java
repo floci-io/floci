@@ -4504,6 +4504,31 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .toList();
     }
 
+    /** The user an SSH public key of that id belongs to, when one is stored, for callers that must not throw. */
+    public Optional<String> findSshPublicKeyOwner(String keyId) {
+        return keyId == null ? Optional.empty() : sshPublicKeys.get(keyId).map(SshPublicKey::getUserName);
+    }
+
+    /** The user a service-specific credential of that id belongs to, when one is stored, without throwing. */
+    public Optional<String> findServiceSpecificCredentialOwner(String credentialId) {
+        return credentialId == null ? Optional.empty()
+                : serviceCredentials.get(credentialId).map(ServiceSpecificCredential::getUserName);
+    }
+
+    /**
+     * The ARN of the service-linked role a deletion task of that id deleted, in the request's partition and account:
+     * the role's path and name as the id {@link #deleteServiceLinkedRole} minted holds them
+     * ({@code task/aws-service-role/<service-principal-name>/<role-name>/<task-uuid>}); empty when no such task is
+     * held.
+     */
+    public Optional<String> findServiceLinkedRoleDeletionArn(String deletionTaskId) {
+        if (deletionTaskId == null || serviceLinkedRoleDeletions.get(deletionTaskId).isEmpty()) {
+            return Optional.empty();
+        }
+        String pathAndName = deletionTaskId.substring("task".length(), deletionTaskId.lastIndexOf('/'));
+        return Optional.of(regionResolver.buildGlobalArn("iam", "role" + pathAndName));
+    }
+
     // Service-specific credentials
     // =========================================================================
 

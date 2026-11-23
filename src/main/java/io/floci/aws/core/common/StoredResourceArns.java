@@ -26,7 +26,10 @@ import java.util.Optional;
  * Cryptography, for the key an alias names and the tags of a key; KMS, for the key an id, an alias or an
  * ARN names, the key an alias points at, a grant is on or a ciphertext was encrypted under, and the tags of a key;
  * EMR, for the clusters of its instance groups and a
- * tag call's resource and the tags of a cluster or a session; IAM Identity Center, for the accounts its permission
+ * tag call's resource and the tags of a cluster or a session; IAM, for the user, group, role, instance profile or
+ * server certificate a name names, path included, the user an access key, an SSH public key or a service-specific
+ * credential belongs to, the role a service-linked role deletion task deleted and the user who signs a request; IAM
+ * Identity Center, for the accounts its permission
  * sets are provisioned to and the tags of an instance,
  * a permission set, an application or a trusted token issuer; Resource Explorer, for its default view and the tags
  * of an index or a view; OAM and RAM, for the sinks, invitations and shares of other accounts they act on, OAM for
@@ -153,6 +156,16 @@ public interface StoredResourceArns {
      * that verb; empty when it reads no such statement, which its handler then refuses.
      */
     default Optional<Statement> statement(String statement) {
+        return Optional.empty();
+    }
+
+    /**
+     * The ARN of the user whose access key {@code accessKeyId} is, as the service that issued the key stores the user,
+     * path included, or its account's root user's for a key of the root: the user an operation acting on the user who
+     * signs it acts on (IAM's {@code GetUser} with no {@code UserName}). Empty for a key of no user, as a role
+     * session's, which such an operation refuses, and for one the service did not issue.
+     */
+    default Optional<String> signedBy(String accessKeyId) {
         return Optional.empty();
     }
 

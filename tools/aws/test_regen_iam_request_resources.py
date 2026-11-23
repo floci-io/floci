@@ -3208,3 +3208,119 @@ def test_a_statement_resource_names_its_member_verb_and_every_variable_of_its_ty
     for bad in (dict(good, verb="select"), dict(good, names={"TableName": "table"}),
                 dict(good, statement="a.b.c.d"), dict(good, types=["stream"])):
         assert r._resource_problems("dynamodb:BatchExecuteStatement", bad, {"index", "table"}, TABLES_FORMATS)
+
+
+# --------------------------------------------------------------------------- #
+# PERMISSION_SOURCES: the vendored IAM identifiers
+# --------------------------------------------------------------------------- #
+USERS_FORMATS = {"user": "arn:${Partition}:iam::${Account}:user/${UserNameWithPath}",
+                 "group": "arn:${Partition}:iam::${Account}:group/${GroupNameWithPath}",
+                 "saml-provider": "arn:${Partition}:iam::${Account}:saml-provider/${SamlProviderName}",
+                 "mfa": "arn:${Partition}:iam::${Account}:mfa/${MfaTokenIdWithPath}",
+                 "role": "arn:${Partition}:iam::${Account}:role/${RoleNameWithPath}"}
+USERS_ARNS = {"syntax": ["arn:aws:iam::{account}:root", "arn:aws:iam::{account}:user/{user-name-with-path}",
+                         "arn:aws:iam::{account}:group/{group-name-with-path}",
+                         "arn:aws:iam::{account}:mfa/{virtual-device-name-with-path}",
+                         "arn:aws:iam::{account}:saml-provider/{provider-name}"],
+              "paths": ["If you use the IAM API or AWS Command Line Interface (AWS CLI) to create IAM resources, you "
+                        "can add an optional path."]}
+
+
+def iam_model() -> dict:
+    """A model shaped as IAM's: creates taking a path, a rename, an operation acting on its signer, a device by its
+    serial number and a deletion task."""
+    shapes = {"name": {"type": "string"}}
+    members = {
+        "CreateUser": ["Path", "UserName"], "CreateVirtualMFADevice": ["Path", "VirtualMFADeviceName"],
+        "UpdateGroup": ["GroupName", "NewPath", "NewGroupName"], "UpdateUser": ["UserName", "NewUserName"],
+        "GetUser": ["UserName"], "ChangePassword": ["OldPassword", "NewPassword"], "TagMFADevice": ["SerialNumber"],
+        "GetServiceLinkedRoleDeletionStatus": ["DeletionTaskId"],
+    }
+    for operation, names in members.items():
+        shapes[f"{operation}Request"] = {"type": "structure", "members": {name: {"shape": "name"} for name in names}}
+    operations = {name: {"name": name, "input": {"shape": f"{name}Request"}} for name in members}
+    return {"metadata": {"protocol": "query", "endpointPrefix": "iam"}, "operations": operations, "shapes": shapes}
+
+
+def test_the_identifiers_give_the_types_whose_arn_holds_a_name_after_its_path():
+    assert r.path_types(USERS_ARNS, USERS_FORMATS) == {
+        "user": (["user", "name"], "path"), "group": (["group", "name"], "path"),
+        "mfa": (["virtual", "device", "name"], "path")}
+
+
+def test_a_create_names_what_it_makes_by_its_name_after_its_path():
+    models = {"iam": iam_model()}
+    assert r.with_paths([{"type": "user", "fill": {"UserNameWithPath": "Path"}}], "iam:CreateUser", USERS_ARNS,
+                        USERS_FORMATS, models) == [
+        {"type": "user", "fill": {"UserNameWithPath": "UserName"}, "path": "Path"}]
+    assert r.with_paths([{"type": "mfa", "fill": {"MfaTokenIdWithPath": "Path"}}], "iam:CreateVirtualMFADevice",
+                        USERS_ARNS, USERS_FORMATS, models) == [
+        {"type": "mfa", "fill": {"MfaTokenIdWithPath": "VirtualMFADeviceName"}, "path": "Path"}]
+    # A request giving no path, and identifiers saying nothing of paths a create gives, leave the resources as they are.
+    named = [{"type": "user", "fill": {"UserNameWithPath": "UserName"}}]
+    assert r.with_paths(named, "iam:GetUser", USERS_ARNS, USERS_FORMATS, models) == named
+    assert r.with_paths([{"type": "user", "fill": {"UserNameWithPath": "Path"}}], "iam:CreateUser",
+                        dict(USERS_ARNS, paths=[]), USERS_FORMATS, models) == [
+        {"type": "user", "fill": {"UserNameWithPath": "Path"}}]
+
+
+def test_a_rename_also_names_the_resource_under_its_new_name_and_path():
+    models = {"iam": iam_model()}
+    sentence = [{"operation": "UpdateGroup", "parameter": None,
+                 "sentence": "The person making the request (the principal), must have permission to change the role "
+                             "group with the old name and the new name."}]
+    old = [{"type": "group", "fill": {"GroupNameWithPath": "GroupName"}}]
+    assert r.with_renames(old, "iam:UpdateGroup", sentence, USERS_ARNS, USERS_FORMATS, models) == old + [
+        {"type": "group", "fill": {"GroupNameWithPath": "NewGroupName"}, "path": "NewPath", "renames": "GroupName"}]
+    assert r.with_renames(old, "iam:UpdateGroup", [], USERS_ARNS, USERS_FORMATS, models) == old
+    # A rename whose request gives no new path is refused rather than read half.
+    with pytest.raises(ValueError, match="no NewUserName and NewPath"):
+        r.with_renames([{"type": "user", "fill": {"UserNameWithPath": "UserName"}}], "iam:UpdateUser", sentence,
+                       USERS_ARNS, USERS_FORMATS, models)
+
+
+def test_an_operation_acting_on_its_signer_names_that_user_when_its_request_names_none():
+    models = {"iam": iam_model()}
+    get_user = [{"operation": "GetUser", "parameter": None,
+                 "sentence": "If you do not specify a user name, IAM determines the user name implicitly based on the "
+                             "AWS access key ID used to sign the request."},
+                {"operation": "GetUser", "parameter": "UserName",
+                 "sentence": "If it is not included, it defaults to the user making the request."}]
+    assert r.with_signing_user([], "iam:GetUser", ["user"], get_user, models) == [
+        {"types": ["user"], "signer": True, "when": {"UserName": [None]}}]
+    change = [{"operation": "ChangePassword", "parameter": None,
+               "sentence": "Changes the password of the IAM user who is calling this operation."}]
+    assert r.with_signing_user([], "iam:ChangePassword", ["user"], change, models) == [
+        {"types": ["user"], "signer": True}]
+    assert r.with_signing_user([], "iam:GetUser", ["user"], [], models) == []
+    with pytest.raises(ValueError, match="not one of each"):
+        r.with_signing_user([], "iam:GetUser", ["group"], get_user, models)
+
+
+def test_a_member_whose_value_is_the_resources_arn_names_it_and_a_formats_type_is_named_through_it():
+    models = {"iam": iam_model()}
+    serial = [{"operation": "TagMFADevice", "parameter": "SerialNumber",
+               "sentence": "For virtual MFA devices, the serial number is the same as the ARN."}]
+    assert r.with_same_as_arn([], "iam:TagMFADevice", ["mfa"], serial, USERS_FORMATS, models) == [
+        {"types": ["mfa"], "arn": "SerialNumber"}]
+    task = [{"operation": "GetServiceLinkedRoleDeletionStatus", "parameter": "DeletionTaskId",
+             "sentence": "This identifier is returned by the DeleteServiceLinkedRole operation in the format "
+                         "task/aws-service-role/<service-principal-name>/<role-name>/<task-uuid>."}]
+    assert r.with_formats([], "iam:GetServiceLinkedRoleDeletionStatus", ["role"], task, models) == [
+        {"types": ["role"], "through": "DeletionTaskId"}]
+    named = [{"type": "role", "fill": {"RoleNameWithPath": "RoleName"}}]
+    assert r.with_formats(named, "iam:GetServiceLinkedRoleDeletionStatus", ["role"], task, models) == named
+
+
+def test_a_resource_named_after_its_path_or_signed_for_is_checked():
+    types = {"user", "group"}
+    good = {"type": "user", "fill": {"UserNameWithPath": "UserName"}, "path": "Path"}
+    renamed = {"type": "group", "fill": {"GroupNameWithPath": "NewGroupName"}, "path": "NewPath",
+               "renames": "GroupName"}
+    signer = {"types": ["user"], "signer": True, "when": {"UserName": [None]}}
+    for resource in (good, renamed, signer, {"types": ["user"], "signer": True}):
+        assert r._resource_problems("iam:Op", resource, types, USERS_FORMATS) == [], resource
+    for bad in (dict(good, path="Paths[]"), dict(good, find=["UserName"]), dict(renamed, path=None),
+                {"type": "group", "fill": {"GroupNameWithPath": "NewGroupName"}, "renames": "GroupName"},
+                dict(signer, signer="yes"), dict(signer, types=["user", "group"]), dict(signer, fill={})):
+        assert r._resource_problems("iam:Op", bad, types, USERS_FORMATS), bad
