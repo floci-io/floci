@@ -34,9 +34,9 @@ jobs:
     # EmrDockerRunnerNightlyIntegrationTest's eleven two-minute tests and two-minute setup,
     # EmrClusterShrinkNightlyIntegrationTest's sixteen-minute method and two-minute setup, and
     # EmrContainersSparkNightlyIntegrationTest's three six-minute methods, eleven-minute method, two-minute setup before
-    # each and 21-minute image pull, and EmrContainersGatewayNightlyIntegrationTest's twenty-minute and seven-minute
-    # methods and 21-minute image pull, 148 minutes. A check added, or a bound raised, raises its group's timeout with
-    # it, so a slow check fails with its own message.
+    # each and 21-minute image pull, and EmrContainersGatewayNightlyIntegrationTest's twenty-minute, seven-minute and
+    # eighteen-minute methods and 21-minute image pull, 166 minutes. A check added, or a bound raised, raises its
+    # group's timeout with it, so a slow check fails with its own message.
     strategy:
       fail-fast: false
       matrix:
@@ -44,7 +44,7 @@ jobs:
           - group: standard
             timeout: 359
           - group: docker-runner
-            timeout: 168
+            timeout: 186
     timeout-minutes: ${{ matrix.timeout }}
     # A fork's schedule would spend its owner's minutes on checks it never asked for; a draft waits until it is
     # ready for review, as the CI shards do.
