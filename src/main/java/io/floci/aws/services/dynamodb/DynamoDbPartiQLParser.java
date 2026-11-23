@@ -1243,6 +1243,15 @@ public class DynamoDbPartiQLParser {
                 + "operator or function: " + op + ", operand type: " + type;
     }
 
+    static String incorrectOperandCount(String function, int count) {
+        return "Incorrect number of operands for operator or function; operator or function: "
+                + function + ", number of operands: " + count;
+    }
+
+    static String documentPathRequired(String function) {
+        return "Operator or function requires a document path; operator or function: " + function;
+    }
+
     private Cond parseCond() {
         if (STATEMENT_STARTS.contains(peek().type())) {
             Token start = peek();
@@ -1448,8 +1457,7 @@ public class DynamoDbPartiQLParser {
 
     private void checkOperands(String function, List<Argument> operands) {
         if (operands.size() != CONDITION_FUNCTION_OPERANDS.getOrDefault(function, LIST_APPEND_OPERANDS)) {
-            deferExpression("Incorrect number of operands for operator or function; operator or function: "
-                    + function + ", number of operands: " + operands.size());
+            deferExpression(incorrectOperandCount(function, operands.size()));
             return;
         }
         Argument first = operands.getFirst();
@@ -1457,8 +1465,7 @@ public class DynamoDbPartiQLParser {
         switch (function) {
             case "attribute_exists", "attribute_not_exists" -> {
                 if (first.path() == null) {
-                    deferExpression("Operator or function requires a document path; operator or function: "
-                            + function);
+                    deferExpression(documentPathRequired(function));
                 }
             }
             case "size" -> {

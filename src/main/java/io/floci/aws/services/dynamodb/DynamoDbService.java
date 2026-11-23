@@ -4938,7 +4938,7 @@ public class DynamoDbService {
             return;
         }
         validateAttributeValueShape(attr);
-        String expectedType = keyAttributeType(table, keyName);
+        String expectedType = table.attributeType(keyName);
         if (expectedType != null && !attr.has(expectedType)) {
             if (surface == KeySurface.ITEM_BODY) {
                 throw new KeySchemaMismatchException(
@@ -4953,16 +4953,6 @@ public class DynamoDbService {
         if (attr.has("B") && attr.get("B").asText().isEmpty()) {
             throw DynamoDbKeyValueErrors.emptyKeyValue("B", keyName);
         }
-    }
-
-    private String keyAttributeType(TableDefinition table, String keyName) {
-        if (table.getAttributeDefinitions() == null) {
-            return null;
-        }
-        return table.getAttributeDefinitions().stream()
-                .filter(def -> keyName.equals(def.getAttributeName()))
-                .map(AttributeDefinition::getAttributeType)
-                .findFirst().orElse(null);
     }
 
     // AWS validates GSI/LSI key attribute values on every write that produces the item,
@@ -5044,7 +5034,7 @@ public class DynamoDbService {
                 continue;
             }
             validateAttributeValueShape(attr);
-            String expectedType = keyAttributeType(table, attrName);
+            String expectedType = table.attributeType(attrName);
             if (expectedType != null && !attr.has(expectedType)) {
                 throw DynamoDbKeyValueErrors.indexKeyTypeMismatch(attrName, expectedType,
                         attr.fieldNames().next(), indexName);

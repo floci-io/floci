@@ -534,6 +534,11 @@ first, `DOT_PRODUCT` the highest. The vector attribute is left out of a result u
 `--projection-expression` names it, and when it is named the values returned are the index's own
 32 bit copies, so a `1` written to the table comes back as `1.0`.
 
+`--search-condition-expression` takes one `=` condition on the `HASH` attribute, joined to the rest
+with `AND`. An `INLINE_FILTER` attribute takes `=`, `<>`, `IN`, `attribute_exists`,
+`attribute_not_exists`, `AND`, `OR` and `NOT`. A Number one also takes `<`, `<=`, `>`, `>=` and
+`BETWEEN`.
+
 Deviations from AWS:
 
 - **The search is exact, not approximate.** AWS may return a slightly different set or order on a
