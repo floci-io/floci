@@ -2,6 +2,7 @@ package io.floci.aws.testing;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.restassured.filter.Filter;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 
@@ -9,6 +10,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.UnaryOperator;
 import java.util.zip.GZIPInputStream;
 
 import static io.restassured.RestAssured.given;
@@ -23,7 +25,7 @@ public final class CloudTrailLogFiles {
 
     /** Every record of every log file in {@code bucket}, in key order, across every page of the listing. */
     public static List<JsonNode> records(String bucket) throws IOException {
-        return records(bucket, null);
+        return records(bucket, (String) null);
     }
 
     /**
@@ -31,12 +33,23 @@ public final class CloudTrailLogFiles {
      * null, as a test under IAM enforcement needs.
      */
     public static List<JsonNode> records(String bucket, String authorization) throws IOException {
+        return records(bucket,
+                request -> authorization == null ? request : request.header("Authorization", authorization));
+    }
+
+    /** As {@link #records(String)}, with each S3 request signed by {@code signer}, where S3 checks signatures. */
+    public static List<JsonNode> records(String bucket, Filter signer) throws IOException {
+        return records(bucket, request -> request.filter(signer));
+    }
+
+    private static List<JsonNode> records(String bucket, UnaryOperator<RequestSpecification> signing)
+            throws IOException {
         List<JsonNode> records = new ArrayList<>();
-        for (String key : keys(bucket, authorization)) {
+        for (String key : keys(bucket, signing)) {
             if (!key.endsWith(".json.gz")) {
                 continue;
             }
-            byte[] gz = request(authorization).when().get("/" + bucket + "/" + key)
+            byte[] gz = signing.apply(given()).when().get("/" + bucket + "/" + key)
                     .then().statusCode(200).extract().asByteArray();
             try (GZIPInputStream in = new GZIPInputStream(new ByteArrayInputStream(gz))) {
                 MAPPER.readTree(in).path("Records").forEach(records::add);
@@ -45,11 +58,11 @@ public final class CloudTrailLogFiles {
         return records;
     }
 
-    private static List<String> keys(String bucket, String authorization) {
+    private static List<String> keys(String bucket, UnaryOperator<RequestSpecification> signing) {
         List<String> keys = new ArrayList<>();
         String token = null;
         do {
-            RequestSpecification listing = request(authorization).queryParam("list-type", "2");
+            RequestSpecification listing = signing.apply(given()).queryParam("list-type", "2");
             if (token != null) {
                 listing = listing.queryParam("continuation-token", token);
             }
@@ -59,10 +72,5 @@ public final class CloudTrailLogFiles {
                     ? page.getString("ListBucketResult.NextContinuationToken") : null;
         } while (token != null);
         return keys;
-    }
-
-    private static RequestSpecification request(String authorization) {
-        RequestSpecification request = given();
-        return authorization == null ? request : request.header("Authorization", authorization);
     }
 }
