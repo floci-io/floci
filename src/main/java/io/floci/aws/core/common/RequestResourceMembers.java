@@ -374,8 +374,7 @@ final class RequestResourceMembers {
      * The file: each operation's resources, the resource types its action acts on, the resources it creates under a
      * parent and the one a create whose action acts on no type, or on other types alone, makes ({@code makes}), as
      * {@code <namespace>:<Operation>}, the members a REST operation's request carries outside its body, each
-     * namespace's ARN formats, and the namespaces it reads, those built by hand, those not read yet, and the others
-     * with resource types. A located member is a label of the request's path, {@code {Label}}, or a parameter of its
+     * namespace's ARN formats, and the namespaces it reads, those not read yet, and the others with resource types. A located member is a label of the request's path, {@code {Label}}, or a parameter of its
      * query, {@code ?name}, by the member's name, and one the clients of an operation locate apart is under each
      * client ({@code locatedApart}), whose vendored route tells a request's client. Each operation's {@code forwarded}
      * requests are those its service makes to another as the caller, and its {@code statements} those it makes as the
@@ -392,7 +391,7 @@ final class RequestResourceMembers {
                  Map<String, Map<String, String>> located, Map<String, Map<String, ArnFormat>> formats,
                  Map<String, Map<String, List<String>>> resourceTagKeys,
                  Map<String, Map<String, Map<String, ResourceKey>>> resourceKeys,
-                 Set<String> namespaces, Set<String> handBuilt, Set<String> notCovered, Set<String> otherNamespaces,
+                 Set<String> namespaces, Set<String> notCovered, Set<String> otherNamespaces,
                  Map<String, List<Forwarded>> forwarded, Map<String, Map<String, List<StatementRequest>>> statements,
                  Map<String, Map<String, Map<String, String>>> locatedApart, Set<String> unread,
                  Map<String, Map<String, List<Resource>>> checkedAs) {
@@ -664,7 +663,6 @@ final class RequestResourceMembers {
         return new Table(Map.copyOf(entries), Map.copyOf(actsOn), Map.copyOf(creates), Map.copyOf(makes),
                 Map.copyOf(targets), Map.copyOf(ec2Query), Map.copyOf(located), Map.copyOf(formats),
                 Map.copyOf(resourceTagKeys), resourceKeys, namespaces,
-                names(document.path("handBuilt")),
                 Set.copyOf(document.path("notCovered").propertyStream().map(Map.Entry::getKey).toList()),
                 names(document.path("otherNamespaces")), Map.copyOf(forwarded), statements(document, formats),
                 Map.copyOf(locatedApart), Set.copyOf(unread), Map.copyOf(checkedAs));

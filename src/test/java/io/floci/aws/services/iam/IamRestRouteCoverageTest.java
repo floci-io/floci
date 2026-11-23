@@ -15,7 +15,6 @@ import java.io.InputStream;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -122,19 +121,16 @@ class IamRestRouteCoverageTest {
 
     /**
      * Every operation of a scope the vendored routes do not leave to the rules alone resolves to its action when
-     * Floci can check it as AWS does: its resources built by hand for its namespace or read by the vendored request
-     * resources, or none, AWS authorizing its action on no resource type. Any other operation stays unmapped,
-     * unchecked rather than checked on {@code *}, until the resources in its path are read. An operation the
-     * authorized actions list as authorized by method is the action its route's method names, and an alternative
-     * route a shared controller also serves it on is checked as the operation, by that route's own method.
+     * Floci can check it as AWS does: its resources read by the vendored request resources, or none, AWS authorizing
+     * its action on no resource type. Any other operation stays unmapped, unchecked rather than checked on {@code *},
+     * until the resources in its path are read. An operation the authorized actions list as authorized by method is
+     * the action its route's method names, and an alternative route a shared controller also serves it on is checked
+     * as the operation, by that route's own method.
      */
     @TestFactory
     Stream<DynamicTest> everyOperationOfARoutedScopeResolvesToItsActionWhenFlociCanCheckIt() throws IOException {
         JsonNode document = load("/aws/rest-routes.json");
         JsonNode models = document.path("models");
-        JsonNode requestResources = load("/aws/iam-request-resources.json");
-        Set<String> handBuilt = new HashSet<>();
-        requestResources.path("handBuilt").forEach(namespace -> handBuilt.add(namespace.asText()));
         List<DynamicTest> tests = new ArrayList<>();
         for (String model : routedModels(document)) {
             String scope = models.path(model).path("credentialScope").asText();
@@ -155,8 +151,7 @@ class IamRestRouteCoverageTest {
                         ContainerRequestContext request = route.request();
                         String action = IamAuthorizedActions.actionFor(scope, operation.getKey(), route.method(),
                                 model, request.getUriInfo().getQueryParameters());
-                        String expected = handBuilt.contains(scope) || read
-                                || IamAuthorizedActions.actsOnNoResourceType(action) ? action : null;
+                        String expected = read || IamAuthorizedActions.actsOnNoResourceType(action) ? action : null;
                         assertEquals(expected, registry.resolveRoute(scope, request), route.toString());
                     }));
                 }

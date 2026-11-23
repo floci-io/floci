@@ -371,7 +371,6 @@ def model(operations: dict[str, dict[str, str]], protocol: str = "json") -> dict
 @pytest.fixture
 def isolated(monkeypatch):
     monkeypatch.setattr(r, "NAMESPACES", ("svc",))
-    monkeypatch.setattr(r, "HAND_BUILT", ("hand",))
     monkeypatch.setattr(r, "NOT_COVERED", {"later": "a later batch"})
     monkeypatch.setattr(r, "MEASURED", {})
     monkeypatch.setattr(r, "STATEMENT_SOURCES", {})
@@ -876,7 +875,7 @@ def test_a_field_of_each_of_a_lists_structures_taking_an_arn_before_a_name_is_re
 
 
 def good_document() -> dict:
-    return {"namespaces": {"svc": ["svc"]}, "handBuilt": ["hand"],
+    return {"namespaces": {"svc": ["svc"]},
             "notCovered": {"later": "a later batch"},
             "otherNamespaces": ["other"], "arnFormats": {"svc": {"thing": FORMATS["thing"], "group": FORMATS["group"]}},
             "pathFormats": {},
@@ -1198,7 +1197,7 @@ def test_the_vendored_file_is_well_formed():
     assert document["integerVariables"] == {"lambda": {"layerVersion": ["LayerVersion"]}}
     # Lambda is read whole: a partial ARN names a function, a provisioned concurrency config acts on the version or
     # alias its Qualifier names, the action the reference gives it, and AddPermission's SourceAccount is its source's.
-    assert "lambda" in document["namespaces"] and "lambda" not in document["handBuilt"]
+    assert "lambda" in document["namespaces"]
     assert operations["lambda:Invoke"]["resources"] == [
         {"type": "function", "fill": {"FunctionName": "FunctionName"}, "partialArn": True}]
     assert operations["lambda:PublishVersion"]["resources"] == [
@@ -1220,7 +1219,7 @@ def test_the_vendored_file_is_well_formed():
         {"type": f"listener-rule/{kind}", "parent": f"listener/{kind}", "arn": "ListenerArn"} for kind in ("app", "net")]
     # S3 is read from the table: an object by its bucket and key, a bucket per client, and DeleteObjects, whose keys
     # its XML body names, left to S3.
-    assert "s3" in document["namespaces"] and "s3" not in document["handBuilt"]
+    assert "s3" in document["namespaces"]
     assert operations["s3:PutObject"]["resources"] == [
         {"type": "object", "fill": {"BucketName": "Bucket", "ObjectName": "Key"}}]
     assert operations["s3:CreateBucket"]["locatedApart"] == {"s3": {"Bucket": "{Bucket}"}, "s3control": {"Bucket": "{name}"}}
@@ -1248,25 +1247,26 @@ def test_the_vendored_file_is_well_formed():
         "type": "loadbalancer/app/", "fill": {"LoadBalancerName": "Name"}, "when": {"Type": ["application", None]}}
 
 
-MEASURED_FORMATS = {"thing": "arn:${Partition}:hand:${Region}:${Account}:thing/${ThingName}"}
+MEASURED_FORMATS = {"thing": "arn:${Partition}:probed:${Region}:${Account}:thing/${ThingName}"}
 PROBED = "real AWS probes in https://example.com/probes accept an allow and enforce a deny on thing/*"
 
 
 def measured_documents(tmp_path, listed: list[str]) -> list[dict]:
-    hand = model({"ListThings": {"StartName": "String"}})
-    hand["metadata"]["endpointPrefix"] = "hand"
-    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}), "hand": hand})
-    return DOCUMENTS + [reference("hand", {"ListThings": listed}, MEASURED_FORMATS)]
+    probed = model({"ListThings": {"StartName": "String"}})
+    probed["metadata"]["endpointPrefix"] = "probed"
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}), "probed": probed})
+    return DOCUMENTS + [reference("probed", {"ListThings": listed}, MEASURED_FORMATS)]
 
 
 def test_a_measured_operation_takes_the_resources_aws_was_measured_to_check_where_the_reference_lists_none(
         isolated, tmp_path):
-    isolated.setattr(r, "MEASURED", {"hand:ListThings": ([{"type": "thing", "fill": {}}], PROBED)})
+    isolated.setattr(r, "NAMESPACES", ("svc", "probed"))
+    isolated.setattr(r, "MEASURED", {"probed:ListThings": ([{"type": "thing", "fill": {}}], PROBED)})
     document = r.build(measured_documents(tmp_path, []), "test", tmp_path, "botocore test")
-    # Read in a namespace otherwise built by hand, keeping the reference's empty types.
-    assert document["operations"]["hand:ListThings"] == {
-        "action": "hand:ListThings", "types": [], "resources": [{"type": "thing", "fill": {}}]}
-    assert r.reads("hand:ListThings")
+    # The measured resources replace what the rules read, keeping the reference's empty types.
+    assert document["operations"]["probed:ListThings"] == {
+        "action": "probed:ListThings", "types": [], "resources": [{"type": "thing", "fill": {}}]}
+    assert r.reads("probed:ListThings")
     assert r.validate(document) == []
     assert r.derive(document, tmp_path) == []
 
@@ -1283,14 +1283,16 @@ def test_a_measured_operation_takes_the_resources_aws_was_measured_to_check_wher
 ])
 def test_a_measured_entry_is_refused_unless_it_cites_aws_for_what_the_metadata_does_not_say(
         isolated, tmp_path, measured, listed, problem):
-    isolated.setattr(r, "MEASURED", {"hand:ListThings": measured})
+    isolated.setattr(r, "NAMESPACES", ("svc", "probed"))
+    isolated.setattr(r, "MEASURED", {"probed:ListThings": measured})
     with pytest.raises(ValueError, match=problem):
         r.build(measured_documents(tmp_path, listed), "test", tmp_path, "botocore test")
 
 
 def test_a_measured_entry_must_name_an_operation_the_file_reads(isolated, tmp_path):
-    isolated.setattr(r, "MEASURED", {"hand:Gone": ([{"type": "thing", "fill": {}}], PROBED)})
-    with pytest.raises(ValueError, match="MEASURED gives hand:Gone, which the file does not read"):
+    isolated.setattr(r, "NAMESPACES", ("svc", "probed"))
+    isolated.setattr(r, "MEASURED", {"probed:Gone": ([{"type": "thing", "fill": {}}], PROBED)})
+    with pytest.raises(ValueError, match="MEASURED gives probed:Gone, which the file does not read"):
         r.build(measured_documents(tmp_path, []), "test", tmp_path, "botocore test")
 
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Regenerate src/main/resources/aws/iam-request-resources.json from AWS's Service Reference and botocore.
 
-Under IAM enforcement every request is checked against the resources it acts on. For the services
-`ResourceArnBuilder` builds them for by hand that is their ARN; for every other service it is `*`,
-so a grant scoped to a resource is refused and a deny scoped to one never applies. This file gives,
+Under IAM enforcement every request is checked against the resources it acts on. A request whose
+resources are not read is checked on `*`, so a grant scoped to a resource is refused and a deny scoped
+to one never applies. This file gives,
 for each operation of the namespaces it reads, the resources its request names, and `RequestResources`
 builds their ARNs from the request. It comes from two sources, each answering what the other cannot:
 
@@ -101,10 +101,9 @@ of its own name with that action's resource types when the reference has that ac
 the reference lists one client's operations per namespace, and
 OpenSearch Service's are the `es` client's alone, while the `opensearch` client's are named after `es` actions.
 
-Every operation in `NAMESPACES` is read, whether Floci serves it or not. `HAND_BUILT` are the namespaces
-`ResourceArnBuilder` builds resources for itself, whose operations are read only where `MEASURED` gives them, and
-`NOT_COVERED` the ones Floci serves that are not read yet, each with its reason;
-`RequestResourceNamespacesIntegrationTest` fails for a served namespace in none of the three.
+Every operation in `NAMESPACES` is read, whether Floci serves it or not, and `NOT_COVERED` are the namespaces Floci
+serves that are not read yet, each with its reason; `RequestResourceNamespacesIntegrationTest` fails for a served
+namespace in neither.
 `ID_TARGETS` is Floci's coverage of id-list namespaces, the types of each it reads by id (EC2's instances and
 network resources): a resource ARN's variable names its list member, with the request's list of whatever resources
 it acts on (`Resources`) as a fallback. A list a type's variable names is the request's targets only when the
@@ -355,9 +354,6 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs",
               "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms", "dynamodb", "iam")
-
-# The namespaces whose resources ResourceArnBuilder builds itself.
-HAND_BUILT = ()
 
 # ---------------------------------------------------------------------------------------------------------------------
 # MEASURED: what AWS was measured to check where neither botocore nor the Service Reference says it.
@@ -4214,7 +4210,7 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
     upstream = with_rest_operations(checked_actions(documents), documents, rest_operations(data))
     covered = {operation: value for operation, value in upstream.items() if reads(operation)}
     _check_overrides(covered)
-    read_namespaces = set(NAMESPACES) | {namespace_of(operation) for operation in covered}
+    read_namespaces = set(NAMESPACES)
     namespaces = {namespace: sorted({client for operation, value in covered.items()
                                      if namespace_of(operation) == namespace for client in value["clients"]})
                   for namespace in sorted(read_namespaces)}
@@ -4253,11 +4249,9 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
                     "make iam-request-resources-verify checks every action, type and format against AWS.",
         },
         "namespaces": namespaces,
-        "handBuilt": list(HAND_BUILT),
         "notCovered": dict(sorted(NOT_COVERED.items())),
         "otherNamespaces": sorted(namespace for namespace in _with_resource_types(documents)
-                                  if namespace not in NAMESPACES and namespace not in HAND_BUILT
-                                  and namespace not in NOT_COVERED),
+                                  if namespace not in NAMESPACES and namespace not in NOT_COVERED),
         "arnFormats": formats,
         "pathFormats": path_formats,
         "resourceTagKeys": resource_tag_keys(documents, formats),
@@ -4405,18 +4399,16 @@ def _with_resource_types(documents: list[dict]) -> set[str]:
 
 
 def reads(operation: str) -> bool:
-    """Read whole namespaces, and in a namespace otherwise built by hand the operations `MEASURED` gives."""
-    namespace = namespace_of(operation)
-    return namespace in NAMESPACES or namespace in HAND_BUILT and operation in MEASURED
+    """Every operation of a namespace in `NAMESPACES` is read, whole."""
+    return namespace_of(operation) in NAMESPACES
 
 
 def _check_overrides(covered: dict[str, dict]) -> None:
     """Every operation `MEASURED` gives is one the file reads, and no namespace is in two places."""
     stale = [f"MEASURED gives {operation}, which the file does not read" for operation in MEASURED
              if operation not in covered]
-    for left, right in (("NAMESPACES", "HAND_BUILT"), ("NAMESPACES", "NOT_COVERED"), ("HAND_BUILT", "NOT_COVERED")):
-        stale += [f"{namespace} is in both {left} and {right}"
-                  for namespace in sorted(set(globals()[left]) & set(globals()[right]))]
+    stale += [f"{namespace} is in both NAMESPACES and NOT_COVERED"
+              for namespace in sorted(set(NAMESPACES) & set(NOT_COVERED))]
     if stale:
         raise ValueError("; ".join(stale))
 
@@ -4424,7 +4416,7 @@ def _check_overrides(covered: dict[str, dict]) -> None:
 def render(document: dict) -> str:
     """The document with one operation to a line."""
     lines = ["{"]
-    for key in ("_source", "namespaces", "handBuilt", "notCovered", "otherNamespaces", "arnFormats", "pathFormats",
+    for key in ("_source", "namespaces", "notCovered", "otherNamespaces", "arnFormats", "pathFormats",
                 "resourceTagKeys",
                 "resourceKeys", "unqualified", "mintedIds", "mintedSuffixes", "integerVariables", "forwardedActions",
                 "statementActions", "statements"):
@@ -4538,10 +4530,9 @@ def validate(document: dict) -> list[str]:
             for namespace, kinds in suffixes.items()):
         problems.append("mintedSuffixes is not resource types of each namespace the file reads whose ARN format ends "
                         "in its one variable, each with a separator and the characters its service mints")
-    for key in ("handBuilt", "otherNamespaces"):
-        if not isinstance(document.get(key), list) or not all(isinstance(n, str) and NAMESPACE_RE.match(n)
-                                                              for n in document[key]):
-            problems.append(f"{key} is not a list of namespaces")
+    if not isinstance(document.get("otherNamespaces"), list) or not all(
+            isinstance(n, str) and NAMESPACE_RE.match(n) for n in document["otherNamespaces"]):
+        problems.append("otherNamespaces is not a list of namespaces")
     if not isinstance(document.get("notCovered"), dict) or not all(
             isinstance(reason, str) and reason for reason in document["notCovered"].values()):
         problems.append("notCovered does not give each a reason")
@@ -5003,9 +4994,7 @@ def verify_against(vendored: dict, upstream: dict[str, dict], formats: dict[str,
         if changed:
             untrue.append(f"AWS no longer gives {namespace}'s {', '.join(changed)} the ARN format the file does")
     added = sorted(operation for operation in upstream
-                   if namespace_of(operation) in vendored["namespaces"]
-                   and (namespace_of(operation) not in vendored["handBuilt"] or operation in MEASURED)
-                   and operation not in vendored["operations"])
+                   if namespace_of(operation) in vendored["namespaces"] and operation not in vendored["operations"])
     return untrue, added
 
 
