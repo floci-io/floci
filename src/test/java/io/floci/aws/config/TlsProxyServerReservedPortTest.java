@@ -12,9 +12,11 @@ import java.util.List;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -30,8 +32,9 @@ class TlsProxyServerReservedPortTest {
         when(tls.enabled()).thenReturn(tlsEnabled);
         when(tls.awsHttpsPort()).thenReturn(awsHttpsPort);
 
-        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.port()).thenReturn(flociPort);
+        when(config.baseUrl()).thenReturn("http://localhost:4566");
         when(config.tls()).thenReturn(tls);
 
         // The listen() future is left uncompleted on purpose: that is the "bind outcome not yet
@@ -66,8 +69,9 @@ class TlsProxyServerReservedPortTest {
         EmulatorConfig.TlsConfig tls = mock(EmulatorConfig.TlsConfig.class);
         when(tls.enabled()).thenReturn(tlsEnabled);
         when(tls.awsHttpsPort()).thenReturn(awsHttpsPort);
-        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.port()).thenReturn(flociPort);
+        when(config.baseUrl()).thenReturn("http://localhost:4566");
         when(config.tls()).thenReturn(tls);
 
         NetServer server = mock(NetServer.class);
@@ -88,6 +92,7 @@ class TlsProxyServerReservedPortTest {
         TlsProxyServer proxy = proxyWith(4566, true, 443);
         assertTrue(proxy.reservesPort(443),
                 "an unresolved bind must still hold the port, or a listener races the proxy for it");
+        assertFalse(proxy.boundAwsHttpsPort().isComplete());
     }
 
     @Test
@@ -102,25 +107,29 @@ class TlsProxyServerReservedPortTest {
     void reservesNothingWhenTlsIsDisabled() {
         TlsProxyServer proxy = proxyWith(4566, false, 443);
         assertFalse(proxy.reservesPort(443));
+        assertTrue(proxy.boundAwsHttpsPort().failed());
     }
 
     @Test
     void doesNotReserveTheAwsHttpsPortWhenItIsDisabled() {
         TlsProxyServer proxy = proxyWith(4566, true, 0);
         assertFalse(proxy.reservesPort(443));
+        assertTrue(proxy.boundAwsHttpsPort().failed());
     }
 
     @Test
     void notifiesHandlersWhenABindFails() {
         List<Integer> released = new ArrayList<>();
         // listen() resolving to a failure is what happens when the privileged port is refused.
+        RuntimeException failure = new RuntimeException("permission denied");
         TlsProxyServer proxy = proxyWith(4566, true, 443,
-                Future.failedFuture(new RuntimeException("permission denied")),
+                Future.failedFuture(failure),
                 p -> p.onPortReleased(released::add));
 
         assertTrue(released.contains(443),
                 "a listener that yielded 443 has no other way to learn the bind failed");
         assertFalse(proxy.reservesPort(443));
+        assertSame(failure, proxy.boundAwsHttpsPort().cause());
     }
 
     @Test

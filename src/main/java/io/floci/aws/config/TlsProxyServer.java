@@ -1,9 +1,12 @@
 package io.floci.aws.config;
 
+import io.floci.aws.core.common.DomainNames;
+import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.quarkus.runtime.Startup;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
+import io.vertx.core.buffer.Buffer;
 import io.vertx.core.net.NetClient;
 import io.vertx.core.net.NetServer;
 import io.vertx.core.net.NetServerOptions;
@@ -14,13 +17,18 @@ import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.Config;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.IntConsumer;
 
 /**
@@ -43,6 +51,10 @@ import java.util.function.IntConsumer;
  * {@code cfn-response} callbacks hardcode {@code https://} and ignore the ResponseURL port,
  * so they PUT to 443 regardless of Floci's configured port; binding 443 lets those callbacks
  * reach Floci. The extra binding is skipped when the port is {@code 0} or equals the public port.
+ *
+ * <p>On that extra port a ClientHello whose SNI server name belongs to a load balancer HTTPS
+ * listener on the same port goes to that listener instead, without terminating TLS: see
+ * {@link #routeServerNames}. Floci's endpoint names, no SNI, and unclaimed names keep the Floci route above.
  *
  * <p>Both listen on the configured {@code quarkus.http.host}, not the loopback pin
  * {@link TlsConfigSource} applies to Quarkus itself, and a non-loopback host needs the same consent
@@ -68,7 +80,10 @@ public class TlsProxyServer {
     private final String host;
     private final int httpBackendPort;
     private final int httpsBackendPort;
+    private final Set<String> endpointHosts = new LinkedHashSet<>();
+    private final Set<String> endpointSuffixes = new LinkedHashSet<>();
     private final List<NetServer> proxyServers = new ArrayList<>();
+    private Future<NetServer> awsHttpsBind;
     /**
      * Ports whose bind definitively failed. Absent means bound, or not resolved yet: callers
      * default to treating the port as the proxy's until the outcome is known, which is what stops
@@ -89,6 +104,24 @@ public class TlsProxyServer {
         failedPorts.forEach(handler::accept);
     }
     private NetClient client;
+    private volatile ServerNameRoute serverNameRoute;
+    /** How long a ClientHello may take to arrive before the connection goes to Floci; tests shorten it. */
+    long clientHelloTimeoutMillis = 5_000;
+
+    /** Picks the local port that serves a TLS server name arriving on a proxy port. */
+    @FunctionalInterface
+    public interface ServerNameRoute {
+        /**
+         * The backend port, or a non-positive value for none. When {@code allowAliases} is false,
+         * only a load balancer's own generated DNS name can claim the connection.
+         */
+        int backendPort(int listenPort, String serverName, boolean allowAliases);
+    }
+
+    /** Sends ClientHellos on the AWS-HTTPS port whose SNI the route claims to the port it names. */
+    public void routeServerNames(ServerNameRoute route) {
+        serverNameRoute = route;
+    }
 
     @Inject
     public TlsProxyServer(Vertx vertx, EmulatorConfig config, Config mpConfig) {
@@ -112,17 +145,22 @@ public class TlsProxyServer {
 
         NetworkExposureGuard.requireConsent(host, config.security());
 
+        if (config.tls().awsHttpsPort() > 0 && config.tls().awsHttpsPort() != config.port()) {
+            configureEndpointNames();
+        }
         client = vertx.createNetClient();
-        Handler<NetSocket> connectHandler = buildConnectHandler();
 
         for (int port : listenPorts()) {
             NetServerOptions options = new NetServerOptions()
                     .setHost(host)
                     .setPort(port);
             NetServer server = vertx.createNetServer(options);
-            server.connectHandler(connectHandler);
+            server.connectHandler(buildConnectHandler(port));
             proxyServers.add(server);
             Future<NetServer> bind = server.listen();
+            if (port != config.port()) {
+                awsHttpsBind = bind;
+            }
             bind.onComplete(ar -> {
                 if (ar.succeeded()) {
                     failedPorts.remove(port);
@@ -155,6 +193,55 @@ public class TlsProxyServer {
         }
     }
 
+    private void configureEndpointNames() {
+        endpointHosts.addAll(TlsConfigSource.defaultEndpointHostnames());
+        Set<String> suffixes = new LinkedHashSet<>(EmbeddedDnsServer.BUILTIN_SUFFIXES);
+        suffixes.add("localhost");
+        config.hostname().ifPresent(suffixes::add);
+        LocalStackParity.withDnsSuffixes(config.dns().extraSuffixes()).ifPresent(suffixes::addAll);
+        if (config.dns().spoofAwsEndpoints()) {
+            suffixes.addAll(TlsConfigSource.awsEndpointSuffixes());
+        }
+        try {
+            String baseHost = URI.create(config.baseUrl()).getHost();
+            if (baseHost != null) {
+                suffixes.add(baseHost);
+            }
+        } catch (IllegalArgumentException e) {
+            LOG.debugv(e, "TLS proxy: cannot read the hostname from floci.base-url");
+        }
+        config.services().lambda().dockerHostOverride().map(TlsProxyServer::normalizeHost).ifPresent(endpointHosts::add);
+        config.services().iot().endpointAddress().filter(address -> !address.isBlank()).ifPresent(address -> {
+            try {
+                String iotHost = TlsConfigSource.iotEndpointHost(address);
+                if (iotHost != null) {
+                    endpointHosts.add(normalizeHost(iotHost));
+                }
+            } catch (URISyntaxException e) {
+                LOG.debugv("TLS proxy: cannot read the hostname from floci.services.iot.endpoint-address: {0}",
+                        e.getReason());
+            }
+        });
+        suffixes.stream().map(TlsProxyServer::normalizeHost).filter(suffix -> !suffix.isEmpty())
+                .forEach(endpointSuffixes::add);
+        endpointHosts.addAll(endpointSuffixes);
+    }
+
+    private static String normalizeHost(String host) {
+        String name = host.strip().toLowerCase(Locale.ROOT);
+        return name.endsWith(".") ? name.substring(0, name.length() - 1) : name;
+    }
+
+    /** Completes with the actual listening port, or fails with the reason a socket was never bound. */
+    public Future<Integer> boundAwsHttpsPort() {
+        if (awsHttpsBind == null) {
+            return Future.failedFuture("TLS proxy did not attempt a separate AWS-HTTPS bind (tls.enabled="
+                    + config.tls().enabled() + ", tls.aws-https-port=" + config.tls().awsHttpsPort()
+                    + ", public port=" + config.port() + ")");
+        }
+        return awsHttpsBind.map(NetServer::actualPort);
+    }
+
     /**
      * Whether the proxy holds, or is still expected to hold, {@code port}.
      *
@@ -184,53 +271,95 @@ public class TlsProxyServer {
     }
 
     /**
-     * Builds the shared connect handler that peeks the first byte to detect TLS and pipes the
-     * connection to the matching backend. A single instance is reused across all listen ports.
+     * Builds the connect handler that peeks the first bytes to detect TLS and pipes the connection
+     * to the matching backend. On the AWS-HTTPS port it buffers a whole ClientHello record first so
+     * a load balancer can claim the connection by its SNI server name.
      */
-    private Handler<NetSocket> buildConnectHandler() {
+    private Handler<NetSocket> buildConnectHandler(int listenPort) {
         return frontSocket -> {
-            // Pause incoming data until we've peeked at the first byte
+            // Pause incoming data until we've peeked at the first bytes
             frontSocket.pause();
+            Buffer buffer = Buffer.buffer();
+            ServerNameRoute route = listenPort == config.port() ? null : serverNameRoute;
+            AtomicBoolean dispatched = new AtomicBoolean();
+            AtomicLong helloTimer = new AtomicLong(-1);
+            frontSocket.closeHandler(ignored -> {
+                dispatched.set(true);
+                vertx.cancelTimer(helloTimer.get());
+            });
 
-            frontSocket.handler(buffer -> {
+            Runnable dispatch = () -> {
+                if (!dispatched.compareAndSet(false, true)) {
+                    return;
+                }
+                vertx.cancelTimer(helloTimer.get());
                 // Remove handler and keep socket paused to prevent data loss
                 // while we establish the backend connection.
                 frontSocket.handler(null);
                 frontSocket.pause();
+                pipeToBackend(frontSocket, buffer, backendPort(listenPort, route, buffer));
+            };
 
-                // Inspect first byte to determine protocol
-                int backendPort;
-                if (buffer.length() > 0 && buffer.getByte(0) == TLS_HANDSHAKE) {
-                    backendPort = httpsBackendPort;
-                } else {
-                    backendPort = httpBackendPort;
-                }
-
-                // Connect to the appropriate backend
-                client.connect(backendPort, "127.0.0.1").onComplete(ar -> {
-                    if (ar.succeeded()) {
-                        NetSocket backSocket = ar.result();
-
-                        // Send the initial buffer that we already read
-                        backSocket.write(buffer);
-
-                        // Bi-directional pipe — pipeTo handles end-of-stream
-                        // propagation and will resume the paused frontSocket.
-                        frontSocket.pipeTo(backSocket).onFailure(err ->
-                                LOG.debugv("TLS proxy: pipe front→back failed: {0}", err.getMessage()));
-                        backSocket.pipeTo(frontSocket).onFailure(err ->
-                                LOG.debugv("TLS proxy: pipe back→front failed: {0}", err.getMessage()));
-                    } else {
-                        LOG.warnv("TLS proxy: failed to connect to backend port {0}: {1}",
-                                String.valueOf(backendPort), ar.cause().getMessage());
-                        frontSocket.close();
+            frontSocket.handler(chunk -> {
+                buffer.appendBuffer(chunk);
+                if (route != null && TlsClientHello.needsMore(buffer)) {
+                    // One deadline from the first partial chunk, never extended: a client that
+                    // stalls or trickles its ClientHello is served by Floci rather than held open.
+                    if (helloTimer.get() == -1) {
+                        helloTimer.set(vertx.setTimer(clientHelloTimeoutMillis, id -> dispatch.run()));
                     }
-                });
+                    return;
+                }
+                dispatch.run();
             });
 
             // Resume to receive the first buffer
             frontSocket.resume();
         };
+    }
+
+    private int backendPort(int listenPort, ServerNameRoute route, Buffer buffer) {
+        if (buffer.length() == 0 || buffer.getByte(0) != TLS_HANDSHAKE) {
+            return httpBackendPort;
+        }
+        String serverName = route == null ? null : TlsClientHello.serverName(buffer);
+        if (serverName == null) {
+            return httpsBackendPort;
+        }
+        if (endpointHosts.contains(serverName)) {
+            return httpsBackendPort;
+        }
+        boolean allowAliases = endpointSuffixes.stream().noneMatch(suffix -> DomainNames.isWithin(serverName, suffix));
+        try {
+            int routed = route.backendPort(listenPort, serverName, allowAliases);
+            return routed > 0 ? routed : httpsBackendPort;
+        } catch (RuntimeException failure) {
+            LOG.debugv(failure, "TLS proxy: routing server name {0} failed; Floci serves it", serverName);
+            return httpsBackendPort;
+        }
+    }
+
+    private void pipeToBackend(NetSocket frontSocket, Buffer buffer, int target) {
+        // Connect to the appropriate backend
+        client.connect(target, "127.0.0.1").onComplete(ar -> {
+            if (ar.succeeded()) {
+                NetSocket backSocket = ar.result();
+
+                // Send the initial buffer that we already read
+                backSocket.write(buffer);
+
+                // Bi-directional pipe — pipeTo handles end-of-stream
+                // propagation and will resume the paused frontSocket.
+                frontSocket.pipeTo(backSocket).onFailure(err ->
+                        LOG.debugv("TLS proxy: pipe front→back failed: {0}", err.getMessage()));
+                backSocket.pipeTo(frontSocket).onFailure(err ->
+                        LOG.debugv("TLS proxy: pipe back→front failed: {0}", err.getMessage()));
+            } else {
+                LOG.warnv("TLS proxy: failed to connect to backend port {0}: {1}",
+                        String.valueOf(target), ar.cause().getMessage());
+                frontSocket.close();
+            }
+        });
     }
 
     @PreDestroy

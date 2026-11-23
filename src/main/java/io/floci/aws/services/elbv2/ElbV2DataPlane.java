@@ -54,6 +54,9 @@ import org.jboss.logging.Logger;
 import javax.naming.InvalidNameException;
 import javax.naming.ldap.LdapName;
 import javax.naming.ldap.Rdn;
+import javax.net.ssl.ExtendedSSLSession;
+import javax.net.ssl.SNIHostName;
+import javax.net.ssl.SNIServerName;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -158,6 +161,10 @@ public class ElbV2DataPlane {
         private long bindRetryTimer = -1;
         private long bindRetryDelay = INITIAL_BIND_RETRY_MILLIS;
         private ReloadingKeyManager tlsKeyManager;
+        /** The server listens on loopback behind the TLS proxy, which holds the public port. */
+        private volatile boolean behindProxy;
+        /** Its loopback port once listening, which the proxy forwards claimed SNI names to; 0 otherwise. */
+        private volatile int serverNamePort;
         private volatile RoutingView routing = new RoutingView(Map.of(), Map.of());
     }
 
@@ -476,6 +483,8 @@ public class ElbV2DataPlane {
      * HTTP and hung every {@code Custom::} resource - and the reverse on a fresh start. Yielding
      * here makes the outcome deterministic and keeps the emulator's own control path working. To
      * give 443 to load balancers instead, set {@code floci.tls.aws-https-port=0} or disable TLS.
+     * An HTTPS listener on a port the proxy holds is served on loopback instead, and the proxy
+     * forwards it the connections whose SNI server name it claims.
      */
     // Package-private for ElbV2ReservedPortTest.
     boolean isReservedByFloci(int port) {
@@ -544,7 +553,12 @@ public class ElbV2DataPlane {
         PortState state = portStates.get(port);
         if (state != null) {
             onCurrentPort(port, state, () -> {
-                if (listenersByHostAndPort.containsKey(port)) {
+                if (!listenersByHostAndPort.containsKey(port)) {
+                    return;
+                }
+                if (state.behindProxy && servers.containsKey(port)) {
+                    restartPortServer(port);
+                } else {
                     ensurePortServer(port);
                 }
             });
@@ -565,6 +579,7 @@ public class ElbV2DataPlane {
     private void ensureReleaseHandlerRegistered() {
         if (releaseHandlerRegistered.compareAndSet(false, true)) {
             tlsProxyServer.onPortReleased(this::bindListenersWaitingOn);
+            tlsProxyServer.routeServerNames(this::serverNameBackendPort);
         }
     }
 
@@ -577,14 +592,35 @@ public class ElbV2DataPlane {
         }
     }
 
+    /**
+     * The loopback port of the HTTPS listener behind the TLS proxy that claims {@code serverName}
+     * on {@code port}, by the same selection as a Host header but without the sole-listener
+     * fallback. Inside Floci's endpoint suffixes, only a load balancer's generated DNS name
+     * can claim the connection.
+     */
+    private int serverNameBackendPort(int port, String serverName, boolean allowAliases) {
+        PortState state = portStates.get(port);
+        int backend = state == null ? 0 : state.serverNamePort;
+        if (backend <= 0) {
+            return -1;
+        }
+        RoutingView routing = state.routing;
+        boolean claimed = allowAliases ? resolveListener(routing, serverName, false) != null
+                : routing.hosts().containsKey(serverName);
+        return claimed ? backend : -1;
+    }
+
     private void startPortServer(int port, PortState state) {
-        if (isReservedByFloci(port)) {
+        boolean behindProxy = isReservedByFloci(port) && port != config.port() && portIsSecure(port)
+                && servedBindings(port).noneMatch(ListenerBinding::tcp);
+        if (isReservedByFloci(port) && !behindProxy) {
             // Returning null leaves `servers` untouched: computeIfAbsent skips a null mapping.
             // The emulator's own port cannot be handed over, so the two cases need different
             // advice: freeing floci.tls.aws-https-port is only meaningful for the TLS proxy.
             String remedy = port == config.port()
                     ? "This is the emulator's own port, so it cannot be freed; give the listener a different port."
-                    : "Set floci.tls.aws-https-port=0 (or disable TLS) to free it.";
+                    : "Only HTTPS listeners share it, by TLS server name; set floci.tls.aws-https-port=0 "
+                            + "(or disable TLS) to free it.";
             LOG.warnv("ELBv2 listener port {0} is reserved by Floci itself; the listener is "
                     + "registered but serves no traffic. {1}", String.valueOf(port), remedy);
             return;
@@ -595,8 +631,8 @@ public class ElbV2DataPlane {
         }
         boolean secure = portIsSecure(port);
         HttpServerOptions options = new HttpServerOptions()
-                .setHost("0.0.0.0")
-                .setPort(port)
+                .setHost(behindProxy ? "127.0.0.1" : "0.0.0.0")
+                .setPort(behindProxy ? 0 : port)
                 .setMaxHeaderSize(MAX_REQUEST_HEADER_SIZE)
                 .setMaxInitialLineLength(MAX_REQUEST_LINE_LENGTH);
         if (secure) {
@@ -608,10 +644,20 @@ public class ElbV2DataPlane {
         HttpServer server = vertx.createHttpServer(options);
         long generation = ++state.generation;
         servers.put(port, server);
+        state.behindProxy = behindProxy;
         try {
             server.requestHandler(req -> handleRequest(req, port));
             server.listen()
-                    .onSuccess(s -> portStarted(port, state, generation, secure ? "HTTPS" : "HTTP"))
+                    .onSuccess(s -> {
+                        if (behindProxy) {
+                            onCurrentPort(port, state, () -> {
+                                if (state.generation == generation) {
+                                    state.serverNamePort = s.actualPort();
+                                }
+                            });
+                        }
+                        portStarted(port, state, generation, secure ? "HTTPS" : "HTTP");
+                    })
                     .onFailure(err -> onCurrentPort(port, state, () -> {
                         if (state.generation == generation && servers.remove(port, server)) {
                             scheduleBindRetry(port, state);
@@ -930,6 +976,8 @@ public class ElbV2DataPlane {
 
     private void closeOwnedServer(int port, PortState state, Supplier<Future<Void>> close) {
         long generation = ++state.generation;
+        state.behindProxy = false;
+        state.serverNamePort = 0;
         state.closing++;
         Future<Void> closed;
         try {
@@ -1043,7 +1091,10 @@ public class ElbV2DataPlane {
     private void handleRequest(HttpServerRequest req, int port) {
         PortState state = portStates.get(port);
         RoutingView routing = state == null ? null : state.routing;
-        RoutedListener listener = routing == null ? null : resolveListener(routing, req.host());
+        RoutedListener listener = routing == null ? null : proxiedListener(state, routing, req);
+        if (listener == null && routing != null) {
+            listener = resolveListener(routing, req.host(), true);
+        }
         if (listener == null) {
             req.response().setStatusCode(502).end("No listener for host");
             return;
@@ -1057,8 +1108,30 @@ public class ElbV2DataPlane {
         req.response().setStatusCode(502).end("No matching rule");
     }
 
+    /**
+     * The listener whose SNI server name the TLS proxy matched to admit this connection. In AWS each
+     * load balancer has its own address, so a connection made to one stays with it whatever Host
+     * header it sends; behind the proxy the server name is what picked the address.
+     */
+    private RoutedListener proxiedListener(PortState state, RoutingView routing, HttpServerRequest req) {
+        if (!state.behindProxy || !req.isSSL()) {
+            return null;
+        }
+        // If the connection reached this listener but the TLS session reports no requested server
+        // names (which can happen after resumption), the request falls back to Host dispatch.
+        if (!(req.connection().sslSession() instanceof ExtendedSSLSession session)) {
+            return null;
+        }
+        for (SNIServerName name : session.getRequestedServerNames()) {
+            if (name instanceof SNIHostName hostname) {
+                return resolveListener(routing, hostname.getAsciiName(), false);
+            }
+        }
+        return null;
+    }
+
     /** Floci's shared socket first uses load-balancer DNS, then unique rule or certificate hosts. */
-    private RoutedListener resolveListener(RoutingView routing, String hostHeader) {
+    private RoutedListener resolveListener(RoutingView routing, String hostHeader, boolean soleListenerFallback) {
         String host = normalizeHost(hostHeader);
         String direct = routing.hosts().get(host);
         if (direct != null) {
@@ -1077,7 +1150,7 @@ public class ElbV2DataPlane {
         if (!certificates.isEmpty()) {
             return certificates.size() == 1 ? certificates.getFirst() : null;
         }
-        return routing.hosts().size() == 1
+        return soleListenerFallback && routing.hosts().size() == 1
                 ? routing.listeners().get(routing.hosts().values().iterator().next()) : null;
     }
 
@@ -1127,12 +1200,12 @@ public class ElbV2DataPlane {
             return;
         }
 
-        ElbV2ForwardedHeaders forwarded = ElbV2ForwardedHeaders.of(req,
+        ListenerBinding binding = listenerBindings.get(listenerArn);
+        int listenerPort = binding != null ? binding.port() : req.localAddress().port();
+        ElbV2ForwardedHeaders forwarded = ElbV2ForwardedHeaders.of(req, listenerPort,
                 loadBalancerAttribute(listenerArn, region, ElbV2ForwardedHeaders.XFF_MODE_ATTRIBUTE),
                 Boolean.parseBoolean(
                         loadBalancerAttribute(listenerArn, region, ElbV2ForwardedHeaders.XFF_CLIENT_PORT_ATTRIBUTE)));
-        ListenerBinding binding = listenerBindings.get(listenerArn);
-        int listenerPort = binding != null ? binding.port() : req.localAddress().port();
         boolean preserveHost = Boolean.parseBoolean(
                 loadBalancerAttribute(listenerArn, region, PRESERVE_HOST_HEADER_ATTRIBUTE));
         String authority = RequestHost.of(req);
