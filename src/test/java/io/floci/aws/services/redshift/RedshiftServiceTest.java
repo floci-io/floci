@@ -1718,6 +1718,8 @@ class RedshiftServiceTest {
         Cluster cluster = service.createCluster("event-cluster", "dc2.large", "admin", "password123");
         when(clusterBackend.get("event-cluster")).thenReturn(Optional.of(cluster));
 
+        when(parameterGroupBackend.get(regionalKey("custom-pg")))
+                .thenReturn(Optional.of(new ClusterParameterGroup("custom-pg", "redshift-1.0", "custom pg")));
         service.modifyCluster("event-cluster", null, null, "changedPassword123", "custom-pg", List.of("sg-new"));
         service.rebootCluster("event-cluster");
         service.deleteCluster("event-cluster");
@@ -3017,12 +3019,45 @@ class RedshiftServiceTest {
         cluster.setClusterIdentifier("my-cluster");
         cluster.setMasterUsername("admin");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+        when(parameterGroupBackend.get(regionalKey("custom-pg")))
+                .thenReturn(Optional.of(new ClusterParameterGroup("custom-pg", "redshift-1.0", "custom pg")));
 
         Cluster updated = service.modifyCluster("my-cluster", null, null, null, "custom-pg", List.of("sg-9"));
 
         assertEquals("custom-pg", updated.getClusterParameterGroupName());
         assertEquals(List.of("sg-9"), updated.getVpcSecurityGroupIds());
         verify(cm, never()).alterUserPassword(any(), any(), any(), any());
+    }
+
+    @Test
+    void modifyClusterRefusesAParameterGroupThatDoesNotExist() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setMasterUsername("admin");
+        cluster.setClusterParameterGroupName("default.redshift-1.0");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+        when(parameterGroupBackend.get(regionalKey("deleted-pg"))).thenReturn(Optional.empty());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.modifyCluster("my-cluster", null, null, null, "deleted-pg", null));
+
+        assertEquals("ClusterParameterGroupNotFound", refused.getErrorCode());
+        assertEquals("Cluster parameter group deleted-pg not found", refused.getMessage());
+        assertEquals("default.redshift-1.0", cluster.getClusterParameterGroupName());
+        verify(clusterBackend, never()).put(eq("my-cluster"), any(Cluster.class));
+    }
+
+    @Test
+    void modifyClusterTakesTheDefaultParameterGroup() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setMasterUsername("admin");
+        cluster.setClusterParameterGroupName("custom-pg");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster updated = service.modifyCluster("my-cluster", null, null, null, "default.redshift-1.0", null);
+
+        assertEquals("default.redshift-1.0", updated.getClusterParameterGroupName());
     }
 
     @Test
@@ -3588,6 +3623,9 @@ class RedshiftServiceTest {
         when(secretsManagerService.createSecret(eq("redshift/restored-managed"), anyString(), isNull(),
                 anyString(), eq("alias/restore-key"), anyList(), eq("redshift"), eq("us-east-1"))).thenReturn(secret);
 
+        when(subnetGroupBackend.get(regionalKey("restore-subnets"))).thenReturn(Optional.of(
+                new ClusterSubnetGroup("restore-subnets", "d", "vpc-1", List.of("subnet-1"))));
+
         Cluster cluster = service.restoreFromClusterSnapshot("restored-managed", "managed-backup", "ra3.large",
                 "restore-subnets", true, "alias/restore-key", "us-east-1");
 
@@ -3599,6 +3637,24 @@ class RedshiftServiceTest {
                 anyString(), eq("alias/restore-key"), anyList(), eq("redshift"), eq("us-east-1"));
         assertEquals(cluster.getMasterPassword(), new ObjectMapper().readTree(secretValue.getValue()).path("password").asText());
         verify(cm).alterUserPassword("111111111111", "restored-managed", "admin", cluster.getMasterPassword());
+    }
+
+    @Test
+    void snapshotRestoreRefusesASubnetGroupThatDoesNotExistAndLeavesNoCluster() {
+        useStatefulClusterStorage();
+        Snapshot snapshot = new Snapshot("backup", "deleted-source", "available", 5439, "admin");
+        snapshot.setMasterPassword("Original123");
+        when(snapshotBackend.get("backup")).thenReturn(Optional.of(snapshot));
+        when(cm.start("111111111111", "restored", "admin", "Original123"))
+                .thenReturn(new RedshiftContainerHandle("restored", "restored", "localhost", 5432));
+        when(subnetGroupBackend.get(regionalKey("deleted-subnets"))).thenReturn(Optional.empty());
+
+        AwsException refused = assertThrows(AwsException.class, () -> service.restoreFromClusterSnapshot("restored",
+                "backup", "ra3.large", "deleted-subnets", false, null, "us-east-1"));
+
+        assertEquals("ClusterSubnetGroupNotFoundFault", refused.getErrorCode());
+        assertTrue(service.describeClusters(null).isEmpty());
+        assertTrue(service.getSnapshot("backup").isPresent());
     }
 
     @Test

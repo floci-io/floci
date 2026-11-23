@@ -1411,6 +1411,7 @@ public class RedshiftService implements ManagedSecretRotator {
             cluster.setNodeType(nodeType);
         }
         if (clusterParameterGroupName != null && !clusterParameterGroupName.isBlank()) {
+            requireParameterGroup(clusterParameterGroupName);
             cluster.setClusterParameterGroupName(clusterParameterGroupName);
             cluster.setUserActivityLoggingEnabled(userActivityLoggingEnabled(clusterParameterGroupName));
         }
@@ -2740,7 +2741,16 @@ public class RedshiftService implements ManagedSecretRotator {
                     Cluster cluster = restoreSnapshot(clusterIdentifier, snapshotIdentifier, null, nodeType,
                             clusters.accountId());
                     try {
-                        cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
+                        // Under the lock the subnet group's delete takes, so the group is either refused here or
+                        // seen by the delete's in-use check once the cluster is stored with it.
+                        mutate(() -> {
+                            if (clusterSubnetGroupName != null && !clusterSubnetGroupName.isBlank()) {
+                                requireSubnetGroup(clusterSubnetGroupName);
+                            }
+                            cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
+                            storeCluster(cluster);
+                            return cluster;
+                        });
                         if (manageMasterPassword) {
                             String password = RandomPasswordGenerator.generate(objectMapper.createObjectNode());
                             modifyCluster(clusterIdentifier, null, null, password, null, List.of());
@@ -3069,6 +3079,24 @@ public class RedshiftService implements ManagedSecretRotator {
         if (auditLogPublisher != null) {
             String region = cluster.getLoggingRegion() != null ? cluster.getLoggingRegion() : regionResolver.getRegion();
             auditLogPublisher.register(accountId, region, cluster);
+        }
+    }
+
+    /**
+     * Refuses a parameter group name this Region holds no group of, as Redshift refuses a cluster naming one; the
+     * default group, which Describe lists, is always there. Callers check under {@link #mutate}, the lock the
+     * group's delete takes, so a group deleted meanwhile is either refused here or kept by the delete's in-use check.
+     */
+    private void requireParameterGroup(String name) {
+        if (!DEFAULT_PARAMETER_GROUP_NAME.equals(name) && parameterGroups.get(regionalKey(name)).isEmpty()) {
+            throw new AwsException("ClusterParameterGroupNotFound", "Cluster parameter group " + name + " not found", 404);
+        }
+    }
+
+    /** As {@link #requireParameterGroup}, for a subnet group. */
+    private void requireSubnetGroup(String name) {
+        if (subnetGroups.get(regionalKey(name)).isEmpty()) {
+            throw new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + name + " not found", 400);
         }
     }
 
