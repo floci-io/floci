@@ -43,6 +43,11 @@ final class EventBridgeErrors {
         return notFound("Failed to " + verb + " the api-destination(s). " + connectionMissing(connectionArn));
     }
 
+    /** An internal lookup by ARN, whose message reaches the dead-letter queue; unquoted, unlike the API's. */
+    static AwsException plainConnectionNotFound(String connectionArn) {
+        return notFound("Connection " + connectionArn + " does not exist.");
+    }
+
     static AwsException busAlreadyExists(String bus) {
         return alreadyExists("Event bus " + bus + " already exists.");
     }
@@ -84,10 +89,6 @@ final class EventBridgeErrors {
 
     private static AwsException validation(String message) {
         return new AwsException("ValidationException", message, 400);
-    }
-
-    static AwsException plainConnectionNotFound(String connectionArn) {
-        return notFound("Connection " + connectionArn + " does not exist.");
     }
 
     private static String connectionMissing(String connection) {
