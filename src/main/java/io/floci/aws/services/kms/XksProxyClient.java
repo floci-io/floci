@@ -47,6 +47,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.stream.Collectors;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Callable;
@@ -395,7 +396,7 @@ public class XksProxyClient implements AutoCloseable {
     static DnsResolver validatingResolver(DnsResolver delegate, Set<String> allowedPrivateHosts) {
         Set<String> allowedHosts = allowedPrivateHosts.stream()
                 .map(XksProxyClient::normalizeHost)
-                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+                .collect(Collectors.toUnmodifiableSet());
         return new ValidatingDnsResolver(delegate, (host, addresses) -> {
             String normalizedHost = normalizeHost(host);
             boolean explicitlyTrustedPrivateHost = allowedHosts.contains(normalizedHost);
