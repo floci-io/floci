@@ -39,7 +39,7 @@ class SesSendAddressLengthIntegrationTest {
     void v2SendEmail_fromOverLimit_returnsBadRequestException() {
         given()
             .contentType("application/json")
-            .header("Authorization", SesV1Requests.AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "%s",
@@ -77,7 +77,7 @@ class SesSendAddressLengthIntegrationTest {
     void v2SendEmail_feedbackForwardingOverLimit_returnsBadRequestException() {
         given()
             .contentType("application/json")
-            .header("Authorization", SesV1Requests.AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",
@@ -101,7 +101,7 @@ class SesSendAddressLengthIntegrationTest {
                         .getBytes(StandardCharsets.UTF_8));
         given()
             .contentType("application/json")
-            .header("Authorization", SesV1Requests.AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("""
                 {
                     "Destination": {"ToAddresses": ["success@simulator.amazonses.com"], "CcAddresses": ["%s"]},
@@ -120,7 +120,7 @@ class SesSendAddressLengthIntegrationTest {
     void v2SendBulkEmail_fromOverLimit_returnsInvalidEmailAddress() {
         given()
             .contentType("application/json")
-            .header("Authorization", SesV1Requests.AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "%s",
