@@ -185,6 +185,33 @@ class DynamoDbNativeBackendTest {
     }
 
     @Test
+    void typedWritesStoreMapKeysInCodePointOrder() throws Exception {
+        backend.createTable(SCOPE, TABLE, List.of(new KeySchemaElement("id", "HASH")),
+                List.of(new AttributeDefinition("id", "S")), 5L, 5L, List.of(), List.of());
+        JsonNode key = json("{\"id\":{\"S\":\"k\"}}");
+
+        backend.putItem(SCOPE, TABLE,
+                json("{\"id\":{\"S\":\"k\"},\"m\":{\"M\":{\"z\":{\"S\":\"1\"},\"b\":{\"S\":\"2\"}}}}"),
+                null, null, null);
+        assertEquals("b,z", keys(backend.getItem(SCOPE, TABLE, key).get("m").get("M")));
+
+        backend.updateItem(SCOPE, TABLE, key, null, "SET p = :p", null,
+                json("{\":p\":{\"M\":{\"z\":{\"S\":\"1\"},\"b\":{\"S\":\"2\"}}}}"), "NONE", null);
+        assertEquals("b,z", keys(backend.getItem(SCOPE, TABLE, key).get("p").get("M")));
+
+        backend.updateItem(SCOPE, TABLE, key,
+                json("{\"q\":{\"Action\":\"PUT\",\"Value\":{\"M\":{\"z\":{\"S\":\"1\"},\"b\":{\"S\":\"2\"}}}}}"),
+                null, null, null, "NONE", null);
+        assertEquals("b,z", keys(backend.getItem(SCOPE, TABLE, key).get("q").get("M")));
+    }
+
+    private static String keys(JsonNode node) {
+        List<String> names = new ArrayList<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return String.join(",", names);
+    }
+
+    @Test
     void storedTagsAreTheTablesForItAndItsIndexesInTheArnsAccountAndRegionAndTaggingPutsANewMap() throws Exception {
         call(Api.DYNAMODB, "CreateTable", json("""
                 {"TableName":"%s",

@@ -15,7 +15,7 @@ import java.util.Map;
  * through the plain API. PartiQL literals keep the order they are written in. An update puts
  * the maps on its document path in code point order and leaves the others as they are.
  */
-final class DynamoDbMapOrder {
+public final class DynamoDbMapOrder {
 
     private static final JsonNodeFactory FACTORY = JsonNodeFactory.instance;
 
@@ -26,7 +26,7 @@ final class DynamoDbMapOrder {
      * Returns a copy of an item, or of a map of attribute values such as ExpressionAttributeValues,
      * with every nested map sorted. The top-level order is kept. Input holding no map is returned as is.
      */
-    static JsonNode sortedItem(JsonNode item) {
+    public static JsonNode sortedItem(JsonNode item) {
         if (item == null || !item.isObject() || !holdsMap(item)) {
             return item;
         }
@@ -34,7 +34,7 @@ final class DynamoDbMapOrder {
     }
 
     /** Returns a copy of a legacy AttributeUpdates map with every nested map of each Value sorted. */
-    static JsonNode sortedAttributeUpdates(JsonNode updates) {
+    public static JsonNode sortedAttributeUpdates(JsonNode updates) {
         if (updates == null || !updates.isObject() || !holdsMap(updates)) {
             return updates;
         }

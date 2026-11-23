@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.resource.ExplorerResource;
+import io.floci.aws.services.dynamodb.DynamoDbMapOrder;
 import io.floci.aws.services.dynamodb.DynamoDbService;
 import io.floci.aws.services.dynamodb.DynamoDbStreamService;
 import io.floci.aws.services.dynamodb.DynamoDbTtlService;
@@ -118,7 +119,8 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     @Override
     public void putItem(Scope scope, String tableName, JsonNode item, String conditionExpression,
                         JsonNode expressionAttributeNames, JsonNode expressionAttributeValues) {
-        RequestScopes.runAs(scope.accountId(), () -> dynamoDbService.putItem(tableName, item, conditionExpression,
+        RequestScopes.runAs(scope.accountId(), () -> dynamoDbService.putItem(tableName,
+                DynamoDbMapOrder.sortedItem(item), conditionExpression,
                 expressionAttributeNames, expressionAttributeValues, scope.region(), "NONE"));
     }
 
@@ -139,9 +141,10 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
                                String updateExpression, JsonNode expressionAttributeNames,
                                JsonNode expressionAttributeValues, String returnValues, String conditionExpression) {
         DynamoDbService.UpdateResult result = RequestScopes.callAs(scope.accountId(), () ->
-                dynamoDbService.updateItem(tableName, key, attributeUpdates, updateExpression,
-                        expressionAttributeNames, expressionAttributeValues, returnValues, conditionExpression,
-                        scope.region(), "NONE"));
+                dynamoDbService.updateItem(tableName, key,
+                        DynamoDbMapOrder.sortedAttributeUpdates(attributeUpdates), updateExpression,
+                        expressionAttributeNames, DynamoDbMapOrder.sortedItem(expressionAttributeValues),
+                        returnValues, conditionExpression, scope.region(), "NONE"));
         if ("ALL_NEW".equals(returnValues)) {
             return result.newItem();
         } else if ("ALL_OLD".equals(returnValues)) {
