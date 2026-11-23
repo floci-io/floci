@@ -58,6 +58,12 @@ public class DockerClientProducer {
     /** Bounds the connect and the answer of the Docker circuit breaker's confirming ping. */
     static final Duration PING_TIMEOUT = Duration.ofSeconds(5);
 
+    /**
+     * The wrapped control-plane transport behind the {@link #dockerClient()} bean, shared with the
+     * {@link #controlPlaneHttpClient()} bean so both never build two pools for one role.
+     */
+    private volatile DockerHttpClient controlPlaneClient;
+
     private final EmulatorConfig config;
     private final DockerPoolGaugeLogger gaugeLogger;
     private final DockerCircuitBreaker breaker;
@@ -478,6 +484,18 @@ public class DockerClientProducer {
     }
 
     /**
+     * The control-plane transport, for callers that issue requests docker-java has no command for.
+     * The same wrapped instance the {@link #dockerClient()} bean runs on: whichever producer runs
+     * first caches it in {@link #controlPlaneClient}, so the two never create two pools for one role.
+     */
+    @Produces
+    @ApplicationScoped
+    public DockerHttpClient controlPlaneHttpClient() {
+        return buildWrappedTransport(buildClientConfig(),
+                validateMaxConnections(config.docker().maxConnections()), "control-plane");
+    }
+
+    /**
      * Streaming DockerClient: container log-follow ({@link ContainerLogStreamer}), Lambda
      * extension execs and Lambda exit watchers, Lambda Web attach streams, and the output of
      * long-running execs (CodeBuild phases, SSM run commands, ECS Exec sessions, EKS audit log followers, ECR garbage collection, EC2 and EKS user data and EMR bootstrap actions). Each
@@ -495,6 +513,7 @@ public class DockerClientProducer {
     }
 
     void disposeDockerClient(@Disposes DockerClient client) throws IOException {
+        controlPlaneClient = null;
         gaugeLogger.unregister("control-plane");
         breaker.close();
         client.close();
@@ -577,24 +596,54 @@ public class DockerClientProducer {
     private DockerClient buildDockerClient(DefaultDockerClientConfig clientConfig, int maxConnections, String role) {
         LOG.infov("Creating {0} DockerClient pool (maxConnections={1}) for host: {2}",
                 role, maxConnections, clientConfig.getDockerHost());
+        return newDockerClient(clientConfig, buildWrappedTransport(clientConfig, maxConnections, role));
+    }
 
+    /**
+     * The transport one role runs on: the raw pool wrapped in its retry, breaker and bulkhead
+     * layers. The control-plane one is cached in {@link #controlPlaneClient}, so the two producer
+     * methods that need it never build it twice; the streaming one is built per call.
+     */
+    private DockerHttpClient buildWrappedTransport(DefaultDockerClientConfig clientConfig, int maxConnections,
+                                                   String role) {
+        if ("control-plane".equals(role)) {
+            DockerHttpClient cached = controlPlaneClient;
+            if (cached != null) {
+                return cached;
+            }
+            DockerHttpClient client = wrapControlPlaneTransport(clientConfig, maxConnections);
+            controlPlaneClient = client;
+            return client;
+        }
+        return wrapStreamingTransport(clientConfig, maxConnections);
+    }
+
+    private DockerHttpClient wrapControlPlaneTransport(DefaultDockerClientConfig clientConfig, int maxConnections) {
         Duration apiTimeout = Duration.ofSeconds(validateApiTimeoutSeconds(config.docker().apiTimeoutSeconds()));
         FlociDockerHttpClient transport = newHttpClient(clientConfig, maxConnections, apiTimeout,
                 Duration.ofSeconds(validateConnectionRequestTimeoutSeconds(
                         config.docker().connectionRequestTimeoutSeconds())));
-        gaugeLogger.register(role, transport::gauges);
-        int launchSlots = "control-plane".equals(role)
-                ? LaunchBulkheadDockerHttpClient.resolveSize(
-                        validateMaxConcurrentLaunches(config.docker().maxConcurrentLaunches()),
-                        Runtime.getRuntime().availableProcessors())
-                : 0;
+        gaugeLogger.register("control-plane", transport::gauges);
+        int launchSlots = LaunchBulkheadDockerHttpClient.resolveSize(
+                validateMaxConcurrentLaunches(config.docker().maxConcurrentLaunches()),
+                Runtime.getRuntime().availableProcessors());
         if (launchSlots > 0) {
             LOG.infov("At most {0} container creates and starts run at once", launchSlots);
         }
         Duration launchWait = Duration.ofSeconds(config.docker().connectionRequestTimeoutSeconds());
         usePingTransport(clientConfig);
-        return newDockerClient(clientConfig,
-                wrapForRole(transport, role, apiTimeout, breaker, launchSlots, launchWait));
+        return wrapForRole(transport, "control-plane", apiTimeout, breaker, launchSlots, launchWait);
+    }
+
+    private DockerHttpClient wrapStreamingTransport(DefaultDockerClientConfig clientConfig, int maxConnections) {
+        Duration apiTimeout = Duration.ofSeconds(validateApiTimeoutSeconds(config.docker().apiTimeoutSeconds()));
+        FlociDockerHttpClient transport = newHttpClient(clientConfig, maxConnections, apiTimeout,
+                Duration.ofSeconds(validateConnectionRequestTimeoutSeconds(
+                        config.docker().connectionRequestTimeoutSeconds())));
+        gaugeLogger.register("streaming", transport::gauges);
+        Duration launchWait = Duration.ofSeconds(config.docker().connectionRequestTimeoutSeconds());
+        usePingTransport(clientConfig);
+        return wrapForRole(transport, "streaming", apiTimeout, breaker, 0, launchWait);
     }
 
     /**
