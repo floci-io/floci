@@ -33,7 +33,6 @@ import java.io.Closeable;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -45,6 +44,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.LongSupplier;
 
 /**
  * Runs each Lambda execution environment as a Kubernetes pod. Mirrors
@@ -111,7 +111,13 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
      * measured from an observation this process can vouch for; cleared when the pod's cold-start
      * wait ends.
      */
-    private final ConcurrentHashMap<String, Instant> unschedulableObservedAt = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> unschedulableObservedAt = new ConcurrentHashMap<>();
+    /**
+     * Nanosecond clock the grace is measured on, replaceable in tests so a grace expiry can be
+     * simulated without waiting it out in real time, as {@code LambdaExitWatcher}'s
+     * {@code nanoClock} does.
+     */
+    volatile LongSupplier unschedulableClock = System::nanoTime;
     private final AtomicBoolean caConfigMapApplied = new AtomicBoolean(false);
     private final AtomicBoolean awsConfigPathWarned = new AtomicBoolean(false);
 
@@ -491,8 +497,10 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
         if (grace <= 0) {
             return reason;
         }
-        Instant firstObserved = unschedulableObservedAt.computeIfAbsent(podName(pod), ignored -> Instant.now());
-        return Duration.between(firstObserved, Instant.now()).getSeconds() >= grace ? reason : null;
+        long firstObserved = unschedulableObservedAt.computeIfAbsent(podName(pod),
+                ignored -> unschedulableClock.getAsLong());
+        return unschedulableClock.getAsLong() - firstObserved >= Duration.ofSeconds(grace).toNanos()
+                ? reason : null;
     }
 
     private static String podName(JsonNode pod) {

@@ -51,6 +51,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -436,7 +437,16 @@ class KubernetesPodLauncherTest {
     @Test
     void unschedulablePodFailsOnceTheGracePeriodIsOut() {
         lenient().when(kubernetes.unschedulableGraceSeconds()).thenReturn(5);
-        markUnschedulableInBackground(Instant.now().minusSeconds(60));
+        AtomicLong clock = new AtomicLong(System.nanoTime());
+        launcher.unschedulableClock = clock::get;
+
+        // Once the launcher has read the Unschedulable status (anchoring the grace), advancing
+        // its clock past the configured seconds fails the cold start without waiting it out.
+        CompletableFuture.runAsync(() -> {
+            markUnschedulableInBackground(Instant.now()).join();
+            awaitLauncherPodRead();
+            clock.addAndGet(Duration.ofSeconds(60).toNanos());
+        });
 
         assertThatThrownBy(() -> launcher.launch(function()))
                 .isInstanceOf(RuntimeException.class)
@@ -458,7 +468,6 @@ class KubernetesPodLauncherTest {
         assertThat(handle.getContainerId()).startsWith("floci-lambda-");
     }
 
-    /** Reports the pod Unschedulable since {@code since}, the shape Karpenter's cluster leaves. */
     /** The Unschedulable status Karpenter's cluster leaves, reported since {@code since}. */
     private static PodStatus unschedulableStatus(Instant since) {
         return new PodStatusBuilder()
