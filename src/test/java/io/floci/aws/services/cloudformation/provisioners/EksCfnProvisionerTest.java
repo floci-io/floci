@@ -6,13 +6,18 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.eks.EksService;
+import io.floci.aws.services.eks.model.BlockStorage;
 import io.floci.aws.services.eks.model.CertificateAuthority;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
+import io.floci.aws.services.eks.model.ComputeConfig;
 import io.floci.aws.services.eks.model.CreateClusterRequest;
+import io.floci.aws.services.eks.model.ElasticLoadBalancing;
+import io.floci.aws.services.eks.model.KubernetesNetworkConfig;
 import io.floci.aws.services.eks.model.Logging;
 import io.floci.aws.services.eks.model.Nodegroup;
 import io.floci.aws.services.eks.model.OidcIdentity;
+import io.floci.aws.services.eks.model.StorageConfig;
 import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
 import io.floci.aws.services.eks.model.UpgradePolicy;
 import org.junit.jupiter.api.Test;
@@ -123,6 +128,100 @@ class EksCfnProvisionerTest {
                 new UpdateClusterConfigRequest(null, null, null, new UpgradePolicy("EXTENDED"), null));
         assertTrue(provisioner.rollbackUpdate(r));
         verify(eks).restoreClusterConfig("prod", null, null, null, new UpgradePolicy("STANDARD"));
+    }
+
+    @Test
+    void aClusterCreatedWithAutoModeAsksForItsComputeStorageAndLoadBalancing() throws Exception {
+        Cluster created = new Cluster();
+        created.setName("prod");
+        created.setArn("arn:aws:eks:us-east-1:000000000000:cluster/prod");
+        when(eks.createCluster(any(CreateClusterRequest.class))).thenReturn(created);
+
+        provisioner.provision(resource("AWS::EKS::Cluster", "Control"), props("""
+                {"Name": "prod", "RoleArn": "arn:aws:iam::000000000000:role/eks",
+                 "ComputeConfig": {"Enabled": true, "NodePools": ["general-purpose", "system"],
+                 "NodeRoleArn": "arn:aws:iam::000000000000:role/eks-auto-node"},
+                 "StorageConfig": {"BlockStorage": {"Enabled": true}},
+                 "KubernetesNetworkConfig": {"ElasticLoadBalancing": {"Enabled": true}}}
+                """), ctx());
+
+        ArgumentCaptor<CreateClusterRequest> create = ArgumentCaptor.forClass(CreateClusterRequest.class);
+        verify(eks).createCluster(create.capture());
+        assertEquals(new ComputeConfig(true, List.of("general-purpose", "system"),
+                "arn:aws:iam::000000000000:role/eks-auto-node"), create.getValue().getComputeConfig());
+        assertEquals(new StorageConfig(new BlockStorage(true)), create.getValue().getStorageConfig());
+        assertEquals(new ElasticLoadBalancing(true),
+                create.getValue().getKubernetesNetworkConfig().getElasticLoadBalancing());
+    }
+
+    @Test
+    void anUpdateTurningAutoModeOnSendsItsThreeMembersAndARollbackRestoresTheConfigurationBefore() throws Exception {
+        Cluster created = new Cluster();
+        created.setName("prod");
+        created.setArn("arn:aws:eks:us-east-1:000000000000:cluster/prod");
+        created.setKubernetesNetworkConfig(new KubernetesNetworkConfig());
+        when(eks.createCluster(any(CreateClusterRequest.class))).thenReturn(created);
+        StackResource r = resource("AWS::EKS::Cluster", "Control");
+        JsonNode before = props("{\"Name\": \"prod\", \"RoleArn\": \"arn:aws:iam::000000000000:role/eks\"}");
+        provisioner.provision(r, before, ctx());
+        when(eks.describeCluster("prod")).thenReturn(created);
+        JsonNode after = props("""
+                {"Name": "prod", "RoleArn": "arn:aws:iam::000000000000:role/eks",
+                 "ComputeConfig": {"Enabled": true, "NodePools": ["general-purpose", "system"],
+                 "NodeRoleArn": "arn:aws:iam::000000000000:role/eks-auto-node"},
+                 "StorageConfig": {"BlockStorage": {"Enabled": true}},
+                 "KubernetesNetworkConfig": {"ElasticLoadBalancing": {"Enabled": true}}}
+                """);
+        ProvisionContext update = new ProvisionContext(ctx().engine(), "us-east-1", "000000000000", "my-stack",
+                "prod", event -> { }, before, PropertyChanges.between("AWS::EKS::Cluster", true, before, after));
+
+        provisioner.provision(r, after, update);
+
+        ArgumentCaptor<UpdateClusterConfigRequest> request = ArgumentCaptor.forClass(UpdateClusterConfigRequest.class);
+        verify(eks).updateClusterConfig(eq("prod"), request.capture());
+        assertEquals(new ComputeConfig(true, List.of("general-purpose", "system"),
+                "arn:aws:iam::000000000000:role/eks-auto-node"), request.getValue().computeConfig());
+        assertEquals(new StorageConfig(new BlockStorage(true)), request.getValue().storageConfig());
+        assertEquals(new ElasticLoadBalancing(true),
+                request.getValue().kubernetesNetworkConfig().getElasticLoadBalancing());
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(eks).restoreAutoMode("prod", null, null, null);
+    }
+
+    @Test
+    void anUpdateThatOnlyLeavesOutTheNodeRoleChangesNoAutoMode() throws Exception {
+        Cluster created = new Cluster();
+        created.setName("prod");
+        created.setArn("arn:aws:eks:us-east-1:000000000000:cluster/prod");
+        when(eks.createCluster(any(CreateClusterRequest.class))).thenReturn(created);
+        StackResource r = resource("AWS::EKS::Cluster", "Control");
+        JsonNode before = props("""
+                {"Name": "prod", "RoleArn": "arn:aws:iam::000000000000:role/eks",
+                 "ComputeConfig": {"Enabled": true, "NodePools": ["general-purpose", "system"],
+                 "NodeRoleArn": "arn:aws:iam::000000000000:role/eks-auto-node"},
+                 "StorageConfig": {"BlockStorage": {"Enabled": true}},
+                 "KubernetesNetworkConfig": {"ElasticLoadBalancing": {"Enabled": true}}}
+                """);
+        provisioner.provision(r, before, ctx());
+        created.setComputeConfig(new ComputeConfig(true, List.of("general-purpose", "system"),
+                "arn:aws:iam::000000000000:role/eks-auto-node"));
+        created.setStorageConfig(new StorageConfig(new BlockStorage(true)));
+        KubernetesNetworkConfig network = new KubernetesNetworkConfig();
+        network.setElasticLoadBalancing(new ElasticLoadBalancing(true));
+        created.setKubernetesNetworkConfig(network);
+        when(eks.describeCluster("prod")).thenReturn(created);
+        JsonNode after = props("""
+                {"Name": "prod", "RoleArn": "arn:aws:iam::000000000000:role/eks",
+                 "ComputeConfig": {"Enabled": true, "NodePools": ["system", "general-purpose"]},
+                 "StorageConfig": {"BlockStorage": {"Enabled": true}},
+                 "KubernetesNetworkConfig": {"ElasticLoadBalancing": {"Enabled": true}}}
+                """);
+        ProvisionContext update = new ProvisionContext(ctx().engine(), "us-east-1", "000000000000", "my-stack",
+                "prod", event -> { }, before, PropertyChanges.between("AWS::EKS::Cluster", true, before, after));
+
+        provisioner.provision(r, after, update);
+
+        verify(eks, never()).updateClusterConfig(any(), any());
     }
 
     @Test
@@ -261,15 +360,17 @@ class EksCfnProvisionerTest {
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
         when(engine.omitNoValue(any())).thenAnswer(inv -> inv.getArgument(0));
-        when(engine.resolveStringList(any())).thenAnswer(inv -> {
-            JsonNode node = inv.getArgument(0);
-            List<String> out = new ArrayList<>();
-            if (node != null && node.isArray()) {
-                node.forEach(element -> out.add(element.asText()));
-            }
-            return out;
-        });
+        when(engine.resolveStringList(any())).thenAnswer(inv -> strings(inv.getArgument(0)));
+        when(engine.resolveLiteralList(any())).thenAnswer(inv -> strings(inv.getArgument(0)));
         return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
+    }
+
+    private static List<String> strings(JsonNode node) {
+        List<String> out = new ArrayList<>();
+        if (node != null && node.isArray()) {
+            node.forEach(element -> out.add(element.asText()));
+        }
+        return out;
     }
 
     private JsonNode props(String json) throws Exception {

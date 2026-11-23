@@ -9,13 +9,17 @@ import io.floci.aws.core.common.ReservedTags;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.eks.model.AccessConfig;
+import io.floci.aws.services.eks.model.BlockStorage;
 import io.floci.aws.services.eks.model.Cluster;
+import io.floci.aws.services.eks.model.ComputeConfig;
 import io.floci.aws.services.eks.model.CreateClusterRequest;
+import io.floci.aws.services.eks.model.ElasticLoadBalancing;
 import io.floci.aws.services.eks.model.KubernetesNetworkConfig;
 import io.floci.aws.services.eks.model.LogSetup;
 import io.floci.aws.services.eks.model.Logging;
 import io.floci.aws.services.eks.model.Nodegroup;
 import io.floci.aws.services.eks.model.ResourcesVpcConfig;
+import io.floci.aws.services.eks.model.StorageConfig;
 import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
 import io.floci.aws.services.eks.model.UpgradePolicy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -57,7 +61,8 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
     private static final String SNAPSHOT_ATTR = CfnRollback.EKS_CLUSTER_UPDATE_SNAPSHOT_ATTR;
     /** The cluster properties updateInPlace applies through UpdateClusterConfig, besides Tags. */
     private static final Set<String> CLUSTER_APPLIED =
-            Set.of("ResourcesVpcConfig", "Logging", "AccessConfig", "UpgradePolicy");
+            Set.of("ResourcesVpcConfig", "Logging", "AccessConfig", "UpgradePolicy", "ComputeConfig", "StorageConfig",
+                    "KubernetesNetworkConfig");
     private static final String NODEGROUP_SNAPSHOT_ATTR = CfnRollback.EKS_NODEGROUP_UPDATE_SNAPSHOT_ATTR;
     // The tag keys the last deployment resolved, reserved ones included, as Ec2Tags.recordKeys records
     // them, so an update removes only those and keeps a tag added outside the stack.
@@ -125,14 +130,9 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> templateTags = ctx.resolveTags(props, "Tags");
         request.setTags(templateTags);
         request.setEncryptionConfig(createSetting(props, "EncryptionConfig", ctx, new TypeReference<>() { }));
-        KubernetesNetworkConfig network =
-                createSetting(props, "KubernetesNetworkConfig", ctx, new TypeReference<>() { });
-        if (network != null) {
-            // EKS Auto Mode stays out until ComputeConfig and StorageConfig go with it: CreateCluster refuses load
-            // balancing without the other two.
-            network.setElasticLoadBalancing(null);
-        }
-        request.setKubernetesNetworkConfig(network);
+        request.setKubernetesNetworkConfig(createSetting(props, "KubernetesNetworkConfig", ctx, new TypeReference<>() { }));
+        request.setComputeConfig(createSetting(props, "ComputeConfig", ctx, new TypeReference<>() { }));
+        request.setStorageConfig(createSetting(props, "StorageConfig", ctx, new TypeReference<>() { }));
         request.setResourcesVpcConfig(createSetting(props, "ResourcesVpcConfig", ctx, new TypeReference<>() { }));
         request.setAccessConfig(createSetting(props, "AccessConfig", ctx, new TypeReference<>() { }));
         request.setLogging(logging(props, ctx));
@@ -159,8 +159,7 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
      * template value is read against the type the resource schema declares, so a value of another type
      * fails the resource with CloudFormation's wording. The request model has no ServiceIpv6Cidr member
      * of KubernetesNetworkConfig and no ControlPlaneEgressMode member of ResourcesVpcConfig, so those
-     * are not read, and a create leaves out KubernetesNetworkConfig's ElasticLoadBalancing, as it does
-     * EKS Auto Mode's other settings.
+     * are not read.
      */
     private static <T> T createSetting(JsonNode props, String name, ProvisionContext ctx, TypeReference<T> type) {
         JsonNode resolved = readSetting(props, name, ctx);
@@ -437,8 +436,68 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
                 upgradePolicy = new UpgradePolicy(supportType);
             }
         }
-        return vpc == null && logging == null && access == null && upgradePolicy == null ? null
-                : new UpdateClusterConfigRequest(vpc, logging, access, upgradePolicy, null);
+        AutoModeChange autoMode = autoModeChange(props, ctx, changes, live);
+        if (vpc == null && logging == null && access == null && upgradePolicy == null && autoMode == null) {
+            return null;
+        }
+        return autoMode == null ? new UpdateClusterConfigRequest(vpc, logging, access, upgradePolicy, null)
+                : new UpdateClusterConfigRequest(vpc, logging, access, upgradePolicy, null,
+                        autoMode.compute(), autoMode.storage(), autoMode.network());
+    }
+
+    /** The EKS Auto Mode members of an UpdateClusterConfig request. */
+    private record AutoModeChange(ComputeConfig compute, StorageConfig storage, KubernetesNetworkConfig network) { }
+
+    /**
+     * The EKS Auto Mode change the template asks for, or null when it asks for none. ComputeConfig, StorageConfig
+     * and KubernetesNetworkConfig.ElasticLoadBalancing are updated in place, not create-only, and go to
+     * UpdateClusterConfig together, as its Auto Mode members: one the template drops is read as disabled. The
+     * request is sent only when what the template declares differs from the live cluster: whether each capability
+     * is on, and with compute on, its node pools and node role. A role the template leaves out is the live one,
+     * which UpdateClusterConfig keeps, so that is no change either.
+     */
+    private static AutoModeChange autoModeChange(JsonNode props, ProvisionContext ctx, PropertyChanges changes,
+                                                 Cluster live) {
+        if (!changed(changes, "ComputeConfig") && !changed(changes, "StorageConfig")
+                && !changed(changes, "KubernetesNetworkConfig")) {
+            return null;
+        }
+        ComputeConfig compute = createSetting(props, "ComputeConfig", ctx, new TypeReference<>() { });
+        StorageConfig storage = createSetting(props, "StorageConfig", ctx, new TypeReference<>() { });
+        KubernetesNetworkConfig declaredNetwork =
+                createSetting(props, "KubernetesNetworkConfig", ctx, new TypeReference<>() { });
+        ElasticLoadBalancing loadBalancing = declaredNetwork == null || declaredNetwork.getElasticLoadBalancing() == null
+                ? new ElasticLoadBalancing(false) : declaredNetwork.getElasticLoadBalancing();
+        compute = compute == null ? new ComputeConfig(false, null, null) : compute;
+        storage = storage == null || storage.blockStorage() == null ? new StorageConfig(new BlockStorage(false)) : storage;
+        KubernetesNetworkConfig liveNetwork = live.getKubernetesNetworkConfig();
+        if (autoModeOn(compute, storage, loadBalancing).equals(autoModeOn(live.getComputeConfig(), live.getStorageConfig(),
+                liveNetwork == null ? null : liveNetwork.getElasticLoadBalancing()))
+                && (!Boolean.TRUE.equals(compute.enabled()) || sameCompute(compute, live.getComputeConfig()))) {
+            return null;
+        }
+        KubernetesNetworkConfig network = new KubernetesNetworkConfig();
+        network.setElasticLoadBalancing(loadBalancing);
+        return new AutoModeChange(compute, storage, network);
+    }
+
+    private static List<Boolean> autoModeOn(ComputeConfig compute, StorageConfig storage,
+                                            ElasticLoadBalancing loadBalancing) {
+        return List.of(compute != null && Boolean.TRUE.equals(compute.enabled()),
+                storage != null && storage.blockStorage() != null && Boolean.TRUE.equals(storage.blockStorage().enabled()),
+                loadBalancing != null && Boolean.TRUE.equals(loadBalancing.enabled()));
+    }
+
+    /** With compute on in both: the same node pools, and the same role unless the template leaves it out. */
+    private static boolean sameCompute(ComputeConfig declared, ComputeConfig live) {
+        if (live == null) {
+            return false;
+        }
+        Set<String> declaredPools = declared.nodePools() == null ? Set.of() : new HashSet<>(declared.nodePools());
+        Set<String> livePools = live.nodePools() == null ? Set.of() : new HashSet<>(live.nodePools());
+        boolean roleKept = declared.nodeRoleArn() == null || declared.nodeRoleArn().isEmpty()
+                || declared.nodeRoleArn().equals(live.nodeRoleArn());
+        return declaredPools.equals(livePools) && roleKept;
     }
 
     private static boolean changed(PropertyChanges changes, String name) {
@@ -478,6 +537,13 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         if (request.upgradePolicy() != null) {
             snapshot.set("upgradePolicy", MAPPER.valueToTree(live.getUpgradePolicy()));
         }
+        if (request.changesAutoMode()) {
+            ObjectNode autoMode = snapshot.putObject("autoMode");
+            autoMode.set("compute", MAPPER.valueToTree(live.getComputeConfig()));
+            autoMode.set("storage", MAPPER.valueToTree(live.getStorageConfig()));
+            KubernetesNetworkConfig network = live.getKubernetesNetworkConfig();
+            autoMode.set("loadBalancing", MAPPER.valueToTree(network == null ? null : network.getElasticLoadBalancing()));
+        }
     }
 
     /**
@@ -507,6 +573,12 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
                     snapshot.has("authenticationMode") ? snapshot.get("authenticationMode").asText() : null,
                     snapshot.has("upgradePolicy")
                             ? MAPPER.convertValue(snapshot.get("upgradePolicy"), UpgradePolicy.class) : null);
+        }
+        JsonNode autoMode = snapshot.get("autoMode");
+        if (name != null && autoMode != null) {
+            eksService.restoreAutoMode(name, MAPPER.convertValue(autoMode.get("compute"), ComputeConfig.class),
+                    MAPPER.convertValue(autoMode.get("storage"), StorageConfig.class),
+                    MAPPER.convertValue(autoMode.get("loadBalancing"), ElasticLoadBalancing.class));
         }
         Ec2Tags.restoreRecord(r, keysAttr, snapshot);
     }

@@ -1371,6 +1371,23 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         });
     }
 
+    /**
+     * Puts back the EKS Auto Mode configuration an update changed, with no AWS rules applied: a stack rollback
+     * restores the node role an update may not change and a configuration UpdateClusterConfig would answer "No
+     * changes needed" to.
+     */
+    public synchronized void restoreAutoMode(String name, ComputeConfig compute, StorageConfig storage,
+                                             ElasticLoadBalancing loadBalancing) {
+        Cluster cluster = requireClusterInRequestRegion(name);
+        saveClusterIfNotDeleting(regionResolver.getAccountId(), clusterKey(cluster), current -> {
+            current.setComputeConfig(compute);
+            current.setStorageConfig(storage);
+            if (current.getKubernetesNetworkConfig() != null) {
+                current.getKubernetesNetworkConfig().setElasticLoadBalancing(loadBalancing);
+            }
+        });
+    }
+
     /** The log types a {@link Logging} setting enables; empty for a null setting. */
     public static Set<String> enabledLogTypes(Logging logging) {
         Set<String> enabled = new HashSet<>();
