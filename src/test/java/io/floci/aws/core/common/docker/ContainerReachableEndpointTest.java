@@ -132,6 +132,32 @@ class ContainerReachableEndpointTest {
     }
 
     @Test
+    void httpsBaseUrlWithoutEmbeddedDnsNamesTheDockerHostTheCertificateNames() {
+        // An EKS node that cannot use Floci's DNS server reaches Floci on the Docker host, which
+        // the self-signed certificate names when Floci runs natively.
+        when(tls.enabled()).thenReturn(true);
+        when(config.port()).thenReturn(4566);
+        lenient().when(embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.18.0.2"));
+        when(dockerHostResolver.resolve()).thenReturn("host.docker.internal");
+        when(tlsCertificates.serves("host.docker.internal")).thenReturn(true);
+
+        assertEquals(Optional.of("https://host.docker.internal:4566"), endpoint(4510).httpsBaseUrl(false));
+    }
+
+    @Test
+    void httpsBaseUrlIsEmptyForAHostTheCertificateDoesNotName() {
+        when(tls.enabled()).thenReturn(true);
+        when(config.hostname()).thenReturn(Optional.empty());
+        when(embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.18.0.2"));
+        when(dockerHostResolver.resolve()).thenReturn("172.18.0.2");
+        when(tlsCertificates.serves(EmbeddedDnsServer.DEFAULT_SUFFIX)).thenReturn(false);
+        when(tlsCertificates.serves("172.18.0.2")).thenReturn(false);
+
+        assertEquals(Optional.empty(), endpoint(4510).httpsBaseUrl(true));
+        assertEquals(Optional.empty(), endpoint(4510).httpsBaseUrl(false));
+    }
+
+    @Test
     void customResourceResponseUrlIsHttpWithoutTls() {
         hostMappedTo4811();
         when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());

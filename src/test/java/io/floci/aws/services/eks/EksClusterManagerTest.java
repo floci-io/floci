@@ -16,6 +16,7 @@ import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Info;
 import com.github.dockerjava.api.model.NetworkSettings;
 import io.floci.aws.config.EmulatorConfig;
@@ -32,6 +33,7 @@ import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
+import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.common.docker.PortAllocator;
@@ -457,7 +459,7 @@ class EksClusterManagerTest {
         when(regionResolver.buildGlobalArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
                 "arn:aws:" + invocation.getArgument(0) + "::" + invocation.getArgument(1) + ":" + invocation.getArgument(2));
 
-        EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
+        EksClusterManager manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                 Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                 config, regionResolver);
@@ -493,7 +495,7 @@ class EksClusterManagerTest {
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
         when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
-        EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
+        EksClusterManager manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                 Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                 config, new RegionResolver("us-east-1", "000000000000"));
@@ -525,7 +527,7 @@ class EksClusterManagerTest {
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
         when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
-        EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
+        EksClusterManager manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                 Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                 config, new RegionResolver("us-east-1", "000000000000"));
@@ -559,7 +561,7 @@ class EksClusterManagerTest {
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
         when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
-        EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
+        EksClusterManager manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                 Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                 config, new RegionResolver("us-east-1", "000000000000"));
@@ -637,7 +639,7 @@ class EksClusterManagerTest {
             when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
 
             containerDetector = Mockito.mock(ContainerDetector.class);
-            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+            manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                     containerDetector, portAllocator,
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                     config, Mockito.mock(RegionResolver.class));
@@ -1658,7 +1660,7 @@ class EksClusterManagerTest {
 
             DockerHostResolver dockerHostResolver = Mockito.mock(DockerHostResolver.class);
             when(dockerHostResolver.resolve()).thenReturn("floci");
-            manager = new EksClusterManager(
+            manager = EksClusterManagers.create(
                     Mockito.mock(ContainerBuilder.class), lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     dockerHostResolver, registryManager, config,
@@ -1823,7 +1825,7 @@ class EksClusterManagerTest {
             when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
             when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
 
-            manager = new EksClusterManager(
+            manager = EksClusterManagers.create(
                     Mockito.mock(ContainerBuilder.class), lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
@@ -1956,7 +1958,7 @@ class EksClusterManagerTest {
             when(containerResponse.getNetworkSettings()).thenReturn(netSettings);
             when(netSettings.getIpAddress()).thenReturn("172.17.0.2");
 
-            manager = new EksClusterManager(
+            manager = EksClusterManagers.create(
                     Mockito.mock(ContainerBuilder.class), lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     dockerHostResolver, Mockito.mock(EcrRegistryManager.class),
@@ -2558,7 +2560,7 @@ class EksClusterManagerTest {
             addons = Mockito.mock(EksAddonService.class);
             when(addons.isInstalled(any(), eq(EksPodIdentityWebhook.POD_IDENTITY_ADDON))).thenReturn(true);
 
-            manager = new EksClusterManager(
+            manager = EksClusterManagers.create(
                     Mockito.mock(ContainerBuilder.class), lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     dockerHostResolver, Mockito.mock(EcrRegistryManager.class),
@@ -2801,7 +2803,7 @@ class EksClusterManagerTest {
                     "https://oidc.eks.us-east-1.amazonaws.com/id/TESTISSUER12345678901234567890");
 
             nodeGroupStorage = new InMemoryStorage<>();
-            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+            manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                     config, regionResolver, null, oidcService, null, null, nodeGroupStorage);
@@ -3747,7 +3749,7 @@ class EksClusterManagerTest {
             when(regionResolver.buildGlobalArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
                     "arn:aws:" + invocation.getArgument(0) + "::" + invocation.getArgument(1) + ":" + invocation.getArgument(2));
 
-            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+            manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                     Mockito.mock(ContainerDetector.class), portAllocator,
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                     config, regionResolver, null, Mockito.mock(EksOidcService.class));
@@ -4052,7 +4054,10 @@ class EksClusterManagerTest {
         private EmulatorConfig.EksServiceConfig eks;
         private EmulatorConfig.TlsConfig tls;
         private ContainerLifecycleManager lifecycleManager;
+        private DockerClient dockerClient;
         private CopyArchiveToContainerCmd copyCmd;
+        private ContainerBuilder containerBuilder;
+        private ContainerReachableEndpoint reachableEndpoint;
         private EksClusterManager manager;
 
         @BeforeEach
@@ -4074,7 +4079,7 @@ class EksClusterManagerTest {
             when(tls.enabled()).thenReturn(true);
 
             lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
-            DockerClient dockerClient = Mockito.mock(DockerClient.class);
+            dockerClient = Mockito.mock(DockerClient.class);
             copyCmd = Mockito.mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
             when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
             when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
@@ -4082,7 +4087,7 @@ class EksClusterManagerTest {
             when(lifecycleManager.startCreated(any(), any()))
                     .thenReturn(new ContainerInfo("container-1", Map.of()));
 
-            ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+            containerBuilder = Mockito.mock(ContainerBuilder.class);
             ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
             when(builder.build()).thenReturn(new ContainerSpec("test-image"));
@@ -4099,11 +4104,56 @@ class EksClusterManagerTest {
             FlociCertificateAuthority certificateAuthority = inlineMock(FlociCertificateAuthority.class);
             when(certificateAuthority.caPem()).thenReturn(CA_PEM);
 
+            reachableEndpoint = EksTestEndpoints.dockerHostEndpoint();
+
             manager = new EksClusterManager(
                     containerBuilder, lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     dockerHostResolver, Mockito.mock(EcrRegistryManager.class), config,
-                    regionResolver, null, null, certificateAuthority);
+                    regionResolver, null, null, certificateAuthority, null, null, 0L, new Ec2ImageCatalog(),
+                    reachableEndpoint);
+        }
+
+        private String writtenManifest() throws Exception {
+            return Files.readString(tempDir.resolve("webhook/000000000000/us-east-1/demo")
+                    .resolve("floci-eks-pod-identity.yaml"));
+        }
+
+        private String writtenCaBundle() throws Exception {
+            String encoded = writtenManifest().split("caBundle: \"")[1].split("\"")[0];
+            return new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
+        }
+
+        private void assertTheWebhookIsRemoved(String containerId) throws Exception {
+            verify(dockerClient).copyArchiveToContainerCmd(containerId);
+            verify(copyCmd).withRemotePath("/var/lib/rancher/k3s");
+            assertEquals(EksClusterManager.POD_IDENTITY_MANIFEST_REMOVED, writtenManifest());
+        }
+
+        private Cluster adoptSurvivingCluster() {
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(containerFromJson(
+                    "{\"Id\":\"cid-1\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\","
+                            + "\"io.floci.eks.shared-mounts\":\"true\"}}")));
+            when(lifecycleManager.adopt("cid-1", List.of(6443), Optional.empty()))
+                    .thenReturn(new ContainerInfo("cid-1", Map.of(), Map.of(6443, 6512)));
+            Cluster cluster = cluster();
+            cluster.setDockerName("floci-eks-demo");
+            manager.restoreCluster(cluster);
+            return cluster;
+        }
+
+        private void flocisDnsServerIsUp() {
+            when(eks.embeddedDns()).thenReturn(true);
+            when(containerBuilder.embeddedDnsServerIpReachableOn(Optional.empty())).thenReturn(Optional.of("172.18.0.2"));
+            when(reachableEndpoint.httpsBaseUrl(true)).thenReturn(Optional.of("https://localhost.floci.io:4566"));
+        }
+
+        private void survivingNodeResolvesThrough(String... resolvers) {
+            InspectContainerCmd inspect = Mockito.mock(InspectContainerCmd.class);
+            InspectContainerResponse response = Mockito.mock(InspectContainerResponse.class);
+            when(dockerClient.inspectContainerCmd("cid-1")).thenReturn(inspect);
+            when(inspect.exec()).thenReturn(response);
+            when(response.getHostConfig()).thenReturn(HostConfig.newHostConfig().withDns(resolvers));
         }
 
         private Cluster cluster() {
@@ -4158,12 +4208,120 @@ class EksClusterManagerTest {
         }
 
         @Test
-        void skipsWithAWarningWhenTlsIsDisabled() {
+        void theApiServerCallsFlociByItsHostnameWhenTheNodeResolvesThroughFlocisDns() throws Exception {
+            // Floci's own certificate names its hostname but not the container IP the Docker host is
+            // in a container, and the node finds the hostname through Floci's DNS server.
+            when(eks.embeddedDns()).thenReturn(true);
+            when(containerBuilder.embeddedDnsServerIpReachableOn(Optional.empty())).thenReturn(Optional.of("172.18.0.2"));
+            when(reachableEndpoint.httpsBaseUrl(true)).thenReturn(Optional.of("https://localhost.floci.io:4566"));
+
+            manager.registerPodIdentityWebhook("container-1", cluster());
+
+            assertTrue(writtenManifest().contains("url: \"https://localhost.floci.io:4566"
+                    + "/_floci/eks/clusters/demo/pod-identity-webhook/scope/000000000000/us-east-1\""));
+        }
+
+        @Test
+        void theApiServerCallsTheDockerHostWhenTheClusterCannotReachFlocisDns() throws Exception {
+            when(eks.embeddedDns()).thenReturn(true);
+            when(containerBuilder.embeddedDnsServerIpReachableOn(Optional.empty())).thenReturn(Optional.empty());
+            when(reachableEndpoint.httpsBaseUrl(true)).thenReturn(Optional.of("https://localhost.floci.io:4566"));
+
+            manager.registerPodIdentityWebhook("container-1", cluster());
+
+            assertTrue(writtenManifest().contains("url: \"https://host.docker.internal:4566/"));
+        }
+
+        @Test
+        void theApiServerCallsTheDockerHostWhenTheNodeIsNotGivenFlocisDns() throws Exception {
+            when(eks.embeddedDns()).thenReturn(false);
+            when(containerBuilder.embeddedDnsServerIpReachableOn(Optional.empty())).thenReturn(Optional.of("172.18.0.2"));
+            when(reachableEndpoint.httpsBaseUrl(true)).thenReturn(Optional.of("https://localhost.floci.io:4566"));
+
+            manager.registerPodIdentityWebhook("container-1", cluster());
+
+            assertTrue(writtenManifest().contains("url: \"https://host.docker.internal:4566/"));
+        }
+
+        @Test
+        void aCertificateThatDoesNotNameTheHostRemovesTheWebhook() throws Exception {
+            // The API server checks the host against Floci's certificate, so it would refuse every call, and the
+            // cluster's data volume may hold a webhook registered under an earlier certificate.
+            when(reachableEndpoint.httpsBaseUrl(false)).thenReturn(Optional.empty());
+
+            manager.registerPodIdentityWebhook("container-1", cluster());
+
+            assertTheWebhookIsRemoved("container-1");
+        }
+
+        @Test
+        void theManifestThatRemovesTheWebhookHoldsNoObjects() {
+            // k3s prunes what an earlier version of a manifest created when the new one no longer holds it.
+            assertTrue(EksClusterManager.POD_IDENTITY_MANIFEST_REMOVED.lines()
+                    .allMatch(line -> line.isBlank() || line.startsWith("#")));
+        }
+
+        @Test
+        void theCaBundleTrustsAConfiguredCertificateAndKeepsTheLocalCa() throws Exception {
+            FlociCertificateAuthority configured = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("configured"));
+            when(tls.certPath()).thenReturn(Optional.of(configured.certificatePath().toString()));
+            when(tls.keyPath()).thenReturn(Optional.of(tempDir.resolve("server.key").toString()));
+
+            manager.registerPodIdentityWebhook("container-1", cluster());
+
+            assertEquals(configured.caPem() + CA_PEM, writtenCaBundle());
+        }
+
+        @Test
+        void adoptingASurvivingClusterRewritesItsManifest() throws Exception {
+            // The manifest written at creation names the address and certificate Floci had then.
+            Cluster cluster = adoptSurvivingCluster();
+
+            assertEquals("cid-1", cluster.getContainerId());
+            verify(lifecycleManager, never()).create(any());
+            verify(dockerClient).copyArchiveToContainerCmd("cid-1");
+            assertTrue(writtenManifest().contains("url: \"https://host.docker.internal:4566"
+                    + "/_floci/eks/clusters/demo/pod-identity-webhook/scope/000000000000/us-east-1\""));
+        }
+
+        @Test
+        void anAdoptedNodeCreatedWithFlocisDnsCallsFlociByItsHostname() throws Exception {
+            flocisDnsServerIsUp();
+            survivingNodeResolvesThrough("172.18.0.2", "8.8.8.8");
+
+            adoptSurvivingCluster();
+
+            assertTrue(writtenManifest().contains("url: \"https://localhost.floci.io:4566/"));
+        }
+
+        @Test
+        void anAdoptedNodeCreatedWithoutFlocisDnsCallsTheDockerHost() throws Exception {
+            // A container keeps the resolvers it was created with, so the node cannot find Floci's hostname
+            // through a DNS server that was not up, or had another address, when it was created.
+            flocisDnsServerIsUp();
+            survivingNodeResolvesThrough("172.18.0.9");
+
+            adoptSurvivingCluster();
+
+            assertTrue(writtenManifest().contains("url: \"https://host.docker.internal:4566/"));
+        }
+
+        @Test
+        void tlsOffRemovesTheWebhook() throws Exception {
             when(tls.enabled()).thenReturn(false);
 
             manager.registerPodIdentityWebhook("container-1", cluster());
 
-            verify(lifecycleManager, never()).getDockerClient();
+            assertTheWebhookIsRemoved("container-1");
+        }
+
+        @Test
+        void adoptingAClusterOnceTlsIsOffRemovesItsWebhook() throws Exception {
+            when(tls.enabled()).thenReturn(false);
+
+            adoptSurvivingCluster();
+
+            assertTheWebhookIsRemoved("cid-1");
         }
 
         @Test
@@ -4251,7 +4409,7 @@ class EksClusterManagerTest {
             when(logStreamer.attachPolledFromNowForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                     .thenReturn(mockHandle);
 
-            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+            manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                     Mockito.mock(ContainerDetector.class), portAllocator,
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                     config, regionResolver, null, null, logStreamer);
@@ -4691,7 +4849,7 @@ class EksClusterManagerTest {
             when(regionResolver.buildGlobalArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
                     "arn:aws:" + invocation.getArgument(0) + "::" + invocation.getArgument(1) + ":" + invocation.getArgument(2));
 
-            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+            manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                     config, regionResolver);
@@ -4812,7 +4970,7 @@ class EksClusterManagerTest {
                     Mockito.mock(EcrRegistryManager.class), config, new RegionResolver("us-east-1", "000000000000"),
                     Mockito.mock(Ec2MetadataServer.class), Mockito.mock(EksOidcService.class),
                     inlineMock(FlociCertificateAuthority.class), Mockito.mock(ContainerLogStreamer.class),
-                    new InMemoryStorage<>(), 0, new Ec2ImageCatalog(config)));
+                    new InMemoryStorage<>(), 0, new Ec2ImageCatalog(config), EksTestEndpoints.dockerHostEndpoint()));
         }
 
         private Cluster clusterNamed(String name, String containerId) {
@@ -5067,7 +5225,7 @@ class EksClusterManagerTest {
             ec2Service = Mockito.mock(Ec2Service.class);
             when(ec2Service.attachContainerToVpc(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                     .thenReturn(Optional.of("floci-vpc-1"));
-            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+            manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                     Mockito.mock(ContainerDetector.class), portAllocator,
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                     config, regionResolver);

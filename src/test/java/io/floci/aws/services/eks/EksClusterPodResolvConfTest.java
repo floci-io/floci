@@ -98,7 +98,7 @@ class EksClusterPodResolvConfTest {
             return copyCmd;
         });
 
-        manager = new EksClusterManager(containerBuilder, lifecycleManager,
+        manager = EksClusterManagers.create(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                 Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                 config, new RegionResolver("us-east-1", "000000000000"), null, null, null, null, null, 0L);

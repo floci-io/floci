@@ -181,6 +181,25 @@ public final class ContainerCaBundle {
         return certificates.toString();
     }
 
+    /**
+     * The PEM a client must trust for Floci's HTTPS endpoint and the certificates Floci issues, served at
+     * {@code GET /_floci/ca.pem}: the local CA, {@code localCa}, alone by default. With a user-provided
+     * certificate the endpoint is signed by that certificate's issuer instead, so the certificates in the
+     * certificate file come first (never a private key it may also hold), then the local CA. A user-provided
+     * certificate is the one {@code TlsConfigSource} serves: TLS on, with both a certificate and a key path.
+     */
+    public static String endpointTrustPem(EmulatorConfig config, String localCa)
+            throws IOException, GeneralSecurityException {
+        if (!config.tls().enabled() || config.tls().keyPath().filter(path -> !path.isBlank()).isEmpty()) {
+            return localCa;
+        }
+        Optional<String> certificate = config.tls().certPath().filter(path -> !path.isBlank());
+        if (certificate.isEmpty()) {
+            return localCa;
+        }
+        return certificatePem(Files.readString(Path.of(certificate.get()))) + localCa;
+    }
+
     /** The {@code KEY=value} entries that make each runtime read {@link #CONTAINER_PATH}. */
     public static List<String> env() {
         return appendEnv(null);
