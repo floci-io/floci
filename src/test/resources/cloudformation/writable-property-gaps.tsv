@@ -628,8 +628,6 @@ AWS::SNS::Topic	KmsMasterKeyId	accepted and ignored
 AWS::SNS::Topic	SignatureVersion	accepted and ignored
 AWS::SNS::Topic	Tags	accepted and ignored
 AWS::SNS::Topic	TracingConfig	accepted and ignored
-AWS::SQS::QueuePolicy	PolicyDocument	accepted and ignored
-AWS::SQS::QueuePolicy	Queues	accepted and ignored
 AWS::SSM::Parameter	AllowedPattern	accepted and ignored
 AWS::SSM::Parameter	DataType	accepted and ignored
 AWS::SSM::Parameter	Description	accepted and ignored
