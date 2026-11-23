@@ -1046,10 +1046,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 ? defaultEncryption(bucket)
                 : new ObjectEncryption(normalizedServerSideEncryption, effectiveOptions.getSseKmsKeyId());
         object.setServerSideEncryption(encryption.algorithm());
-        object.setSseKmsKeyId("aws:kms".equals(encryption.algorithm())
-            || "aws:kms:dsse".equals(encryption.algorithm())
-                ? encryption.kmsKeyId()
-                : null);
+        object.setSseKmsKeyId(encryption.keptKmsKeyId());
         if (sseCustomerKey != null) {
             object.setSseCustomerAlgorithm(sseCustomerKey.algorithm());
             object.setSseCustomerKeyMd5(sseCustomerKey.keyMd5());
@@ -4840,16 +4837,13 @@ public class S3Service implements Resettable, ResourceProvider {
             upload.setContentDisposition(contentDisposition);
             upload.setContentEncoding(objectOptions.getContentEncoding());
             upload.setCacheControl(objectOptions.getCacheControl());
-            upload.setServerSideEncryption(normalizedServerSideEncryption);
-            upload.setSseKmsKeyId("aws:kms".equals(normalizedServerSideEncryption)
-                    || "aws:kms:dsse".equals(normalizedServerSideEncryption) ? sseKmsKeyId : null);
+            ObjectEncryption requested = new ObjectEncryption(normalizedServerSideEncryption, sseKmsKeyId);
+            upload.setServerSideEncryption(requested.algorithm());
+            upload.setSseKmsKeyId(requested.keptKmsKeyId());
             if (normalizedServerSideEncryption == null && customerKey == null) {
                 ObjectEncryption encryption = defaultEncryption(destination);
                 upload.setDefaultServerSideEncryption(encryption.algorithm());
-                upload.setDefaultSseKmsKeyId("aws:kms".equals(encryption.algorithm())
-                        || "aws:kms:dsse".equals(encryption.algorithm())
-                        ? encryption.kmsKeyId()
-                        : null);
+                upload.setDefaultSseKmsKeyId(encryption.keptKmsKeyId());
             }
             if (customerKey != null) {
                 upload.setSseCustomerAlgorithm(customerKey.algorithm());
@@ -7289,8 +7283,14 @@ public class S3Service implements Resettable, ResourceProvider {
 
     record SseCustomerKey(String algorithm, String keyMd5) {}
 
-    /** The server-side encryption an object is stored with, and its KMS key for {@code aws:kms} and {@code aws:kms:dsse}. */
-    private record ObjectEncryption(String algorithm, String kmsKeyId) {}
+    /** A server-side encryption and the KMS key id that came with it; {@link #keptKmsKeyId()} applies the rule that keeps it. */
+    record ObjectEncryption(String algorithm, String kmsKeyId) {
+
+        /** The key id this encryption keeps: only {@code aws:kms} and {@code aws:kms:dsse} carry one. */
+        String keptKmsKeyId() {
+            return "aws:kms".equals(algorithm) || "aws:kms:dsse".equals(algorithm) ? kmsKeyId : null;
+        }
+    }
 
     /**
      * The encryption S3 applies to an object written to {@code bucket} without encryption headers: the
