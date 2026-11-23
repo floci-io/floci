@@ -156,7 +156,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private static final String MANAGED_POLICY_ETAG = "E23ZP02F085DFQ";
 
     private final AccountAwareStorageBackend<Distribution> distStore;
-    private final StorageBackend<String, ConnectionGroup> connectionGroupStore;
+    private final AccountAwareStorageBackend<ConnectionGroup> connectionGroupStore;
     private final StorageBackend<String, List<Invalidation>> invalidationStore;
     private final StorageBackend<String, CachePolicy> cachePolicyStore;
     private final StorageBackend<String, OriginRequestPolicy> orpStore;
@@ -272,9 +272,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                 tagStore.put(dist.getArn(), tags);
             }
             distStore.put(id, dist);
-            if (dist.getConfig() != null && "tenant-only".equals(dist.getConfig().getConnectionMode())) {
-                ensureDefaultConnectionGroup();
-            }
+            ensureDefaultConnectionGroupForTenantOnly(dist.getConfig());
             return dist;
         });
     }
@@ -309,8 +307,19 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             updated.setEtag(UUID.randomUUID().toString());
             updated.setTags(existing.getTags());
             distStore.put(id, updated);
+            ensureDefaultConnectionGroupForTenantOnly(updated.getConfig());
             return updated;
         });
+    }
+
+    /**
+     * The account's default connection group stands behind every {@code tenant-only} distribution, so
+     * it is minted when a distribution first selects the mode, on the create as on the update.
+     */
+    private void ensureDefaultConnectionGroupForTenantOnly(DistributionConfig config) {
+        if (config != null && "tenant-only".equals(config.getConnectionMode())) {
+            ensureDefaultConnectionGroup();
+        }
     }
 
     @Override
@@ -727,6 +736,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         invalidationStore.delete(id);
         tagStore.delete(existing.getArn());
         tagStore.delete("distribution/" + id);
+        clearViewerFallbackReferences(id);
     }
 
     /**
@@ -742,6 +752,21 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             tagStore.delete(existing.getArn());
         }
         tagStore.delete("distribution/" + id);
+        clearViewerFallbackReferences(id);
+    }
+
+    /**
+     * Drops the {@code ViewerFallback} reference of every connection group that named the deleted
+     * distribution. AWS documents no in-use error for a fallback distribution, so the delete
+     * succeeds and the groups it stood behind read back without a fallback.
+     */
+    private void clearViewerFallbackReferences(String distributionId) {
+        for (ConnectionGroup group : connectionGroupStore.scan(k -> true)) {
+            if (distributionId.equals(group.getViewerFallbackDistributionId())) {
+                group.setViewerFallbackDistributionId(null);
+                connectionGroupStore.put(group.getId(), group);
+            }
+        }
     }
 
     public List<Distribution> listDistributions(String marker, int maxItems) {
@@ -986,7 +1011,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                                         String viewerFallbackDistributionId) {
         String id = "cg_" + randomIdSuffix(24);
         group.setId(id);
-        group.setArn(arn("connection-group/" + id));
+        group.setArn(regionResolver.buildGlobalArn("cloudfront", "connection-group/" + id));
         group.setName(name);
         group.setAnycastIpListId(anycastIpListId);
         group.setEnabled(enabled != null && enabled);
@@ -1003,7 +1028,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private ConnectionGroup requireConnectionGroup(String id) {
         ConnectionGroup group = connectionGroupStore.get(id).orElse(null);
         if (group == null) {
-            throw new AwsException("EntityNotFound", "The connection group " + id + " does not exist.", 404);
+            throw notFound(id);
         }
         return group;
     }
@@ -1053,12 +1078,25 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                                                               String anycastIpListId, Boolean enabled,
                                                               Boolean ipv6Enabled,
                                                               String viewerFallbackDistributionId) {
+        return updateConnectionGroup(id, ifMatch, anycastIpListId, enabled, ipv6Enabled,
+                viewerFallbackDistributionId, null, null);
+    }
+
+    /**
+     * The extended form the CloudFormation provisioner drives, where a template's presence of
+     * {@code ViewerFallback} and of {@code Tags} is known. {@code clearViewerFallback} removes the
+     * fallback distribution instead of keeping the stored one, and a non-null {@code tags} replaces
+     * the group's tags wholesale (an empty map removes them all); null leaves each as it is.
+     */
+    public synchronized ConnectionGroup updateConnectionGroup(String id, String ifMatch,
+                                                              String anycastIpListId, Boolean enabled,
+                                                              Boolean ipv6Enabled,
+                                                              String viewerFallbackDistributionId,
+                                                              Boolean clearViewerFallback,
+                                                              Map<String, String> tags) {
         requireIfMatch(ifMatch);
         ConnectionGroup group = requireConnectionGroup(id);
-        if (!group.getEtag().equals(ifMatch)) {
-            throw new AwsException("PreconditionFailed",
-                    "The specified If-Match didn't match the ETag header.", 412);
-        }
+        requireCurrentEtag(group, ifMatch);
         requireDistributionExists(viewerFallbackDistributionId);
         if (anycastIpListId != null) {
             group.setAnycastIpListId(anycastIpListId);
@@ -1069,8 +1107,13 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         if (ipv6Enabled != null) {
             group.setIpv6Enabled(ipv6Enabled);
         }
-        if (viewerFallbackDistributionId != null) {
+        if (Boolean.TRUE.equals(clearViewerFallback)) {
+            group.setViewerFallbackDistributionId(null);
+        } else if (viewerFallbackDistributionId != null) {
             group.setViewerFallbackDistributionId(viewerFallbackDistributionId);
+        }
+        if (tags != null) {
+            replaceConnectionGroupTags(group, tags);
         }
         group.setLastModifiedTime(Instant.now());
         group.setEtag("E" + randomIdSuffix(12));
@@ -1078,13 +1121,29 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         return group;
     }
 
-    public synchronized void deleteConnectionGroup(String id, String ifMatch) {
-        requireIfMatch(ifMatch);
-        ConnectionGroup group = requireConnectionGroup(id);
+    /** Drives the group's tags to the desired set, the model field echoing what the store keeps. */
+    private void replaceConnectionGroupTags(ConnectionGroup group, Map<String, String> tags) {
+        if (tags.isEmpty()) {
+            tagStore.delete(group.getArn());
+            group.setTags(null);
+            return;
+        }
+        tagStore.put(group.getArn(), new LinkedHashMap<>(tags));
+        group.setTags(new LinkedHashMap<>(tags));
+    }
+
+    /** One copy of the stale-If-Match refusal the group writes share. */
+    private static void requireCurrentEtag(ConnectionGroup group, String ifMatch) {
         if (!group.getEtag().equals(ifMatch)) {
             throw new AwsException("PreconditionFailed",
                     "The specified If-Match didn't match the ETag header.", 412);
         }
+    }
+
+    public synchronized void deleteConnectionGroup(String id, String ifMatch) {
+        requireIfMatch(ifMatch);
+        ConnectionGroup group = requireConnectionGroup(id);
+        requireCurrentEtag(group, ifMatch);
         if (Boolean.TRUE.equals(group.getIsDefault())) {
             throw new AwsException("CannotDeleteEntityWhileInUse",
                     "The default connection group cannot be deleted.", 409);
@@ -1094,9 +1153,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                     "The connection group has not been disabled.", 409);
         }
         connectionGroupStore.delete(id);
-        if (group.getTags() != null) {
-            tagStore.delete(group.getArn());
-        }
+        tagStore.delete(group.getArn());
     }
 
     public List<ConnectionGroup> listConnectionGroups(String marker, int maxItems,
@@ -1110,15 +1167,24 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     /**
      * The distributions whose configuration selects one connection mode, listed like
-     * {@link #listDistributions(String, int)} lists all of them.
+     * {@link #listDistributions(String, int)} lists all of them. The mode is held to the
+     * enumeration the shape declares, and a distribution stored without a mode reads as
+     * {@code direct}: an omitted member is what an ordinary distribution sends.
      */
     public List<Distribution> listDistributionsByConnectionMode(String connectionMode, String marker,
                                                                 int maxItems) {
+        if (!CONNECTION_MODES.contains(connectionMode)) {
+            throw new AwsException("InvalidArgument", "The ConnectionMode specified is not valid.", 400);
+        }
         List<Distribution> all = new ArrayList<>(distStore.scan(k -> true));
-        all.removeIf(dist -> dist.getConfig() == null
-                || !connectionMode.equals(dist.getConfig().getConnectionMode()));
+        all.removeIf(dist -> !connectionMode.equals(effectiveConnectionMode(dist)));
         all.sort((a, b) -> a.getId().compareTo(b.getId()));
         return paginate(all, marker, maxItems, Distribution::getId);
+    }
+
+    private static String effectiveConnectionMode(Distribution dist) {
+        String mode = dist.getConfig() == null ? null : dist.getConfig().getConnectionMode();
+        return mode == null ? "direct" : mode;
     }
 
     /** A connection group's routing endpoint reads like a distribution's domain name. */
@@ -2955,28 +3021,16 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     private static String generateDistributionId() {
-        StringBuilder sb = new StringBuilder("E");
-        for (int i = 0; i < 13; i++) {
-            sb.append(CHARS.charAt(RANDOM.nextInt(CHARS.length())));
-        }
-        return sb.toString();
+        return "E" + randomIdSuffix(13);
     }
 
     /** AWS issues public key ids as K + 13 characters; the value travels in Key-Pair-Id. */
     private static String generatePublicKeyId() {
-        StringBuilder sb = new StringBuilder("K");
-        for (int i = 0; i < 13; i++) {
-            sb.append(CHARS.charAt(RANDOM.nextInt(CHARS.length())));
-        }
-        return sb.toString();
+        return "K" + randomIdSuffix(13);
     }
 
     private static String generateInvalidationId() {
-        StringBuilder sb = new StringBuilder("I");
-        for (int i = 0; i < 13; i++) {
-            sb.append(CHARS.charAt(RANDOM.nextInt(CHARS.length())));
-        }
-        return sb.toString();
+        return "I" + randomIdSuffix(13);
     }
 
     private static <T> List<T> mergeCustomAndManaged(String type, String policyLabel,

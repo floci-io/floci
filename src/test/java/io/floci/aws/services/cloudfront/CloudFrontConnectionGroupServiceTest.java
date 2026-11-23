@@ -19,6 +19,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -239,5 +240,61 @@ class CloudFrontConnectionGroupServiceTest {
 
         // A marker at the mode's only id leaves nothing after it.
         assertEquals(0, service.listDistributionsByConnectionMode("tenant-only", tenantOnly.getId(), 100).size());
+    }
+
+    @Test
+    void anUnknownConnectionModeIsRefusedWithInvalidArgument() {
+        CloudFrontService service = service();
+        service.createDistribution(distributionWithConnectionMode("direct"), Map.of());
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.listDistributionsByConnectionMode("bogus", null, 100));
+        assertEquals("InvalidArgument", e.getErrorCode());
+    }
+
+    @Test
+    void aDistributionStoredWithoutConnectionModeListsUnderDirect() {
+        CloudFrontService service = service();
+        Distribution dist = service.createDistribution(distributionWithConnectionMode(null), Map.of());
+
+        List<Distribution> direct = service.listDistributionsByConnectionMode("direct", null, 100);
+        assertEquals(List.of(dist.getId()), direct.stream().map(Distribution::getId).toList());
+        assertEquals(0, service.listDistributionsByConnectionMode("tenant-only", null, 100).size());
+    }
+
+    @Test
+    void updatingADistributionToTenantOnlyMintsTheDefaultGroup() {
+        CloudFrontService service = service();
+        Distribution created = service.createDistribution(distributionWithConnectionMode("direct"), Map.of());
+        assertEquals(0, service.listConnectionGroups(null, 100, null).size());
+
+        created.getConfig().setConnectionMode("tenant-only");
+        service.updateDistribution(created.getId(), created.getEtag(), created);
+
+        List<ConnectionGroup> groups = service.listConnectionGroups(null, 100, null);
+        assertEquals(1, groups.size());
+        assertTrue(groups.getFirst().getIsDefault());
+    }
+
+    @Test
+    void deletingAFallbackDistributionClearsTheGroupsViewerFallback() {
+        CloudFrontService service = service();
+        Distribution dist = service.createDistribution(distributionWithConnectionMode("direct"), Map.of());
+        String groupId = service.createConnectionGroup("fallback-group", null, null, null, dist.getId(), Map.of())
+                .getId();
+
+        service.deleteDistribution(dist.getId(), dist.getEtag());
+        assertNull(service.getConnectionGroup(groupId).getViewerFallbackDistributionId());
+    }
+
+    @Test
+    void theCloudFormationRemovalAlsoClearsTheGroupsViewerFallback() {
+        CloudFrontService service = service();
+        Distribution dist = service.createDistribution(distributionWithConnectionMode("direct"), Map.of());
+        String groupId = service.createConnectionGroup("fallback-group", null, null, null, dist.getId(), Map.of())
+                .getId();
+
+        service.removeDistribution(dist.getId());
+        assertNull(service.getConnectionGroup(groupId).getViewerFallbackDistributionId());
     }
 }

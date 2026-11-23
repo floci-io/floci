@@ -288,20 +288,18 @@ public class CloudFrontController {
             for (Map<String, String> filter : XmlParser.extractGroups(body, "ConnectionGroupAssociationFilter")) {
                 anycastIpListId = blankToNull(filter.get("AnycastIpListId"));
             }
-            List<ConnectionGroup> groups =
-                    service.listConnectionGroups(marker, maxItems == null ? 100 : maxItems, anycastIpListId);
-            List<ConnectionGroup> all =
-                    service.listConnectionGroups(null, Integer.MAX_VALUE, anycastIpListId);
-            boolean truncated = maxItems != null && maxItems > 0 && all.size() > groups.size();
-            String nextMarker = truncated ? groups.get(groups.size() - 1).getName() : "";
+            int pageSize = maxItems == null ? 100 : maxItems;
+            Page<ConnectionGroup> page = page(
+                    service.listConnectionGroups(marker, paginationFetchLimit(pageSize), anycastIpListId),
+                    pageSize, ConnectionGroup::getName);
             XmlBuilder xml = new XmlBuilder()
                     .start("ListConnectionGroupsResult", NS)
                     .start("ConnectionGroups");
-            for (ConnectionGroup group : groups) {
+            for (ConnectionGroup group : page.items()) {
                 xml.raw(xmlConnectionGroup(group, "ConnectionGroupSummary"));
             }
             xml.end("ConnectionGroups")
-                    .elem("NextMarker", nextMarker)
+                    .elem("NextMarker", page.nextMarker())
                     .end("ListConnectionGroupsResult");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
@@ -315,17 +313,22 @@ public class CloudFrontController {
                                                       @QueryParam("Marker") String marker,
                                                       @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
         try {
-            List<Distribution> distributions =
-                    service.listDistributionsByConnectionMode(connectionMode, marker, maxItems);
+            Page<Distribution> page = page(
+                    service.listDistributionsByConnectionMode(connectionMode, marker,
+                            paginationFetchLimit(maxItems)),
+                    maxItems, Distribution::getId);
+            int totalDistributions = service
+                    .listDistributionsByConnectionMode(connectionMode, null, Integer.MAX_VALUE).size();
+
             XmlBuilder xml = new XmlBuilder()
                     .start("DistributionList", NS)
                     .elem("Marker", marker != null ? marker : "")
-                    .elem("NextMarker", "")
+                    .elem("NextMarker", page.nextMarker())
                     .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", false)
-                    .elem("Quantity", distributions.size())
+                    .elem("IsTruncated", page.truncated())
+                    .elem("Quantity", totalDistributions)
                     .start("Items");
-            for (Distribution d : distributions) {
+            for (Distribution d : page.items()) {
                 xml.raw(xmlDistributionSummary(d));
             }
             xml.end("Items").end("DistributionList");
