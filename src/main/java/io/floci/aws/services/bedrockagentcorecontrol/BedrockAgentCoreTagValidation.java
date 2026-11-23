@@ -53,6 +53,9 @@ final class BedrockAgentCoreTagValidation {
     }
 
     private static void validateKey(String key) {
+        if (key == null) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("tags.key"));
+        }
         String violation = BedrockTagKeyValueRules.keyViolation(key);
         if (violation != null) {
             throw SmithyValidationErrors.validationException(violation);

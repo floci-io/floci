@@ -73,6 +73,32 @@ class BedrockAgentCoreTagValidationTest {
         assertDoesNotThrow(() -> BedrockAgentCoreTagValidation.validateTags(null));
     }
 
+    @Test
+    void directMapNullMembersKeepTheirErrors() {
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put(null, "value");
+        AwsException keyError = assertThrows(AwsException.class,
+                () -> BedrockAgentCoreTagValidation.validateTagMap(tags));
+        assertEquals("ValidationException", keyError.getErrorCode());
+        assertEquals(400, keyError.getHttpStatus());
+        assertEquals("1 validation error detected: Value null at 'tags.key' failed to satisfy constraint: "
+                + "Member must not be null", keyError.getMessage());
+
+        tags.clear();
+        tags.put("key", null);
+        AwsException valueError = assertThrows(AwsException.class,
+                () -> BedrockAgentCoreTagValidation.validateTagMap(tags));
+        assertEquals("ValidationException", valueError.getErrorCode());
+        assertEquals(400, valueError.getHttpStatus());
+        assertEquals("tag value must be a string", valueError.getMessage());
+
+        AwsException mapError = assertThrows(AwsException.class,
+                () -> BedrockAgentCoreTagValidation.validateTagMap(null));
+        assertEquals("ValidationException", mapError.getErrorCode());
+        assertEquals(400, mapError.getHttpStatus());
+        assertEquals("tags must be an object with at most 50 entries", mapError.getMessage());
+    }
+
     private static Stream<Arguments> modeledTagFailures() {
         String prefix = "1 validation error detected: ";
         String keyRules = "Value at 'tags' failed to satisfy constraint: Map keys must satisfy constraint: ["
