@@ -30,6 +30,18 @@ import static org.mockito.Mockito.when;
 class ContainerBuilderTest {
 
     @Test
+    void withoutEnvRemovesEveryEntryOfThatVariableAndNoOther() {
+        ContainerSpec spec = new TestFixture().builder.newContainer("alpine")
+                .withEnv("POD", "1")
+                .withEnv("POD_CIDR", "10.0.0.0/16")
+                .withEnv("POD", "2")
+                .withoutEnv("POD")
+                .build();
+
+        assertEquals(List.of("POD_CIDR=10.0.0.0/16"), spec.env());
+    }
+
+    @Test
     void withHostDockerInternalOnLinux_omitsAutomaticAliasForPodmanDaemon() {
         TestFixture fixture = new TestFixture();
         when(fixture.dockerHostResolver.isLinuxHost()).thenReturn(true);

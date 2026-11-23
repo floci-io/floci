@@ -54,6 +54,7 @@ import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import io.floci.aws.services.ec2.model.Placement;
 import io.floci.aws.services.ec2.model.RouteTable;
 import io.floci.aws.services.ec2.model.Tag;
+import io.floci.aws.services.ec2.net.Cidr4;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.services.eks.model.CertificateAuthority;
 import io.floci.aws.services.eks.model.Cluster;
@@ -134,6 +135,13 @@ public class EksClusterManager
     private static final String ENDPOINT_HOST_LABEL = "io.floci.eks.endpoint-host";
     /** Marks a node started behind {@link #RSHARE_ENTRYPOINT}, whose mounts are shared. */
     private static final String SHARED_MOUNTS_LABEL = "io.floci.eks.shared-mounts";
+    /** The pod network a node was started with: {@link #FLANNEL_POD_NETWORK}, or {@code vpc:} and its prefixes. */
+    private static final String POD_NETWORK_LABEL = "io.floci.eks.pod-network";
+    private static final String FLANNEL_POD_NETWORK = "flannel";
+    private static final String VPC_POD_NETWORK_LABEL_PREFIX = "vpc:";
+    /** The k3s arguments that leave pod addresses to the VPC pod network's bridge configuration. */
+    static final List<String> VPC_POD_NETWORK_SERVER_ARGS = List.of("--flannel-backend=none",
+            "--disable-network-policy", "--kube-controller-manager-arg=allocate-node-cidrs=false");
     private static final Pattern HOSTNAME = Pattern.compile(
             "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*");
 
@@ -759,6 +767,7 @@ public class EksClusterManager
         List<String> previousPodPrefixes = cluster != null ? cluster.getNodePodPrefixes() : null;
         VpcLease vpcLease = acquireClusterVpcLease(cluster, labelAccountId, clusterRegion);
         String nodeIp = vpcLease != null ? vpcLease.address() : null;
+        VpcPodNetwork podNetwork = vpcPodNetwork(cluster, vpcLease, true);
         String restoredNodeIp = (previousNodeIp != null && !previousNodeIp.isBlank()
                 && previousNodeIp.equals(nodeIp)) ? previousNodeIp : null;
 
@@ -776,8 +785,11 @@ public class EksClusterManager
                     config.services().eks().disableCni(),
                     defaultStorageClass,
                     serviceCidr,
-                    clusterCidr,
+                    podNetwork != null ? podNetwork.vpcCidr() : clusterCidr,
                     nodeIp);
+            if (podNetwork != null) {
+                serverArgs.addAll(VPC_POD_NETWORK_SERVER_ARGS);
+            }
             endpointHost = endpointHost();
             if (!"localhost".equals(endpointHost)) {
                 serverArgs.add("--tls-san=" + endpointHost);
@@ -829,6 +841,7 @@ public class EksClusterManager
             labels.put(NODE_CAPACITY_LABEL, capacityLabel(cluster, nodeLimits));
             labels.put(DEFAULT_STORAGE_CLASS_LABEL, String.valueOf(defaultStorageClass));
             labels.put(SHARED_MOUNTS_LABEL, "true");
+            labels.put(POD_NETWORK_LABEL, podNetworkLabel(podNetwork));
             if (!"localhost".equals(endpointHost)) {
                 labels.put(ENDPOINT_HOST_LABEL, endpointHost);
             }
@@ -921,7 +934,10 @@ public class EksClusterManager
             // `mount --make-rshared /` before k3s starts gives the node the same; kind's own node
             // image runs the same fix in its entrypoint. RSHARE_ENTRYPOINT is POSIX sh-compatible
             // (no bashisms): the k3s image has no bash, only busybox sh.
-            specBuilder.withEntrypoint(RSHARE_ENTRYPOINT);
+            if (podNetwork != null) {
+                podNetwork.env(nodeIp).forEach(specBuilder::withEnv);
+            }
+            specBuilder.withEntrypoint(podNetwork != null ? VPC_POD_NETWORK_ENTRYPOINT : RSHARE_ENTRYPOINT);
             specBuilder.withCmd(buildRshareWrappedCmd(serverArgs));
             spec = specBuilder.build();
 
@@ -954,6 +970,11 @@ public class EksClusterManager
                     cluster.setContainerId(null);
                     throw new IllegalStateException("Failed to attach restored EKS container "
                             + containerName + " to VPC " + vpcLease.vpcId());
+                }
+                if (podNetwork != null) {
+                    LOG.warnv("EKS cluster {0} runs its pods on k3s''s own network: its node could not join VPC {1}",
+                            cluster.getName(), vpcLease.vpcId());
+                    dropVpcPodNetwork(specBuilder, serverArgs, podNetwork, clusterCidr, nodeIp);
                 }
                 releaseClusterVpcLease(cluster, resourceName);
                 if (cluster != null) {
@@ -1081,8 +1102,9 @@ public class EksClusterManager
         // A node started before its mounts were shared keeps private mounts, on which a CSI node plugin's
         // Bidirectional mounts fail: it is replaced on the same data volume, as one with another capacity is.
         boolean privateMounts = existingLabels == null || !"true".equals(existingLabels.get(SHARED_MOUNTS_LABEL));
+        // One started with another pod network is replaced too.
         if (capacityChanged || privateMounts || onAnotherNetwork(existing.get())
-                || !endpointHost.equals(certificateHost(existingLabels))) {
+                || !endpointHost.equals(certificateHost(existingLabels)) || podNetworkChanged(cluster, existingLabels)) {
             replaceClusterContainer(cluster, null);
         }
     }
@@ -1147,8 +1169,9 @@ public class EksClusterManager
         int oldPort = cluster.getHostPort();
         String containerName = cluster.getDockerName();
         String backupName = capacityBackupName(cluster);
-        String oldCertificateHost = certificateHost(lifecycleManager.findByName(containerName)
-                .map(Container::getLabels).orElse(null));
+        Map<String, String> oldLabels = lifecycleManager.findByName(containerName).map(Container::getLabels).orElse(null);
+        String oldCertificateHost = certificateHost(oldLabels);
+        List<String> oldPodPrefixes = labelPodPrefixes(startedPodNetwork(oldLabels));
         DockerClient docker = lifecycleManager.getDockerClient();
         try {
             lifecycleManager.removeIfExistsStrict(backupName, true);
@@ -1178,6 +1201,7 @@ public class EksClusterManager
             LOG.warnv("Could not replace the k3s container of EKS cluster {0}: {1}; restoring surviving node",
                     cluster.getName(), replacement.getMessage());
             restorePreviousNodeType(cluster, previousType);
+            retainPodPrefixes(cluster, oldPodPrefixes);
             if (!renamed) {
                 return false;
             }
@@ -1980,6 +2004,197 @@ public class EksClusterManager
     static final List<String> RSHARE_ENTRYPOINT = List.of("sh", "-c",
             "mount --make-rshared / || echo 'floci: WARN: mount --make-rshared / failed; "
                     + "CSI drivers and an external CNI may not work' >&2; exec /bin/k3s \"$@\"");
+
+    /**
+     * {@link #RSHARE_ENTRYPOINT}, preceded by the node's side of the VPC pod network, from what
+     * {@link VpcPodNetwork#env} sets. With flannel off, k3s leaves containerd's CNI paths at their defaults,
+     * {@code /opt/cni/bin} and {@code /etc/cni/net.d}, so the plugins the image ships in its {@code /bin/cni} go there
+     * and the bridge configuration over the node's prefixes beside them. The bridge, {@code cni0}, is created here with
+     * each prefix's gateway address, as the bridge plugin gives a bridge the gateway of one subnet only. The interface
+     * holding the node's VPC address
+     * answers ARP for the pods' addresses, as the VPC delivers a prefix's traffic to the interface it is delegated to,
+     * and traffic from a prefix leaving the VPC takes the node's address, as the VPC CNI's SNAT gives it. It runs on
+     * every start of the container, whose network namespace a restart rebuilds.
+     */
+    static final List<String> VPC_POD_NETWORK_ENTRYPOINT = List.of("sh", "-c", String.join("\n",
+            "mkdir -p /opt/cni/bin /etc/cni/net.d",
+            "for plugin in bridge host-local loopback portmap; do ln -sf /bin/cni /opt/cni/bin/$plugin; done",
+            "printf '%s' \"$FLOCI_POD_CNI_CONFIG\" > /etc/cni/net.d/10-floci-vpc.conflist",
+            "ip link add cni0 type bridge 2>/dev/null || true",
+            "for gateway in $FLOCI_POD_GATEWAYS; do ip addr add \"$gateway\" dev cni0 2>/dev/null || true; done",
+            "ip link set cni0 up",
+            "iface=$(ip -o -4 addr show | awk -v ip=\"$FLOCI_NODE_IP\""
+                    + " '{ split($4, a, \"/\"); if (a[1] == ip) { print $2; exit } }')",
+            "if [ -n \"$iface\" ]; then echo 1 > \"/proc/sys/net/ipv4/conf/$iface/proxy_arp\"; else"
+                    + " echo \"floci: WARN: no interface holds $FLOCI_NODE_IP, so pod addresses do not answer on the VPC\""
+                    + " >&2; fi",
+            "for prefix in $FLOCI_POD_PREFIXES; do",
+            "  iptables -t nat -C POSTROUTING -s \"$prefix\" ! -d \"$FLOCI_VPC_CIDR\" -j MASQUERADE 2>/dev/null"
+                    + " || iptables -t nat -A POSTROUTING -s \"$prefix\" ! -d \"$FLOCI_VPC_CIDR\" -j MASQUERADE",
+            "done",
+            RSHARE_ENTRYPOINT.get(2)));
+
+    /** The VPC pod network a node runs: its VPC's range on the Docker network, and the prefixes its pods use. */
+    record VpcPodNetwork(String vpcCidr, List<String> prefixes) {
+
+        /** What {@link #VPC_POD_NETWORK_ENTRYPOINT} reads, for a node at {@code nodeIp}. */
+        Map<String, String> env(String nodeIp) {
+            Map<String, String> env = new LinkedHashMap<>();
+            env.put("FLOCI_NODE_IP", nodeIp);
+            env.put("FLOCI_VPC_CIDR", vpcCidr);
+            env.put("FLOCI_POD_PREFIXES", String.join(" ", prefixes));
+            env.put("FLOCI_POD_GATEWAYS", prefixes.stream().map(prefix -> podGateway(prefix) + "/" + prefixLength(prefix))
+                    .collect(Collectors.joining(" ")));
+            env.put("FLOCI_POD_CNI_CONFIG", podCniConfig(prefixes));
+            return env;
+        }
+
+        String label() {
+            return VPC_POD_NETWORK_LABEL_PREFIX + String.join(",", prefixes);
+        }
+    }
+
+    /**
+     * The bridge CNI configuration over {@code prefixes}: one bridge, {@code cni0}, holding in each prefix the address
+     * its pods route through, which the node gives it, host-local handing out the rest of the prefixes in order, and no
+     * masquerade, which the node applies to traffic leaving the VPC only.
+     */
+    static String podCniConfig(List<String> prefixes) {
+        String ranges = prefixes.stream()
+                .map(prefix -> "{\"subnet\": \"" + prefix + "\", \"gateway\": \"" + podGateway(prefix) + "\"}")
+                .collect(Collectors.joining(", "));
+        return "{\"cniVersion\": \"1.0.0\", \"name\": \"floci-vpc\", \"plugins\": ["
+                + "{\"type\": \"bridge\", \"bridge\": \"cni0\", \"isGateway\": false, \"ipMasq\": false,"
+                + " \"hairpinMode\": true, \"ipam\": {\"type\": \"host-local\", \"ranges\": [[" + ranges + "]],"
+                + " \"routes\": [{\"dst\": \"0.0.0.0/0\"}]}},"
+                + " {\"type\": \"portmap\", \"capabilities\": {\"portMappings\": true}}]}";
+    }
+
+    /** The address the pods of {@code prefix} route through: its first host address, which the node holds. */
+    static String podGateway(String prefix) {
+        return Cidr4.format(podPrefix(prefix).network() + 1);
+    }
+
+    private static int prefixLength(String prefix) {
+        return podPrefix(prefix).prefix();
+    }
+
+    private static Cidr4 podPrefix(String prefix) {
+        return Cidr4.parse(prefix).orElseThrow(() -> new IllegalArgumentException("not a CIDR: " + prefix));
+    }
+
+    /**
+     * The VPC pod network a node holding {@code lease} runs, or null when it runs k3s's flannel network: the setting is
+     * off, {@code disable-cni} leaves the pod network to an external CNI, the node holds no address or prefix in a
+     * Docker-backed VPC, or the VPC has no Docker network range. {@code warn} logs why a node that asks for it does
+     * not get it.
+     */
+    private VpcPodNetwork vpcPodNetwork(Cluster cluster, VpcLease lease, boolean warn) {
+        EmulatorConfig.EksServiceConfig eks = config.services().eks();
+        if (!eks.vpcPodNetwork() || lease == null) {
+            return null;
+        }
+        String why = null;
+        Optional<String> vpcCidr = Optional.empty();
+        if (eks.disableCni()) {
+            why = "disable-cni leaves the pod network to an external CNI";
+        } else if (cluster.getNodePodPrefixes() == null || cluster.getNodePodPrefixes().isEmpty()) {
+            why = "its node holds no VPC prefix";
+        } else {
+            Ec2Service ec2 = ec2Service();
+            vpcCidr = ec2 == null ? Optional.empty() : ec2.effectiveVpcCidr(lease.accountId(), lease.region(), lease.vpcId());
+            if (vpcCidr.isEmpty()) {
+                why = "VPC " + lease.vpcId() + " has no Docker network range";
+            }
+        }
+        if (why != null) {
+            if (warn) {
+                LOG.warnv("EKS cluster {0} runs its pods on k3s''s own network: {1}", cluster.getName(), why);
+            }
+            return null;
+        }
+        return new VpcPodNetwork(vpcCidr.get(), List.copyOf(cluster.getNodePodPrefixes()));
+    }
+
+    private static String podNetworkLabel(VpcPodNetwork podNetwork) {
+        return podNetwork == null ? FLANNEL_POD_NETWORK : podNetwork.label();
+    }
+
+    /**
+     * Whether a surviving node runs another pod network than it should: k3s's flannel network while the VPC pod network
+     * is on, the VPC while it is off, or prefixes it no longer holds all of. A replacement leases the prefixes a node
+     * lacks. A node on k3s's network is replaced only when its replacement would run the VPC's: it leases the prefixes
+     * for it here, and gives them back when it cannot, so a node that falls back to k3s's network is not replaced again
+     * on every start.
+     */
+    private boolean podNetworkChanged(Cluster cluster, Map<String, String> existingLabels) {
+        String existing = startedPodNetwork(existingLabels);
+        VpcLease lease = resolveClusterVpcLease(cluster);
+        EmulatorConfig.EksServiceConfig eks = config.services().eks();
+        if (!eks.vpcPodNetwork() || eks.disableCni() || lease == null) {
+            return !FLANNEL_POD_NETWORK.equals(existing);
+        }
+        VpcPodNetwork current = vpcPodNetwork(cluster, lease, false);
+        if (current == null && FLANNEL_POD_NETWORK.equals(existing)) {
+            leasePodPrefixes(cluster, lease, true);
+            if (vpcPodNetwork(cluster, lease, false) != null) {
+                return true;
+            }
+            retainPodPrefixes(cluster, List.of());
+            return false;
+        }
+        return current == null || !current.label().equals(existing);
+    }
+
+    /** The pod network a node was started with, by its label: k3s's own when it has none, as before the label. */
+    private static String startedPodNetwork(Map<String, String> labels) {
+        return labels == null ? FLANNEL_POD_NETWORK : labels.getOrDefault(POD_NETWORK_LABEL, FLANNEL_POD_NETWORK);
+    }
+
+    /** The prefixes a node started with the pod network {@code label} hands out: none on k3s's own network. */
+    private static List<String> labelPodPrefixes(String label) {
+        return label.startsWith(VPC_POD_NETWORK_LABEL_PREFIX)
+                ? List.of(label.substring(VPC_POD_NETWORK_LABEL_PREFIX.length()).split(",")) : List.of();
+    }
+
+    /**
+     * Gives back the prefixes the node holds other than {@code kept}: a node that keeps running after its replacement
+     * failed hands out only the prefixes it was started with, not those leased for the replacement.
+     */
+    private void retainPodPrefixes(Cluster cluster, List<String> kept) {
+        String resourceName = clusterResourceName(cluster);
+        List<String> held = clusterPodPrefixes.get(resourceName);
+        VpcLease lease = clusterVpcLeases.get(resourceName);
+        Ec2Service ec2 = ec2Service();
+        if (held == null || lease == null || ec2 == null) {
+            return;
+        }
+        List<String> released = held.stream().filter(prefix -> !kept.contains(prefix)).toList();
+        released.forEach(prefix -> ec2.releaseVpcPrefix(lease.accountId(), lease.region(), lease.subnetId(), prefix));
+        held.removeAll(released);
+        cluster.setNodePodPrefixes(held.isEmpty() ? null : new ArrayList<>(held));
+    }
+
+    /** Takes the VPC pod network off the spec of a node falling back to the bridge: it starts on k3s's own network. */
+    private static void dropVpcPodNetwork(ContainerBuilder.Builder spec, List<String> serverArgs,
+                                          VpcPodNetwork podNetwork, String clusterCidr, String nodeIp) {
+        VPC_POD_NETWORK_SERVER_ARGS.forEach(serverArgs::remove);
+        int cidrAt = serverArgs.indexOf("--cluster-cidr=" + podNetwork.vpcCidr());
+        if (cidrAt >= 0 && clusterCidr != null && !clusterCidr.isBlank()) {
+            serverArgs.set(cidrAt, "--cluster-cidr=" + clusterCidr);
+        } else if (cidrAt >= 0) {
+            serverArgs.remove(cidrAt);
+        }
+        podNetwork.env(nodeIp).keySet().forEach(spec::withoutEnv);
+        spec.withEntrypoint(RSHARE_ENTRYPOINT);
+        spec.withLabels(Map.of(POD_NETWORK_LABEL, FLANNEL_POD_NETWORK));
+    }
+
+    /** Where pod traffic reaches the node from: its VPC prefixes on the VPC pod network, else k3s's pod CIDR. */
+    private String podSourceCidrs(Cluster cluster) {
+        VpcPodNetwork podNetwork = vpcPodNetwork(cluster, resolveClusterVpcLease(cluster), false);
+        return podNetwork == null ? cluster.getPodCidr() : String.join(",", podNetwork.prefixes());
+    }
 
     /**
      * Builds the CMD to pair with {@link #RSHARE_ENTRYPOINT}: an unused $0 placeholder
@@ -3010,7 +3225,7 @@ public class EksClusterManager
             }
 
             ContainerExec.Result forward = execInContainerForResult(containerId,
-                    EksPodNetworkRouting.buildImdsForwardCommand(cluster.getPodCidr(),
+                    EksPodNetworkRouting.buildImdsForwardCommand(podSourceCidrs(cluster),
                             config.services().eks().imdsPodNetwork(), dockerHostResolver.resolve(),
                             config.services().ec2().imdsPort()), 30);
             if (forward.exitCode() != 0) {
@@ -3097,7 +3312,7 @@ public class EksClusterManager
     private void forwardPodIdentityAddress(Cluster cluster, String containerId) {
         try {
             ContainerExec.Result forward = execInContainerForResult(containerId,
-                    EksPodNetworkRouting.buildPodIdentityForwardCommand(cluster.getPodCidr(),
+                    EksPodNetworkRouting.buildPodIdentityForwardCommand(podSourceCidrs(cluster),
                             dockerHostResolver.resolve(), config.port()), 30);
             if (forward.exitCode() != 0) {
                 LOG.warnv("Could not forward the Pod Identity address for EKS cluster {0} to Floci: {1}",

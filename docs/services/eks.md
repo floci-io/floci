@@ -768,31 +768,51 @@ does not enable it; omitted or false values keep the simulated behavior.
 | `FLOCI_SERVICES_EKS_IMDS` | `false` | Enable link-local IMDS (`169.254.169.254`) proxy in cluster containers |
 | `FLOCI_SERVICES_EKS_EMBEDDED_DNS` | `true` | Inject Floci's embedded DNS server into cluster containers for Route 53 private hosted zones and internal name resolution |
 | `FLOCI_SERVICES_EKS_VPC_ROUTE_PROGRAMMING` | `true` | Program emulated VPC route table entries into k3s cluster containers |
-| `FLOCI_SERVICES_EKS_VPC_POD_NETWORK` | `false` | Lease IPv4 `/28` prefixes of the node's subnet onto its network interface, as the VPC CNI's prefix delegation does (see [VPC pod prefixes](#vpc-pod-prefixes)) |
+| `FLOCI_SERVICES_EKS_VPC_POD_NETWORK` | `false` | Give pods addresses from IPv4 `/28` prefixes of the node's subnet, listed on its network interface, as the VPC CNI's prefix delegation does (see [VPC pod network](#vpc-pod-network)) |
 | `FLOCI_SERVICES_EKS_VPC_POD_PREFIXES` | `2` | How many `/28` prefixes a node holds with `FLOCI_SERVICES_EKS_VPC_POD_NETWORK` |
 
-### VPC pod prefixes
+### VPC pod network
 
-With `FLOCI_SERVICES_EKS_VPC_POD_NETWORK=true`, a node holding an address in a Docker-backed subnet also leases IPv4 `/28`
-prefixes of that subnet, as the Amazon VPC CNI plugin's prefix delegation assigns them to a node's network interface.
-The node's interface lists them in `ipv4PrefixSet`, on `DescribeInstances` and `DescribeNetworkInterfaces`, where the AWS
-Load Balancer Controller looks for the interface behind a pod address.
+With `FLOCI_SERVICES_EKS_VPC_POD_NETWORK=true`, pods get addresses from the cluster's VPC, as the Amazon VPC CNI plugin
+gives them with prefix delegation, instead of k3s's own pod network. A node holding an address in a Docker-backed subnet
+leases IPv4 `/28` prefixes of that subnet, and its pods take their addresses from them. The node's interface lists the
+prefixes in `ipv4PrefixSet`, on `DescribeInstances` and `DescribeNetworkInterfaces`, where the AWS Load Balancer
+Controller finds the interface behind a pod address, so a target group with `TargetType ip` reaches the pods: Floci's
+health checks and load balancers dial the pod addresses on the VPC's Docker network, as other instances in the VPC do.
 
 - **Count**: `FLOCI_SERVICES_EKS_VPC_POD_PREFIXES`, two by default: under the VPC CNI's default `WARM_PREFIX_TARGET` of
   one, which keeps one prefix wholly free, a node running pods holds two. With the setting on, Floci refuses to start
   unless the count is between 1 and 16. A subnet without enough free `/28` blocks leaves the node the ones it could
   lease, with a warning.
 - **Placement**: prefixes are taken from the top of the subnet down, clear of the subnet's last address, which AWS
-  reserves, and of every address an instance, interface, gateway, endpoint or container already holds. A container
-  Floci joins to the VPC's network without an address of its own, Floci itself or a node holding no subnet address, takes the
+  reserves, and of every address an instance, interface, gateway, endpoint or container already holds. A container Floci
+  joins to the VPC's network without an address of its own, Floci itself or a node holding no subnet address, takes the
   lowest address of the VPC's range that nothing leases or holds, so it never lands in a prefix. When Docker cannot say
   which addresses its containers hold, no prefix is leased or re-reserved, with a warning.
 - **Held addresses**: a prefix's sixteen addresses count as held, so no instance or interface gets one, and
   `DescribeSubnets` leaves them out of `AvailableIpAddressCount`.
-- **Lifecycle**: the node keeps its prefixes across a restart, re-reserving them as it re-reserves its address, and leases
-  new ones only for those another holder took meanwhile. An adopted node keeps the prefixes it was started with and
-  leases no others; a container that replaces it later leases the ones it lacks. Deleting the cluster, or a first start that falls back to the bridge network, gives them back.
-- Pods keep their addresses from the cluster's pod CIDR (`10.42.0.0/16`).
+- **Lifecycle**: the node keeps its prefixes across a restart, re-reserving them as it re-reserves its address, and
+  leases new ones only for those another holder took meanwhile. An adopted node keeps the prefixes it was started with
+  and leases no others; a container that replaces it later leases the ones it lacks. Deleting the cluster, or a first
+  start that falls back to the bridge network, gives them back.
+- **On the node**: k3s starts without flannel and its network policy controller (the VPC CNI enforces no network
+  policy unless it is enabled), with the VPC's range as its cluster CIDR. A bridge, `cni0`, hands out the prefixes'
+  addresses, keeping the first host address of each for itself as the pods' gateway, so a prefix gives thirteen pods
+  their addresses. The node answers ARP for them on the VPC network, as the VPC delivers a prefix's traffic to the
+  interface it is delegated to, and traffic from a prefix leaving the VPC takes the node's address, as the VPC CNI's
+  SNAT gives it. Inside the VPC, pods keep their own addresses both ways.
+- **Out of addresses**: pods beyond what the prefixes hold stay in `ContainerCreating`, as on EKS when a node runs out
+  of addresses. `FLOCI_SERVICES_EKS_VPC_POD_PREFIXES` gives the node more.
+- **Link-local endpoints**: the rules that send pods' requests for IMDS (with `FLOCI_SERVICES_EKS_IMDS_POD_NETWORK`) and
+  for the Pod Identity address to Floci match the prefixes instead of `10.42.0.0/16`.
+- **Changing the setting**: a node started with another pod network, or with prefixes it no longer holds all of, is
+  replaced on its data volume when Floci starts, as one with another capacity is. A node on k3s's network is replaced
+  only when its replacement would run the VPC's, so one that fell back stays as it is until its subnet has a free `/28`.
+  A replacement that fails leaves the node running as it was, with the prefixes it was started with.
+- **Falls back to k3s's network** when `FLOCI_SERVICES_EKS_DISABLE_CNI` leaves the pod network to an external CNI, or
+  when the node holds no address or prefix in a Docker-backed subnet; a warning says which. On Docker Desktop for macOS
+  and Windows, as with any container address, the host cannot dial pod addresses; containers and Floci in a container
+  can.
 
 ### Kubernetes versions and network configuration
 

@@ -4315,8 +4315,9 @@ public interface EmulatorConfig {
         boolean imdsPodNetwork();
 
         /**
-         * When true, each cluster node holds IPv4 /28 prefixes of its subnet on its network interface, as the Amazon VPC
-         * CNI plugin's prefix delegation assigns them. A node needs an address in a Docker-backed subnet for it.
+         * When true, pods get addresses from IPv4 /28 prefixes of their node's subnet, which the node holds on its network
+         * interface, as the Amazon VPC CNI plugin's prefix delegation assigns them, instead of k3s's own pod network. A
+         * node needs an address in a Docker-backed subnet for it.
          */
         @WithDefault("false")
         boolean vpcPodNetwork();

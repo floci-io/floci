@@ -289,6 +289,15 @@ public class ContainerBuilder {
         }
 
         /**
+         * Removes the environment variable {@code key}, however many times it was added.
+         */
+        public Builder withoutEnv(String key) {
+            String entry = key + "=";
+            this.env.removeIf(variable -> variable.startsWith(entry));
+            return this;
+        }
+
+        /**
          * Sets the container command (overrides image CMD).
          */
         public Builder withCmd(List<String> cmd) {
