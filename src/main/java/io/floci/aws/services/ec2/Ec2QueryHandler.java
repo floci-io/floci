@@ -5472,6 +5472,7 @@ public class Ec2QueryHandler {
     // ─── Network Interface handlers ───────────────────────────────────────────
 
     private Response handleDescribeNetworkInterfaces(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         List<String> ids = getList(p, "NetworkInterfaceId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
 
@@ -5479,7 +5480,6 @@ public class Ec2QueryHandler {
         int maxResults = parseIntParam(p, "MaxResults", 0);
         String nextToken = p.getFirst("NextToken");
 
-        checkDryRun(p);
         NetworkInterfaceListResult result = service.describeNetworkInterfaces(region, ids, filters, maxResults, nextToken);
         List<NetworkInterface> nis = result.networkInterfaces();
 
