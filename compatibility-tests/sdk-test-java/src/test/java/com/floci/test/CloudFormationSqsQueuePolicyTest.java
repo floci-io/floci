@@ -5,9 +5,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
-import software.amazon.awssdk.services.cloudformation.model.CloudFormationException;
 import software.amazon.awssdk.services.cloudformation.model.CreateStackRequest;
-import software.amazon.awssdk.services.cloudformation.model.DeleteStackRequest;
 import software.amazon.awssdk.services.cloudformation.model.DescribeStacksRequest;
 import software.amazon.awssdk.services.cloudformation.model.Output;
 import software.amazon.awssdk.services.cloudformation.model.Stack;
@@ -15,7 +13,6 @@ import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest;
 import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
 
-import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -27,6 +24,7 @@ class CloudFormationSqsQueuePolicyTest {
     private static CloudFormationClient cloudFormation;
     private static SqsClient sqs;
     private static String stackName;
+    private static String stackId;
     private static String queueAName;
     private static String queueBName;
 
@@ -43,8 +41,7 @@ class CloudFormationSqsQueuePolicyTest {
     static void cleanup() {
         if (cloudFormation != null) {
             try {
-                cloudFormation.deleteStack(DeleteStackRequest.builder().stackName(stackName).build());
-                waitForDeleted(stackName, 30);
+                CloudFormationStackTestHelper.deleteStack(cloudFormation, stackId, stackName);
             } catch (Exception e) {
                 System.err.println("CloudFormation SQS QueuePolicy cleanup skipped: " + e.getMessage());
             }
@@ -57,11 +54,11 @@ class CloudFormationSqsQueuePolicyTest {
 
     @Test
     void appliesUpdatesAndClearsQueuePolicyThroughAwsSdk() throws InterruptedException {
-        cloudFormation.createStack(CreateStackRequest.builder()
+        stackId = cloudFormation.createStack(CreateStackRequest.builder()
                 .stackName(stackName)
                 .templateBody(templateWithPolicy("QueueA", "sqs:SendMessage"))
-                .build());
-        assertThat(waitForTerminal(stackName, 30)).isEqualTo("CREATE_COMPLETE");
+                .build()).stackId();
+        CloudFormationStackTestHelper.awaitStatus(cloudFormation, stackId, stackName, "CREATE_COMPLETE");
 
         Map<String, String> outputs = stackOutputs();
         String queueAUrl = outputs.get("QueueAUrl");
@@ -76,7 +73,7 @@ class CloudFormationSqsQueuePolicyTest {
         cloudFormation.updateStack(r -> r
                 .stackName(stackName)
                 .templateBody(templateWithPolicy("QueueB", "sqs:ReceiveMessage")));
-        assertThat(waitForTerminal(stackName, 30)).isEqualTo("UPDATE_COMPLETE");
+        CloudFormationStackTestHelper.awaitStatus(cloudFormation, stackId, stackName, "UPDATE_COMPLETE");
 
         assertThat(queuePolicy(queueAUrl)).isNull();
         assertThat(queuePolicy(queueBUrl))
@@ -87,17 +84,17 @@ class CloudFormationSqsQueuePolicyTest {
         cloudFormation.updateStack(r -> r
                 .stackName(stackName)
                 .templateBody(templateWithoutPolicy()));
-        assertThat(waitForTerminal(stackName, 30)).isEqualTo("UPDATE_COMPLETE");
+        CloudFormationStackTestHelper.awaitStatus(cloudFormation, stackId, stackName, "UPDATE_COMPLETE");
 
         assertThat(queuePolicy(queueBUrl)).isNull();
 
-        cloudFormation.deleteStack(DeleteStackRequest.builder().stackName(stackName).build());
-        waitForDeleted(stackName, 30);
+        CloudFormationStackTestHelper.deleteStack(cloudFormation, stackId, stackName);
+        stackId = null;
     }
 
     private static Map<String, String> stackOutputs() {
         Stack stack = cloudFormation.describeStacks(
-                DescribeStacksRequest.builder().stackName(stackName).build()).stacks().get(0);
+                DescribeStacksRequest.builder().stackName(stackId).build()).stacks().get(0);
         return stack.outputs().stream()
                 .collect(Collectors.toMap(Output::outputKey, Output::outputValue));
     }
@@ -168,44 +165,5 @@ class CloudFormationSqsQueuePolicyTest {
                   }
                 }
                 """.formatted(queueAName, queueBName);
-    }
-
-    private static String waitForTerminal(String name, int maxSeconds) throws InterruptedException {
-        long deadline = System.currentTimeMillis() + maxSeconds * 1000L;
-        while (System.currentTimeMillis() < deadline) {
-            List<Stack> stacks = cloudFormation.describeStacks(
-                    DescribeStacksRequest.builder().stackName(name).build()).stacks();
-            if (!stacks.isEmpty()) {
-                String status = stacks.get(0).stackStatusAsString();
-                if (!status.endsWith("_IN_PROGRESS")) {
-                    return status;
-                }
-            }
-            Thread.sleep(500);
-        }
-        throw new AssertionError(
-                "Stack " + name + " did not reach a terminal state within " + maxSeconds + "s");
-    }
-
-    private static void waitForDeleted(String name, int maxSeconds) throws InterruptedException {
-        long deadline = System.currentTimeMillis() + maxSeconds * 1000L;
-        while (System.currentTimeMillis() < deadline) {
-            try {
-                List<Stack> stacks = cloudFormation.describeStacks(
-                        DescribeStacksRequest.builder().stackName(name).build()).stacks();
-                if (stacks.isEmpty()
-                        || "DELETE_COMPLETE".equals(stacks.get(0).stackStatusAsString())) {
-                    return;
-                }
-            } catch (CloudFormationException e) {
-                if (e.getMessage() != null && e.getMessage().contains("does not exist")) {
-                    return;
-                }
-                throw e;
-            }
-            Thread.sleep(500);
-        }
-        throw new AssertionError(
-                "Stack " + name + " was not deleted within " + maxSeconds + "s");
     }
 }

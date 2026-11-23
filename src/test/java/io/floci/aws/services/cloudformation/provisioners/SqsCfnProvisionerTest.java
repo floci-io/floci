@@ -460,6 +460,14 @@ class SqsCfnProvisionerTest {
                 () -> provisioner.provision(r, noQueues, ctx()));
         assertEquals("ValidationError", emptyQueuesError.getErrorCode());
 
+        ObjectNode blankQueues = mapper.createObjectNode();
+        blankQueues.putArray("Queues").add(" ");
+        blankQueues.putObject("PolicyDocument").put("Version", "2012-10-17");
+
+        AwsException blankQueuesError = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, blankQueues, ctx()));
+        assertEquals("ValidationError", blankQueuesError.getErrorCode());
+
         ObjectNode noPolicy = mapper.createObjectNode();
         noPolicy.putArray("Queues").add("http://localhost:4566/000000000000/queue-a");
 

@@ -290,7 +290,9 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionQueuePolicy(StackResource r, JsonNode props, ProvisionContext ctx) {
-        List<String> queues = ctx.resolveStringList(props, "Queues");
+        List<String> queues = ctx.resolveStringList(props, "Queues").stream()
+                .filter(q -> !q.isBlank())
+                .toList();
         if (queues.isEmpty()) {
             throw new AwsException("ValidationError",
                     "AWS::SQS::QueuePolicy requires at least one queue URL in Queues.", 400);
