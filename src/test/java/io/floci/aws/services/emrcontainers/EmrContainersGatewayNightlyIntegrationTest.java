@@ -53,12 +53,13 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * An EMR on EKS managed endpoint, run for real in the {@code docker} runner mode: it runs a Jupyter Enterprise Gateway
  * in its release's {@code notebook-spark} image from Amazon ECR Public, and a Jupyter client reaches it at its
- * {@code serverUrl} with a session token, starts a PySpark kernel there, and a session with a kernel of its own, which
- * the kernels and sessions listings show that token alone, and runs code on Floci's S3 over the PySpark kernel's
- * WebSocket, as the guide's "Example: Deploy a JupyterLab notebook" does through {@code JUPYTER_GATEWAY_URL}, then
- * changes its Spark session's settings with {@code %%configure}, as "Modifying PySpark session parameters" does,
- * and runs code on Floci's S3 in the "Apache Spark with Scala" kernel too. An
- * endpoint whose {@code jeg-config} sets a short idle timeout culls a kernel left idle.
+ * {@code serverUrl} with a session token, as a browser's CORS preflight does without one. The client starts a
+ * PySpark kernel there, and a session with a kernel of its own, which the kernels and sessions listings show that
+ * token alone, and runs code on Floci's S3 over the PySpark kernel's WebSocket, as the guide's "Example: Deploy a
+ * JupyterLab notebook" does through {@code JUPYTER_GATEWAY_URL}, then changes its Spark session's settings with
+ * {@code %%configure}, as "Modifying PySpark session parameters" does, and runs code on Floci's S3 in the "Apache
+ * Spark with Scala" kernel too. An endpoint whose {@code jeg-config} sets a short idle timeout culls a kernel left
+ * idle.
  *
  * <p>A nightly check: the release's notebook image is about 6 GB.
  */
@@ -122,6 +123,14 @@ class EmrContainersGatewayNightlyIntegrationTest {
         HttpClient http = HttpClient.newHttpClient();
         assertEquals(401, http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/kernelspecs")).build(),
                 HttpResponse.BodyHandlers.discarding()).statusCode(), "a request without the session token");
+        // A browser's CORS preflight carries no token, and the gateway answers it.
+        HttpResponse<Void> preflight = http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/kernels"))
+                .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+                .header("Origin", "http://notebook.test").header("Access-Control-Request-Method", "POST").build(),
+                HttpResponse.BodyHandlers.discarding());
+        assertEquals(200, preflight.statusCode());
+        assertTrue(preflight.headers().firstValue("Access-Control-Allow-Methods").orElse("").contains("POST"),
+                preflight.headers().toString());
         HttpResponse<String> specs = http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/kernelspecs"))
                 .header("Authorization", "token " + token).build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(200, specs.statusCode(), specs.body());

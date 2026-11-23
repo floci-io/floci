@@ -1404,6 +1404,22 @@ class EmrContainersServiceTest {
     }
 
     @Test
+    void corsPreflightReachesAnActiveEndpointsGatewayWithoutAToken() {
+        GatewayRunner runner = new GatewayRunner();
+        EmrContainersService service = gatewayService(runner, stores());
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String endpointId = gatewayEndpoint(service, clusterId);
+        awaitEndpoint(service, clusterId, endpointId, "ACTIVE");
+
+        SparkConnectTargets.Route route = service.gatewayPreflightRoute(endpointId).orElseThrow();
+        assertEquals("127.0.0.1", route.host());
+        assertEquals(GatewayRunner.PORT, route.port());
+        route.ended().run();
+        assertTrue(service.gatewayPreflightRoute("ep0000000000000").isEmpty(), "no gateway runs for it");
+        runner.stop(endpointId);
+    }
+
+    @Test
     void deletedDockerEndpointStopsItsGatewayAndItsTokensGo() {
         GatewayRunner runner = new GatewayRunner();
         EmrContainersService service = gatewayService(runner, stores());

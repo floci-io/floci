@@ -81,6 +81,9 @@ class EmrContainersGatewayProxyTest {
         when(service.gatewayRoute(anyString(), any())).thenReturn(Optional.empty());
         when(service.gatewayRoute(ENDPOINT, TOKEN)).thenAnswer(invocation -> Optional.of(
                 SparkConnectTargets.Route.to("127.0.0.1", gateway.actualPort(), requestsEnded::incrementAndGet)));
+        when(service.gatewayPreflightRoute(anyString())).thenReturn(Optional.empty());
+        when(service.gatewayPreflightRoute(ENDPOINT)).thenAnswer(invocation -> Optional.of(
+                SparkConnectTargets.Route.to("127.0.0.1", gateway.actualPort(), requestsEnded::incrementAndGet)));
         ServiceConfigAccess serviceConfigAccess = mock(ServiceConfigAccess.class);
         when(serviceConfigAccess.isEnabled(eq(EmrContainersService.SERVICE))).thenReturn(true);
         EmrContainersGatewayProxy proxy = new EmrContainersGatewayProxy(service, serviceConfigAccess, vertx);
@@ -122,6 +125,22 @@ class EmrContainersGatewayProxyTest {
 
         assertEquals(201, answer.status);
         assertEquals(Digests.sha256Hex(TOKEN), new JsonObject(answer.body).getString("session"));
+        awaitCount(requestsEnded, 1);
+    }
+
+    @Test
+    void corsPreflightGoesToItsGatewayWithoutAToken() throws Exception {
+        // A browser's preflight carries no token, and Jupyter Enterprise Gateway checks none for one.
+        Answer preflight = request(HttpMethod.OPTIONS, BASE + "/api/kernels", null, null);
+        Answer elsewhere = request(HttpMethod.OPTIONS, EmrContainersService.GATEWAY_PATH + "ep0000000000000/api",
+                null, null);
+
+        assertEquals(201, preflight.status);
+        JsonObject got = new JsonObject(preflight.body);
+        assertEquals("OPTIONS", got.getString("method"));
+        assertEquals("/api/kernels", got.getString("uri"));
+        assertNull(got.getString("session"), "a preflight is no session token's");
+        assertEquals(401, elsewhere.status, "an endpoint with no gateway running");
         awaitCount(requestsEnded, 1);
     }
 
