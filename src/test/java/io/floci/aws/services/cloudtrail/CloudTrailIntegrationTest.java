@@ -13,6 +13,7 @@ import java.io.ByteArrayInputStream;
 import java.util.UUID;
 import java.util.zip.GZIPInputStream;
 
+import static io.floci.aws.services.cloudtrail.CloudTrailRequests.invokeCloudTrail;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -615,14 +616,6 @@ class CloudTrailIntegrationTest {
             .header("X-Amz-Target", CT_TARGET + action)
             .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + EMPTY_HISTORY_ACCOUNT
                     + "/20260101/us-east-1/cloudtrail/aws4_request, SignedHeaders=host, Signature=0")
-            .contentType(JSON11)
-            .body(body)
-        .when().post("/");
-    }
-
-    private static Response invokeCloudTrail(String action, String body) {
-        return given()
-            .header("X-Amz-Target", CT_TARGET + action)
             .contentType(JSON11)
             .body(body)
         .when().post("/");
