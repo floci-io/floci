@@ -120,13 +120,13 @@ class ElbV2TcpDataPlaneIntegrationTest {
         loadBalancerArn = client.createLoadBalancer(request -> request
                 .name("tcp-regression-nlb")
                 .type(LoadBalancerTypeEnum.NETWORK)
-                .subnets(Ec2Service.defaultSubnetId("us-east-1", "a")))
+                .subnets(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000")))
                 .loadBalancers().getFirst().loadBalancerArn();
         targetGroupArn = client.createTargetGroup(request -> request
                 .name("tcp-regression-tg")
                 .protocol(ProtocolEnum.TCP)
                 .port(backend.actualPort())
-                .vpcId(Ec2Service.defaultVpcId("us-east-1"))
+                .vpcId(Ec2Service.defaultVpcId("us-east-1", "000000000000"))
                 .targetType(TargetTypeEnum.IP)
                 .healthCheckProtocol(ProtocolEnum.HTTP)
                 .healthCheckPort(Integer.toString(healthBackend.actualPort()))
@@ -338,8 +338,8 @@ class ElbV2TcpDataPlaneIntegrationTest {
     void secondListenerOnTcpPortRegistersWithoutTakingThePort(ProtocolEnum protocol) throws Exception {
         String otherLbArn = client.createLoadBalancer(request -> request.name("tcp-regression-other")
                 .type(protocol == ProtocolEnum.TCP ? LoadBalancerTypeEnum.NETWORK : LoadBalancerTypeEnum.APPLICATION)
-                .subnets(Ec2Service.defaultSubnetId("us-east-1", "a"),
-                        Ec2Service.defaultSubnetId("us-east-1", "b")))
+                .subnets(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"),
+                        Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000")))
                 .loadBalancers().getFirst().loadBalancerArn();
         try {
             Action action = protocol == ProtocolEnum.TCP
@@ -366,8 +366,8 @@ class ElbV2TcpDataPlaneIntegrationTest {
         LoadBalancer other = client.createLoadBalancer(
                 request -> request.name("tcp-regression-parked")
                         .type(LoadBalancerTypeEnum.APPLICATION)
-                        .subnets(Ec2Service.defaultSubnetId("us-east-1", "a"),
-                                Ec2Service.defaultSubnetId("us-east-1", "b")))
+                        .subnets(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"),
+                                Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000")))
                 .loadBalancers().getFirst();
         try {
             client.createListener(request -> request.loadBalancerArn(other.loadBalancerArn())
@@ -402,8 +402,8 @@ class ElbV2TcpDataPlaneIntegrationTest {
     void listenerStartsAfterExternalPortOwnerReleasesIt(ProtocolEnum protocol) throws Exception {
         LoadBalancer other = client.createLoadBalancer(request -> request.name("tcp-regression-occupied")
                 .type(protocol == ProtocolEnum.TCP ? LoadBalancerTypeEnum.NETWORK : LoadBalancerTypeEnum.APPLICATION)
-                .subnets(Ec2Service.defaultSubnetId("us-east-1", "a"),
-                        Ec2Service.defaultSubnetId("us-east-1", "b")))
+                .subnets(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"),
+                        Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000")))
                 .loadBalancers().getFirst();
         try (ServerSocket occupied = new ServerSocket(0)) {
             int port = occupied.getLocalPort();
@@ -482,7 +482,7 @@ class ElbV2TcpDataPlaneIntegrationTest {
     @Test
     void updatingForwardActionOnlyChangesNewTcpConnections() throws Exception {
         String emptyTgArn = client.createTargetGroup(request -> request.name("tcp-regression-empty")
-                .protocol(ProtocolEnum.TCP).port(12345).vpcId(Ec2Service.defaultVpcId("us-east-1"))
+                .protocol(ProtocolEnum.TCP).port(12345).vpcId(Ec2Service.defaultVpcId("us-east-1", "000000000000"))
                 .targetType(TargetTypeEnum.IP)).targetGroups().getFirst().targetGroupArn();
         try {
             try (Socket established = connect(listenerPort)) {

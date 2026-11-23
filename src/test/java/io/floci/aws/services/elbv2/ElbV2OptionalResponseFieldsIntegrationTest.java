@@ -48,8 +48,8 @@ class ElbV2OptionalResponseFieldsIntegrationTest {
                 .validationMethod("DNS")).certificateArn();
         loadBalancer = elb.createLoadBalancer(request -> request.name(uniqueName("optional-lb"))
                 .type("application").subnets(
-                        Ec2Service.defaultSubnetId(REGION.id(), "a"),
-                        Ec2Service.defaultSubnetId(REGION.id(), "b")))
+                        Ec2Service.defaultSubnetId(REGION.id(), "a", "000000000000"),
+                        Ec2Service.defaultSubnetId(REGION.id(), "b", "000000000000")))
                 .loadBalancers().getFirst().loadBalancerArn();
         targetGroup = elb.createTargetGroup(request -> request.name(uniqueName("optional-tg"))
                 .targetType("lambda")).targetGroups().getFirst().targetGroupArn();
@@ -230,7 +230,7 @@ class ElbV2OptionalResponseFieldsIntegrationTest {
     private String createTargetGroup(String prefix, String protocol, String healthCheckProtocol) {
         String arn = elb.createTargetGroup(request -> request.name(uniqueName(prefix))
                         .protocol(protocol).port(2022).targetType("ip")
-                        .vpcId(Ec2Service.defaultVpcId(REGION.id()))
+                        .vpcId(Ec2Service.defaultVpcId(REGION.id(), "000000000000"))
                         .healthCheckProtocol(healthCheckProtocol))
                 .targetGroups().getFirst().targetGroupArn();
         createdTargetGroups.add(arn);

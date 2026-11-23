@@ -745,8 +745,8 @@ class EksServiceTest {
                 new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
-        vpcConfig.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"),
-                Ec2Service.defaultSubnetId("us-east-1", "b")));
+        vpcConfig.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"),
+                Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000")));
 
         CreateClusterRequest req = new CreateClusterRequest();
         req.setName("real-subnet-cluster");
@@ -756,8 +756,8 @@ class EksServiceTest {
         Cluster cluster = service.createCluster(req);
 
         assertEquals("real-subnet-cluster", cluster.getName());
-        assertEquals(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"),
-                Ec2Service.defaultSubnetId("us-east-1", "b")),
+        assertEquals(List.of(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"),
+                Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000")),
                 cluster.getResourcesVpcConfig().getSubnetIds());
     }
 
@@ -780,8 +780,8 @@ class EksServiceTest {
                 realEc2Service(), new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
-        vpcConfig.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"),
-                Ec2Service.defaultSubnetId("us-east-1", "b")));
+        vpcConfig.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"),
+                Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000")));
 
         CreateClusterRequest req = new CreateClusterRequest();
         req.setName("vpc-id-cluster");
@@ -790,7 +790,7 @@ class EksServiceTest {
 
         Cluster cluster = service.createCluster(req);
 
-        assertEquals(Ec2Service.defaultVpcId("us-east-1"), cluster.getResourcesVpcConfig().getVpcId());
+        assertEquals(Ec2Service.defaultVpcId("us-east-1", "000000000000"), cluster.getResourcesVpcConfig().getVpcId());
     }
 
     @Test
@@ -810,7 +810,7 @@ class EksServiceTest {
                 realEc2Service(), new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
-        vpcConfig.setSubnetIds(List.of(Ec2Service.defaultSubnetId("eu-west-2", "a")));
+        vpcConfig.setSubnetIds(List.of(Ec2Service.defaultSubnetId("eu-west-2", "a", "000000000000")));
 
         CreateClusterRequest req = new CreateClusterRequest();
         req.setName("cross-region-cluster");
@@ -848,7 +848,7 @@ class EksServiceTest {
         Ec2Service ec2Service = realEc2Service();
         ec2Service.ensureDefaultResources("us-east-1");
         String usEastOnlySubnet = ec2Service
-                .createSubnet("us-east-1", Ec2Service.defaultVpcId("us-east-1"), "172.31.200.0/24", "us-east-1a")
+                .createSubnet("us-east-1", Ec2Service.defaultVpcId("us-east-1", "000000000000"), "172.31.200.0/24", "us-east-1a")
                 .getSubnetId();
 
         // The request is for eu-west-2, where that subnet does not exist.
@@ -1814,7 +1814,7 @@ class EksServiceTest {
     void createClusterCreatesClusterSecurityGroupInResolvedVpc() {
         Ec2Service ec2Service = realEc2Service();
         ec2Service.ensureDefaultResources("us-east-1");
-        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1", "000000000000");
         String subnetId = ec2Service
                 .createSubnet("us-east-1", defaultVpc, "172.31.100.0/24", "us-east-1a")
                 .getSubnetId();
@@ -1941,7 +1941,7 @@ class EksServiceTest {
     void deleteClusterDeletesClusterSecurityGroup() {
         Ec2Service ec2Service = realEc2Service();
         ec2Service.ensureDefaultResources("us-east-1");
-        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1", "000000000000");
         String subnetId = ec2Service
                 .createSubnet("us-east-1", defaultVpc, "172.31.101.0/24", "us-east-1a")
                 .getSubnetId();
@@ -1971,7 +1971,7 @@ class EksServiceTest {
     void deleteClusterSucceedsWhenClusterSecurityGroupAlreadyDeleted() {
         Ec2Service ec2Service = realEc2Service();
         ec2Service.ensureDefaultResources("us-east-1");
-        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1", "000000000000");
         String subnetId = ec2Service
                 .createSubnet("us-east-1", defaultVpc, "172.31.102.0/24", "us-east-1a")
                 .getSubnetId();
@@ -2032,7 +2032,7 @@ class EksServiceTest {
     void backfillClusterSecurityGroupOnStartup() {
         Ec2Service ec2Service = realEc2Service();
         ec2Service.ensureDefaultResources("us-east-1");
-        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1", "000000000000");
 
         StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
         AccountAwareStorageBackend<Cluster> clusterStore =
@@ -2071,7 +2071,7 @@ class EksServiceTest {
     void backfillClusterSecurityGroupLeavesExistingSecurityGroupUnchanged() {
         Ec2Service ec2Service = realEc2Service();
         ec2Service.ensureDefaultResources("us-east-1");
-        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1", "000000000000");
 
         StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
         AccountAwareStorageBackend<Cluster> clusterStore =
@@ -2102,7 +2102,7 @@ class EksServiceTest {
     void restartRoundTripPersistsClusterSecurityGroupId() {
         Ec2Service ec2Service = realEc2Service();
         ec2Service.ensureDefaultResources("us-east-1");
-        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1", "000000000000");
         String subnetId = ec2Service
                 .createSubnet("us-east-1", defaultVpc, "172.31.103.0/24", "us-east-1a")
                 .getSubnetId();
@@ -2170,7 +2170,7 @@ class EksServiceTest {
     void createClusterCleansUpSecurityGroupWhenClusterCreationFails() {
         Ec2Service ec2Service = realEc2Service();
         ec2Service.ensureDefaultResources("us-east-1");
-        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1", "000000000000");
         String subnetId = ec2Service
                 .createSubnet("us-east-1", defaultVpc, "172.31.104.0/24", "us-east-1a")
                 .getSubnetId();
@@ -2205,7 +2205,7 @@ class EksServiceTest {
     void backfillClusterSecurityGroupsSkipsMissingVpcWithoutFailingStartup() {
         Ec2Service ec2Service = realEc2Service();
         ec2Service.ensureDefaultResources("us-east-1");
-        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1", "000000000000");
 
         StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
         AccountAwareStorageBackend<Cluster> clusterStore =
@@ -2250,7 +2250,7 @@ class EksServiceTest {
         String nonDefaultAccount = "123456789012";
         Ec2Service ec2Service = realEc2Service();
         ec2Service.ensureDefaultResources("us-east-1");
-        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1", "000000000000");
 
         StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
         AccountAwareStorageBackend<Cluster> clusterStore =
@@ -2285,7 +2285,7 @@ class EksServiceTest {
     void createClusterSecurityGroupCleansUpWhenTaggingFails() {
         Ec2Service spyEc2 = spy(realEc2Service());
         spyEc2.ensureDefaultResources("us-east-1");
-        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1", "000000000000");
 
         doThrow(new RuntimeException("Simulated tagging failure"))
                 .when(spyEc2).createSystemTags(any(), any(), any());

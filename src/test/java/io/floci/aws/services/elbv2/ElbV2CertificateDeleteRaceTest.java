@@ -88,8 +88,8 @@ class ElbV2CertificateDeleteRaceTest {
                 .formParam("Action", "CreateLoadBalancer")
                 .formParam("Name", name)
                 .formParam("Type", "application")
-                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
-                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b"))
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"))
+                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000"))
             .when().post("/").then().statusCode(200)
                 .extract().path("CreateLoadBalancerResponse.CreateLoadBalancerResult"
                         + ".LoadBalancers.member.LoadBalancerArn");

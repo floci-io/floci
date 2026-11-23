@@ -273,8 +273,8 @@ class RdsResourceIamIntegrationTest {
             for (String proxyName : List.of(name, other)) {
                 root.createDBProxy(r -> r.dbProxyName(proxyName).engineFamily("POSTGRESQL")
                         .roleArn(prefix + "iam::" + ACCOUNT + ":role/proxy")
-                        .vpcSubnetIds(Ec2Service.defaultSubnetId(regionName, "a"),
-                                Ec2Service.defaultSubnetId(regionName, "b"))
+                        .vpcSubnetIds(Ec2Service.defaultSubnetId(regionName, "a", "000000000000"),
+                                Ec2Service.defaultSubnetId(regionName, "b", "000000000000"))
                         .auth(a -> a.authScheme("SECRETS")
                                 .secretArn(prefix + "secretsmanager:" + regionName + ":" + ACCOUNT + ":secret:db-AbCdEf"))
                         .tags(tag("Owner", "team-a")));
@@ -284,8 +284,8 @@ class RdsResourceIamIntegrationTest {
                 String targetArn = root.describeDBProxyTargetGroups(r -> r.dbProxyName(name))
                         .targetGroups().getFirst().targetGroupArn();
                 String endpointArn = root.createDBProxyEndpoint(r -> r.dbProxyName(name).dbProxyEndpointName(name)
-                        .vpcSubnetIds(Ec2Service.defaultSubnetId(regionName, "a"),
-                                Ec2Service.defaultSubnetId(regionName, "b"))).dbProxyEndpoint().dbProxyEndpointArn();
+                        .vpcSubnetIds(Ec2Service.defaultSubnetId(regionName, "a", "000000000000"),
+                                Ec2Service.defaultSubnetId(regionName, "b", "000000000000"))).dbProxyEndpoint().dbProxyEndpointArn();
                 policy(user, """
                         [{"Effect":"Allow","Action":"rds:ModifyDBProxy","Resource":"%s",
                           "Condition":{"StringEquals":{"aws:ResourceTag/Owner":"team-a"}}},
@@ -398,7 +398,7 @@ class RdsResourceIamIntegrationTest {
                     .dbClusterParameterGroup().dbClusterParameterGroupArn();
             case "subgrp" -> client.createDBSubnetGroup(r -> r.dbSubnetGroupName(name)
                     .dbSubnetGroupDescription("IAM regression").tags(tag)
-                    .subnetIds(Ec2Service.defaultSubnetId(region, "a"), Ec2Service.defaultSubnetId(region, "b")))
+                    .subnetIds(Ec2Service.defaultSubnetId(region, "a", "000000000000"), Ec2Service.defaultSubnetId(region, "b", "000000000000")))
                     .dbSubnetGroup().dbSubnetGroupArn();
             case "db" -> client.createDBInstance(r -> r.dbInstanceIdentifier(name).engine("postgres")
                     .dbInstanceClass("db.t3.micro").allocatedStorage(20).masterUsername("admin")
@@ -417,7 +417,7 @@ class RdsResourceIamIntegrationTest {
                     .parameters(parameter -> parameter.parameterName("log_min_duration_statement")
                             .parameterValue("1000").applyMethod("immediate")));
             case "subgrp" -> client.modifyDBSubnetGroup(r -> r.dbSubnetGroupName(name).dbSubnetGroupDescription("updated")
-                    .subnetIds(Ec2Service.defaultSubnetId(region, "a"), Ec2Service.defaultSubnetId(region, "b")));
+                    .subnetIds(Ec2Service.defaultSubnetId(region, "a", "000000000000"), Ec2Service.defaultSubnetId(region, "b", "000000000000")));
             case "db" -> client.modifyDBInstance(r -> r.dbInstanceIdentifier(name).backupRetentionPeriod(2));
             case "cluster" -> client.modifyDBCluster(r -> r.dbClusterIdentifier(name).backupRetentionPeriod(2));
             default -> throw new IllegalArgumentException(type);
