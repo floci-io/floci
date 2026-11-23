@@ -637,6 +637,33 @@ class EksServiceTest {
         assertEquals(ClusterStatus.ACTIVE, service.describeCluster("running-cluster").getStatus());
     }
 
+    @Test
+    void deletingAClusterEndsItsNodeInEc2BeforeDeletingItsSecurityGroup() {
+        Cluster cluster = activeCluster();
+        cluster.setArn("arn:aws:eks:us-east-1:000000000000:cluster/running-cluster");
+        ResourcesVpcConfig vpc = new ResourcesVpcConfig();
+        vpc.setVpcId("vpc-1");
+        vpc.setClusterSecurityGroupId("sg-cluster");
+        cluster.setResourcesVpcConfig(vpc);
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.deriveClusterNodeInstanceId(cluster, "us-east-1", "000000000000")).thenReturn("i-0de00node");
+        Ec2Service ec2 = mock(Ec2Service.class);
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
+        clusterStore.putForAccount("000000000000", EksService.clusterKey("us-east-1", cluster.getName()), cluster);
+        EksService service = new EksService(fixedStorageFactory(clusterStore), testConfig(false, false),
+                new RegionResolver("us-east-1", "000000000000"), clusterManager, ec2,
+                new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
+                        new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        service.deleteCluster(cluster.getName());
+
+        InOrder order = inOrder(clusterManager, ec2);
+        order.verify(clusterManager).stopCluster(cluster);
+        order.verify(ec2).endClusterNodeInstance("000000000000", "us-east-1", "i-0de00node");
+        order.verify(ec2).deleteSecurityGroup("us-east-1", "sg-cluster");
+    }
+
     private static Cluster activeCluster() {
         Cluster cluster = new Cluster();
         cluster.setName("running-cluster");

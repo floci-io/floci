@@ -76,4 +76,26 @@ public class InstanceNetworkInterface {
 
     public List<String> getIpv6Addresses() { return ipv6Addresses; }
     public void setIpv6Addresses(List<String> ipv6Addresses) { this.ipv6Addresses = ipv6Addresses; }
+
+    /** A copy with lists of its own, so a change to the copy does not reach this interface. */
+    public InstanceNetworkInterface copy() {
+        InstanceNetworkInterface copy = new InstanceNetworkInterface();
+        copy.networkInterfaceId = networkInterfaceId;
+        copy.subnetId = subnetId;
+        copy.vpcId = vpcId;
+        copy.description = description;
+        copy.ownerId = ownerId;
+        copy.status = status;
+        copy.macAddress = macAddress;
+        copy.privateIpAddress = privateIpAddress;
+        copy.privateDnsName = privateDnsName;
+        copy.sourceDestCheck = sourceDestCheck;
+        copy.groups = new ArrayList<>(groups);
+        copy.ipv6Addresses = new ArrayList<>(ipv6Addresses);
+        copy.attachmentId = attachmentId;
+        copy.deviceIndex = deviceIndex;
+        copy.attachTime = attachTime;
+        copy.deleteOnTermination = deleteOnTermination;
+        return copy;
+    }
 }

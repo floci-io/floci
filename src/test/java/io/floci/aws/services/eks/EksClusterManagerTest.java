@@ -47,7 +47,9 @@ import io.floci.aws.services.ec2.Ec2ImageCatalog;
 import io.floci.aws.services.ec2.Ec2InstanceTypeCatalog;
 import io.floci.aws.services.ec2.Ec2MetadataServer;
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.model.GroupIdentifier;
 import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.ec2.model.InstanceNetworkInterface;
 import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import io.floci.aws.services.ec2.model.Placement;
 import io.floci.aws.services.ec2.net.VpcNetworkManager;
@@ -5241,6 +5243,67 @@ class EksClusterManagerTest {
             vpcConfig.setSubnetIds(subnetIds);
             cluster.setResourcesVpcConfig(vpcConfig);
             return cluster;
+        }
+
+        @Test
+        void aNodeInASubnetHasAPrimaryInterfaceHoldingTheClusterSecurityGroup() {
+            Cluster cluster = vpcCluster("eni-cluster", "vpc-1", List.of("subnet-1", "subnet-2"));
+            cluster.getResourcesVpcConfig().setClusterSecurityGroupId("sg-cluster");
+            cluster.setNodePrivateIp("10.0.1.25");
+            when(ec2Service.securityGroupName("000000000000", "us-east-1", "sg-cluster"))
+                    .thenReturn(Optional.of("eks-cluster-sg-eni-cluster-0123abcd"));
+
+            Instance node = manager.synthesizeClusterNodeInstance(cluster, "172.17.0.2", "us-east-1", "000000000000");
+
+            assertEquals(List.of("sg-cluster:eks-cluster-sg-eni-cluster-0123abcd"), groupsOf(node.getSecurityGroups()));
+            assertEquals(1, node.getNetworkInterfaces().size());
+            InstanceNetworkInterface eni = node.getNetworkInterfaces().getFirst();
+            assertEquals(manager.deriveClusterNodeNetworkInterfaceId(cluster, "us-east-1", "000000000000"),
+                    eni.getNetworkInterfaceId());
+            assertTrue(eni.getNetworkInterfaceId().matches("eni-[0-9a-f]{17}"), eni.getNetworkInterfaceId());
+            assertTrue(eni.getAttachmentId().matches("eni-attach-[0-9a-f]{17}"), eni.getAttachmentId());
+            assertEquals(0, eni.getDeviceIndex());
+            assertEquals("subnet-1", eni.getSubnetId());
+            assertEquals("vpc-1", eni.getVpcId());
+            assertEquals("000000000000", eni.getOwnerId());
+            assertEquals("10.0.1.25", eni.getPrivateIpAddress());
+            assertEquals(node.getPrivateDnsName(), eni.getPrivateDnsName());
+            assertEquals(List.of("sg-cluster:eks-cluster-sg-eni-cluster-0123abcd"), groupsOf(eni.getGroups()));
+            // The ids are the cluster's, so the node keeps them across a restart.
+            InstanceNetworkInterface again = manager.synthesizeClusterNodeInstance(
+                    cluster, "172.17.0.3", "us-east-1", "000000000000").getNetworkInterfaces().getFirst();
+            assertEquals(eni.getNetworkInterfaceId(), again.getNetworkInterfaceId());
+            assertEquals(eni.getAttachmentId(), again.getAttachmentId());
+        }
+
+        @Test
+        void aNodeWithoutASubnetAddressHasNoInterfaceAndANodeWhoseGroupIsGoneHasNoGroup() {
+            Cluster noSubnet = new Cluster();
+            noSubnet.setName("no-subnet");
+            Instance bare = manager.synthesizeClusterNodeInstance(noSubnet, "172.17.0.2", "us-east-1", "000000000000");
+            assertTrue(bare.getNetworkInterfaces().isEmpty());
+            assertTrue(bare.getSecurityGroups().isEmpty());
+
+            // No address leased in the subnet: the node's own address is its container's, on another network.
+            Cluster unleased = vpcCluster("unleased", "vpc-1", List.of("subnet-1"));
+            unleased.getResourcesVpcConfig().setClusterSecurityGroupId("sg-cluster");
+            Instance fallback = manager.synthesizeClusterNodeInstance(unleased, "172.17.0.2", "us-east-1", "000000000000");
+            assertEquals("172.17.0.2", fallback.getPrivateIpAddress());
+            assertTrue(fallback.getNetworkInterfaces().isEmpty());
+            assertTrue(fallback.getSecurityGroups().isEmpty());
+
+            Cluster groupGone = vpcCluster("group-gone", "vpc-1", List.of("subnet-1"));
+            groupGone.setNodePrivateIp("10.0.1.26");
+            groupGone.getResourcesVpcConfig().setClusterSecurityGroupId("sg-gone");
+            when(ec2Service.securityGroupName("000000000000", "us-east-1", "sg-gone")).thenReturn(Optional.empty());
+            Instance node = manager.synthesizeClusterNodeInstance(groupGone, "172.17.0.2", "us-east-1", "000000000000");
+            assertEquals(1, node.getNetworkInterfaces().size());
+            assertTrue(node.getNetworkInterfaces().getFirst().getGroups().isEmpty());
+            assertTrue(node.getSecurityGroups().isEmpty());
+        }
+
+        private List<String> groupsOf(List<GroupIdentifier> groups) {
+            return groups.stream().map(group -> group.getGroupId() + ":" + group.getGroupName()).toList();
         }
 
         @Test

@@ -67,6 +67,8 @@ public class Instance {
     // without model backing, a modify → plan cycle would show drift. Tracked as a known limitation.
     private boolean disableApiStop = false;
     private boolean disableApiTermination = false;
+    // EC2's copy of an instance a cluster serves, its node, which a change through EC2 stores.
+    private boolean clusterNodeCopy;
 
     // Null for an instance persisted before metadata options were stored; reads fall back to
     // AWS's launch defaults through effectiveMetadataOptions(). Volatile because IMDS reads it on
@@ -304,6 +306,9 @@ public class Instance {
 
     public boolean isDisableApiTermination() { return disableApiTermination; }
     public void setDisableApiTermination(boolean disableApiTermination) { this.disableApiTermination = disableApiTermination; }
+
+    public boolean isClusterNodeCopy() { return clusterNodeCopy; }
+    public void setClusterNodeCopy(boolean clusterNodeCopy) { this.clusterNodeCopy = clusterNodeCopy; }
 
     public LaunchTemplateData.MetadataOptions getMetadataOptions() { return metadataOptions; }
     public void setMetadataOptions(LaunchTemplateData.MetadataOptions metadataOptions) { this.metadataOptions = metadataOptions; }
