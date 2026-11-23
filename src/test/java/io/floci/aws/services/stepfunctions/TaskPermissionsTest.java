@@ -657,11 +657,33 @@ class TaskPermissionsTest {
                                            StoredResourceArns secrets, StoredResourceArns states,
                                            boolean callback) throws Exception {
         return TaskPermissions.of(integration(tail), json(request), machine("aws"), null, null, callback,
-                new TaskPermissions.ControlServices(cloudFormation, secrets, states)).orElseThrow();
+                new TaskPermissions.ControlServices(cloudFormation, secrets, states, schedules())).orElseThrow();
     }
 
     private static TaskPermissions control(String tail, String request) throws Exception {
         return control(tail, request, null, null, null, false);
+    }
+
+    /** Scheduler as IAM asks it: its default schedule group, the one a request naming none acts on. */
+    private static StoredResourceArns schedules() {
+        return new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "scheduler";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<String> findDefault(String type, String region) {
+                return "schedule-group".equals(type)
+                        ? Optional.of("arn:aws:scheduler:" + region + ":" + ACCOUNT + ":schedule-group/default")
+                        : Optional.empty();
+            }
+        };
     }
 
     /** CloudFormation as IAM asks it: the stack {@code s} and the stack set {@code ss}, under the ids it minted. */
@@ -709,7 +731,7 @@ class TaskPermissionsTest {
             "aws-sdk:rdsdata:batchExecuteStatement", "http:get", "elasticmapreduce:describeCluster"})
     void anApiNoIntegrationServesIsNotChecked(String tail) throws Exception {
         assertEquals(Optional.empty(), TaskPermissions.of(integration(tail), json("{}"), machine("aws"), null, null, false,
-                new TaskPermissions.ControlServices(null, null, null)));
+                new TaskPermissions.ControlServices(null, null, null, null)));
     }
 
     /** A new case in the handler has to name its resource type here, or it would run unchecked under enforcement. */
@@ -723,7 +745,8 @@ class TaskPermissionsTest {
             actions++;
             String api = Character.toLowerCase(action.group(1).charAt(0)) + action.group(1).substring(1);
             assertTrue(TaskPermissions.of(integration("aws-sdk:cloudformation:" + api), json("{}"), machine("aws"), null,
-                    null, false, new TaskPermissions.ControlServices(null, null, null)).isPresent(), action.group(1));
+                    null, false, new TaskPermissions.ControlServices(null, null, null, null)).isPresent(),
+                action.group(1));
         }
         assertEquals(36, actions);
     }
