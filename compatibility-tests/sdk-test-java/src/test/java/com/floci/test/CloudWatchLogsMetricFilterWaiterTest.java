@@ -19,7 +19,7 @@ class CloudWatchLogsMetricFilterWaiterTest {
         JsonNode expected = new ObjectMapper().readTree("{\"Sum\":10,\"SampleCount\":2}");
         AtomicInteger reads = new AtomicInteger();
         List<Datapoint> points = CloudWatchLogsMetricFilterTest.awaitSeries(
-                () -> reads.incrementAndGet() == 1 ? series(3, 1) : series(10, 2), expected, Duration.ofSeconds(1));
+                () -> reads.incrementAndGet() == 1 ? series(3, 1) : series(10, 2), expected, true, MetricFilterQueryAssertions.recorded(expected), Duration.ofSeconds(1));
         assertThat(reads.get()).isEqualTo(2);
         assertThat(points.get(0).sum()).isEqualTo(10);
         assertThat(points.get(0).sampleCount()).isEqualTo(2);
@@ -30,7 +30,7 @@ class CloudWatchLogsMetricFilterWaiterTest {
         JsonNode expected = new ObjectMapper().readTree("{\"Sum\":10,\"SampleCount\":2}");
         AtomicInteger reads = new AtomicInteger();
         List<Datapoint> points = CloudWatchLogsMetricFilterTest.awaitSeries(
-                () -> reads.incrementAndGet() == 1 ? series(3, 2) : series(10, 2), expected, Duration.ofSeconds(1));
+                () -> reads.incrementAndGet() == 1 ? series(3, 2) : series(10, 2), expected, true, MetricFilterQueryAssertions.recorded(expected), Duration.ofSeconds(1));
         assertThat(reads.get()).isEqualTo(2);
         assertThat(points.get(0).sum()).isEqualTo(10);
     }
@@ -42,7 +42,7 @@ class CloudWatchLogsMetricFilterWaiterTest {
         List<Datapoint> points = CloudWatchLogsMetricFilterTest.awaitSeries(() -> {
             reads.incrementAndGet();
             return series(3, 1);
-        }, expected, Duration.ZERO);
+        }, expected, true, MetricFilterQueryAssertions.recorded(expected), Duration.ZERO);
         assertThat(reads.get()).isEqualTo(1);
         assertThatThrownBy(() -> assertThat(points.get(0).sum()).isEqualTo(10))
                 .isInstanceOf(AssertionError.class);
@@ -54,7 +54,7 @@ class CloudWatchLogsMetricFilterWaiterTest {
         List<Datapoint> points = CloudWatchLogsMetricFilterTest.awaitSeries(() -> {
             reads.incrementAndGet();
             return List.of();
-        }, null, Duration.ofSeconds(1));
+        }, null, false, List.of(), Duration.ofSeconds(1));
         assertThat(points).isEmpty();
         assertThat(reads.get()).isEqualTo(1);
     }

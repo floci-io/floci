@@ -369,11 +369,11 @@ class CloudWatchLogsMetricFilterTest {
     private static void assertSeries(String metric, Instant minute, List<Dimension> dimensions, JsonNode expected)
             throws Exception {
         boolean present = expected != null && expected.has("Sum");
+        List<String> recorded = present ? MetricFilterQueryAssertions.recorded(expected) : List.of();
         List<Statistic> statistics = MetricFilterQueryAssertions.STATISTICS.stream().map(Statistic::fromValue).toList();
         List<Datapoint> points = awaitSeries(
-                () -> statistics(metric, minute, dimensions, statistics), expected, Duration.ofSeconds(10));
+                () -> statistics(metric, minute, dimensions, statistics), expected, present, recorded, Duration.ofSeconds(10));
         assertThat(points).as(metric + " at " + minute + " " + dimensions).hasSize(present ? 1 : 0);
-        List<String> recorded = present ? MetricFilterQueryAssertions.recorded(expected) : List.of();
         if (present) {
             Datapoint point = points.get(0);
             assertThat(point.timestamp()).isEqualTo(minute);
@@ -405,10 +405,8 @@ class CloudWatchLogsMetricFilterTest {
         MetricFilterQueryAssertions.assertSeries(namespace, metric, minute, dimensions, expected);
     }
 
-    static List<Datapoint> awaitSeries(Supplier<List<Datapoint>> read, JsonNode expected, Duration timeout)
-            throws InterruptedException {
-        boolean present = expected != null && expected.has("Sum");
-        List<String> recorded = present ? MetricFilterQueryAssertions.recorded(expected) : List.of();
+    static List<Datapoint> awaitSeries(Supplier<List<Datapoint>> read, JsonNode expected, boolean present,
+                                     List<String> recorded, Duration timeout) throws InterruptedException {
         long deadline = System.nanoTime() + timeout.toNanos();
         List<Datapoint> points = read.get();
         while (present && !matchesSeries(points, expected, recorded) && System.nanoTime() < deadline) {
