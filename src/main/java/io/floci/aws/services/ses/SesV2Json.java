@@ -235,9 +235,8 @@ final class SesV2Json {
             return Map.of();
         }
         if (!keys.containsAll(filter.keySet())) {
-            throw SmithyValidationErrors.badRequest( "Value at 'filter' "
-                    + "failed to satisfy constraint: Map keys must satisfy constraint: "
-                    + "[Member must satisfy enum value set: [" + String.join(", ", keys) + "]]");
+            throw SmithyValidationErrors.badRequest(SmithyValidationErrors.Violations.WITHOUT_VALUES
+                    .mapKeys("filter", null, List.of("Member must satisfy enum value set: " + keys)));
         }
         if (filter.values().stream().anyMatch(v -> v != null && invalidValue.test(v))) {
             throw SmithyValidationErrors.badRequest(SmithyValidationErrors.Violations.WITHOUT_VALUES

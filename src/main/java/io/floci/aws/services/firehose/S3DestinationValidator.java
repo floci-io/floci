@@ -228,8 +228,9 @@ public final class S3DestinationValidator {
             valueViolation |= !isMappingValueValid(mapping.getValue());
         }
         if (keyViolation) {
-            violations.add(violation(shapeName, member,
-                    "Map keys must satisfy constraint: " + constraintSet(NO_WHITESPACE_PATTERN)));
+            violations.add(SmithyValidationErrors.Violations.WITHOUT_VALUES.mapKeys(
+                    shapeName + "." + member, null,
+                    SmithyValidationErrors.constraintSet(1, MAPPING_MAX_LENGTH, NO_WHITESPACE_PATTERN, null)));
         }
         if (valueViolation) {
             violations.add(SmithyValidationErrors.Violations.WITHOUT_VALUES.mapValues(shapeName + "." + member,
