@@ -892,27 +892,37 @@ helm install my-app ./chart \
   --set image.tag=v1
 ```
 
+The same two accounts' registry hosts as AWS names them,
+`<account>.dkr.ecr.<region>.amazonaws.com` (`amazonaws.com.cn` in the China regions), are
+mirrored too, so a chart written for EKS that names its own account's images that way pulls
+them from Floci unchanged:
+
+```bash
+helm install my-app ./chart \
+  --set image.repository=000000000000.dkr.ecr.us-east-1.amazonaws.com/my-repo \
+  --set image.tag=v1
+```
+
+containerd still tries AWS itself last, so an image Floci does not hold is looked for there,
+as it would be without the mirror.
+
 Requirements and limits:
 
 - The k3s container must reach Floci's Docker-network address. Set the global
   `FLOCI_SERVICES_DOCKER_NETWORK` as in the standard `docker-compose.yml` or the
   EKS service network variable.
-- Only Floci-mintable hostnames are mirrored; public registries (docker.io, ghcr.io, …)
-  are never touched.
+- Only Floci-mintable hostnames and the two accounts' AWS registry hosts are mirrored;
+  public registries (docker.io, ghcr.io, …) and other accounts' AWS registries, such as the
+  ones EKS add-on images come from, are never touched.
 - Mirrored hostnames carry the port the repository URIs advertise, which is the host port
   when Floci's container publishes `4566` on another one (see [ECR](ecr.md#docker-compose-port-mapping)).
 - Repository URIs using a non-default `registryId` (account) are not covered.
-- The mirror set is snapshotted when the cluster is created. Clusters created before this
-  feature can be fixed manually because the k3s container filesystem survives a restart. A surviving
-  container keeps the name it was created with, so those clusters are still `floci-eks-<cluster>`
-  while newer ones are `floci-aws-eks-<cluster>`, and a non-default account adds `<account>.` before
-  the cluster name. Look the name up first:
-
-  ```bash
-  docker ps --filter name=<cluster> --format '{{.Names}}'
-  docker cp registries.yaml <container>:/etc/rancher/k3s/registries.yaml
-  docker restart <container>
-  ```
+- A node keeps the mirror set it was started with. When Floci starts, a surviving node whose
+  `registries.yaml` differs from the one Floci gives it now, such as one created before a mirror
+  entry was added, is replaced on its data volume, as one with another capacity is, and the
+  replacement gets the current set. It is not replaced while the registry is unavailable, since the
+  replacement would get no mirror either, nor to take its mirror away when
+  `FLOCI_SERVICES_EKS_ECR_REGISTRY_MIRROR` is off.
 
 ### DNS resolution and Route 53 private hosted zones
 

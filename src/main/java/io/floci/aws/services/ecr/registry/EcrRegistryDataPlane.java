@@ -3,6 +3,8 @@ package io.floci.aws.services.ecr.registry;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.NetworkExposureGuard;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsPartitions;
+import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.services.ecr.EcrService;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -42,6 +44,12 @@ public class EcrRegistryDataPlane {
     private static final Logger LOG = Logger.getLogger(EcrRegistryDataPlane.class);
     private static final Pattern ECR_HOST = Pattern.compile(
             "^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.localhost(?:\\.floci\\.io)?(?::[0-9]+)?$");
+    /**
+     * An account's registry host as AWS names it, {@code <account>.dkr.ecr.<region>.<dnsSuffix>}, which containerd sends
+     * as a mirror request's {@code ns} when an EKS node's registries.yaml mirrors it to Floci.
+     */
+    private static final Pattern AWS_ECR_HOST = Pattern.compile(
+            "^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.(" + AwsPartitions.dnsSuffixRegex() + ")(?::[0-9]+)?$");
     private static final String MANIFESTS_PATH = "/manifests/";
     private static final long REPOSITORY_LOCK_POLL_MILLIS = 5;
     /**
@@ -695,11 +703,8 @@ public class EcrRegistryDataPlane {
         if (!registryPath.startsWith("/v2/")) {
             return Optional.empty();
         }
-        Matcher hostMatch = ECR_HOST.matcher(host == null ? "" : host);
-        if (!hostMatch.matches()) {
-            hostMatch = ECR_HOST.matcher(queryParameter(query, "ns"));
-        }
-        if (hostMatch.matches()) {
+        Matcher hostMatch = registryHost(host, query);
+        if (hostMatch != null) {
             String repository = "/v2/".equals(registryPath) ? "" : repositoryName(registryPath.substring("/v2/".length()));
             String storageRepositoryName = hostMatch.group(1) + "/" + hostMatch.group(2) + "/" + repository;
             String backendUri = repository.isEmpty()
@@ -732,6 +737,25 @@ public class EcrRegistryDataPlane {
         return Optional.of(new RegistryRequest(segments[0], segments[1], repository,
                 storageRepositoryName, storageRepositoryName,
                 registryPath + querySuffix(query, true), tag(registryPath)));
+    }
+
+    /**
+     * The registry a request is for: its host when that is a Floci repository host, else the registry a mirror request
+     * names in {@code ns}, a Floci repository host or an account's AWS registry host in that region's partition. A request
+     * with an AWS registry host in its {@code Host} header is not routed here.
+     */
+    private static Matcher registryHost(String host, String query) {
+        Matcher byHost = ECR_HOST.matcher(host == null ? "" : host);
+        if (byHost.matches()) {
+            return byHost;
+        }
+        String namespace = queryParameter(query, "ns");
+        Matcher byNamespace = ECR_HOST.matcher(namespace);
+        if (byNamespace.matches()) {
+            return byNamespace;
+        }
+        Matcher mirrored = AWS_ECR_HOST.matcher(namespace);
+        return mirrored.matches() && AwsRegions.dnsSuffixFor(mirrored.group(2)).equals(mirrored.group(3)) ? mirrored : null;
     }
 
     private static boolean isLoopbackHost(String host) {
