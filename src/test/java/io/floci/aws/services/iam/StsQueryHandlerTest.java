@@ -2,6 +2,7 @@ package io.floci.aws.services.iam;
 
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AccountResolver;
+import io.floci.aws.core.common.IamConditionContextResolver;
 import io.floci.aws.core.common.OidcIssuerKeyLookup;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
@@ -128,6 +129,7 @@ class StsQueryHandlerTest {
                 mock(CentralRootAccess.class),
                 tokenIssuer,
                 new RequestContext(),
+                mock(IamConditionContextResolver.class),
                 clock);
     }
 
@@ -1083,7 +1085,7 @@ class StsQueryHandlerTest {
                 new RegionResolver(REGION, "000000000000"), config, mock(AssumeRolePolicyEvaluator.class),
                 trust, verifier, keys, mock(SAMLProviderService.class), mock(SAMLTrustPolicyEvaluator.class),
                 mock(DelegationRequestService.class), mock(CentralRootAccess.class),
-                mock(WebIdentityTokenIssuer.class), new RequestContext());
+                mock(WebIdentityTokenIssuer.class), new RequestContext(), mock(IamConditionContextResolver.class));
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleArn", requestedRoleArn);
         params.putSingle("RoleSessionName", "app");

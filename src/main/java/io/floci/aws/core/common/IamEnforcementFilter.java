@@ -578,9 +578,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 ? Optional.of(accountRootArns(accountId))
                 : iamService.resolveCallerArns(akid);
         callerArns = callerArns.map(arns -> withPresentedDevice(arns, action, ctx, akid));
+        conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
+        conditionContextResolver.putRequestTransport(conditionContext);
         if (callerArns.isPresent()) {
             caller = caller.withPrincipalArn(callerArns.get().callerArn());
-            conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
             callerArns.get().putPrincipalKeys(conditionContext);
         }
         // Internal transfers bypass customer policies only for a registered session scope in a tagged bucket.
@@ -595,6 +596,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         List<Map<String, List<String>>> targetContexts = withRequestTags(conditionContext, requestTags);
         for (Map<String, List<String>> target : remainingTargets) {
             Map<String, List<String>> targetContext = new HashMap<>(target);
+            conditionContextResolver.putRequestTransport(targetContext);
             callerArns.ifPresent(arns -> arns.putPrincipalKeys(targetContext));
             targetContexts.addAll(withRequestTags(targetContext, requestTags));
         }
@@ -614,6 +616,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 Map<String, List<String>> resolved = conditionContextResolver.resolvePart(credentialScope,
                         target.action(), resolvedOperation.operation(), ctx, target.element(), region);
                 Map<String, List<String>> partContext = resolved == null ? new HashMap<>() : new HashMap<>(resolved);
+                conditionContextResolver.putRequestTransport(partContext);
                 callerArns.ifPresent(arns -> arns.putPrincipalKeys(partContext));
                 if (abortIfDenied(ctx, caller, principal, target.action(), action, credentialScope,
                         resolveResourceArns(credentialScope, target.resources()), List.of(partContext), region,
@@ -971,6 +974,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                           String region, String accountId, String akid) {
         for (PassedRoles.PassedRole passed : PassedRoles.of(action, ctx, lookupsFor(accountId, region))) {
             Map<String, List<String>> context = new HashMap<>();
+            conditionContextResolver.putRequestTransport(context);
             if (callerArns != null) {
                 callerArns.putPrincipalKeys(context);
             }
@@ -998,6 +1002,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         String action = PassedNetworkConnectors.ACTION;
         for (String connector : PassedNetworkConnectors.of(operation, ctx, region)) {
             Map<String, List<String>> context = new HashMap<>();
+            conditionContextResolver.putRequestTransport(context);
             if (callerArns != null) {
                 callerArns.putPrincipalKeys(context);
             }
@@ -1098,6 +1103,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         List<String> made = created.isEmpty() ? resources : created;
         for (TagOnCreate.TagSet set : tagging.checked()) {
             Map<String, List<String>> context = TagOnCreate.conditionContext(tagging, set, operation);
+            conditionContextResolver.putRequestTransport(context);
             if (callerArns != null) {
                 callerArns.putPrincipalKeys(context);
             }
@@ -1505,15 +1511,12 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 return;
             }
 
-            Map<String, List<String>> conditionContext = null;
+            Map<String, List<String>> conditionContext = new HashMap<>();
+            conditionContextResolver.putRequestTransport(conditionContext);
             if (caller.arns().isPresent()) {
-                conditionContext = new HashMap<>();
                 caller.arns().get().putPrincipalKeys(conditionContext);
             }
             if (requestConditions != null && !requestConditions.isEmpty()) {
-                if (conditionContext == null) {
-                    conditionContext = new HashMap<>();
-                }
                 conditionContext.putAll(requestConditions);
             }
 

@@ -24,6 +24,7 @@ import io.floci.aws.services.s3.S3ObjectActions;
 import io.floci.aws.services.s3.S3ObjectKeys;
 import io.floci.aws.services.s3.S3Service;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import io.vertx.core.http.HttpServerRequest;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -546,6 +547,27 @@ public class IamConditionContextResolver {
         Instant now = Instant.now();
         conditions.put("aws:CurrentTime", List.of(now.toString()));
         conditions.put("aws:EpochTime", List.of(Long.toString(now.getEpochSecond())));
+    }
+
+    /**
+     * The keys the IAM User Guide takes from the connection and headers of the request itself:
+     * {@code aws:SourceIp}, "the requester's IP address", read as CloudTrail's {@code sourceIPAddress} is
+     * ({@link RequestSourceAddress}): from the connection, never from a header the client writes; {@code aws:SecureTransport}, "whether the request was sent using
+     * TLS"; {@code aws:UserAgent}, "the requester's client application", from the {@code User-Agent}
+     * header; and {@code aws:referer}, "provided by the caller in an HTTP header", only when the request
+     * carries {@code Referer}. Without a current HTTP request, as for a call no client made, none is
+     * written.
+     */
+    public void putRequestTransport(Map<String, List<String>> conditions) {
+        RoutingContext current = currentVertxRequest == null ? null : currentVertxRequest.getCurrent();
+        HttpServerRequest request = current == null ? null : current.request();
+        if (request == null) {
+            return;
+        }
+        putIfPresent(conditions, "aws:SourceIp", RequestSourceAddress.of(request));
+        conditions.put("aws:SecureTransport", List.of(Boolean.toString(request.isSSL())));
+        putIfPresent(conditions, "aws:UserAgent", request.getHeader("User-Agent"));
+        putIfPresent(conditions, "aws:referer", request.getHeader("Referer"));
     }
 
     private static void putResourceAccount(Map<String, List<String>> conditions, String resourceArn,
