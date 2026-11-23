@@ -84,6 +84,21 @@ class SessionServersTest {
     }
 
     @Test
+    void aCallWithoutATokenReachesARunningServerAsACallOfItsSession() {
+        answeringServer();
+
+        Route route = servers.routeWithoutToken(SESSION, owner).orElseThrow();
+        route.ended().run();
+
+        assertEquals(List.of("answering", "busy", "idle"), owner.events);
+        assertTrue(servers.routeWithoutToken("session-2", owner).isEmpty(), "no server runs for it");
+        owner.refusal = () -> "Session " + SESSION + " is TERMINATING.";
+        Route refused = servers.routeWithoutToken(SESSION, owner).orElseThrow();
+        assertEquals(Route.UNAVAILABLE, refused.status());
+        assertEquals("Session " + SESSION + " is TERMINATING.", refused.refusal());
+    }
+
+    @Test
     void aServersEntryGoesWhenItStopsEvenWhereItsOwnerFailsToHearIt() {
         answeringServer();
         owner.stoppedFails = true;

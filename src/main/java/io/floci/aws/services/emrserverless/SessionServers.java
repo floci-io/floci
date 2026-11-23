@@ -246,6 +246,23 @@ public final class SessionServers {
         return Optional.of(RequestScopes.callAs(grant.accountId(), grant.region(), () -> callStarted(grant, owner)));
     }
 
+    /**
+     * Where a call to session {@code sessionId}'s server that carries no token goes, as a server takes a CORS
+     * preflight without one: empty where no thread of this process runs that server; refused while {@code owner} says
+     * the session takes no calls; else its server, the call counting as one the session takes until it ends.
+     */
+    public Optional<Route> routeWithoutToken(String sessionId, Owner owner) {
+        Server server;
+        synchronized (this) {
+            server = servers.get(sessionId);
+        }
+        if (server == null) {
+            return Optional.empty();
+        }
+        Grant grant = new Grant(server.accountId, server.region, sessionId, Instant.MAX);
+        return Optional.of(RequestScopes.callAs(server.accountId, server.region, () -> callStarted(grant, owner)));
+    }
+
     /** Checks the session at {@code at} by {@code check}, run as its account and Region, in place of any it had. */
     public void checkAt(String sessionId, Instant at, Runnable check) {
         if (checks == null) {

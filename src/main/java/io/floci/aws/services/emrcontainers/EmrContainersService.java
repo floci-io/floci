@@ -770,6 +770,15 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
     }
 
     /**
+     * Where a CORS preflight to endpoint {@code endpointId}'s gateway goes, which Jupyter Enterprise Gateway 2.6.0's
+     * TokenAuthorizationMixin takes without a token: empty where no gateway of this process runs, refused while the
+     * endpoint is not ACTIVE, else its gateway. Called off the event loop, as the account and Region of none.
+     */
+    public Optional<SparkConnectTargets.Route> gatewayPreflightRoute(String endpointId) {
+        return gateways == null ? Optional.empty() : gateways.servers().routeWithoutToken(endpointId, gatewayOwner);
+    }
+
+    /**
      * The endpoint as it stands, stored: in the docker runner mode, one whose gateway no thread of this process runs,
      * as after a restart, has ended, TERMINATED_WITH_ERRORS, or TERMINATED where it was being deleted.
      */

@@ -231,7 +231,8 @@ remote kernel lifecycle management capability that interactive clients need" (EM
   not yet expired, as Jupyter Enterprise Gateway takes one: its last `token` parameter, else an `Authorization: token
   <token>` header, which is what a Jupyter client sends. Any other request gets that gateway's 401
   `{"reason": "Unauthorized", "message": ""}`, an expired token's with a message saying so, and one to an endpoint
-  that is not `ACTIVE` gets 503.
+  that is not `ACTIVE` gets 503. A browser's CORS preflight (`OPTIONS`) goes to an endpoint's gateway without a
+  token, as Jupyter Enterprise Gateway's token check passes it over, and the gateway sends the CORS headers back.
 * **Kernels**: the image's `python3` ("Python 3"); `spark-python-kubernetes` ("PySpark on Kubernetes", the name the
   guide's `jupyter-kernel-overrides` example gives it); and `spark-scala-kubernetes` ("Apache Spark with Scala", a
   name of Floci's beside it, as the guide gives the Scala kernel none), which runs the image's Apache Toree under
@@ -262,6 +263,5 @@ remote kernel lifecycle management capability that interactive clients need" (EM
   `RemoteMappingKernelManager.cull_interval`, "The interval in seconds (integer) on which to check for idle kernels
   that exceed the cull timeout value." As jupyter_server's culler does by default, a kernel with a client connected
   is not culled. Other `jeg-config` properties go nowhere.
-* **Not emulated yet**: `jupyter-kernel-overrides` images. A browser's CORS preflight (`OPTIONS`), which Jupyter
-  Enterprise Gateway takes without a token, needs one here. `certificateArn` is kept, and the `serverUrl` is plain
-  HTTP on Floci's port.
+* **Not emulated yet**: `jupyter-kernel-overrides` images. `certificateArn` is kept, and the `serverUrl` is plain HTTP
+  on Floci's port.
