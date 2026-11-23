@@ -35,9 +35,7 @@ class SesTemplateRequiredPartsIntegrationTest {
     @ParameterizedTest
     @MethodSource("refusedV2Contents")
     void v2Create_refusesTheContent(String content, String message) {
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("{\"TemplateName\": \"required-parts-refused\", \"TemplateContent\": " + content + "}")
         .when()
             .post("/v2/email/templates")
@@ -50,9 +48,7 @@ class SesTemplateRequiredPartsIntegrationTest {
     @ParameterizedTest
     @MethodSource("refusedV2Contents")
     void v2Update_refusesTheContentOfAnUnknownTemplate(String content, String message) {
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("{\"TemplateContent\": " + content + "}")
         .when()
             .put("/v2/email/templates/required-parts-ghost")
@@ -64,9 +60,7 @@ class SesTemplateRequiredPartsIntegrationTest {
 
     @Test
     void v2Create_readsAnEmptyPartBackAsNoPart() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("""
                 {"TemplateName": "required-parts-html-only",
                  "TemplateContent": {"Subject": "S", "Text": "", "Html": "<p>h</p>"}}

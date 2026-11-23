@@ -128,7 +128,7 @@ class SesIdentityCertificateV2IntegrationTest {
     void deleteEmailIdentityIsRefusedWhileACertificateIsAssociated() {
         String identity = "smime-delete@floci.test";
         createIdentity(identity);
-        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
                 .body("{\"EmailIdentity\":\"" + identity + "\",\"CertificateArn\":\"" + MISSING_CERT_ARN + "\"}")
         .when().post("/v2/email/identity/certificates").then().statusCode(200);
 
@@ -170,26 +170,26 @@ class SesIdentityCertificateV2IntegrationTest {
     }
 
     private static void createIdentity(String identity) {
-        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
                 .body("{\"EmailIdentity\":\"" + identity + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
     }
 
     private static Response associate(String identity, String fromAddress, String certificateArn) {
         String from = fromAddress == null ? "" : ",\"FromAddress\":\"" + fromAddress + "\"";
-        return given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
+        return SesV2Requests.v2()
                 .body("{\"EmailIdentity\":\"" + identity + "\"" + from
                         + ",\"CertificateArn\":\"" + certificateArn + "\"}")
                 .when().post("/v2/email/identity/certificates");
     }
 
     private static Response disassociate(String body) {
-        return given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
+        return SesV2Requests.v2()
                 .body(body).when().post("/v2/email/identity/certificates/delete");
     }
 
     private static Response list(String body) {
-        return given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
+        return SesV2Requests.v2()
                 .body(body).when().post("/v2/email/identity/certificates/list");
     }
 
