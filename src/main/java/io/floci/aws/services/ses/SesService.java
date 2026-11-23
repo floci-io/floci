@@ -292,6 +292,9 @@ public class SesService {
         SesAddressSyntax.requireEnvelope(request);
         String effectiveConfigSet = validateEnvelope(request);
         SesAddressLength.requireEnvelope(request);
+        if (request.content() instanceof EmailContent.Template template) {
+            SesTemplateService.requireSendTemplateName(template.templateName());
+        }
         if (requireVerifiedSender) {
             requireVerifiedSenders(List.of(
                     new SendingAddress(request.source(), request.sourceArn()),
@@ -1726,6 +1729,9 @@ public class SesService {
                     .map(entry -> BulkEmailEntryResult.failure(BulkEmailEntryResult.Status.INVALID_PARAMETER,
                             "Destination cannot be empty"))
                     .toList();
+        }
+        if (request.templateName() != null) {
+            SesTemplateService.requireSendTemplateName(request.templateName());
         }
         // The sender and return path are checked once for the whole call, then a stored template is
         // looked up, then the tenant associations, as on a single send (probe-confirmed).
