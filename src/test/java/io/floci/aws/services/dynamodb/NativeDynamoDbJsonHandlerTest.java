@@ -4561,6 +4561,150 @@ class NativeDynamoDbJsonHandlerTest {
                 + "cannot contain an empty string value. Key: userId", ex.getMessage());
     }
 
+    private static final String UPDATE_SIZE_MESSAGE = "Item size to update has exceeded the maximum allowed size";
+    private static final String PUT_SIZE_MESSAGE = "Item size has exceeded the maximum allowed size";
+    private static final int ITEM_LIMIT = 400 * 1024;
+
+    private ObjectNode transactStatementUpdate(String table, String userId, int valueLength) {
+        ObjectNode member = transactMember("Update", table, "Key", item("userId", userId));
+        ObjectNode update = (ObjectNode) member.get("Update");
+        update.put("UpdateExpression", "SET c = if_not_exists(c, :v)");
+        update.set("ExpressionAttributeValues",
+                mapper.createObjectNode().set(":v", attributeValue("S", "v".repeat(valueLength))));
+        return member;
+    }
+
+    private ObjectNode transactOversizedPut(String userId) {
+        return transactMember("Put", "Users", "Item", item("userId", userId, "b", "b".repeat(ITEM_LIMIT)));
+    }
+
+    private ObjectNode transactWrongTypeDelete() {
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("N", "5"));
+        return transactMember("Delete", "Users", "Key", key);
+    }
+
+    private void seedUserWithC(String userId) {
+        service.putItem("Users", item("userId", userId, "c", "x"), "eu-west-1");
+    }
+
+    private void assertTransactWriteRefused(String code, String message, ObjectNode... members) {
+        ObjectNode request = transactWriteOf(members);
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
+        assertEquals(code, ex.getErrorCode());
+        assertEquals(message, ex.getMessage());
+    }
+
+    @Test
+    void transactWriteItemsRefusesAnOversizedStatementBeforeAFailingConditionAndLeavesItemsAlone() {
+        createUsersTable("eu-west-1");
+        seedUserWithC("u1");
+        ObjectNode check = transactMember("ConditionCheck", "Users", "Key", item("userId", "u9"));
+        ((ObjectNode) check.get("ConditionCheck")).put("ConditionExpression", "attribute_exists(userId)");
+
+        assertTransactWriteRefused("ValidationException", UPDATE_SIZE_MESSAGE,
+                check, transactStatementUpdate("Users", "u1", ITEM_LIMIT));
+        assertEquals(item("userId", "u1", "c", "x"), service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @Test
+    void transactWriteItemsAcceptsAStatementOfExactlyTheLimit() throws Exception {
+        createUsersTable("eu-west-1");
+        seedUserWithC("u1");
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactStatementUpdate("Users", "u1", ITEM_LIMIT - 1)), "eu-west-1");
+
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void transactWriteItemsAnswersResourceNotFoundForALaterMissingTableBeforeAnOversizedStatement() {
+        createUsersTable("eu-west-1");
+        seedUserWithC("u1");
+
+        assertTransactWriteRefused("ResourceNotFoundException", "Requested resource not found",
+                transactStatementUpdate("Users", "u1", ITEM_LIMIT), transactStatementUpdate("Nope", "u1", 1));
+    }
+
+    @Test
+    void transactWriteItemsAnswersResourceNotFoundForALaterMissingTableBeforeAKeyMismatch() {
+        createUsersTable("eu-west-1");
+
+        assertTransactWriteRefused("ResourceNotFoundException", "Requested resource not found",
+                transactWrongTypeDelete(), transactStatementUpdate("Nope", "u1", 1));
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAKeyMismatchBeforeALaterOversizedStatement() throws Exception {
+        createUsersTable("eu-west-1");
+        seedUserWithC("u1");
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactWrongTypeDelete(), transactStatementUpdate("Users", "u1", ITEM_LIMIT)),
+                "eu-west-1");
+
+        assertEquals(400, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals("Transaction cancelled, please refer cancellation reasons for specific reasons "
+                + "[ValidationError, None]", body.get("message").asText());
+    }
+
+    @Test
+    void transactWriteItemsRefusesAnOversizedStatementBeforeALaterKeyMismatch() {
+        createUsersTable("eu-west-1");
+        seedUserWithC("u1");
+
+        assertTransactWriteRefused("ValidationException", UPDATE_SIZE_MESSAGE,
+                transactStatementUpdate("Users", "u1", ITEM_LIMIT), transactWrongTypeDelete());
+    }
+
+    @Test
+    void transactWriteItemsReportsTheFirstOversizedMemberWhenAPutAndAnUpdateBothOverflow() {
+        createUsersTable("eu-west-1");
+        seedUserWithC("u1");
+
+        assertTransactWriteRefused("ValidationException", PUT_SIZE_MESSAGE,
+                transactOversizedPut("u2"), transactStatementUpdate("Users", "u1", ITEM_LIMIT));
+        assertTransactWriteRefused("ValidationException", UPDATE_SIZE_MESSAGE,
+                transactStatementUpdate("Users", "u1", ITEM_LIMIT), transactOversizedPut("u2"));
+    }
+
+    @Test
+    void transactWriteItemsRefusesAnOversizedPutBeforeItsFailingCondition() {
+        createUsersTable("eu-west-1");
+        ObjectNode put = transactOversizedPut("u1");
+        ((ObjectNode) put.get("Put")).put("ConditionExpression", "attribute_exists(userId)");
+
+        assertTransactWriteRefused("ValidationException", PUT_SIZE_MESSAGE, put);
+    }
+
+    @Test
+    void transactWriteItemsRefusesAnOversizedPutBeforeItsMissingKey() {
+        createUsersTable("eu-west-1");
+
+        assertTransactWriteRefused("ValidationException", PUT_SIZE_MESSAGE,
+                transactMember("Put", "Users", "Item", item("b", "b".repeat(ITEM_LIMIT))));
+    }
+
+    @Test
+    void transactWriteItemsRefusesAnOversizedMemberBeforeTheDuplicateItemCheck() {
+        createUsersTable("eu-west-1");
+        seedUserWithC("u1");
+        ObjectNode check = transactMember("ConditionCheck", "Users", "Key", item("userId", "u1"));
+        ((ObjectNode) check.get("ConditionCheck")).put("ConditionExpression", "attribute_exists(userId)");
+        ObjectNode update = transactMember("Update", "Users", "Key", item("userId", "u1"));
+        ((ObjectNode) update.get("Update")).put("UpdateExpression", "SET c = :v");
+        ((ObjectNode) update.get("Update")).set("ExpressionAttributeValues",
+                mapper.createObjectNode().set(":v", attributeValue("S", "v")));
+
+        assertTransactWriteRefused("ValidationException", PUT_SIZE_MESSAGE,
+                transactOversizedPut("u1"), update, check);
+        assertTransactWriteRefused("ValidationException", UPDATE_SIZE_MESSAGE,
+                transactStatementUpdate("Users", "u1", ITEM_LIMIT), check);
+    }
+
     @Test
     void transactWriteItemsCancelsOnAPutIndexKeyOfTheWrongType() throws Exception {
         createProvisionedTableWithGsi("Movies", "eu-west-1");

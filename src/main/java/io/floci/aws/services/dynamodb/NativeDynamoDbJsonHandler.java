@@ -2956,7 +2956,7 @@ public class NativeDynamoDbJsonHandler {
         List<JsonNode> transactItems = new ArrayList<>();
         transactItemsNode.forEach(transactItems::add);
         try {
-            dynamoDbService.cancelOnKeySchemaMismatch(transactItems, region);
+            dynamoDbService.validateTransactMemberKeysAndSizes(transactItems, region);
         } catch (TransactionCanceledException e) {
             return transactWriteCanceled(e);
         }
