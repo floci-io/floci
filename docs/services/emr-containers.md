@@ -232,18 +232,22 @@ remote kernel lifecycle management capability that interactive clients need" (EM
   <token>` header, which is what a Jupyter client sends. Any other request gets that gateway's 401
   `{"reason": "Unauthorized", "message": ""}`, an expired token's with a message saying so, and one to an endpoint
   that is not `ACTIVE` gets 503.
-* **Kernels**: the image's `python3` ("Python 3"), and `spark-python-kubernetes` ("PySpark on Kubernetes", the
-  name the guide's `jupyter-kernel-overrides` example gives it), whose `spark` and `sc` are a Spark session in
-  Spark's local mode, where EMR on EKS runs each kernel and its executors in pods of their own. It runs on the image's
-  Python, with `spark.pyspark.virtualenv.enabled` set to `false`: the image's `spark-defaults.conf` turns the
-  virtualenv on, and `spark-submit` makes one on YARN and Kubernetes alone. As Jupyter Enterprise
-  Gateway does, a kernel gets the `KERNEL_` variables of its start request's `env`, which a Jupyter client sends from
-  its own environment; `KERNEL_EXTRA_SPARK_OPTS`, "additional Spark configurations for the Spark kernels", goes to
-  the PySpark kernel's `spark-submit`. Listing the kernels (`GET /api/kernels`) answers with those started with the
-  request's session token alone, as the guide's "Monitoring interactive endpoints" has ListKernels "list the kernels
-  that have been previously started using the same session token", whether the kernels API or the sessions API
-  (`POST /api/sessions`) started them, and listing the sessions (`GET /api/sessions`) answers with those holding such
-  kernels; any of the endpoint's tokens reaches a kernel or a session by its id.
+* **Kernels**: the image's `python3` ("Python 3"); `spark-python-kubernetes` ("PySpark on Kubernetes", the name the
+  guide's `jupyter-kernel-overrides` example gives it); and `spark-scala-kubernetes` ("Apache Spark with Scala", a
+  name of Floci's beside it, as the guide gives the Scala kernel none), which runs the image's Apache Toree under
+  `spark-submit`, as Toree's own kernel spec does. The Spark kernels' `spark` and `sc` are a Spark session in Spark's
+  local mode, where EMR on EKS runs each kernel and its executors in pods of their own. The PySpark kernel runs on
+  the image's Python, with `spark.pyspark.virtualenv.enabled` set to `false`: the image's `spark-defaults.conf` turns
+  the virtualenv on, and `spark-submit` makes one on YARN and Kubernetes alone. Every kernel runs with the endpoint's
+  execution role, as "All kernels and users that connect to the interactive endpoint utilize the role that you
+  specified when you created the endpoint", whichever role its session token was asked for with. As Jupyter
+  Enterprise Gateway does, a kernel gets the `KERNEL_` variables of its start request's `env`, which a Jupyter client
+  sends from its own environment; `KERNEL_EXTRA_SPARK_OPTS`, "additional Spark configurations for the Spark kernels",
+  goes to the Spark kernels' `spark-submit`. Listing the kernels (`GET /api/kernels`) answers with those started with
+  the request's session token alone, as the guide's "Monitoring interactive endpoints" has ListKernels "list the
+  kernels that have been previously started using the same session token", whether the kernels API or the sessions
+  API (`POST /api/sessions`) started them, and listing the sessions (`GET /api/sessions`) answers with those holding
+  such kernels; any of the endpoint's tokens reaches a kernel or a session by its id.
 * **`%%configure`**: the PySpark kernel loads the image's own `%%configure` magic, with which "you can adjust the
   Spark configuration associated with a PySpark session" ("Modifying PySpark session parameters"). The magic turns
   its cell's settings into `KERNEL_EXTRA_SPARK_OPTS` and posts them, signed with an AES key of its kernel's own, to
@@ -258,7 +262,6 @@ remote kernel lifecycle management capability that interactive clients need" (EM
   `RemoteMappingKernelManager.cull_interval`, "The interval in seconds (integer) on which to check for idle kernels
   that exceed the cull timeout value." As jupyter_server's culler does by default, a kernel with a client connected
   is not culled. Other `jeg-config` properties go nowhere.
-* **Not emulated yet**: the "Apache Spark with Scala" kernel and `jupyter-kernel-overrides` images. A browser's CORS
-  preflight (`OPTIONS`), which Jupyter Enterprise Gateway takes without a token, needs one here. Every kernel runs
-  with the endpoint's execution role, whichever role its session token was asked for with. `certificateArn` is
-  kept, and the `serverUrl` is plain HTTP on Floci's port.
+* **Not emulated yet**: `jupyter-kernel-overrides` images. A browser's CORS preflight (`OPTIONS`), which Jupyter
+  Enterprise Gateway takes without a token, needs one here. `certificateArn` is kept, and the `serverUrl` is plain
+  HTTP on Floci's port.
