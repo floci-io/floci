@@ -16,6 +16,7 @@ import io.floci.aws.services.iam.ServiceRoleAuthorizer.Permission;
 import io.floci.aws.services.msk.MskService;
 import io.floci.aws.services.msk.model.ClusterState;
 import io.floci.aws.services.msk.model.MskCluster;
+import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -25,9 +26,11 @@ import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -550,10 +553,7 @@ class MskStreamingViewsTest {
         Thread create = Thread.ofVirtual().start(() -> views.create(createStatement(), "orders", SCHEMA, SESSION, backend));
 
         // the create is parked on the schema lock the drop holds, which is what keeps the view from existing yet
-        while (create.getState() != Thread.State.BLOCKED) {
-            assertThat(create.isAlive(), is(true));
-            Thread.onSpinWait();
-        }
+        ThreadStates.awaitState(create, EnumSet.of(Thread.State.BLOCKED), Duration.ofSeconds(5), "the create");
 
         assertThat(create.isAlive(), is(true));
         assertThat(registry.list(ACCOUNT, SESSION.clusterKey(), "dev"), hasSize(0));
