@@ -3252,6 +3252,63 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .body(not(containsString("AccessDeniedException")));
     }
 
+    /**
+     * A CloudWatch alarm is checked on the ARN CloudWatch mints for it, {@code alarm:<name>}: a grant on one alarm lets
+     * the caller create it and not another, and a deny on one alarm refuses a request whose list names it, while the
+     * same request naming another alarm goes through.
+     */
+    @Test
+    void aCloudWatchAlarmIsCheckedOnTheArnCloudWatchGivesIt() {
+        String alarm = "res-alarm-" + suffix();
+        String other = alarm + "-other";
+        String alarmArn = "arn:aws:cloudwatch:" + REGION + ":" + ACCOUNT + ":alarm:" + alarm;
+        cleanup.register(() -> admin("monitoring").formParam("Action", "DeleteAlarms").formParam("Version", "2010-08-01")
+                .formParam("AlarmNames.member.1", alarm).formParam("AlarmNames.member.2", other).post("/"));
+        User user = user("res-cw-alarm");
+        user.policy(allowOn("cloudwatch:PutMetricAlarm", alarmArn));
+        putMetricAlarm(user.query("monitoring", "PutMetricAlarm"), alarm).statusCode(200);
+        refused(putMetricAlarm(user.query("monitoring", "PutMetricAlarm"), other), "cloudwatch:PutMetricAlarm");
+
+        putMetricAlarm(admin("monitoring").formParam("Action", "PutMetricAlarm"), other).statusCode(200);
+        user.policy(allowOn("cloudwatch:DisableAlarmActions", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"cloudwatch:DisableAlarmActions\",\"Resource\":\"" + alarmArn + "\"}");
+        refused(user.query("monitoring", "DisableAlarmActions").formParam("Version", "2010-08-01")
+                .formParam("AlarmNames.member.1", other).formParam("AlarmNames.member.2", alarm).post("/").then(),
+                "cloudwatch:DisableAlarmActions");
+        user.query("monitoring", "DisableAlarmActions").formParam("Version", "2010-08-01")
+                .formParam("AlarmNames.member.1", other).post("/").then().statusCode(200);
+    }
+
+    /**
+     * A CloudWatch dashboard is checked on its ARN, which has no Region, as AWS gives it and CloudWatch mints it, so a
+     * grant on one dashboard lets the caller write and read it and not another.
+     */
+    @Test
+    void aCloudWatchDashboardIsCheckedOnItsArnWithoutARegion() {
+        String dashboard = "res-dash-" + suffix();
+        cleanup.register(() -> admin("monitoring").formParam("Action", "DeleteDashboards")
+                .formParam("Version", "2010-08-01").formParam("DashboardNames.member.1", dashboard).post("/"));
+        User user = user("res-cw-dash");
+        user.policy(allowOn("cloudwatch:PutDashboard", "arn:aws:cloudwatch::" + ACCOUNT + ":dashboard/" + dashboard)
+                + "," + allowOn("cloudwatch:GetDashboard", "arn:aws:cloudwatch::" + ACCOUNT + ":dashboard/" + dashboard));
+        putDashboard(user, dashboard).statusCode(200);
+        refused(putDashboard(user, dashboard + "-other"), "cloudwatch:PutDashboard");
+        user.query("monitoring", "GetDashboard").formParam("Version", "2010-08-01").formParam("DashboardName", dashboard)
+                .post("/").then().statusCode(200).body(containsString(":dashboard/" + dashboard));
+    }
+
+    private static ValidatableResponse putMetricAlarm(RequestSpecification request, String name) {
+        return request.formParam("Version", "2010-08-01").formParam("AlarmName", name).formParam("Namespace", "Res")
+                .formParam("MetricName", "Requests").formParam("Statistic", "Sum").formParam("Period", "60")
+                .formParam("EvaluationPeriods", "1").formParam("Threshold", "1")
+                .formParam("ComparisonOperator", "GreaterThanThreshold").post("/").then();
+    }
+
+    private static ValidatableResponse putDashboard(User user, String name) {
+        return user.query("monitoring", "PutDashboard").formParam("Version", "2010-08-01")
+                .formParam("DashboardName", name).formParam("DashboardBody", "{\"widgets\":[]}").post("/").then();
+    }
+
     private static ValidatableResponse glue(String operation, String body) {
         return adminJson("glue", "AWSGlue." + operation).body(body).post("/").then();
     }

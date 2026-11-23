@@ -1835,6 +1835,47 @@ class ResourceArnBuilderTest {
                 builder.buildResources("sns", "sns:TagResource", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
+    // ── CloudWatch ──────────────────────────────────────────────────────────────
+
+    /**
+     * A CloudWatch request is checked on each alarm its AlarmNames list names, or the one its AlarmName names, as
+     * {@code alarm:<name>} in the request's Region, the ARN CloudWatch mints for an alarm; one naming no alarm is
+     * checked on {@code *}.
+     */
+    @Test
+    void cloudWatchChecksTheAlarmsARequestNames() {
+        setFormBody("Action=DeleteAlarms&Version=2010-08-01&AlarmNames.member.1=high-cpu&AlarmNames.member.2=low-disk");
+        assertEquals(List.of("arn:aws:cloudwatch:us-west-2:000000000000:alarm:high-cpu",
+                        "arn:aws:cloudwatch:us-west-2:000000000000:alarm:low-disk"),
+                builder.buildResources("cloudwatch", "cloudwatch:DeleteAlarms", ctx, "us-west-2", ACCOUNT, "aws"));
+        setJsonBody("{\"AlarmName\":\"high-cpu\",\"StateValue\":\"ALARM\",\"StateReason\":\"test\"}");
+        when(ctx.getMediaType()).thenReturn(MediaType.valueOf("application/x-amz-json-1.0"));
+        assertEquals(List.of("arn:aws:cloudwatch:us-west-2:000000000000:alarm:high-cpu"),
+                builder.buildResources("cloudwatch", "cloudwatch:SetAlarmState", ctx, "us-west-2", ACCOUNT, "aws"));
+        setFormBody("Action=DescribeAlarms&Version=2010-08-01&AlarmNamePrefix=high");
+        assertEquals(List.of("*"),
+                builder.buildResources("cloudwatch", "cloudwatch:DescribeAlarms", ctx, "us-west-2", ACCOUNT, "aws"));
+    }
+
+    /**
+     * A dashboard's ARN has no Region, as the Service Reference gives it and CloudWatch mints it, and a metric stream
+     * is checked on the one its Name names; publishing or reading metric data names no resource, so is checked on
+     * {@code *}.
+     */
+    @Test
+    void cloudWatchChecksADashboardWithoutItsRegionAndAMetricStreamByItsName() {
+        setFormBody("Action=DeleteDashboards&Version=2010-08-01&DashboardNames.member.1=ops");
+        assertEquals(List.of("arn:aws:cloudwatch::000000000000:dashboard/ops"),
+                builder.buildResources("cloudwatch", "cloudwatch:DeleteDashboards", ctx, "us-west-2", ACCOUNT, "aws"));
+        setJsonBody("{\"Name\":\"to-firehose\"}");
+        when(ctx.getMediaType()).thenReturn(MediaType.valueOf("application/x-amz-json-1.0"));
+        assertEquals(List.of("arn:aws:cloudwatch:us-west-2:000000000000:metric-stream/to-firehose"),
+                builder.buildResources("cloudwatch", "cloudwatch:GetMetricStream", ctx, "us-west-2", ACCOUNT, "aws"));
+        setFormBody("Action=PutMetricData&Version=2010-08-01&Namespace=App&MetricData.member.1.MetricName=Hits");
+        assertEquals(List.of("*"),
+                builder.buildResources("cloudwatch", "cloudwatch:PutMetricData", ctx, "us-west-2", ACCOUNT, "aws"));
+    }
+
     // ── S3 and S3 Control ───────────────────────────────────────────────────────
 
     /** The resources an S3 or S3 Control request names, read from the generated table on the route it matches. */
