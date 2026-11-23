@@ -1323,12 +1323,15 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
 
     /**
      * Whether an UpdateClusterConfig naming these EKS Auto Mode members changes {@code cluster}'s configuration; it
-     * answers one that doesn't "No changes needed". A member left null keeps the stored one. Only that is decided
-     * here; UpdateClusterConfig checks the rest.
+     * answers one that doesn't "No changes needed". A member left null keeps the stored one. The three capabilities
+     * are first checked to be on or off together, as UpdateClusterConfig checks them, since a configuration with
+     * compute off compares as off whatever the other two are. UpdateClusterConfig checks the rest.
      */
     public static boolean changesAutoMode(Cluster cluster, ComputeConfig compute, StorageConfig storage,
                                           ElasticLoadBalancing loadBalancing) {
-        return !autoMode(cluster).state().equals(nextAutoMode(cluster, compute, storage, loadBalancing).state());
+        AutoMode next = nextAutoMode(cluster, compute, storage, loadBalancing);
+        requireCapabilitiesTogether(next.compute(), next.storage(), next.loadBalancing());
+        return !autoMode(cluster).state().equals(next.state());
     }
 
     private static void storeAutoMode(Cluster cluster, AutoMode autoMode) {

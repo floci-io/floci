@@ -21,6 +21,8 @@ import io.floci.aws.services.eks.model.StorageConfig;
 import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
 import io.floci.aws.services.eks.model.UpgradePolicy;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
@@ -218,6 +220,32 @@ class EksCfnProvisionerTest {
 
         provisioner.provision(r, after, update(before, after));
 
+        verify(eks, never()).updateClusterConfig(any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"\"StorageConfig\": {\"BlockStorage\": {\"Enabled\": true}}",
+            "\"KubernetesNetworkConfig\": {\"ElasticLoadBalancing\": {\"Enabled\": true}}"})
+    void anUpdateTurningOnOneCapabilityAloneIsRefusedAsUpdateClusterConfigRefusesIt(String capability)
+            throws Exception {
+        Cluster created = new Cluster();
+        created.setName("prod");
+        created.setArn("arn:aws:eks:us-east-1:000000000000:cluster/prod");
+        created.setKubernetesNetworkConfig(new KubernetesNetworkConfig());
+        when(eks.createCluster(any(CreateClusterRequest.class))).thenReturn(created);
+        StackResource r = resource("AWS::EKS::Cluster", "Control");
+        JsonNode before = props("{\"Name\": \"prod\", \"RoleArn\": \"arn:aws:iam::000000000000:role/eks\"}");
+        provisioner.provision(r, before, ctx());
+        when(eks.describeCluster("prod")).thenReturn(created);
+        JsonNode after = props(PROD_ROLE + capability + "}");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, after, update(before, after)));
+
+        assertEquals("InvalidParameterException", refused.getErrorCode());
+        assertEquals("For EKS Auto Mode, please ensure that all required configs, including computeConfig, "
+                + "kubernetesNetworkConfig, and blockStorage are all either fully enabled or fully disabled.",
+                refused.getMessage());
         verify(eks, never()).updateClusterConfig(any(), any());
     }
 
