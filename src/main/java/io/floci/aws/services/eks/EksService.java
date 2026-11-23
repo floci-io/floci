@@ -290,6 +290,20 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
     }
 
+    /**
+     * The ACTIVE clusters, in every account, that have EKS Auto Mode's load balancing capability on and a running
+     * node: the ones whose LoadBalancer Services get a load balancer.
+     */
+    List<AccountAwareStorageBackend.AccountEntry<Cluster>> autoModeLoadBalancingClusters() {
+        return allClusterEntries().stream().filter(entry -> {
+            Cluster cluster = entry.value();
+            KubernetesNetworkConfig network = cluster == null ? null : cluster.getKubernetesNetworkConfig();
+            return network != null && network.getElasticLoadBalancing() != null
+                    && Boolean.TRUE.equals(network.getElasticLoadBalancing().enabled())
+                    && cluster.getStatus() == ClusterStatus.ACTIVE && cluster.getContainerId() != null;
+        }).toList();
+    }
+
     private List<AccountAwareStorageBackend.AccountEntry<Cluster>> allClusterEntries() {
         if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
             return aware.scanAllAccountEntries(k -> true).stream().peek(entry -> {
