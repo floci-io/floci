@@ -43,7 +43,7 @@ class SesSendRawNoDestinationIntegrationTest {
 
         String messageId = given()
             .contentType("application/json")
-            .header("Authorization", SesV1Requests.AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "%s",
@@ -65,7 +65,7 @@ class SesSendRawNoDestinationIntegrationTest {
     void v2SendEmail_rawWithoutAnyRecipient_returnsMissingToHeader() {
         given()
             .contentType("application/json")
-            .header("Authorization", SesV1Requests.AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",
@@ -84,7 +84,7 @@ class SesSendRawNoDestinationIntegrationTest {
     void v2SendEmail_rawWithoutAnyRecipient_reportsUnknownConfigurationSetFirst() {
         given()
             .contentType("application/json")
-            .header("Authorization", SesV1Requests.AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("""
                 {
                     "ConfigurationSetName": "no-destination-missing-cs",
@@ -103,7 +103,7 @@ class SesSendRawNoDestinationIntegrationTest {
     void v2SendEmail_rawWithEmptyDestination_returnsMissingToHeader() {
         given()
             .contentType("application/json")
-            .header("Authorization", SesV1Requests.AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",
@@ -123,7 +123,7 @@ class SesSendRawNoDestinationIntegrationTest {
     void v2SendEmail_rawWithNonArrayDestinationMember_returnsSerializationException() {
         given()
             .contentType("application/json")
-            .header("Authorization", SesV1Requests.AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",
@@ -142,7 +142,7 @@ class SesSendRawNoDestinationIntegrationTest {
     void v2SendEmail_rawWithoutDestination_checksHeaderRecipientSyntax() {
         given()
             .contentType("application/json")
-            .header("Authorization", SesV1Requests.AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",
@@ -161,7 +161,7 @@ class SesSendRawNoDestinationIntegrationTest {
     void v2SendEmail_rawWithoutDestination_checksCcHeaderRecipientSyntax() {
         given()
             .contentType("application/json")
-            .header("Authorization", SesV1Requests.AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",

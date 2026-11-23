@@ -28,22 +28,13 @@ class SesSendNullAddressIntegrationTest {
     private static final String NULL_ADDRESS = "Invalid email address null.";
     private static final String EMPTY_DESTINATION = "Destination cannot be empty";
 
-    private static ValidatableResponse post(String path, String body) {
-        return given()
-            .contentType("application/json")
-            .header("Authorization", SesV1Requests.AUTH)
-            .body(body)
-        .when()
-            .post(path)
-        .then();
-    }
-
     private static ValidatableResponse send(String body) {
-        return post("/v2/email/outbound-emails", body);
+        return SesV2Requests.post("/v2/email/outbound-emails", body);
     }
 
     private static ValidatableResponse bulk(String members, String entries) {
-        return post("/v2/email/outbound-bulk-emails", "{\"FromEmailAddress\": \"" + SENDER + "\", " + members
+        return SesV2Requests.post("/v2/email/outbound-bulk-emails",
+                "{\"FromEmailAddress\": \"" + SENDER + "\", " + members
                 + "\"DefaultContent\": " + INLINE_TEMPLATE + ", \"BulkEmailEntries\": [" + entries + "]}");
     }
 

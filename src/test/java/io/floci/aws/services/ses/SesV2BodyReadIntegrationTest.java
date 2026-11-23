@@ -9,7 +9,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.util.List;
 import java.util.stream.Stream;
 
-import static io.floci.aws.services.ses.SesV2SerializationErrors.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.assertSerializationException;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;

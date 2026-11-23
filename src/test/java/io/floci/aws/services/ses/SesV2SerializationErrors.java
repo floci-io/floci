@@ -15,7 +15,6 @@ import static org.hamcrest.Matchers.equalTo;
  */
 final class SesV2SerializationErrors {
 
-    static final String AUTH = authFor("us-east-1");
     static final String STRUCTURE = "Start of structure or map found where not expected.";
     static final String LIST = "Start of list found where not expected";
     static final String NUMBER = "NUMBER_VALUE can not be converted to a String";
@@ -35,13 +34,8 @@ final class SesV2SerializationErrors {
                 Arguments.of("\"hello\"", null));
     }
 
-    /** An Authorization header signed for {@code region}, for a test that needs its own region state. */
-    static String authFor(String region) {
-        return SesV1Requests.authFor(region);
-    }
-
     static void assertError(String method, String path, String body, String type, String message) {
-        assertError(AUTH, method, path, body, type, message);
+        assertError(SesV2Requests.AUTH, method, path, body, type, message);
     }
 
     static void assertError(String auth, String method, String path, String body, String type, String message) {
