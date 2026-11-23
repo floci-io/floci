@@ -1371,6 +1371,13 @@ class DynamoDbVectorSearchIntegrationTest {
     private static final String X_NAMES = "{\"#x\": \"x\"}";
     private static final String CX_NAMES = "{\"#c\": \"category\", \"#x\": \"x\"}";
     private static final String C_NAMES = "{\"#c\": \"category\"}";
+    private static final String LONG_CONDITION = "\"tenant = :t" + " ".repeat(4086) + "\"";
+    private static final String DEEP_CONDITION = "\"" + "NOT ".repeat(25000) + "tenant = :t\"";
+    private static final String LONG_PROJECTION = "\"category" + " ".repeat(4089) + "\"";
+    private static final String CONDITION_TOO_LONG = "Invalid SearchConditionExpression: Expression size "
+            + "has exceeded the maximum allowed size;";
+    private static final String PROJECTION_TOO_LONG = "Invalid ProjectionExpression: Expression size has "
+            + "exceeded the maximum allowed size;";
 
     private static String members(String condition, String values, String names, String projection) {
         StringBuilder members = new StringBuilder();
@@ -1422,10 +1429,18 @@ class DynamoDbVectorSearchIntegrationTest {
                 Arguments.of(MISSING_TABLE, members(TENANT_EQUALS, T_VALUES, null, "\"#zz\""), UNDEFINED_ZZ),
                 Arguments.of(MISSING_TABLE, members("\"attribute_exists(price)\"", "{}", null, null),
                         EMPTY_VALUES),
-                Arguments.of(MISSING_TABLE, members(null, T_VALUES, null, null), VALUES_NEED_EXPRESSION));
+                Arguments.of(MISSING_TABLE, members(null, T_VALUES, null, null), VALUES_NEED_EXPRESSION),
+                Arguments.of(MISSING_TABLE, members(LONG_CONDITION, T_VALUES, null, null), CONDITION_TOO_LONG),
+                Arguments.of(MISSING_TABLE, members(DEEP_CONDITION, T_VALUES, null, null), CONDITION_TOO_LONG),
+                Arguments.of(MISSING_TABLE, members(TENANT_EQUALS, T_VALUES, null, LONG_PROJECTION),
+                        PROJECTION_TOO_LONG),
+                Arguments.of(MISSING_TABLE, members(LONG_CONDITION, T_VALUES, null, LONG_PROJECTION),
+                        PROJECTION_TOO_LONG),
+                Arguments.of(FILTERS, members(LONG_CONDITION, T_VALUES, null, "\"#zz\""), UNDEFINED_ZZ),
+                Arguments.of(FILTERS, members(LONG_CONDITION, "{}", null, null), EMPTY_VALUES));
     }
 
-    @ParameterizedTest
+    @ParameterizedTest(name = "[{index}] {0}: {2}")
     @Order(50)
     @MethodSource("searchChecksBeforeTheTableLookup")
     void searchVectorsChecksTheExpressionsBeforeItLooksUpTheTable(String table, String extraMembers,

@@ -1722,7 +1722,9 @@ public class NativeDynamoDbJsonHandler {
             }
             requireAbsentWithoutExpression(exprAttrValues, "ExpressionAttributeValues");
         }
+        DynamoDbExpressionSize.checkRead(projectionExpression, "ProjectionExpression");
         ProjectionEvaluator.validateExpression(projectionExpression, exprAttrNames);
+        DynamoDbExpressionSize.checkRead(searchCondition, "SearchConditionExpression");
         ExpressionEvaluator.Expr condition =
                 DynamoDbVectorSearch.parseSearchCondition(searchCondition, exprAttrNames, exprAttrValues);
         checkUnusedEan(exprAttrNames, extractHashTokens(searchCondition, projectionExpression));
