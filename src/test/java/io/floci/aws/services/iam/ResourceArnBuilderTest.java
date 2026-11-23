@@ -2544,7 +2544,9 @@ class ResourceArnBuilderTest {
                 eks(eks, "GET", "/clusters/held", "eks:DescribeCluster"));
         assertEquals(List.of("arn:aws:eks:us-east-1:000000000000:cluster/held"),
                 eks(eks, "GET", "/clusters/held/node-groups", "eks:ListNodegroups"));
-        assertEquals(List.of("*"), eks(eks, "GET", "/clusters", "eks:ListClusters"));
+        // ListClusters is checked on every cluster of the account, as measured on AWS (MEASURED, #9039).
+        assertEquals(List.of("arn:aws:eks:us-east-1:000000000000:cluster/*"),
+                eks(eks, "GET", "/clusters", "eks:ListClusters"));
     }
 
     /** CreateCluster is checked on the cluster its body names, as the EKS user guide's example policy grants it. */

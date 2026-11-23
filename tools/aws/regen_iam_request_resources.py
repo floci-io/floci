@@ -432,6 +432,27 @@ MEASURED: dict[str, tuple[list[dict], str]] = {
         "(https://github.com/aws/aws-emulator/blob/main/issues/things-that-do-not-work/"
         "20261024T015148Z-dynamodb-does-not-enforce-iam-listtables-succeeds-for.md); the Service Reference lists no "
         "resource type for the action"),
+    "es:ListDomainNames": (
+        [{"type": "domain", "fill": {}}],
+        "real AWS probes in https://github.com/floci-io/floci/issues/9039 (OpenSearch, us-east-1, 2026-11-19, an "
+        "assumed role per case): with no permissions the call is refused '... is not authorized to perform: "
+        "es:ListDomainNames on resource: arn:aws:es:us-east-1:<account>:domain/* because no identity-based policy "
+        "allows the es:ListDomainNames action', and a role whose one statement allows the action on domain/* alone "
+        "is allowed it; the Service Reference lists no resource type for the action"),
+    "s3tables:ListTableBuckets": (
+        [{"type": "TableBucket", "fill": {}}],
+        "real AWS probes in https://github.com/floci-io/floci/issues/9039 (S3 Tables, us-east-1, 2026-11-19, an "
+        "assumed role per case): with no permissions the call is refused '... is not authorized to perform: "
+        "s3tables:ListTableBuckets on resource: arn:aws:s3tables:us-east-1:<account>:bucket/* because no "
+        "identity-based policy allows the s3tables:ListTableBuckets action', and a role whose one statement allows "
+        "the action on bucket/* alone is allowed it; the Service Reference lists no resource type for the action"),
+    "eks:ListClusters": (
+        [{"type": "cluster", "fill": {}}],
+        "real AWS probes in https://github.com/floci-io/floci/issues/9039 (Amazon EKS, us-east-1, 2026-11-19, an "
+        "assumed role per case): with no permissions the call is refused '... is not authorized to perform: "
+        "eks:ListClusters on resource: arn:aws:eks:us-east-1:<account>:cluster/* because no identity-based policy "
+        "allows the eks:ListClusters action', and a role whose one statement allows the action on cluster/* alone "
+        "is allowed it; the Service Reference lists no resource type for the action"),
     **{f"states:{operation}": ([{"type": kind, "fill": {}, "find": ["taskToken"]} for kind in ("activity", "statemachine")],
                                _SEND_TASK_EVIDENCE)
        for operation in ("SendTaskSuccess", "SendTaskFailure", "SendTaskHeartbeat")},
