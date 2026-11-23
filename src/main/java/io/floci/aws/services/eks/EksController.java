@@ -61,9 +61,10 @@ public class EksController {
             + "aws(?::|%3[aA])cluster-access-policy(?:/|%2[fF])[^/]+";
 
 
-    private static final List<String> UPDATE_CONFIG_FAMILIES = List.of("resourcesVpcConfig", "logging", "accessConfig");
+    private static final List<String> UPDATE_CONFIG_FAMILIES =
+            List.of("resourcesVpcConfig", "logging", "accessConfig", "upgradePolicy");
     private static final Set<String> UPDATE_CONFIG_MEMBERS =
-            Set.of("name", "clientRequestToken", "resourcesVpcConfig", "logging", "accessConfig");
+            Set.of("name", "clientRequestToken", "resourcesVpcConfig", "logging", "accessConfig", "upgradePolicy");
 
     private final EksService eksService;
     private final EksAccessEntryService accessEntries;

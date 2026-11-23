@@ -12,5 +12,6 @@ public record UpdateClusterConfigRequest(
         ResourcesVpcConfig resourcesVpcConfig,
         Logging logging,
         AccessConfig accessConfig,
+        UpgradePolicy upgradePolicy,
         String clientRequestToken
 ) {}

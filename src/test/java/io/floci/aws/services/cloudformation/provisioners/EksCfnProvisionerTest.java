@@ -13,6 +13,8 @@ import io.floci.aws.services.eks.model.CreateClusterRequest;
 import io.floci.aws.services.eks.model.Logging;
 import io.floci.aws.services.eks.model.Nodegroup;
 import io.floci.aws.services.eks.model.OidcIdentity;
+import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
+import io.floci.aws.services.eks.model.UpgradePolicy;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -31,6 +33,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -92,7 +95,67 @@ class EksCfnProvisionerTest {
                 "prod", event -> { }, before, PropertyChanges.between("AWS::EKS::Cluster", true, before, after));
         provisioner.provision(r, after, update);
         assertTrue(provisioner.rollbackUpdate(r));
-        verify(eks, never()).restoreClusterConfig(any(), any(), any(), any());
+        verify(eks, never()).restoreClusterConfig(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aDroppedUpgradePolicyReturnsTheClusterToExtendedSupportAndARollbackRestoresIt() throws Exception {
+        Cluster created = new Cluster();
+        created.setName("prod");
+        created.setArn("arn:aws:eks:us-east-1:000000000000:cluster/prod");
+        when(eks.createCluster(any(CreateClusterRequest.class))).thenReturn(created);
+        StackResource r = resource("AWS::EKS::Cluster", "Control");
+        JsonNode before = props("{\"Name\": \"prod\", \"RoleArn\": \"arn:aws:iam::000000000000:role/eks\", "
+                + "\"UpgradePolicy\": {\"SupportType\": \"STANDARD\"}}");
+        provisioner.provision(r, before, ctx());
+        ArgumentCaptor<CreateClusterRequest> create = ArgumentCaptor.forClass(CreateClusterRequest.class);
+        verify(eks).createCluster(create.capture());
+        assertEquals(new UpgradePolicy("STANDARD"), create.getValue().getUpgradePolicy());
+
+        created.setUpgradePolicy(new UpgradePolicy("STANDARD"));
+        when(eks.describeCluster("prod")).thenReturn(created);
+        JsonNode after = props("{\"Name\": \"prod\", \"RoleArn\": \"arn:aws:iam::000000000000:role/eks\"}");
+        ProvisionContext update = new ProvisionContext(ctx().engine(), "us-east-1", "000000000000", "my-stack",
+                "prod", event -> { }, before, PropertyChanges.between("AWS::EKS::Cluster", true, before, after));
+        provisioner.provision(r, after, update);
+
+        verify(eks).updateClusterConfig("prod",
+                new UpdateClusterConfigRequest(null, null, null, new UpgradePolicy("EXTENDED"), null));
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(eks).restoreClusterConfig("prod", null, null, null, new UpgradePolicy("STANDARD"));
+    }
+
+    @Test
+    void anUnrelatedUpdateStoresThePolicyTheTemplateDeclaresForAClusterThatHoldsNone() throws Exception {
+        Cluster created = new Cluster();
+        created.setName("prod");
+        created.setArn("arn:aws:eks:us-east-1:000000000000:cluster/prod");
+        when(eks.createCluster(any(CreateClusterRequest.class))).thenReturn(created);
+        StackResource r = resource("AWS::EKS::Cluster", "Control");
+        String declared = "\"Name\": \"prod\", \"RoleArn\": \"arn:aws:iam::000000000000:role/eks\", "
+                + "\"UpgradePolicy\": {\"SupportType\": \"STANDARD\"}, ";
+        JsonNode first = props("{" + declared + "\"Tags\": [{\"Key\": \"team\", \"Value\": \"a\"}]}");
+        provisioner.provision(r, first, ctx());
+        // A cluster created before Floci kept the policy holds none, and reports EXTENDED.
+        created.setTags(new HashMap<>(Map.of("team", "a")));
+        when(eks.describeCluster("prod")).thenReturn(created);
+
+        JsonNode second = props("{" + declared + "\"Tags\": [{\"Key\": \"team\", \"Value\": \"b\"}]}");
+        provisioner.provision(r, second, update(first, second));
+        verify(eks).restoreClusterConfig("prod", null, null, null, new UpgradePolicy("STANDARD"));
+        verify(eks, never()).updateClusterConfig(any(), any());
+
+        // A cluster that holds a policy keeps it, as it keeps one changed outside the stack.
+        created.setUpgradePolicy(new UpgradePolicy("EXTENDED"));
+        JsonNode third = props("{" + declared + "\"Tags\": [{\"Key\": \"team\", \"Value\": \"c\"}]}");
+        provisioner.provision(r, third, update(second, third));
+        verify(eks, times(1)).restoreClusterConfig(any(), any(), any(), any(), any());
+        verify(eks, never()).updateClusterConfig(any(), any());
+    }
+
+    private ProvisionContext update(JsonNode before, JsonNode after) {
+        return new ProvisionContext(ctx().engine(), "us-east-1", "000000000000", "my-stack",
+                "prod", event -> { }, before, PropertyChanges.between("AWS::EKS::Cluster", true, before, after));
     }
 
     @Test
@@ -197,6 +260,7 @@ class EksCfnProvisionerTest {
             return node == null ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(engine.omitNoValue(any())).thenAnswer(inv -> inv.getArgument(0));
         when(engine.resolveStringList(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
             List<String> out = new ArrayList<>();
