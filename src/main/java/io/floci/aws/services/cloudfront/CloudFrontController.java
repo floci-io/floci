@@ -161,20 +161,7 @@ public class CloudFrontController {
                     maxItems, Distribution::getId);
             int totalDistributions =
                     service.listDistributions(null, Integer.MAX_VALUE).size();
-
-            XmlBuilder xml = new XmlBuilder()
-                    .start("DistributionList", NS)
-                    .elem("Marker", marker != null ? marker : "")
-                    .elem("NextMarker", page.nextMarker())
-                    .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", page.truncated())
-                    .elem("Quantity", totalDistributions)
-                    .start("Items");
-            for (Distribution d : page.items()) {
-                xml.raw(xmlDistributionSummary(d));
-            }
-            xml.end("Items").end("DistributionList");
-            return Response.ok(xml.build(), XML).build();
+            return distributionListResponse(page, totalDistributions, marker, maxItems);
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
@@ -319,23 +306,27 @@ public class CloudFrontController {
                     maxItems, Distribution::getId);
             int totalDistributions = service
                     .listDistributionsByConnectionMode(connectionMode, null, Integer.MAX_VALUE).size();
-
-            XmlBuilder xml = new XmlBuilder()
-                    .start("DistributionList", NS)
-                    .elem("Marker", marker != null ? marker : "")
-                    .elem("NextMarker", page.nextMarker())
-                    .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", page.truncated())
-                    .elem("Quantity", totalDistributions)
-                    .start("Items");
-            for (Distribution d : page.items()) {
-                xml.raw(xmlDistributionSummary(d));
-            }
-            xml.end("Items").end("DistributionList");
-            return Response.ok(xml.build(), XML).build();
+            return distributionListResponse(page, totalDistributions, marker, maxItems);
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
+    }
+
+    private Response distributionListResponse(Page<Distribution> page, int totalDistributions,
+                                              String marker, int maxItems) {
+        XmlBuilder xml = new XmlBuilder()
+                .start("DistributionList", NS)
+                .elem("Marker", marker != null ? marker : "")
+                .elem("NextMarker", page.nextMarker())
+                .elem("MaxItems", maxItems)
+                .elem("IsTruncated", page.truncated())
+                .elem("Quantity", totalDistributions)
+                .start("Items");
+        for (Distribution d : page.items()) {
+            xml.raw(xmlDistributionSummary(d));
+        }
+        xml.end("Items").end("DistributionList");
+        return Response.ok(xml.build(), XML).build();
     }
 
     // ── Invalidations ─────────────────────────────────────────────────────────
