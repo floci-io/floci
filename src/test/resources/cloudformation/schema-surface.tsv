@@ -224,5 +224,5 @@ AWS::VerifiedPermissions::PolicyStore	Arn,EncryptionState,PolicyStoreId	Deletion
 AWS::VerifiedPermissions::PolicyTemplate	PolicyTemplateId	Description,Name,PolicyStoreId,Statement
 AWS::WAFv2::IPSet	Arn,Id	Addresses,Description,IPAddressVersion,Name,Scope,Tags
 AWS::WAFv2::LoggingConfiguration	ManagedByFirewallManager	LogDestinationConfigs,LoggingFilter,RedactedFields,ResourceArn
-AWS::WAFv2::WebACL	Arn,Capacity,Id,LabelNamespace	ApplicationConfig,AssociationConfig,CaptchaConfig,ChallengeConfig,CustomResponseBodies,DataProtectionConfig,DefaultAction,Description,MonetizationConfig,Name,OnSourceDDoSProtectionConfig,Rules,Scope,Tags,TokenDomains,VisibilityConfig
+AWS::WAFv2::WebACL	Arn,Capacity,Id,LabelNamespace	AnalyticsConfig,ApplicationConfig,AssociationConfig,CaptchaConfig,ChallengeConfig,CustomResponseBodies,DataProtectionConfig,DefaultAction,Description,MonetizationConfig,Name,OnSourceDDoSProtectionConfig,Rules,Scope,Tags,TokenDomains,VisibilityConfig
 AWS::WAFv2::WebACLAssociation		ResourceArn,WebACLArn
