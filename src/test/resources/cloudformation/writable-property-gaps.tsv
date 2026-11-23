@@ -581,7 +581,6 @@ AWS::Redshift::Cluster	SnapshotCopyManual	accepted and ignored
 AWS::Redshift::Cluster	SnapshotCopyRetentionPeriod	accepted and ignored
 AWS::Redshift::ClusterSecurityGroup	Description	accepted and ignored
 AWS::Redshift::ClusterSecurityGroup	Tags	accepted and ignored
-AWS::Redshift::ClusterSubnetGroup	Tags	accepted and ignored
 AWS::RedshiftServerless::Namespace	FinalSnapshotName	accepted and ignored
 AWS::RedshiftServerless::Namespace	FinalSnapshotRetentionPeriod	accepted and ignored
 AWS::RedshiftServerless::Namespace	NamespaceResourcePolicy	accepted and ignored
