@@ -1388,9 +1388,12 @@ public class RedshiftService implements ManagedSecretRotator {
         rejectPausedCluster(cluster);
         validateAutomatedRetention(nodeType == null ? cluster.getNodeType() : nodeType,
                 automatedRetention == null ? cluster.getAutomatedSnapshotRetentionPeriod() : automatedRetention);
+        boolean parameterGroupChanged = clusterParameterGroupName != null && !clusterParameterGroupName.isBlank();
+        if (parameterGroupChanged) {
+            requireParameterGroup(clusterParameterGroupName);
+        }
 
         boolean passwordChanged = masterUserPassword != null && !masterUserPassword.isBlank();
-        boolean parameterGroupChanged = clusterParameterGroupName != null && !clusterParameterGroupName.isBlank();
         boolean securityGroupsChanged = vpcSecurityGroupIds != null && !vpcSecurityGroupIds.isEmpty();
         // alterUserPassword runs before any mutation of the cluster object (a live reference
         // from HybridStorage, not a copy); if it throws, no metadata has been changed yet.
@@ -1410,8 +1413,7 @@ public class RedshiftService implements ManagedSecretRotator {
         if (nodeType != null && !nodeType.isBlank()) {
             cluster.setNodeType(nodeType);
         }
-        if (clusterParameterGroupName != null && !clusterParameterGroupName.isBlank()) {
-            requireParameterGroup(clusterParameterGroupName);
+        if (parameterGroupChanged) {
             cluster.setClusterParameterGroupName(clusterParameterGroupName);
             cluster.setUserActivityLoggingEnabled(userActivityLoggingEnabled(clusterParameterGroupName));
         }

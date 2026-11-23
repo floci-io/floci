@@ -3048,6 +3048,28 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void modifyClusterRefusingAParameterGroupLeavesThePasswordAndNodeTypeUntouched() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setNodeType("dc2.large");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("old-pw");
+        cluster.setClusterParameterGroupName("default.redshift-1.0");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+        when(parameterGroupBackend.get(regionalKey("deleted-pg"))).thenReturn(Optional.empty());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.modifyCluster("my-cluster", "ra3.xlplus", null, "new-pw", "deleted-pg", null));
+
+        assertEquals("ClusterParameterGroupNotFound", refused.getErrorCode());
+        assertEquals("old-pw", cluster.getMasterPassword());
+        assertEquals("dc2.large", cluster.getNodeType());
+        verify(cm, never()).alterUserPassword(any(), any(), any(), any());
+        verify(proxyManager, never()).updateMasterPassword(any(), any());
+        verify(clusterBackend, never()).put(eq("my-cluster"), any(Cluster.class));
+    }
+
+    @Test
     void modifyClusterTakesTheDefaultParameterGroup() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
