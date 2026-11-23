@@ -1227,6 +1227,14 @@ def test_the_vendored_file_is_well_formed():
     # An SQS request names its queue by URL, which SQS finds as its handlers do; a create names it by name.
     assert operations["sqs:SendMessage"]["resources"] == [{"type": "queue", "fill": {}, "find": ["QueueUrl"]}]
     assert operations["sqs:CreateQueue"]["resources"] == [{"type": "queue", "fill": {"QueueName": "QueueName"}}]
+    # CloudWatch is read whole: each alarm a list names, and a dashboard by its name, its ARN with no Region.
+    assert "cloudwatch" in document["namespaces"] and "cloudwatch" not in document["notCovered"]
+    assert operations["cloudwatch:DeleteAlarms"]["resources"] == [
+        {"type": "alarm", "fill": {"AlarmName": "AlarmNames[]"}}]
+    assert operations["cloudwatch:DeleteDashboards"]["resources"] == [
+        {"type": "dashboard", "fill": {"DashboardName": "DashboardNames[]"}}]
+    assert document["arnFormats"]["cloudwatch"]["dashboard"] == (
+        "arn:${Partition}:cloudwatch::${Account}:dashboard/${DashboardName}")
     # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
     assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]

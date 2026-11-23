@@ -467,6 +467,15 @@ legacy `2009-05-15` API, which supports only `ListMetrics` and `GetMetricStatist
 An invalid version or action returns HTTP 404 `InvalidAction`; an absent action returns
 HTTP 404 `UnknownOperationException`. IAM policies use the `cloudwatch` action prefix.
 
+With IAM enforcement on, each action is checked on the resources the AWS Service Authorization
+Reference lists for it, read from the request: an alarm by its `AlarmName` or each of its
+`AlarmNames`, as `arn:aws:cloudwatch:<region>:<account>:alarm:<name>`; a dashboard by its
+`DashboardName` or each of its `DashboardNames`, as `arn:aws:cloudwatch::<account>:dashboard/<name>`,
+with no Region; a metric stream by its `Name` or each of its `Names`, as
+`arn:aws:cloudwatch:<region>:<account>:metric-stream/<name>`; and a tag call on its `ResourceARN`.
+`PutMetricData`, `GetMetricData`, `GetMetricStatistics`, `ListMetrics`, `ListDashboards` and
+`ListMetricStreams` name no resource and are checked on `*`, as is a `DescribeAlarms` naming no alarm.
+
 JSON `PutMetricData` accepts a gzip-compressed body (`Content-Encoding: gzip`), which the AWS
 CLI, boto3 and the other SDKs that call CloudWatch over JSON send by default for any body of
 10 KiB or more. With signature validation and IAM enforcement on, the signature is checked over
