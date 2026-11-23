@@ -126,6 +126,7 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -4298,7 +4299,8 @@ class EksClusterManagerTest {
 
             assertEquals("cid-1", cluster.getContainerId());
             verify(lifecycleManager, never()).create(any());
-            verify(dockerClient).copyArchiveToContainerCmd("cid-1");
+            // The webhook's manifest, and the block storage one with no objects.
+            verify(dockerClient, times(2)).copyArchiveToContainerCmd("cid-1");
             assertTrue(writtenManifest().contains("url: \"https://host.docker.internal:4566"
                     + "/_floci/eks/clusters/demo/pod-identity-webhook/scope/000000000000/us-east-1\""));
         }
@@ -4340,7 +4342,9 @@ class EksClusterManagerTest {
 
             adoptSurvivingCluster();
 
-            assertTheWebhookIsRemoved("cid-1");
+            // Two copies into the node: the webhook's manifest, and the block storage one with no objects.
+            verify(dockerClient, times(2)).copyArchiveToContainerCmd("cid-1");
+            assertEquals(EksClusterManager.POD_IDENTITY_MANIFEST_REMOVED, writtenManifest());
         }
 
         @Test

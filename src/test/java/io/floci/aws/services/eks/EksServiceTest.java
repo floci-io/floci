@@ -406,7 +406,7 @@ class EksServiceTest {
     @Test
     void turningAutoModeOnGivesTheRunningNodeBlockStorageAndAPoolChangeDoesNotReapplyIt() {
         StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
-        var clusterStore = new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+        AccountAwareStorageBackend<Cluster> clusterStore = new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
         Cluster running = new Cluster();
         running.setName("auto-running");
         running.setArn("arn:aws:eks:us-east-1:000000000000:cluster/auto-running");

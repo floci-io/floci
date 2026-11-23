@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
 import java.time.Duration;
 import java.util.UUID;
 
@@ -118,6 +119,24 @@ class EksAutoModeBlockStorageDockerIntegrationTest {
         await("pod wrote to the volume").atMost(Duration.ofMinutes(2)).pollInterval(Duration.ofSeconds(3))
                 .until(() -> node.kubectl("exec", "writer", "-n", "default", "--", "cat", "/data/file")
                         .stdout().trim().equals("stored"));
+    }
+
+    @Test
+    void turningBlockStorageOffRemovesTheProvisionerEvenWithoutFlocisCopyOfItsManifest() throws Exception {
+        cluster = EksTestNode.cluster(ACCOUNT, "ebs-gone-" + UUID.randomUUID().toString().substring(0, 8));
+        cluster.setStorageConfig(new StorageConfig(new BlockStorage(true)));
+        EksTestNode node = EksTestNode.start(dockerClient, eksClusterManager, cluster, Duration.ofSeconds(90));
+        await("provisioner installed").atMost(Duration.ofMinutes(2)).pollInterval(Duration.ofSeconds(3))
+                .until(() -> node.kubectl("get", "deployment", PROVISIONER, "-n", "kube-system").exitCode() == 0);
+
+        // Floci's own copy is gone (another data path, a cleaned host); the node's copy is what k3s applies.
+        Files.deleteIfExists(eksClusterManager.localClusterFile(cluster, "auto-mode",
+                EksClusterManager.BLOCK_STORAGE_MANIFEST_FILE));
+        cluster.setStorageConfig(new StorageConfig(new BlockStorage(false)));
+        eksClusterManager.applyBlockStorage(cluster.getContainerId(), cluster);
+
+        await("provisioner pruned").atMost(Duration.ofMinutes(2)).pollInterval(Duration.ofSeconds(3))
+                .until(() -> node.kubectl("get", "deployment", PROVISIONER, "-n", "kube-system").exitCode() == 1);
     }
 
     @Test
