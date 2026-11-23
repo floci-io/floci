@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.TlsProxyServer;
+import io.floci.aws.config.TlsProxyServer.ServerNameTarget;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.CertificateReferenceResolver;
 import io.floci.aws.core.common.CertificateReferenceResolver.CertificateMaterial;
@@ -54,9 +55,6 @@ import org.jboss.logging.Logger;
 import javax.naming.InvalidNameException;
 import javax.naming.ldap.LdapName;
 import javax.naming.ldap.Rdn;
-import javax.net.ssl.ExtendedSSLSession;
-import javax.net.ssl.SNIHostName;
-import javax.net.ssl.SNIServerName;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -579,7 +577,7 @@ public class ElbV2DataPlane {
     private void ensureReleaseHandlerRegistered() {
         if (releaseHandlerRegistered.compareAndSet(false, true)) {
             tlsProxyServer.onPortReleased(this::bindListenersWaitingOn);
-            tlsProxyServer.routeServerNames(this::serverNameBackendPort);
+            tlsProxyServer.routeServerNames(this::serverNameTarget);
         }
     }
 
@@ -593,21 +591,24 @@ public class ElbV2DataPlane {
     }
 
     /**
-     * The loopback port of the HTTPS listener behind the TLS proxy that claims {@code serverName}
+     * The loopback port and identity of the HTTPS listener behind the TLS proxy that claims {@code serverName}
      * on {@code port}, by the same selection as a Host header but without the sole-listener
      * fallback. Inside Floci's endpoint suffixes, only a load balancer's generated DNS name
      * can claim the connection.
      */
-    private int serverNameBackendPort(int port, String serverName, boolean allowAliases) {
+    private ServerNameTarget serverNameTarget(int port, String serverName, boolean allowAliases) {
         PortState state = portStates.get(port);
         int backend = state == null ? 0 : state.serverNamePort;
         if (backend <= 0) {
-            return -1;
+            return null;
         }
         RoutingView routing = state.routing;
-        boolean claimed = allowAliases ? resolveListener(routing, serverName, false) != null
-                : routing.hosts().containsKey(serverName);
-        return claimed ? backend : -1;
+        if (!allowAliases) {
+            String arn = routing.hosts().get(serverName);
+            return arn == null ? null : new ServerNameTarget(backend, arn);
+        }
+        RoutedListener listener = resolveListener(routing, serverName, false);
+        return listener == null ? null : new ServerNameTarget(backend, listener.arn());
     }
 
     private void startPortServer(int port, PortState state) {
@@ -646,7 +647,7 @@ public class ElbV2DataPlane {
         servers.put(port, server);
         state.behindProxy = behindProxy;
         try {
-            server.requestHandler(req -> handleRequest(req, port));
+            server.requestHandler(req -> handleRequest(req, port, behindProxy));
             server.listen()
                     .onSuccess(s -> {
                         if (behindProxy) {
@@ -1088,12 +1089,17 @@ public class ElbV2DataPlane {
         state.routing = new RoutingView(Map.copyOf(hosts), Map.copyOf(routes));
     }
 
-    private void handleRequest(HttpServerRequest req, int port) {
+    private void handleRequest(HttpServerRequest req, int port, boolean behindProxy) {
         PortState state = portStates.get(port);
         RoutingView routing = state == null ? null : state.routing;
-        RoutedListener listener = routing == null ? null : proxiedListener(state, routing, req);
-        if (listener == null && routing != null) {
-            listener = resolveListener(routing, req.host(), true);
+        RoutedListener listener = null;
+        if (routing != null) {
+            if (behindProxy) {
+                String arn = tlsProxyServer.pinnedRoute(req.localAddress().port(), req.remoteAddress());
+                listener = arn == null ? null : routing.listeners().get(arn);
+            } else {
+                listener = resolveListener(routing, req.host(), true);
+            }
         }
         if (listener == null) {
             req.response().setStatusCode(502).end("No listener for host");
@@ -1106,28 +1112,6 @@ public class ElbV2DataPlane {
             }
         }
         req.response().setStatusCode(502).end("No matching rule");
-    }
-
-    /**
-     * The listener whose SNI server name the TLS proxy matched to admit this connection. In AWS each
-     * load balancer has its own address, so a connection made to one stays with it whatever Host
-     * header it sends; behind the proxy the server name is what picked the address.
-     */
-    private RoutedListener proxiedListener(PortState state, RoutingView routing, HttpServerRequest req) {
-        if (!state.behindProxy || !req.isSSL()) {
-            return null;
-        }
-        // If the connection reached this listener but the TLS session reports no requested server
-        // names (which can happen after resumption), the request falls back to Host dispatch.
-        if (!(req.connection().sslSession() instanceof ExtendedSSLSession session)) {
-            return null;
-        }
-        for (SNIServerName name : session.getRequestedServerNames()) {
-            if (name instanceof SNIHostName hostname) {
-                return resolveListener(routing, hostname.getAsciiName(), false);
-            }
-        }
-        return null;
     }
 
     /** Floci's shared socket first uses load-balancer DNS, then unique rule or certificate hosts. */

@@ -2,6 +2,7 @@ package io.floci.aws.services.elbv2;
 
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.TlsProxyServer;
+import io.floci.aws.config.TlsProxyServer.ServerNameTarget;
 import io.floci.aws.core.common.CertificateReferenceResolver;
 import io.floci.aws.core.common.CertificateReferenceResolver.CertificateMaterial;
 import io.floci.aws.core.common.Pem;
@@ -41,6 +42,7 @@ import static io.floci.aws.services.elbv2.ElbV2PublicationTestSupport.servedCert
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -242,13 +244,14 @@ class ElbV2ReservedPortTest {
             assertEquals(0, options.getValue().getPort());
             assertTrue(options.getValue().isSsl());
             TlsProxyServer.ServerNameRoute route = fixture.route();
-            assertEquals(50443, route.backendPort(443, "lb-1.elb.example.test", false));
-            assertEquals(-1, route.backendPort(443, "api.example.test", false));
-            assertEquals(50443, route.backendPort(443, "www.example.test", true));
-            assertEquals(50443, route.backendPort(443, "api.example.test", true));
-            assertEquals(-1, route.backendPort(443, "s3.amazonaws.com", true),
+            ServerNameTarget expected = new ServerNameTarget(50443, fixture.listener.getListenerArn());
+            assertEquals(expected, route.resolve(443, "lb-1.elb.example.test", false));
+            assertNull(route.resolve(443, "api.example.test", false));
+            assertEquals(expected, route.resolve(443, "www.example.test", true));
+            assertEquals(expected, route.resolve(443, "api.example.test", true));
+            assertNull(route.resolve(443, "s3.amazonaws.com", true),
                     "an unclaimed name stays with Floci even when a single load balancer serves the port");
-            assertEquals(-1, route.backendPort(8443, "lb-1.elb.example.test", true));
+            assertNull(route.resolve(8443, "lb-1.elb.example.test", true));
 
             ArgumentCaptor<IntConsumer> released = ArgumentCaptor.forClass(IntConsumer.class);
             verify(fixture.proxy).onPortReleased(released.capture());
@@ -258,7 +261,7 @@ class ElbV2ReservedPortTest {
             verify(fixture.vertx, times(2)).createHttpServer(options.capture());
             assertEquals("0.0.0.0", options.getValue().getHost());
             assertEquals(443, options.getValue().getPort());
-            assertEquals(-1, route.backendPort(443, "lb-1.elb.example.test", true),
+            assertNull(route.resolve(443, "lb-1.elb.example.test", true),
                     "once the listener owns 443 itself the proxy no longer forwards to it");
         } finally {
             fixture.dataPlane.shutdown();
@@ -272,8 +275,9 @@ class ElbV2ReservedPortTest {
         try {
             fixture.publish();
             TlsProxyServer.ServerNameRoute route = fixture.route();
-            assertEquals(50443, route.backendPort(443, "lb-1.elb.example.test", false));
-            assertEquals(-1, route.backendPort(443, "api.example.test", false));
+            assertEquals(new ServerNameTarget(50443, fixture.listener.getListenerArn()),
+                    route.resolve(443, "lb-1.elb.example.test", false));
+            assertNull(route.resolve(443, "api.example.test", false));
 
             fixture.listener.setProtocol(protocol);
             fixture.listener.setDefaultCertificate(null);
@@ -282,7 +286,7 @@ class ElbV2ReservedPortTest {
             verify(fixture.local).close();
             verify(fixture.vertx, times(1)).createHttpServer(any(HttpServerOptions.class));
             verify(fixture.vertx, never()).createNetServer(any(NetServerOptions.class));
-            assertEquals(-1, route.backendPort(443, "lb-1.elb.example.test", true));
+            assertNull(route.resolve(443, "lb-1.elb.example.test", true));
             assertTrue(records.stream().map(LogCapture::formatted)
                             .anyMatch(message -> message.contains("port 443 is reserved by Floci itself")),
                     "expected the reserved-port warning, got " + records.stream().map(LogCapture::formatted).toList());

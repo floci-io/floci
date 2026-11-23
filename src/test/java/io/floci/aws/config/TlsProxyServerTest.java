@@ -1,5 +1,6 @@
 package io.floci.aws.config;
 
+import io.floci.aws.config.TlsProxyServer.ServerNameTarget;
 import io.floci.aws.testutil.FreePorts;
 import io.vertx.core.Vertx;
 import io.vertx.core.net.NetServer;
@@ -173,7 +174,7 @@ class TlsProxyServerTest {
             proxy = new TlsProxyServer(vertx, config, "127.0.0.1",
                     httpBackend.actualPort(), httpsBackend.actualPort());
             proxy.routeServerNames((port, name, allowAliases) -> port == awsHttpsPort && allowAliases && !name.equals("other.example.test")
-                    ? albBackend.actualPort() : -1);
+                    ? new ServerNameTarget(albBackend.actualPort(), "listener") : null);
 
             assertEquals("ALB", roundTrip(awsHttpsPort, TlsClientHelloTest.clientHello("ALB.example.test").getBytes()));
             assertEquals("TLS", roundTrip(awsHttpsPort, TlsClientHelloTest.clientHello("other.example.test").getBytes()));
@@ -201,7 +202,8 @@ class TlsProxyServerTest {
             int awsHttpsPort = ports[1];
             proxy = new TlsProxyServer(vertx, configWith(true, ports[0], awsHttpsPort), "127.0.0.1",
                     4510, httpsBackend.actualPort());
-            proxy.routeServerNames((port, name, allowAliases) -> "alb.example.test".equals(name) ? albBackend.actualPort() : -1);
+            proxy.routeServerNames((port, name, allowAliases) -> "alb.example.test".equals(name)
+                    ? new ServerNameTarget(albBackend.actualPort(), "listener") : null);
             byte[] hello = TlsClientHelloTest.clientHello("alb.example.test").getBytes();
 
             awaitListening(awsHttpsPort);

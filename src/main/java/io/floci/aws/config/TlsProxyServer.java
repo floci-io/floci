@@ -11,6 +11,7 @@ import io.vertx.core.net.NetClient;
 import io.vertx.core.net.NetServer;
 import io.vertx.core.net.NetServerOptions;
 import io.vertx.core.net.NetSocket;
+import io.vertx.core.net.SocketAddress;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -23,6 +24,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
@@ -105,6 +107,7 @@ public class TlsProxyServer {
     }
     private NetClient client;
     private volatile ServerNameRoute serverNameRoute;
+    private final Map<BackendConnection, PinnedRoute> pinnedRoutes = new ConcurrentHashMap<>();
     /** How long a ClientHello may take to arrive before the connection goes to Floci; tests shorten it. */
     long clientHelloTimeoutMillis = 5_000;
 
@@ -112,15 +115,27 @@ public class TlsProxyServer {
     @FunctionalInterface
     public interface ServerNameRoute {
         /**
-         * The backend port, or a non-positive value for none. When {@code allowAliases} is false,
+         * The backend target, or null for none. When {@code allowAliases} is false,
          * only a load balancer's own generated DNS name can claim the connection.
          */
-        int backendPort(int listenPort, String serverName, boolean allowAliases);
+        ServerNameTarget resolve(int listenPort, String serverName, boolean allowAliases);
     }
+
+    public record ServerNameTarget(int port, String routeId) {}
+
+    private record BackendConnection(int port, SocketAddress peer) {}
+
+    private record PinnedRoute(NetSocket socket, String routeId) {}
 
     /** Sends ClientHellos on the AWS-HTTPS port whose SNI the route claims to the port it names. */
     public void routeServerNames(ServerNameRoute route) {
         serverNameRoute = route;
+    }
+
+    /** Returns the route selected from the ClientHello for this loopback connection. */
+    public String pinnedRoute(int backendPort, SocketAddress peer) {
+        PinnedRoute route = pinnedRoutes.get(new BackendConnection(backendPort, peer));
+        return route == null ? null : route.routeId();
     }
 
     @Inject
@@ -297,7 +312,10 @@ public class TlsProxyServer {
                 // while we establish the backend connection.
                 frontSocket.handler(null);
                 frontSocket.pause();
-                pipeToBackend(frontSocket, buffer, backendPort(listenPort, route, buffer));
+                boolean tls = buffer.length() > 0 && buffer.getByte(0) == TLS_HANDSHAKE;
+                ServerNameTarget target = tls ? serverNameTarget(listenPort, route, buffer) : null;
+                int backendPort = target == null ? (tls ? httpsBackendPort : httpBackendPort) : target.port();
+                pipeToBackend(frontSocket, buffer, backendPort, target);
             };
 
             frontSocket.handler(chunk -> {
@@ -318,32 +336,32 @@ public class TlsProxyServer {
         };
     }
 
-    private int backendPort(int listenPort, ServerNameRoute route, Buffer buffer) {
-        if (buffer.length() == 0 || buffer.getByte(0) != TLS_HANDSHAKE) {
-            return httpBackendPort;
-        }
+    private ServerNameTarget serverNameTarget(int listenPort, ServerNameRoute route, Buffer buffer) {
         String serverName = route == null ? null : TlsClientHello.serverName(buffer);
-        if (serverName == null) {
-            return httpsBackendPort;
-        }
-        if (endpointHosts.contains(serverName)) {
-            return httpsBackendPort;
+        if (serverName == null || endpointHosts.contains(serverName)) {
+            return null;
         }
         boolean allowAliases = endpointSuffixes.stream().noneMatch(suffix -> DomainNames.isWithin(serverName, suffix));
         try {
-            int routed = route.backendPort(listenPort, serverName, allowAliases);
-            return routed > 0 ? routed : httpsBackendPort;
+            return route.resolve(listenPort, serverName, allowAliases);
         } catch (RuntimeException failure) {
             LOG.debugv(failure, "TLS proxy: routing server name {0} failed; Floci serves it", serverName);
-            return httpsBackendPort;
+            return null;
         }
     }
 
-    private void pipeToBackend(NetSocket frontSocket, Buffer buffer, int target) {
+    private void pipeToBackend(NetSocket frontSocket, Buffer buffer, int port, ServerNameTarget target) {
         // Connect to the appropriate backend
-        client.connect(target, "127.0.0.1").onComplete(ar -> {
+        client.connect(port, "127.0.0.1").onComplete(ar -> {
             if (ar.succeeded()) {
                 NetSocket backSocket = ar.result();
+                if (target != null) {
+                    BackendConnection connection = new BackendConnection(port, backSocket.localAddress());
+                    PinnedRoute pin = new PinnedRoute(backSocket, target.routeId());
+                    // Publish before sending the ClientHello so the backend can read the pin on its first request.
+                    pinnedRoutes.put(connection, pin);
+                    backSocket.closeHandler(ignored -> pinnedRoutes.remove(connection, pin));
+                }
 
                 // Send the initial buffer that we already read
                 backSocket.write(buffer);
@@ -356,7 +374,7 @@ public class TlsProxyServer {
                         LOG.debugv("TLS proxy: pipe back→front failed: {0}", err.getMessage()));
             } else {
                 LOG.warnv("TLS proxy: failed to connect to backend port {0}: {1}",
-                        String.valueOf(target), ar.cause().getMessage());
+                        String.valueOf(port), ar.cause().getMessage());
                 frontSocket.close();
             }
         });
