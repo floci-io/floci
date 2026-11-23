@@ -1307,7 +1307,11 @@ class EmrContainersServiceTest {
                  "configurationOverrides": {"applicationConfiguration": [{"classification": "spark-defaults",
                    "properties": {"spark.sql.shuffle.partitions": "4", "spark.master": "k8s://https://eks.test:443",
                      "spark.submit.deployMode": "cluster",
-                     "spark.kubernetes.driverEnv.SPARK_DIST_CLASSPATH": "/opt/extra/*"}}]}}
+                     "spark.kubernetes.driverEnv.SPARK_DIST_CLASSPATH": "/opt/extra/*"}},
+                  {"classification": "jeg-config", "properties": {
+                     "RemoteMappingKernelManager.cull_idle_timeout": "3600",
+                     "RemoteMappingKernelManager.cull_interval": "60",
+                     "RemoteMappingKernelManager.cull_connected": "true"}}]}}
                 """.formatted(RELEASE, ROLE, UUID.randomUUID()))).get("id").textValue();
     }
 
@@ -1354,7 +1358,11 @@ class EmrContainersServiceTest {
                 job.environment().get(EmrContainersGateways.CLASS_PATH_VARIABLE),
                 "a kernel's driver keeps the endpoint's class path and gains S3A's AWS SDK");
         assertEquals(EmrContainersGateways.PROGRAM, job.environment().get(EmrContainersGateways.PROGRAM_VARIABLE));
-        assertTrue(job.command().get(2).endsWith("exec python3 /tmp/floci-gateway/gateway.py"), job.command().get(2));
+        assertTrue(job.command().get(2).endsWith("exec python3 /tmp/floci-gateway/gateway.py \"$@\""),
+                job.command().get(2));
+        // The guide's "Jupyter Enterprise Gateway (JEG) configuration options" allow-lists the first two.
+        assertEquals(List.of("gateway", "--RemoteMappingKernelManager.cull_idle_timeout=3600",
+                "--RemoteMappingKernelManager.cull_interval=60"), job.command().subList(3, job.command().size()));
 
         clock.advance(Duration.ofMinutes(3).plusSeconds(15));
         gatewayUnanswered.set(null);
