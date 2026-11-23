@@ -60,6 +60,11 @@ arn:aws:transfer:{region}:{accountId}:user/{serverId}/{userName}
 
 Server IDs have the format `s-` followed by 17 lowercase alphanumeric characters (e.g. `s-01234567890abcdef`).
 
+With IAM enforcement on, each action is checked on the resources the AWS Service Authorization
+Reference lists for it, read from the request: a server by its `ServerId` and a user by its
+`ServerId` and `UserName`, as the ARNs above, and a tag call on its `Arn`. `CreateServer` and
+`ListServers` name no resource and are checked on `*`.
+
 ## Example Usage
 
 ```bash
