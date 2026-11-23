@@ -98,7 +98,12 @@ class EcrLifecyclePolicyValidationIntegrationTest {
                 new Object[]{region, policyWithPriority("\"rulePriority\":0,")},
                 new Object[]{region, policyWithPriority("\"rulePriority\":-1,")},
                 new Object[]{region, policyWithPriority("\"rulePriority\":null,")},
-                new Object[]{region, policyWithPriority("\"rulePriority\":2147483648,")}));
+                new Object[]{region, policyWithPriority("\"rulePriority\":2147483648,")},
+                new Object[]{region, "{\"rules\":[" + RULE.replace("\"countNumber\":2", "\"countNumber\":0") + "]}"},
+                new Object[]{region, "{\"rules\":[" + RULE.replace("\"any\"", "\"tagged\"") + "]}"},
+                new Object[]{region, "{\"rules\":[" + RULE + ","
+                        + RULE.replace("\"rulePriority\":1", "\"rulePriority\":2")
+                        .replace("\"tagStatus\":\"any\"", "\"tagStatus\":\"untagged\"") + "]}"}));
     }
 
     private static String policyWithPriority(String property) {
@@ -120,6 +125,27 @@ class EcrLifecyclePolicyValidationIntegrationTest {
             assertThrows(RepositoryNotFoundException.class,
                     () -> client.putLifecyclePolicy(r -> r.repositoryName(repository)
                             .lifecyclePolicyText(VALID_POLICY)));
+        }
+    }
+
+    /** ECR's validator ends its text with a newline, which the message keeps inside the closing quote. */
+    @Test
+    void aRefusedDocumentCarriesEcrsMessage() {
+        String repository = "lifecycle-validation/" + UUID.randomUUID();
+        try (EcrClient client = AwsTestClients.create(EcrClient.builder(), "test", Region.US_EAST_1)) {
+            InvalidParameterException zeroCount = assertThrows(InvalidParameterException.class,
+                    () -> client.putLifecyclePolicy(r -> r.repositoryName(repository).lifecyclePolicyText(
+                            "{\"rules\":[" + RULE.replace("\"countNumber\":2", "\"countNumber\":0") + "]}")));
+            InvalidParameterException malformed = assertThrows(InvalidParameterException.class,
+                    () -> client.putLifecyclePolicy(r -> r.repositoryName(repository)
+                            .lifecyclePolicyText("{1:2}" + " ".repeat(100))));
+
+            assertEquals("Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: 'Lifecycle policy "
+                    + "validation failure: numeric instance is lower than the required minimum (minimum: 1, found: 0)"
+                    + "\n'", zeroCount.awsErrorDetails().errorMessage());
+            assertEquals("Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: 'Lifecycle policy "
+                    + "parsing failure: Could not map policyString into LifecyclePolicy.'",
+                    malformed.awsErrorDetails().errorMessage());
         }
     }
 
