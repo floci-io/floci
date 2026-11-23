@@ -57,6 +57,7 @@ import io.floci.aws.services.eks.model.StorageConfig;
 import io.floci.aws.services.eks.model.Update;
 import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
 import io.floci.aws.services.eks.model.UpdateParam;
+import io.floci.aws.services.eks.model.UpgradePolicy;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -808,6 +809,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             throw new AwsException("InvalidParameterException", "Invalid authenticationMode", 400);
         }
         validateAutoMode(request.getComputeConfig(), request.getStorageConfig(), request.getKubernetesNetworkConfig());
+        UpgradePolicy requestedPolicy = request.getUpgradePolicy();
+        UpgradePolicy upgradePolicy = requestedPolicy == null || requestedPolicy.supportType() == null
+                ? UpgradePolicy.DEFAULT : new UpgradePolicy(requireSupportType(requestedPolicy.supportType()));
         AccessConfig accessConfig = new AccessConfig(authenticationMode,
                 requestedAccess == null || requestedAccess.bootstrapClusterCreatorAdminPermissions() == null
                         || requestedAccess.bootstrapClusterCreatorAdminPermissions());
@@ -821,6 +825,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         cluster.setAccessConfig(accessConfig);
         cluster.setComputeConfig(request.getComputeConfig());
         cluster.setStorageConfig(request.getStorageConfig());
+        cluster.setUpgradePolicy(upgradePolicy);
         cluster.setArn(arn);
         cluster.setAccountId(accountId);
         cluster.setCreatedAt(Instant.now());
@@ -844,6 +849,11 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         } else {
             cluster.setVersion(DEFAULT_K8S_VERSION);
             cluster.setExplicitVersion(false);
+        }
+        if (UpgradePolicy.STANDARD.equals(upgradePolicy.supportType()) && !inStandardSupport(cluster)) {
+            throw new AwsException("InvalidParameterException", "The requested Kubernetes version \""
+                    + cluster.getVersion() + "\" is only supported under extended support. Please change the "
+                    + "supportType to extended support to create the cluster.", 400);
         }
 
         cluster.setRoleArn(request.getRoleArn());
@@ -1042,9 +1052,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             Map.of("CONFIG_MAP", 0, "API_AND_CONFIG_MAP", 1, "API", 2);
 
     /**
-     * UpdateClusterConfig for {@code resourcesVpcConfig} endpoint access, {@code logging} and
-     * {@code accessConfig.authenticationMode}. AWS accepts more members and lets the subnets and security
-     * groups change; floci applies these three families and refuses a different subnet or security group list.
+     * UpdateClusterConfig for {@code resourcesVpcConfig} endpoint access, {@code logging},
+     * {@code accessConfig.authenticationMode} and {@code upgradePolicy}. AWS accepts more members and lets the subnets
+     * and security groups change; floci applies these four families and refuses a different subnet or security group
+     * list.
      * Each family the request names is stored as its own {@link Update} and all are returned in order. The
      * REST endpoint refuses a request naming more than one family, as EKS does, so it returns the only one. The
      * request is kept with the first update, and a repeat of its {@code clientRequestToken} returns that update.
@@ -1054,9 +1065,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         Cluster cluster = requireClusterInRequestRegion(name);
         EksAddonService.requireActiveCluster(cluster);
         if (request == null || (request.resourcesVpcConfig() == null && request.logging() == null
-                && request.accessConfig() == null)) {
+                && request.accessConfig() == null && request.upgradePolicy() == null)) {
             throw new AwsException("InvalidParameterException",
-                    "UpdateClusterConfig supports resourcesVpcConfig, logging and accessConfig only", 400);
+                    "UpdateClusterConfig supports resourcesVpcConfig, logging, accessConfig and upgradePolicy only", 400);
         }
         String token = request.clientRequestToken();
         if (token != null && !token.isBlank()) {
@@ -1104,6 +1115,14 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         if (requestedMode != null) {
             requireForwardAuthenticationMode(mode, requestedMode);
         }
+        String requestedSupportType = request.upgradePolicy() == null || request.upgradePolicy().supportType() == null
+                ? null : requireSupportType(request.upgradePolicy().supportType());
+        // Extended support can be turned on at any time, and off only while the version is in standard support.
+        if (UpgradePolicy.STANDARD.equals(requestedSupportType) && !inStandardSupport(cluster)) {
+            throw new AwsException("InvalidParameterException", "The Kubernetes version \"" + cluster.getVersion()
+                    + "\" is not in standard support. Please update the cluster to a version in standard support to "
+                    + "change the supportType", 400);
+        }
 
         Boolean finalPublicAccess = publicAccess;
         Boolean finalPrivateAccess = privateAccess;
@@ -1139,13 +1158,20 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                         List.of(new UpdateParam("AuthenticationMode", requestedMode)), null,
                         updates.isEmpty() ? request : null));
             }
+            if (requestedSupportType != null) {
+                UpgradePolicy policy = new UpgradePolicy(requestedSupportType);
+                current.setUpgradePolicy(policy);
+                updates.add(addons.recordUpdate(current, "UpgradePolicyUpdate",
+                        List.of(new UpdateParam("UpgradePolicy", json(policy))), null,
+                        updates.isEmpty() ? request : null));
+            }
         });
         if (!saved[0]) {
             throw new AwsException("ResourceNotFoundException", "No cluster found for name: " + name, 404);
         }
         if (updates.isEmpty()) {
-            throw new AwsException("InvalidParameterException",
-                    "UpdateClusterConfig supports resourcesVpcConfig, logging and accessConfig.authenticationMode only", 400);
+            throw new AwsException("InvalidParameterException", "UpdateClusterConfig supports resourcesVpcConfig, "
+                    + "logging, accessConfig.authenticationMode and upgradePolicy.supportType only", 400);
         }
         LOG.infov("Updated the configuration of EKS cluster {0}: {1}", cluster.getName(),
                 updates.stream().map(Update::type).toList());
@@ -1165,7 +1191,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                         && Objects.equals(a.getEndpointPrivateAccess(), b.getEndpointPrivateAccess())
                         && Objects.equals(a.getPublicAccessCidrs(), b.getPublicAccessCidrs());
         return sameVpc && Objects.equals(existing.logging(), request.logging())
-                && Objects.equals(existing.accessConfig(), request.accessConfig());
+                && Objects.equals(existing.accessConfig(), request.accessConfig())
+                && Objects.equals(existing.upgradePolicy(), request.upgradePolicy());
     }
 
     /** The cluster's current settings with the request applied on top, in the shape createCluster validates. */
@@ -1191,7 +1218,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
      * authentication mode backwards, which UpdateClusterConfig refuses.
      */
     public synchronized void restoreClusterConfig(String name, ResourcesVpcConfig endpoint, Logging logging,
-                                                  String authenticationMode) {
+                                                  String authenticationMode, UpgradePolicy upgradePolicy) {
         Cluster cluster = requireClusterInRequestRegion(name);
         saveClusterIfNotDeleting(regionResolver.getAccountId(), clusterKey(cluster), current -> {
             if (endpoint != null && current.getResourcesVpcConfig() != null) {
@@ -1205,6 +1232,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             if (authenticationMode != null && current.getAccessConfig() != null) {
                 current.setAccessConfig(new AccessConfig(authenticationMode,
                         current.getAccessConfig().bootstrapClusterCreatorAdminPermissions()));
+            }
+            if (upgradePolicy != null) {
+                current.setUpgradePolicy(upgradePolicy);
             }
         });
     }
@@ -1244,6 +1274,22 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             throw new AwsException("InvalidParameterException",
                     "Floci does not support changing " + member + " through UpdateClusterConfig", 400);
         }
+    }
+
+    /**
+     * Whether the cluster's Kubernetes version is in standard support now. A cluster that named no version is: AWS gives
+     * it a version in standard support, while Floci reports {@link #DEFAULT_K8S_VERSION} for it.
+     */
+    private static boolean inStandardSupport(Cluster cluster) {
+        return !cluster.isExplicitVersion() || EksVersionCalendar.inStandardSupport(cluster.getVersion(), Instant.now());
+    }
+
+    private static String requireSupportType(String supportType) {
+        if (!UpgradePolicy.SUPPORT_TYPES.contains(supportType)) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid supportType '" + supportType + "'. Valid values: STANDARD | EXTENDED", 400);
+        }
+        return supportType;
     }
 
     private static void requireForwardAuthenticationMode(String current, String requested) {

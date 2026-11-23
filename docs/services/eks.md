@@ -39,6 +39,7 @@ or list operations. Resource tags are not retained for post-deletion policy cond
 |---|---|
 | `CreateCluster` | Create a new EKS cluster |
 | `DescribeCluster` | Describe a cluster by name |
+| `UpdateClusterConfig` | Update a cluster's endpoint access, logging, authentication mode or upgrade policy |
 | `ListClusters` | List cluster names with pagination (`maxResults` 1-100 and `nextToken`) |
 | `DeleteCluster` | Delete a cluster |
 | `CreateAccessEntry` | Create STANDARD or EC2_LINUX access-entry metadata |
@@ -57,7 +58,7 @@ or list operations. Resource tags are not retained for post-deletion policy cond
 | `DescribeAddon` | Describe an addon by cluster and addon name |
 | `ListAddons` | List addon names installed in a cluster with pagination |
 | `UpdateAddon` | Update addon configuration, version, or service account role |
-| `DescribeUpdate` | Describe an update for an addon |
+| `DescribeUpdate` | Describe an update for an addon or a cluster's configuration |
 | `DeleteAddon` | Delete an addon from a cluster |
 | `DescribeAddonVersions` | Describe supported addon versions by Kubernetes version or addon name |
 | `CreateNodegroup` | Create node group metadata for a cluster |
@@ -350,6 +351,33 @@ EKS clusters support configuring KMS envelope encryption for secrets and control
   - When both `api` and `audit` are enabled, both streams are created and populated under `/aws/eks/<cluster-name>/cluster`. When neither is enabled, no log group or streams are created.
 - **Component streams deviation**: AWS EKS provisions separate log streams for each component (`kube-apiserver-*`, `kube-apiserver-audit-*`, `kube-controller-manager-*`, `kube-scheduler-*`, `authenticator-*`). Because Floci runs clusters on k3s, which embeds the Kubernetes API server, controller manager, and scheduler within a single process, control plane container logs are delivered to the single `kube-apiserver-<hash>` stream when `api` is enabled, and API server audit logs are delivered to `kube-apiserver-audit-<hash>` when `audit` is enabled. Other control plane log types (`authenticator`, `controllerManager`, `scheduler`) do not provision separate streams.
 - **Authenticator logs**: Authenticator webhook authentication events are logged directly by Floci.
+
+## Upgrade policy
+
+`CreateCluster` accepts `upgradePolicy.supportType`, `STANDARD` or `EXTENDED`, and `CreateCluster` and
+`DescribeCluster` return it. A cluster created without one reports `EXTENDED`, the policy AWS gives new clusters, and
+so does a cluster Floci stored before it kept the policy, as AWS gave existing clusters extended support as well.
+`UpdateClusterConfig` changes it, alone in its request as EKS requires, and answers with a `Successful`
+`UpgradePolicyUpdate` whose `UpgradePolicy` parameter holds the policy as JSON, `{"supportType":"STANDARD"}`, as AWS
+records it. Any other support type is refused with `InvalidParameterException`.
+
+`STANDARD` is refused for a version past its end of standard support, as on AWS. Floci keeps the Amazon EKS
+Kubernetes release calendar's end of standard support for each version it serves, and treats a newer version as in
+standard support. Both refusals are `InvalidParameterException`:
+
+- `CreateCluster`: "The requested Kubernetes version "1.30" is only supported under extended support. Please change
+  the supportType to extended support to create the cluster."
+- `UpdateClusterConfig`: "The Kubernetes version "1.30" is not in standard support. Please update the cluster to a
+  version in standard support to change the supportType"
+
+`EXTENDED` is accepted on any version. A cluster created without a version is treated as in standard support, since
+the version AWS gives such a cluster is, although Floci reports 1.29 for it. Floci does not upgrade a `STANDARD`
+cluster when its version reaches the end of standard support, and it records an update that names the policy the
+cluster already has.
+
+In CloudFormation, `AWS::EKS::Cluster` creates the cluster with its `UpgradePolicy` and updates it in place. A
+template that drops `UpgradePolicy` returns the cluster to `EXTENDED`, and a stack rollback restores the policy. A
+cluster a stack created before Floci kept the policy gets the one its template declares on the stack's next update.
 
 ## EKS Auto Mode configuration
 
@@ -1219,7 +1247,7 @@ eks.deleteCluster(r -> r.name("my-cluster"));
 The following EKS features are not yet supported:
 
 - `UpdateClusterVersion`
-- `UpdateClusterConfig` members other than `resourcesVpcConfig` endpoint access and `publicAccessCidrs`, `logging` and `accessConfig.authenticationMode`; a different `subnetIds` or `securityGroupIds` list is refused
+- `UpdateClusterConfig` members other than `resourcesVpcConfig` endpoint access and `publicAccessCidrs`, `logging`, `accessConfig.authenticationMode` and `upgradePolicy`; a different `subnetIds` or `securityGroupIds` list is refused
 - `UpdateNodegroupConfig` / `UpdateNodegroupVersion`
 - Add-ons (`CreateAddon`, `DescribeAddon`, `ListAddons`)
 - Identity provider configs

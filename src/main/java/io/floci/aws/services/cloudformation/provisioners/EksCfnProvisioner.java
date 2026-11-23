@@ -17,6 +17,7 @@ import io.floci.aws.services.eks.model.Logging;
 import io.floci.aws.services.eks.model.Nodegroup;
 import io.floci.aws.services.eks.model.ResourcesVpcConfig;
 import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
+import io.floci.aws.services.eks.model.UpgradePolicy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -55,7 +56,8 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
     private static final List<String> NODEGROUP_ATTRIBUTES = List.of("Id", "ClusterName", "NodegroupName", "Arn");
     private static final String SNAPSHOT_ATTR = CfnRollback.EKS_CLUSTER_UPDATE_SNAPSHOT_ATTR;
     /** The cluster properties updateInPlace applies through UpdateClusterConfig, besides Tags. */
-    private static final Set<String> CLUSTER_APPLIED = Set.of("ResourcesVpcConfig", "Logging", "AccessConfig");
+    private static final Set<String> CLUSTER_APPLIED =
+            Set.of("ResourcesVpcConfig", "Logging", "AccessConfig", "UpgradePolicy");
     private static final String NODEGROUP_SNAPSHOT_ATTR = CfnRollback.EKS_NODEGROUP_UPDATE_SNAPSHOT_ATTR;
     // The tag keys the last deployment resolved, reserved ones included, as Ec2Tags.recordKeys records
     // them, so an update removes only those and keeps a tag added outside the stack.
@@ -134,6 +136,7 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         request.setResourcesVpcConfig(createSetting(props, "ResourcesVpcConfig", ctx, new TypeReference<>() { }));
         request.setAccessConfig(createSetting(props, "AccessConfig", ctx, new TypeReference<>() { }));
         request.setLogging(logging(props, ctx));
+        request.setUpgradePolicy(createSetting(props, "UpgradePolicy", ctx, new TypeReference<>() { }));
         Cluster created = eksService.createCluster(request);
         // The cluster this resource named before is gone or replaced; publish writes only what the
         // new one has, so its endpoint and certificate must not outlive it.
@@ -240,9 +243,9 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * The update AWS makes for the properties it does not replace on: the cluster keeps its name.
-     * Tags, Logging, AccessConfig.AuthenticationMode and the endpoint access members of ResourcesVpcConfig
-     * are applied, and only when the template's value differs from the live cluster's. EksService has no
-     * UpdateClusterVersion, so a changed Version is accepted with a warning and not applied. AWS lets
+     * Tags, Logging, AccessConfig.AuthenticationMode, UpgradePolicy and the endpoint access members of
+     * ResourcesVpcConfig are applied, and only when the template's value differs from the live cluster's.
+     * EksService has no UpdateClusterVersion, so a changed Version is accepted with a warning and not applied. AWS lets
      * UpdateClusterConfig choose different subnets and security groups, but floci does not apply that, so a
      * changed or dropped subnet or security group list fails the resource. The snapshot holds, and the
      * rollback restores, only the config families the update changes, taken from the same read the request is
@@ -254,6 +257,7 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         // One read of the cluster: the request, the snapshot and the apply all start from it.
         Cluster current = currentOr(live);
         UpdateClusterConfigRequest configRequest = configRequest(props, ctx, changes, current);
+        UpgradePolicy unstoredPolicy = unstoredPolicy(props, ctx, changes, current);
         updateTagsInPlace(r, props, ctx, live.getArn(), live.getTags(), live.getName(), TAG_KEYS_ATTR, SNAPSHOT_ATTR,
                 () -> publish(r, live), true, snapshot -> {
                     snapshot.put("name", live.getName());
@@ -262,7 +266,26 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
                     if (configRequest != null) {
                         eksService.updateClusterConfig(live.getName(), configRequest);
                     }
+                    if (unstoredPolicy != null) {
+                        eksService.restoreClusterConfig(live.getName(), null, null, null, unstoredPolicy);
+                    }
                 });
+    }
+
+    /**
+     * The policy an unchanged template declares for a cluster created before Floci kept the policy, whose create
+     * therefore never stored it, or null. It is written as that create would have written it, without
+     * UpdateClusterConfig's rules, and stays when the update rolls back. A changed policy goes through
+     * UpdateClusterConfig instead, and a cluster that holds a policy keeps it, as one changed outside the stack does.
+     */
+    private static UpgradePolicy unstoredPolicy(JsonNode props, ProvisionContext ctx, PropertyChanges changes,
+                                                Cluster live) {
+        if (live.hasStoredUpgradePolicy() || changed(changes, "UpgradePolicy")) {
+            return null;
+        }
+        UpgradePolicy declared = createSetting(props, "UpgradePolicy", ctx, new TypeReference<>() { });
+        return declared == null || !UpgradePolicy.SUPPORT_TYPES.contains(declared.supportType())
+                || declared.supportType().equals(live.getUpgradePolicy().supportType()) ? null : declared;
     }
 
     /**
@@ -345,7 +368,8 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
     /**
      * The UpdateClusterConfig request for the families whose changed template value differs from the live
      * cluster, or null when none does. A member the template dropped is read as its AWS default: public access
-     * on, private access off, every address allowed and no log type exported; floci applies that default itself.
+     * on, private access off, every address allowed, no log type exported and extended support; floci applies that
+     * default itself.
      * A dropped AuthenticationMode asks for nothing, as a mode cannot be moved back. The subnet and security
      * group lists go along as the template has them, a dropped list counting as an empty one, so the service
      * refuses one that differs from the live cluster's.
@@ -355,6 +379,7 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         ResourcesVpcConfig vpc = null;
         Logging logging = null;
         AccessConfig access = null;
+        UpgradePolicy upgradePolicy = null;
         ResourcesVpcConfig current = live.getResourcesVpcConfig();
         if (changed(changes, "ResourcesVpcConfig") && current != null) {
             ResourcesVpcConfig desired = createSetting(props, "ResourcesVpcConfig", ctx, new TypeReference<>() { });
@@ -404,8 +429,16 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
                 access = new AccessConfig(desired.authenticationMode(), null);
             }
         }
-        return vpc == null && logging == null && access == null ? null
-                : new UpdateClusterConfigRequest(vpc, logging, access, null);
+        if (changed(changes, "UpgradePolicy")) {
+            UpgradePolicy desired = createSetting(props, "UpgradePolicy", ctx, new TypeReference<>() { });
+            String supportType = desired == null || desired.supportType() == null
+                    ? UpgradePolicy.EXTENDED : desired.supportType();
+            if (!supportType.equals(live.getUpgradePolicy().supportType())) {
+                upgradePolicy = new UpgradePolicy(supportType);
+            }
+        }
+        return vpc == null && logging == null && access == null && upgradePolicy == null ? null
+                : new UpdateClusterConfigRequest(vpc, logging, access, upgradePolicy, null);
     }
 
     private static boolean changed(PropertyChanges changes, String name) {
@@ -442,6 +475,9 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
                 && live.getAccessConfig().authenticationMode() != null) {
             snapshot.put("authenticationMode", live.getAccessConfig().authenticationMode());
         }
+        if (request.upgradePolicy() != null) {
+            snapshot.set("upgradePolicy", MAPPER.valueToTree(live.getUpgradePolicy()));
+        }
     }
 
     /**
@@ -463,11 +499,14 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         snapshot.path("touched").forEach(key -> touched.add(key.asText()));
         converge(CfnRollback.snapshotText(snapshot, "arn"), CfnRollback.snapshotTags(snapshot), touched);
         String name = CfnRollback.snapshotText(snapshot, "name");
-        if (name != null && (snapshot.has("endpoint") || snapshot.has("logging") || snapshot.has("authenticationMode"))) {
+        if (name != null && (snapshot.has("endpoint") || snapshot.has("logging") || snapshot.has("authenticationMode")
+                || snapshot.has("upgradePolicy"))) {
             eksService.restoreClusterConfig(name,
                     snapshot.has("endpoint") ? MAPPER.convertValue(snapshot.get("endpoint"), ResourcesVpcConfig.class) : null,
                     snapshot.has("logging") ? MAPPER.convertValue(snapshot.get("logging"), Logging.class) : null,
-                    snapshot.has("authenticationMode") ? snapshot.get("authenticationMode").asText() : null);
+                    snapshot.has("authenticationMode") ? snapshot.get("authenticationMode").asText() : null,
+                    snapshot.has("upgradePolicy")
+                            ? MAPPER.convertValue(snapshot.get("upgradePolicy"), UpgradePolicy.class) : null);
         }
         Ec2Tags.restoreRecord(r, keysAttr, snapshot);
     }

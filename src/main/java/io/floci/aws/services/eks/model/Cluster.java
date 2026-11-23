@@ -158,6 +158,17 @@ public class Cluster {
     @JsonProperty("storageConfig")
     private StorageConfig storageConfig;
 
+    @JsonProperty("upgradePolicy")
+    private UpgradePolicy upgradePolicy;
+
+    /** A cluster stored before Floci kept the policy reports EKS's default, which existing clusters were given too. */
+    public UpgradePolicy getUpgradePolicy() { return upgradePolicy == null ? UpgradePolicy.DEFAULT : upgradePolicy; }
+    public void setUpgradePolicy(UpgradePolicy upgradePolicy) { this.upgradePolicy = upgradePolicy; }
+
+    /** Whether the cluster holds a policy of its own, which one stored before Floci kept the policy does not. */
+    @JsonIgnore
+    public boolean hasStoredUpgradePolicy() { return upgradePolicy != null; }
+
     public AccessConfig getAccessConfig() { return accessConfig; }
     public void setAccessConfig(AccessConfig accessConfig) { this.accessConfig = accessConfig; }
 
@@ -305,6 +316,7 @@ public class Cluster {
         c.accessConfig = this.accessConfig;
         c.computeConfig = this.computeConfig;
         c.storageConfig = this.storageConfig;
+        c.upgradePolicy = this.upgradePolicy;
         return c;
     }
 }

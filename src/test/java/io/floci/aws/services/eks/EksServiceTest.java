@@ -52,6 +52,8 @@ import io.floci.aws.services.eks.model.ResourcesVpcConfig;
 import io.floci.aws.services.eks.model.StorageConfig;
 import io.floci.aws.services.eks.model.Update;
 import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
+import io.floci.aws.services.eks.model.UpdateParam;
+import io.floci.aws.services.eks.model.UpgradePolicy;
 import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -85,6 +87,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -938,13 +941,109 @@ class EksServiceTest {
             vpc.setEndpointPublicAccess(false);
             vpc.setPublicAccessCidrs(List.of(cidr));
             AwsException e = assertThrows(AwsException.class, () -> service.updateClusterConfig(
-                    "cidr-cluster", new UpdateClusterConfigRequest(vpc, null, null, null)), cidr);
+                    "cidr-cluster", new UpdateClusterConfigRequest(vpc, null, null, null, null)), cidr);
             assertEquals("InvalidParameterException", e.getErrorCode(), cidr);
             ResourcesVpcConfig stored = service.describeCluster("cidr-cluster").getResourcesVpcConfig();
             assertEquals(Boolean.TRUE, stored.getEndpointPublicAccess(), cidr);
             assertEquals(List.of("0.0.0.0/0"), stored.getPublicAccessCidrs(), cidr);
         }
         verify(addons, never()).recordUpdate(any(), anyString(), any(), any(), any());
+    }
+
+    @Test
+    void createClusterGivesExtendedSupportUnlessTheRequestAsksForStandard() {
+        CreateClusterRequest noSupportType = new CreateClusterRequest();
+        noSupportType.setName("policy-default");
+        noSupportType.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        noSupportType.setUpgradePolicy(new UpgradePolicy(null));
+        assertEquals(new UpgradePolicy("EXTENDED"), eksService.createCluster(noSupportType).getUpgradePolicy());
+
+        CreateClusterRequest standard = new CreateClusterRequest();
+        standard.setName("policy-standard");
+        standard.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        standard.setUpgradePolicy(new UpgradePolicy("STANDARD"));
+        eksService.createCluster(standard);
+        assertEquals(new UpgradePolicy("STANDARD"), eksService.describeCluster("policy-standard").getUpgradePolicy());
+
+        CreateClusterRequest bogus = new CreateClusterRequest();
+        bogus.setName("policy-bogus");
+        bogus.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        bogus.setUpgradePolicy(new UpgradePolicy("standard"));
+        AwsException e = assertThrows(AwsException.class, () -> eksService.createCluster(bogus));
+        assertEquals("InvalidParameterException", e.getErrorCode());
+        assertEquals("Invalid supportType 'standard'. Valid values: STANDARD | EXTENDED", e.getMessage());
+        assertFalse(eksService.listClusters().contains("policy-bogus"));
+    }
+
+    @Test
+    void standardSupportIsRefusedForAVersionPastItsEndOfStandardSupport() {
+        CreateClusterRequest create = new CreateClusterRequest();
+        create.setName("policy-retired");
+        create.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        create.setVersion("1.30");
+        create.setUpgradePolicy(new UpgradePolicy("STANDARD"));
+        AwsException refused = assertThrows(AwsException.class, () -> eksService.createCluster(create));
+        assertEquals("InvalidParameterException", refused.getErrorCode());
+        assertEquals("The requested Kubernetes version \"1.30\" is only supported under extended support. "
+                + "Please change the supportType to extended support to create the cluster.", refused.getMessage());
+        assertFalse(eksService.listClusters().contains("policy-retired"));
+
+        create.setUpgradePolicy(null);
+        eksService.createCluster(create);
+        AwsException update = assertThrows(AwsException.class, () -> eksService.updateClusterConfig("policy-retired",
+                new UpdateClusterConfigRequest(null, null, null, new UpgradePolicy("STANDARD"), null)));
+        assertEquals("InvalidParameterException", update.getErrorCode());
+        assertEquals("The Kubernetes version \"1.30\" is not in standard support. Please update the cluster to a "
+                + "version in standard support to change the supportType", update.getMessage());
+        assertEquals(new UpgradePolicy("EXTENDED"), eksService.describeCluster("policy-retired").getUpgradePolicy());
+    }
+
+    @Test
+    void standardSupportIsAcceptedForAVersionTheCalendarDoesNotListYet() {
+        CreateClusterRequest create = new CreateClusterRequest();
+        create.setName("policy-newest");
+        create.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        create.setVersion("1.38");
+        create.setUpgradePolicy(new UpgradePolicy("STANDARD"));
+
+        assertEquals(new UpgradePolicy("STANDARD"), eksService.createCluster(create).getUpgradePolicy());
+    }
+
+    @Test
+    void aClusterStoredBeforeFlociKeptTheUpgradePolicyReportsExtendedSupport() throws Exception {
+        // AWS gave existing clusters extended support too.
+        ObjectMapper mapper = new ObjectMapper();
+        Cluster stored = mapper.readValue("{\"name\":\"old\"}", Cluster.class);
+
+        assertEquals("EXTENDED", mapper.valueToTree(stored).path("upgradePolicy").path("supportType").asText());
+    }
+
+    @Test
+    void updateClusterConfigRecordsTheUpgradePolicyAsJsonAndRefusesAnUnknownSupportType() {
+        EksAddonService addons = mock(EksAddonService.class);
+        Update recorded = new Update("u", "Successful", "UpgradePolicyUpdate", List.of(), 0, List.of());
+        when(addons.recordUpdate(any(), anyString(), any(), any(), any())).thenReturn(recorded);
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, ec2Service,
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class), addons);
+        CreateClusterRequest create = new CreateClusterRequest();
+        create.setName("policy-update");
+        create.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        service.createCluster(create);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.updateClusterConfig("policy-update",
+                new UpdateClusterConfigRequest(null, null, null, new UpgradePolicy("LONG"), null)));
+        assertEquals("InvalidParameterException", e.getErrorCode());
+        assertEquals(new UpgradePolicy("EXTENDED"), service.describeCluster("policy-update").getUpgradePolicy());
+        verify(addons, never()).recordUpdate(any(), anyString(), any(), any(), any());
+
+        UpdateClusterConfigRequest request =
+                new UpdateClusterConfigRequest(null, null, null, new UpgradePolicy("STANDARD"), null);
+        service.updateClusterConfig("policy-update", request);
+
+        verify(addons).recordUpdate(any(), eq("UpgradePolicyUpdate"),
+                eq(List.of(new UpdateParam("UpgradePolicy", "{\"supportType\":\"STANDARD\"}"))), any(), eq(request));
+        assertEquals(new UpgradePolicy("STANDARD"), service.describeCluster("policy-update").getUpgradePolicy());
     }
 
     @Test
@@ -966,7 +1065,7 @@ class EksServiceTest {
                 create.setAccessConfig(new AccessConfig(modes.get(from), null));
                 service.createCluster(create);
                 UpdateClusterConfigRequest request = new UpdateClusterConfigRequest(
-                        null, null, new AccessConfig(modes.get(to), null), null);
+                        null, null, new AccessConfig(modes.get(to), null), null, null);
                 if (to == from + 1) {
                     service.updateClusterConfig(name, request);
                     assertEquals(modes.get(to), service.describeCluster(name).getAccessConfig()

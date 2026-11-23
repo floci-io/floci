@@ -318,6 +318,7 @@ class CloudFormationEksIntegrationTest {
             assertEquals(List.of("api", "audit"), cluster.getList(
                     "cluster.logging.clusterLogging.find { it.enabled == true }.types").stream().sorted().toList());
             assertEquals("API", cluster.getString("cluster.accessConfig.authenticationMode"));
+            assertEquals("STANDARD", cluster.getString("cluster.upgradePolicy.supportType"));
         } finally {
             CfnStackWaits.deleteStack(stack);
         }
@@ -336,6 +337,7 @@ class CloudFormationEksIntegrationTest {
             assertEquals(true, cluster.getBoolean("cluster.resourcesVpcConfig.endpointPublicAccess"));
             assertEquals("API_AND_CONFIG_MAP", cluster.getString("cluster.accessConfig.authenticationMode"));
             assertEquals(List.of(), cluster.getList("cluster.logging.clusterLogging.findAll { it.enabled == true }"));
+            assertEquals("EXTENDED", cluster.getString("cluster.upgradePolicy.supportType"));
 
             CfnStackWaits.updateStack(client, stack, configStack(true, false), "UPDATE_COMPLETE");
             assertEquals(id, physicalId(client, stack, "Subject"));
@@ -345,6 +347,7 @@ class CloudFormationEksIntegrationTest {
             assertEquals(List.of("api"),
                     cluster.getList("cluster.logging.clusterLogging.find { it.enabled == true }.types"));
             assertEquals("API", cluster.getString("cluster.accessConfig.authenticationMode"));
+            assertEquals("STANDARD", cluster.getString("cluster.upgradePolicy.supportType"));
         } finally {
             CfnStackWaits.deleteStack(stack);
         }
@@ -405,7 +408,8 @@ class CloudFormationEksIntegrationTest {
             + " \"ServiceIpv4Cidr\": \"172.20.0.0/16\"}";
 
     private static final String SETTINGS = "\"Logging\": {\"ClusterLogging\": {\"EnabledTypes\": ["
-            + "{\"Type\": \"api\"}, {\"Type\": \"audit\"}]}}, \"AccessConfig\": {\"AuthenticationMode\": \"API\"}";
+            + "{\"Type\": \"api\"}, {\"Type\": \"audit\"}]}}, \"AccessConfig\": {\"AuthenticationMode\": \"API\"},"
+            + " \"UpgradePolicy\": {\"SupportType\": \"STANDARD\"}";
 
     private static String subnet(String id, String cidr, String zone) {
         return "\"" + id + "\": {\"Type\": \"AWS::EC2::Subnet\", \"Properties\": {\"VpcId\": {\"Ref\": \"Vpc\"},"
@@ -421,7 +425,8 @@ class CloudFormationEksIntegrationTest {
     private static String configStack(boolean updated, boolean fails) {
         String settings = updated
                 ? "\"EndpointPublicAccess\": false, \"EndpointPrivateAccess\": true}, \"Logging\": {\"ClusterLogging\": "
-                        + "{\"EnabledTypes\": [{\"Type\": \"api\"}]}}, \"AccessConfig\": {\"AuthenticationMode\": \"API\"}"
+                        + "{\"EnabledTypes\": [{\"Type\": \"api\"}]}}, \"AccessConfig\": {\"AuthenticationMode\": \"API\"},"
+                        + " \"UpgradePolicy\": {\"SupportType\": \"STANDARD\"}"
                 : "\"EndpointPublicAccess\": true}, \"AccessConfig\": {\"AuthenticationMode\": \"API_AND_CONFIG_MAP\"}";
         return "{\"Resources\": {"
                 + "\"Vpc\": {\"Type\": \"AWS::EC2::VPC\", \"Properties\": {\"CidrBlock\": \"10.7.0.0/16\"}},"
