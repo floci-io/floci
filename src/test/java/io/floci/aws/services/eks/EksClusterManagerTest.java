@@ -55,6 +55,7 @@ import io.floci.aws.services.ec2.model.Placement;
 import io.floci.aws.services.ec2.net.VpcNetworkManager;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
+import io.floci.aws.services.eks.model.BlockStorage;
 import io.floci.aws.services.eks.model.CertificateAuthority;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
@@ -64,6 +65,7 @@ import io.floci.aws.services.eks.model.Logging;
 import io.floci.aws.services.eks.model.Nodegroup;
 import io.floci.aws.services.eks.model.OidcIdentity;
 import io.floci.aws.services.eks.model.ResourcesVpcConfig;
+import io.floci.aws.services.eks.model.StorageConfig;
 import io.floci.aws.testing.ThreadStates;
 import io.floci.aws.testutil.LogCapture;
 import jakarta.ws.rs.core.Response;
@@ -563,6 +565,25 @@ class EksClusterManagerTest {
         ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
         verify(builder).withCmd(cmdCaptor.capture());
         assertEquals(List.of("floci-k3s", "server"), cmdCaptor.getValue().subList(0, 2));
+    }
+
+    @Test
+    void theBlockStorageManifestRunsTheConfiguredImagesUnderTheAutoModeProvisionerName() {
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
+        when(config.services().eks().blockStorageProvisionerImage()).thenReturn("mirror.test/local-path:v1");
+        when(config.services().eks().blockStorageHelperImage()).thenReturn("mirror.test/busybox:v2");
+        EksClusterManager manager = EksClusterManagers.create(Mockito.mock(ContainerBuilder.class),
+                Mockito.mock(ContainerLifecycleManager.class), Mockito.mock(ContainerDetector.class),
+                Mockito.mock(PortAllocator.class), Mockito.mock(DockerHostResolver.class),
+                Mockito.mock(EcrRegistryManager.class), config, new RegionResolver("us-east-1", "000000000000"));
+
+        String manifest = manager.blockStorageManifest();
+
+        assertTrue(manifest.contains("image: \"mirror.test/local-path:v1\""), manifest);
+        assertTrue(manifest.contains("image: \"mirror.test/busybox:v2\""), manifest);
+        assertTrue(manifest.contains("- --provisioner-name\n        - ebs.csi.eks.amazonaws.com\n"), manifest);
+        assertFalse(manifest.contains("%"), manifest);
+        assertFalse(manifest.contains("kind: StorageClass"), manifest);
     }
 
     @ParameterizedTest
@@ -4272,6 +4293,45 @@ class EksClusterManagerTest {
                     dockerHostResolver, Mockito.mock(EcrRegistryManager.class), config,
                     regionResolver, null, null, certificateAuthority, null, null, 0L, new Ec2ImageCatalog(),
                     reachableEndpoint);
+        }
+
+        @Test
+        void aClusterThatHadTheBlockStorageProvisionerGetsTheEmptyManifestOnceBlockStorageIsOff() throws Exception {
+            Path localCopy = blockStorageCopy();
+            Files.createDirectories(localCopy.getParent());
+            Files.writeString(localCopy, "kind: Deployment\n");
+
+            manager.applyBlockStorage("container-1", cluster());
+
+            verify(dockerClient).copyArchiveToContainerCmd("container-1");
+            verify(copyCmd).withRemotePath("/var/lib/rancher/k3s");
+            assertEquals(EksClusterManager.BLOCK_STORAGE_MANIFEST_REMOVED, Files.readString(localCopy));
+        }
+
+        @Test
+        void aClusterThatNeverHadTheBlockStorageProvisionerGetsNoCopy() {
+            manager.applyBlockStorage("container-1", cluster());
+
+            verify(dockerClient, never()).copyArchiveToContainerCmd(anyString());
+            assertFalse(Files.exists(blockStorageCopy()));
+        }
+
+        @Test
+        void aClusterWithBlockStorageGetsTheProvisioner() throws Exception {
+            when(eks.blockStorageProvisionerImage()).thenReturn("rancher/local-path-provisioner:v0.0.35");
+            when(eks.blockStorageHelperImage()).thenReturn("rancher/mirrored-library-busybox:1.37.0");
+            Cluster cluster = cluster();
+            cluster.setStorageConfig(new StorageConfig(new BlockStorage(true)));
+
+            manager.applyBlockStorage("container-1", cluster);
+
+            verify(dockerClient).copyArchiveToContainerCmd("container-1");
+            assertEquals(manager.blockStorageManifest(), Files.readString(blockStorageCopy()));
+        }
+
+        private Path blockStorageCopy() {
+            return tempDir.resolve("auto-mode/000000000000/us-east-1/demo")
+                    .resolve(EksClusterManager.BLOCK_STORAGE_MANIFEST_FILE);
         }
 
         private String writtenManifest() throws Exception {

@@ -702,6 +702,17 @@ Stock Amazon EKS clusters historically define a default `gp2` StorageClass point
 
 Callers requiring dynamic volume provisioning can install a driver (such as the `aws-ebs-csi-driver` addon) and define their desired StorageClass. As on an EKS node, the cluster node's mounts are shared, so a driver's node plugin can mount volumes under `/var/lib/kubelet` with `Bidirectional` propagation.
 
+An [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) cluster with block storage enabled (`storageConfig.blockStorage.enabled`) provisions the claims of a StorageClass whose provisioner is `ebs.csi.eks.amazonaws.com`, as Auto Mode's EBS capability does. Floci serves them from the node's disk with a local-path provisioner registered under that name (`FLOCI_SERVICES_EKS_BLOCK_STORAGE_PROVISIONER_IMAGE`), installed while block storage is enabled. As on AWS, the cluster gets no StorageClass; create one naming the provisioner:
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: auto-ebs-sc
+provisioner: ebs.csi.eks.amazonaws.com
+volumeBindingMode: WaitForFirstConsumer
+```
+
 For local testing workflows that rely on automatic volume binding without a CSI driver, set `floci.services.eks.default-storage-class: true` (or `FLOCI_SERVICES_EKS_DEFAULT_STORAGE_CLASS=true`) to retain k3s's bundled `local-path` provisioner and default StorageClass.
 
 ## Joining EC2 instances as cluster nodes
@@ -763,6 +774,8 @@ does not enable it; omitted or false values keep the simulated behavior.
 | `FLOCI_SERVICES_EKS_ECR_REGISTRY_MIRROR` | `true` | Inject a containerd `registries.yaml` so pods can pull images pushed to [Floci ECR](ecr.md) |
 | `FLOCI_SERVICES_EKS_DISABLE_CNI` | `false` | Start k3s without bundled flannel, network policy, and kube-proxy so an external CNI can take over |
 | `FLOCI_SERVICES_EKS_DEFAULT_STORAGE_CLASS` | `false` | Retain k3s bundled local-path provisioner and default StorageClass (default false matches EKS with no default class) |
+| `FLOCI_SERVICES_EKS_BLOCK_STORAGE_PROVISIONER_IMAGE` | `rancher/local-path-provisioner:v0.0.35` | Provisioner that serves EKS Auto Mode block storage (`ebs.csi.eks.amazonaws.com`) |
+| `FLOCI_SERVICES_EKS_BLOCK_STORAGE_HELPER_IMAGE` | `rancher/mirrored-library-busybox:1.37.0` | Helper pod image of that provisioner |
 | `FLOCI_SERVICES_EKS_IRSA_SIGNING_KEY` | `true` | Pass the cluster OIDC signing key to k3s so in-cluster projected service account tokens can assume IAM roles via Floci STS |
 | `FLOCI_SERVICES_EKS_POD_IDENTITY_WEBHOOK` | `true` | Register a mutating admission webhook that injects pod identity credentials. Needs `FLOCI_TLS_ENABLED=true` |
 | `FLOCI_SERVICES_EKS_IMDS` | `false` | Enable link-local IMDS (`169.254.169.254`) proxy in cluster containers |

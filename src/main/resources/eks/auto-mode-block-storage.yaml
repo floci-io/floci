@@ -1,0 +1,133 @@
+# EKS Auto Mode block storage, installed by Floci while the cluster's storageConfig.blockStorage is enabled.
+# Claims of a StorageClass whose provisioner is ebs.csi.eks.amazonaws.com, the name Auto Mode's EBS provisioner
+# answers to, are served by the local-path provisioner from the node's disk. As on AWS, no StorageClass is created.
+# Adapted from k3s's manifests/local-storage.yaml (v1.36.0+k3s1, Apache-2.0); every object has its own name, so it
+# runs beside k3s's bundled provisioner when floci.services.eks.default-storage-class keeps that one.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: floci-auto-mode-ebs-provisioner
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: floci-auto-mode-ebs-provisioner
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "persistentvolumeclaims", "configmaps", "pods/log"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["endpoints", "persistentvolumes", "pods"]
+  verbs: ["*"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["storageclasses"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: floci-auto-mode-ebs-provisioner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: floci-auto-mode-ebs-provisioner
+subjects:
+- kind: ServiceAccount
+  name: floci-auto-mode-ebs-provisioner
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: floci-auto-mode-ebs-provisioner
+  namespace: kube-system
+spec:
+  revisionHistoryLimit: 0
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: floci-auto-mode-ebs-provisioner
+  template:
+    metadata:
+      labels:
+        app: floci-auto-mode-ebs-provisioner
+    spec:
+      priorityClassName: "system-node-critical"
+      serviceAccountName: floci-auto-mode-ebs-provisioner
+      tolerations:
+          - key: "CriticalAddonsOnly"
+            operator: "Exists"
+          - key: "node-role.kubernetes.io/control-plane"
+            operator: "Exists"
+            effect: "NoSchedule"
+      nodeSelector:
+        kubernetes.io/os: linux
+      containers:
+      - name: provisioner
+        image: "%PROVISIONER_IMAGE%"
+        imagePullPolicy: IfNotPresent
+        command:
+        - local-path-provisioner
+        - start
+        - --config
+        - /etc/config/config.json
+        - --provisioner-name
+        - ebs.csi.eks.amazonaws.com
+        - --configmap-name
+        - floci-auto-mode-ebs-provisioner
+        - --service-account-name
+        - floci-auto-mode-ebs-provisioner
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/config/
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+      volumes:
+        - name: config-volume
+          configMap:
+            name: floci-auto-mode-ebs-provisioner
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: floci-auto-mode-ebs-provisioner
+  namespace: kube-system
+data:
+  config.json: |-
+    {
+      "nodePathMap":[
+      {
+        "node":"DEFAULT_PATH_FOR_NON_LISTED_NODES",
+        "paths":["/var/lib/rancher/k3s/storage/ebs"]
+      }
+      ]
+    }
+  setup: |-
+    #!/bin/sh
+    set -eu
+    mkdir -m 0777 -p "${VOL_DIR}"
+    chmod 700 "${VOL_DIR}/.."
+  teardown: |-
+    #!/bin/sh
+    set -eu
+    rm -rf "${VOL_DIR}"
+  helperPod.yaml: |-
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: helper-pod
+    spec:
+      containers:
+      - name: helper-pod
+        image: "%HELPER_IMAGE%"
+        imagePullPolicy: IfNotPresent

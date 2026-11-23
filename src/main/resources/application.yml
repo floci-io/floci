@@ -967,6 +967,8 @@ floci:
       ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
       disable-cni: false           # start k3s without its bundled flannel/kube-proxy so a real CNI (e.g. Cilium) can take over
       default-storage-class: false # start k3s without its bundled local-path provisioner to match EKS
+      block-storage-provisioner-image: rancher/local-path-provisioner:v0.0.35 # serves EKS Auto Mode block storage (ebs.csi.eks.amazonaws.com)
+      block-storage-helper-image: rancher/mirrored-library-busybox:1.37.0     # its helper pods
       imds: false                  # expose link-local IMDS (169.254.169.254) inside the cluster container
       imds-pod-network: false      # route link-local IMDS traffic from ordinary pod network namespaces (requires imds: true)
       vpc-pod-network: false       # give pods addresses from /28 prefixes of the node's subnet, as VPC CNI prefix delegation does

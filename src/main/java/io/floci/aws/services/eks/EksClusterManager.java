@@ -77,6 +77,7 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.net.HttpURLConnection;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
@@ -171,6 +172,13 @@ public class EksClusterManager
     static final String POD_IDENTITY_MANIFEST_REMOVED = """
             # Floci registers no EKS Pod Identity webhook for this cluster now; its log says why.
             # k3s deletes the MutatingWebhookConfiguration an earlier version of this file created.
+            """;
+    static final String BLOCK_STORAGE_MANIFEST_FILE = "floci-eks-auto-mode-block-storage.yaml";
+    static final String BLOCK_STORAGE_MANIFEST_TAR_ENTRY = "server/manifests/" + BLOCK_STORAGE_MANIFEST_FILE;
+    // The manifest once block storage is off: no objects, so k3s deletes the provisioner it held before.
+    static final String BLOCK_STORAGE_MANIFEST_REMOVED = """
+            # EKS Auto Mode block storage is off for this cluster.
+            # k3s deletes the provisioner an earlier version of this file created.
             """;
     private static final String ENDPOINT_MODE_NETWORK = "network";
     public static final String DEFAULT_POD_CIDR = "10.42.0.0/16";
@@ -1007,6 +1015,7 @@ public class EksClusterManager
         injectEcrRegistryMirror(containerId, cluster, registries);
         linkContainerdCertsDir(containerId, cluster.getName());
         registerPodIdentityWebhook(containerId, cluster);
+        applyBlockStorage(containerId, cluster);
         if (signingKeyFiles != null) {
             copySigningKeysIntoContainer(containerId, signingKeyFiles, cluster.getName());
         }
@@ -1164,6 +1173,7 @@ public class EksClusterManager
         // The manifest written at creation names the address and certificate Floci had then.
         registerPodIdentityWebhook(info.containerId(), cluster,
                 () -> survivingNodeResolvesThroughFloci(info.containerId()));
+        applyBlockStorage(info.containerId(), cluster);
         activeClusters.put(clusterResourceName(cluster), cluster);
         attachClusterLogs(cluster, true, true, false);
 
@@ -3000,11 +3010,60 @@ public class EksClusterManager
     }
 
     private void installPodIdentityManifest(String containerId, Cluster cluster, String manifest) {
-        writeLocalCopy(localClusterFile(cluster, "webhook", POD_IDENTITY_MANIFEST_FILE), manifest, cluster.getName());
-        byte[] tar = tarSingleFile(POD_IDENTITY_MANIFEST_TAR_ENTRY, manifest);
+        installManifest(containerId, cluster, "webhook", POD_IDENTITY_MANIFEST_FILE, POD_IDENTITY_MANIFEST_TAR_ENTRY,
+                manifest);
+    }
+
+    /**
+     * Writes {@code manifest} into the k3s container's {@code server/manifests}, which k3s applies, and keeps a
+     * local copy under {@code <dataPath>/<kind>/...} for {@link #localClusterFile}.
+     */
+    private void installManifest(String containerId, Cluster cluster, String kind, String fileName, String tarEntry,
+                                 String manifest) {
+        writeLocalCopy(localClusterFile(cluster, kind, fileName), manifest, cluster.getName());
+        byte[] tar = tarSingleFile(tarEntry, manifest);
         RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId, K3S_DATA_DIR,
-                POD_IDENTITY_MANIFEST_FILE, out -> out.write(tar),
+                fileName, out -> out.write(tar),
                 RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
+    }
+
+    /**
+     * Installs the EKS Auto Mode block storage provisioner while the cluster's {@code storageConfig.blockStorage} is
+     * enabled: claims of a StorageClass naming {@code ebs.csi.eks.amazonaws.com} are then provisioned from the
+     * node's disk. Otherwise, if it was installed before, replaces it with {@link #BLOCK_STORAGE_MANIFEST_REMOVED}:
+     * the manifest lives on the cluster's data volume, which outlives a restart, and k3s prunes what it created.
+     */
+    void applyBlockStorage(String containerId, Cluster cluster) {
+        boolean enabled = cluster.getStorageConfig() != null && cluster.getStorageConfig().blockStorage() != null
+                && Boolean.TRUE.equals(cluster.getStorageConfig().blockStorage().enabled());
+        try {
+            if (!enabled && !Files.exists(localClusterFile(cluster, "auto-mode", BLOCK_STORAGE_MANIFEST_FILE))) {
+                return;
+            }
+            installManifest(containerId, cluster, "auto-mode", BLOCK_STORAGE_MANIFEST_FILE,
+                    BLOCK_STORAGE_MANIFEST_TAR_ENTRY, enabled ? blockStorageManifest() : BLOCK_STORAGE_MANIFEST_REMOVED);
+            if (enabled) {
+                LOG.infov("Installed the EKS Auto Mode block storage provisioner for cluster {0}", cluster.getName());
+            }
+        } catch (Exception e) {
+            LOG.warnv("EKS cluster {0} gets no Auto Mode block storage: could not install {1} into the k3s "
+                    + "container: {2}", cluster.getName(), BLOCK_STORAGE_MANIFEST_FILE, e.getMessage());
+        }
+    }
+
+    /** The block storage manifest with the configured provisioner and helper images. */
+    String blockStorageManifest() {
+        // An inline literal, which the native image build finds and packages.
+        try (InputStream in = EksClusterManager.class.getResourceAsStream("/eks/auto-mode-block-storage.yaml")) {
+            if (in == null) {
+                throw new IllegalStateException("missing resource /eks/auto-mode-block-storage.yaml");
+            }
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8)
+                    .replace("%PROVISIONER_IMAGE%", config.services().eks().blockStorageProvisionerImage())
+                    .replace("%HELPER_IMAGE%", config.services().eks().blockStorageHelperImage());
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     /**

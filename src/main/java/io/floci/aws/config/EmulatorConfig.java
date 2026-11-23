@@ -4302,6 +4302,19 @@ public interface EmulatorConfig {
         boolean defaultStorageClass();
 
         /**
+         * The local-path provisioner image that serves EKS Auto Mode block storage: while a cluster's
+         * {@code storageConfig.blockStorage} is enabled, claims of a StorageClass whose provisioner is
+         * {@code ebs.csi.eks.amazonaws.com} are provisioned from the node's disk by it. The default is the version
+         * k3s v1.36.0+k3s1 bundles.
+         */
+        @WithDefault("rancher/local-path-provisioner:v0.0.35")
+        String blockStorageProvisionerImage();
+
+        /** The image of the helper pods that {@link #blockStorageProvisionerImage()} runs to create and remove volumes. */
+        @WithDefault("rancher/mirrored-library-busybox:1.37.0")
+        String blockStorageHelperImage();
+
+        /**
          * When true, exposes an IMDS link-local proxy (169.254.169.254:80) inside the cluster container's
          * network namespace that relays to Floci's EC2 metadata service.
          */
