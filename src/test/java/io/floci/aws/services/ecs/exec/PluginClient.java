@@ -1,5 +1,6 @@
 package io.floci.aws.services.ecs.exec;
 
+import io.floci.aws.services.ssmmessages.AgentMessage;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;

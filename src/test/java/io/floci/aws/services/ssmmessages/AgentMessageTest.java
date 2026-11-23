@@ -1,4 +1,4 @@
-package io.floci.aws.services.ecs.exec;
+package io.floci.aws.services.ssmmessages;
 
 import io.floci.aws.core.common.Digests;
 import org.junit.jupiter.api.Test;
