@@ -11,17 +11,30 @@ import io.floci.aws.services.sagemaker.model.SageMakerEntities.EndpointResource;
 import io.floci.aws.services.sagemaker.model.SageMakerEntities.ModelResource;
 import io.floci.aws.services.sagemaker.model.SageMakerEntities.TrainingJobResource;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 class SageMakerServiceTest {
     private static final String DEFAULT_ACCOUNT = "000000000000";
@@ -359,6 +372,170 @@ class SageMakerServiceTest {
         assertTrue(fixture.service().updateTrainingJob(trainingJob("Completed")));
         assertEquals("Completed",
                 fixture.jobs().getForAccount(OTHER_ACCOUNT, "us-east-1::demo-job").orElseThrow().trainingJobStatus);
+    }
+
+    /**
+     * #5664: shutdown stops every endpoint's container, so after a restart an endpoint that was running or still
+     * starting goes back to Creating and starts again, written in its own account; a failed one stays as it is, and
+     * one a crash left deleting is deleted.
+     */
+    @Test
+    void restoringStartsEveryRunningOrStartingEndpointAgainInItsOwnAccount() {
+        InMemoryStorage<String, EndpointResource> raw = spy(new InMemoryStorage<String, EndpointResource>());
+        AccountAwareStorageBackend<EndpointResource> endpoints =
+                new AccountAwareStorageBackend<>(raw, null, DEFAULT_ACCOUNT);
+        SageMakerEndpointManager manager = mock(SageMakerEndpointManager.class);
+        SageMakerService service = restoringService(endpoints, manager);
+        EndpointResource running = endpoint("InService", "running");
+        running.containerId = "stopped-on-shutdown";
+        running.invokeHost = "172.17.0.9";
+        running.invokePort = 32768;
+        running.generation = 3;
+        // A record saved before endpoints carried their account: the account it is stored under owns it.
+        running.accountId = null;
+        EndpointResource starting = endpoint("Creating", "starting");
+        starting.accountId = DEFAULT_ACCOUNT;
+        EndpointResource failed = endpoint("Failed", "failed");
+        failed.failureReason = "Container did not pass /ping health check";
+        endpoints.putForAccount(OTHER_ACCOUNT, "us-east-1::running", running);
+        endpoints.putForAccount(DEFAULT_ACCOUNT, "us-east-1::starting", starting);
+        endpoints.putForAccount(OTHER_ACCOUNT, "us-east-1::failed", failed);
+        endpoints.putForAccount(OTHER_ACCOUNT, "us-east-1::deleting", endpoint("Deleting", "deleting"));
+        clearInvocations(raw);
+
+        service.restorePersistedRuntime();
+
+        EndpointResource restored = endpoints.getForAccount(OTHER_ACCOUNT, "us-east-1::running").orElseThrow();
+        assertEquals("Creating", restored.endpointStatus);
+        assertNull(restored.containerId);
+        assertNull(restored.invokeHost);
+        assertEquals(0, restored.invokePort);
+        assertEquals(4, restored.generation);
+        verify(raw).put(OTHER_ACCOUNT + "/us-east-1::running", restored);
+        assertEquals("Creating",
+                endpoints.getForAccount(DEFAULT_ACCOUNT, "us-east-1::starting").orElseThrow().endpointStatus);
+        verify(raw).put(eq(DEFAULT_ACCOUNT + "/us-east-1::starting"), any());
+        EndpointResource stillFailed = endpoints.getForAccount(OTHER_ACCOUNT, "us-east-1::failed").orElseThrow();
+        assertEquals("Failed", stillFailed.endpointStatus);
+        assertEquals("Container did not pass /ping health check", stillFailed.failureReason);
+        assertTrue(endpoints.getForAccount(OTHER_ACCOUNT, "us-east-1::deleting").isEmpty());
+
+        ArgumentCaptor<EndpointResource> started = ArgumentCaptor.forClass(EndpointResource.class);
+        verify(manager, times(2)).startEndpointAsync(started.capture(), eq(service));
+        assertEquals(Map.of("running", OTHER_ACCOUNT, "starting", DEFAULT_ACCOUNT), started.getAllValues().stream()
+                .collect(Collectors.toMap(endpoint -> endpoint.endpointName, endpoint -> endpoint.accountId)));
+        verify(manager).stopEndpoint(argThat(endpoint -> "deleting".equals(endpoint.endpointName)));
+    }
+
+    /** One endpoint that cannot be restored leaves the others to restore, and its failure is thrown at the end. */
+    @Test
+    void anEndpointThatCannotBeRestoredLeavesTheOthersToRestore() {
+        AccountAwareStorageBackend<EndpointResource> endpoints =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, DEFAULT_ACCOUNT);
+        SageMakerEndpointManager manager = mock(SageMakerEndpointManager.class);
+        SageMakerService service = restoringService(endpoints, manager);
+        endpoints.putForAccount(OTHER_ACCOUNT, "us-east-1::first", endpoint("InService", "first"));
+        endpoints.putForAccount(OTHER_ACCOUNT, "us-east-1::second", endpoint("InService", "second"));
+        IllegalStateException cause = new IllegalStateException("worker pool shut down");
+        doThrow(cause).when(manager)
+                .startEndpointAsync(argThat(endpoint -> "first".equals(endpoint.endpointName)), any());
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, service::restorePersistedRuntime);
+
+        assertEquals("Could not restore SageMaker endpoint first of account " + OTHER_ACCOUNT, thrown.getMessage());
+        assertSame(cause, thrown.getCause());
+        verify(manager).startEndpointAsync(argThat(endpoint -> "second".equals(endpoint.endpointName)), eq(service));
+    }
+
+    /**
+     * A start worker runs with a copy of the endpoint, so an UpdateEndpoint while a restored endpoint is starting
+     * supersedes the restore's start: its result is discarded, not published over the update.
+     */
+    @Test
+    void anUpdateSupersedesTheStartOfARestoredEndpoint() throws Exception {
+        AccountAwareStorageBackend<EndpointResource> endpoints =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, DEFAULT_ACCOUNT);
+        InMemoryStorage<String, EndpointConfigResource> configs = new InMemoryStorage<>();
+        configs.put("us-east-1::demo-cfg", endpointConfig("demo-cfg", "demo"));
+        SageMakerEndpointManager manager = mock(SageMakerEndpointManager.class);
+        SageMakerService service = new SageMakerService(new InMemoryStorage<String, ModelResource>(), configs,
+                endpoints, new InMemoryStorage<String, TrainingJobResource>(),
+                new RegionResolver("us-east-1", DEFAULT_ACCOUNT), mapper, manager, mock(SageMakerTrainingRunner.class));
+        EndpointResource stored = endpoint("InService");
+        stored.accountId = DEFAULT_ACCOUNT;
+        endpoints.putForAccount(DEFAULT_ACCOUNT, "us-east-1::demo-ep", stored);
+        service.restorePersistedRuntime();
+        ArgumentCaptor<EndpointResource> restoreRun = ArgumentCaptor.forClass(EndpointResource.class);
+        verify(manager).startEndpointAsync(restoreRun.capture(), eq(service));
+
+        service.updateEndpoint(mapper.readTree("""
+                {"EndpointName":"demo-ep","EndpointConfigName":"demo-cfg"}"""), "us-east-1");
+        restoreRun.getValue().endpointStatus = "InService";
+        restoreRun.getValue().invokeHost = "172.17.0.9";
+
+        assertFalse(service.finalizeEndpointStart(restoreRun.getValue()));
+        EndpointResource current = endpoints.getForAccount(DEFAULT_ACCOUNT, "us-east-1::demo-ep").orElseThrow();
+        assertEquals("Creating", current.endpointStatus);
+        assertNull(current.invokeHost);
+    }
+
+    /** A start publishes its own fields onto the stored endpoint, keeping what was written to it meanwhile. */
+    @Test
+    void aStartsResultKeepsTagsAddedWhileItRan() {
+        WorkerFixture fixture = workerFixture();
+        fixture.endpoints().getForAccount(OTHER_ACCOUNT, "us-east-1::demo-ep").orElseThrow().tags.put("team", "ml");
+        EndpointResource run = endpoint("InService");
+        run.invokeHost = "172.17.0.9";
+        run.invokePort = 32768;
+
+        assertTrue(fixture.service().finalizeEndpointStart(run));
+
+        EndpointResource current = fixture.endpoints().getForAccount(OTHER_ACCOUNT, "us-east-1::demo-ep").orElseThrow();
+        assertEquals("InService", current.endpointStatus);
+        assertEquals("172.17.0.9", current.invokeHost);
+        assertEquals(32768, current.invokePort);
+        assertEquals(Map.of("team", "ml"), current.tags);
+    }
+
+    /**
+     * A record from before stores were account-scoped is moved into the default account, not copied there: a second
+     * restart restores it once, and a deleting one is gone for good.
+     */
+    @Test
+    void aRecordFromBeforeAccountScopedStoresIsMovedNotCopied() {
+        InMemoryStorage<String, EndpointResource> raw = new InMemoryStorage<>();
+        AccountAwareStorageBackend<EndpointResource> endpoints =
+                new AccountAwareStorageBackend<>(raw, null, DEFAULT_ACCOUNT);
+        SageMakerEndpointManager manager = mock(SageMakerEndpointManager.class);
+        SageMakerService service = restoringService(endpoints, manager);
+        EndpointResource legacy = endpoint("InService", "legacy");
+        legacy.accountId = null;
+        raw.put("us-east-1::legacy", legacy);
+        EndpointResource gone = endpoint("Deleting", "gone");
+        gone.accountId = null;
+        raw.put("us-east-1::gone", gone);
+
+        service.restorePersistedRuntime();
+        service.restorePersistedRuntime();
+
+        assertEquals(Set.of(DEFAULT_ACCOUNT + "/us-east-1::legacy"), raw.keys());
+        verify(manager, times(2)).startEndpointAsync(argThat(endpoint -> "legacy".equals(endpoint.endpointName)),
+                eq(service));
+        assertEquals(3, endpoints.getForAccount(DEFAULT_ACCOUNT, "us-east-1::legacy").orElseThrow().generation);
+    }
+
+    private SageMakerService restoringService(AccountAwareStorageBackend<EndpointResource> endpoints,
+                                              SageMakerEndpointManager manager) {
+        return new SageMakerService(new InMemoryStorage<String, ModelResource>(),
+                new InMemoryStorage<String, EndpointConfigResource>(), endpoints,
+                new InMemoryStorage<String, TrainingJobResource>(), new RegionResolver("us-east-1", DEFAULT_ACCOUNT),
+                mapper, manager, mock(SageMakerTrainingRunner.class));
+    }
+
+    private static EndpointResource endpoint(String status, String name) {
+        EndpointResource endpoint = endpoint(status);
+        endpoint.endpointName = name;
+        return endpoint;
     }
 
     private record WorkerFixture(SageMakerService service,

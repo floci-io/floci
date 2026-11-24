@@ -11,6 +11,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.stream.Stream;
 
+import static io.floci.aws.services.ses.SesV1Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -21,9 +22,6 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesTemplateV1IntegrationTest {
-
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
 
     @Test
     @Order(1)
@@ -284,7 +282,7 @@ class SesTemplateV1IntegrationTest {
 
     @Test
     @Order(12)
-    void sendTemplatedEmail_withTemplateArn_resolvesStoredTemplate() {
+    void sendTemplatedEmail_withTemplateArnOnly_isModelViolation() {
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
@@ -318,8 +316,10 @@ class SesTemplateV1IntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(200)
-            .body(containsString("<MessageId>"));
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value at 'template' "
+                    + "failed to satisfy constraint: Member must not be null"));
     }
 
     @Test
@@ -350,12 +350,14 @@ class SesTemplateV1IntegrationTest {
             .formParam("Action", "SendTemplatedEmail")
             .formParam("Source", "v1-arn-sender@example.com")
             .formParam("Destination.ToAddresses.member.1", "to@example.com")
+            .formParam("Template", "v1-arn-welcome")
             .formParam("TemplateArn", "not-an-arn")
             .formParam("TemplateData", "{}")
         .when()
             .post("/")
         .then()
             .statusCode(400)
-            .body(containsString("<Code>InvalidParameterValue</Code>"));
+            .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
+            .body("ErrorResponse.Error.Message", equalTo("ARNs must start with 'arn:': not-an-arn"));
     }
 }

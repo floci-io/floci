@@ -23,6 +23,8 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -35,8 +37,6 @@ import static org.junit.jupiter.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesSimpleAttachmentsV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String SENDER = "attach-sender@example.com";
     private static final byte[] PDF_BYTES = "%PDF-1.4 fake report \u0000\u0001ÿ".getBytes(StandardCharsets.ISO_8859_1);
     private static final byte[] PNG_BYTES = {(byte) 0x89, 'P', 'N', 'G', 0, 1, 2, 3, (byte) 0xfe};
@@ -44,7 +44,7 @@ class SesSimpleAttachmentsV2IntegrationTest {
     @Test
     @Order(1)
     void createSender() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"EmailIdentity\": \"" + SENDER + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
     }
@@ -299,7 +299,7 @@ class SesSimpleAttachmentsV2IntegrationTest {
     }
 
     private static Response send(String body) {
-        return given().contentType("application/json").header("Authorization", AUTH)
+        return v2()
                 .body(body)
                 .when().post("/v2/email/outbound-emails");
     }

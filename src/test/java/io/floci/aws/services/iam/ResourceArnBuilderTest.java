@@ -7,6 +7,8 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.ProtocolClaim;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
+import io.floci.aws.core.common.RequestPathLabels;
+import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.WireProtocol;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -14,6 +16,11 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsStoredResourceArns;
 import io.floci.aws.services.cloudwatch.logs.model.Delivery;
+import io.floci.aws.services.configservice.AwsConfigService;
+import io.floci.aws.services.configservice.ConfigFixtures;
+import io.floci.aws.services.configservice.ConfigStoredResourceArns;
+import io.floci.aws.services.dynamodb.DynamoDbStoredResourceArns;
+import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess;
 import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.eks.EksStoredResourceArns;
 import io.floci.aws.services.iam.model.AccessKey;
@@ -23,11 +30,14 @@ import io.floci.aws.services.iam.model.IamUser;
 import io.floci.aws.services.iam.model.InstanceProfile;
 import io.floci.aws.services.iam.model.ServerCertificate;
 import io.floci.aws.services.kms.KmsService;
+import io.floci.aws.services.kms.KmsStoredResourceArns;
 import io.floci.aws.services.lambda.LambdaStoredResourceArns;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService;
+import io.floci.aws.services.s3.S3RequestPathLabels;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.SqsServiceFactory;
 import io.floci.aws.services.sqs.SqsStoredResourceArns;
+import io.floci.aws.testing.ParallelLocks;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.ext.web.RoutingContext;
@@ -40,6 +50,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -47,10 +58,12 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -70,6 +83,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class ResourceArnBuilderTest {
 
     private static final String ACCOUNT = "000000000000";
@@ -79,6 +93,8 @@ class ResourceArnBuilderTest {
     private UriInfo uriInfo;
     private MultivaluedMap<String, String> queryParams;
     private Map<String, Object> contextProperties;
+    /** The form {@link #setFormBody} last sent, whose {@code Action} or {@code Operation} is what IAM dispatches. */
+    private String sentForm;
 
     @ParameterizedTest
     @CsvSource({"aws,us-east-1", "aws-us-gov,us-gov-west-1", "aws-cn,cn-north-1"})
@@ -116,6 +132,7 @@ class ResourceArnBuilderTest {
 
     /** Query-protocol services carry their parameters in a form body, as IAM does. */
     private void setFormBody(String form) {
+        sentForm = form;
         contextProperties.clear();
         byte[] bytes = form.getBytes(StandardCharsets.UTF_8);
         ByteArrayInputStream in = new ByteArrayInputStream(bytes);
@@ -175,18 +192,21 @@ class ResourceArnBuilderTest {
         stored.setArn(arn);
         IamService service = mock(IamService.class);
         when(service.findServerCertificate(name)).thenReturn(Optional.of(stored));
-        @SuppressWarnings("unchecked")
-        Instance<IamService> instance = mock(Instance.class);
-        when(instance.get()).thenReturn(service);
-        return new ResourceArnBuilder(new ObjectMapper(), instance);
+        return backedBy(service);
     }
 
-    /** A builder reading {@code service}, for the actions that name a resource that exists. */
+    /**
+     * A builder reading {@code service} through IAM's stored ARNs, as the filter's does, for the actions that name a
+     * resource that exists.
+     */
     private static ResourceArnBuilder backedBy(IamService service) {
         @SuppressWarnings("unchecked")
         Instance<IamService> instance = mock(Instance.class);
         when(instance.get()).thenReturn(service);
-        return new ResourceArnBuilder(new ObjectMapper(), instance);
+        @SuppressWarnings("unchecked")
+        Instance<DelegationRequestOwnership> delegations = mock(Instance.class);
+        when(delegations.isUnsatisfied()).thenReturn(true);
+        return reading(new IamStoredResourceArns(delegations, instance, new RegionResolver("us-east-1", ACCOUNT)));
     }
 
     private static IamService storeHolding(String userName, String path, String arn) {
@@ -202,7 +222,28 @@ class ResourceArnBuilderTest {
     /** The ARN the builder gives for the request in {@code form}, with one resource expected. */
     private String resourceOf(ResourceArnBuilder resourceArnBuilder, String form) {
         setFormBody(form);
-        return resourceArnBuilder.build("iam", ctx, "us-east-1", ACCOUNT);
+        return iamResource(resourceArnBuilder, "us-east-1", ACCOUNT);
+    }
+
+    /** The first of {@link #iamResources}, as the filter's single resource. */
+    private String iamResource(ResourceArnBuilder resourceArnBuilder, String region, String account) {
+        return iamResources(resourceArnBuilder, region, account).getFirst();
+    }
+
+    /**
+     * The resources the builder gives the IAM request set up, in the request's partition, for the operation IAM
+     * dispatches it as: the form's {@code Action}, or its legacy {@code Operation}, or else the query's.
+     */
+    private List<String> iamResources(ResourceArnBuilder resourceArnBuilder, String region, String account) {
+        String action = queryParams.getFirst("Action");
+        for (String parameter : sentForm == null ? new String[0] : sentForm.split("&")) {
+            if (parameter.startsWith("Action=") || parameter.startsWith("Operation=")) {
+                action = parameter.substring(parameter.indexOf('=') + 1);
+                break;
+            }
+        }
+        return resourceArnBuilder.buildResources("iam", "iam:" + action, ctx, region, account,
+                AwsRegions.partitionFor(region));
     }
 
     /**
@@ -243,22 +284,19 @@ class ResourceArnBuilderTest {
     @Test
     void iamNamesTheDelegationRequestABlockOfActionsActsOn() {
         String id = "dr-0123456789abcdef01234567";
-        // The forward is in this block now. AWS's "Managing Permissions for Delegation Requests"
-        // lists iam:UpdateDelegationRequest among the permissions an administrator grants, as
-        // "Forward a delegation request to an administrator for approval", so it is authorizable
-        // and names the request its id names, where this suite used to pin it at the wildcard on
-        // the belief that AWS published no action for it.
+        // The forward is one of them: the Service Reference does not list it, and its API reference says "that owner
+        // gets a default permission to update the delegation request" its DelegationRequestId names.
         for (String action : List.of("AssociateDelegationRequest", "AcceptDelegationRequest",
-                "RejectDelegationRequest", "GetDelegationRequest", "UpdateDelegationRequest")) {
+                "RejectDelegationRequest", "GetDelegationRequest", "SendDelegationToken", "UpdateDelegationRequest")) {
             assertEquals("arn:aws:iam::000000000000:delegation-request/" + id,
                     resourceOf(builder, "Action=" + action + "&DelegationRequestId=" + id), action);
         }
     }
 
     @Test
-    void iamLeavesADelegationRequestItIsAboutToMintAtTheWildcard() {
-        // IAM assigns the id, so the create names no resource to authorize against.
-        assertEquals("*", resourceOf(builder,
+    void iamLeavesTheIdOfADelegationRequestItIsAboutToMintOpen() {
+        // IAM assigns the id, so the create is checked on a request of any id.
+        assertEquals("arn:aws:iam::000000000000:delegation-request/*", resourceOf(builder,
                 "Action=CreateDelegationRequest&Description=d&RequestorWorkflowId=w"));
     }
 
@@ -345,7 +383,7 @@ class ResourceArnBuilderTest {
     void iamMintsACreateInTheRequestsPartition() {
         setFormBody("Action=CreateUser&UserName=bob");
         assertEquals("arn:aws-cn:iam::000000000000:user/bob",
-                builder.build("iam", ctx, "cn-north-1", ACCOUNT));
+                iamResource(builder, "cn-north-1", ACCOUNT));
     }
 
     /**
@@ -380,17 +418,37 @@ class ResourceArnBuilderTest {
     }
 
     /**
-     * A SAML provider's ARN is its bare name and an OIDC provider's is its URL without the
-     * scheme, neither of which carries a path. Minting them the way the pathed types are minted
-     * would name resources that do not exist.
+     * {@code SimulatePrincipalPolicy} is checked on each user, role or group its request names by ARN, as the table
+     * reads every member holding an ARN of a type the action acts on: its {@code PolicySourceArn}, and a
+     * {@code CallerArn} or {@code ResourceArns} entry naming one too. A resource of another service there names nothing
+     * of IAM's, so a simulation of S3 objects is checked on its source principal alone.
      */
     @Test
-    void iamMintsProviderArnsWithoutAPath() {
+    void iamChecksASimulationOnEachPrincipalItsRequestNames() {
+        String alice = "arn:aws:iam::000000000000:user/alice";
+        String bob = "arn:aws:iam::000000000000:user/bob";
+        setFormBody("Action=SimulatePrincipalPolicy&ActionNames.member.1=s3%3AGetObject"
+                + "&PolicySourceArn=" + URLEncoder.encode(alice, StandardCharsets.UTF_8)
+                + "&ResourceArns.member.1=" + URLEncoder.encode(bob, StandardCharsets.UTF_8)
+                + "&ResourceArns.member.2=arn%3Aaws%3As3%3A%3A%3Abucket%2Fkey");
+        assertEquals(List.of(alice, bob), iamResources(builder, "us-east-1", ACCOUNT));
+        setFormBody("Action=SimulatePrincipalPolicy&ActionNames.member.1=s3%3AGetObject"
+                + "&PolicySourceArn=" + URLEncoder.encode(alice, StandardCharsets.UTF_8)
+                + "&ResourceArns.member.1=arn%3Aaws%3As3%3A%3A%3Abucket%2Fkey");
+        assertEquals(List.of(alice), iamResources(builder, "us-east-1", ACCOUNT));
+    }
+
+    /**
+     * A SAML provider's ARN is its bare name, which carries no path. An OIDC provider's is its URL without the scheme,
+     * which no source the table reads says of the request's {@code Url}, so that create names nothing and is checked
+     * on {@code *}.
+     */
+    @Test
+    void iamNamesASamlProviderByItsNameAndAnOidcCreateByNothing() {
         assertEquals("arn:aws:iam::000000000000:saml-provider/corp",
                 resourceOf(builder, "Action=CreateSAMLProvider&Name=corp"));
-        assertEquals("arn:aws:iam::000000000000:oidc-provider/example.com/app",
-                resourceOf(builder, "Action=CreateOpenIDConnectProvider"
-                        + "&Url=https%3A%2F%2Fexample.com%2Fapp"));
+        assertEquals("*", resourceOf(builder, "Action=CreateOpenIDConnectProvider"
+                + "&Url=https%3A%2F%2Fexample.com%2Fapp"));
     }
 
     /**
@@ -403,8 +461,7 @@ class ResourceArnBuilderTest {
         String userArn = "arn:aws:iam::000000000000:user/bob";
         setFormBody("Action=UpdateUser&UserName=bob&NewUserName=robert");
         assertEquals(List.of(userArn, "arn:aws:iam::000000000000:user/robert"),
-                backedBy(storeHolding("bob", "/", userArn))
-                        .buildResources("iam", ctx, "us-east-1", ACCOUNT));
+                iamResources(backedBy(storeHolding("bob", "/", userArn)), "us-east-1", ACCOUNT));
 
         String groupArn = "arn:aws:iam::000000000000:group/managers";
         IamGroup group = new IamGroup();
@@ -415,31 +472,17 @@ class ResourceArnBuilderTest {
         when(store.findGroup(ACCOUNT, "managers")).thenReturn(Optional.of(group));
         setFormBody("Action=UpdateGroup&GroupName=managers&NewGroupName=mgrs");
         assertEquals(List.of(groupArn, "arn:aws:iam::000000000000:group/mgrs"),
-                backedBy(store).buildResources("iam", ctx, "us-east-1", ACCOUNT));
+                iamResources(backedBy(store), "us-east-1", ACCOUNT));
     }
 
     /**
-     * {@code CreateServiceLinkedRole} does not name the role it creates. AWS derives it from
-     * {@code AWSServiceName}, so the same table the create reads gives the name, and the role
-     * sits under the service-role path carrying the canonical principal.
+     * {@code CreateServiceLinkedRole} does not name the role it creates: AWS derives it from {@code AWSServiceName},
+     * which no source the table reads says, so the create is checked on a role with its path and name open.
      */
     @Test
-    void iamNamesTheRoleAServiceLinkedCreateWouldMint() {
-        assertEquals("arn:aws:iam::000000000000:role/aws-service-role/autoscaling.amazonaws.com/"
-                        + "AWSServiceRoleForAutoScaling",
-                resourceOf(builder, "Action=CreateServiceLinkedRole"
-                        + "&AWSServiceName=autoscaling.amazonaws.com"));
-        // A suffix is part of the name AWS mints, so it is part of the resource too.
-        assertEquals("arn:aws:iam::000000000000:role/aws-service-role/autoscaling.amazonaws.com/"
-                        + "AWSServiceRoleForAutoScaling_fleet",
-                resourceOf(builder, "Action=CreateServiceLinkedRole"
-                        + "&AWSServiceName=autoscaling.amazonaws.com&CustomSuffix=fleet"));
-        // A principal the table does not carry keeps the derived name, which is what the create
-        // mints for it: the two read the same table, so the check cannot name a different role.
-        assertEquals("arn:aws:iam::000000000000:role/aws-service-role/es.amazonaws.com/"
-                        + "AWSServiceRoleForEs",
-                resourceOf(builder,
-                        "Action=CreateServiceLinkedRole&AWSServiceName=es.amazonaws.com"));
+    void iamChecksAServiceLinkedCreateOnAnyRole() {
+        assertEquals("arn:aws:iam::000000000000:role/*", resourceOf(builder, "Action=CreateServiceLinkedRole"
+                + "&AWSServiceName=autoscaling.amazonaws.com&CustomSuffix=fleet"));
     }
 
     /**
@@ -479,7 +522,7 @@ class ResourceArnBuilderTest {
         iam.createUser("worker", "/");
 
         setFormBody("Action=GetAccessKeyLastUsed&AccessKeyId=AKIALEGACYEXAMPLE");
-        assertEquals(List.of("*"), backedBy(iam).buildResources("iam", ctx, "us-east-1", stranger));
+        assertEquals(List.of("*"), iamResources(backedBy(iam), "us-east-1", stranger));
         assertTrue(raw.get("AKIALEGACYEXAMPLE").isPresent(), "the lookup must leave the key unmoved");
         assertTrue(raw.get(stranger + "/AKIALEGACYEXAMPLE").isEmpty(), "the lookup must not copy the key");
     }
@@ -495,9 +538,8 @@ class ResourceArnBuilderTest {
     }
 
     /**
-     * An action whose resource the request does not name stays at {@code *}: the ones the
-     * reference gives no resource type, and the ones that default to the calling user, whose
-     * identity is the filter's to supply rather than this builder's.
+     * An action whose resource the request does not name stays at {@code *}: the ones the reference gives no resource
+     * type, and the ones acting on the user who signs them, with no stored ARNs to give that user.
      */
     @Test
     void iamFallsBackToTheWildcardWhenTheRequestNamesNoResource() {
@@ -509,22 +551,53 @@ class ResourceArnBuilderTest {
     }
 
     /**
-     * The deletion task identifier carries the role's path and name, in the format the action's
-     * reference publishes, which is the only thing left to name: the role itself is already gone
-     * by the time the status is asked for.
+     * The role a deletion task deleted, which IAM gives for the task it holds: the role itself is already gone by the
+     * time the status is asked for. A task IAM does not hold names nothing rather than half a resource.
      */
     @Test
     void iamNamesTheRoleADeletionTaskIdentifies() {
-        assertEquals("arn:aws:iam::000000000000:role/aws-service-role/lex.amazonaws.com/"
-                        + "AWSServiceRoleForLexBots",
-                resourceOf(builder, "Action=GetServiceLinkedRoleDeletionStatus&DeletionTaskId="
-                        + "task%2Faws-service-role%2Flex.amazonaws.com"
-                        + "%2FAWSServiceRoleForLexBots%2F12345678-1234-1234-1234-123456789012"));
-        // A malformed identifier names nothing rather than half a resource.
-        for (String taskId : List.of("task%2Faws-service-role%2F", "nonsense", "task%2Fother%2Fx")) {
-            assertEquals("*", resourceOf(builder,
-                    "Action=GetServiceLinkedRoleDeletionStatus&DeletionTaskId=" + taskId), taskId);
-        }
+        String task = "task/aws-service-role/lex.amazonaws.com/AWSServiceRoleForLexBots/"
+                + "12345678-1234-1234-1234-123456789012";
+        String role = "arn:aws:iam::000000000000:role/aws-service-role/lex.amazonaws.com/AWSServiceRoleForLexBots";
+        IamService store = mock(IamService.class);
+        when(store.findServiceLinkedRoleDeletionArn(task)).thenReturn(Optional.of(role));
+        when(store.findServiceLinkedRoleDeletionArn("nonsense")).thenReturn(Optional.empty());
+        assertEquals(role, resourceOf(backedBy(store), "Action=GetServiceLinkedRoleDeletionStatus&DeletionTaskId="
+                + URLEncoder.encode(task, StandardCharsets.UTF_8)));
+        assertEquals("*", resourceOf(backedBy(store),
+                "Action=GetServiceLinkedRoleDeletionStatus&DeletionTaskId=nonsense"));
+    }
+
+    /**
+     * An operation acting on the user who signs it when its request names none, as {@code GetUser} with no
+     * {@code UserName} and {@code ChangePassword} always do, is checked on that user's stored ARN, path included, or on
+     * the account root's for a key of the root; a role session's key names no user, and its {@code UserName}, given,
+     * names the user it gives.
+     */
+    @Test
+    void iamNamesTheUserWhoSignsARequestNamingNone() {
+        String bob = "arn:aws:iam::000000000000:user/team/bob";
+        IamService store = storeHolding("bob", "/team/", bob);
+        when(store.findUserNameByAccessKeyId("AKIABOB")).thenReturn(Optional.of("bob"));
+        when(store.resolveCallerArn("AKIAROOT")).thenReturn(Optional.of("arn:aws:iam::000000000000:root"));
+        when(store.resolveCallerArn("ASIASESSION"))
+                .thenReturn(Optional.of("arn:aws:sts::000000000000:assumed-role/app/s"));
+        ResourceArnBuilder stored = backedBy(store);
+        when(ctx.getHeaderString("Authorization")).thenReturn(signedBy("AKIABOB"));
+        assertEquals(bob, resourceOf(stored, "Action=GetUser"));
+        assertEquals(bob, resourceOf(stored, "Action=ChangePassword&OldPassword=a&NewPassword=b"));
+        assertEquals(bob, resourceOf(stored, "Action=ListAccessKeys"));
+        assertEquals("arn:aws:iam::000000000000:user/alice", resourceOf(stored, "Action=GetUser&UserName=alice"));
+        when(ctx.getHeaderString("Authorization")).thenReturn(signedBy("AKIAROOT"));
+        assertEquals("arn:aws:iam::000000000000:root", resourceOf(stored, "Action=GetUser"));
+        when(ctx.getHeaderString("Authorization")).thenReturn(signedBy("ASIASESSION"));
+        assertEquals("*", resourceOf(stored, "Action=GetUser"));
+    }
+
+    /** A SigV4 {@code Authorization} header signed with {@code accessKeyId}. */
+    private static String signedBy(String accessKeyId) {
+        return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20261123/us-east-1/iam/aws4_request, "
+                + "SignedHeaders=host, Signature=0";
     }
 
     /**
@@ -567,7 +640,7 @@ class ResourceArnBuilderTest {
     void iamNamesTheServerCertificateBeingActedOn() {
         String arn = "arn:aws:iam::000000000000:server-certificate/my-cert";
         setFormBody("Action=DeleteServerCertificate&ServerCertificateName=my-cert");
-        assertEquals(arn, backedBy("my-cert", arn).build("iam", ctx, "us-east-1", "000000000000"));
+        assertEquals(arn, iamResource(backedBy("my-cert", arn), "us-east-1", "000000000000"));
     }
 
     @Test
@@ -578,11 +651,11 @@ class ResourceArnBuilderTest {
                 "DeleteServerCertificate", "TagServerCertificate", "UntagServerCertificate",
                 "ListServerCertificateTags")) {
             setFormBody("Action=" + action + "&ServerCertificateName=c1");
-            assertEquals(arn, stored.build("iam", ctx, "us-east-1", "000000000000"), action);
+            assertEquals(arn, iamResource(stored, "us-east-1", "000000000000"), action);
         }
         // The upload is the one that mints rather than reads: nothing is stored yet.
         setFormBody("Action=UploadServerCertificate&ServerCertificateName=c1");
-        assertEquals(arn, builder.build("iam", ctx, "us-east-1", "000000000000"));
+        assertEquals(arn, iamResource(builder, "us-east-1", "000000000000"));
     }
 
     /**
@@ -609,7 +682,7 @@ class ResourceArnBuilderTest {
                     for (String region : List.of("us-east-1", "cn-north-1", "us-gov-west-1")) {
                         setFormBody(spelling + "=" + action + "&ServerCertificateName=c1");
                         assertEquals(storedArn,
-                                stored.build("iam", ctx, region, "000000000000"),
+                                iamResource(stored, region, "000000000000"),
                                 action + " named by " + spelling + ", signed in " + region);
                     }
                 }
@@ -629,7 +702,7 @@ class ResourceArnBuilderTest {
                 + "&NewServerCertificateName=new");
         assertEquals(
                 List.of(stored, "arn:aws:iam::000000000000:server-certificate/new"),
-                backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+                iamResources(backedBy("old", stored), "us-east-1", "000000000000"));
     }
 
     /** A move renames the path, so the destination path is named the same way. */
@@ -639,7 +712,7 @@ class ResourceArnBuilderTest {
         setFormBody("Action=UpdateServerCertificate&ServerCertificateName=old&NewPath=/team/");
         assertEquals(
                 List.of(stored, "arn:aws:iam::000000000000:server-certificate/team/old"),
-                backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+                iamResources(backedBy("old", stored), "us-east-1", "000000000000"));
     }
 
     /**
@@ -651,7 +724,7 @@ class ResourceArnBuilderTest {
         String stored = "arn:aws:iam::000000000000:server-certificate/old";
         setFormBody("Action=UpdateServerCertificate&ServerCertificateName=old");
         assertEquals(List.of(stored),
-                backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+                iamResources(backedBy("old", stored), "us-east-1", "000000000000"));
     }
 
     /**
@@ -666,16 +739,16 @@ class ResourceArnBuilderTest {
                 + "&NewServerCertificateName=new");
         assertEquals(
                 List.of(stored, "arn:aws-cn:iam::000000000000:server-certificate/new"),
-                backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+                iamResources(backedBy("old", stored), "us-east-1", "000000000000"));
     }
 
     @Test
     void missingGetRoleUsesItsNameButCannotAcceptAnInjectedPath() {
         setFormBody("Action=GetRole&RoleName=local-storage&Path=/injected/");
         assertEquals("arn:aws:iam::000000000000:role/local-storage",
-                builder.build("iam", ctx, "us-east-1", ACCOUNT));
+                iamResource(builder, "us-east-1", ACCOUNT));
         assertEquals("arn:aws-us-gov:iam::000000000000:role/local-storage",
-                builder.build("iam", ctx, "us-gov-west-1", ACCOUNT));
+                iamResource(builder, "us-gov-west-1", ACCOUNT));
     }
 
     @Test
@@ -759,14 +832,14 @@ class ResourceArnBuilderTest {
         queryParams.add("RoleName", "query-decoy");
         setFormBody("Operation=GetRole&RoleName=first&RoleName=duplicate&Path=/injected/");
         assertEquals("arn:aws:iam::111122223333:role/first",
-                builder.build("iam", ctx, "us-east-1", "111122223333"));
+                iamResource(builder, "us-east-1", "111122223333"));
         for (String action : List.of("DeleteRole", "ListRolePolicies", "TagRole", "UpdateRole")) {
             setFormBody("Action=" + action + "&RoleName=first&Path=/injected/");
             assertEquals("arn:aws:iam::" + ACCOUNT + ":role/first",
-                    builder.build("iam", ctx, "us-east-1", ACCOUNT), action);
+                    iamResource(builder, "us-east-1", ACCOUNT), action);
         }
         setFormBody("Action=GetRole");
-        assertEquals("*", builder.build("iam", ctx, "us-east-1", ACCOUNT));
+        assertEquals("*", iamResource(builder, "us-east-1", ACCOUNT));
     }
 
     @Test
@@ -778,7 +851,7 @@ class ResourceArnBuilderTest {
         queryParams.add("RoleName", "first");
         queryParams.add("RoleName", "duplicate");
         queryParams.add("Path", "/injected/");
-        assertEquals("arn:aws:iam::000000000000:role/first", builder.build("iam", ctx, "us-east-1", ACCOUNT));
+        assertEquals("arn:aws:iam::000000000000:role/first", iamResource(builder, "us-east-1", ACCOUNT));
         queryParams.clear();
         queryParams.add("Action", "CreateTags");
         queryParams.add("ResourceId.1", "i-first");
@@ -789,15 +862,13 @@ class ResourceArnBuilderTest {
                 builder.buildResources("ec2", "ec2:CreateTags", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
-    /**
-     * Nothing stored under that name means nothing to name: the operation fails as NoSuchEntity
-     * regardless, and minting an ARN for an absent resource would hand a policy something to match.
-     */
+    /** A certificate IAM does not hold is named as its name alone names it, under the root path. */
     @Test
-    void iamFallsBackToTheWildcardWhenNoCertificateIsStored() {
+    void iamNamesACertificateItDoesNotHoldUnderTheRootPath() {
         setFormBody("Action=DeleteServerCertificate&ServerCertificateName=absent");
-        assertEquals("*", backedBy("other", "arn:aws:iam::000000000000:server-certificate/other")
-                .build("iam", ctx, "us-east-1", "000000000000"));
+        assertEquals("arn:aws:iam::000000000000:server-certificate/absent",
+                iamResource(backedBy("other", "arn:aws:iam::000000000000:server-certificate/other"), "us-east-1",
+                        "000000000000"));
     }
 
     /**
@@ -809,17 +880,17 @@ class ResourceArnBuilderTest {
     void iamTakesTheUploadPathFromTheRequest() {
         setFormBody("Action=UploadServerCertificate&ServerCertificateName=c1&Path=/team/");
         assertEquals("arn:aws:iam::000000000000:server-certificate/team/c1",
-                builder.build("iam", ctx, "us-east-1", "000000000000"));
+                iamResource(builder, "us-east-1", "000000000000"));
 
         // Written without surrounding slashes, it still lands as a path segment.
         setFormBody("Action=UploadServerCertificate&ServerCertificateName=c1&Path=team");
         assertEquals("arn:aws:iam::000000000000:server-certificate/team/c1",
-                builder.build("iam", ctx, "us-east-1", "000000000000"));
+                iamResource(builder, "us-east-1", "000000000000"));
 
         // Omitted, it is the root path.
         setFormBody("Action=UploadServerCertificate&ServerCertificateName=c1");
         assertEquals("arn:aws:iam::000000000000:server-certificate/c1",
-                builder.build("iam", ctx, "us-east-1", "000000000000"));
+                iamResource(builder, "us-east-1", "000000000000"));
     }
 
     /**
@@ -830,11 +901,11 @@ class ResourceArnBuilderTest {
     void iamMintsAnUploadedCertificateArnInTheRequestPartition() {
         setFormBody("Action=UploadServerCertificate&ServerCertificateName=my-cert");
         assertEquals("arn:aws-cn:iam::000000000000:server-certificate/my-cert",
-                builder.build("iam", ctx, "cn-north-1", "000000000000"));
+                iamResource(builder, "cn-north-1", "000000000000"));
 
         setFormBody("Action=UploadServerCertificate&ServerCertificateName=my-cert");
         assertEquals("arn:aws-us-gov:iam::000000000000:server-certificate/my-cert",
-                builder.build("iam", ctx, "us-gov-west-1", "000000000000"));
+                iamResource(builder, "us-gov-west-1", "000000000000"));
     }
 
     /**
@@ -848,26 +919,20 @@ class ResourceArnBuilderTest {
         ResourceArnBuilder stored = backedBy("my-cert", arn);
 
         setFormBody("Action=DeleteServerCertificate&ServerCertificateName=my-cert");
-        assertEquals(arn, stored.build("iam", ctx, "cn-north-1", "000000000000"));
+        assertEquals(arn, iamResource(stored, "cn-north-1", "000000000000"));
 
         setFormBody("Action=DeleteServerCertificate&ServerCertificateName=my-cert");
-        assertEquals(arn, stored.build("iam", ctx, "us-gov-west-1", "000000000000"));
+        assertEquals(arn, iamResource(stored, "us-gov-west-1", "000000000000"));
     }
 
-    /**
-     * ListServerCertificates names no certificate, and every other IAM action is still unmapped,
-     * so both resolve to the wildcard rather than to a fabricated ARN.
-     */
+    /** ListServerCertificates names no certificate, nor does a delete leaving its name out: both are on {@code *}. */
     @Test
     void iamFallsBackToTheWildcardWhenNoCertificateIsNamed() {
         setFormBody("Action=ListServerCertificates&PathPrefix=/team/");
-        assertEquals("*", builder.build("iam", ctx, "us-east-1", "000000000000"));
-
-        setFormBody("Action=DeleteUser&UserName=bob");
-        assertEquals("*", builder.build("iam", ctx, "us-east-1", "000000000000"));
+        assertEquals("*", iamResource(builder, "us-east-1", "000000000000"));
 
         setFormBody("Action=DeleteServerCertificate");
-        assertEquals("*", builder.build("iam", ctx, "us-east-1", "000000000000"));
+        assertEquals("*", iamResource(builder, "us-east-1", "000000000000"));
     }
 
     private void setJsonBody(String json) {
@@ -906,54 +971,66 @@ class ResourceArnBuilderTest {
                 "us-east-1", ACCOUNT, "aws"));
     }
 
+    /** A stream call is checked on the stream its group and stream names name, read raw, in the request's partition. */
     @Test
-    void logStreamTargetsUseTheServingActionAndRequestPartition() {
-        for (String action : List.of("logs:CreateLogStream", "logs:DeleteLogStream")) {
+    void logStreamTargetsAreTheStreamTheRequestNamesFromTheTable() {
+        for (String action : List.of("logs:CreateLogStream", "logs:DeleteLogStream", "logs:PutLogEvents")) {
             for (String region : List.of("us-east-1", "cn-north-1", "us-gov-west-1")) {
+                String partition = AwsRegions.partitionFor(region);
                 setJsonBody("{\"logGroupName\":\" /group \",\"logStreamName\":42}");
-                when(ctx.getHeaderString("X-Amz-Target")).thenReturn("Logs_20140328.DeleteLogGroup");
-                assertEquals(List.of("arn:" + AwsRegions.partitionFor(region)
-                                + ":logs:" + region + ":123456789012:log-group: /group :log-stream:42"),
-                        builder.buildLogResources(action, ctx, region, "123456789012", AwsRegions.partitionFor(region)));
+                assertEquals(List.of("arn:" + partition + ":logs:" + region + ":" + ACCOUNT
+                                + ":log-group: /group :log-stream:42"),
+                        builder.buildResources("logs", action, ctx, region, ACCOUNT, partition));
             }
         }
     }
 
+    /**
+     * A group call is checked on the group its name names, as the Service Reference formats a log group, with no
+     * trailing {@code :*}; the evaluator matches a policy naming the group with one for the group's own management
+     * actions ({@code LogGroupArnPolicyCompatibilityTest}).
+     */
     @Test
-    void logGroupTargetsUseTheServingActionAndRequestPartition() {
+    void logGroupTargetsAreTheGroupTheRequestNamesFromTheTable() {
         for (String action : List.of("logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy",
-                "logs:DeleteRetentionPolicy")) {
+                "logs:DeleteRetentionPolicy", "logs:TagLogGroup", "logs:FilterLogEvents", "logs:DescribeLogStreams",
+                "logs:PutMetricFilter", "logs:StartQuery")) {
             for (String region : List.of("us-east-1", "cn-north-1", "us-gov-west-1")) {
+                String partition = AwsRegions.partitionFor(region);
                 setJsonBody("{\"logGroupName\":42}");
-                when(ctx.getHeaderString("X-Amz-Target")).thenReturn("Logs_20140328.DeleteLogStream");
-                assertEquals(List.of("arn:" + AwsRegions.partitionFor(region)
-                                + ":logs:" + region + ":123456789012:log-group:42:*"),
-                        builder.buildLogResources(action, ctx, region, "123456789012", AwsRegions.partitionFor(region)));
+                assertEquals(List.of("arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":log-group:42"),
+                        builder.buildResources("logs", action, ctx, region, ACCOUNT, partition));
             }
         }
+        // A request naming no group names nothing the table reads.
+        setJsonBody("{}");
+        assertEquals(List.of("*"), builder.buildResources("logs", "logs:FilterLogEvents", ctx, "us-east-1", ACCOUNT,
+                "aws"));
+    }
+
+    /** A subscription filter is checked on its group, and on its destination when that is a Logs destination. */
+    @Test
+    void subscriptionFilterTargetsAreItsGroupAndALogsDestination() {
+        String prefix = "arn:aws:logs:us-east-1:" + ACCOUNT + ":";
+        setJsonBody("{\"logGroupName\":\"app\",\"destinationArn\":\"arn:aws:lambda:us-east-1:" + ACCOUNT
+                + ":function:ship\"}");
+        assertEquals(List.of(prefix + "log-group:app"),
+                builder.buildResources("logs", "logs:PutSubscriptionFilter", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"logGroupName\":\"app\",\"destinationArn\":\"" + prefix + "destination:central\"}");
+        assertEquals(List.of(prefix + "destination:central", prefix + "log-group:app"),
+                builder.buildResources("logs", "logs:PutSubscriptionFilter", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     @Test
-    void directLogTagTargetsUseBareArnAndServingAction() {
+    void logTagTargetsAreTheArnTheRequestCarries() {
         for (String action : List.of("logs:TagResource", "logs:UntagResource", "logs:ListTagsForResource")) {
             for (String region : List.of("us-east-1", "cn-north-1", "us-gov-west-1", "custom-region-1")) {
                 String partition = AwsRegions.partitionFor(region);
-                String arn = "arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":log-group:group";
-                setJsonBody("{\"resourceArn\":\"" + arn + "\"}");
-                when(ctx.getHeaderString("X-Amz-Target")).thenReturn("Logs_20140328.DeleteLogGroup");
-                assertEquals(List.of(arn), builder.buildLogResources(action, ctx, region, ACCOUNT, partition));
-            }
-        }
-    }
-
-    @Test
-    void destinationTagTargetsUseDestinationArn() {
-        for (String action : List.of("logs:TagResource", "logs:UntagResource", "logs:ListTagsForResource")) {
-            for (String region : List.of("us-east-1", "cn-north-1", "us-gov-west-1")) {
-                String partition = AwsRegions.partitionFor(region);
-                String arn = "arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":destination:central";
-                setJsonBody("{\"resourceArn\":\"" + arn + "\"}");
-                assertEquals(List.of(arn), builder.buildLogResources(action, ctx, region, ACCOUNT, partition));
+                for (String resource : List.of("log-group:group", "destination:central")) {
+                    String arn = "arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":" + resource;
+                    setJsonBody("{\"resourceArn\":\"" + arn + "\"}");
+                    assertEquals(List.of(arn), builder.buildResources("logs", action, ctx, region, ACCOUNT, partition));
+                }
             }
         }
     }
@@ -963,15 +1040,16 @@ class ResourceArnBuilderTest {
     void putDestinationTargetsTheDestinationItNames(String partition, String region) {
         setJsonBody("{\"destinationName\":\"central\"}");
         assertEquals(List.of("arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":destination:central"),
-                builder.buildLogResources("logs:PutDestination", ctx, region, ACCOUNT, partition));
+                builder.buildResources("logs", "logs:PutDestination", ctx, region, ACCOUNT, partition));
         String targetArn = "arn:" + partition + ":kinesis:" + region + ":" + ACCOUNT + ":stream/central";
         String roleArn = "arn:" + partition + ":iam::" + ACCOUNT + ":role/logs-delivery";
         setJsonBody("{\"destinationName\":\"central\",\"targetArn\":\"" + targetArn
                 + "\",\"roleArn\":\"" + roleArn + "\"}");
         assertEquals(List.of("arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":destination:central"),
-                builder.buildLogResources("logs:PutDestination", ctx, region, ACCOUNT, partition));
+                builder.buildResources("logs", "logs:PutDestination", ctx, region, ACCOUNT, partition));
         setJsonBody("{}");
-        assertEquals(List.of("*"), builder.buildLogResources("logs:PutDestination", ctx, region, ACCOUNT, partition));
+        assertEquals(List.of("*"),
+                builder.buildResources("logs", "logs:PutDestination", ctx, region, ACCOUNT, partition));
     }
 
     @Test
@@ -987,51 +1065,43 @@ class ResourceArnBuilderTest {
                 .thenThrow(new AwsException("ResourceNotFoundException", "Delivery not found", 400));
         when(deliveries.destinationArnsFrom("bus-source", "us-east-1"))
                 .thenReturn(List.of(prefix + "delivery-destination:bus-logs"));
-        ResourceArnBuilder builder = reading(new CloudWatchLogsStoredResourceArns(deliveries));
+        ResourceArnBuilder builder = reading(new CloudWatchLogsStoredResourceArns(null, null, deliveries, null));
         for (String action : List.of("logs:PutDeliverySource", "logs:GetDeliverySource")) {
             setJsonBody("{\"name\":\"bus-source\"}");
             assertEquals(List.of(prefix + "delivery-source:bus-source"),
-                    builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+                    builder.buildResources("logs", action, ctx, "us-east-1", ACCOUNT, "aws"));
         }
         setJsonBody("{\"name\":\"bus-source\"}");
         assertEquals(List.of(prefix + "delivery-destination:bus-logs"),
-                builder.buildLogResources("logs:DeleteDeliverySource", ctx, "us-east-1", ACCOUNT, "aws"));
+                builder.buildResources("logs", "logs:DeleteDeliverySource", ctx, "us-east-1", ACCOUNT, "aws"));
         // A source with no deliveries reaches no destination, so the request names none of its resource type.
         setJsonBody("{\"name\":\"idle-source\"}");
-        assertEquals(List.of("*"), builder.buildLogResources("logs:DeleteDeliverySource", ctx, "us-east-1", ACCOUNT,
-                "aws"));
+        assertEquals(List.of("*"),
+                builder.buildResources("logs", "logs:DeleteDeliverySource", ctx, "us-east-1", ACCOUNT, "aws"));
         for (String action : List.of("logs:PutDeliveryDestination", "logs:GetDeliveryDestination",
                 "logs:DeleteDeliveryDestination")) {
             setJsonBody("{\"name\":\"bus-logs\"}");
             assertEquals(List.of(prefix + "delivery-destination:bus-logs"),
-                    builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+                    builder.buildResources("logs", action, ctx, "us-east-1", ACCOUNT, "aws"));
         }
         for (String action : List.of("logs:GetDelivery", "logs:DeleteDelivery", "logs:UpdateDeliveryConfiguration")) {
             setJsonBody("{\"id\":\"AbCdEfGh12345678\"}");
             assertEquals(List.of(prefix + "delivery:AbCdEfGh12345678"),
-                    builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+                    builder.buildResources("logs", action, ctx, "us-east-1", ACCOUNT, "aws"));
             // One it holds none of has its id open.
             setJsonBody("{\"id\":\"gone\"}");
             assertEquals(List.of(prefix + "delivery:*"),
-                    builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+                    builder.buildResources("logs", action, ctx, "us-east-1", ACCOUNT, "aws"));
         }
         setJsonBody("{\"deliverySourceName\":\"bus-source\",\"deliveryDestinationArn\":\""
                 + prefix + "delivery-destination:bus-logs\"}");
         assertEquals(List.of(prefix + "delivery-destination:bus-logs", prefix + "delivery:*",
                         prefix + "delivery-source:bus-source"),
-                builder.buildLogResources("logs:CreateDelivery", ctx, "us-east-1", ACCOUNT, "aws"));
+                builder.buildResources("logs", "logs:CreateDelivery", ctx, "us-east-1", ACCOUNT, "aws"));
         for (String action : List.of("logs:DescribeDeliverySources", "logs:DescribeDeliveryDestinations",
                 "logs:DescribeDeliveries")) {
             setJsonBody("{}");
-            assertEquals(List.of("*"), builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
-        }
-    }
-
-    @Test
-    void excludedLogsActionsKeepWildcardResources() {
-        for (String action : List.of("logs:PutLogEvents")) {
-            setJsonBody("{\"logGroupName\":\"group\",\"logStreamName\":\"stream\"}");
-            assertEquals(List.of("*"), builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+            assertEquals(List.of("*"), builder.buildResources("logs", action, ctx, "us-east-1", ACCOUNT, "aws"));
         }
     }
 
@@ -1126,183 +1196,148 @@ class ResourceArnBuilderTest {
                         ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
+    private static final String DDB = "arn:aws:dynamodb:us-east-1:000000000000:table/";
+
+    /** The resources a DynamoDB request is checked on, as the table reads {@code operation}. */
+    private List<String> dynamoDb(String operation) {
+        return builder.buildResources("dynamodb", "dynamodb:" + operation, ctx, "us-east-1", ACCOUNT, "aws");
+    }
+
+    /** The checks of a DynamoDB request checked by its parts, each statement parsed as DynamoDB parses it. */
+    private List<RequestResources.Target> dynamoDbTargets(String operation) {
+        return reading(new DynamoDbStoredResourceArns(mock(DynamoDbTableAccess.class)))
+                .targets("dynamodb", "dynamodb:" + operation, ctx, "us-east-1", ACCOUNT, "aws");
+    }
+
     @Test
-    void dynamoDbBuildsArnFromShortTableName() {
+    void dynamoDbChecksTheTableItsRequestNames() {
         setJsonBody("{\"TableName\":\"FgacTable\"}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable", arn);
+        assertEquals(List.of(DDB + "FgacTable"), dynamoDb("GetItem"));
+        // A bare name that merely looks ARN-ish is still a name, not an ARN.
+        setJsonBody("{\"TableName\":\"arn:aws:dynamodb:us-east-1\"}");
+        assertEquals(List.of(DDB + "arn:aws:dynamodb:us-east-1"), dynamoDb("GetItem"));
+        setJsonBody("{\"TableName\":\"" + DDB + "FgacTable\"}");
+        assertEquals(List.of(DDB + "FgacTable"), dynamoDb("GetItem"));
+        setJsonBody("{\"TableCreationParameters\":{\"TableName\":\"ImportTarget\"},\"InputFormat\":\"DYNAMODB_JSON\"}");
+        assertEquals(List.of(DDB + "ImportTarget"), dynamoDb("ImportTable"));
+        setJsonBody("{}");
+        assertEquals(List.of("*"), dynamoDb("GetItem"));
     }
 
     /**
-     * Pass-through used to be a {@code startsWith("arn:aws:dynamodb:")} probe, so a table ARN from
-     * any other partition was not recognised as an ARN at all and got rebuilt as
-     * {@code table/arn:aws-cn:dynamodb:...}, a resource name that matches no policy.
+     * A table ARN of any partition is checked as given, and as the caller's table of that name, which DynamoDB acts on:
+     * a {@code startsWith("arn:aws:dynamodb:")} probe once rebuilt another partition's ARN as {@code table/arn:...}.
      */
     @Test
-    void dynamoDbReturnsExactArnForAnyPartition() {
-        for (String fullArn : List.of(
-                "arn:aws-us-gov:dynamodb:us-gov-west-1:000000000000:table/FgacTable",
+    void dynamoDbChecksATableArnOfAnyPartitionAsGiven() {
+        for (String fullArn : List.of("arn:aws-us-gov:dynamodb:us-gov-west-1:000000000000:table/FgacTable",
                 "arn:aws-cn:dynamodb:cn-north-1:000000000000:table/FgacTable")) {
             setJsonBody("{\"TableName\":\"" + fullArn + "\"}");
-            assertEquals(fullArn, builder.build("dynamodb", ctx, "us-east-1", "000000000000"));
+            List<String> checked = dynamoDb("GetItem");
+            assertEquals(fullArn, checked.getFirst());
+            assertTrue(checked.contains(DDB + "FgacTable"), checked.toString());
         }
     }
 
-    /** A bare name that merely looks ARN-ish is still a name, not an ARN. */
     @Test
-    void dynamoDbTreatsAnIncompleteArnAsATableName() {
-        setJsonBody("{\"TableName\":\"arn:aws:dynamodb:us-east-1\"}");
-        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/arn:aws:dynamodb:us-east-1",
-                builder.build("dynamodb", ctx, "us-east-1", "000000000000"));
+    void dynamoDbChecksTheResourceAnArnMemberHolds() {
+        setJsonBody("{\"ResourceArn\":\"" + DDB + "FgacTable\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"dev\"}]}");
+        assertEquals(List.of(DDB + "FgacTable"), dynamoDb("TagResource"));
+        setJsonBody("{\"TableArn\":\"" + DDB + "ExportTable\",\"S3Bucket\":\"my-bucket\"}");
+        assertEquals(List.of(DDB + "ExportTable"), dynamoDb("ExportTableToPointInTime"));
+        String stream = DDB + "FgacTable/stream/2026-09-01T00:00:00.000";
+        setJsonBody("{\"StreamArn\":\"" + stream + "\"}");
+        assertEquals(List.of(stream), dynamoDb("DescribeStream"));
+        String export = DDB + "FgacTable/export/01693526400000-abcd";
+        setJsonBody("{\"ExportArn\":\"" + export + "\"}");
+        assertEquals(List.of(export), dynamoDb("DescribeExport"));
     }
 
     @Test
-    void dynamoDbReturnsExactArnIfTableNameIsAlreadyArn() {
-        String fullArn = "arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable";
-        setJsonBody("{\"TableName\":\"" + fullArn + "\"}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(fullArn, arn);
-    }
-
-    @Test
-    void dynamoDbBuildsArnFromResourceArn() {
-        String tagArn = "arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable";
-        setJsonBody("{\"ResourceArn\":\"" + tagArn + "\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"dev\"}]}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(tagArn, arn);
-    }
-
-    @Test
-    void dynamoDbBuildsArnFromTableArn() {
-        String exportArn = "arn:aws:dynamodb:us-east-1:000000000000:table/ExportTable";
-        setJsonBody("{\"TableArn\":\"" + exportArn + "\",\"S3Bucket\":\"my-bucket\"}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(exportArn, arn);
-    }
-
-    @Test
-    void dynamoDbBuildsArnFromStreamArn() {
-        String streamArn = "arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable/stream/2026-09-01T00:00:00.000";
-        setJsonBody("{\"StreamArn\":\"" + streamArn + "\"}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(streamArn, arn);
-    }
-
-    @Test
-    void dynamoDbBuildsArnFromExportArn() {
-        String exportArn = "arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable/export/01693526400000-abcd";
-        setJsonBody("{\"ExportArn\":\"" + exportArn + "\"}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(exportArn, arn);
-    }
-
-    @Test
-    void dynamoDbBuildsArnFromTheSourceOfAPointInTimeRestore() {
+    void dynamoDbChecksThePointInTimeRestoreOnItsSourceTable() {
         setJsonBody("{\"SourceTableName\":\"Music\",\"TargetTableName\":\"MusicCopy\"}");
-        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/Music",
-                builder.build("dynamodb", ctx, "us-east-1", "000000000000"));
-        String sourceArn = "arn:aws:dynamodb:eu-west-2:000000000000:table/Music";
-        setJsonBody("{\"SourceTableArn\":\"" + sourceArn + "\",\"TargetTableName\":\"MusicCopy\"}");
-        assertEquals(sourceArn, builder.build("dynamodb", ctx, "us-east-1", "000000000000"));
+        assertEquals(List.of(DDB + "Music"), dynamoDb("RestoreTableToPointInTime"));
+        String source = "arn:aws:dynamodb:eu-west-2:000000000000:table/Music";
+        setJsonBody("{\"SourceTableArn\":\"" + source + "\",\"TargetTableName\":\"MusicCopy\"}");
+        assertEquals(source, dynamoDb("RestoreTableToPointInTime").getFirst());
     }
 
+    /** A batch's tables are the keys of its RequestItems, which botocore keys by the shape a table's name has. */
     @Test
-    void dynamoDbBuildsArnFromSingleTableBatchRequest() {
+    void dynamoDbChecksABatchOnEveryTableItsRequestItemsKey() {
         setJsonBody("{\"RequestItems\":{\"MyTable\":{\"Keys\":[]}}}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/MyTable", arn);
-    }
-
-    @Test
-    void dynamoDbBuildsArnsFromMultiTableBatchRequest() {
+        assertEquals(List.of(DDB + "MyTable"), dynamoDb("BatchGetItem"));
         setJsonBody("{\"RequestItems\":{\"TableA\":{\"Keys\":[]},\"TableB\":{\"Keys\":[]}}}");
-        List<String> arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of(
-                "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
-                "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
-        ), arns);
+        assertEquals(List.of(DDB + "TableA", DDB + "TableB"), dynamoDb("BatchGetItem"));
+        assertEquals(List.of(DDB + "TableA", DDB + "TableB"), dynamoDb("BatchWriteItem"));
     }
 
+    /**
+     * Each of a transaction's items is checked as the action the developer guide gives its kind, on its own table,
+     * with the item it comes from: {@code Put} as {@code dynamodb:PutItem}, {@code ConditionCheck} as
+     * {@code dynamodb:ConditionCheckItem}, {@code Get} as {@code dynamodb:GetItem}; the transaction's own action never.
+     */
     @Test
-    void dynamoDbBuildsArnFromSingleTableTransactRequest() {
-        setJsonBody("{\"TransactItems\":[{\"Put\":{\"TableName\":\"MyTable\"}},{\"Delete\":{\"TableName\":\"MyTable\"}}]}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/MyTable", arn);
+    void dynamoDbChecksEachTransactionItemAsItsKindsAction() {
+        setJsonBody("{\"TransactItems\":[{\"Put\":{\"TableName\":\"TableA\"}},"
+                + "{\"ConditionCheck\":{\"TableName\":\"TableB\"}},{\"Delete\":{\"TableName\":\"TableA\"}}]}");
+        assertTrue(RequestResources.checkedByParts("dynamodb:TransactWriteItems"));
+        List<RequestResources.Target> targets = dynamoDbTargets("TransactWriteItems");
+        assertEquals(List.of("dynamodb:ConditionCheckItem", "dynamodb:PutItem", "dynamodb:DeleteItem"),
+                targets.stream().map(RequestResources.Target::action).toList());
+        assertEquals(List.of(List.of(DDB + "TableB"), List.of(DDB + "TableA"), List.of(DDB + "TableA")),
+                targets.stream().map(RequestResources.Target::resources).toList());
+        assertEquals("TableB", targets.getFirst().element().path("TableName").asText());
+        setJsonBody("{\"TransactItems\":[{\"Get\":{\"TableName\":\"MyTable\"}}]}");
+        assertEquals(List.of(new RequestResources.Target("dynamodb:GetItem", List.of(DDB + "MyTable"),
+                        dynamoDbTargets("TransactGetItems").getFirst().element())),
+                dynamoDbTargets("TransactGetItems"));
+        assertEquals(List.of(), dynamoDbTargets("GetItem"));
     }
 
+    /**
+     * A PartiQL statement is checked as the action the developer guide gives its verb, on the table or index it names,
+     * as DynamoDB parses it, a quoted keyword or name included; each statement of a batch or transaction apart.
+     */
     @Test
-    void dynamoDbBuildsArnsFromMultiTableTransactRequest() {
-        setJsonBody("{\"TransactItems\":[{\"Put\":{\"TableName\":\"TableA\"}},{\"Delete\":{\"TableName\":\"TableB\"}},{\"Get\":{\"TableName\":\"TableA\"}}]}");
-        List<String> arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of(
-                "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
-                "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
-        ), arns);
-    }
-
-    @Test
-    void dynamoDbBuildsArnFromPartiQLStatement() {
-        setJsonBody("{\"Statement\":\"SELECT * FROM \\\"UsersTable\\\" WHERE id = '1'\"}");
-        List<String> arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/UsersTable"), arns);
-
-        setJsonBody("{\"Statement\":\"INSERT INTO OrdersTable VALUE {'id': '1'}\"}");
-        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/OrdersTable"), arns);
-
-        setJsonBody("{\"Statement\":\"UPDATE \\\"ProductsTable\\\" SET price=10 WHERE id='1'\"}");
-        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/ProductsTable"), arns);
-
-        setJsonBody("{\"Statement\":\"DELETE FROM \\\"LogsTable\\\" WHERE id='1'\"}");
-        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/LogsTable"), arns);
-
-        setJsonBody("{\"Statement\":\"SELECT * FROM \\\"Table With Spaces & Special:Chars\\\" WHERE id = '1'\"}");
-        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/Table With Spaces & Special:Chars"), arns);
-
-        setJsonBody("{\"Statement\":\"SELECT * FROM 'Table.With.Single.Quotes#1' WHERE id = '1'\"}");
-        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/Table.With.Single.Quotes#1"), arns);
-
-        setJsonBody("{\"Statement\":\"SELECT \\\"FROM TableEvil\\\" FROM \\\"TableA\\\" WHERE pk = 1\"}");
-        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"), arns);
-    }
-
-    @Test
-    void dynamoDbBuildsArnsFromPartiQLBatchStatements() {
-        setJsonBody("{\"Statements\":[{\"Statement\":\"SELECT * FROM \\\"TableA\\\" WHERE id = '1'\"},{\"Statement\":\"SELECT * FROM TableB WHERE id = '2'\"}]}");
-        List<String> arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of(
-                "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
-                "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
-        ), arns);
-    }
-
-    @Test
-    void dynamoDbBuildsArnsFromPartiQLTransactStatements() {
-        setJsonBody("{\"TransactStatements\":[{\"Statement\":\"INSERT INTO \\\"TableA\\\" VALUE {'id': '1'}\"},{\"Statement\":\"UPDATE \\\"TableB\\\" SET x=1 WHERE id='2'\"}]}");
-        List<String> arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of(
-                "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
-                "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
-        ), arns);
-    }
-
-    @Test
-    void dynamoDbBuildsArnFromTableCreationParameters() {
-        setJsonBody("{\"TableCreationParameters\":{\"TableName\":\"ImportTarget\"},\"InputFormat\":\"DYNAMODB_JSON\"}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/ImportTarget", arn);
-    }
-
-    @Test
-    void dynamoDbReturnsWildcardWhenNoTableSpecified() {
-        setJsonBody("{}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals("*", arn);
+    void dynamoDbChecksEachPartiQLStatementAsItsVerbsAction() {
+        Map<String, String> statements = new LinkedHashMap<>();
+        statements.put("SELECT * FROM \\\"UsersTable\\\" WHERE id = '1'", "dynamodb:PartiQLSelect UsersTable");
+        statements.put("INSERT INTO OrdersTable VALUE {'id': '1'}", "dynamodb:PartiQLInsert OrdersTable");
+        statements.put("UPDATE \\\"ProductsTable\\\" SET price=10 WHERE id='1'",
+                "dynamodb:PartiQLUpdate ProductsTable");
+        statements.put("DELETE FROM \\\"LogsTable\\\" WHERE id='1'", "dynamodb:PartiQLDelete LogsTable");
+        statements.put("SELECT * FROM \\\"Table With Spaces & Special:Chars\\\" WHERE id = '1'",
+                "dynamodb:PartiQLSelect Table With Spaces & Special:Chars");
+        statements.put("SELECT \\\"FROM TableEvil\\\" FROM \\\"TableA\\\" WHERE pk = 1",
+                "dynamodb:PartiQLSelect TableA");
+        statements.forEach((statement, expected) -> {
+            setJsonBody("{\"Statement\":\"" + statement + "\"}");
+            List<RequestResources.Target> targets = dynamoDbTargets("ExecuteStatement");
+            String[] parts = expected.split(" ", 2);
+            assertEquals(List.of(new RequestResources.Target(parts[0], List.of(DDB + parts[1]), null)), targets,
+                    statement);
+        });
+        setJsonBody("{\"Statement\":\"SELECT * FROM \\\"Music\\\".\\\"byArtist\\\" WHERE a = 'x'\"}");
+        assertEquals(List.of(new RequestResources.Target("dynamodb:PartiQLSelect",
+                List.of(DDB + "Music/index/byArtist"), null)), dynamoDbTargets("ExecuteStatement"));
+        setJsonBody("{\"Statements\":[{\"Statement\":\"SELECT * FROM \\\"TableA\\\" WHERE id = '1'\"},"
+                + "{\"Statement\":\"DELETE FROM TableB WHERE id = '2'\"}]}");
+        List<RequestResources.Target> batch = dynamoDbTargets("BatchExecuteStatement");
+        assertEquals(List.of("dynamodb:PartiQLSelect TableA", "dynamodb:PartiQLDelete TableB"), batch.stream()
+                .map(target -> target.action() + " " + target.resources().getFirst().substring(DDB.length())).toList());
+        assertTrue(batch.getFirst().element().path("Statement").asText().contains("TableA"));
+        setJsonBody("{\"TransactStatements\":[{\"Statement\":\"INSERT INTO \\\"TableA\\\" VALUE {'id': '1'}\"},"
+                + "{\"Statement\":\"UPDATE \\\"TableB\\\" SET x=1 WHERE id='2'\"}]}");
+        assertEquals(List.of("dynamodb:PartiQLInsert", "dynamodb:PartiQLUpdate"),
+                dynamoDbTargets("ExecuteTransaction").stream().map(RequestResources.Target::action).sorted().toList());
+        setJsonBody("{\"TransactStatements\":[{\"Statement\":\"INSERT INTO \\\"TableA\\\" VALUE {'id': '1'}\"},"
+                + "{\"Statement\":\"EXISTS(SELECT * FROM \\\"TableB\\\" WHERE id = ? AND x = 1)\"}]}");
+        assertEquals(List.of("dynamodb:PartiQLSelect TableB", "dynamodb:PartiQLInsert TableA"),
+                dynamoDbTargets("ExecuteTransaction").stream().map(target -> target.action() + " "
+                        + target.resources().getFirst().substring(DDB.length())).toList());
+        setJsonBody("{\"Statements\":[{\"Statement\":\"-- nothing\"}]}");
+        assertEquals(List.of(), dynamoDbTargets("BatchExecuteStatement"));
     }
 
     @Test
@@ -1310,8 +1345,7 @@ class ResourceArnBuilderTest {
         String json = "{\"TableName\":\"FgacTable\",\"Item\":{\"PK\":{\"S\":\"USER_1\"}}}";
         setJsonBody(json);
 
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable", arn);
+        assertEquals(List.of(DDB + "FgacTable"), dynamoDb("PutItem"));
 
         InputStream entityStream = ctx.getEntityStream();
         assertNotNull(entityStream);
@@ -1454,12 +1488,16 @@ class ResourceArnBuilderTest {
     private static final String KMS_OTHER_KEY_ARN = "arn:aws:kms:us-east-1:000000000000:key/5678efab-34cd-12ab-90ef-1234567890ab";
     private static final String KMS_ALIAS_ARN = "arn:aws:kms:us-east-1:000000000000:alias/app";
 
-    /** A builder reading {@code kms}, for a key named by an id, an alias or an ARN. */
+    /** A builder reading {@code kms} as KMS's stored ARNs answer from it, in the caller's account. */
     private static ResourceArnBuilder backedBy(KmsService kms) {
-        @SuppressWarnings("unchecked")
-        Instance<KmsService> instance = mock(Instance.class);
-        when(instance.get()).thenReturn(kms);
-        return new ResourceArnBuilder(new ObjectMapper(), null, instance);
+        RegionResolver regions = mock(RegionResolver.class);
+        when(regions.getAccountId()).thenReturn(ACCOUNT);
+        return reading(new KmsStoredResourceArns(kms, regions));
+    }
+
+    /** The resources a KMS request is checked on, as the table reads {@code operation}. */
+    private List<String> kms(ResourceArnBuilder builder, String operation) {
+        return builder.buildResources("kms", "kms:" + operation, ctx, "us-east-1", ACCOUNT, "aws");
     }
 
     /** A builder reading the stored ARNs of a namespace, for every request of that namespace. */
@@ -1467,7 +1505,7 @@ class ResourceArnBuilderTest {
         @SuppressWarnings("unchecked")
         Instance<StoredResourceArns> instance = mock(Instance.class);
         when(instance.iterator()).thenAnswer(invocation -> List.of(stored).iterator());
-        return new ResourceArnBuilder(new ObjectMapper(), null, null, instance);
+        return new ResourceArnBuilder(new ObjectMapper(), instance);
     }
 
     /** The finder of the stored ARNs of a namespace, answering one name of one type with one ARN. */
@@ -1486,308 +1524,169 @@ class ResourceArnBuilderTest {
     }
 
     /**
-     * The gap issue 6256 describes. KMS is a JSON protocol on {@code /} with the key in the body,
-     * so reading a {@code /keys/<id>} path segment named nothing and every call was evaluated
-     * against {@code key/*}: an {@code Allow} scoped to one key ARN never matched, and a
-     * {@code Deny} scoped to one never fired. A key-scoped operation is now evaluated against the
-     * key its request names.
+     * The gap issue 6256 describes. KMS is a JSON protocol on {@code /} with the key in the body, so reading a
+     * {@code /keys/<id>} path segment named nothing and every call was evaluated against {@code key/*}. A key-scoped
+     * operation is checked on the key its request names, an alias name or ARN resolved to the key it points at, in
+     * whatever state, as KMS's handler resolves it.
      */
     @Test
-    void kmsNamesTheKeyAKeyScopedOperationActsOn() {
+    void aKmsKeyScopedOperationIsCheckedOnTheKeyItsRequestNames() {
         KmsService kms = mock(KmsService.class);
-        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
-        when(kms.findKeyArn(KMS_KEY_ID, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        when(kms.findKeyArnOfAccount(any(), any(), any())).thenReturn(Optional.empty());
+        when(kms.findKeyArnOfAccount(KMS_KEY_ID, ACCOUNT, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        when(kms.findKeyArnOfAccount("alias/app", ACCOUNT, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        when(kms.findKeyArnOfAccount(KMS_ALIAS_ARN, ACCOUNT, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
         ResourceArnBuilder backed = backedBy(kms);
-        for (String action : List.of("kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey",
-                "kms:GenerateDataKeyWithoutPlaintext", "kms:DescribeKey", "kms:GetPublicKey",
-                "kms:ScheduleKeyDeletion", "kms:CancelKeyDeletion", "kms:CreateGrant", "kms:ListGrants",
-                "kms:RevokeGrant", "kms:Sign", "kms:Verify", "kms:GenerateMac", "kms:VerifyMac",
-                "kms:TagResource", "kms:UntagResource", "kms:ListResourceTags", "kms:GetKeyPolicy",
-                "kms:PutKeyPolicy", "kms:ListKeyPolicies", "kms:UpdateKeyDescription",
-                "kms:EnableKey", "kms:DisableKey", "kms:EnableKeyRotation", "kms:DisableKeyRotation",
-                "kms:GetKeyRotationStatus", "kms:RotateKeyOnDemand", "kms:GetParametersForImport",
-                "kms:ImportKeyMaterial", "kms:DeleteImportedKeyMaterial", "kms:ReplicateKey",
-                "kms:RetireGrant")) {
+        for (String operation : List.of("Encrypt", "Decrypt", "GenerateDataKey", "GenerateDataKeyWithoutPlaintext",
+                "DescribeKey", "GetPublicKey", "ScheduleKeyDeletion", "CancelKeyDeletion", "CreateGrant", "ListGrants",
+                "Sign", "Verify", "GenerateMac", "VerifyMac", "TagResource", "UntagResource", "ListResourceTags",
+                "GetKeyPolicy", "PutKeyPolicy", "ListKeyPolicies", "UpdateKeyDescription", "EnableKey", "DisableKey",
+                "EnableKeyRotation", "DisableKeyRotation", "GetKeyRotationStatus", "RotateKeyOnDemand",
+                "GetParametersForImport", "ImportKeyMaterial", "DeleteImportedKeyMaterial", "RevokeGrant")) {
             setJsonBody("{\"KeyId\":\"" + KMS_KEY_ID + "\"}");
-            assertEquals(List.of(KMS_KEY_ARN),
-                    backed.buildKmsResources(action, ctx, "us-east-1", ACCOUNT, "aws"), action);
+            assertEquals(List.of(KMS_KEY_ARN), kms(backed, operation), operation);
+        }
+        for (String named : List.of("alias/app", KMS_ALIAS_ARN, KMS_KEY_ARN)) {
+            setJsonBody("{\"KeyId\":\"" + named + "\",\"Plaintext\":\"aGk=\"}");
+            assertEquals(List.of(KMS_KEY_ARN), kms(backed, "Encrypt"), named);
         }
     }
 
-    private static final String PC_KEY_ARN =
-            "arn:aws:payment-cryptography:us-east-1:000000000000:key/abc123";
-
-    /**
-     * A key named by an alias is authorized against the key it points at, as the handler resolves
-     * it. Otherwise an {@code Allow} scoped to {@code key/*} passes while an {@code Deny} scoped
-     * to the key the alias names is missed, and the caller reads or deletes a key it was denied.
-     */
+    /** A key KMS holds none of is checked on its id in the request's partition, as KMS mints a key there. */
     @Test
-    void paymentCryptographyResolvesAnAliasToTheKeyItPointsAt() {
-        ResourceArnBuilder reading = reading(stored("payment-cryptography", "key", "alias/team/card-key", PC_KEY_ARN));
-
-        // The route its resources are read from is the one the request's path matches, so the
-        // request names its method and its URI.
-        when(ctx.getMethod()).thenReturn("POST");
-        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost:4566/"));
-        when(uriInfo.getBaseUri()).thenReturn(URI.create("http://localhost:4566/"));
-        setJsonBody("{\"KeyIdentifier\":\"alias/team/card-key\"}");
-        assertEquals(List.of(PC_KEY_ARN),
-                reading.buildResources("payment-cryptography", "payment-cryptography:GetKey", ctx,
-                        "us-east-1", ACCOUNT, "aws"));
-    }
-
-    /** A key named by an alias is authorized against the key it points at, as the handler resolves it. */
-    @Test
-    void kmsResolvesAnAliasToTheKeyItPointsAt() {
+    void aKmsKeyNoneHoldsIsCheckedOnItsIdInTheRequestsPartition() {
         KmsService kms = mock(KmsService.class);
-        when(kms.findKeyArn("alias/app", "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
-        when(kms.findKeyArn(KMS_ALIAS_ARN, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
-        ResourceArnBuilder backed = backedBy(kms);
-
-        setJsonBody("{\"KeyId\":\"alias/app\"}");
-        assertEquals(List.of(KMS_KEY_ARN),
-                backed.buildKmsResources("kms:Encrypt", ctx, "us-east-1", ACCOUNT, "aws"));
-        setJsonBody("{\"KeyId\":\"" + KMS_ALIAS_ARN + "\"}");
-        assertEquals(List.of(KMS_KEY_ARN),
-                backed.buildKmsResources("kms:Encrypt", ctx, "us-east-1", ACCOUNT, "aws"));
-    }
-
-    /**
-     * The operations the KMS permissions reference gives no resource, which it also requires a
-     * policy to name {@code *} for, stay at the wildcard; a key-scoped operation that names no
-     * key keeps the permissive fallback rather than being refused here, since the handler
-     * refuses it with its own error.
-     */
-    @Test
-    void kmsLeavesTheActionsThatNameNoKeyAtTheirOwnResources() {
-        ResourceArnBuilder backed = backedBy(mock(KmsService.class));
-        for (String action : List.of("kms:CreateKey", "kms:GenerateRandom", "kms:ListKeys",
-                "kms:ListAliases", "kms:ListRetirableGrants")) {
-            setJsonBody("{\"KeyId\":\"" + KMS_KEY_ID + "\"}");
-            assertEquals(List.of("*"),
-                    backed.buildKmsResources(action, ctx, "us-east-1", ACCOUNT, "aws"), action);
-        }
-        setJsonBody("{}");
-        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
-                backed.buildKmsResources("kms:RetireGrant", ctx, "us-east-1", ACCOUNT, "aws"));
-        assertEquals(List.of("arn:aws-cn:kms:cn-north-1:000000000000:key/*"),
-                backed.buildKmsResources("kms:RetireGrant", ctx, "cn-north-1", ACCOUNT, "aws-cn"));
-    }
-
-    /**
-     * A request with no body at all keeps the action's own resources: the operations the reference
-     * gives no resource stay at {@code *}, and a key-scoped one falls back to every key the
-     * account holds rather than being refused here.
-     */
-    @Test
-    void kmsKeepsEachActionsOwnResourcesForARequestWithNoBody() {
-        ResourceArnBuilder backed = backedBy(mock(KmsService.class));
-        assertEquals(List.of("*"),
-                backed.buildKmsResources("kms:CreateKey", ctx, "us-east-1", ACCOUNT, "aws"));
-        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
-                backed.buildKmsResources("kms:Encrypt", ctx, "us-east-1", ACCOUNT, "aws"));
-    }
-
-    /**
-     * A key ARN the account holds nothing of is kept as the caller spelled it, a bare key id is
-     * minted in the request's partition, and an alias that resolves to nothing names every key:
-     * the operation fails before a policy matters.
-     */
-    @Test
-    void kmsMintsKeyArnsInTheRequestPartitionAndFallsBackForTheUnresolvable() {
-        KmsService kms = mock(KmsService.class);
-        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
-        ResourceArnBuilder backed = backedBy(kms);
-
-        setJsonBody("{\"KeyId\":\"" + KMS_KEY_ARN + "\"}");
-        assertEquals(List.of(KMS_KEY_ARN),
-                backed.buildKmsResources("kms:Encrypt", ctx, "us-east-1", ACCOUNT, "aws"));
-
+        when(kms.findKeyArnOfAccount(any(), any(), any())).thenReturn(Optional.empty());
         setJsonBody("{\"KeyId\":\"" + KMS_KEY_ID + "\"}");
         assertEquals(List.of("arn:aws-cn:kms:cn-north-1:000000000000:key/" + KMS_KEY_ID),
-                backed.buildKmsResources("kms:Encrypt", ctx, "cn-north-1", ACCOUNT, "aws-cn"));
-
-        setJsonBody("{\"KeyId\":\"alias/gone\"}");
-        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
-                backed.buildKmsResources("kms:Encrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+                backedBy(kms).buildResources("kms", "kms:Encrypt", ctx, "cn-north-1", ACCOUNT, "aws-cn"));
     }
 
     /**
-     * A {@code Decrypt} names its key in an optional {@code KeyId}; without one the key is the
-     * one that encrypted the {@code CiphertextBlob}, read the same way the handler reads it.
+     * The calls whose actions the Service Reference gives no resource type, the custom key store ones among them,
+     * are checked on {@code *}, as AWS checks them.
      */
     @Test
-    void kmsDecryptResolvesTheKeyFromTheCiphertextItNames() {
+    void theKmsCallsThatNameNoKeyAreCheckedOnStar() {
+        ResourceArnBuilder backed = backedBy(mock(KmsService.class));
+        setJsonBody("{\"CustomKeyStoreId\":\"cks-1234567890abcdef0\"}");
+        for (String operation : List.of("CreateKey", "GenerateRandom", "ListKeys", "ListAliases",
+                "ListRetirableGrants", "ConnectCustomKeyStore", "DescribeCustomKeyStores", "DeleteCustomKeyStore")) {
+            assertEquals(List.of("*"), kms(backed, operation), operation);
+        }
+    }
+
+    /**
+     * A Decrypt naming no key is checked on the key its ciphertext was encrypted under, which the API reference says
+     * KMS reads from the blob's metadata; one naming a key on that key; one whose blob names none KMS holds on
+     * {@code *}.
+     */
+    @Test
+    void decryptIsCheckedOnTheKeyOfItsCiphertextWhenItNamesNone() {
         byte[] blob = "ciphertext".getBytes(StandardCharsets.UTF_8);
         String encoded = Base64.getEncoder().encodeToString(blob);
         KmsService kms = mock(KmsService.class);
-        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
+        when(kms.findKeyArnOfAccount(any(), any(), any())).thenReturn(Optional.empty());
+        when(kms.findKeyArnOfAccount("alias/app", ACCOUNT, "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
         when(kms.decryptToKeyArn(blob, "us-east-1")).thenReturn(KMS_KEY_ARN);
         ResourceArnBuilder backed = backedBy(kms);
 
         setJsonBody("{\"CiphertextBlob\":\"" + encoded + "\"}");
-        assertEquals(List.of(KMS_KEY_ARN),
-                backed.buildKmsResources("kms:Decrypt", ctx, "us-east-1", ACCOUNT, "aws"));
-
-        when(kms.findKeyArn("alias/app", "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
-        setJsonBody("{\"KeyId\":\"alias/app\",\"CiphertextBlob\":\"" + encoded + "\"}");
-        assertEquals(List.of(KMS_OTHER_KEY_ARN),
-                backed.buildKmsResources("kms:Decrypt", ctx, "us-east-1", ACCOUNT, "aws"));
-
-        KmsService unresolvable = mock(KmsService.class);
-        when(unresolvable.findKeyArn(any(), any())).thenReturn(Optional.empty());
-        when(unresolvable.decryptToKeyArn(any(), any())).thenReturn(null);
-        setJsonBody("{\"CiphertextBlob\":\"" + encoded + "\"}");
-        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
-                backedBy(unresolvable).buildKmsResources("kms:Decrypt", ctx, "us-east-1", ACCOUNT, "aws"));
-
-        setJsonBody("{\"CiphertextBlob\":629}");
-        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
-                backed.buildKmsResources("kms:Decrypt", ctx, "us-east-1", ACCOUNT, "aws"));
-
-        setJsonBody("{\"CiphertextBlob\":{\"KeyId\":\"x\"}}");
-        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
-                backed.buildKmsResources("kms:Decrypt", ctx, "us-east-1", ACCOUNT, "aws"));
-
-        setJsonBody("{\"CiphertextBlob\":[\"aGk=\"]}");
-        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
-                backed.buildKmsResources("kms:Decrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of(KMS_KEY_ARN), kms(backed, "Decrypt"));
+        setJsonBody("{\"CiphertextBlob\":\"" + encoded + "\",\"KeyId\":\"alias/app\"}");
+        assertEquals(List.of(KMS_OTHER_KEY_ARN), kms(backed, "Decrypt"));
+        setJsonBody("{\"CiphertextBlob\":\"not base64!\"}");
+        assertEquals(List.of("*"), kms(backed, "Decrypt"));
     }
 
     /**
-     * The alias operations name their resources as the alias permissions page gives them:
-     * {@code CreateAlias} the alias and the key, {@code UpdateAlias} the alias, the key it points
-     * at and the key it will point at, and {@code DeleteAlias} the alias and the key it points
-     * at. A request naming no alias AWS would accept the name of names nothing.
+     * The alias calls are checked on the alias and the keys the developer guide's permissions table names: CreateAlias
+     * the key it associates, UpdateAlias the newly and the currently associated key, DeleteAlias the key its alias is
+     * associated with.
      */
     @Test
-    void kmsAliasOperationsNameTheAliasAndTheKeysTheyTouch() {
+    void theKmsAliasCallsAreCheckedOnTheAliasAndItsKeys() {
         KmsService kms = mock(KmsService.class);
-        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
-        when(kms.findKeyArn(KMS_KEY_ID, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        when(kms.findKeyArnOfAccount(any(), any(), any())).thenReturn(Optional.empty());
+        when(kms.findKeyArnOfAccount(KMS_KEY_ID, ACCOUNT, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
         when(kms.findKeyArn("alias/app", "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
         ResourceArnBuilder backed = backedBy(kms);
 
         setJsonBody("{\"AliasName\":\"alias/app\",\"TargetKeyId\":\"" + KMS_KEY_ID + "\"}");
-        assertEquals(List.of(KMS_ALIAS_ARN, KMS_KEY_ARN),
-                backed.buildKmsResources("kms:CreateAlias", ctx, "us-east-1", ACCOUNT, "aws"));
-
-        setJsonBody("{\"AliasName\":\"alias/app\",\"TargetKeyId\":\"" + KMS_KEY_ID + "\"}");
-        assertEquals(List.of(KMS_ALIAS_ARN, KMS_OTHER_KEY_ARN, KMS_KEY_ARN),
-                backed.buildKmsResources("kms:UpdateAlias", ctx, "us-east-1", ACCOUNT, "aws"));
-
-        // A retarget onto the key the alias already points at names that key once.
-        when(kms.findKeyArn("alias/app", "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
-        setJsonBody("{\"AliasName\":\"alias/app\",\"TargetKeyId\":\"" + KMS_KEY_ID + "\"}");
-        assertEquals(List.of(KMS_ALIAS_ARN, KMS_KEY_ARN),
-                backed.buildKmsResources("kms:UpdateAlias", ctx, "us-east-1", ACCOUNT, "aws"));
-
-        when(kms.findKeyArn("alias/app", "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
+        assertEquals(List.of(KMS_ALIAS_ARN, KMS_KEY_ARN), kms(backed, "CreateAlias"));
+        assertEquals(List.of(KMS_ALIAS_ARN, KMS_KEY_ARN, KMS_OTHER_KEY_ARN), kms(backed, "UpdateAlias"));
         setJsonBody("{\"AliasName\":\"alias/app\"}");
-        assertEquals(List.of(KMS_ALIAS_ARN, KMS_OTHER_KEY_ARN),
-                backed.buildKmsResources("kms:DeleteAlias", ctx, "us-east-1", ACCOUNT, "aws"));
-
-        // A name AWS would refuse contributes no alias resource, and a request naming no alias
-        // at all names nothing but the wildcard.
-        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
-        setJsonBody("{\"AliasName\":\"app\",\"TargetKeyId\":\"" + KMS_KEY_ID + "\"}");
-        assertEquals(List.of(KMS_KEY_ARN),
-                backed.buildKmsResources("kms:CreateAlias", ctx, "us-east-1", ACCOUNT, "aws"));
-        setJsonBody("{}");
-        assertEquals(List.of("*"),
-                backed.buildKmsResources("kms:DeleteAlias", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of(KMS_ALIAS_ARN, KMS_OTHER_KEY_ARN), kms(backed, "DeleteAlias"));
     }
 
     /**
-     * A {@code ReEncrypt} acts on two keys, and the filter authorizes a request once per
-     * resource, so both are named: the source the ciphertext or its optional {@code SourceKeyId}
-     * resolves to, and the destination its {@code DestinationKeyId} names.
+     * ReEncrypt is checked as the two actions the permissions table gives it, never as its own name:
+     * {@code kms:ReEncryptFrom} on the key it decrypts with (its {@code SourceKeyId}, or else the key of its
+     * ciphertext) and {@code kms:ReEncryptTo} on the key it encrypts with.
      */
     @Test
-    void kmsReEncryptNamesBothKeysItActsOn() {
+    void reEncryptIsCheckedAsReEncryptFromOnItsSourceAndReEncryptToOnItsDestination() {
         byte[] blob = "ciphertext".getBytes(StandardCharsets.UTF_8);
         String encoded = Base64.getEncoder().encodeToString(blob);
         KmsService kms = mock(KmsService.class);
-        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
-        when(kms.decryptToKeyArn(blob, "us-east-1")).thenReturn(KMS_KEY_ARN);
-        when(kms.findKeyArn("alias/destination", "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
+        when(kms.findKeyArnOfAccount(any(), any(), any())).thenReturn(Optional.empty());
+        when(kms.findKeyArnOfAccount("alias/source", ACCOUNT, "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
+        when(kms.findKeyArnOfAccount("alias/destination", ACCOUNT, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        when(kms.decryptToKeyArn(blob, "us-east-1")).thenReturn(KMS_OTHER_KEY_ARN);
         ResourceArnBuilder backed = backedBy(kms);
 
         setJsonBody("{\"CiphertextBlob\":\"" + encoded + "\",\"DestinationKeyId\":\"alias/destination\"}");
-        assertEquals(List.of(KMS_KEY_ARN, KMS_OTHER_KEY_ARN),
-                backed.buildKmsResources("kms:ReEncrypt", ctx, "us-east-1", ACCOUNT, "aws"));
-
-        when(kms.findKeyArn("alias/source", "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
-        setJsonBody("{\"SourceKeyId\":\"alias/source\",\"DestinationKeyId\":\"alias/destination\"}");
-        assertEquals(List.of(KMS_KEY_ARN, KMS_OTHER_KEY_ARN),
-                backed.buildKmsResources("kms:ReEncrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of(new RequestResources.Target("kms:ReEncryptFrom", List.of(KMS_OTHER_KEY_ARN), null),
+                        new RequestResources.Target("kms:ReEncryptTo", List.of(KMS_KEY_ARN), null)),
+                backed.targets("kms", "kms:ReEncrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"CiphertextBlob\":\"" + encoded + "\",\"SourceKeyId\":\"alias/source\","
+                + "\"DestinationKeyId\":\"alias/destination\"}");
+        assertEquals(List.of(new RequestResources.Target("kms:ReEncryptFrom", List.of(KMS_OTHER_KEY_ARN), null),
+                        new RequestResources.Target("kms:ReEncryptTo", List.of(KMS_KEY_ARN), null)),
+                backed.targets("kms", "kms:ReEncrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+        // A source no member names, nor the ciphertext, is not checked; the destination is.
+        setJsonBody("{\"CiphertextBlob\":\"not base64!\",\"DestinationKeyId\":\"alias/destination\"}");
+        assertEquals(List.of(new RequestResources.Target("kms:ReEncryptTo", List.of(KMS_KEY_ARN), null)),
+                backed.targets("kms", "kms:ReEncrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of("*"), kms(backed, "ReEncrypt"));
+        assertEquals(List.of(), backed.targets("kms", "kms:Encrypt", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     /**
-     * A {@code ReEncrypt} never reads a {@code KeyId}: its source is the key that encrypted the
-     * ciphertext when the request names no {@code SourceKeyId}, so a {@code KeyId} naming
-     * another key cannot choose the key the request is authorized against. A caller allowed
-     * on the claimed key only could otherwise submit another key's ciphertext and have it
-     * re-encrypted under the allowed one.
+     * ReplicateKey is checked as the two permissions the table gives it: {@code kms:ReplicateKey} on the primary key
+     * and {@code kms:CreateKey} on no resource.
      */
     @Test
-    void kmsReEncryptNamesTheSourceTheHandlerDecryptsWithNotAKeyId() {
-        byte[] blob = "ciphertext".getBytes(StandardCharsets.UTF_8);
-        String encoded = Base64.getEncoder().encodeToString(blob);
+    void replicateKeyIsCheckedAsReplicateKeyOnItsKeyAndCreateKeyOnStar() {
         KmsService kms = mock(KmsService.class);
-        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
-        when(kms.decryptToKeyArn(blob, "us-east-1")).thenReturn(KMS_KEY_ARN);
-        when(kms.findKeyArn("alias/claimed", "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
-        ResourceArnBuilder backed = backedBy(kms);
-
-        setJsonBody("{\"CiphertextBlob\":\"" + encoded
-                + "\",\"KeyId\":\"alias/claimed\",\"DestinationKeyId\":\"" + KMS_OTHER_KEY_ARN + "\"}");
-        assertEquals(List.of(KMS_KEY_ARN, KMS_OTHER_KEY_ARN),
-                backed.buildKmsResources("kms:ReEncrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+        when(kms.findKeyArnOfAccount(KMS_KEY_ID, ACCOUNT, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        setJsonBody("{\"KeyId\":\"" + KMS_KEY_ID + "\",\"ReplicaRegion\":\"us-west-2\"}");
+        assertEquals(List.of(new RequestResources.Target("kms:ReplicateKey", List.of(KMS_KEY_ARN), null),
+                        new RequestResources.Target("kms:CreateKey", List.of("*"), null)),
+                backedBy(kms).targets("kms", "kms:ReplicateKey", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     /**
-     * A grant operation names the key the grant it acts on belongs to: a token-only
-     * {@code RetireGrant} the key the token's grant belongs to, since the handler finds the
-     * grant by the token alone, and a {@code RetireGrant} or a {@code RevokeGrant} identifying
-     * its grant by {@code KeyId} and {@code GrantId} the key it names together with that grant's
-     * key. A token naming no grant the account holds keeps the permissive fallback.
+     * The grant calls are checked on the key they name and on the key the grant their {@code GrantId} names is on,
+     * which closes naming one key while revoking another key's grant. A RetireGrant naming its grant by token alone
+     * names neither, as botocore's record of a grant holds no token: it is checked on {@code *}.
      */
     @Test
-    void kmsGrantOperationsNameTheKeyTheGrantTheyActOnBelongsTo() {
+    void theKmsGrantCallsAreCheckedOnTheirKeyAndTheKeyOfTheirGrant() {
         KmsService kms = mock(KmsService.class);
-        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
-        when(kms.findKeyArn(KMS_KEY_ID, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
-        when(kms.findKeyArn("other-key", "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
-        when(kms.findGrantKeyArn("grant-token", null, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        when(kms.findKeyArnOfAccount(any(), any(), any())).thenReturn(Optional.empty());
+        when(kms.findKeyArnOfAccount(KMS_KEY_ID, ACCOUNT, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        when(kms.findKeyArnOfAccount("other-key", ACCOUNT, "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
         when(kms.findGrantKeyArn(null, "grant-id", "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
-        when(kms.findGrantKeyArn("unknown-token", null, "us-east-1")).thenReturn(Optional.empty());
         ResourceArnBuilder backed = backedBy(kms);
-
-        setJsonBody("{\"GrantToken\":\"grant-token\"}");
-        assertEquals(List.of(KMS_KEY_ARN),
-                backed.buildKmsResources("kms:RetireGrant", ctx, "us-east-1", ACCOUNT, "aws"));
-
-        setJsonBody("{\"GrantToken\":\"unknown-token\"}");
-        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
-                backed.buildKmsResources("kms:RetireGrant", ctx, "us-east-1", ACCOUNT, "aws"));
-
-        setJsonBody("{\"KeyId\":\"" + KMS_KEY_ID + "\",\"GrantId\":\"grant-id\"}");
-        assertEquals(List.of(KMS_KEY_ARN),
-                backed.buildKmsResources("kms:RetireGrant", ctx, "us-east-1", ACCOUNT, "aws"));
-        assertEquals(List.of(KMS_KEY_ARN),
-                backed.buildKmsResources("kms:RevokeGrant", ctx, "us-east-1", ACCOUNT, "aws"));
 
         setJsonBody("{\"KeyId\":\"other-key\",\"GrantId\":\"grant-id\"}");
-        assertEquals(List.of(KMS_OTHER_KEY_ARN, KMS_KEY_ARN),
-                backed.buildKmsResources("kms:RevokeGrant", ctx, "us-east-1", ACCOUNT, "aws"));
-
-        when(kms.findGrantKeyArn("grant-token", "grant-id", "us-east-1"))
-                .thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
-        setJsonBody("{\"KeyId\":\"" + KMS_KEY_ID + "\",\"GrantId\":\"grant-id\",\"GrantToken\":\"grant-token\"}");
-        assertEquals(List.of(KMS_KEY_ARN),
-                backed.buildKmsResources("kms:RevokeGrant", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of(KMS_OTHER_KEY_ARN, KMS_KEY_ARN), kms(backed, "RevokeGrant"));
+        assertEquals(List.of(KMS_OTHER_KEY_ARN, KMS_KEY_ARN), kms(backed, "RetireGrant"));
+        setJsonBody("{\"KeyId\":\"" + KMS_KEY_ID + "\",\"GrantId\":\"grant-id\"}");
+        assertEquals(List.of(KMS_KEY_ARN), kms(backed, "RevokeGrant"));
+        setJsonBody("{\"GrantToken\":\"grant-token\"}");
+        assertEquals(List.of("*"), kms(backed, "RetireGrant"));
     }
 
     // ── SSM ──────────────────────────────────────────────────────────────────────
@@ -1942,97 +1841,303 @@ class ResourceArnBuilderTest {
                 builder.buildResources("sns", "sns:TagResource", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
-    // ── S3 ──────────────────────────────────────────────────────────────────────
+    // ── CloudWatch ──────────────────────────────────────────────────────────────
 
+    /**
+     * A CloudWatch request is checked on each alarm its AlarmNames list names, or the one its AlarmName names, as
+     * {@code alarm:<name>} in the request's Region, the ARN CloudWatch mints for an alarm; one naming no alarm is
+     * checked on {@code *}.
+     */
     @Test
-    void s3BuildsBucketArn() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket");
-        String arn = builder.build("s3", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:s3:::my-bucket", arn);
-    }
-
-    @Test
-    void s3BuildsArnsInTheRequestRegionsPartition() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket/key.txt");
-        assertEquals("arn:aws-cn:s3:::my-bucket/key.txt",
-                builder.build("s3", ctx, "cn-north-1", "000000000000"));
-        when(uriInfo.getPath()).thenReturn("/");
-        assertEquals("arn:aws-us-gov:s3:::*", builder.build("s3", ctx, "us-gov-west-1", "000000000000"));
-    }
-
-    @Test
-    void s3BuildsObjectArn() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket/folder/file.json");
-        String arn = builder.build("s3", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:s3:::my-bucket/folder/file.json", arn);
+    void cloudWatchChecksTheAlarmsARequestNames() {
+        setFormBody("Action=DeleteAlarms&Version=2010-08-01&AlarmNames.member.1=high-cpu&AlarmNames.member.2=low-disk");
+        assertEquals(List.of("arn:aws:cloudwatch:us-west-2:000000000000:alarm:high-cpu",
+                        "arn:aws:cloudwatch:us-west-2:000000000000:alarm:low-disk"),
+                builder.buildResources("cloudwatch", "cloudwatch:DeleteAlarms", ctx, "us-west-2", ACCOUNT, "aws"));
+        setJsonBody("{\"AlarmName\":\"high-cpu\",\"StateValue\":\"ALARM\",\"StateReason\":\"test\"}");
+        when(ctx.getMediaType()).thenReturn(MediaType.valueOf("application/x-amz-json-1.0"));
+        assertEquals(List.of("arn:aws:cloudwatch:us-west-2:000000000000:alarm:high-cpu"),
+                builder.buildResources("cloudwatch", "cloudwatch:SetAlarmState", ctx, "us-west-2", ACCOUNT, "aws"));
+        setFormBody("Action=DescribeAlarms&Version=2010-08-01&AlarmNamePrefix=high");
+        assertEquals(List.of("*"),
+                builder.buildResources("cloudwatch", "cloudwatch:DescribeAlarms", ctx, "us-west-2", ACCOUNT, "aws"));
     }
 
     /**
-     * S3VirtualHostFilter rewrites a virtual-hosted bucket-level request (GET /) to
-     * /bucket/. The resource is still the bucket, so the ARN must carry no trailing
-     * slash or a policy naming arn:aws:s3:::bucket stops matching and an allowed
-     * ListBucket is denied for every SDK that defaults to virtual-hosted addressing.
+     * A dashboard's ARN has no Region, as the Service Reference gives it and CloudWatch mints it, and a metric stream
+     * is checked on the one its Name names; publishing or reading metric data names no resource, so is checked on
+     * {@code *}.
      */
     @Test
-    void s3BuildsBucketArnForVirtualHostedRewrittenPath() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket/");
-        String arn = builder.build("s3", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:s3:::my-bucket", arn);
+    void cloudWatchChecksADashboardWithoutItsRegionAndAMetricStreamByItsName() {
+        setFormBody("Action=DeleteDashboards&Version=2010-08-01&DashboardNames.member.1=ops");
+        assertEquals(List.of("arn:aws:cloudwatch::000000000000:dashboard/ops"),
+                builder.buildResources("cloudwatch", "cloudwatch:DeleteDashboards", ctx, "us-west-2", ACCOUNT, "aws"));
+        setJsonBody("{\"Name\":\"to-firehose\"}");
+        when(ctx.getMediaType()).thenReturn(MediaType.valueOf("application/x-amz-json-1.0"));
+        assertEquals(List.of("arn:aws:cloudwatch:us-west-2:000000000000:metric-stream/to-firehose"),
+                builder.buildResources("cloudwatch", "cloudwatch:GetMetricStream", ctx, "us-west-2", ACCOUNT, "aws"));
+        setFormBody("Action=PutMetricData&Version=2010-08-01&Namespace=App&MetricData.member.1.MetricName=Hits");
+        assertEquals(List.of("*"),
+                builder.buildResources("cloudwatch", "cloudwatch:PutMetricData", ctx, "us-west-2", ACCOUNT, "aws"));
     }
 
+    // ── AWS Config ──────────────────────────────────────────────────────────────
+
+    /**
+     * A config rule, a configuration recorder and a conformance pack carry an id Config mints in their ARNs, which a
+     * request naming them by name does not give, so each is checked on the ARN Config stores it under; one Config holds
+     * none of is checked on its name with that id open, or on every rule for a rule.
+     */
     @Test
-    void s3KeepsTrailingSlashOfAFolderMarkerKey() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket/folder/");
-        String arn = builder.build("s3", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:s3:::my-bucket/folder/", arn);
+    void configChecksARuleARecorderAndAConformancePackOnTheArnsConfigStoresThemUnder() {
+        AwsConfigService config = new AwsConfigService(new RegionResolver("us-east-1", ACCOUNT), null);
+        ConfigFixtures.Stored stored = ConfigFixtures.stored(config, "us-east-1");
+        ResourceArnBuilder reading = reading(new ConfigStoredResourceArns(config));
+
+        setJsonBody("{\"ConfigRuleName\":\"versioning\"}");
+        assertEquals(List.of(stored.rule()), config(reading, "DeleteEvaluationResults"));
+        setJsonBody("{\"ConfigurationRecorderName\":\"default\"}");
+        assertEquals(List.of(stored.recorder()), config(reading, "StopConfigurationRecorder"));
+        setJsonBody("{\"ConformancePackName\":\"pack\"}");
+        assertEquals(List.of(stored.pack()), config(reading, "DeleteConformancePack"));
+
+        setJsonBody("{\"ConfigRuleName\":\"missing\"}");
+        assertEquals(List.of("arn:aws:config:us-east-1:000000000000:config-rule/*"),
+                config(reading, "DeleteEvaluationResults"));
+        setJsonBody("{\"ConformancePackName\":\"other\"}");
+        assertEquals(List.of("arn:aws:config:us-east-1:000000000000:conformance-pack/other/*"),
+                config(reading, "DeleteConformancePack"));
+
+        // A recorder put names its recorder in its ConfigurationRecorder structure, the stored one when it exists.
+        setJsonBody("{\"ConfigurationRecorder\":{\"name\":\"default\",\"roleARN\":\"arn:aws:iam::000000000000:role/r\"}}");
+        assertEquals(List.of(stored.recorder()), config(reading, "PutConfigurationRecorder"));
+        // An aggregation authorization is the caller's, its path the account and Region it authorizes.
+        setJsonBody("{\"AuthorizedAccountId\":\"111122223333\",\"AuthorizedAwsRegion\":\"eu-west-1\"}");
+        assertEquals(List.of("arn:aws:config:us-east-1:000000000000:aggregation-authorization/111122223333/eu-west-1"),
+                config(reading, "PutAggregationAuthorization"));
+    }
+
+    /** The resources an AWS Config request is checked on, as the table reads {@code operation}. */
+    private List<String> config(ResourceArnBuilder builder, String operation) {
+        return builder.buildResources("config", "config:" + operation, ctx, "us-east-1", ACCOUNT, "aws");
+    }
+
+    // ── AWS DMS ─────────────────────────────────────────────────────────────────
+
+    /**
+     * The Service Reference gives each DMS type an ARN format ending in a literal {@code *}, which the reader matches
+     * as written, so a request naming an endpoint by its ARN matches no format and is checked on {@code *}, and one
+     * naming a subnet group by its identifier is checked on the format itself.
+     */
+    @Test
+    void dmsChecksASubnetGroupOnTheFormatTheReferenceGivesIt() {
+        setJsonBody("{\"EndpointArn\":\"arn:aws:dms:us-east-1:000000000000:endpoint:ABCDEFGHIJKLMNOP\"}");
+        assertEquals(List.of("*"),
+                builder.buildResources("dms", "dms:DeleteEndpoint", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ReplicationSubnetGroupIdentifier\":\"default\"}");
+        assertEquals(List.of("arn:aws:dms:us-east-1:000000000000:subgrp:*"),
+                builder.buildResources("dms", "dms:DeleteReplicationSubnetGroup", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{}");
+        assertEquals(List.of("*"),
+                builder.buildResources("dms", "dms:DescribeEndpoints", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    // ── ElastiCache ─────────────────────────────────────────────────────────────
+
+    /**
+     * An ElastiCache request is checked on the cluster, replication group or parameter group its identifier names, as
+     * {@code <type>:<name>} in the request's Region, the ARN ElastiCache mints; a tag call names its resource in
+     * {@code ResourceName}, which the table does not read, so it is checked on {@code *}.
+     */
+    @Test
+    void elastiCacheChecksTheResourceItsIdentifierNames() {
+        setFormBody("Action=DescribeCacheClusters&Version=2015-02-02&CacheClusterId=cache-1");
+        assertEquals(List.of("arn:aws:elasticache:us-west-2:000000000000:cluster:cache-1"),
+                builder.buildResources("elasticache", "elasticache:DescribeCacheClusters", ctx, "us-west-2", ACCOUNT,
+                        "aws"));
+        setFormBody("Action=CreateCacheParameterGroup&Version=2015-02-02&CacheParameterGroupName=tuned"
+                + "&CacheParameterGroupFamily=redis7&Description=d");
+        assertEquals(List.of("arn:aws:elasticache:us-west-2:000000000000:parametergroup:tuned"),
+                builder.buildResources("elasticache", "elasticache:CreateCacheParameterGroup", ctx, "us-west-2",
+                        ACCOUNT, "aws"));
+        setFormBody("Action=ListTagsForResource&Version=2015-02-02"
+                + "&ResourceName=arn%3Aaws%3Aelasticache%3Aus-west-2%3A000000000000%3Acluster%3Acache-1");
+        assertEquals(List.of("*"), builder.buildResources("elasticache", "elasticache:ListTagsForResource", ctx,
+                "us-west-2", ACCOUNT, "aws"));
+        setFormBody("Action=DescribeCacheClusters&Version=2015-02-02");
+        assertEquals(List.of("*"), builder.buildResources("elasticache", "elasticache:DescribeCacheClusters", ctx,
+                "us-west-2", ACCOUNT, "aws"));
+        // A user group's change is checked on the group and on each user it adds or removes.
+        setFormBody("Action=ModifyUserGroup&Version=2015-02-02&UserGroupId=admins&UserIdsToAdd.member.1=alice"
+                + "&UserIdsToRemove.member.1=bob");
+        assertEquals(List.of("arn:aws:elasticache:us-west-2:000000000000:usergroup:admins",
+                        "arn:aws:elasticache:us-west-2:000000000000:user:alice",
+                        "arn:aws:elasticache:us-west-2:000000000000:user:bob"),
+                builder.buildResources("elasticache", "elasticache:ModifyUserGroup", ctx, "us-west-2", ACCOUNT, "aws"));
+    }
+
+    // ── Identity Store ──────────────────────────────────────────────────────────
+
+    /**
+     * An Identity Store request is checked on the identity store its IdentityStoreId names and on the user or group its
+     * id names, whose ARN has no Region and no account; a list is checked on every user, as the Service Reference gives
+     * it.
+     */
+    @Test
+    void identityStoreChecksTheStoreAndTheUserARequestNames() {
+        setJsonBody("{\"IdentityStoreId\":\"d-1234567890\",\"UserId\":\"1234567890-u1\"}");
+        assertEquals(List.of("arn:aws:identitystore::000000000000:identitystore/d-1234567890",
+                        "arn:aws:identitystore:::user/1234567890-u1"),
+                builder.buildResources("identitystore", "identitystore:DescribeUser", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"IdentityStoreId\":\"d-1234567890\"}");
+        assertEquals(List.of("arn:aws:identitystore:::user/*",
+                        "arn:aws:identitystore::000000000000:identitystore/d-1234567890"),
+                builder.buildResources("identitystore", "identitystore:ListUsers", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     /**
-     * A key keeps the slashes it is sent with, and so does the ARN the request is checked against.
-     * {@code PUT /bucket//email.txt} stores the key {@code /email.txt}; read from the collapsed
-     * path it was checked on {@code bucket/email.txt}, so a grant on that object covered this one
-     * and a statement naming {@code bucket//*} reached nothing.
+     * An identity store is checked in the account whose instance holds it, which the service answers for the store an
+     * {@code IdentityStoreId} names, not in the caller's.
      */
     @Test
-    void s3ReadsAKeysOwnLeadingSlashFromThePathAsSent() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket/email.txt");
-        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost/my-bucket//email.txt"));
+    void identityStoreChecksTheStoreInTheAccountItsServiceGives() {
+        ResourceArnBuilder reading = reading(new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "identitystore";
+            }
 
-        assertEquals("arn:aws:s3:::my-bucket//email.txt", builder.build("s3", ctx, "us-east-1", ACCOUNT));
-    }
-
-    /** The same inside a key, where the collapsed path named a key one separator short. */
-    @Test
-    void s3KeepsADoubleSlashInsideAKey() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket/a/b.txt");
-        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost/my-bucket/a//b.txt"));
-
-        assertEquals("arn:aws:s3:::my-bucket/a//b.txt", builder.build("s3", ctx, "us-east-1", ACCOUNT));
-    }
-
-    /**
-     * Virtual-hosted, where the bucket came from the Host header and S3VirtualHostFilter rewrote the
-     * path: the key's leading slash is then only in the request the server received.
-     */
-    @Test
-    void s3ReadsAVirtualHostedKeysOwnSlashFromTheRequestAsReceived() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket/email.txt");
-        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://my-bucket.localhost/my-bucket/email.txt"));
-        ResourceArnBuilder withRequest = new ResourceArnBuilder(new ObjectMapper(), vertxRequestOn("//email.txt"));
-
-        assertEquals("arn:aws:s3:::my-bucket//email.txt", withRequest.build("s3", ctx, "us-east-1", ACCOUNT));
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return "Identitystore".equals(type)
+                        ? Optional.of("arn:aws:identitystore::111122223333:identitystore/" + names.getFirst())
+                        : Optional.empty();
+            }
+        });
+        setJsonBody("{\"IdentityStoreId\":\"d-1234567890\",\"UserId\":\"1234567890-u1\"}");
+        assertEquals(List.of("arn:aws:identitystore::111122223333:identitystore/d-1234567890",
+                        "arn:aws:identitystore:::user/1234567890-u1"),
+                reading.buildResources("identitystore", "identitystore:DescribeUser", ctx, "us-east-1", ACCOUNT,
+                        "aws"));
     }
 
     /**
-     * A key of slashes alone reaches the object route through the escaped path S3SlashOnlyKeyFilter
-     * rewrites it to, and still reads as that object rather than as the bucket.
+     * A required type an Identity Store request does not name is asked of the service: a membership's group and user
+     * through its id, and a lookup's user by the members of the one way its alternate identifier is given, with their
+     * paths, as the table writes them.
      */
     @Test
-    void s3KeepsAKeyOfOnlySlashes() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket//");
-        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost/my-bucket/%2F"));
+    void identityStoreAsksTheServiceForTheRequiredTypesARequestDoesNotName() {
+        List<List<String>> asked = new ArrayList<>();
+        ResourceArnBuilder reading = reading(new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "identitystore";
+            }
 
-        assertEquals("arn:aws:s3:::my-bucket//", builder.build("s3", ctx, "us-east-1", ACCOUNT));
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<String> findByMembers(String type, List<String> members, List<String> names,
+                                                  String region) {
+                asked.add(members);
+                return Optional.of("arn:aws:identitystore:::user/" + names.getLast());
+            }
+
+            @Override
+            public List<String> through(String member, String value, String region) {
+                return List.of("arn:aws:identitystore:::group/g-of-" + value,
+                        "arn:aws:identitystore:::user/u-of-" + value);
+            }
+        });
+        setJsonBody("{\"IdentityStoreId\":\"d-1234567890\",\"MembershipId\":\"m1\"}");
+        assertEquals(List.of("arn:aws:identitystore:::membership/m1",
+                        "arn:aws:identitystore::000000000000:identitystore/d-1234567890",
+                        "arn:aws:identitystore:::group/g-of-m1", "arn:aws:identitystore:::user/u-of-m1"),
+                reading.buildResources("identitystore", "identitystore:DeleteGroupMembership", ctx, "us-east-1",
+                        ACCOUNT, "aws"));
+        setJsonBody("{\"IdentityStoreId\":\"d-1234567890\",\"AlternateIdentifier\":{\"UniqueAttribute\":"
+                + "{\"AttributePath\":\"userName\",\"AttributeValue\":\"alice\"}}}");
+        assertEquals(List.of("arn:aws:identitystore::000000000000:identitystore/d-1234567890",
+                        "arn:aws:identitystore:::user/alice"),
+                reading.buildResources("identitystore", "identitystore:GetUserId", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of(List.of("IdentityStoreId", "AlternateIdentifier.UniqueAttribute.AttributePath",
+                "AlternateIdentifier.UniqueAttribute.AttributeValue")), asked);
+    }
+
+    // ── MemoryDB ────────────────────────────────────────────────────────────────
+
+    /**
+     * A MemoryDB request is checked on the cluster, ACL or user its name names, as {@code <type>/<name>}, the ARN
+     * MemoryDB mints. The Service Reference lists no {@code cluster} for CreateCluster but the multi-Region cluster it
+     * may join, named by its MultiRegionClusterName, not by the new cluster's ClusterName, though both formats call
+     * their variable {@code ${ClusterName}}; DeleteCluster is checked on the cluster its ClusterName names.
+     */
+    @Test
+    void memoryDbChecksTheResourceItsNameNamesAsTheGeneratedTableReadsIt() {
+        setJsonBody("{\"ClusterName\":\"cache\"}");
+        assertEquals(List.of("arn:aws:memorydb:us-east-1:000000000000:cluster/cache"),
+                builder.buildResources("memorydb", "memorydb:DescribeClusters", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ClusterName\":\"cache\",\"NodeType\":\"db.t4g.small\",\"ACLName\":\"open-access\","
+                + "\"MultiRegionClusterName\":\"global\"}");
+        assertEquals(List.of("arn:aws:memorydb:us-east-1:000000000000:acl/open-access",
+                        "arn:aws:memorydb::000000000000:multiregioncluster/global"),
+                builder.buildResources("memorydb", "memorydb:CreateCluster", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ClusterName\":\"cache\"}");
+        assertEquals(List.of("arn:aws:memorydb:us-east-1:000000000000:cluster/cache"),
+                builder.buildResources("memorydb", "memorydb:DeleteCluster", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    // ── Route 53 Resolver ───────────────────────────────────────────────────────
+
+    /**
+     * A Route 53 Resolver request is checked on the rule, endpoint or domain list its id names, as {@code <type>/<id>},
+     * the ARN Route 53 Resolver mints. A DNSSEC configuration's format takes a ResourceId, which the request gives as
+     * the VPC's id, so the generated table checks the configuration under the VPC's id.
+     */
+    @Test
+    void route53ResolverChecksTheResourceItsIdNames() {
+        setJsonBody("{\"ResolverRuleId\":\"rslvr-rr-abc123\"}");
+        assertEquals(List.of("arn:aws:route53resolver:us-east-1:000000000000:resolver-rule/rslvr-rr-abc123"),
+                builder.buildResources("route53resolver", "route53resolver:GetResolverRule", ctx, "us-east-1",
+                        ACCOUNT, "aws"));
+        setJsonBody("{\"ResourceId\":\"vpc-0abc\"}");
+        assertEquals(List.of("arn:aws:route53resolver:us-east-1:000000000000:resolver-dnssec-config/vpc-0abc"),
+                builder.buildResources("route53resolver", "route53resolver:GetResolverDnssecConfig", ctx,
+                        "us-east-1", ACCOUNT, "aws"));
+        // An outpost resolver's create names the Outpost it runs on, another service's ARN, and makes its own.
+        setJsonBody("{\"Name\":\"edge\",\"OutpostArn\":\"arn:aws:outposts:us-east-1:000000000000:outpost/op-1\"}");
+        assertEquals(List.of("arn:aws:route53resolver:us-east-1:000000000000:outpost-resolver/*"),
+                builder.buildResources("route53resolver", "route53resolver:CreateOutpostResolver", ctx, "us-east-1",
+                        ACCOUNT, "aws"));
+    }
+
+    // ── S3 and S3 Control ───────────────────────────────────────────────────────
+
+    /** The resources an S3 or S3 Control request names, read from the generated table on the route it matches. */
+    private List<String> s3(ResourceArnBuilder from, String method, String sent, String operation, String region,
+                            String partition) {
+        when(ctx.getMethod()).thenReturn(method);
+        request(sent);
+        return from.buildResources("s3", "s3:" + operation, ctx, region, ACCOUNT, partition);
+    }
+
+    private List<String> s3(String method, String sent, String operation) {
+        return s3(builder, method, sent, operation, "us-east-1", "aws");
+    }
+
+    /** A builder reading S3's keys as S3 does, from {@code received}, the path the server received. */
+    private static ResourceArnBuilder readingS3Keys(String received) {
+        RequestPathLabels s3Keys = new S3RequestPathLabels(vertxRequestOn(received));
+        @SuppressWarnings("unchecked")
+        Instance<RequestPathLabels> labels = mock(Instance.class);
+        when(labels.isUnsatisfied()).thenReturn(false);
+        when(labels.iterator()).thenAnswer(invocation -> List.of(s3Keys).iterator());
+        return new ResourceArnBuilder(new ObjectMapper(), null, labels);
     }
 
     /** A current request whose path is {@code sentPath}, the path the server received. */
@@ -2046,90 +2151,72 @@ class ResourceArnBuilderTest {
         return current;
     }
 
-    // ── S3 Control ─────────────────────────────────────────────────────────────
+    /** A bucket and an object are named by their route's labels, in the partition of the request's Region. */
+    @Test
+    void anS3RequestIsCheckedOnTheBucketOrObjectItsRouteNames() {
+        assertEquals(List.of("arn:aws:s3:::my-bucket"), s3("PUT", "/my-bucket", "CreateBucket"));
+        assertEquals(List.of("arn:aws:s3:::my-bucket"), s3("GET", "/my-bucket?list-type=2", "ListObjectsV2"));
+        assertEquals(List.of("arn:aws:s3:::my-bucket/folder/file.json"),
+                s3("GET", "/my-bucket/folder/file.json", "GetObject"));
+        assertEquals(List.of("arn:aws-cn:s3:::my-bucket/key.txt"),
+                s3(builder, "GET", "/my-bucket/key.txt", "GetObject", "cn-north-1", "aws-cn"));
+        // ListBuckets acts on no resource type.
+        assertEquals(List.of("*"), s3("GET", "/", "ListBuckets"));
+    }
 
     /**
-     * An S3 Control tagging route names the resource it acts on by its ARN, and that ARN as
-     * written is what the request is checked against. The data-plane reading of the path, which
-     * issue #6537 reports, checked s3:GetObject on a bucket named v20180820, so a policy
-     * allowing the tagging action on the real bucket never matched. The ARN is the caller's own
-     * naming of the resource, kept as the ARN-carrying requests of other services are: the plain
-     * general-purpose form and the directory-bucket form the Go SDK and Terraform send alike.
+     * A key keeps the slashes it is sent with, and so does the ARN the request is checked against, read as S3 reads
+     * it: {@code PUT /bucket//email.txt} stores the key {@code /email.txt}; read from the router's collapsed path it
+     * would be checked on {@code bucket/email.txt}, so a grant on that object would cover this one.
      */
     @Test
-    void s3ControlTaggingIsCheckedAgainstTheArnTheRouteNames() {
-        for (String action : List.of("s3:ListTagsForResource", "s3:TagResource", "s3:UntagResource")) {
-            when(uriInfo.getPath()).thenReturn("/v20180820/tags/arn:aws:s3:::repro-bucket");
+    void anS3KeyKeepsTheSlashesItWasSentWith() {
+        assertEquals(List.of("arn:aws:s3:::my-bucket//email.txt"),
+                s3(readingS3Keys("/my-bucket//email.txt"), "PUT", "/my-bucket//email.txt", "PutObject", "us-east-1",
+                        "aws"));
+        assertEquals(List.of("arn:aws:s3:::my-bucket/a//b.txt"),
+                s3(readingS3Keys("/my-bucket/a//b.txt"), "GET", "/my-bucket/a//b.txt", "GetObject", "us-east-1",
+                        "aws"));
+        assertEquals(List.of("arn:aws:s3:::my-bucket/folder/"),
+                s3(readingS3Keys("/my-bucket/folder/"), "PUT", "/my-bucket/folder/", "PutObject", "us-east-1", "aws"));
+        // Virtual-hosted: S3VirtualHostFilter put the bucket into the path, and the server received the key alone.
+        assertEquals(List.of("arn:aws:s3:::my-bucket//email.txt"),
+                s3(readingS3Keys("//email.txt"), "GET", "/my-bucket//email.txt", "GetObject", "us-east-1", "aws"));
+    }
+
+    /**
+     * An S3 Control tagging route names the resource it acts on by its ARN, and that ARN as written, percent-encoded as
+     * the Go SDK sends it or not, is what the request is checked against, never a bucket named v20180820 (issue
+     * #6537). One naming no ARN stays on the wildcard, under which the handler refuses it.
+     */
+    @Test
+    void anS3ControlTaggingRouteIsCheckedOnTheArnItNames() {
+        for (String[] call : List.of(new String[] {"GET", "ListTagsForResource"}, new String[] {"POST", "TagResource"},
+                new String[] {"DELETE", "UntagResource"})) {
             assertEquals(List.of("arn:aws:s3:::repro-bucket"),
-                    builder.buildResources("s3", action, ctx, "us-east-1", ACCOUNT, "aws"), action);
-            when(uriInfo.getPath())
-                    .thenReturn("/v20180820/tags/arn:aws:s3:us-east-1:000000000000:bucket/repro-bucket");
-            assertEquals(List.of("arn:aws:s3:us-east-1:000000000000:bucket/repro-bucket"),
-                    builder.buildResources("s3", action, ctx, "us-east-1", ACCOUNT, "aws"), action);
+                    s3(call[0], "/v20180820/tags/arn:aws:s3:::repro-bucket", call[1]), call[1]);
+            assertEquals(List.of("arn:aws:s3:::repro-bucket"),
+                    s3(call[0], "/v20180820/tags/arn%3Aaws%3As3%3A%3A%3Arepro-bucket", call[1]), call[1]);
         }
+        assertEquals(List.of("*"), s3("GET", "/v20180820/tags/not-an-arn", "ListTagsForResource"));
     }
 
     /**
-     * An S3 Control route names no object, so nothing of it is read as a bucket and a key: the ARN
-     * in its path is still taken as written, percent-encoded as the Go SDK sends it or not.
+     * AWS gives s3:ListAccessPoints and the account-level Block Public Access actions no resource type, so a request
+     * of them is checked on the wildcard alone, as other namespaces' no-resource actions are.
      */
     @Test
-    void s3ControlTaggingIsNotReadAsABucketAndAKey() {
-        when(uriInfo.getPath()).thenReturn("/v20180820/tags/arn:aws:s3:::repro-bucket");
-        when(uriInfo.getRequestUri())
-                .thenReturn(URI.create("http://localhost/v20180820/tags/arn%3Aaws%3As3%3A%3A%3Arepro-bucket"));
-
-        assertEquals(List.of("arn:aws:s3:::repro-bucket"),
-                builder.buildResources("s3", "s3:TagResource", ctx, "us-east-1", ACCOUNT, "aws"));
+    void anS3ControlAccountRouteIsCheckedOnTheWildcardAlone() {
+        assertEquals(List.of("*"), s3("GET", "/v20180820/accesspoint", "ListAccessPoints"));
+        assertEquals(List.of("*"), s3("GET", "/v20180820/configuration/publicAccessBlock", "GetPublicAccessBlock"));
+        assertEquals(List.of("*"), s3("PUT", "/v20180820/configuration/publicAccessBlock", "PutPublicAccessBlock"));
     }
 
-    /** A tagging route naming no ARN stays on the wildcard, under which the handler refuses it. */
+    /** A data-plane request into a bucket named v20180820 keeps its own bucket and object. */
     @Test
-    void s3ControlTaggingNamingNoArnLeavesTheWildcard() {
-        when(uriInfo.getPath()).thenReturn("/v20180820/tags/not-an-arn");
-        assertEquals(List.of("*"),
-                builder.buildResources("s3", "s3:ListTagsForResource", ctx, "us-east-1", ACCOUNT, "aws"));
-    }
-
-    /**
-     * AWS gives s3:ListAccessPoints and the account-level Block Public Access actions no
-     * resource type, so the request is checked against the wildcard alone, as the no-resource
-     * actions of other namespaces are (the KMS list operations): a bucket-scoped statement,
-     * {@code arn:<partition>:s3:::*} or any other ARN, grants them nothing, and a NotResource
-     * naming any bucket denies the call.
-     */
-    @Test
-    void s3ControlAccountRoutesAreCheckedAgainstTheWildcardAlone() {
-        when(uriInfo.getPath()).thenReturn("/v20180820/accesspoint");
-        assertEquals(List.of("*"),
-                builder.buildResources("s3", "s3:ListAccessPoints", ctx, "us-east-1", ACCOUNT, "aws"));
-        when(uriInfo.getPath()).thenReturn("/v20180820/configuration/publicAccessBlock");
-        assertEquals(List.of("*"),
-                builder.buildResources("s3", "s3:PutAccountPublicAccessBlock", ctx, "us-east-1", ACCOUNT, "aws"));
-        assertEquals(List.of("*"),
-                builder.buildResources("s3", "s3:GetAccountPublicAccessBlock", ctx, "us-east-1", ACCOUNT, "aws"));
-        assertEquals(List.of("*"),
-                builder.buildResources("s3", "s3:PutAccountPublicAccessBlock", ctx, "us-gov-west-1", ACCOUNT,
-                        "aws-us-gov"));
-    }
-
-    /**
-     * The operation tells S3 Control's requests from the data plane, not the path: a request a
-     * data-plane action claims under the same prefix, a bucket actually named v20180820, keeps
-     * the bucket and object ARN of its own path, the slashes of its key included.
-     */
-    @Test
-    void aDataPlaneOperationUnderTheS3ControlPrefixKeepsItsOwnArn() {
-        when(uriInfo.getPath()).thenReturn("/v20180820/tags/key.txt");
-        assertEquals(List.of("arn:aws:s3:::v20180820/tags/key.txt"),
-                builder.buildResources("s3", "s3:PutObject", ctx, "us-east-1", ACCOUNT, "aws"));
-        when(uriInfo.getPath()).thenReturn("/v20180820");
-        assertEquals(List.of("arn:aws:s3:::v20180820"),
-                builder.buildResources("s3", "s3:ListBucket", ctx, "us-east-1", ACCOUNT, "aws"));
-        when(uriInfo.getPath()).thenReturn("/v20180820/a/b.txt");
-        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost/v20180820/a//b.txt"));
-        assertEquals(List.of("arn:aws:s3:::v20180820/a//b.txt"),
-                builder.buildResources("s3", "s3:PutObject", ctx, "us-east-1", ACCOUNT, "aws"));
+    void aDataPlaneRequestUnderTheS3ControlPrefixKeepsItsOwnBucketAndObject() {
+        assertEquals(List.of("arn:aws:s3:::v20180820/tags/key.txt"), s3("PUT", "/v20180820/tags/key.txt", "PutObject"));
+        assertEquals(List.of("arn:aws:s3:::v20180820"), s3("GET", "/v20180820", "ListObjects"));
     }
 
     // ── The vendored table of request resources ─────────────────────────────────
@@ -2412,90 +2499,116 @@ class ResourceArnBuilderTest {
         return builder.buildResources("dsql", operation, ctx, region, "000000000000", partition);
     }
 
+    /**
+     * Bedrock's requests are read from the generated table on the route they match: a resource-policy route acts on
+     * the resource whose ARN it carries, in its path or in its body's {@code resourceArn} for PutResourcePolicy, and a
+     * guardrail route on the guardrail its path names.
+     */
     @Test
-    void bedrockResourcePolicyRoutesResolveTheArnTheyCarry() {
+    void aBedrockRequestIsCheckedOnTheResourceItsRouteNames() {
         String guardrail = "arn:aws:bedrock:us-east-1:000000000000:guardrail/abc123def456";
-        for (String method : List.of("GET", "DELETE")) {
-            when(ctx.getMethod()).thenReturn(method);
-            when(uriInfo.getPath()).thenReturn("/resource-policy/" + guardrail);
-            assertEquals(List.of(guardrail), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT), method);
+        // An SDK escapes a label's slashes, so the ARN is one segment of the path.
+        String encoded = "arn%3Aaws%3Abedrock%3Aus-east-1%3A000000000000%3Aguardrail%2Fabc123def456";
+        for (String[] call : List.of(new String[] {"GET", "GetResourcePolicy"},
+                new String[] {"DELETE", "DeleteResourcePolicy"})) {
+            when(ctx.getMethod()).thenReturn(call[0]);
+            request("/resource-policy/" + encoded);
+            assertEquals(List.of(guardrail), bedrock(call[1]), call[1]);
         }
         when(ctx.getMethod()).thenReturn("POST");
-        when(uriInfo.getPath()).thenReturn("/resource-policy");
+        request("/resource-policy");
         setJsonBody("{\"resourceArn\":\"" + guardrail + "\",\"resourcePolicy\":\"{}\"}");
-        assertEquals(List.of(guardrail), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT));
-        // A value that is not an ARN, and every other Bedrock route, name no resource.
+        assertEquals(List.of(guardrail), bedrock("PutResourcePolicy"));
+        // A value that is not an ARN names no resource.
         setJsonBody("{\"resourceArn\":\"abc123def456\",\"resourcePolicy\":\"{}\"}");
-        assertEquals(List.of("*"), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of("*"), bedrock("PutResourcePolicy"));
         when(ctx.getMethod()).thenReturn("GET");
-        when(uriInfo.getPath()).thenReturn("/resource-policy/abc123def456");
-        assertEquals(List.of("*"), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT));
-        when(uriInfo.getPath()).thenReturn("/guardrails/abc123def456");
-        assertEquals(List.of("*"), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT));
+        request("/resource-policy/abc123def456");
+        assertEquals(List.of("*"), bedrock("GetResourcePolicy"));
+        request("/guardrails/abc123def456");
+        assertEquals(List.of(guardrail), bedrock("GetGuardrail"));
     }
 
+    private List<String> bedrock(String operation) {
+        return builder.buildResources("bedrock", "bedrock:" + operation, ctx, "us-east-1", ACCOUNT, "aws");
+    }
+
+    /**
+     * API Gateway's requests are read from the generated table on the route they match: a route authorized as its HTTP
+     * method acts on the resource its own path names, with no account, the {@code /v2} of an HTTP or WebSocket API's
+     * left out. The router resolves dot segments and empty segments before the route is matched, which
+     * {@code ApiGatewayPathArnEnforcementIntegrationTest} covers through the server.
+     */
     @Test
-    void apiGatewayRoutesResolveThePathTheyNameWithNoAccount() {
+    void anApiGatewayRouteIsCheckedOnThePathItNames() {
+        when(ctx.getMethod()).thenReturn("GET");
         request("/restapis/abc123/stages");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        // Each segment is decoded as the router decodes it, so an encoded id names the API it routes to.
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages"), apiGateway("GetStages"));
+        // A label is decoded as the router decodes it, so an encoded id names the API it routes to.
         request("/restapis/%61bc123/stages");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        // Dot segments are resolved after decoding, as the router resolves them.
-        request("/restapis/x/%2E%2E/abc123/stages");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        request("/restapis/%2e/abc123");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        // Empty segments are dropped once the dots are resolved, as the router collapses them.
-        request("/restapis//abc123");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        request("/restapis/x/..//abc123");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        request("/restapis/x//../abc123");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/x/abc123"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        request("/v2/tags/arn:aws:apigateway:us-east-1::/apis/x/%2E%2E/a1b2c3");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages"), apiGateway("GetStages"));
+        // The guide's REST API row, where the Service Reference gives the HTTP API's stage.
+        request("/restapis/abc123/stages/prod");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages/prod"), apiGateway("GetStage"));
         request("/restapis/");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis"), apiGateway("GetRestApis"));
+        // A label's own slash or escape stays in its segment, so it cannot pass for a path of more segments.
+        request("/restapis/abc%2Fstages%2Fprod");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc%2Fstages%2Fprod"), apiGateway("GetRestApi"));
+        request("/restapis/abc%2525");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc%2525"), apiGateway("GetRestApi"));
+        // A path the guide publishes no row for is its own resource path.
+        request("/sdktypes");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/sdktypes"), apiGateway("GetSdkTypes"));
         // An HTTP or WebSocket API path's /v2 is not part of the resource it names.
         request("/v2/apis");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis"), apiGateway("GetApis"));
         request("/v2/apis/a1b2c3/stages/prod");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis/a1b2c3/stages/prod"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis/a1b2c3/stages/prod"), apiGateway("GetStage"));
         // A stage name keeps the characters it is written with, sent literally or encoded.
         request("/v2/apis/a1b2c3/stages/$default");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis/a1b2c3/stages/$default"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis/a1b2c3/stages/$default"), apiGateway("GetStage"));
         request("/v2/apis/a1b2c3/stages/%24default");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis/a1b2c3/stages/$default"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        request("/v2domains");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/v2domains"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        // A tagging route names the ARN it tags still encoded, as AWS names its Tags resource.
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis/a1b2c3/stages/$default"), apiGateway("GetStage"));
+        // A tagging route names the ARN it tags URL-encoded, as AWS names its Tags resource, however it is sent.
+        String tags = "arn:aws:apigateway:us-east-1::/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3";
         request("/v2/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of(tags), apiGateway("GetTags"));
         request("/v2/tags/arn:aws:apigateway:us-east-1::/apis/a1b2c3");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of(tags), apiGateway("GetTags"));
         request("/tags/arn%3aaws%3aapigateway%3aus-east-1%3a%3a%2frestapis%2fabc123");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Frestapis%2Fabc123"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/tags/"
+                + "arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Frestapis%2Fabc123"), apiGateway("GetTags"));
+        // The guide's domain name access associations carry the account.
+        request("/domainnameaccessassociations");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1:" + ACCOUNT + ":/domainnameaccessassociations"),
+                apiGateway("GetDomainNameAccessAssociations"));
         request("/restapis");
         assertEquals(List.of("arn:aws-us-gov:apigateway:us-gov-west-1::/restapis"),
-                builder.buildResources("apigateway", ctx, "us-gov-west-1", ACCOUNT, "aws-us-gov"));
+                builder.buildResources("apigateway", "apigateway:GetRestApis", ctx, "us-gov-west-1", ACCOUNT,
+                        "aws-us-gov"));
+    }
+
+    /** API Gateway's operations AWS authorizes as their method by several of its actions, and their own named ones. */
+    @Test
+    void anApiGatewayRouteOfSeveralActionsOrAnArnItCarriesIsCheckedAsTheTableReadsIt() {
+        // CreateRestApi is authorized by POST and PUT, and by UpdateRestApiPolicy for a policy: its route's own path.
+        when(ctx.getMethod()).thenReturn("POST");
+        request("/restapis");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis"), apiGateway("CreateRestApi"));
+        when(ctx.getMethod()).thenReturn("DELETE");
+        request("/restapis/abc123/stages/prod/cache/data");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages/prod/cache/data"),
+                apiGateway("FlushStageCache"));
+        // A label holding the ARN of what the route acts on names that resource.
+        String association = "arn:aws:apigateway:us-east-1:" + ACCOUNT + ":/domainnameaccessassociations/domainname/"
+                + "private.example.com+abc123/vpcesource/vpce-0123456789abcdef0";
+        request("/domainnameaccessassociations/" + URLEncoder.encode(association, StandardCharsets.UTF_8));
+        assertEquals(List.of(association), apiGateway("DeleteDomainNameAccessAssociation"));
+    }
+
+    private List<String> apiGateway(String operation) {
+        return builder.buildResources("apigateway", "apigateway:" + operation, ctx, "us-east-1", ACCOUNT, "aws");
     }
 
     /**
@@ -2712,7 +2825,9 @@ class ResourceArnBuilderTest {
                 eks(eks, "GET", "/clusters/held", "eks:DescribeCluster"));
         assertEquals(List.of("arn:aws:eks:us-east-1:000000000000:cluster/held"),
                 eks(eks, "GET", "/clusters/held/node-groups", "eks:ListNodegroups"));
-        assertEquals(List.of("*"), eks(eks, "GET", "/clusters", "eks:ListClusters"));
+        // ListClusters is checked on every cluster of the account, as measured on AWS (MEASURED, #9039).
+        assertEquals(List.of("arn:aws:eks:us-east-1:000000000000:cluster/*"),
+                eks(eks, "GET", "/clusters", "eks:ListClusters"));
     }
 
     /** CreateCluster is checked on the cluster its body names, as the EKS user guide's example policy grants it. */

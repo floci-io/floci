@@ -108,11 +108,12 @@ class ElbV2SubnetDependencyIntegrationTest {
     @Test
     void referencesInAnotherAccountDoNotPinTheSameDefaultSubnetId() {
         String otherAccount = TestAccounts.randomId();
-        String first = Ec2Service.defaultSubnetId(REGION, "a");
-        String second = Ec2Service.defaultSubnetId(REGION, "b");
+        String first = Ec2Service.defaultSubnetId(REGION, "a", ACCOUNT);
+        String second = Ec2Service.defaultSubnetId(REGION, "b", ACCOUNT);
         String arn = loadBalancer("application", first, second);
         try {
-            request("ec2", otherAccount, REGION, "DeleteSubnet", "SubnetId", first).statusCode(200);
+            request("ec2", otherAccount, REGION, "DeleteSubnet", "SubnetId",
+                    Ec2Service.defaultSubnetId(REGION, "a", otherAccount)).statusCode(200);
             ec2("DeleteSubnet", "SubnetId", first).statusCode(400)
                     .body("Response.Errors.Error.Code", equalTo("DependencyViolation"));
         } finally {

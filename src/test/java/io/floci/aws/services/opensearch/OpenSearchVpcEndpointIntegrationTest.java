@@ -40,8 +40,8 @@ class OpenSearchVpcEndpointIntegrationTest {
     private static final String VPC_DOMAIN = "vpce-domain";
     private static final String PUBLIC_DOMAIN = "vpce-public";
     // The seeded default subnets, so EC2 can name their VPC and zones.
-    private static final String SUBNET_A = Ec2Service.defaultSubnetId("us-east-1", "a");
-    private static final String SUBNET_B = Ec2Service.defaultSubnetId("us-east-1", "b");
+    private static final String SUBNET_A = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
+    private static final String SUBNET_B = Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000");
 
     @Inject
     Ec2Service ec2Service;

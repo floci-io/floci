@@ -20,7 +20,9 @@ import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocketFactory;
 import java.io.IOException;
 import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
 import java.net.Proxy;
+import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.security.GeneralSecurityException;
@@ -82,7 +84,7 @@ public class ElbV2HealthChecker implements Resettable {
         return Objects.equals(a.getId(), b.getId()) && effectivePort(a, tg) == effectivePort(b, tg);
     }
 
-    public void startMonitoring(TargetGroup tg) {
+    public synchronized void startMonitoring(TargetGroup tg) {
         if (config.services().elbv2().mock()) {
             return;
         }
@@ -93,11 +95,18 @@ public class ElbV2HealthChecker implements Resettable {
         states.computeIfAbsent(tgArn, k -> new ConcurrentHashMap<>());
 
         long intervalMs = (tg.getHealthCheckIntervalSeconds() != null ? tg.getHealthCheckIntervalSeconds() : 30) * 1000L;
-        long timerId = vertx.setPeriodic(intervalMs, id -> probeAll(tgArn, tg));
-        timers.put(tgArn, timerId);
+        long timerId = vertx.setPeriodic(intervalMs, id -> {
+            if (Objects.equals(timers.get(tgArn), id)) {
+                probeAll(tgArn, tg);
+            }
+        });
+        Long previous = timers.put(tgArn, timerId);
+        if (previous != null) {
+            vertx.cancelTimer(previous);
+        }
     }
 
-    public void stopMonitoring(String tgArn) {
+    public synchronized void stopMonitoring(String tgArn) {
         Long timerId = timers.remove(tgArn);
         if (timerId != null) {
             vertx.cancelTimer(timerId);
@@ -105,7 +114,7 @@ public class ElbV2HealthChecker implements Resettable {
         states.remove(tgArn);
     }
 
-    public void clear() {
+    public synchronized void clear() {
         timers.values().forEach(vertx::cancelTimer);
         timers.clear();
         states.clear();
@@ -185,6 +194,7 @@ public class ElbV2HealthChecker implements Resettable {
                 continue;
             }
             String protocol = tg.getHealthCheckProtocol();
+            boolean tcpCheck = "TCP".equals(protocol);
             String path = tg.getHealthCheckPath() != null ? tg.getHealthCheckPath() : "/";
             String matcher = tg.getMatcher() != null ? tg.getMatcher() : "200";
             int timeout = tg.getHealthCheckTimeoutSeconds() != null ? tg.getHealthCheckTimeoutSeconds() : 5;
@@ -210,7 +220,9 @@ public class ElbV2HealthChecker implements Resettable {
                     return SocketDeadline.call(timeout, () -> {
                         Ec2InstancePorts.Endpoint endpoint = ElbV2TargetResolver.resolve(ec2Service,
                                 instancePorts, tg, targetId, probePort);
-                        return probeOnce(endpoint.host(), endpoint.port(), path, timeout, protocol);
+                        return tcpCheck
+                                ? connectOnce(endpoint.host(), endpoint.port(), timeout)
+                                : probeOnce(endpoint.host(), endpoint.port(), path, timeout, protocol);
                     }, () -> {
                         synchronized (state) {
                             state.workerRunning = false;
@@ -240,7 +252,7 @@ public class ElbV2HealthChecker implements Resettable {
                                         targetId, port, outcome.cause().getMessage());
                             } else if (outcome.result() != null) {
                                 int statusCode = outcome.result();
-                                if (matchesStatusCode(statusCode, matcher)) {
+                                if (tcpCheck || matchesStatusCode(statusCode, matcher)) {
                                     state.consecutiveFailures = 0;
                                     state.consecutiveSuccesses++;
                                     boolean initialApplicationTarget = "initial".equals(state.status)
@@ -275,6 +287,15 @@ public class ElbV2HealthChecker implements Resettable {
                 }
                 throw error;
             }
+        }
+    }
+
+    /** A TCP health check passes once the connection opens; nothing is sent. */
+    private static int connectOnce(String host, int port, int timeoutSeconds) throws IOException {
+        try (Socket socket = new Socket(Proxy.NO_PROXY)) {
+            socket.connect(new InetSocketAddress(ElbV2TargetResolver.resolveCheckedAddress(host), port),
+                    timeoutSeconds * 1000);
+            return 0;
         }
     }
 

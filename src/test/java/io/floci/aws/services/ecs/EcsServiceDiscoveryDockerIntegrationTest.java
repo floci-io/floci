@@ -49,7 +49,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class EcsServiceDiscoveryDockerIntegrationTest {
 
     private static final String REGION = "us-east-1";
-    private static final String SUBNET = Ec2Service.defaultSubnetId("us-east-1", "a");
+    private static final String SUBNET = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
     private static final String BUSYBOX_IMAGE = TestImages.BUSYBOX;
     private static final String CONTAINER_NAME = "app";
     private static final String CLOUD_MAP_SERVICE_NAME = "cache";

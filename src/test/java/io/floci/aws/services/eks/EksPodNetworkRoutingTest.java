@@ -2,8 +2,10 @@ package io.floci.aws.services.eks;
 
 import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.testing.HelperShellFixture;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -25,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(ParallelLocks.PORTS)
 class EksPodNetworkRoutingTest {
 
     /** What the stand-in iptables is asked when it lists the rules for the address in each chain, and deletes them. */
@@ -57,6 +60,18 @@ class EksPodNetworkRoutingTest {
     private static final Path RELAY_PID_FILE = Path.of("/tmp/floci-pod-identity-proxy.pid");
     /** As {@link #RELAY_PID_FILE}, for IMDS. */
     private static final Path IMDS_RELAY_PID_FILE = Path.of("/tmp/floci-imds-proxy.pid");
+
+    @Test
+    void podRulesTakeSeveralSourceRangesSeparatedByCommas() {
+        String script = EksPodNetworkRouting.buildImdsForwardCommand("10.0.1.224/28,10.0.1.208/28", true,
+                "10.0.0.5", 9169)[2];
+
+        assertTrue(script.contains("-s 10.0.1.224/28,10.0.1.208/28 "), script);
+        assertThrows(IllegalArgumentException.class, () ->
+                EksPodNetworkRouting.buildImdsForwardCommand("10.0.1.224/28,bogus", true, "10.0.0.5", 9169));
+        assertThrows(IllegalArgumentException.class, () ->
+                EksPodNetworkRouting.buildImdsForwardCommand("10.0.1.224/28,", true, "10.0.0.5", 9169));
+    }
 
     @Test
     void linkLocalEndpointValidatesInput() {

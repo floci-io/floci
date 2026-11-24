@@ -198,6 +198,11 @@ block is ever produced even when a request supplies `tools`.
 
 ## Behavior notes
 
+`TagResource` requires a string-to-string `tags` map with at most 50 entries. Keys have
+1 to 128 characters and values 0 to 256, using the AgentCore tag character pattern.
+Missing or malformed maps and invalid entries return `ValidationException` without
+changing stored tags. An empty map is valid; keys omitted from a request stay unchanged.
+
 - `agentRuntimeId` is `<name>-<10 alphanumerics>`; the runtime ARN is
   `arn:<partition>:bedrock-agentcore:<region>:<account>:runtime/<agentRuntimeId>` and
   stays the same across versions. Endpoint ARNs append `/runtime-endpoint/<name>`, including `DEFAULT`.
@@ -252,7 +257,7 @@ resource once the stack update commits, as on AWS. Deleting the stack deletes th
 Properties the emulated control plane has no model for are accepted and logged once at `WARN`
 rather than failing the stack: the runtime's `CapacityProviderConfiguration`,
 `FilesystemConfigurations`, `LifecycleConfiguration`, `PlatformVersion` and
-`RequestHeaderConfiguration`; the endpoint's `Tags`; and the memory's `MemoryStrategies`,
+`RequestHeaderConfiguration`; and the memory's `MemoryStrategies`,
 `IndexedKeys`, `NamespaceKeys` and `StreamDeliveryResources`.
 
 ## Examples

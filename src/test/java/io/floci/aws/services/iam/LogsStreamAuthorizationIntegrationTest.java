@@ -69,49 +69,20 @@ class LogsStreamAuthorizationIntegrationTest {
         assertPresent(group, "selected", action.equals("CreateLogStream"));
     }
 
+    /**
+     * A stream carries no resource tags: Floci holds none on a stream, and nothing AWS publishes gives a stream its
+     * group's, so a condition on the group's tags matches no stream call.
+     */
     @ParameterizedTest
     @ValueSource(strings = {"CreateLogStream", "DeleteLogStream"})
-    void groupTagDenyPreventsMutationEvenWithWildcardAllow(String action) {
-        String group = group(Map.of("protected", "true"));
+    void aStreamCallCarriesNoTagsOfItsGroup(String action) {
+        String group = group(Map.of("team", "blue"));
         prepare(action, group, "selected");
-        String caller = user(policy("Allow", action, "*", "") + ","
-                + policy("Deny", action, "*",
-                ",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/protected\":\"true\"}}"));
-
+        String caller = user(policy("Allow", action, "*",
+                ",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"blue\"}}"));
         stream(caller, action, group, "selected").statusCode(400)
                 .body(containsString("AccessDeniedException"));
         assertPresent(group, "selected", action.equals("DeleteLogStream"));
-        if (action.equals("DeleteLogStream")) {
-            assertEvent(group, "selected");
-        }
-        for (Map<String, String> tags : List.of(Map.of("protected", "false"), Map.<String, String>of())) {
-            String allowed = group(tags);
-            prepare(action, allowed, "selected");
-            stream(caller, action, allowed, "selected").statusCode(200);
-            assertPresent(allowed, "selected", action.equals("CreateLogStream"));
-        }
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"CreateLogStream", "DeleteLogStream"})
-    void resourceTagAllowReadsTheOwningGroup(String action) {
-        String group = group(Map.of("team", "blue"));
-        String other = group(Map.of("team", "red"));
-        String untagged = group(Map.of());
-        prepare(action, group, "selected");
-        prepare(action, other, "selected");
-        prepare(action, untagged, "selected");
-        String caller = user(policy("Allow", action, "*",
-                ",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"blue\"}}"));
-
-        stream(caller, action, other, "selected").statusCode(400)
-                .body(containsString("AccessDeniedException"));
-        assertPresent(other, "selected", action.equals("DeleteLogStream"));
-        stream(caller, action, untagged, "selected").statusCode(400)
-                .body(containsString("AccessDeniedException"));
-        assertPresent(untagged, "selected", action.equals("DeleteLogStream"));
-        stream(caller, action, group, "selected").statusCode(200);
-        assertPresent(group, "selected", action.equals("CreateLogStream"));
     }
 
     @ParameterizedTest
@@ -144,36 +115,72 @@ class LogsStreamAuthorizationIntegrationTest {
         assertPresent(group, "42", action.equals("DeleteLogStream"));
     }
 
+    /** A group call reads the tags of the group of its name in the request's own account and Region. */
     @ParameterizedTest
-    @ValueSource(strings = {"CreateLogStream", "DeleteLogStream"})
+    @ValueSource(strings = {"PutRetentionPolicy", "DescribeLogStreams"})
     void sameNamedGroupsKeepTheirAccountAndRegionTags(String action) {
-        String group = "logs-stream-scope-" + UUID.randomUUID();
+        String group = "logs-group-scope-" + UUID.randomUUID();
         String otherAccount = "222222222222";
         String otherRegion = "eu-west-1";
         createGroup(ACCOUNT, REGION, group, Map.of("team", "blue"));
         createGroup(ACCOUNT, otherRegion, group, Map.of("team", "red"));
         createGroup(otherAccount, REGION, group, Map.of("team", "red"));
-        if (action.equals("DeleteLogStream")) {
-            for (String[] scope : List.of(new String[]{ACCOUNT, REGION}, new String[]{ACCOUNT, otherRegion},
-                    new String[]{otherAccount, REGION})) {
-                call(endpoint.getPort(), scope[0], scope[1], "CreateLogStream",
-                        Map.of("logGroupName", group, "logStreamName", "selected")).statusCode(200);
-            }
-        }
+        Map<String, ?> body = action.equals("PutRetentionPolicy")
+                ? Map.of("logGroupName", group, "retentionInDays", 7) : Map.of("logGroupName", group);
         String statements = policy("Allow", action, "*",
                 ",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"blue\"}}");
         String caller = user(statements);
         String otherCaller = user(otherAccount, statements);
-        call(endpoint.getPort(), caller, otherRegion, action,
-                Map.of("logGroupName", group, "logStreamName", "selected"))
+        call(endpoint.getPort(), caller, otherRegion, action, body)
                 .statusCode(400).body(containsString("AccessDeniedException"));
-        call(endpoint.getPort(), otherCaller, REGION, action,
-                Map.of("logGroupName", group, "logStreamName", "selected"))
+        call(endpoint.getPort(), otherCaller, REGION, action, body)
                 .statusCode(400).body(containsString("AccessDeniedException"));
-        assertPresent(ACCOUNT, otherRegion, group, "selected", action.equals("DeleteLogStream"));
-        assertPresent(otherAccount, REGION, group, "selected", action.equals("DeleteLogStream"));
-        stream(caller, action, group, "selected").statusCode(200);
-        assertPresent(group, "selected", action.equals("CreateLogStream"));
+        call(endpoint.getPort(), caller, REGION, action, body).statusCode(200);
+    }
+
+    /** Writing and reading a stream's events is checked on the stream the request names, as the table reads it. */
+    @ParameterizedTest
+    @ValueSource(strings = {"PutLogEvents", "GetLogEvents"})
+    void aStreamsEventsAreCheckedOnTheStreamTheRequestNames(String action) {
+        String group = group(Map.of());
+        for (String name : List.of("selected", "other")) {
+            stream(ACCOUNT, "CreateLogStream", group, name).statusCode(200);
+        }
+        String caller = user(policy("Allow", action, streamArn(group, "selected"), ""));
+        call(endpoint.getPort(), caller, action, events(action, group, "other"))
+                .statusCode(400).body(containsString("AccessDeniedException"));
+        call(endpoint.getPort(), caller, action, events(action, group, "selected")).statusCode(200);
+    }
+
+    /** A call on a log group is checked on the group the request names, as the table reads it, not on {@code *}. */
+    @ParameterizedTest
+    @ValueSource(strings = {"FilterLogEvents", "DescribeLogStreams", "PutMetricFilter", "PutSubscriptionFilter"})
+    void aGroupCallIsCheckedOnTheGroupTheRequestNames(String action) {
+        String group = group(Map.of());
+        String other = group(Map.of());
+        String caller = user(policy("Allow", action,
+                "arn:aws:logs:" + REGION + ":" + ACCOUNT + ":log-group:" + group, ""));
+        call(endpoint.getPort(), caller, action, groupCall(action, other))
+                .statusCode(400).body(containsString("AccessDeniedException"));
+        call(endpoint.getPort(), caller, action, groupCall(action, group)).statusCode(200);
+    }
+
+    private static Map<String, ?> events(String action, String group, String stream) {
+        return action.equals("PutLogEvents")
+                ? Map.of("logGroupName", group, "logStreamName", stream, "logEvents",
+                        List.of(Map.of("timestamp", System.currentTimeMillis(), "message", "written")))
+                : Map.of("logGroupName", group, "logStreamName", stream);
+    }
+
+    private static Map<String, ?> groupCall(String action, String group) {
+        return switch (action) {
+            case "PutMetricFilter" -> Map.of("logGroupName", group, "filterName", "errors", "filterPattern", "ERROR",
+                    "metricTransformations", List.of(Map.of("metricName", "Errors", "metricNamespace", "App",
+                            "metricValue", "1")));
+            case "PutSubscriptionFilter" -> Map.of("logGroupName", group, "filterName", "ship", "filterPattern", "",
+                    "destinationArn", "arn:aws:lambda:" + REGION + ":" + ACCOUNT + ":function:ship");
+            default -> Map.of("logGroupName", group);
+        };
     }
 
     @ParameterizedTest
@@ -198,8 +205,7 @@ class LogsStreamAuthorizationIntegrationTest {
             }
         }
         String resource = "arn:aws:logs:" + region + ":" + ACCOUNT + ":log-group:" + group + ":log-stream:selected";
-        String caller = user(policy("Allow", action, resource,
-                ",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"blue\"}}"));
+        String caller = user(policy("Allow", action, resource, ""));
         given().port(endpoint.getPort()).contentType("application/x-amz-json-1.1")
                 .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
                 .queryParam("X-Amz-Credential", caller + "/20261015/" + region + "/logs/aws4_request")
@@ -241,8 +247,7 @@ class LogsStreamAuthorizationIntegrationTest {
         }
         String resource = "arn:aws:logs:" + selectedRegion + ":" + account
                 + ":log-group:" + group + ":log-stream:selected";
-        String caller = user(account, policy("Allow", action, resource,
-                ",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"blue\"}}"));
+        String caller = user(account, policy("Allow", action, resource, ""));
         RequestSpecification request = given().port(endpoint.getPort()).contentType("application/x-amz-json-1.1")
                 .queryParam("X-Amz-Credential", caller + "/20261015/" + remote + "/logs/aws4_request")
                 .queryParam("X-Amz-Signature", "abc")
@@ -266,8 +271,7 @@ class LogsStreamAuthorizationIntegrationTest {
         seedHistoricalStream(protectedGroup, "s");
         assertPresent(protectedGroup, "s", true);
         assertEvent(protectedGroup, "s");
-        String caller = user(policy("Allow", "DeleteLogStream", exactGrant ? streamArn(group, "x::s") : "*",
-                ",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"blue\"}}"));
+        String caller = user(policy("Allow", "DeleteLogStream", exactGrant ? streamArn(group, "x::s") : "*", ""));
         Response response = stream(caller, "DeleteLogStream", group, "x::s").extract().response();
         assertAll("reject storage alias and retain historical stream and event",
                 () -> response.then().statusCode(400).body(containsString("InvalidParameterException")),

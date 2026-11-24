@@ -14,6 +14,7 @@ import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.concurrent.KeyedWriteLocks;
 import io.floci.aws.core.resource.ExplorerResource;
@@ -45,12 +46,15 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 
@@ -90,6 +94,8 @@ public class EcrService implements ResourceProvider, Resettable {
     private static final int MAX_REPO_NAME_LENGTH = 256;
     private static final int MAX_PULL_TIME_EXCLUSIONS = 100;
     private static final int MAX_PULL_THROUGH_CACHE_PREFIX_LENGTH = 30;
+    private static final int MIN_LIFECYCLE_POLICY_LENGTH = 100;
+    private static final int MAX_LIFECYCLE_POLICY_LENGTH = 30720;
     private static final Map<String, String> ACCOUNT_SETTING_DEFAULTS = Map.of(
             "BASIC_SCAN_TYPE_VERSION", "AWS_NATIVE", "REGISTRY_POLICY_SCOPE", "V2", "BLOB_MOUNTING", "DISABLED");
 
@@ -110,6 +116,23 @@ public class EcrService implements ResourceProvider, Resettable {
     // Held while a repository's tags are copied, changed and put in place of the map it held, which is never changed.
     // The copy is put one entry at a time, as the map always was, so ListTagsForResource keeps the order it listed.
     private final Object tagLock = new Object();
+    // When the sweep last applied each repository's lifecycle policy, with the text it applied, so a policy put since
+    // reads as never applied. Kept in memory: a restart only delays the next report by one sweep.
+    private final Map<String, LifecycleEvaluation> lifecycleEvaluations = new ConcurrentHashMap<>();
+    // Held, per repository, by the lifecycle sweep while it applies the policy, and by every change to the policy or
+    // to the repository's existence, so the sweep applies a policy only to the repository that still holds it.
+    private final KeyedWriteLocks<String> lifecycleLocks = new KeyedWriteLocks<>();
+    // Counts the writes each backing registry repository has had, so the sweep, which reads the images without the
+    // write lock, can tell that none was written before it takes the lock to expire some.
+    private final Map<String, AtomicLong> repositoryWrites = new ConcurrentHashMap<>();
+    // What each repository's manifests say about manifest lists and subjects, by digest: a manifest's content never
+    // changes, so the sweep reads only the manifests it has not read before.
+    private final Map<String, Map<String, ManifestReferences>> manifestReferences = new ConcurrentHashMap<>();
+
+    private record LifecycleEvaluation(String policyText, Instant evaluatedAt) {}
+
+    /** The images a manifest list names, and the image an artifact names as its subject, null for none. */
+    private record ManifestReferences(Set<String> listed, String subject) {}
 
     @Inject
     public EcrService(StorageFactory factory,
@@ -296,23 +319,27 @@ public class EcrService implements ResourceProvider, Resettable {
      * Recreates {@link Repository} metadata entries for registry namespaces found in the catalog.
      * Namespaces created by Floci are {@code <account>/<region>/<repoName>}; pre-proxy registry
      * namespaces are recovered for the default account and region without moving image storage.
+     *
+     * <p>The catalog is read when the registry starts, outside any request or inside the one that
+     * happened to start it, so each entry is read and written in the account it belongs to: the
+     * configured default account for a pre-proxy namespace, the account a namespaced one begins with.
      */
     void reconcileFromCatalog(List<String> catalog) {
         if (catalog == null || catalog.isEmpty()) {
             return;
         }
+        String defaultAccount = regionResolver.getDefaultAccountId();
+        String defaultRegion = regionResolver.getDefaultRegion();
         int recreated = 0;
         for (String registryRepositoryName : catalog) {
-            String defaultAccount = regionResolver.getAccountId();
-            String defaultRegion = regionResolver.getDefaultRegion();
             String legacyKey = key(defaultRegion, defaultAccount, registryRepositoryName);
-            Optional<Repository> legacyRepository = repoStore.get(legacyKey);
+            Optional<Repository> legacyRepository = repositoryInAccount(defaultAccount, legacyKey);
             if (legacyRepository.isPresent()) {
                 Repository repo = legacyRepository.get();
                 repo.setRepositoryUri(registryManager.getRepositoryUri(
                         defaultAccount, defaultRegion, repo.getRepositoryName()));
                 repo.setRegistryRepositoryName(registryRepositoryName);
-                repoStore.put(legacyKey, repo);
+                AccountAwareStorageBackend.putInAccount(repoStore, defaultAccount, legacyKey, repo);
                 continue;
             }
             String[] parts = registryRepositoryName.split("/", 3);
@@ -322,14 +349,14 @@ public class EcrService implements ResourceProvider, Resettable {
             String region = namespaced ? parts[1] : defaultRegion;
             String repoName = namespaced ? parts[2] : registryRepositoryName;
             String key = key(region, account, repoName);
-            Optional<Repository> existing = repoStore.get(key);
+            Optional<Repository> existing = repositoryInAccount(account, key);
             if (existing.isPresent()) {
                 Repository repo = existing.get();
                 repo.setRepositoryUri(registryManager.getRepositoryUri(account, region, repoName));
                 if (!namespaced) {
                     repo.setRegistryRepositoryName(registryRepositoryName);
                 }
-                repoStore.put(key, repo);
+                AccountAwareStorageBackend.putInAccount(repoStore, account, key, repo);
                 continue;
             }
             Repository repo = new Repository();
@@ -341,12 +368,24 @@ public class EcrService implements ResourceProvider, Resettable {
                 repo.setRegistryRepositoryName(registryRepositoryName);
             }
             repo.setCreatedAt(Instant.now());
-            repoStore.put(key, repo);
+            AccountAwareStorageBackend.putInAccount(repoStore, account, key, repo);
             recreated++;
         }
         if (recreated > 0) {
             LOG.infov("Reconciled {0} ECR repository metadata entries from registry catalog", recreated);
         }
+    }
+
+    /**
+     * The repository stored under {@code key} in {@code account}. An entry from before the store was kept by account
+     * is the default account's, as the store reads it, and moves into that account when it asks.
+     */
+    private Optional<Repository> repositoryInAccount(String account, String key) {
+        if (repoStore instanceof AccountAwareStorageBackend<Repository> aware) {
+            boolean ownsLegacyEntries = account.equals(regionResolver.getDefaultAccountId());
+            return aware.getForAccountMigratingLegacy(account, key, repo -> ownsLegacyEntries);
+        }
+        return repoStore.get(key);
     }
 
     // ============================================================
@@ -652,6 +691,17 @@ public class EcrService implements ResourceProvider, Resettable {
                                        String registryId,
                                        boolean force,
                                        String region) {
+        String lifecycleKey = key(region, effectiveAccount(registryId), repositoryName);
+        lockLifecycle(lifecycleKey);
+        try {
+            return deleteRepositoryUnderLifecycleLock(repositoryName, registryId, force, region);
+        } finally {
+            unlockLifecycle(lifecycleKey);
+        }
+    }
+
+    private Repository deleteRepositoryUnderLifecycleLock(String repositoryName, String registryId, boolean force,
+                                                          String region) {
         String account = effectiveAccount(registryId);
         String key = key(region, account, repositoryName);
         Repository repo = repoStore.get(key).orElseThrow(() -> notFound(repositoryName, account));
@@ -703,6 +753,7 @@ public class EcrService implements ResourceProvider, Resettable {
         }
 
         repoStore.delete(key);
+        lifecycleEvaluations.remove(key);
         // Drop cached image metadata for this repo.
         String metaPrefix = key + "::";
         synchronized (imageMetaStore) {
@@ -1375,7 +1426,28 @@ public class EcrService implements ResourceProvider, Resettable {
      * {@link #lockRepositoryWrites}.
      */
     public void unlockRepositoryWrites(String storageRepositoryName) {
+        repositoryWrites.computeIfAbsent(storageRepositoryName, ignored -> new AtomicLong()).incrementAndGet();
         repositoryWriteLocks.release(storageRepositoryName);
+    }
+
+    /** How many holds of the repository's write lock have ended, each a write the repository may have had. */
+    private long repositoryWriteCount(String storageRepositoryName) {
+        return repositoryWrites.computeIfAbsent(storageRepositoryName, ignored -> new AtomicLong()).get();
+    }
+
+    /** See {@code lifecycleLocks}; an interruption surfaces as a {@code ServerException}. */
+    private void lockLifecycle(String repositoryKey) {
+        try {
+            lifecycleLocks.acquire(repositoryKey);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AwsException("ServerException",
+                    "Interrupted while waiting for the lifecycle lock on " + repositoryKey, 500);
+        }
+    }
+
+    private void unlockLifecycle(String repositoryKey) {
+        lifecycleLocks.release(repositoryKey);
     }
 
     /** The repository write lock entries still counting writers, for tests. */
@@ -1715,21 +1787,42 @@ public class EcrService implements ResourceProvider, Resettable {
         return repo;
     }
 
-    /** Returns whether the repository rejects a second manifest write for an existing tag. */
+    /**
+     * Returns whether the repository rejects a second manifest write for an existing tag. The registry data plane
+     * asks outside any request, so the repository is read in the account its registry host names.
+     */
     public boolean isImageTagImmutable(String repositoryName, String registryId, String region) {
         String account = effectiveAccount(registryId);
-        return repoStore.get(key(region, account, repositoryName))
+        return dataPlaneRepository(repositoryName, account, region)
                 .map(Repository::getImageTagMutability)
                 .filter("IMMUTABLE"::equals)
                 .isPresent();
     }
 
-    /** Returns the physical registry namespace selected for an ECR repository. */
+    /**
+     * Returns the physical registry namespace of an ECR repository, for the registry data plane, which asks outside
+     * any request: the repository is read in the account its registry host names. A name with no repository is
+     * refused as ECR refuses it, with {@code RepositoryNotFoundException} the data plane answers as
+     * {@code NAME_UNKNOWN}, once the registry's catalog has been read into the metadata. Before that, a repository
+     * whose images the registry holds may have no metadata yet, so the name is refused as unavailable rather than
+     * as missing.
+     */
     public String registryRepositoryName(String repositoryName, String registryId, String region) {
         String account = effectiveAccount(registryId);
-        return repoStore.get(key(region, account, repositoryName))
+        return dataPlaneRepository(repositoryName, account, region)
                 .map(repo -> registryRepositoryName(repo, region))
-                .orElseGet(() -> registryManager.internalRepoName(account, region, repositoryName));
+                .orElseThrow(() -> {
+                    if (!registryManager.isCatalogReconciled()) {
+                        return new IllegalStateException("The ECR registry catalog has not been read yet, so "
+                                + "repository '" + repositoryName + "' in registry " + account
+                                + " cannot be told from a missing one.");
+                    }
+                    return notFound(repositoryName, account);
+                });
+    }
+
+    private Optional<Repository> dataPlaneRepository(String repositoryName, String account, String region) {
+        return AccountAwareStorageBackend.readInAccount(repoStore, account, key(region, account, repositoryName));
     }
 
     public void tagResource(String repoName, String registryId, Map<String, String> tags, String region) {
@@ -1785,49 +1878,289 @@ public class EcrService implements ResourceProvider, Resettable {
 
     public Repository putLifecyclePolicy(String repoName, String registryId, String policyText, String region) {
         validateLifecyclePolicyDocument(policyText);
-        Repository repo = requireRepo(repoName, registryId, region);
-        repo.setLifecyclePolicyText(policyText);
-        repoStore.put(key(region, repo.getRegistryId(), repoName), repo);
-        return repo;
+        String lifecycleKey = key(region, effectiveAccount(registryId), repoName);
+        lockLifecycle(lifecycleKey);
+        try {
+            Repository repo = requireRepo(repoName, registryId, region);
+            repo.setLifecyclePolicyText(policyText);
+            repoStore.put(key(region, repo.getRegistryId(), repoName), repo);
+            return repo;
+        } finally {
+            unlockLifecycle(lifecycleKey);
+        }
     }
 
+    /**
+     * Refuses a lifecycle policy document ECR would refuse: one outside the model's 100 to 30720 characters, then one
+     * {@link EcrLifecyclePolicy#parse} refuses.
+     */
     public static void validateLifecyclePolicyDocument(String text) {
-        JsonNode policy;
-        try {
-            policy = text == null ? null : SINGLE_JSON_VALUE.readTree(text);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("InvalidParameterException", "Lifecycle policy must be a JSON object", 400);
+        String bound = null;
+        if (text != null && text.length() < MIN_LIFECYCLE_POLICY_LENGTH) {
+            bound = "greater than or equal to " + MIN_LIFECYCLE_POLICY_LENGTH;
+        } else if (text != null && text.length() > MAX_LIFECYCLE_POLICY_LENGTH) {
+            bound = "less than or equal to " + MAX_LIFECYCLE_POLICY_LENGTH;
         }
-        JsonNode rules = policy == null || !policy.isObject() ? null : policy.get("rules");
-        if (rules == null || !rules.isArray() || rules.isEmpty()) {
-            throw new AwsException("InvalidParameterException",
-                    "Lifecycle policy must contain a nonempty rules array", 400);
+        if (bound != null) {
+            throw new AwsException("InvalidParameterException", "Invalid parameter at 'lifecyclePolicyText' failed to "
+                    + "satisfy constraint: 'Member must have length " + bound + "'", 400);
         }
-        Set<Integer> priorities = new LinkedHashSet<>();
-        for (JsonNode rule : rules) {
-            JsonNode priority = rule.get("rulePriority");
-            if (priority == null || !priority.isIntegralNumber() || !priority.canConvertToInt()
-                    || priority.intValue() <= 0 || !priorities.add(priority.intValue())) {
-                throw new AwsException("InvalidParameterException",
-                        "Lifecycle rule priorities must be unique positive integers", 400);
-            }
-        }
+        EcrLifecyclePolicy.parse(text);
     }
 
     public Repository getLifecyclePolicy(String repoName, String registryId, String region) {
         Repository repo = requireRepo(repoName, registryId, region);
         if (repo.getLifecyclePolicyText() == null) {
             throw new AwsException("LifecyclePolicyNotFoundException",
-                    "No lifecycle policy associated with repository " + repoName, 400);
+                    "Lifecycle policy does not exist for the repository with name '" + repoName
+                            + "' in the registry with id '" + repo.getRegistryId() + "'", 400);
         }
         return repo;
     }
 
-    public Repository deleteLifecyclePolicy(String repoName, String registryId, String region) {
-        Repository repo = getLifecyclePolicy(repoName, registryId, region);
-        repo.setLifecyclePolicyText(null);
-        repoStore.put(key(region, repo.getRegistryId(), repoName), repo);
-        return repo;
+    /** The policy a repository held when it was deleted, with the time Floci last applied it, null if never. */
+    public record DeletedLifecyclePolicy(String registryId, String repositoryName, String lifecyclePolicyText,
+                                         Instant lastEvaluatedAt) {}
+
+    public DeletedLifecyclePolicy deleteLifecyclePolicy(String repoName, String registryId, String region) {
+        String lifecycleKey = key(region, effectiveAccount(registryId), repoName);
+        lockLifecycle(lifecycleKey);
+        try {
+            Repository repo = getLifecyclePolicy(repoName, registryId, region);
+            String text = repo.getLifecyclePolicyText();
+            Instant lastEvaluatedAt = lifecyclePolicyEvaluatedAt(repo, region);
+            repo.setLifecyclePolicyText(null);
+            repoStore.put(key(region, repo.getRegistryId(), repoName), repo);
+            lifecycleEvaluations.remove(key(region, repo.getRegistryId(), repoName));
+            return new DeletedLifecyclePolicy(repo.getRegistryId(), repoName, text, lastEvaluatedAt);
+        } finally {
+            unlockLifecycle(lifecycleKey);
+        }
+    }
+
+    /** When the lifecycle sweep last applied the repository's current policy; null until it has. */
+    public Instant lifecyclePolicyEvaluatedAt(Repository repo, String region) {
+        LifecycleEvaluation evaluation = lifecycleEvaluations.get(
+                key(region, repo.getRegistryId(), repo.getRepositoryName()));
+        return evaluation != null && evaluation.policyText().equals(repo.getLifecyclePolicyText())
+                ? evaluation.evaluatedAt() : null;
+    }
+
+    /**
+     * Applies the lifecycle policy of every repository that has one, in every account and Region, as ECR does in the
+     * background. Nothing is done while the backing registry is not running: the sweep never starts it. A repository
+     * that fails is retried by the next sweep, after the others have been applied.
+     */
+    void applyLifecyclePolicies(Instant now) {
+        if (isDisabled() || !registryManager.isStarted() || registryManager.httpClient() == null) {
+            return;
+        }
+        List<AccountAwareStorageBackend.AccountEntry<Repository>> withPolicies = new ArrayList<>();
+        for (AccountAwareStorageBackend.AccountEntry<Repository> entry : repositoriesInEveryAccount()) {
+            if (entry.key().split("::", 3).length == 3 && entry.value().getLifecyclePolicyText() != null) {
+                withPolicies.add(entry);
+            }
+        }
+        if (withPolicies.isEmpty()) {
+            return;
+        }
+        List<String> catalog;
+        try {
+            catalog = registryManager.httpClient().catalogStrict();
+        } catch (IOException e) {
+            throw new IllegalStateException("ECR lifecycle sweep could not read the registry catalog", e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("ECR lifecycle sweep was interrupted reading the registry catalog", e);
+        }
+        List<String> failedRepositories = new ArrayList<>();
+        List<RuntimeException> failures = new ArrayList<>();
+        for (AccountAwareStorageBackend.AccountEntry<Repository> entry : withPolicies) {
+            String[] scope = entry.key().split("::", 3);
+            String region = scope[0];
+            String account = scope[1];
+            String name = scope[2];
+            try {
+                RequestScopes.runAs(account, region, () -> applyLifecyclePolicy(account, region, name, catalog, now));
+            } catch (RuntimeException e) {
+                failedRepositories.add(entry.key());
+                failures.add(e);
+            }
+        }
+        if (!failures.isEmpty()) {
+            IllegalStateException failure = new IllegalStateException(
+                    "ECR lifecycle sweep failed for repositories " + failedRepositories);
+            failures.forEach(failure::addSuppressed);
+            throw failure;
+        }
+    }
+
+    private List<AccountAwareStorageBackend.AccountEntry<Repository>> repositoriesInEveryAccount() {
+        if (repoStore instanceof AccountAwareStorageBackend<Repository> aware) {
+            return aware.scanAllAccountEntries(key -> true);
+        }
+        List<AccountAwareStorageBackend.AccountEntry<Repository>> repositories = new ArrayList<>();
+        for (String key : repoStore.keys()) {
+            repoStore.get(key).ifPresent(repo -> repositories.add(
+                    new AccountAwareStorageBackend.AccountEntry<>(repo.getRegistryId(), key, repo)));
+        }
+        return repositories;
+    }
+
+    /**
+     * Applies one repository's policy under its lifecycle lock, so neither the policy nor the repository changes while
+     * it is applied. The images are read and evaluated without the repository's write lock, which is taken only to
+     * expire what the policy selects, and only if the repository had no write since the images were read; otherwise
+     * the next sweep applies the policy. A policy stored before PutLifecyclePolicy checked every rule, and that it now
+     * refuses, is left unapplied.
+     */
+    private void applyLifecyclePolicy(String account, String region, String name, List<String> catalog, Instant now) {
+        String key = key(region, account, name);
+        lockLifecycle(key);
+        try {
+            String text = repoStore.get(key).map(Repository::getLifecyclePolicyText).orElse(null);
+            if (text == null) {
+                return;
+            }
+            EcrLifecyclePolicy policy;
+            try {
+                policy = EcrLifecyclePolicy.parse(text);
+            } catch (AwsException e) {
+                LOG.warnv("Not applying the lifecycle policy of ECR repository {0}/{1}/{2}, which PutLifecyclePolicy "
+                        + "refuses: {3}", region, account, name, e.getMessage());
+                return;
+            }
+            String internal = resolveRegistryRepoName(account, region, name, catalog);
+            long writes = repositoryWriteCount(internal);
+            Map<String, String> expired = imagesToExpire(account, region, name, internal, policy, now);
+            if (!expired.isEmpty() && !expire(account, region, name, internal, expired, writes)) {
+                return;
+            }
+            lifecycleEvaluations.put(key, new LifecycleEvaluation(text, now));
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            throw new IllegalStateException("Could not apply the lifecycle policy of ECR repository " + region + "/"
+                    + account + "/" + name + ": " + e.getMessage(), e);
+        } finally {
+            unlockLifecycle(key);
+        }
+    }
+
+    /**
+     * Deletes the expired manifests, subjects before the artifacts naming them, under the repository's write lock;
+     * false, deleting nothing, when the repository had a write since its images were read. A registry error stops the
+     * deletes, so no artifact goes while the image it names is still there.
+     */
+    private boolean expire(String account, String region, String name, String internal, Map<String, String> expired,
+                           long writesWhenRead) throws IOException, InterruptedException {
+        RegistryHttpClient http = registryManager.httpClient();
+        lockRepositoryWrites(internal);
+        try {
+            if (repositoryWriteCount(internal) != writesWhenRead) {
+                LOG.debugv("ECR repository {0}/{1}/{2} was written while its lifecycle policy was evaluated; the next "
+                        + "sweep applies it", region, account, name);
+                return false;
+            }
+            for (Map.Entry<String, String> image : expired.entrySet()) {
+                if (http.deleteManifestStrict(internal, image.getKey())) {
+                    removeImagePush(account, region, name, image.getKey());
+                    LOG.infov("ECR lifecycle policy expired image {0} of repository {1}/{2}/{3} ({4})",
+                            image.getKey(), region, account, name, image.getValue());
+                }
+            }
+            return true;
+        } finally {
+            unlockRepositoryWrites(internal);
+        }
+    }
+
+    /**
+     * What the policy expires among the images the registry holds for the repository, each tagged digest with its
+     * tags and every other manifest untagged, with why. A digest a held manifest list names is kept until the list
+     * goes. An artifact naming another image as its {@code subject} is selected by no rule while that image is held,
+     * and expires once it is gone, whether the policy expires it now or it was deleted, as ECR expires reference
+     * artifacts.
+     */
+    private Map<String, String> imagesToExpire(String account, String region, String name, String internal,
+                                               EcrLifecyclePolicy policy, Instant now)
+            throws IOException, InterruptedException {
+        RegistryHttpClient http = registryManager.httpClient();
+        Map<String, List<String>> tagsByDigest = new LinkedHashMap<>();
+        for (String tag : http.listTagsStrict(internal)) {
+            String digest = http.headManifestDigestStrict(internal, tag, null);
+            if (digest != null) {
+                tagsByDigest.computeIfAbsent(digest, ignored -> new ArrayList<>()).add(tag);
+            }
+        }
+        for (String digest : registryManager.heldManifestDigests(internal)) {
+            tagsByDigest.putIfAbsent(digest, List.of());
+        }
+
+        Map<String, ManifestReferences> known = manifestReferences.getOrDefault(internal, Map.of());
+        Map<String, ManifestReferences> references = new HashMap<>();
+        Set<String> listed = new HashSet<>();
+        Map<String, String> subjects = new LinkedHashMap<>();
+        for (String digest : tagsByDigest.keySet()) {
+            ManifestReferences read = known.get(digest);
+            if (read == null) {
+                read = readReferences(http, internal, digest);
+            }
+            references.put(digest, read);
+            listed.addAll(read.listed());
+            if (read.subject() != null) {
+                subjects.put(digest, read.subject());
+            }
+        }
+        manifestReferences.put(internal, references);
+
+        List<EcrLifecycleEvaluator.Image> images = new ArrayList<>();
+        for (Map.Entry<String, List<String>> image : tagsByDigest.entrySet()) {
+            String digest = image.getKey();
+            String subject = subjects.get(digest);
+            if (subject == null || !tagsByDigest.containsKey(subject)) {
+                Instant pushedAt = describeImagePush(account, region, name, digest).getPushedAt();
+                images.add(new EcrLifecycleEvaluator.Image(digest, image.getValue(),
+                        pushedAt != null ? pushedAt : now, listed.contains(digest)));
+            }
+        }
+        Map<String, String> expired = new LinkedHashMap<>();
+        for (EcrLifecycleEvaluator.Expiry expiry : EcrLifecycleEvaluator.expiries(policy, images, now)) {
+            expired.put(expiry.digest(), "rule " + expiry.rulePriority());
+        }
+        boolean added = true;
+        while (added) {
+            added = false;
+            for (Map.Entry<String, String> referrer : subjects.entrySet()) {
+                String subject = referrer.getValue();
+                if (!expired.containsKey(referrer.getKey())
+                        && (!tagsByDigest.containsKey(subject) || expired.containsKey(subject))) {
+                    expired.put(referrer.getKey(), "an artifact of image " + subject + ", which is gone");
+                    added = true;
+                }
+            }
+        }
+        return expired;
+    }
+
+    private static ManifestReferences readReferences(RegistryHttpClient http, String internal, String digest)
+            throws IOException, InterruptedException {
+        RegistryHttpClient.ManifestResult manifest = http.getManifest(internal, digest, null);
+        if (manifest == null || manifest.body() == null) {
+            throw new IOException("the registry did not return manifest " + digest);
+        }
+        JsonNode body = MAPPER.readTree(manifest.body());
+        Set<String> listed = new HashSet<>();
+        for (JsonNode child : body.path("manifests")) {
+            if (child.path("digest").isTextual()) {
+                listed.add(child.path("digest").asText());
+            }
+        }
+        JsonNode subject = body.path("subject").path("digest");
+        return new ManifestReferences(Set.copyOf(listed), subject.isTextual() ? subject.asText() : null);
     }
 
     public Repository setRepositoryPolicy(String repoName, String registryId, String policyText, String region) {
@@ -1945,6 +2278,8 @@ public class EcrService implements ResourceProvider, Resettable {
         synchronized (imageMetaStore) {
             pendingImagePushes.clear();
         }
+        lifecycleEvaluations.clear();
+        manifestReferences.clear();
     }
 
     private static String imageMetaKey(String region, String account, String repoName, String digest) {
@@ -2109,8 +2444,12 @@ public class EcrService implements ResourceProvider, Resettable {
     }
 
     private String resolveRegistryRepoNameStrict(String account, String region, String repoName) throws Exception {
+        return resolveRegistryRepoName(account, region, repoName, registryManager.httpClient().catalogStrict());
+    }
+
+    /** {@link #resolveRegistryRepoNameStrict} against a catalog already read. */
+    private String resolveRegistryRepoName(String account, String region, String repoName, List<String> catalog) {
         String internal = registryManager.internalRepoName(account, region, repoName);
-        List<String> catalog = registryManager.httpClient().catalogStrict();
         if (catalog.contains(internal)) {
             return internal;
         }

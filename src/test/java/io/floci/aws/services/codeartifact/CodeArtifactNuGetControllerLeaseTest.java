@@ -2,11 +2,14 @@ package io.floci.aws.services.codeartifact;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -37,6 +40,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CodeArtifactNuGetControllerLeaseTest {
     private static final String REGION = "us-east-1";
     private static final String OWNER = "123456789012";

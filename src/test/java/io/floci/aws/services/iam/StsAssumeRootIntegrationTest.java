@@ -153,6 +153,11 @@ class StsAssumeRootIntegrationTest {
                 .body("ErrorResponse.Error.Code", equalTo("OrganizationNotFoundException"));
     }
 
+    /**
+     * The privileged session acts as the member account's root, and reports what its token cost:
+     * 200 bytes of this emulator's own minting, 4 percent of the limit a session token is held to.
+     * The operation declares no state to carry and no deprecated member, so the pair is all of it.
+     */
     @Test
     @Order(6)
     void aPrivilegedSessionActsAsTheMemberAccountRoot() {
@@ -161,7 +166,8 @@ class StsAssumeRootIntegrationTest {
                 .when().post("/").then().statusCode(200)
                 .body("AssumeRootResponse.AssumeRootResult.Credentials.AccessKeyId", startsWith("ASIA"))
                 .body("AssumeRootResponse.AssumeRootResult.Credentials.Expiration", notNullValue())
-                .body("AssumeRootResponse.AssumeRootResult.SessionTokenSize", notNullValue())
+                .body("AssumeRootResponse.AssumeRootResult.SessionTokenSize", equalTo("200"))
+                .body("AssumeRootResponse.AssumeRootResult.SessionTokenUtilization", equalTo("4"))
                 .extract().path("AssumeRootResponse.AssumeRootResult.Credentials.AccessKeyId");
         String sessionToken = assumeRoot(managementKey, memberAccount, TASK_POLICY)
                 .when().post("/").then().statusCode(200)
@@ -289,7 +295,8 @@ class StsAssumeRootIntegrationTest {
         assumeRoot(managementKey, memberAccount, TASK_POLICY)
                 .formParam("MinimumSessionTokenSize", "1024")
                 .when().post("/").then().statusCode(200)
-                .body("AssumeRootResponse.AssumeRootResult.SessionTokenSize", equalTo("1024"));
+                .body("AssumeRootResponse.AssumeRootResult.SessionTokenSize", equalTo("1024"))
+                .body("AssumeRootResponse.AssumeRootResult.SessionTokenUtilization", equalTo("25"));
     }
 
     /**

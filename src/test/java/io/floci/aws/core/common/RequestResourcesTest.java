@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -55,6 +56,8 @@ class RequestResourcesTest {
     void detachFindsBothAttachmentEndpointsAndKeepsTypedMissingFallbacks() {
         String prefix = "arn:aws:ec2:us-east-1:000000000000:";
         StoredResourceArns stored = mock(StoredResourceArns.class);
+        // The reader asks with the members' paths too, which a service finding by the values alone leaves to them.
+        when(stored.findByMembers(any(), any(), any(), any())).thenCallRealMethod();
         when(stored.findByMembers("instance", List.of("eni-attach-one"), "us-east-1"))
                 .thenReturn(Optional.of(prefix + "instance/i-one"));
         when(stored.findByMembers("network-interface", List.of("eni-attach-one"), "us-east-1"))
@@ -280,7 +283,8 @@ class RequestResourcesTest {
     @Test
     void listTablesIsCheckedOnTheTableCollectionAwsWasMeasuredToCheck() {
         assertTrue(RequestResources.reads("dynamodb:ListTables"));
-        assertFalse(RequestResources.reads("dynamodb:DescribeLimits"));
+        assertEquals(List.of(), RequestResources.of("dynamodb:DescribeLimits", json("{}"), "aws-us-gov",
+                "us-gov-west-1", "111122223333"));
         for (String body : List.of("{}", "{\"TableName\":\"ignored\",\"ExclusiveStartTableName\":\"cursor\"}")) {
             assertEquals(List.of("arn:aws-us-gov:dynamodb:us-gov-west-1:111122223333:table/*"),
                     RequestResources.of("dynamodb:ListTables", json(body), "aws-us-gov", "us-gov-west-1",
@@ -336,7 +340,8 @@ class RequestResourcesTest {
     /**
      * An ARN naming another account whose service acts on that account's resource for the caller (the sink an OAM
      * link is made to, a RAM invitation sent to it) is that resource alone, never the caller's of that name too; one
-     * the service holds no such resource under is still checked as the caller's own too.
+     * the service holds no such resource under is still checked as the caller's own too. The link {@code CreateLink}
+     * makes is the caller's.
      */
     @Test
     void anArnOfAnotherAccountItsServiceActsOnThereIsCheckedAsGivenAlone() {
@@ -345,13 +350,15 @@ class RequestResourcesTest {
         String link = "{\"SinkIdentifier\":\"" + sink + "\",\"LabelTemplate\":\"$AccountName\"}";
         String accept = "{\"resourceShareInvitationArn\":\"" + invitation + "\"}";
 
-        assertEquals(List.of(sink), RequestResources.of("oam:CreateLink", json(link), "aws", "us-east-1",
+        String made = "arn:aws:oam:us-east-1:000000000000:link/*";
+        assertEquals(List.of(sink, made), RequestResources.of("oam:CreateLink", json(link), "aws", "us-east-1",
                 "000000000000", reaching("oam", sink)));
         assertEquals(List.of(invitation), RequestResources.of("ram:AcceptResourceShareInvitation", json(accept), "aws",
                 "us-east-1", "000000000000", reaching("ram", invitation)));
-        assertEquals(List.of(sink, "arn:aws:oam:us-east-1:000000000000:sink/abc"), RequestResources.of("oam:CreateLink",
-                json(link), "aws", "us-east-1", "000000000000", reaching("oam", "arn:aws:oam:us-east-1:111122223333:sink/x")));
-        assertEquals(List.of(sink, "arn:aws:oam:us-east-1:000000000000:sink/abc"), of("oam:CreateLink", json(link)));
+        String own = "arn:aws:oam:us-east-1:000000000000:sink/abc";
+        assertEquals(List.of(sink, own, made), RequestResources.of("oam:CreateLink", json(link), "aws", "us-east-1",
+                "000000000000", reaching("oam", "arn:aws:oam:us-east-1:111122223333:sink/x")));
+        assertEquals(List.of(sink, own, made), of("oam:CreateLink", json(link)));
     }
 
     /**
@@ -430,6 +437,18 @@ class RequestResourcesTest {
                 "servicediscovery:TagResource", namespace, "aws", "us-east-1", "000000000000", Map.of()));
         assertEquals(List.of("arn:aws:servicediscovery:us-east-1:000000000000:namespace/*"),
                 created("servicediscovery:CreateHttpNamespace", namespace));
+    }
+
+    /**
+     * A create whose action acts on other types tags the resource it makes when its request names it: MemoryDB's
+     * {@code CreateCluster} tags its new cluster, not the multi-Region cluster it may join.
+     */
+    @Test
+    void aCreateActingOnOtherTypesTagsTheResourceItMakes() {
+        ContainerRequestContext cluster = json("{\"ClusterName\":\"cache\",\"MultiRegionClusterName\":\"global\","
+                + "\"ACLName\":\"open-access\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"a\"}]}");
+        assertEquals(List.of("arn:aws:memorydb:us-east-1:000000000000:cluster/cache"),
+                created("memorydb:CreateCluster", cluster));
     }
 
     /** A namespace's stored ARNs that find nothing, and act on the resource {@code arn} names in its own account. */

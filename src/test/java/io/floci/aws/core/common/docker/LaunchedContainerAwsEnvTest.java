@@ -1,7 +1,10 @@
 package io.floci.aws.core.common.docker;
 
 import io.floci.aws.services.iam.model.SessionCreds;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.Map;
@@ -18,6 +21,7 @@ import static org.mockito.Mockito.when;
  * The Floci endpoint is stubbed via {@link ContainerReachableEndpoint} so the test does not
  * depend on host networking.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class LaunchedContainerAwsEnvTest {
 
     private LaunchedContainerAwsEnv awsEnvWithEndpoint(String baseUrl) {

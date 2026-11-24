@@ -99,6 +99,7 @@ public class RabbitMqManager {
                 .withName(containerName)
                 .withDockerNetwork(config.services().dockerNetwork())
                 .withLogRotation()
+                .withPushedLogs()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "amazonmq", broker.getBrokerId(), regionResolver.getAccountId(),
                         brokerRegion(broker)));
@@ -176,7 +177,7 @@ public class RabbitMqManager {
         String logGroup = broker.generalLogGroup();
         String logStream = logStreamer.generateLogStreamName(shortId);
         String region = brokerRegion(broker);
-        Closeable logHandle = logStreamer.attach(
+        Closeable logHandle = logStreamer.attachPolled(
                 info.containerId(), logGroup, logStream, region, "amazonmq:" + broker.getBrokerId());
         if (logHandle != null) {
             logStreams.put(broker.getBrokerId(), logHandle);

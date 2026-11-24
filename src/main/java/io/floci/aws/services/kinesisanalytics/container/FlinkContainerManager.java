@@ -167,6 +167,7 @@ public class FlinkContainerManager {
                 .withHostDockerInternalOnLinux()
                 .withEmbeddedDns()
                 .withLogRotation()
+                .withPushedLogs()
                 .withJavaTrustStore()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "kinesisanalytics", app.getApplicationName(),
@@ -628,7 +629,7 @@ public class FlinkContainerManager {
         String logGroup = "/aws/kinesis-analytics/" + app.getApplicationName();
         String logStream = logStreamer.generateLogStreamName(shortId);
         String region = regionOf(app);
-        Closeable logHandle = logStreamer.attach(containerId, logGroup, logStream, region,
+        Closeable logHandle = logStreamer.attachPolled(containerId, logGroup, logStream, region,
                 "kinesisanalytics:" + runtimeKey(app));
         if (logHandle != null) {
             logStreams.put(runtimeKey(app), logHandle);

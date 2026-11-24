@@ -1207,6 +1207,11 @@ public class RedshiftService implements ManagedSecretRotator {
 
     /** The caller's cluster an ARN names, when the ARN is exactly that cluster's in this Region. */
     public Optional<Cluster> findClusterByArn(String clusterArn) {
+        return findClusterByArn(clusterArn, regionResolver.getRegion());
+    }
+
+    /** The caller's cluster an ARN names, when the ARN is exactly that cluster's in {@code region}. */
+    public Optional<Cluster> findClusterByArn(String clusterArn, String region) {
         if (!AwsArnUtils.looksLikeArn(clusterArn)) {
             return Optional.empty();
         }
@@ -1214,8 +1219,12 @@ public class RedshiftService implements ManagedSecretRotator {
         if (!"redshift".equals(arn.service()) || !arn.resource().startsWith("cluster:")) {
             return Optional.empty();
         }
+        String effectiveRegion = region != null && !region.isBlank() ? region : regionResolver.getRegion();
         String identifier = arn.resource().substring("cluster:".length());
-        return regionalCluster(identifier).filter(cluster -> clusterArn.equals(clusterArn(identifier)));
+        String expectedArn = regionResolver.buildArn("redshift", effectiveRegion, "cluster:" + identifier);
+        return clusters.get(identifier)
+                .filter(cluster -> clusterRegion(cluster).equals(effectiveRegion))
+                .filter(cluster -> clusterArn.equals(expectedArn));
     }
 
     /** Sets, or with {@code null} removes, the resource policy of the caller's cluster an ARN names. */
@@ -1388,9 +1397,12 @@ public class RedshiftService implements ManagedSecretRotator {
         rejectPausedCluster(cluster);
         validateAutomatedRetention(nodeType == null ? cluster.getNodeType() : nodeType,
                 automatedRetention == null ? cluster.getAutomatedSnapshotRetentionPeriod() : automatedRetention);
+        boolean parameterGroupChanged = clusterParameterGroupName != null && !clusterParameterGroupName.isBlank();
+        if (parameterGroupChanged) {
+            requireParameterGroup(clusterParameterGroupName);
+        }
 
         boolean passwordChanged = masterUserPassword != null && !masterUserPassword.isBlank();
-        boolean parameterGroupChanged = clusterParameterGroupName != null && !clusterParameterGroupName.isBlank();
         boolean securityGroupsChanged = vpcSecurityGroupIds != null && !vpcSecurityGroupIds.isEmpty();
         // alterUserPassword runs before any mutation of the cluster object (a live reference
         // from HybridStorage, not a copy); if it throws, no metadata has been changed yet.
@@ -1410,7 +1422,7 @@ public class RedshiftService implements ManagedSecretRotator {
         if (nodeType != null && !nodeType.isBlank()) {
             cluster.setNodeType(nodeType);
         }
-        if (clusterParameterGroupName != null && !clusterParameterGroupName.isBlank()) {
+        if (parameterGroupChanged) {
             cluster.setClusterParameterGroupName(clusterParameterGroupName);
             cluster.setUserActivityLoggingEnabled(userActivityLoggingEnabled(clusterParameterGroupName));
         }
@@ -2740,7 +2752,16 @@ public class RedshiftService implements ManagedSecretRotator {
                     Cluster cluster = restoreSnapshot(clusterIdentifier, snapshotIdentifier, null, nodeType,
                             clusters.accountId());
                     try {
-                        cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
+                        // Under the lock the subnet group's delete takes, so the group is either refused here or
+                        // seen by the delete's in-use check once the cluster is stored with it.
+                        mutate(() -> {
+                            if (clusterSubnetGroupName != null && !clusterSubnetGroupName.isBlank()) {
+                                requireSubnetGroup(clusterSubnetGroupName);
+                            }
+                            cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
+                            storeCluster(cluster);
+                            return cluster;
+                        });
                         if (manageMasterPassword) {
                             String password = RandomPasswordGenerator.generate(objectMapper.createObjectNode());
                             modifyCluster(clusterIdentifier, null, null, password, null, List.of());
@@ -3072,6 +3093,24 @@ public class RedshiftService implements ManagedSecretRotator {
         }
     }
 
+    /**
+     * Refuses a parameter group name this Region holds no group of, as Redshift refuses a cluster naming one; the
+     * default group, which Describe lists, is always there. Callers check under {@link #mutate}, the lock the
+     * group's delete takes, so a group deleted meanwhile is either refused here or kept by the delete's in-use check.
+     */
+    private void requireParameterGroup(String name) {
+        if (!DEFAULT_PARAMETER_GROUP_NAME.equals(name) && parameterGroups.get(regionalKey(name)).isEmpty()) {
+            throw new AwsException("ClusterParameterGroupNotFound", "Cluster parameter group " + name + " not found", 404);
+        }
+    }
+
+    /** As {@link #requireParameterGroup}, for a subnet group. */
+    private void requireSubnetGroup(String name) {
+        if (subnetGroups.get(regionalKey(name)).isEmpty()) {
+            throw new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + name + " not found", 400);
+        }
+    }
+
     private void requireMutableParameterGroup(String name) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterValue", "ParameterGroupName is required", 400);
@@ -3101,9 +3140,21 @@ public class RedshiftService implements ManagedSecretRotator {
         // resetClusterParameterGroup hold from their read to their write, so a delete can't land in between and be
         // undone by their write; the event is emitted after it.
         ClusterParameterGroup group = mutate(() -> {
-            ClusterParameterGroup found = parameterGroups.get(regionalKey(parameterGroupName))
-                    .orElseThrow(() -> new AwsException("ClusterParameterGroupNotFound",
-                            "Cluster parameter group " + parameterGroupName + " not found", 404));
+            // As Redshift answers (measured on AWS): the default group, which is answered for without being stored,
+            // can't be deleted (a custom group an older Floci stored under its name stays deletable, as it stays
+            // modifiable), and a group a cluster of the Region still uses is refused, checked under the lock cluster
+            // changes hold too.
+            Optional<ClusterParameterGroup> stored = parameterGroups.get(regionalKey(parameterGroupName));
+            if (stored.isEmpty() && DEFAULT_PARAMETER_GROUP_NAME.equals(parameterGroupName)) {
+                throw new AwsException("InvalidParameterValue",
+                        "The Cluster Parameter Group cannot be deleted: " + parameterGroupName, 400);
+            }
+            ClusterParameterGroup found = stored.orElseThrow(() -> new AwsException("ClusterParameterGroupNotFound",
+                    "Cluster parameter group " + parameterGroupName + " not found", 404));
+            if (regionalClusters().stream().anyMatch(c -> parameterGroupName.equals(c.getClusterParameterGroupName()))) {
+                throw new AwsException("InvalidClusterParameterGroupState", "One or more Clusters are still members of "
+                        + "this parameter group " + parameterGroupName + ", so the group cannot be deleted", 400);
+            }
             parameterGroups.delete(regionalKey(parameterGroupName));
             parameterGroups.flush();
             return found;
@@ -3272,6 +3323,13 @@ public class RedshiftService implements ManagedSecretRotator {
             ClusterSubnetGroup group = subnetGroups.get(regionalKey(name))
                     .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault",
                             "Cluster subnet group " + name + " not found", 400));
+            // A group a cluster of the Region still uses is refused, naming one such cluster, as Redshift answers
+            // (measured on AWS).
+            regionalClusters().stream().filter(c -> name.equals(c.getClusterSubnetGroupName()))
+                    .map(Cluster::getClusterIdentifier).sorted().findFirst().ifPresent(cluster -> {
+                        throw new AwsException("InvalidClusterSubnetGroupStateFault", "Cannot delete the subnet group '"
+                                + name + "' because at least one Cluster: " + cluster + " is still using it.", 400);
+                    });
             subnetGroups.delete(regionalKey(name));
             subnetGroups.flush();
             return group;
@@ -4235,7 +4293,8 @@ public class RedshiftService implements ManagedSecretRotator {
         return resource.substring(0, sep);
     }
 
-    private String clusterArn(String clusterIdentifier) {
+    /** The ARN of a cluster of the request's account and Region, as Redshift's tag calls take it. */
+    public String clusterArn(String clusterIdentifier) {
         return regionResolver.buildArn("redshift", regionResolver.getRegion(), "cluster:" + clusterIdentifier);
     }
 
@@ -4244,11 +4303,13 @@ public class RedshiftService implements ManagedSecretRotator {
                 "snapshot:" + clusterIdentifier + "/" + snapshotIdentifier);
     }
 
-    private String parameterGroupArn(String parameterGroupName) {
+    /** The ARN of a cluster parameter group of the request's account and Region, as the tag calls take it. */
+    public String parameterGroupArn(String parameterGroupName) {
         return regionResolver.buildArn("redshift", regionResolver.getRegion(), "parametergroup:" + parameterGroupName);
     }
 
-    private String subnetGroupArn(String name) {
+    /** The ARN of a cluster subnet group of the request's account and Region, as the tag calls take it. */
+    public String subnetGroupArn(String name) {
         return regionResolver.buildArn("redshift", regionResolver.getRegion(), "subnetgroup:" + name);
     }
 

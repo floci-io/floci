@@ -11,7 +11,9 @@ import io.floci.aws.services.acm.AcmService;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.cognito.CognitoService;
 import io.floci.aws.services.cognito.model.CognitoGroup;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Clock;
 import java.util.HashMap;
@@ -38,6 +40,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /** The Cognito user pool group CFN provisioner in isolation, with only CognitoService mocked. */
+@ResourceLock(ParallelLocks.PORTS)
 class CognitoUserPoolGroupCfnProvisionerTest {
 
     private final CognitoService cognito = mock(CognitoService.class);

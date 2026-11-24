@@ -547,6 +547,24 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(as(user, "lambda").get("/2015-03-31/functions/route-fn/").then(), "lambda:GetFunction");
     }
 
+    @Test
+    void aListCallAwsChecksOnItsServicesResourcesIsAllowedByAPolicyScopedToThem() {
+        // AWS checks these list calls on every resource of the type, not on *, as measured in #9039: a policy on
+        // the type's wildcard allows the call, and one on a single resource of the type does not.
+        String user = user("route-measured-list");
+        String[][] calls = {
+                {"es:ListDomainNames", "es", "/2021-01-01/domain", "arn:aws:es:us-east-1:" + ACCOUNT + ":domain/"},
+                {"s3tables:ListTableBuckets", "s3tables", "/buckets",
+                        "arn:aws:s3tables:us-east-1:" + ACCOUNT + ":bucket/"},
+                {"eks:ListClusters", "eks", "/clusters", "arn:aws:eks:us-east-1:" + ACCOUNT + ":cluster/"}};
+        for (String[] call : calls) {
+            policy(user, allow(call[0], call[3] + "*"));
+            as(user, call[1]).get(call[2]).then().statusCode(200);
+            policy(user, allow(call[0], call[3] + "one"));
+            refused(as(user, call[1]).get(call[2]).then(), call[0]);
+        }
+    }
+
     /** Creates an EKS cluster as the account's admin, removed afterwards, and returns its ARN. */
     private String eksCluster(String name) {
         return eksCluster(name, "{}");
@@ -1590,13 +1608,17 @@ class IamRestRouteEnforcementIntegrationTest {
         String body = "{\"SinkIdentifier\":\"" + sink + "\",\"LabelTemplate\":\"$AccountName\","
                 + "\"ResourceTypes\":[\"AWS::CloudWatch::Metric\"]}";
 
+        String links = "arn:aws:oam:us-east-1:" + ACCOUNT + ":link/*";
+
         // The sink is the other account's, which the link is made to: a grant on a sink of that name of the caller's
-        // own is no grant on it.
-        policy(user, allow(action, sink.replace(PEER, ACCOUNT)));
+        // own is no grant on it. The link it makes is the caller's, and is checked too.
+        policy(user, allow(action, sink.replace(PEER, ACCOUNT)) + "," + allow(action, links));
         refused(request(user, "oam", "POST", "/CreateLink", body), action);
         policy(user, allow(action, "*") + "," + deny(action, sink));
         refused(request(user, "oam", "POST", "/CreateLink", body), action);
         policy(user, allow(action, sink));
+        refused(request(user, "oam", "POST", "/CreateLink", body), action);
+        policy(user, allow(action, sink) + "," + allow(action, links));
         String link = request(user, "oam", "POST", "/CreateLink", body).statusCode(200).extract().path("Arn");
         cleanup.register(() -> adminOf("oam").body("{\"Identifier\":\"" + link + "\"}").post("/DeleteLink"));
     }

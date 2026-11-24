@@ -18,6 +18,7 @@ import com.github.dockerjava.api.model.ContainerNetworkSettings;
 import com.github.dockerjava.api.model.ContainerPort;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.Info;
+import com.github.dockerjava.api.model.StreamType;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
@@ -31,9 +32,11 @@ import io.floci.aws.core.common.docker.HostBlindPortAllocator;
 import io.floci.aws.core.common.docker.PortAllocator;
 import io.floci.aws.core.common.docker.SidecarHealthHelper;
 import io.floci.aws.testing.ManualClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -42,6 +45,8 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 
 import java.io.Closeable;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -49,6 +54,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -73,6 +79,7 @@ import static org.mockito.Mockito.when;
  * {@link PortAllocator} that skips the host probe ({@link HostBlindPortAllocator}) and a mocked Docker layer so the
  * failure path can be exercised without a Docker daemon or free host ports.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class EcrRegistryManagerTest {
 
     private static final int BASE_PORT = 6100;
@@ -201,7 +208,7 @@ class EcrRegistryManagerTest {
         List<String> events = new ArrayList<>();
         RegistryHttpClient client = Mockito.mock(RegistryHttpClient.class);
         when(client.baseUrl()).thenReturn("http://localhost:" + BASE_PORT);
-        when(client.catalog()).thenAnswer(invocation -> {
+        when(client.catalogStrict()).thenAnswer(invocation -> {
             events.add("catalog");
             return List.of("repository");
         });
@@ -220,6 +227,92 @@ class EcrRegistryManagerTest {
         manager.ensureStarted();
 
         assertEquals(List.of("healthy", "catalog", "reconciled"), events);
+    }
+
+    @Test
+    void aCatalogTheRegistryFailedToGiveIsReadAgainRatherThanTakenAsEmpty() throws Exception {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        RegistryHttpClient client = registryClient();
+        when(client.catalogStrict())
+                .thenThrow(new IOException("Registry catalog returned 500"))
+                .thenReturn(List.of("legacy/service"));
+        List<List<String>> reconciled = new ArrayList<>();
+        manager.setReconcileHook(reconciled::add);
+
+        manager.ensureStarted();
+
+        assertFalse(manager.isCatalogReconciled());
+        assertTrue(reconciled.isEmpty());
+
+        manager.ensureCatalogReconciled();
+        manager.ensureCatalogReconciled();
+
+        assertTrue(manager.isCatalogReconciled());
+        assertEquals(List.of(List.of("legacy/service")), reconciled);
+        verify(client, times(2)).catalogStrict();
+    }
+
+    @Test
+    void aFailedCatalogRetryWaitsBeforeTheNextRead() throws Exception {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        ManualClock clock = new ManualClock(Instant.parse("2026-11-21T00:00:00Z"));
+        manager.setClock(clock);
+        RegistryHttpClient client = registryClient();
+        when(client.catalogStrict()).thenThrow(new IOException("Registry catalog returned 500"));
+        manager.setReconcileHook(repositories -> { });
+
+        manager.ensureStarted();
+        manager.ensureCatalogReconciled();
+        clock.advance(Duration.ofMillis(EcrRegistryManager.RECONCILE_RETRY_MILLIS - 1));
+        manager.ensureCatalogReconciled();
+
+        verify(client, times(2)).catalogStrict();
+
+        clock.advance(Duration.ofMillis(1));
+        manager.ensureCatalogReconciled();
+
+        verify(client, times(3)).catalogStrict();
+        assertFalse(manager.isCatalogReconciled());
+    }
+
+    @Test
+    void aCatalogRetryWaitsForTheRegistryToStart() throws Exception {
+        RegistryHttpClient client = registryClient();
+        manager.setReconcileHook(repositories -> { });
+
+        manager.ensureCatalogReconciled();
+
+        verify(client, never()).catalogStrict();
+        assertFalse(manager.isCatalogReconciled());
+    }
+
+    @Test
+    void aRecoveredRegistryHasItsCatalogReadAgain() throws Exception {
+        when(lifecycleManager.createAndStart(any()))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("first-container", Map.of()))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("second-container", Map.of()));
+        RegistryHttpClient client = registryClient();
+        when(client.catalogStrict()).thenReturn(List.of()).thenReturn(List.of("restored/service"));
+        List<List<String>> reconciled = new ArrayList<>();
+        manager.setReconcileHook(reconciled::add);
+
+        manager.ensureStarted();
+        when(lifecycleManager.presenceOf("first-container")).thenReturn(ContainerPresence.ABSENT);
+        manager.ensureStarted();
+
+        assertTrue(manager.isCatalogReconciled());
+        assertEquals(List.of(List.of(), List.of("restored/service")), reconciled);
+    }
+
+    /** A registry client the manager uses in place of HTTP, answering the health check at once. */
+    private RegistryHttpClient registryClient() {
+        RegistryHttpClient client = Mockito.mock(RegistryHttpClient.class);
+        when(client.baseUrl()).thenReturn("http://localhost:" + BASE_PORT);
+        manager = Mockito.spy(manager);
+        Mockito.doReturn(client).when(manager).httpClient();
+        return client;
     }
 
     @Test
@@ -385,7 +478,7 @@ class EcrRegistryManagerTest {
                 .thenReturn(new ContainerLifecycleManager.ContainerInfo("second-container", Map.of()));
         Closeable firstLogStream = Mockito.mock(Closeable.class);
         Closeable secondLogStream = Mockito.mock(Closeable.class);
-        when(logStreamer.attach(anyString(), anyString(), anyString(), anyString(), anyString()))
+        when(logStreamer.attachPolled(anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(firstLogStream, secondLogStream);
 
         assertTrue(manager.tryEnsureStarted());
@@ -495,8 +588,8 @@ class EcrRegistryManagerTest {
 
         manager.ensureStarted();
 
-        verify(logStreamer).attach(eq("container-id"), eq("/aws/ecr/registry"), any(), eq("us-east-1"), eq("ecr:registry"));
-        verify(logStreamer, never()).attachFromNow(any(), any(), any(), any(), any());
+        verify(logStreamer).attachPolled(eq("container-id"), eq("/aws/ecr/registry"), any(), eq("us-east-1"), eq("ecr:registry"));
+        verify(logStreamer, never()).attachPolledFromNow(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -514,8 +607,8 @@ class EcrRegistryManagerTest {
 
         manager.ensureStarted();
 
-        verify(logStreamer).attachFromNow(eq("0123456789abcdef"), eq("/aws/ecr/registry"), any(), eq("us-east-1"), eq("ecr:registry"));
-        verify(logStreamer, never()).attach(any(), any(), any(), any(), any());
+        verify(logStreamer).attachPolledFromNow(eq("0123456789abcdef"), eq("/aws/ecr/registry"), any(), eq("us-east-1"), eq("ecr:registry"));
+        verify(logStreamer, never()).attachPolled(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -1020,6 +1113,45 @@ class EcrRegistryManagerTest {
                 "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_layers",
                 "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_manifests",
                 "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_uploads");
+    }
+
+    /** The registry's API lists tags only; untagged manifests are read from the revision links of its storage. */
+    @Test
+    void heldManifestDigestsAreReadFromTheRevisionLinks() {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        String revisions = "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app"
+                + "/_manifests/revisions/sha256";
+        String first = "a".repeat(64);
+        String second = "0123456789abcdef".repeat(4);
+        DockerClient dockerClient = Mockito.mock(DockerClient.class);
+        ExecCreateCmd execCreate = Mockito.mock(ExecCreateCmd.class, Mockito.RETURNS_SELF);
+        ExecCreateCmdResponse exec = Mockito.mock(ExecCreateCmdResponse.class);
+        when(exec.getId()).thenReturn("exec-id");
+        when(execCreate.exec()).thenReturn(exec);
+        when(dockerClient.execCreateCmd("container-id")).thenReturn(execCreate);
+        ExecStartCmd execStart = Mockito.mock(ExecStartCmd.class);
+        when(execStart.exec(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            ResultCallback<Frame> callback = invocation.getArgument(0);
+            callback.onNext(new Frame(StreamType.STDOUT, (revisions + "/" + first + "/link\n" + revisions + "/"
+                    + second + "/link\n" + revisions + "/not-a-digest/link\n").getBytes(StandardCharsets.UTF_8)));
+            callback.onComplete();
+            return callback;
+        });
+        when(dockerClient.execStartCmd("exec-id")).thenReturn(execStart);
+        InspectExecCmd inspect = Mockito.mock(InspectExecCmd.class);
+        InspectExecResponse result = Mockito.mock(InspectExecResponse.class);
+        when(result.getExitCodeLong()).thenReturn(0L);
+        when(inspect.exec()).thenReturn(result);
+        when(dockerClient.inspectExecCmd("exec-id")).thenReturn(inspect);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        manager.ensureStarted();
+
+        assertEquals(Set.of("sha256:" + first, "sha256:" + second),
+                manager.heldManifestDigests("000000000000/us-east-1/team/app"));
+        verify(execCreate).withCmd("timeout", "-k", "1", "10", "sh", "-c", "[ -d '" + revisions + "' ] || exit 0; "
+                + "find '" + revisions + "' -mindepth 2 -maxdepth 2 -name link");
     }
 
     @Test

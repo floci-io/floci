@@ -11,7 +11,9 @@ import io.floci.aws.services.lambda.model.LambdaFunction;
 import io.floci.aws.services.lambda.model.LambdaUrlConfig;
 import io.floci.aws.services.lambda.zip.CodeStore;
 import io.floci.aws.services.lambda.zip.ZipExtractor;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -35,6 +37,7 @@ import static org.mockito.Mockito.when;
  * cannot be created there, while the commercial partition and the partitions no source covers
  * are unchanged.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class LambdaFunctionUrlPartitionTest {
 
     private static final String ACCOUNT = "000000000000";

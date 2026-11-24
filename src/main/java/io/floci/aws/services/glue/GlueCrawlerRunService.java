@@ -26,10 +26,11 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Glue crawler runs. No data store is crawled and no table is written: a crawl follows the crawler
- * state machine (READY, RUNNING, back to READY with a LastCrawl status) and settles lazily when
- * read. With the default {@code crawler-run-duration-seconds} of 0 a crawl finishes as soon as it
- * starts; a positive duration keeps the crawler RUNNING for that long.
+ * Glue crawler runs. A crawl follows the crawler state machine (READY, RUNNING, back to READY with a
+ * LastCrawl status) and settles lazily when read, asking the {@link CrawlRunner} how it ended. With the
+ * default {@code crawler-run-duration-seconds} of 0 a crawl finishes as soon as it starts; a positive
+ * duration keeps the crawler RUNNING for that long. The default runner crawls no data store and
+ * writes no table.
  *
  * <p>Every public method is synchronized. Starting and stopping a crawl, and the crawler mutations
  * AWS refuses while a crawl runs (UpdateCrawler, DeleteCrawler), check the crawl state and act on
@@ -44,6 +45,7 @@ public class GlueCrawlerRunService {
     static final String STATE_RUNNING = "RUNNING";
     static final String STATUS_SUCCEEDED = "SUCCEEDED";
     static final String STATUS_CANCELLED = "CANCELLED";
+    static final String STATUS_FAILED = "FAILED";
 
     private static final String LOG_GROUP = "/aws-glue/crawlers";
     static final String CRAWL_ID_PREFIX = "crawl:";
@@ -57,6 +59,7 @@ public class GlueCrawlerRunService {
     private final GlueService glueService;
     private final int runDurationSeconds;
     private final Clock clock;
+    private final CrawlRunner crawlRunner;
 
     @Inject
     public GlueCrawlerRunService(StorageFactory storageFactory, GlueService glueService, EmulatorConfig config,
@@ -64,12 +67,19 @@ public class GlueCrawlerRunService {
         this(new RegionScopedStorage<>(storageFactory, regionResolver, "glue", "crawler_runs.json", new TypeReference<>() {}),
                 new RegionScopedStorage<>(storageFactory, regionResolver,
                         "glue", "workflow_run_crawls.json", new TypeReference<>() {}),
-                glueService, config.services().glue().crawlerRunDurationSeconds(), Clock.systemUTC());
+                glueService, config.services().glue().crawlerRunDurationSeconds(), Clock.systemUTC(),
+                CrawlRunner.NO_DATA_STORE);
     }
 
     GlueCrawlerRunService(StorageBackend<String, CrawlerRunRecord> recordStore,
                           StorageBackend<String, List<FinishedCrawl>> workflowCrawlStore, GlueService glueService,
                           int runDurationSeconds, Clock clock) {
+        this(recordStore, workflowCrawlStore, glueService, runDurationSeconds, clock, CrawlRunner.NO_DATA_STORE);
+    }
+
+    GlueCrawlerRunService(StorageBackend<String, CrawlerRunRecord> recordStore,
+                          StorageBackend<String, List<FinishedCrawl>> workflowCrawlStore, GlueService glueService,
+                          int runDurationSeconds, Clock clock, CrawlRunner crawlRunner) {
         if (runDurationSeconds < 0) {
             throw new IllegalArgumentException(
                     "floci.services.glue.crawler-run-duration-seconds must not be negative: " + runDurationSeconds);
@@ -79,6 +89,7 @@ public class GlueCrawlerRunService {
         this.glueService = glueService;
         this.runDurationSeconds = runDurationSeconds;
         this.clock = clock;
+        this.crawlRunner = crawlRunner;
     }
 
     public synchronized String startCrawler(String name) {
@@ -114,7 +125,7 @@ public class GlueCrawlerRunService {
         if (record.getCurrentStart() == null) {
             throw new AwsException("CrawlerNotRunningException", "Crawler with name " + name + " isn't running", 400);
         }
-        finish(record, clock.instant(), STATUS_CANCELLED);
+        finish(record, clock.instant(), CrawlOutcome.cancelled());
         LOG.infov("Stopped Glue crawler {0}", name);
     }
 
@@ -132,6 +143,7 @@ public class GlueCrawlerRunService {
         if (record.getLastStatus() != null) {
             LastCrawlInfo lastCrawl = new LastCrawlInfo();
             lastCrawl.setStatus(record.getLastStatus());
+            lastCrawl.setErrorMessage(record.getLastErrorMessage());
             lastCrawl.setStartTime(record.getLastStart());
             lastCrawl.setLogGroup(LOG_GROUP);
             lastCrawl.setLogStream(crawler.getName());
@@ -219,7 +231,8 @@ public class GlueCrawlerRunService {
     }
 
     /** A crawl of a workflow run as the workflow graph reports it: the {@code Crawl} structure. */
-    public record WorkflowCrawl(String crawlerName, String state, Instant startedOn, Instant completedOn) {}
+    public record WorkflowCrawl(String crawlerName, String state, Instant startedOn, Instant completedOn,
+                                String errorMessage) {}
 
     /** The crawls, settled, that belong to a workflow run: finished ones and a crawl still running. */
     public synchronized List<WorkflowCrawl> crawlsInWorkflowRun(String workflowRunId) {
@@ -227,13 +240,14 @@ public class GlueCrawlerRunService {
         for (CrawlerRunRecord stored : recordStore.scan(key -> true)) {
             CrawlerRunRecord record = settledRecord(stored.getCrawlerName());
             if (record.getCurrentStart() != null && workflowRunId.equals(record.getCurrentWorkflowRunId())) {
-                running.add(new WorkflowCrawl(record.getCrawlerName(), STATE_RUNNING, record.getCurrentStart(), null));
+                running.add(new WorkflowCrawl(record.getCrawlerName(), STATE_RUNNING, record.getCurrentStart(), null,
+                        null));
             }
         }
         List<WorkflowCrawl> crawls = new ArrayList<>();
         for (FinishedCrawl crawl : workflowCrawlStore.get(workflowRunId).orElse(List.of())) {
             crawls.add(new WorkflowCrawl(crawl.getCrawlerName(), crawl.getStatus(), crawl.getStartedAt(),
-                    crawl.getFinishedAt()));
+                    crawl.getFinishedAt(), crawl.getErrorMessage()));
         }
         crawls.addAll(running);
         crawls.sort(Comparator.comparing(WorkflowCrawl::startedOn));
@@ -303,9 +317,9 @@ public class GlueCrawlerRunService {
         List<Double> runtimes = record.getRuntimeSeconds();
         metrics.put("LastRuntimeSeconds", runtimes.isEmpty() ? 0.0 : runtimes.getLast());
         metrics.put("MedianRuntimeSeconds", median(runtimes));
-        metrics.put("TablesCreated", 0);
-        metrics.put("TablesUpdated", 0);
-        metrics.put("TablesDeleted", 0);
+        metrics.put("TablesCreated", record.getLastTablesCreated());
+        metrics.put("TablesUpdated", record.getLastTablesUpdated());
+        metrics.put("TablesDeleted", record.getLastTablesDeleted());
         return metrics;
     }
 
@@ -335,11 +349,24 @@ public class GlueCrawlerRunService {
         }
         Instant finishesAt = record.getCurrentStart().plusSeconds(runDurationSeconds);
         if (!clock.instant().isBefore(finishesAt)) {
-            finish(record, finishesAt, STATUS_SUCCEEDED);
+            finish(record, finishesAt, runCrawl(record.getCrawlerName()));
         }
     }
 
-    private void finish(CrawlerRunRecord record, Instant finishedAt, String status) {
+    /**
+     * A runner that throws must still end the crawl: otherwise the crawl stays active, every later read
+     * invokes the runner again, and a workflow's crawl never reaches its completion history.
+     */
+    private CrawlOutcome runCrawl(String crawlerName) {
+        try {
+            return crawlRunner.run(crawlerName);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Glue crawler {0} failed: {1}", crawlerName, e.getMessage());
+            return CrawlOutcome.failed(e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+        }
+    }
+
+    private void finish(CrawlerRunRecord record, Instant finishedAt, CrawlOutcome outcome) {
         List<Double> runtimes = new ArrayList<>(record.getRuntimeSeconds());
         runtimes.add(Duration.between(record.getCurrentStart(), finishedAt).toMillis() / 1000.0);
         if (runtimes.size() > MAX_RUNTIME_HISTORY) {
@@ -350,7 +377,11 @@ public class GlueCrawlerRunService {
         finished.setSequence(record.getFinishedCount() + 1);
         finished.setStartedAt(record.getCurrentStart());
         finished.setFinishedAt(finishedAt);
-        finished.setStatus(status);
+        finished.setStatus(outcome.status());
+        finished.setErrorMessage(outcome.errorMessage());
+        finished.setTablesCreated(outcome.tablesCreated());
+        finished.setTablesUpdated(outcome.tablesUpdated());
+        finished.setTablesDeleted(outcome.tablesDeleted());
         finished.setCrawlId(record.getCurrentCrawlId());
         finished.setOriginRunId(record.getCurrentOriginRunId());
         finished.setWorkflowRunId(record.getCurrentWorkflowRunId());
@@ -369,7 +400,11 @@ public class GlueCrawlerRunService {
         record.setRecentCrawls(recent);
         record.setFinishedCount(finished.getSequence());
         record.setLastStart(record.getCurrentStart());
-        record.setLastStatus(status);
+        record.setLastStatus(outcome.status());
+        record.setLastErrorMessage(outcome.errorMessage());
+        record.setLastTablesCreated(outcome.tablesCreated());
+        record.setLastTablesUpdated(outcome.tablesUpdated());
+        record.setLastTablesDeleted(outcome.tablesDeleted());
         record.setLastMessagePrefix(record.getCurrentMessagePrefix());
         record.setCurrentStart(null);
         record.setCurrentMessagePrefix(null);

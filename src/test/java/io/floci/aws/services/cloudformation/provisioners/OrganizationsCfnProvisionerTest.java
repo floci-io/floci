@@ -253,6 +253,25 @@ class OrganizationsCfnProvisionerTest {
     }
 
     @Test
+    void aClosedAccountsStateGetAttIsClosed() {
+        CreateAccountStatus status = new CreateAccountStatus();
+        status.setState("SUCCEEDED");
+        status.setAccountId("123456789012");
+        when(organizations.createAccount(eq(ACCOUNT), eq("dev@example.com"), eq("Dev"), any(), eq(false)))
+                .thenReturn(status);
+        OrganizationAccount closed = account(ROOT_ID);
+        closed.setStatus("SUSPENDED");
+        when(organizations.describeAccount(ACCOUNT, "123456789012")).thenReturn(closed);
+
+        StackResource r = resource("AWS::Organizations::Account", "Dev");
+        provisioner.provision(r, mapper.createObjectNode().put("AccountName", "Dev").put("Email", "dev@example.com"),
+                ctx());
+
+        assertEquals("SUSPENDED", r.getAttributes().get("Status"));
+        assertEquals("CLOSED", r.getAttributes().get("State"));
+    }
+
+    @Test
     void accountPathsNameTheParentTheAccountWasMovedInto() {
         CreateAccountStatus status = new CreateAccountStatus();
         status.setState("SUCCEEDED");

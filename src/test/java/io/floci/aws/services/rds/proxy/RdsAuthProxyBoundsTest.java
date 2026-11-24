@@ -4,10 +4,12 @@ import io.floci.aws.config.FlociCertificateAuthority;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.rds.container.RdsBackendGate;
 import io.floci.aws.services.rds.model.DatabaseEngine;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.FreePorts;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -31,6 +33,7 @@ import static org.mockito.Mockito.mock;
  * accept backlog) added to {@link RdsAuthProxy} for the POSTGRES engine, mirroring the
  * equivalent coverage in {@code RedshiftAuthProxyTest}.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class RdsAuthProxyBoundsTest {
 
     @TempDir

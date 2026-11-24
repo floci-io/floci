@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -9,6 +10,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
+import software.amazon.awssdk.services.cloudformation.model.CloudFormationException;
 
 import java.util.List;
 import java.util.stream.Stream;
@@ -20,6 +24,7 @@ import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * A template holding a null value, or a body that is no template, is refused when the operation is
@@ -201,6 +206,22 @@ class CloudFormationNullValuesIntegrationTest {
         for (String action : List.of("ValidateTemplate", "CreateStack", "GetTemplateSummary")) {
             assertRefused(templateUrl(action, "http://localhost:4566/" + bucket + "/missing.json"), missingKey);
             assertRefused(templateUrl(action, "http://localhost:4566/" + bucket + "-gone/t.json"), missingBucket);
+        }
+    }
+
+    @Test
+    void aJsonTemplateNestedBeyondTheStreamConstraintIsRefusedWithValidationError() {
+        String deep = "{\"Resources\":{\"H\":{\"Type\":\"AWS::CloudFormation::WaitConditionHandle\"}},\"Metadata\":"
+                + "{\"k\":".repeat(1000) + "1" + "}".repeat(1000) + "}";
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CloudFormationException refused = assertThrows(CloudFormationException.class,
+                    () -> client.validateTemplate(r -> r.templateBody(deep)));
+
+            assertEquals(400, refused.statusCode());
+            assertEquals("ValidationError", refused.awsErrorDetails().errorCode());
+            assertEquals("Template format error: JSON not well-formed.",
+                    refused.awsErrorDetails().errorMessage());
         }
     }
 

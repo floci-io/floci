@@ -1,5 +1,6 @@
 package io.floci.aws.core.common;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Future;
 import io.vertx.core.MultiMap;
 import io.vertx.core.Vertx;
@@ -15,6 +16,8 @@ import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.Map;
@@ -35,6 +38,7 @@ import static org.mockito.Mockito.when;
  * Spark Connect calls through {@link SparkConnectProxy}, over HTTP/2 from the first byte as gRPC's are: a server of
  * gRPC's shape stands in for a session's Spark Connect server, and a service's routes for its tokens.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SparkConnectProxyTest {
 
     private static final String PATH = "/spark.connect.SparkConnectService/ExecutePlan";

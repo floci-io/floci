@@ -13,6 +13,7 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
@@ -34,8 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesMetricsV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/sa-east-1/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("sa-east-1");
     private static final String SENDER = "metrics-sender@example.com";
 
     private static final long DAY = Duration.ofDays(1).toSeconds();
@@ -59,7 +59,7 @@ class SesMetricsV2IntegrationTest {
     }
 
     private static Response post(String queriesJson) {
-        return given().contentType("application/json").header("Authorization", AUTH)
+        return v2(AUTH)
                 .body("{\"Queries\": [" + queriesJson + "]}")
         .when().post("/v2/email/metrics/batch");
     }
@@ -74,7 +74,7 @@ class SesMetricsV2IntegrationTest {
     }
 
     private static Response dimensionQuery(String dimension, String value) {
-        return given().contentType("application/json").header("Authorization", AUTH)
+        return v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "v", "Namespace": "VDM", "Metric": "SEND",
                                   "Dimensions": {"%s": "%s"},
@@ -89,7 +89,7 @@ class SesMetricsV2IntegrationTest {
     }
 
     private static void send(String destination) {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -105,7 +105,7 @@ class SesMetricsV2IntegrationTest {
     @Order(0)
     void batchGetMetricData_vdmDisabled_reportsTheGateBeforeItValidatesTheRequest() {
         // The body is invalid in three ways; with VDM off none of that is reached.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"Queries\": []}")
         .when().post("/v2/email/metrics/batch").then().statusCode(404)
                 .body("message", containsString(
@@ -115,10 +115,10 @@ class SesMetricsV2IntegrationTest {
     @Test
     @Order(1)
     void enableVdmAndVerifyTheSender() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"ENABLED\"}}")
         .when().put("/v2/email/account/vdm").then().statusCode(200);
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"EmailIdentity\":\"" + SENDER + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
     }
@@ -182,7 +182,7 @@ class SesMetricsV2IntegrationTest {
 
         // A window ending at the first bucket stops before it.
         long firstBucket = timestamps.get(0).longValue();
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "before", "Namespace": "VDM", "Metric": "SEND",
                                   "StartDate": %d, "EndDate": %d}]}
@@ -194,7 +194,7 @@ class SesMetricsV2IntegrationTest {
     @Test
     @Order(6)
     void batchGetMetricData_filtersOnTheIdentityDimension() {
-        Response response = given().contentType("application/json").header("Authorization", AUTH)
+        Response response = v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "mine", "Namespace": "VDM", "Metric": "SEND",
                                   "Dimensions": {"EMAIL_IDENTITY": "example.com"},
@@ -215,11 +215,11 @@ class SesMetricsV2IntegrationTest {
     void batchGetMetricData_filtersOnTheConfigurationSetEverySendPathResolves() {
         // One send down each of the three paths, all naming the same set. A regression in any one
         // of the three assignments shows up here as a count below three.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"ConfigurationSetName\": \"metrics-set\"}")
         .when().post("/v2/email/configuration-sets").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"FromEmailAddress": "%s", "ConfigurationSetName": "metrics-set",
                      "Destination": {"ToAddresses": ["simple@example.com"]},
@@ -229,7 +229,7 @@ class SesMetricsV2IntegrationTest {
         .when().post("/v2/email/outbound-emails").then().statusCode(200);
 
         String raw = "From: " + SENDER + "\r\nTo: raw@example.com\r\nSubject: r\r\n\r\nhi\r\n";
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"FromEmailAddress": "%s", "ConfigurationSetName": "metrics-set",
                      "Destination": {"ToAddresses": ["raw@example.com"]},
@@ -238,7 +238,7 @@ class SesMetricsV2IntegrationTest {
                         .encodeToString(raw.getBytes(StandardCharsets.UTF_8))))
         .when().post("/v2/email/outbound-emails").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"TemplateName": "metrics-cvet", "FromEmailAddress": "%s",
                      "TemplateSubject": "verify", "TemplateContent": "<p>verify</p>",
@@ -246,14 +246,14 @@ class SesMetricsV2IntegrationTest {
                      "FailureRedirectionURL": "https://example.com/no"}
                     """.formatted(SENDER))
         .when().post("/v2/email/custom-verification-email-templates").then().statusCode(200);
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"EmailAddress": "cvet@example.com", "TemplateName": "metrics-cvet",
                      "ConfigurationSetName": "metrics-set"}
                     """)
         .when().post("/v2/email/outbound-custom-verification-emails").then().statusCode(200);
 
-        Response response = given().contentType("application/json").header("Authorization", AUTH)
+        Response response = v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "set", "Namespace": "VDM", "Metric": "SEND",
                                   "Dimensions": {"CONFIGURATION_SET": "metrics-set"},
@@ -269,7 +269,7 @@ class SesMetricsV2IntegrationTest {
 
         // A send naming a blank set resolves to no set, so it must not join any set's count. A
         // blank dimension value cannot be used to check that: AWS refuses one outright.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"FromEmailAddress": "%s", "ConfigurationSetName": "",
                      "Destination": {"ToAddresses": ["blank@example.com"]},
@@ -278,7 +278,7 @@ class SesMetricsV2IntegrationTest {
                     """.formatted(SENDER))
         .when().post("/v2/email/outbound-emails").then().statusCode(200);
 
-        Response after = given().contentType("application/json").header("Authorization", AUTH)
+        Response after = v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "set", "Namespace": "VDM", "Metric": "SEND",
                                   "Dimensions": {"CONFIGURATION_SET": "metrics-set"},
@@ -294,17 +294,17 @@ class SesMetricsV2IntegrationTest {
     void batchGetMetricData_filtersOnTheTenantTheSendNamed() {
         // Without a send that actually names a tenant, dropping the setTenantName assignments
         // would leave every positive tenant metric at zero and the suite green.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"TenantName\": \"metrics-tenant\"}")
         .when().post("/v2/email/tenants").then().statusCode(200);
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"TenantName": "metrics-tenant",
                      "ResourceArn": "arn:aws:ses:sa-east-1:000000000000:identity/%s"}
                     """.formatted(SENDER))
         .when().post("/v2/email/tenants/resources").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"FromEmailAddress": "%s", "TenantName": "metrics-tenant",
                      "Destination": {"ToAddresses": ["tenant@example.com"]},
@@ -315,7 +315,7 @@ class SesMetricsV2IntegrationTest {
 
         // The raw path stores the tenant too, and only a raw send covers its own assignment.
         String raw = "From: " + SENDER + "\r\nTo: tenant-raw@example.com\r\nSubject: t\r\n\r\nhi\r\n";
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"FromEmailAddress": "%s", "TenantName": "metrics-tenant",
                      "Destination": {"ToAddresses": ["tenant-raw@example.com"]},
@@ -324,7 +324,7 @@ class SesMetricsV2IntegrationTest {
                         .encodeToString(raw.getBytes(StandardCharsets.UTF_8))))
         .when().post("/v2/email/outbound-emails").then().statusCode(200);
 
-        Response response = given().contentType("application/json").header("Authorization", AUTH)
+        Response response = v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "mine", "Namespace": "VDM", "Metric": "SEND",
                                   "Dimensions": {"TENANT_NAME": "metrics-tenant"},
@@ -342,7 +342,7 @@ class SesMetricsV2IntegrationTest {
     @Test
     @Order(9)
     void batchGetMetricData_validatesInTheProbedOrder() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"Queries\": []}")
         .when().post("/v2/email/metrics/batch").then().statusCode(400)
                 .body("message", equalTo("1 validation error detected: Value at 'queries' failed "
@@ -356,7 +356,7 @@ class SesMetricsV2IntegrationTest {
                 .body("message", containsString("Member must have length less than or equal to 10"));
 
         // A duplicate id outranks both the reversed dates and the interval cap.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "same", "Namespace": "VDM", "Metric": "SEND",
                                   "StartDate": %d, "EndDate": %d},
@@ -368,7 +368,7 @@ class SesMetricsV2IntegrationTest {
 
         // TENANT_NAME is a valid dimension on AWS even though the pinned SDK model omits it, so it
         // must not be refused as unsupported.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "tenant", "Namespace": "VDM", "Metric": "SEND",
                                   "Dimensions": {"TENANT_NAME": "no-such-tenant"},
@@ -378,7 +378,7 @@ class SesMetricsV2IntegrationTest {
                 .body("Results[0].Values", empty());
 
         // An unknown dimension name outranks the member constraints.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "d", "Namespace": "VDM", "Metric": "NOT_A_METRIC",
                                   "Dimensions": {"NOT_A_DIMENSION": "x"},
@@ -388,7 +388,7 @@ class SesMetricsV2IntegrationTest {
                 .body("message", equalTo("Unsupported dimension provided."));
 
         // Member constraints aggregate into one message, metric first, then namespace, then id.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "", "Namespace": "NOT_VDM", "Metric": "NOT_A_METRIC",
                                   "StartDate": %d, "EndDate": %d}]}
@@ -415,7 +415,7 @@ class SesMetricsV2IntegrationTest {
         goodValue("EMAIL_IDENTITY", "UPPER@Example.COM");
         goodValue("ISP", "Not-An_Isp");
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "same-instant", "Namespace": "VDM", "Metric": "SEND",
                                   "StartDate": %d, "EndDate": %d}]}
@@ -423,7 +423,7 @@ class SesMetricsV2IntegrationTest {
         .when().post("/v2/email/metrics/batch").then().statusCode(400)
                 .body("message", equalTo("Expected start date to be before the end date."));
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "wide", "Namespace": "VDM", "Metric": "SEND",
                                   "StartDate": %d, "EndDate": %d}]}
@@ -433,7 +433,7 @@ class SesMetricsV2IntegrationTest {
                         + "Please partition your requested interval."));
 
         // Four keys became reachable when TENANT_NAME was added; the model caps the map at three.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "four", "Namespace": "VDM", "Metric": "SEND",
                                   "Dimensions": {"ISP": "UNKNOWN_ISP", "EMAIL_IDENTITY": "example.com",
@@ -446,7 +446,7 @@ class SesMetricsV2IntegrationTest {
                         + "Member must have length less than or equal to 3"));
 
         // Probed request-wide: a bad dimension value in any query outranks a bad date in any other.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "dates", "Namespace": "VDM", "Metric": "SEND",
                                   "StartDate": %d, "EndDate": %d},
@@ -458,7 +458,7 @@ class SesMetricsV2IntegrationTest {
                 .body("message", equalTo("Invalid email identity provided."));
 
         // A timestamp outside Instant's range is the caller's problem, not a server error.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "huge", "Namespace": "VDM", "Metric": "SEND",
                                   "StartDate": 1, "EndDate": 999999999999999999}]}
@@ -467,7 +467,7 @@ class SesMetricsV2IntegrationTest {
 
         // A window that parses but sits within a day of Instant's upper bound must still answer,
         // rather than overflowing while the aggregation window is widened.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "edge", "Namespace": "VDM", "Metric": "SEND",
                                   "StartDate": "+1000000000-12-01T00:00:00Z",
@@ -477,13 +477,13 @@ class SesMetricsV2IntegrationTest {
                 .body("Results[0].Values", empty());
 
         // A list member that is not an array is a deserialization failure too, not an empty list.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"Queries\": {}}")
         .when().post("/v2/email/metrics/batch").then().statusCode(400)
                 .body("message", equalTo("Start of structure or map found where not expected."));
 
         // A map member that is not an object is a deserialization failure, not an absent filter.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "shape", "Namespace": "VDM", "Metric": "SEND",
                                   "Dimensions": [],
@@ -495,7 +495,7 @@ class SesMetricsV2IntegrationTest {
         // Sixty days exactly is accepted. Both ends come from one reading of the clock, so a
         // second boundary between two calls cannot turn this into sixty days and one second.
         long capEnd = end();
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"Queries": [{"Id": "cap", "Namespace": "VDM", "Metric": "SEND",
                                   "StartDate": %d, "EndDate": %d}]}
@@ -506,7 +506,7 @@ class SesMetricsV2IntegrationTest {
     @Test
     @Order(10)
     void cleanUpVdmAndIdentity() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"DISABLED\"}}")
         .when().put("/v2/email/account/vdm");
         given().header("Authorization", AUTH)

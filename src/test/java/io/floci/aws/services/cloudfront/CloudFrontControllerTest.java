@@ -2,6 +2,7 @@ package io.floci.aws.services.cloudfront;
 
 import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.services.cloudfront.model.CloudFrontFunction;
+import io.floci.aws.services.cloudfront.model.ConnectionGroup;
 import io.floci.aws.services.cloudfront.model.ContinuousDeploymentPolicy;
 import io.floci.aws.services.cloudfront.model.Distribution;
 import jakarta.ws.rs.core.Response;
@@ -798,6 +799,88 @@ class CloudFrontControllerTest {
                   </DefaultCacheBehavior>
                 </DistributionConfig>
                 """.formatted(defaultCacheBehaviorExtra);
+    }
+
+    @Test
+    void listDistributionsByConnectionModeSetsTheTruncationMembers() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        Distribution first = distribution("A");
+        Distribution second = distribution("B");
+        Distribution third = distribution("C");
+        Distribution fourth = distribution("D");
+        when(service.listDistributionsByConnectionMode("direct", null, 3))
+                .thenReturn(List.of(first, second, third));
+        when(service.listDistributionsByConnectionMode("direct", "B", 3))
+                .thenReturn(List.of(third, fourth));
+        when(service.listDistributionsByConnectionMode("direct", null, Integer.MAX_VALUE))
+                .thenReturn(List.of(first, second, third, fourth));
+
+        CloudFrontController controller = new CloudFrontController(service);
+
+        try (Response firstPage = controller.listDistributionsByConnectionMode("direct", null, 2);
+             Response secondPage = controller.listDistributionsByConnectionMode("direct", "B", 2)) {
+            String firstXml = (String) firstPage.getEntity();
+            String secondXml = (String) secondPage.getEntity();
+
+            assertEquals("true", XmlParser.extractFirst(firstXml, "IsTruncated", null));
+            assertEquals("B", XmlParser.extractFirst(firstXml, "NextMarker", null));
+            assertEquals("4", XmlParser.extractFirst(firstXml, "Quantity", null));
+            assertEquals(List.of("A", "B"), XmlParser.extractAll(firstXml, "Id"));
+
+            assertEquals("false", XmlParser.extractFirst(secondXml, "IsTruncated", null));
+            assertTrue(XmlParser.extractAll(secondXml, "NextMarker").isEmpty());
+            assertEquals("4", XmlParser.extractFirst(secondXml, "Quantity", null));
+            assertEquals(List.of("C", "D"), XmlParser.extractAll(secondXml, "Id"));
+        }
+    }
+
+    @Test
+    void listConnectionGroupsStopsAtTheExactEndOfASecondPage() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        ConnectionGroup alpha = connectionGroup("alpha");
+        ConnectionGroup beta = connectionGroup("beta");
+        ConnectionGroup gamma = connectionGroup("gamma");
+        when(service.listConnectionGroups(null, 3, null)).thenReturn(List.of(alpha, beta, gamma));
+        when(service.listConnectionGroups("beta", 3, null)).thenReturn(List.of(gamma));
+        when(service.listConnectionGroups("gamma", 3, null)).thenReturn(List.of());
+
+        CloudFrontController controller = new CloudFrontController(service);
+
+        try (Response firstPage = controller.listConnectionGroups(listConnectionGroupsBody(null, 2));
+             Response secondPage = controller.listConnectionGroups(listConnectionGroupsBody("beta", 2));
+             Response lastPage = controller.listConnectionGroups(listConnectionGroupsBody("gamma", 2))) {
+            String firstXml = (String) firstPage.getEntity();
+            String secondXml = (String) secondPage.getEntity();
+            String lastXml = (String) lastPage.getEntity();
+
+            assertEquals(List.of("alpha", "beta"), XmlParser.extractAll(firstXml, "Name"));
+            assertEquals("beta", XmlParser.extractFirst(firstXml, "NextMarker", null));
+
+            assertEquals(List.of("gamma"), XmlParser.extractAll(secondXml, "Name"));
+            assertTrue(XmlParser.extractAll(secondXml, "NextMarker").isEmpty(),
+                    "the final page carries no next marker");
+
+            assertTrue(XmlParser.extractAll(lastXml, "Name").isEmpty(),
+                    "a marker past the last group answers an empty page");
+            assertTrue(XmlParser.extractAll(lastXml, "NextMarker").isEmpty());
+        }
+    }
+
+    private static String listConnectionGroupsBody(String marker, int maxItems) {
+        return """
+                <ListConnectionGroupsRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  %s<MaxItems>%d</MaxItems>
+                </ListConnectionGroupsRequest>
+                """.formatted(marker == null ? "" : "<Marker>" + marker + "</Marker>", maxItems);
+    }
+
+    private static ConnectionGroup connectionGroup(String name) {
+        ConnectionGroup group = new ConnectionGroup();
+        group.setName(name);
+        group.setEnabled(true);
+        group.setIpv6Enabled(true);
+        group.setIsDefault(false);
+        return group;
     }
 
     private static Distribution distribution(String id) {

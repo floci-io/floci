@@ -10,8 +10,10 @@ import io.floci.aws.services.cognito.model.CognitoUser;
 import io.floci.aws.services.cognito.model.UserPool;
 import io.floci.aws.services.cognito.model.UserPoolClient;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -32,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 /** Software-token MFA in a pool where MFA is optional, turned on per user with the MFA preference actions. */
+@ResourceLock(ParallelLocks.PORTS)
 class CognitoOptionalTotpMfaTest {
     private static final String USERNAME = "alice";
     private static final String PASSWORD = "Perm1234!";

@@ -21,11 +21,28 @@ public class Integration {
     private Map<String, String> responseTemplates;
     private String templateSelectionExpression;
     private Map<String, String> requestParameters;
+    private Map<String, Map<String, String>> responseParameters;
     private String connectionId;
+    private TlsConfig tlsConfig;
 
     private String credentialsArn;
 
     public Integration() {}
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class TlsConfig {
+        private String serverNameToVerify;
+
+        public TlsConfig() {}
+
+        public TlsConfig(String serverNameToVerify) {
+            this.serverNameToVerify = serverNameToVerify;
+        }
+
+        public String getServerNameToVerify() { return serverNameToVerify; }
+        public void setServerNameToVerify(String serverNameToVerify) { this.serverNameToVerify = serverNameToVerify; }
+    }
 
     public String getCredentialsArn() { return credentialsArn; }
     public void setCredentialsArn(String credentialsArn) { this.credentialsArn = credentialsArn; }
@@ -46,7 +63,9 @@ public class Integration {
         this.responseTemplates = src.responseTemplates;
         this.templateSelectionExpression = src.templateSelectionExpression;
         this.requestParameters = src.requestParameters;
+        this.responseParameters = src.responseParameters;
         this.connectionId = src.connectionId;
+        this.tlsConfig = src.tlsConfig;
     }
 
     public String getIntegrationId() { return integrationId; }
@@ -88,6 +107,12 @@ public class Integration {
     public Map<String, String> getRequestParameters() { return requestParameters; }
     public void setRequestParameters(Map<String, String> requestParameters) { this.requestParameters = requestParameters; }
 
+    public Map<String, Map<String, String>> getResponseParameters() { return responseParameters; }
+    public void setResponseParameters(Map<String, Map<String, String>> responseParameters) { this.responseParameters = responseParameters; }
+
     public String getConnectionId() { return connectionId; }
     public void setConnectionId(String connectionId) { this.connectionId = connectionId; }
+
+    public TlsConfig getTlsConfig() { return tlsConfig; }
+    public void setTlsConfig(TlsConfig tlsConfig) { this.tlsConfig = tlsConfig; }
 }

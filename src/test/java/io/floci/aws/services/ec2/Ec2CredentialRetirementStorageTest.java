@@ -9,9 +9,11 @@ import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.model.SessionCredential;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.StorageFactories;
 import io.vertx.core.json.JsonObject;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -32,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
+@ResourceLock(ParallelLocks.PORTS)
 class Ec2CredentialRetirementStorageTest {
     private static final String ACCOUNT = "000000000000";
     private static final String OTHER_ACCOUNT = "111122223333";

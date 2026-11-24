@@ -1,6 +1,7 @@
 package io.floci.aws.services.mwaa.proxy;
 
 import io.floci.aws.core.common.docker.ContainerExec;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.FreePorts;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
@@ -12,6 +13,7 @@ import io.vertx.core.http.RequestOptions;
 import io.vertx.core.json.JsonObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -35,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * single-event-loop-thread {@link Vertx}, so a slow CLI call can only avoid starving unrelated
  * traffic if it no longer runs on that thread.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class MwaaWebProxyCliOffloadTest {
 
     private static final MwaaWebProxy.AirflowAccount NO_ACCOUNT = new MwaaWebProxy.AirflowAccount("admin", "unused");

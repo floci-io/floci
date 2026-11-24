@@ -105,7 +105,7 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            .body("DescribeVpcsResponse.vpcSet.item[0].vpcId", equalTo(Ec2Service.defaultVpcId("us-east-1")))
+            .body("DescribeVpcsResponse.vpcSet.item[0].vpcId", equalTo(Ec2Service.defaultVpcId("us-east-1", "000000000000")))
             .body("DescribeVpcsResponse.vpcSet.item[0].cidrBlock", equalTo("172.31.0.0/16"))
             .body("DescribeVpcsResponse.vpcSet.item[0].isDefault", equalTo("true"));
     }
@@ -119,7 +119,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "DescribeSubnets")
             .formParam("Filter.1.Name", "vpc-id")
-            .formParam("Filter.1.Value.1", Ec2Service.defaultVpcId("us-east-1"))
+            .formParam("Filter.1.Value.1", Ec2Service.defaultVpcId("us-east-1", "000000000000"))
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -144,7 +144,7 @@ class Ec2IntegrationTest {
             .formParam("Filter.1.Name", "group-name")
             .formParam("Filter.1.Value.1", "default")
             .formParam("Filter.2.Name", "vpc-id")
-            .formParam("Filter.2.Value.1", Ec2Service.defaultVpcId("us-east-1"))
+            .formParam("Filter.2.Value.1", Ec2Service.defaultVpcId("us-east-1", "000000000000"))
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -154,7 +154,7 @@ class Ec2IntegrationTest {
             .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].groupName", equalTo("default"))
             .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].groupDescription",
                 equalTo("default VPC security group"))
-            .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].vpcId", equalTo(Ec2Service.defaultVpcId("us-east-1")));
+            .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].vpcId", equalTo(Ec2Service.defaultVpcId("us-east-1", "000000000000")));
     }
 
     // =========================================================================
@@ -2110,7 +2110,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "DescribeSecurityGroupRules")
             .formParam("Filter.1.Name", "group-id")
-            .formParam("Filter.1.Value.1", Ec2Service.defaultSecurityGroupId("us-east-1"))
+            .formParam("Filter.1.Value.1", Ec2Service.defaultSecurityGroupId("us-east-1", "000000000000"))
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")

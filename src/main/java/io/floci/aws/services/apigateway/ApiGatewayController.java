@@ -911,13 +911,11 @@ public class ApiGatewayController {
 
     @GET
     @Path("/usageplans")
-    public Response getUsagePlans(@Context HttpHeaders headers, @QueryParam("keyId") String keyId) {
+    public Response getUsagePlans(@Context HttpHeaders headers, @QueryParam("keyId") String keyId,
+                                  @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        List<UsagePlan> plans = service.getUsagePlans(region, keyId);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("item");
-        plans.forEach(p -> items.add(toUsagePlanNode(p, false)));
-        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+        PaginatedResult<UsagePlan> page = service.getUsagePlanPage(region, keyId, pageLimit(limit), position);
+        return pageResponse(page, p -> toUsagePlanNode(p, false));
     }
 
     @GET
@@ -1197,13 +1195,13 @@ public class ApiGatewayController {
 
     @GET
     @Path("/restapis/{apiId}/models")
-    public Response getModels(@Context HttpHeaders headers, @PathParam("apiId") String apiId) {
+    public Response getModels(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                              @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        List<io.floci.aws.services.apigateway.model.Model> models = service.getModels(region, apiId);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("item");
-        models.forEach(m -> items.add(toModelNode(m)));
-        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+        // Model clashes with the imported API Gateway v2 model
+        PaginatedResult<io.floci.aws.services.apigateway.model.Model> page =
+                service.getModelPage(region, apiId, pageLimit(limit), position);
+        return pageResponse(page, this::toModelNode);
     }
 
     @GET
@@ -1659,12 +1657,13 @@ public class ApiGatewayController {
 
     @GET
     @Path("/vpclinks")
-    public Response getV1VpcLinks(@Context HttpHeaders headers) {
+    public Response getV1VpcLinks(@Context HttpHeaders headers,
+                                  @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        ObjectNode result = objectMapper.createObjectNode();
-        ArrayNode items = result.putArray("item");
-        service.getVpcLinks(region).forEach(l -> items.add(toV1VpcLinkNode(l)));
-        return Response.ok(result.toString()).type(MediaType.APPLICATION_JSON).build();
+        // VpcLink clashes with the imported API Gateway v2 model
+        PaginatedResult<io.floci.aws.services.apigateway.model.VpcLink> page =
+                service.getVpcLinkPage(region, pageLimit(limit), position);
+        return pageResponse(page, this::toV1VpcLinkNode);
     }
 
     @GET
@@ -2900,6 +2899,12 @@ public class ApiGatewayController {
         }
         if (i.getConnectionType() != null) node.put("connectionType", i.getConnectionType());
         if (i.getConnectionId() != null) node.put("connectionId", i.getConnectionId());
+        if (i.getTlsConfig() != null) {
+            ObjectNode tlsConfig = node.putObject("tlsConfig");
+            if (i.getTlsConfig().getServerNameToVerify() != null) {
+                tlsConfig.put("serverNameToVerify", i.getTlsConfig().getServerNameToVerify());
+            }
+        }
         node.put("payloadFormatVersion", i.getPayloadFormatVersion());
         if (i.getCredentialsArn() != null) {
             node.put("credentialsArn", i.getCredentialsArn());
@@ -2916,6 +2921,9 @@ public class ApiGatewayController {
         if (i.getRequestParameters() != null) {
             ObjectNode requestParameters = node.putObject("requestParameters");
             i.getRequestParameters().forEach(requestParameters::put);
+        }
+        if (i.getResponseParameters() != null) {
+            node.set("responseParameters", objectMapper.valueToTree(i.getResponseParameters()));
         }
         if (i.getTemplateSelectionExpression() != null) {
             node.put("templateSelectionExpression", i.getTemplateSelectionExpression());

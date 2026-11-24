@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -72,22 +73,22 @@ class SesEventPublishingAccountV2IntegrationTest {
                 .body("{\"TopicArn\":\"" + topicArn + "\",\"Protocol\":\"sqs\",\"Endpoint\":\"" + queueArn + "\"}")
         .when().post("/").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2(SES_AUTH)
                 .body("{\"EmailIdentity\":\"" + SENDER + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2(SES_AUTH)
                 .body("{\"ConfigurationSetName\":\"" + CS + "\"}")
         .when().post("/v2/email/configuration-sets").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2(SES_AUTH)
                 .body("""
                     {"EventDestinationName":"ed-sns","EventDestination":{"Enabled":true,
                      "MatchingEventTypes":["SEND","DELIVERY"],"SnsDestination":{"TopicArn":"%s"}}}
                     """.formatted(topicArn))
         .when().post("/v2/email/configuration-sets/" + CS + "/event-destinations").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2(SES_AUTH)
                 .body("""
                     {"FromEmailAddress":"%s","Destination":{"ToAddresses":["success@simulator.amazonses.com"]},
                      "ConfigurationSetName":"%s",

@@ -169,7 +169,8 @@ public class CloudFrontWebSocketProxy {
                     viewerResponse.putHeader("Upgrade", response.getHeader("Upgrade"));
                     NetSocket originSocket = response.netSocket();
                     request.toNetSocket()
-                            .onSuccess(viewerSocket -> splice(viewerSocket, originSocket))
+                            .onSuccess(viewerSocket -> WebSocketUpgrades.splice(viewerSocket, originSocket,
+                                    () -> { }))
                             .onFailure(err -> {
                                 LOG.debugv("CloudFront WebSocket tunnel lost the viewer: {0}", err.getMessage());
                                 originSocket.close();
@@ -303,18 +304,5 @@ public class CloudFrontWebSocketProxy {
                 response.putHeader(name, headers.getAll(name));
             }
         }
-    }
-
-    private static void splice(NetSocket viewer, NetSocket origin) {
-        AtomicBoolean closed = new AtomicBoolean();
-        Runnable close = () -> {
-            if (closed.compareAndSet(false, true)) {
-                viewer.close();
-                origin.close();
-            }
-        };
-        Runnable onData = () -> { };
-        WebSocketUpgrades.relay(viewer, origin, onData, close);
-        WebSocketUpgrades.relay(origin, viewer, onData, close);
     }
 }

@@ -6,8 +6,11 @@ import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.core.DefaultDockerClientConfig;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.Digests;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -46,6 +49,7 @@ import static org.mockito.Mockito.when;
  * assertion failure, normalizeDockerHost method does not exist yet,
  * confirming the missing normalization logic).
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class DockerClientProducerTest {
 
     /**
@@ -714,6 +718,37 @@ class DockerClientProducerTest {
     void validatePoolGaugeIntervalSeconds_zeroOrPositive_returnsItUnchanged() {
         assertEquals(0, DockerClientProducer.validatePoolGaugeIntervalSeconds(0));
         assertEquals(60, DockerClientProducer.validatePoolGaugeIntervalSeconds(60));
+    }
+
+    @Test
+    void validateMaxConcurrentLaunches_negative_throwsNamingTheSetting() {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> DockerClientProducer.validateMaxConcurrentLaunches(-1));
+
+        assertThat(e.getMessage(), containsString("floci.docker.max-concurrent-launches"));
+        assertThat(e.getMessage(), containsString("FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES"));
+    }
+
+    @Test
+    void validateMaxConcurrentLaunches_zeroOrPositive_returnsItUnchanged() {
+        assertEquals(0, DockerClientProducer.validateMaxConcurrentLaunches(0));
+        assertEquals(8, DockerClientProducer.validateMaxConcurrentLaunches(8));
+    }
+
+    @Test
+    void validateBreakerFailureThreshold_negative_throwsNamingTheSetting() {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> DockerClientProducer.validateBreakerFailureThreshold(-1));
+
+        assertThat(e.getMessage(), containsString("floci.docker.breaker-failure-threshold"));
+        assertThat(e.getMessage(), containsString("FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD"));
+        assertThat(e.getMessage(), containsString("must be at least 0"));
+    }
+
+    @Test
+    void validateBreakerFailureThreshold_zeroOrPositive_returnsItUnchanged() {
+        assertEquals(0, DockerClientProducer.validateBreakerFailureThreshold(0));
+        assertEquals(3, DockerClientProducer.validateBreakerFailureThreshold(3));
     }
 
     @Test

@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV1Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -13,9 +14,6 @@ import static org.hamcrest.Matchers.not;
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesIdentityAttributesV1IntegrationTest {
-
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
 
     @Test
     @Order(1)
@@ -89,8 +87,41 @@ class SesIdentityAttributesV1IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("<MailFromDomain></MailFromDomain>"))
-            .body(containsString("<MailFromDomainStatus>Pending</MailFromDomainStatus>"));
+            .body(containsString("<key>v1-attrs.floci.test</key>"))
+            .body(containsString("<BehaviorOnMXFailure>UseDefaultValue</BehaviorOnMXFailure>"))
+            .body(not(containsString("MailFromDomain>")))
+            .body(not(containsString("MailFromDomainStatus")));
+    }
+
+    @Test
+    void getIdentityMailFromDomainAttributes_unknownIdentity_hasNoEntry() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "GetIdentityMailFromDomainAttributes")
+            .formParam("Identities.member.1", "v1-attrs-unknown.floci.test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("MailFromDomainAttributes"))
+            .body(not(containsString("<entry>")));
+    }
+
+    @Test
+    void getIdentityMailFromDomainAttributes_skipsOnlyTheUnknownIdentity() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "GetIdentityMailFromDomainAttributes")
+            .formParam("Identities.member.1", "v1-attrs-unknown.floci.test")
+            .formParam("Identities.member.2", "v1-attrs.floci.test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<key>v1-attrs.floci.test</key>"))
+            .body(not(containsString("v1-attrs-unknown.floci.test")));
     }
 
     @Test
@@ -145,7 +176,19 @@ class SesIdentityAttributesV1IntegrationTest {
 
     @Test
     @Order(11)
-    void setIdentityMailFromDomain_missingMailFromDomain_returnsInvalidParameterValue() {
+    void setIdentityMailFromDomain_missingMailFromDomain_clears() {
+        // Probed: SES takes an absent MailFromDomain as the request to clear the domain.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "SetIdentityMailFromDomain")
+            .formParam("Identity", "v1-attrs.floci.test")
+            .formParam("MailFromDomain", "mail.v1-attrs.floci.test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
@@ -154,8 +197,20 @@ class SesIdentityAttributesV1IntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(400)
-            .body(containsString("InvalidParameterValue"));
+            .statusCode(200)
+            .body(containsString("SetIdentityMailFromDomainResponse"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "GetIdentityMailFromDomainAttributes")
+            .formParam("Identities.member.1", "v1-attrs.floci.test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<BehaviorOnMXFailure>UseDefaultValue</BehaviorOnMXFailure>"))
+            .body(not(containsString("MailFromDomain>")));
     }
 
     @Test

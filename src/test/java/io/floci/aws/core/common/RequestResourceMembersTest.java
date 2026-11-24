@@ -18,7 +18,6 @@ import java.io.ByteArrayInputStream;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -159,26 +158,83 @@ class RequestResourceMembersTest {
     }
 
     @Test
+    void aRouteTypeIsReadAsAReferenceTypeAndNeverUnderOneOfItsNames() throws Exception {
+        // API Gateway's developer guide gives the paths of resources the Service Reference gives no type, and an API
+        // Gateway v2 path label holds a hyphen.
+        ObjectNode document = (ObjectNode) MAPPER.readTree("""
+                {
+                  "namespaces": {"example": ["example"]},
+                  "arnFormats": {"example": {
+                    "Tags": "arn:${Partition}:example:${Region}::/tags/${UrlEncodedResourceARN}"
+                  }},
+                  "pathFormats": {"example": {
+                    "/sdktypes (resource-path-specifier)": "arn:${Partition}:example:${Region}::/sdktypes"
+                  }},
+                  "operations": {
+                    "example:GetSdkTypes": {"resources": [{"type": "/sdktypes (resource-path-specifier)", "fill": {}}]},
+                    "example:GetTags": {
+                      "resources": [{"type": "Tags", "fill": {"UrlEncodedResourceARN": "ResourceArn"}}],
+                      "located": {"ResourceArn": "{resource-arn}"}
+                    }
+                  }
+                }
+                """);
+        RequestResourceMembers.Table table = parse(document.toString());
+        assertEquals(Set.of("Tags", "/sdktypes (resource-path-specifier)"), table.formats().get("example").keySet());
+        assertEquals(List.of("/sdktypes (resource-path-specifier)"),
+                table.operations().get("example:GetSdkTypes").getFirst().types());
+        ObjectNode clash = document.deepCopy();
+        ((ObjectNode) clash.path("pathFormats").path("example"))
+                .put("Tags", "arn:${Partition}:example:${Region}::/tags");
+        assertThrows(IllegalStateException.class, () -> parse(clash.toString()));
+    }
+
+    @Test
+    void anOperationCheckedAsSeveralActionsHasEachResourceUnderItsAction() throws Exception {
+        // KMS's ReEncrypt is authorized by kms:ReEncryptFrom on its source key and kms:ReEncryptTo on its destination.
+        ObjectNode document = (ObjectNode) MAPPER.readTree("""
+                {
+                  "namespaces": {"example": ["example"]},
+                  "arnFormats": {"example": {"key": "arn:${Partition}:example:${Region}:${Account}:key/${KeyId}"}},
+                  "operations": {
+                    "example:ReEncrypt": {
+                      "actions": {"example:ReEncryptFrom": ["key"], "example:ReEncryptTo": ["key"]},
+                      "resources": [
+                        {"type": "key", "fill": {"KeyId": "SourceKeyId"}, "action": "example:ReEncryptFrom"},
+                        {"types": ["key"], "through": "CiphertextBlob", "when": {"SourceKeyId": [null]},
+                         "action": "example:ReEncryptFrom"},
+                        {"type": "key", "fill": {"KeyId": "DestinationKeyId"}, "action": "example:ReEncryptTo"}
+                      ]
+                    }
+                  }
+                }
+                """);
+        RequestResourceMembers.Table table = parse(document.toString());
+        assertEquals(List.of(), table.operations().get("example:ReEncrypt"));
+        Map<String, List<Resource>> checkedAs = table.checkedAs().get("example:ReEncrypt");
+        assertEquals(List.of("example:ReEncryptFrom", "example:ReEncryptTo"), List.copyOf(checkedAs.keySet()));
+        assertEquals(2, checkedAs.get("example:ReEncryptFrom").size());
+        assertEquals(new Member("CiphertextBlob", false), checkedAs.get("example:ReEncryptFrom").get(1).through());
+        assertEquals(Map.of("KeyId", new Member("DestinationKeyId", false)),
+                checkedAs.get("example:ReEncryptTo").getFirst().fill());
+        ObjectNode unrecorded = document.deepCopy();
+        ((ObjectNode) unrecorded.path("operations").path("example:ReEncrypt").path("resources").path(0))
+                .put("action", "example:ReEncrypt");
+        assertThrows(IllegalStateException.class, () -> parse(unrecorded.toString()));
+        ObjectNode unchecked = document.deepCopy();
+        ((ObjectNode) unchecked.path("operations").path("example:ReEncrypt").path("resources").path(2))
+                .remove("action");
+        assertThrows(IllegalStateException.class, () -> parse(unchecked.toString()));
+    }
+
+    @Test
     void theTableReadsItsNamespacesAndGivesEachTypeItNamesAnArnFormat() {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         assertTrue(table.namespaces().containsAll(List.of("cognito-idp", "ecr", "elasticloadbalancing", "states")));
-        assertTrue(table.namespaces().contains("lambda"));
-        assertFalse(table.handBuilt().contains("lambda"));
-        assertEquals(Set.of("dynamodb", "logs"), table.namespaces().stream().filter(table.handBuilt()::contains)
-                .collect(Collectors.toSet()));
-        Set<String> logsDelivery = Stream.of("PutDeliverySource", "GetDeliverySource", "DeleteDeliverySource",
-                "DescribeDeliverySources", "PutDeliveryDestination", "GetDeliveryDestination",
-                "DeleteDeliveryDestination", "DescribeDeliveryDestinations", "CreateDelivery", "GetDelivery",
-                "UpdateDeliveryConfiguration", "DeleteDelivery", "DescribeDeliveries")
-                .map(operation -> "logs:" + operation).collect(Collectors.toSet());
-        Set<String> expected = new HashSet<>(logsDelivery);
-        expected.add("logs:PutDestination");
-        // What AWS was measured to check where the Service Reference lists no resource type (MEASURED).
-        expected.add("dynamodb:ListTables");
-        assertEquals(expected, table.operations().keySet().stream()
-                .filter(operation -> table.handBuilt().contains(operation.substring(0, operation.indexOf(':'))))
-                .collect(Collectors.toSet()),
-                "only the operations listed to read override hand-built operations");
+        assertTrue(table.namespaces().containsAll(List.of("lambda", "logs", "iam")));
+        assertEquals(Set.of(), table.operations().keySet().stream()
+                .filter(operation -> !table.namespaces().contains(operation.substring(0, operation.indexOf(':'))))
+                .collect(Collectors.toSet()), "every operation read is one of a namespace read whole");
         assertTrue(table.namespaces().stream().noneMatch(table.notCovered()::contains));
         assertTrue(table.operations().containsKey("rds:CreateDBParameterGroup"));
         assertTrue(table.operations().containsKey("rds:CreateDBProxy"));
@@ -309,9 +365,10 @@ class RequestResourceMembersTest {
                     + "{\"resources\":[],\"creates\":[{\"type\":\"part\",\"parent\":\"thing\",\"arn\":\"ThingArn\"}]}}}"),
                     part);
         }
-        // A member past one structure, or filling a variable from a list in a list.
+        // An ARN member past one structure, a member filling a variable past two, or one filling it from a list in a
+        // list.
         assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"types\":[\"thing\"],\"arn\":\"A[].B.ThingArn\"}")));
-        for (String bad : List.of("A.Names[]", "A[].Names[]", "A[].B.Name")) {
+        for (String bad : List.of("A.Names[]", "A[].Names[]", "A[].B.C.Name")) {
             assertThrows(IllegalStateException.class, () -> parse(document(formats,
                     "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"" + bad + "\"}}")), bad);
         }
@@ -488,14 +545,18 @@ class RequestResourceMembersTest {
     @TestFactory
     Stream<DynamicTest> everyResourceOfTheTableIsReadFromAJsonBodyAndAForm() {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
-        return table.operations().entrySet().stream().flatMap(operation -> operation.getValue().stream()
+        // An unread operation names what it acts on in a body the reader does not read, so it reads none of it.
+        return table.operations().entrySet().stream().filter(operation -> !table.unread().contains(operation.getKey()))
+                .flatMap(operation -> operation.getValue().stream()
                 .map(resource -> DynamicTest.dynamicTest(operation.getKey() + " " + resource, () -> {
                     String namespace = operation.getKey().substring(0, operation.getKey().indexOf(':'));
                     String name = operation.getKey().substring(namespace.length() + 1);
-                    ArnFormat format = table.formats().get(namespace).get(resource.types().getFirst());
+                    String type = exampleType(resource, operation.getValue());
+                    ArnFormat format = table.formats().get(namespace).get(type);
                     String arn = example(format.format());
                     String account = resource.account() != null ? "111122223333" : "000000000000";
-                    String expected = resource.arn() != null || resource.through() != null || resource.byDefault() ? arn
+                    String expected = resource.arn() != null || resource.through() != null || resource.byDefault()
+                            || resource.signer() ? arn
                             : expected(format.format(), resource, account) + (format.minted() ? "/*"
                                     : format.mintedSuffix() != null && resource.fill().size() == 1
                                     ? format.mintedSuffix() : "");
@@ -503,7 +564,8 @@ class RequestResourceMembersTest {
                     StringBuilder form = new StringBuilder("Action=" + name);
                     Map<Member, String> values = resource.arn() != null ? Map.of(resource.arn(), arn)
                             : resource.through() != null ? Map.of(resource.through(), "x")
-                            : Stream.concat(resource.fill().values().stream(), resource.find().stream()).distinct()
+                            : Stream.of(resource.fill().values().stream(), resource.find().stream(),
+                                    Stream.ofNullable(resource.renames())).flatMap(members -> members).distinct()
                                     .collect(Collectors.toMap(m -> m, m -> "x"));
                     Map<Member, String> given = new LinkedHashMap<>(values);
                     if (resource.account() != null) {
@@ -535,15 +597,17 @@ class RequestResourceMembersTest {
                         form.append('&').append(parameter).append('=').append(encoded(sent));
                     });
                     List<String> named = operation.getValue().stream()
-                            .filter(other -> (other == resource || named(other) || sharesAMember(other, given)
-                                    || fillsFromTheArn(other, resource)
+                            .filter(other -> (other == resource || named(other) && !other.signer()
+                                    || signedFor(other, given) || sharesAMember(other, given)
+                                    || fillsFromTheArn(other, resource, type)
                                     || !other.find().isEmpty() && other.find().equals(resource.find())
                                     && other.when().equals(resource.when()) && other.unless().equals(resource.unless()))
                                     && (other.endpoint() == null || resource.endpoint() == null
                                     || other.endpoint().equals(resource.endpoint())))
-                            .map(other -> other == resource ? expected : expected(
-                                    table.formats().get(namespace).get(other.types().getFirst()).format(), other,
-                                    "000000000000", given.keySet()))
+                            .flatMap(other -> other == resource ? inTheRequestsRegionToo(expected, resource).stream()
+                                    : other.signer() ? Stream.of(arn)
+                                    : Stream.of(expected(table.formats().get(namespace).get(other.types().getFirst())
+                                    .format(), other, "000000000000", given.keySet())))
                             .distinct().toList();
                     StoredResourceArns stored = runningOn(namespace, arn, resource.byDefault());
                     assertEquals(named, RequestResources.of(operation.getKey(),
@@ -629,12 +693,36 @@ class RequestResourceMembersTest {
     /**
      * Whether a resource fills its variables from the ARN the other's member holds, as that ARN's type's variable alone
      * (a permission set made in the instance an {@code InstanceArn} names), so a request naming the other by an ARN of
-     * its first type, which the test gives, names it too.
+     * the type the test gives names it too.
      */
-    private static boolean fillsFromTheArn(Resource resource, Resource other) {
+    private static boolean fillsFromTheArn(Resource resource, Resource other, String type) {
         return other.arn() != null && !resource.fill().isEmpty()
                 && resource.fill().values().stream().allMatch(other.arn()::equals)
-                && other.types().getFirst().equals(resource.arnOf().get(other.arn().path()));
+                && type.equals(resource.arnOf().get(other.arn().path()));
+    }
+
+    /**
+     * The type of the ARN the test gives a resource's member: for an ARN member that also fills a resource of one of
+     * the types it is read as, that resource's type, as the member holds one of those (OAM's {@code CreateLink} reads
+     * its {@code SinkIdentifier} as a link or a sink and fills the sink from it); else its first type.
+     */
+    private static String exampleType(Resource resource, List<Resource> resources) {
+        return resource.arn() == null ? resource.types().getFirst() : resources.stream()
+                .filter(other -> other.arn() == null && other.fill().containsValue(resource.arn())
+                        && !other.arnOf().containsKey(resource.arn().path())
+                        && resource.types().contains(other.types().getFirst()))
+                .map(other -> other.types().getFirst()).findFirst().orElse(resource.types().getFirst());
+    }
+
+    /**
+     * Whether a request giving these members names the user who signs it: the resource is that user, and every member
+     * it is named {@code when} is absent from them, as each value list holds absent as {@code ""}.
+     */
+    private static boolean signedFor(Resource resource, Map<Member, String> given) {
+        Map<String, String> values = given.entrySet().stream()
+                .collect(Collectors.toMap(entry -> entry.getKey().name(), Map.Entry::getValue, (a, b) -> a));
+        return resource.signer() && resource.when().entrySet().stream()
+                .allMatch(member -> member.getValue().contains(values.getOrDefault(member.getKey(), "")));
     }
 
     /** Whether every request of its operation names the resource: no member names it and no member's value selects it. */
@@ -644,11 +732,17 @@ class RequestResourceMembersTest {
     }
 
     /**
-     * A namespace's stored ARNs that find nothing, and give {@code arn} for whatever a request names a resource through
-     * and, when {@code defaults}, as the resource of any type the service acts on for a request naming none.
+     * A namespace's stored ARNs that find nothing, and give {@code arn} for whatever a request names a resource
+     * through, as the user whose key signs a request and, when {@code defaults}, as the resource of any type the
+     * service acts on for a request naming none.
      */
     private static StoredResourceArns runningOn(String namespace, String arn, boolean defaults) {
         return new StoredResourceArns() {
+            @Override
+            public Optional<String> signedBy(String accessKeyId) {
+                return Optional.of(arn);
+            }
+
             @Override
             public Optional<String> findDefault(String type, String region) {
                 return defaults ? Optional.of(arn) : Optional.empty();
@@ -701,18 +795,27 @@ class RequestResourceMembersTest {
                 .noneMatch(unless -> unless.getValue().contains(values.getOrDefault(unless.getKey(), "")));
     }
 
-    /** The value at the member's path in a body: in its list's first element, and in its field's structure. */
+    /**
+     * The value at the member's path in a body: in its list's first element, and in its field's structure, which the
+     * other fields the request gives of it share ({@code AlternateIdentifier.ExternalId}'s {@code Issuer} and
+     * {@code Id}).
+     */
     private static void put(ObjectNode body, Member member, String value) {
         if (member.field() == null) {
-            if (member.list()) {
+            if (member.map()) {
+                body.putObject(member.name()).putObject(value);
+            } else if (member.list()) {
                 body.putArray(member.name()).add(value);
             } else {
                 body.put(member.name(), value);
             }
         } else if (member.map()) {
             put(body.putObject(member.name()).putObject("table"), member.field(), value);
+        } else if (member.list()) {
+            put(body.putArray(member.name()).addObject(), member.field(), value);
         } else {
-            put(member.list() ? body.putArray(member.name()).addObject() : body.putObject(member.name()), member.field(), value);
+            put(body.get(member.name()) instanceof ObjectNode shared ? shared : body.putObject(member.name()),
+                    member.field(), value);
         }
     }
 
@@ -750,6 +853,66 @@ class RequestResourceMembersTest {
 
     private static ArnFormat format(String format) {
         return new ArnFormat(format, RequestResourceMembers.pattern(format), false);
+    }
+
+    /**
+     * A member the clients of an operation locate apart is read for the client whose route a request matched, and an
+     * operation naming what it acts on in a body the reader does not read is recorded unread; a malformed entry of
+     * either is refused.
+     */
+    @Test
+    void membersLocatedApartAreReadForTheRequestsClientAndUnreadOperationsAreRecorded() throws Exception {
+        String formats = "\"arnFormats\":{\"a\":{\"thing\":\"arn:${Partition}:a:::${ThingName}\"}}";
+        String operation = "{\"resources\":[{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Bucket\"}}],"
+                + "\"located\":{\"Marker\":\"?marker\"},"
+                + "\"locatedApart\":{\"one\":{\"Bucket\":\"{Bucket}\"},\"two\":{\"Bucket\":\"{name}\"}},"
+                + "\"unread\":[\"Delete.Objects[].Key\"]}";
+        RequestResourceMembers.Table table = parse("{\"namespaces\":{\"a\":[]}," + formats
+                + ",\"operations\":{\"a:Op\":" + operation + "}}");
+        assertEquals(Map.of("one", Map.of("Bucket", "{Bucket}"), "two", Map.of("Bucket", "{name}")),
+                table.locatedApart().get("a:Op"));
+        assertEquals(Set.of("a:Op"), table.unread());
+        // An unread operation is one the table does not read: RequestResources.of names nothing from it.
+        assertFalse(RequestResources.readable(table, "a:Op"));
+        RequestResourceMembers.Table read = parse("{\"namespaces\":{\"a\":[]}," + formats
+                + ",\"operations\":{\"a:Op\":{\"resources\":[]}}}");
+        assertTrue(RequestResources.readable(read, "a:Op"));
+        assertFalse(RequestResources.readable(read, "a:Other"));
+        assertEquals(Map.of("Marker", "?marker", "Bucket", "{Bucket}"),
+                RequestResources.locatedMembers(table, "a:Op", "one", Map.of()));
+        assertEquals(Map.of("Marker", "?marker", "Bucket", "{name}"),
+                RequestResources.locatedMembers(table, "a:Op", "two", Map.of()));
+        // A request no route of the operation matched, or one of a client locating nothing apart, reads only what every
+        // client locates alike.
+        assertEquals(Map.of("Marker", "?marker"), RequestResources.locatedMembers(table, "a:Op", null, Map.of()));
+        assertEquals(Map.of("Marker", "?marker"), RequestResources.locatedMembers(table, "a:Op", "three", Map.of()));
+        // A generated alternative route still says where its members are.
+        assertEquals(Map.of("Bucket", "{name}"),
+                RequestResources.locatedMembers(table, "a:Op", "two", Map.of("Marker", "body")));
+        for (String bad : List.of("\"locatedApart\":{\"One\":{\"Bucket\":\"{Bucket}\"}}",
+                "\"locatedApart\":{\"one\":{\"Bucket\":\"Bucket\"}}", "\"locatedApart\":{\"one\":{}}",
+                "\"locatedApart\":{}", "\"locatedApart\":[]", "\"locatedApart\":\"one\"",
+                "\"locatedApart\":{\"one\":\"{Bucket}\"}", "\"locatedApart\":{\"one\":[\"{Bucket}\"]}",
+                "\"unread\":[\"Delete..Key\"]", "\"unread\":[1]", "\"unread\":[]", "\"unread\":\"Delete.Key\"",
+                "\"unread\":{\"a\":\"Delete.Key\"}")) {
+            assertThrows(IllegalStateException.class, () -> parse("{\"namespaces\":{\"a\":[]}," + formats
+                    + ",\"operations\":{\"a:Op\":{\"resources\":[]," + bad + "}}}"), bad);
+        }
+    }
+
+    /**
+     * The ARN a request names in a member, and, for one whose format gives it a Region of its own (a Multi-Region
+     * Access Point request's, in us-west-2), the same ARN in the request's, us-east-1, where the reader checks a named
+     * resource as well.
+     */
+    private static List<String> inTheRequestsRegionToo(String expected, Resource resource) {
+        if (resource.arn() == null || !AwsArnUtils.isArn(expected)) {
+            return List.of(expected);
+        }
+        AwsArnUtils.Arn named = AwsArnUtils.parse(expected);
+        return named.region().isEmpty() || named.region().equals("us-east-1") ? List.of(expected)
+                : List.of(expected, new AwsArnUtils.Arn(named.partition(), named.service(), "us-east-1",
+                        named.accountId(), named.resource()).toString());
     }
 
     private static String document(String formats, String resource) {
@@ -807,6 +970,8 @@ class RequestResourceMembersTest {
         when(request.getMethod()).thenReturn("POST");
         when(request.getMediaType()).thenReturn(MediaType.valueOf(mediaType));
         when(request.getEntityStream()).thenAnswer(invocation -> new ByteArrayInputStream(bytes));
+        when(request.getHeaderString("Authorization"))
+                .thenReturn("AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20261123/us-east-1/iam/aws4_request");
         return request;
     }
 }

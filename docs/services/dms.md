@@ -137,6 +137,18 @@ returned.
   is not a cross-account or cross-Region operation on AWS and is not one here either.
 - Deleting a resource deletes its tags with it.
 
+### IAM enforcement
+
+With IAM enforcement on, each action is checked on the resources the AWS Service Authorization
+Reference lists for it, read from the request. The reference gives each DMS type an ARN format
+ending in a literal `*` (`arn:aws:dms:<region>:<account>:subgrp:*`), which Floci matches as
+written. So a request naming a subnet group by its identifier, or creating a replication instance,
+is checked on that pattern (`subgrp:*`, `rep:*`), while a request naming an endpoint, a replication
+instance or a task by its ARN matches no format and is checked on `*`, as are the tagging calls and
+the Describe actions. A request leaving out an optional ARN, such as a `CreateEndpoint` with no
+`CertificateArn`, names nothing of that type: a format ending in `*` stands for every resource of
+its type, not one.
+
 ## Limitations
 
 - **No migration runs.** A started task stays `running` until stopped; a full-load task

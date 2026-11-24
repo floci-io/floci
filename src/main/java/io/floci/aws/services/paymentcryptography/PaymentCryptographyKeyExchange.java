@@ -942,24 +942,6 @@ final class PaymentCryptographyKeyExchange {
     }
 
     /**
-     * Refuses a key that is not TDES, and returns its algorithm: AS2805
-     * cryptography is all TDES.
-     *
-     * @param algorithmName the key's algorithm
-     * @param role what the key is, for the refusal
-     * @return the algorithm
-     */
-    private static PaymentCryptographyKeyAlgorithm requireTdes(String algorithmName, String role) {
-        PaymentCryptographyKeyAlgorithm algorithm =
-                PaymentCryptographyKeyAlgorithm.from(algorithmName);
-        if (algorithm == null || !algorithm.isTdes()) {
-            throw validation("an AS2805 key is a TDES key, but the " + role + " is "
-                    + algorithmName);
-        }
-        return algorithm;
-    }
-
-    /**
      * The parameter a token names, when it is one this service issued for that kind of
      * material and it has not expired.
      *
@@ -1447,11 +1429,11 @@ final class PaymentCryptographyKeyExchange {
                     + "which it needs to wrap a key cryptogram");
         }
         requireKeyEncryptionKey(kek);
-        requireTdes(kek.getKeyAlgorithm(), "AS2805 wrapping key " + kek.getArn());
+        PaymentCryptographyKeyRules.requireTdes(kek.getKeyAlgorithm(), "AS2805 wrapping key " + kek.getArn());
         // AS2805's cryptography is all TDES, so only TDES keys leave and come back in
         // an AS2805 cryptogram.
         PaymentCryptographyKeyAlgorithm algorithm =
-                requireTdes(key.getKeyAlgorithm(), "key " + key.getArn());
+                PaymentCryptographyKeyRules.requireTdes(key.getKeyAlgorithm(), "key " + key.getArn());
         String tooWeak = PaymentCryptographyKeyStrength.refusal(kek.getKeyAlgorithm(),
                 key.getKeyAlgorithm());
         if (tooWeak != null) {
@@ -1581,7 +1563,7 @@ final class PaymentCryptographyKeyExchange {
         String wrappingKeyIdentifier = text(material, "WrappingKeyIdentifier");
         PaymentCryptographyKey kek = usableKey(wrappingKeyIdentifier, region);
         requireKeyEncryptionKey(kek);
-        requireTdes(kek.getKeyAlgorithm(), "AS2805 wrapping key " + kek.getArn());
+        PaymentCryptographyKeyRules.requireTdes(kek.getKeyAlgorithm(), "AS2805 wrapping key " + kek.getArn());
         // The wrapping key opens an incoming cryptogram, so it has to be allowed to unwrap.
         // The model names no error code of its own for this, so it is a validation error,
         // as the rest of the refusals about a key's modes of use are.
@@ -1593,7 +1575,8 @@ final class PaymentCryptographyKeyExchange {
         String algorithmName = text(material, "KeyAlgorithm");
         // AS2805's cryptography is all TDES, so only TDES keys leave and come back in
         // an AS2805 cryptogram.
-        PaymentCryptographyKeyAlgorithm algorithm = requireTdes(algorithmName, "carried key");
+        PaymentCryptographyKeyAlgorithm algorithm =
+                PaymentCryptographyKeyRules.requireTdes(algorithmName, "carried key");
         // The wrapping key has to be at least as strong as the key it protects, the same
         // rule the export enforces, so a cryptogram that the export would refuse to write
         // does not open here either.

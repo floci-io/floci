@@ -18,7 +18,6 @@ import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.Base64;
 import java.util.List;
-import java.util.function.IntFunction;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -31,20 +30,7 @@ class DynamoDbItemSizeServiceTest {
     private static final int MAX_ITEM_SIZE = 400 * 1024;
     private static final String UPDATE_EXCEEDED =
             "Item size to update has exceeded the maximum allowed size";
-    private static final int UPDATE_COST = 3;
-    private static final int SET_OR_ADD_COST = 19;
-    private static final int REMOVE_OR_DELETE_COST = 1;
-    private static final int LIST_INDEX_COST = 1;
-    private static final int OPERAND_PATH_COST = 1;
-    private static final int OPERAND_PATH_ELEMENT_COST = 14;
-    private static final int PLUS_COST = 34;
-    private static final int MINUS_COST = 37;
-    private static final int LIST_APPEND_COST = 37;
-    private static final int IF_NOT_EXISTS_COST = 39;
     private static final int CONTAINER_COST = 3;
-    private static final int TARGET_CONTAINER_COST = 4;
-    // "pk" plus a one-byte value, short enough that the ceiling falls below 400KB.
-    private static final int SHORT_KEY_BYTES = 3;
 
     private DynamoDbService service;
     private NativeDynamoDbJsonHandler handler;
@@ -112,12 +98,114 @@ class DynamoDbItemSizeServiceTest {
     }
 
     @Test
-    void updateItemSitsBelowTheLimitAtAShortKey() {
-        int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES - (UPDATE_COST + SET_OR_ADD_COST);
+    void updateItemAcceptsAFinishedItemOfExactlyTheLimitAtAShortKey() {
+        update("a", "SET b = :pad", MAX_ITEM_SIZE, 0);
+        assertEquals(MAX_ITEM_SIZE, storedBytes("a"));
+        assertRefused(() -> update("b", "SET b = :pad", MAX_ITEM_SIZE + 1, 0));
+    }
 
-        update("a", "SET b = :pad", ceiling, 0);
-        assertEquals(ceiling, storedBytes("a"));
-        assertRefused(() -> update("b", "SET b = :pad", ceiling + 1, 0));
+    @Test
+    void updateItemCountsATargetNameAndEachValueTheOperandUses() {
+        assertStatementCeiling(withC(), "SET c = if_not_exists(c, :v)", null, null, 1);
+    }
+
+    @Test
+    void updateItemCountsEveryNameOfADocumentPath() {
+        assertStatementCeiling(withC("d", mapValue("leaf", stringValue("x"))),
+                "SET d.leaf = if_not_exists(d.leaf, :v)", null, null, "d".length() + "leaf".length());
+        ObjectNode nested = mapValue("e", mapValue("leaf", stringValue("x")));
+        assertStatementCeiling(withC("d", nested),
+                "SET d.e.leaf = if_not_exists(d.e.leaf, :v)", null, null, "d".length() + "e".length() + "leaf".length());
+    }
+
+    @Test
+    void updateItemCountsAListIndexAsZero() {
+        ObjectNode list = listValue();
+        for (int i = 0; i < 11; i++) {
+            ((ArrayNode) list.get("L")).add(stringValue("x"));
+        }
+        assertStatementCeiling(withC("l", list), "SET l[0] = if_not_exists(l[0], :v)", null, null, "l".length());
+        assertStatementCeiling(withC("l", list), "SET l[10] = if_not_exists(l[10], :v)", null, null, "l".length());
+    }
+
+    @Test
+    void updateItemDoesNotMergeTargetPathsThatShareAPrefix() {
+        ObjectNode map = JsonNodeFactory.instance.objectNode();
+        map.putObject("M").set("a", stringValue("x"));
+        ((ObjectNode) map.get("M")).set("b", stringValue("y"));
+        assertStatementCeiling(withC("d", map),
+                "SET d.a = if_not_exists(d.a, :v), d.b = if_not_exists(d.b, :w)", null,
+                values(":w", stringValue("y")),
+                "d".length() + "a".length() + "d".length() + "b".length() + "y".length());
+    }
+
+    @Test
+    void updateItemResolvesAliasesInATargetPath() {
+        assertStatementCeiling(withC("d", mapValue("leafleafle", stringValue("x"))),
+                "SET #d.#l = if_not_exists(#d.#l, :v)", names("#d", "d", "#l", "leafleafle"), null,
+                "d".length() + "leafleafle".length());
+    }
+
+    @Test
+    void updateItemCountsTheValueAnAddWritesButNotADelete() {
+        ObjectNode members = values(":w", stringSetValue("z".repeat(100000)));
+        ObjectNode seed = withC("s", stringSetValue("q"));
+        assertStatementCeiling(seed, "SET c = if_not_exists(c, :v) ADD s :w", null, members, 1 + 1 + 100000);
+        assertStatementCeiling(seed, "SET c = if_not_exists(c, :v) DELETE s :w", null, members, 1);
+    }
+
+    @Test
+    void updateItemDoesNotCountARemovePath() {
+        assertStatementCeiling(withC(), "SET c = if_not_exists(c, :v) REMOVE #r", names("#r", "r".repeat(1000)),
+                null, 1);
+    }
+
+    @Test
+    void updateItemCountsTheNameAndNumberBytesOfAnAdd() {
+        assertStatementCeiling(withC(), "SET c = if_not_exists(c, :v) ADD #m :w", names("#m", "m".repeat(1000)),
+                values(":w", numberValue("12345678901234567890")), 1 + 1000 + 11);
+    }
+
+    @Test
+    void updateItemCountsEachValueOfAnArithmeticOperand() {
+        ObjectNode two = values(":one", numberValue("1"));
+        two.set(":two", numberValue("2"));
+        assertStatementCeiling(withC(), "SET c = if_not_exists(c, :v), n = :one + :two", null, two,
+                1 + 1 + 2 + 2);
+        assertStatementCeiling(withC("n", numberValue("1")), "SET c = if_not_exists(c, :v), n = n + :two", null,
+                values(":two", numberValue("2")), 1 + 1 + 2);
+        assertStatementCeiling(withC(), "SET c = if_not_exists(c, :v), n = if_not_exists(n, :two) + :two", null,
+                values(":two", numberValue("2")), 1 + 1 + 2 + 2);
+    }
+
+    @Test
+    void updateItemCountsEachValueOfAListAppend() {
+        ObjectNode lists = values(":a", listValue(stringValue("aaaa")));
+        lists.set(":b", listValue(stringValue("bbbb")));
+        assertStatementCeiling(withC(), "SET c = if_not_exists(c, :v), l = list_append(:a, :b)", null, lists,
+                1 + 1 + 8 + 8);
+    }
+
+    @Test
+    void updateItemDoesNotCountAnOperandPath() {
+        assertStatementCeiling(withC("e", stringValue("e".repeat(100000))), "SET c = if_not_exists(c, :v), d = e",
+                null, null, 1 + 1);
+    }
+
+    @Test
+    void updateItemCountsAValueOncePerUse() {
+        assertStatementCeiling(withC(), "SET c = if_not_exists(c, :v), d = if_not_exists(d, :v)", null, null,
+                1 + 1, 2);
+    }
+
+    @Test
+    void updateItemDoesNotCountAValueUsedOnlyInTheCondition() {
+        seed("a", "c", stringValue("x"));
+
+        service.updateItem(TABLE, key("a"), null, "SET b = :s", null,
+                values(":s", stringValue("y")).set(":v", stringValue("h".repeat(MAX_ITEM_SIZE + 300))),
+                "NONE", "c <> :v", REGION, "NONE");
+        assertEquals("y", service.getItem(TABLE, key("a"), REGION).get("b").get("S").asText());
     }
 
     @Test
@@ -127,87 +215,6 @@ class DynamoDbItemSizeServiceTest {
         update(longKey, "SET b = :pad", MAX_ITEM_SIZE, 0);
         assertEquals(MAX_ITEM_SIZE, storedBytes(longKey));
         assertRefused(() -> update("K".repeat(100), "SET b = :pad", MAX_ITEM_SIZE + 1, 0));
-    }
-
-    @Test
-    void updateItemChargesNineteenBytesForASecondSetClause() {
-        int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES - (UPDATE_COST + SET_OR_ADD_COST * 2);
-        ObjectNode second = values(":c", stringValue("y"));
-
-        update("a", "SET b = :pad, c = :c", ceiling, 2, second);
-        assertEquals(ceiling, storedBytes("a"));
-        assertRefused(() -> update("b", "SET b = :pad, c = :c", ceiling + 1, 2, second));
-    }
-
-    @Test
-    void updateItemChargesNineteenBytesForAnAdd() {
-        int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES - (UPDATE_COST + SET_OR_ADD_COST * 2);
-        ObjectNode one = values(":one", numberValue("1"));
-        int numberBytes = "n".length() + 2;
-
-        update("a", "SET b = :pad ADD n :one", ceiling, numberBytes, one);
-        assertEquals(ceiling, storedBytes("a"));
-        assertRefused(() -> update("b", "SET b = :pad ADD n :one", ceiling + 1, numberBytes, one));
-    }
-
-    @Test
-    void updateItemChargesTwoBytesForARemoveAlongsideASet() {
-        int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES
-                - (UPDATE_COST + SET_OR_ADD_COST + REMOVE_OR_DELETE_COST + "r".length());
-        seed("a", "r", stringValue("z"));
-        seed("b", "r", stringValue("z"));
-
-        update("a", "SET b = :pad REMOVE r", ceiling, 0);
-        assertEquals(ceiling, storedBytes("a"));
-        assertRefused(() -> update("b", "SET b = :pad REMOVE r", ceiling + 1, 0));
-    }
-
-    @Test
-    void updateItemChargesTwoBytesForADeleteAlongsideASet() {
-        int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES
-                - (UPDATE_COST + SET_OR_ADD_COST + REMOVE_OR_DELETE_COST + "s".length());
-        ObjectNode members = values(":members", stringSetValue("z"));
-        seed("a", "s", stringSetValue("z"));
-        seed("b", "s", stringSetValue("z"));
-
-        update("a", "SET b = :pad DELETE s :members", ceiling, 0, members);
-        assertEquals(ceiling, storedBytes("a"));
-        assertRefused(() -> update("b", "SET b = :pad DELETE s :members", ceiling + 1, 0, members));
-    }
-
-    @Test
-    void updateItemChargesADocumentPathLikeAPlainSet() {
-        int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES - (UPDATE_COST + SET_OR_ADD_COST);
-        int mapBytes = "leaf".length() + 1 + 3;
-        seed("a", "d", mapValue("leaf", stringValue("x")));
-        seed("b", "d", mapValue("leaf", stringValue("x")));
-
-        update("a", "SET d.leaf = :pad", ceiling, mapBytes);
-        assertEquals(ceiling, storedBytes("a"));
-        assertRefused(() -> update("b", "SET d.leaf = :pad", ceiling + 1, mapBytes));
-    }
-
-    @Test
-    void updateItemChargesOneMoreByteThroughAListIndex() {
-        int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES
-                - (UPDATE_COST + SET_OR_ADD_COST + LIST_INDEX_COST);
-        int elementBytes = CONTAINER_COST + 1;
-        seed("a", "d", listValue(stringValue("x")));
-        seed("b", "d", listValue(stringValue("x")));
-
-        update("a", "SET d[0] = :pad", ceiling, elementBytes);
-        assertEquals(ceiling, storedBytes("a"));
-        assertRefused(() -> update("b", "SET d[0] = :pad", ceiling + 1, elementBytes));
-    }
-
-    @Test
-    void updateItemChargesIfNotExistsAndTheOperandsItReads() {
-        int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES
-                - (UPDATE_COST + SET_OR_ADD_COST + IF_NOT_EXISTS_COST + operandPath("b"));
-
-        update("a", "SET b = if_not_exists(b, :pad)", ceiling, 0);
-        assertEquals(ceiling, storedBytes("a"));
-        assertRefused(() -> update("b", "SET b = if_not_exists(b, :pad)", ceiling + 1, 0));
     }
 
     @ParameterizedTest
@@ -263,16 +270,14 @@ class DynamoDbItemSizeServiceTest {
     }
 
     @Test
-    void updateItemDoesNotChargeForAnAttributeItLeavesAlone() {
+    void updateItemCountsAnUntouchedAttributeInTheFinishedItem() {
         int untouchedBytes = 1 + 10; // "u" plus its value
-        int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES + untouchedBytes
-                - (UPDATE_COST + SET_OR_ADD_COST);
         seed("a", "u", stringValue("y".repeat(10)));
         seed("b", "u", stringValue("y".repeat(10)));
 
-        update("a", "SET b = :pad", ceiling, untouchedBytes);
-        assertEquals(ceiling, storedBytes("a"));
-        assertRefused(() -> update("b", "SET b = :pad", ceiling + 1, untouchedBytes));
+        update("a", "SET b = :pad", MAX_ITEM_SIZE, untouchedBytes);
+        assertEquals(MAX_ITEM_SIZE, storedBytes("a"));
+        assertRefused(() -> update("b", "SET b = :pad", MAX_ITEM_SIZE + 1, untouchedBytes));
     }
 
     @Test
@@ -352,121 +357,8 @@ class DynamoDbItemSizeServiceTest {
         assertEquals(before, service.getItem(TABLE, key("a"), REGION));
     }
 
-    @Test
-    void updateItemChargesListAppendAndTheOperandsItReads() {
-        int fixed = UPDATE_COST + SET_OR_ADD_COST + "l".length()
-                + LIST_APPEND_COST + operandPath("l") + CONTAINER_COST + 1;
-
-        assertUpdateCeiling(attributes("l", listValue(stringValue("x"))), "SET l = list_append(l, :list)",
-                pad -> values(":list", listValue(stringValue("x".repeat(pad)))), MAX_ITEM_SIZE - fixed);
-    }
-
-    @Test
-    void updateItemChargesIfNotExistsNestedInListAppend() {
-        int fixed = UPDATE_COST + SET_OR_ADD_COST + "l".length() + LIST_APPEND_COST
-                + IF_NOT_EXISTS_COST + operandPath("l") + CONTAINER_COST + CONTAINER_COST + 1;
-
-        assertUpdateCeiling(null, "SET l = list_append(if_not_exists(l, :empty), :list)", pad -> {
-            ObjectNode values = values(":list", listValue(stringValue("x".repeat(pad))));
-            values.set(":empty", listValue());
-            return values;
-        }, MAX_ITEM_SIZE - fixed);
-    }
-
-    @Test
-    void updateItemChargesTheSourcePathOfACopy() {
-        int fixed = UPDATE_COST + 2 * SET_OR_ADD_COST + "a".length() + operandPath("b") + "c".length();
-
-        assertUpdateCeiling(attributes("b", stringValue("y")), "SET a = b, c = :pad",
-                pad -> values(":pad", stringValue("x".repeat(pad))), MAX_ITEM_SIZE - fixed);
-    }
-
-    @Test
-    void updateItemChargesEveryElementOfANestedSourcePath() {
-        ObjectNode list = listValue();
-        for (int i = 0; i < 11; i++) {
-            ((ArrayNode) list.get("L")).add(stringValue("x"));
-        }
-        int fixed = UPDATE_COST + 2 * SET_OR_ADD_COST + "a".length() + operandPath("d", "ee", "10") + "c".length();
-
-        assertUpdateCeiling(attributes("d", mapValue("ee", list)), "SET a = d.ee[10], c = :pad",
-                pad -> values(":pad", stringValue("x".repeat(pad))), MAX_ITEM_SIZE - fixed);
-    }
-
-    @Test
-    void updateItemChargesPlusAndMinusDifferently() {
-        int one = 2;
-        int fixed = UPDATE_COST + 3 * SET_OR_ADD_COST
-                + "n".length() + PLUS_COST + operandPath("n") + one
-                + "m".length() + MINUS_COST + operandPath("m") + one
-                + "c".length();
-        ObjectNode seed = attributes("n", numberValue("1"));
-        seed.set("m", numberValue("1"));
-
-        assertUpdateCeiling(seed, "SET n = n + :one, m = m - :one, c = :pad", pad -> {
-            ObjectNode values = values(":pad", stringValue("x".repeat(pad)));
-            values.set(":one", numberValue("1"));
-            return values;
-        }, MAX_ITEM_SIZE - fixed);
-    }
-
-    @Test
-    void updateItemCountsASharedTargetPrefixOnce() {
-        int fixed = UPDATE_COST + 2 * SET_OR_ADD_COST
-                + "d".length() + TARGET_CONTAINER_COST + "a".length() + "b".length() + "e".length();
-
-        assertUpdateCeiling(attributes("d", JsonNodeFactory.instance.objectNode().set("M",
-                        JsonNodeFactory.instance.objectNode())), "SET d.a = :pad, d.b = :e", pad -> {
-            ObjectNode values = values(":pad", stringValue("x".repeat(pad)));
-            values.set(":e", stringValue("e"));
-            return values;
-        }, MAX_ITEM_SIZE - fixed);
-    }
-
-    @Test
-    void updateItemCountsTheDigitsOfAListIndex() {
-        ObjectNode list = listValue();
-        for (int i = 0; i < 11; i++) {
-            ((ArrayNode) list.get("L")).add(stringValue("x"));
-        }
-        int fixed = UPDATE_COST + SET_OR_ADD_COST + "l".length() + TARGET_CONTAINER_COST + "10".length();
-
-        assertUpdateCeiling(attributes("l", list), "SET l[10] = :pad",
-                pad -> values(":pad", stringValue("x".repeat(pad))), MAX_ITEM_SIZE - fixed);
-    }
-
-    @Test
-    void updateItemChargesRemoveAndDeleteByTheirPathAlone() {
-        ObjectNode seed = attributes("rrrrrrrrrr", stringValue("y"));
-        seed.set("ssssssssss", stringSetValue("y", "z"));
-        int fixed = UPDATE_COST + 2 * (REMOVE_OR_DELETE_COST + 10) + SET_OR_ADD_COST + "c".length();
-
-        assertUpdateCeiling(seed, "REMOVE rrrrrrrrrr DELETE ssssssssss :z SET c = :pad", pad -> {
-            ObjectNode values = values(":pad", stringValue("x".repeat(pad)));
-            values.set(":z", stringSetValue("z".repeat(100)));
-            return values;
-        }, MAX_ITEM_SIZE - fixed);
-    }
-
-    @Test
-    void updateItemChargesTheValueAnAddWritesNotTheSetItBuilds() {
-        int fixed = UPDATE_COST + 2 * SET_OR_ADD_COST + "ss".length() + 1 + "c".length();
-
-        assertUpdateCeiling(attributes("ss", stringSetValue("yy")), "ADD ss :v SET c = :pad", pad -> {
-            ObjectNode values = values(":pad", stringValue("x".repeat(pad)));
-            values.set(":v", stringSetValue("z"));
-            return values;
-        }, MAX_ITEM_SIZE - fixed);
-    }
-
     private void update(String keyValue, String expression, int totalBytes, int otherBytes) {
-        update(keyValue, expression, totalBytes, otherBytes, JsonNodeFactory.instance.objectNode());
-    }
-
-    private void update(String keyValue, String expression, int totalBytes, int otherBytes,
-                         ObjectNode extraValues) {
-        ObjectNode values = extraValues.deepCopy();
-        values.set(":pad", stringValue(padding(keyValue, totalBytes, otherBytes)));
+        ObjectNode values = values(":pad", stringValue(padding(keyValue, totalBytes, otherBytes)));
         service.updateItem(TABLE, key(keyValue), null, expression, null, values, "NONE", REGION);
     }
 
@@ -511,26 +403,47 @@ class DynamoDbItemSizeServiceTest {
         service.putItem(TABLE, item, REGION);
     }
 
-    private void assertUpdateCeiling(ObjectNode seed, String expression, IntFunction<ObjectNode> values,
-                                     int maxPadding) {
-        for (String keyValue : List.of("a", "b")) {
-            if (seed != null) {
-                ObjectNode item = key(keyValue);
-                item.setAll(seed.deepCopy());
-                service.putItem(TABLE, item, REGION);
-            }
-        }
-        service.updateItem(TABLE, key("a"), null, expression, null, values.apply(maxPadding), "NONE", REGION);
-        assertRefused(() -> service.updateItem(TABLE, key("b"), null, expression, null,
-                values.apply(maxPadding + 1), "NONE", REGION));
+    private ObjectNode withC() {
+        return attributes("c", stringValue("x"));
     }
 
-    private static int operandPath(String... elements) {
-        int size = OPERAND_PATH_COST;
-        for (String element : elements) {
-            size += OPERAND_PATH_ELEMENT_COST + element.length();
+    private ObjectNode withC(String name, JsonNode value) {
+        ObjectNode seed = withC();
+        seed.set(name, value);
+        return seed;
+    }
+
+    private ObjectNode names(String... aliasAndName) {
+        ObjectNode names = JsonNodeFactory.instance.objectNode();
+        for (int i = 0; i < aliasAndName.length; i += 2) {
+            names.put(aliasAndName[i], aliasAndName[i + 1]);
         }
-        return size;
+        return names;
+    }
+
+    private void assertStatementCeiling(ObjectNode seed, String expression, ObjectNode names, ObjectNode extra,
+                                        int fixedBytes) {
+        assertStatementCeiling(seed, expression, names, extra, fixedBytes, 1);
+    }
+
+    private void assertStatementCeiling(ObjectNode seed, String expression, ObjectNode names, ObjectNode extra,
+                                        int fixedBytes, int vUses) {
+        int maxPad = (MAX_ITEM_SIZE - fixedBytes) / vUses;
+        for (String keyValue : List.of("a", "b")) {
+            ObjectNode item = key(keyValue);
+            item.setAll(seed.deepCopy());
+            service.putItem(TABLE, item, REGION);
+        }
+        service.updateItem(TABLE, key("a"), null, expression, names, statementValues(extra, maxPad),
+                "NONE", REGION);
+        assertRefused(() -> service.updateItem(TABLE, key("b"), null, expression, names,
+                statementValues(extra, maxPad + 1), "NONE", REGION));
+    }
+
+    private ObjectNode statementValues(ObjectNode extra, int pad) {
+        ObjectNode values = extra == null ? JsonNodeFactory.instance.objectNode() : extra.deepCopy();
+        values.set(":v", stringValue("x".repeat(pad)));
+        return values;
     }
 
     private ObjectNode attributes(String name, JsonNode value) {

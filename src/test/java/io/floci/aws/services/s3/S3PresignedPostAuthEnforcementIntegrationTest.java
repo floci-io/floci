@@ -28,6 +28,8 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
 
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_SECRET_KEY;
 import static io.floci.aws.testing.EnforcementFixtures.createUser;
 import static io.floci.aws.testing.EnforcementFixtures.removeBucket;
 import static io.restassured.RestAssured.given;
@@ -48,8 +50,6 @@ import static org.hamcrest.Matchers.notNullValue;
 class S3PresignedPostAuthEnforcementIntegrationTest {
 
     private static final String BUCKET = "presigned-post-auth-bucket";
-    private static final String LEGACY_ACCESS_KEY_ID = "test";
-    private static final String LEGACY_SECRET_KEY = "test";
     // Matches the "20260101" date embedded in every credential scope built by this test class.
     private static final String AMZ_DATE = "20260101T000000Z";
 
@@ -648,6 +648,30 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
         }
 
         /** Removes {@link #BUCKET}, which the tests from {@code createBucket} on share, with the objects they uploaded. */
+    /**
+     * A caller from another account, outside the bucket owner's organization, is refused with "Access Denied" alone:
+     * "Cross-account requests outside of the same organization return a generic Access Denied message". IAM refuses
+     * the POST before its signature is read, on the bucket's owner as the decision resolves it.
+     */
+    @Test
+    @Order(37)
+    void anotherAccountsCallerIsToldAccessDeniedAlone() {
+        UserCredentials credentials = createUser(cleanup, endpoint.getPort(), OTHER_ACCOUNT_IAM_AUTH,
+                "presigned-post-other-account");
+
+        given()
+            .multiPart("key", "uploads/other-account.txt")
+            .multiPart("x-amz-credential", credentials.accessKeyId() + "/20260101/us-east-1/s3/aws4_request")
+            .multiPart("file", "other-account.txt",
+                    "should not be stored".getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(403)
+            .body("Error.Code", Matchers.equalTo("AccessDenied"))
+            .body("Error.Message", Matchers.equalTo("Access Denied"));
+    }
+
     @Test
     @Order(99)
     void cleanup_removeTheSharedBucket() {
@@ -680,6 +704,10 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
 
     private static final String IAM_ROOT_AUTH =
             "AWS4-HMAC-SHA256 Credential=" + LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/iam/aws4_request"
+                    + ", SignedHeaders=host, Signature=abc";
+
+    private static final String OTHER_ACCOUNT_IAM_AUTH =
+            "AWS4-HMAC-SHA256 Credential=222233334444/20260101/us-east-1/iam/aws4_request"
                     + ", SignedHeaders=host, Signature=abc";
 
     private static void putUserPolicy(String userName, String policyName, String policyDocument) {

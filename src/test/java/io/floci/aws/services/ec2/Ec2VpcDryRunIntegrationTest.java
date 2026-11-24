@@ -19,9 +19,9 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * DryRun on the VPC, subnet, internet gateway and route table calls is answered with DryRunOperation and
- * HTTP 412 once the request has passed the checks the real call makes, and changes nothing. A dry run the
- * real call would refuse keeps that call's error.
+ * DryRun on the VPC, subnet, internet gateway, route table and security group rule calls is answered with
+ * DryRunOperation and HTTP 412 once the request has passed the checks the real call makes, and changes nothing.
+ * A dry run the real call would refuse keeps that call's error.
  */
 @QuarkusTest
 class Ec2VpcDryRunIntegrationTest {
@@ -31,6 +31,11 @@ class Ec2VpcDryRunIntegrationTest {
     private static final String MISSING_VPC = "vpc-0123456789abcdef0";
     private static final String MISSING_GATEWAY = "igw-0123456789abcdef0";
     private static final String MISSING_TABLE = "rtb-0123456789abcdef0";
+    private static final String MISSING_GROUP = "sg-0123456789abcdef0";
+    private static final String MISSING_RULE = "sgr-0123456789abcdef0";
+    /** One TCP port from 10.0.0.0/8, in an IpPermissions member; each request below gives the port it adds. */
+    private static final String PERMISSION = "IpPermissions.1.IpProtocol=tcp IpPermissions.1.FromPort=%1$d"
+            + " IpPermissions.1.ToPort=%1$d IpPermissions.1.IpRanges.1.CidrIp=10.0.0.0/8";
 
     private String account;
     /** The fixture's ids by the names the requests below give them in braces, such as {vpc}. */
@@ -39,7 +44,8 @@ class Ec2VpcDryRunIntegrationTest {
     /**
      * A VPC with two subnets, one holding a network interface; an internet gateway attached to it; a route
      * table routing 0.0.0.0/0 to the gateway and associated with the occupied subnet, and a second one with
-     * neither. Beside them, an empty VPC and a gateway attached to nothing.
+     * neither. Beside them, an empty VPC and a gateway attached to nothing. In the first VPC, a security group
+     * allowing port 22 in and port 443 out, from and to 10.0.0.0/8.
      */
     @BeforeEach
     void buildTheNetwork() {
@@ -61,6 +67,10 @@ class Ec2VpcDryRunIntegrationTest {
                 "GatewayId", ids.get("gateway"));
         ids.put("association", create("AssociateRouteTable", "associationId", "RouteTableId", ids.get("table"),
                 "SubnetId", ids.get("subnet")));
+        ids.put("group", create("CreateSecurityGroup", "groupId", "GroupName", "dry-run",
+                "GroupDescription", "dry run", "VpcId", ids.get("vpc")));
+        ids.put("ingressRule", authorize("AuthorizeSecurityGroupIngress", 22));
+        ids.put("egressRule", authorize("AuthorizeSecurityGroupEgress", 443));
     }
 
     /** A request each call's real call accepts in the fixture. */
@@ -77,7 +87,20 @@ class Ec2VpcDryRunIntegrationTest {
                 new String[] {"DeleteRouteTable", "RouteTableId={spareTable}"},
                 new String[] {"AssociateRouteTable", "RouteTableId={spareTable} SubnetId={freeSubnet}"},
                 new String[] {"DisassociateRouteTable", "AssociationId={association}"},
-                new String[] {"DeleteRoute", "RouteTableId={table} DestinationCidrBlock=0.0.0.0/0"});
+                new String[] {"DeleteRoute", "RouteTableId={table} DestinationCidrBlock=0.0.0.0/0"},
+                new String[] {"AuthorizeSecurityGroupIngress", "GroupId={group} " + PERMISSION.formatted(8080)},
+                new String[] {"AuthorizeSecurityGroupEgress", "GroupId={group} " + PERMISSION.formatted(8443)},
+                new String[] {"RevokeSecurityGroupIngress", "GroupId={group} " + PERMISSION.formatted(22)},
+                new String[] {"RevokeSecurityGroupIngress", "GroupId={group} SecurityGroupRuleId.1={ingressRule}"},
+                new String[] {"RevokeSecurityGroupEgress", "GroupId={group} " + PERMISSION.formatted(443)},
+                new String[] {"RevokeSecurityGroupEgress", "GroupId={group} SecurityGroupRuleId.1={egressRule}"},
+                new String[] {"ModifySecurityGroupRules", "GroupId={group}"
+                        + " SecurityGroupRule.1.SecurityGroupRuleId={ingressRule}"
+                        + " SecurityGroupRule.1.SecurityGroupRule.Description=changed"},
+                new String[] {"UpdateSecurityGroupRuleDescriptionsIngress", "GroupId={group} "
+                        + PERMISSION.formatted(22) + " IpPermissions.1.IpRanges.1.Description=changed"},
+                new String[] {"UpdateSecurityGroupRuleDescriptionsEgress", "GroupId={group} "
+                        + PERMISSION.formatted(443) + " IpPermissions.1.IpRanges.1.Description=changed"});
     }
 
     @ParameterizedTest
@@ -126,7 +149,28 @@ class Ec2VpcDryRunIntegrationTest {
                     + " | InvalidRouteTableID.NotFound",
             "DeleteRoute | RouteTableId={table} DestinationCidrBlock=10.0.0.0/16 | InvalidParameterValue",
             "DeleteRoute | RouteTableId={table} DestinationCidrBlock=10.9.0.0/16 | InvalidRoute.NotFound",
-            "DeleteRoute | RouteTableId={table} | MissingParameter"
+            "DeleteRoute | RouteTableId={table} | MissingParameter",
+            "AuthorizeSecurityGroupIngress | GroupId=" + MISSING_GROUP + " IpPermissions.1.IpProtocol=-1"
+                    + " | InvalidGroup.NotFound",
+            "AuthorizeSecurityGroupIngress | GroupId={group} IpPermissions.1.IpProtocol=-1"
+                    + " IpPermissions.1.PrefixListIds.1.PrefixListId=pl-0123456789abcdef0"
+                    + " | InvalidPrefixListID.NotFound",
+            "AuthorizeSecurityGroupIngress | GroupId={group} IpPermissions.1.IpProtocol=-1"
+                    + " TagSpecification.1.ResourceType=security-group-rule TagSpecification.1.Tag.1.Key=aws:dry-run"
+                    + " | InvalidParameter",
+            "AuthorizeSecurityGroupEgress | GroupId=" + MISSING_GROUP + " IpPermissions.1.IpProtocol=-1"
+                    + " | InvalidGroup.NotFound",
+            "RevokeSecurityGroupIngress | GroupId=" + MISSING_GROUP + " IpPermissions.1.IpProtocol=-1"
+                    + " | InvalidGroup.NotFound",
+            "RevokeSecurityGroupIngress | GroupId={group} SecurityGroupRuleId.1={egressRule}"
+                    + " | InvalidSecurityGroupRuleId.NotFound",
+            "RevokeSecurityGroupEgress | GroupId={group} SecurityGroupRuleId.1=" + MISSING_RULE
+                    + " | InvalidSecurityGroupRuleId.NotFound",
+            "ModifySecurityGroupRules | GroupId=" + MISSING_GROUP + " SecurityGroupRule.1.SecurityGroupRuleId="
+                    + MISSING_RULE + " | InvalidGroup.NotFound",
+            "ModifySecurityGroupRules | GroupId={group} SecurityGroupRule.1.SecurityGroupRuleId=" + MISSING_RULE
+                    + " SecurityGroupRule.1.SecurityGroupRule.Description=changed"
+                    + " | InvalidSecurityGroupRuleId.NotFound"
     })
     void aDryRunTheRealCallWouldRefuseKeepsItsError(String action, String params, String code) {
         String before = snapshot();
@@ -143,7 +187,8 @@ class Ec2VpcDryRunIntegrationTest {
     /**
      * Everything these calls can change in the test's account, as the describe calls report it: the VPCs
      * and what DeleteVpc removes with one (its default security group and network ACL), the subnets, the
-     * network interface, the internet gateways and the route tables with their routes and associations.
+     * network interface, the internet gateways, the route tables with their routes and associations, and the
+     * security groups with their rules.
      */
     private String snapshot() {
         return String.join("\n",
@@ -151,6 +196,7 @@ class Ec2VpcDryRunIntegrationTest {
                 body("DescribeSubnets"),
                 body("DescribeNetworkInterfaces"),
                 body("DescribeSecurityGroups"),
+                body("DescribeSecurityGroupRules"),
                 body("DescribeNetworkAcls"),
                 body("DescribeInternetGateways"),
                 body("DescribeRouteTables"));
@@ -179,6 +225,12 @@ class Ec2VpcDryRunIntegrationTest {
             result = result.replace("{" + id.getKey() + "}", id.getValue());
         }
         return result;
+    }
+
+    /** Adds {@code port} to the fixture's group in the direction {@code action} names, and returns the rule's id. */
+    private String authorize(String action, int port) {
+        return create(action, "securityGroupRuleSet.item.securityGroupRuleId",
+                params("GroupId={group} " + PERMISSION.formatted(port)));
     }
 
     /** Runs {@code action} and returns what its answer holds at {@code path}. */

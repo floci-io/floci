@@ -62,6 +62,9 @@
 # check fails until the actions of no resource type list the model's scope.
 # src/main/resources/aws/iam-paginators.json, what each paged IAM list pages by, is generated
 # from botocore's IAM model and paginators by tools/aws/regen_iam_paginators.py.
+# src/main/resources/aws/iam-cloudtrail-shapes.json, how a CloudTrail record names and types an IAM
+# call's members and errors, is generated from botocore's IAM model by
+# tools/aws/regen_iam_cloudtrail_shapes.py.
 
 PYTHON ?= python3
 
@@ -307,6 +310,7 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_securityhub_shapes.py
 	$(PYTHON) tools/aws/regen_rekognition_shapes.py
 	$(PYTHON) tools/aws/regen_kinesis_shapes.py
+	$(PYTHON) tools/aws/regen_eventbridgev2_shapes.py
 	$(PYTHON) tools/aws/regen_config_shapes.py
 	$(PYTHON) tools/aws/regen_iam_shapes.py
 	$(PYTHON) tools/aws/regen_sts_shapes.py
@@ -318,9 +322,11 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_eks_shapes.py
 	$(PYTHON) tools/aws/regen_organizations_shapes.py
 	$(PYTHON) tools/aws/regen_emr_serverless_shapes.py
+	$(PYTHON) tools/aws/regen_rpcv2_cbor_shapes.py
 	$(PYTHON) tools/aws/regen_query_services.py
 	$(PYTHON) tools/aws/regen_rest_routes.py
 	$(PYTHON) tools/aws/regen_iam_paginators.py
+	$(PYTHON) tools/aws/regen_iam_cloudtrail_shapes.py
 
 aws-data-check: aws-data-check-botocore ## CI gate: the vendored AWS data must match a fresh generation
 	@$(PYTHON) tools/aws/regen_partitions.py --check || { \
@@ -449,6 +455,10 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 		echo "error: Kinesis request shapes are out of date; run 'make aws-data-sync'."; \
 		exit 1; \
 	}
+	@$(PYTHON) tools/aws/regen_eventbridgev2_shapes.py --check || { \
+		echo "error: EventBridge V2 request shapes are out of date; run 'make aws-data-sync'."; \
+		exit 1; \
+	}
 	@$(PYTHON) tools/aws/regen_config_shapes.py --check || { \
 		echo "error: AWS Config request shapes are out of date; run 'make aws-data-sync'."; \
 		exit 1; \
@@ -499,6 +509,10 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}
+	@$(PYTHON) tools/aws/regen_rpcv2_cbor_shapes.py --check || { \
+		echo "error: RPC v2 CBOR wire shapes are stale; run make aws-data-sync-botocore."; \
+		exit 1; \
+	}
 	@$(PYTHON) tools/aws/regen_query_services.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/query-services.json is out of date."; \
@@ -514,6 +528,12 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 	@$(PYTHON) tools/aws/regen_iam_paginators.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/iam-paginators.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_iam_cloudtrail_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/iam-cloudtrail-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}
@@ -593,7 +613,8 @@ IAM_ACTION_RESOURCES_PATHS := src/main/resources/aws/iam-action-resources.json \
 	tools/aws/regen_iam_action_resources.py tools/aws/test_regen_iam_action_resources.py
 IAM_AUTHORIZED_ACTIONS_PATHS := src/main/resources/aws/iam-authorized-actions.json \
 	tools/aws/regen_iam_authorized_actions.py tools/aws/test_regen_iam_authorized_actions.py \
-	src/main/resources/aws/rest-routes.json
+	src/main/resources/aws/rest-routes.json tools/aws/sources/s3-required-actions.json \
+	tools/aws/fetch_s3_required_actions.py tools/aws/test_fetch_s3_required_actions.py
 IAM_PASSED_ROLES_PATHS := src/main/resources/aws/iam-passed-roles.json $(IAM_PASSED_ROLES_GENERATOR) \
 	tools/aws/test_regen_iam_passed_roles.py
 IAM_PASSED_NETWORK_CONNECTORS_PATHS := src/main/resources/aws/iam-passed-network-connectors.json \
@@ -618,7 +639,16 @@ DOCUMENTED_ROUTES_PATHS := src/main/resources/aws/rest-routes.json tools/aws/reg
 IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json \
 	tools/aws/regen_iam_request_resources.py $(IAM_PASSED_ROLES_GENERATOR) \
 	tools/aws/test_regen_iam_request_resources.py tools/aws/sources/athena-glue-ddl-permissions.json \
-	tools/aws/fetch_athena_glue_ddl_permissions.py tools/aws/test_fetch_athena_glue_ddl_permissions.py
+	tools/aws/fetch_athena_glue_ddl_permissions.py tools/aws/test_fetch_athena_glue_ddl_permissions.py \
+	tools/aws/regen_iam_authorized_actions.py tools/aws/sources/s3-required-actions.json \
+	tools/aws/sources/apigateway-arn-formats.json tools/aws/fetch_apigateway_arn_formats.py \
+	tools/aws/test_fetch_apigateway_arn_formats.py src/main/resources/aws/iam-authorized-actions.json \
+	tools/aws/sources/kms-api-permissions.json tools/aws/fetch_kms_api_permissions.py \
+	tools/aws/test_fetch_kms_api_permissions.py tools/aws/sources/dynamodb-permissions.json \
+	tools/aws/fetch_dynamodb_permissions.py tools/aws/test_fetch_dynamodb_permissions.py \
+	tools/aws/sources/iam-identifiers.json tools/aws/fetch_iam_identifiers.py tools/aws/test_fetch_iam_identifiers.py \
+	tools/aws/sources/required-resource-types.json tools/aws/fetch_required_resource_types.py \
+	tools/aws/test_fetch_required_resource_types.py
 
 iam-data-verify: ## CI gate (online): every vendored IAM file must still match AWS; CHANGED="<paths>" checks only the ones they cover
 	@# Every check runs even when an earlier one fails, so one file's drift cannot hide another's

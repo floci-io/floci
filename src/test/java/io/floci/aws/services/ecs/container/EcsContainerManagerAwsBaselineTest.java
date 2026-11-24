@@ -18,8 +18,11 @@ import io.floci.aws.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.ssm.SsmService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
@@ -50,6 +53,7 @@ import static org.mockito.Mockito.when;
  * so the test asserts the env that <em>would</em> be handed to Docker without launching a
  * container — runnable under {@code mvn test} (CI) with no Docker daemon.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EcsContainerManagerAwsBaselineTest {
 
     private ContainerBuilder containerBuilder;

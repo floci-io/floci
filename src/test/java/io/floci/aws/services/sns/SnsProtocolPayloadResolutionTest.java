@@ -9,8 +9,11 @@ import io.floci.aws.services.sns.model.PushNotification;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.SqsServiceFactory;
 import io.floci.aws.services.sqs.model.Message;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.Map;
@@ -22,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * subscription protocol, not just {@code application}, matching real SNS: each subscriber
  * receives the value under its protocol key, falling back to {@code default}.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SnsProtocolPayloadResolutionTest {
 
     private static final String REGION = "us-east-1";

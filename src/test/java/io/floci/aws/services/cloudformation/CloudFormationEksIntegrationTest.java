@@ -12,6 +12,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 import java.util.stream.Stream;
 
 import static io.floci.aws.services.cloudformation.CfnStackTestSupport.createUpdateChangeSet;
@@ -250,29 +251,42 @@ class CloudFormationEksIntegrationTest {
         }
     }
 
-    /** EKS Auto Mode stays out of AWS::EKS::Cluster for now, so a template enabling it still creates its cluster. */
     @Test
-    void aClusterEnablingAutoModeIsCreatedWithoutIt() {
+    void aClusterIsCreatedWithAutoModeAndAnUpdateDroppingItTurnsItOffInPlace() {
         String stack = "cfn-eks-auto-" + Long.toString(System.nanoTime(), 36);
         String autoMode = "\"ComputeConfig\": {\"Enabled\": true, \"NodePools\": [\"general-purpose\", \"system\"],"
                 + " \"NodeRoleArn\": \"arn:aws:iam::000000000000:role/eks-auto-node\"},"
                 + " \"StorageConfig\": {\"BlockStorage\": {\"Enabled\": true}},"
                 + " \"KubernetesNetworkConfig\": {\"ElasticLoadBalancing\": {\"Enabled\": true}}";
-        // The Gateway API settings, which Floci doesn't model, don't fail the conversion either.
+        // The Gateway API settings, which Floci doesn't model, don't fail the conversion.
         String gatewayApi = "\"KubernetesNetworkConfig\": {\"ElasticLoadBalancing\": {\"Enabled\": false,"
                 + " \"GatewayApi\": {\"Crds\": {\"Managed\": true}}}}";
-        String template = "{\"Resources\": {"
-                + "\"Subject\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE + autoMode + "}},"
-                + "\"Gateway\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE + gatewayApi + "}}}}";
+        String gateway = "\"Gateway\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE + gatewayApi + "}}";
         try (CloudFormationClient client = AwsTestClients.create(
                 CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
-            CfnStackWaits.createStack(client, stack, template, "CREATE_COMPLETE");
-            for (String resource : List.of("Subject", "Gateway")) {
-                JsonPath cluster = given().get("/clusters/" + physicalId(client, stack, resource)).jsonPath();
-                assertNull(cluster.get("cluster.computeConfig"), resource);
-                assertNull(cluster.get("cluster.storageConfig"), resource);
-                assertNull(cluster.get("cluster.kubernetesNetworkConfig.elasticLoadBalancing"), resource);
-            }
+            CfnStackWaits.createStack(client, stack, "{\"Resources\": {"
+                    + "\"Subject\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE + autoMode + "}},"
+                    + gateway + "}}", "CREATE_COMPLETE");
+            String subject = physicalId(client, stack, "Subject");
+            JsonPath cluster = given().get("/clusters/" + subject).jsonPath();
+            assertEquals(true, cluster.getBoolean("cluster.computeConfig.enabled"));
+            assertEquals(List.of("general-purpose", "system"), cluster.getList("cluster.computeConfig.nodePools"));
+            assertEquals("arn:aws:iam::000000000000:role/eks-auto-node",
+                    cluster.getString("cluster.computeConfig.nodeRoleArn"));
+            assertEquals(true, cluster.getBoolean("cluster.storageConfig.blockStorage.enabled"));
+            assertEquals(true, cluster.getBoolean("cluster.kubernetesNetworkConfig.elasticLoadBalancing.enabled"));
+            assertEquals(false, given().get("/clusters/" + physicalId(client, stack, "Gateway")).jsonPath()
+                    .getBoolean("cluster.kubernetesNetworkConfig.elasticLoadBalancing.enabled"));
+
+            CfnStackWaits.updateStack(client, stack, "{\"Resources\": {"
+                    + "\"Subject\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {"
+                    + ROLE.substring(0, ROLE.length() - 2) + "}}," + gateway + "}}", "UPDATE_COMPLETE");
+
+            assertEquals(subject, physicalId(client, stack, "Subject"));
+            JsonPath updated = given().get("/clusters/" + subject).jsonPath();
+            assertEquals(false, updated.getBoolean("cluster.computeConfig.enabled"));
+            assertEquals(false, updated.getBoolean("cluster.storageConfig.blockStorage.enabled"));
+            assertEquals(false, updated.getBoolean("cluster.kubernetesNetworkConfig.elasticLoadBalancing.enabled"));
         } finally {
             CfnStackWaits.deleteStack(stack);
         }
@@ -317,9 +331,74 @@ class CloudFormationEksIntegrationTest {
             assertEquals(List.of("api", "audit"), cluster.getList(
                     "cluster.logging.clusterLogging.find { it.enabled == true }.types").stream().sorted().toList());
             assertEquals("API", cluster.getString("cluster.accessConfig.authenticationMode"));
+            assertEquals("STANDARD", cluster.getString("cluster.upgradePolicy.supportType"));
         } finally {
             CfnStackWaits.deleteStack(stack);
         }
+    }
+
+    @Test
+    void aClustersConfigIsRestoredWhenAnUpdateRollsBackAndChangedInPlaceWhenItSucceeds() {
+        String stack = "cfn-eks-cfgupd-" + Long.toString(System.nanoTime(), 36);
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack, configStack(false, false), "CREATE_COMPLETE");
+            String id = physicalId(client, stack, "Subject");
+
+            CfnStackWaits.updateStack(client, stack, configStack(true, true), "UPDATE_ROLLBACK_COMPLETE");
+            JsonPath cluster = given().get("/clusters/" + physicalId(client, stack, "Subject")).jsonPath();
+            assertEquals(true, cluster.getBoolean("cluster.resourcesVpcConfig.endpointPublicAccess"));
+            assertEquals("API_AND_CONFIG_MAP", cluster.getString("cluster.accessConfig.authenticationMode"));
+            assertEquals(List.of(), cluster.getList("cluster.logging.clusterLogging.findAll { it.enabled == true }"));
+            assertEquals("EXTENDED", cluster.getString("cluster.upgradePolicy.supportType"));
+
+            CfnStackWaits.updateStack(client, stack, configStack(true, false), "UPDATE_COMPLETE");
+            assertEquals(id, physicalId(client, stack, "Subject"));
+            cluster = given().get("/clusters/" + id).jsonPath();
+            assertEquals(false, cluster.getBoolean("cluster.resourcesVpcConfig.endpointPublicAccess"));
+            assertEquals(true, cluster.getBoolean("cluster.resourcesVpcConfig.endpointPrivateAccess"));
+            assertEquals(List.of("api"),
+                    cluster.getList("cluster.logging.clusterLogging.find { it.enabled == true }.types"));
+            assertEquals("API", cluster.getString("cluster.accessConfig.authenticationMode"));
+            assertEquals("STANDARD", cluster.getString("cluster.upgradePolicy.supportType"));
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    @Test
+    void aRefusedSubnetOrSecurityGroupChangeRollsTheStackBackAndAReorderingIsNoChange() {
+        String stack = "cfn-eks-net-" + Long.toString(System.nanoTime(), 36);
+        // {subnets, security groups, expected status}: a replaced subnet and a dropped list are changes, an order is not
+        String[][] steps = {{"SubA, SubC", "Sg", "UPDATE_ROLLBACK_COMPLETE"},
+                {"SubA, SubB", "", "UPDATE_ROLLBACK_COMPLETE"}, {"SubB, SubA", "Sg", "UPDATE_COMPLETE"}};
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack, netStack("SubA, SubB", "Sg"), "CREATE_COMPLETE");
+            JsonPath before = given().get("/clusters/" + physicalId(client, stack, "Subject")).jsonPath();
+            for (String[] step : steps) {
+                CfnStackWaits.updateStack(client, stack, netStack(step[0], step[1]), step[2]);
+                JsonPath after = given().get("/clusters/" + physicalId(client, stack, "Subject")).jsonPath();
+                for (String list : List.of("subnetIds", "securityGroupIds")) {
+                    assertEquals(before.getList("cluster.resourcesVpcConfig." + list).stream().sorted().toList(),
+                            after.getList("cluster.resourcesVpcConfig." + list).stream().sorted().toList(), step[0] + step[1]);
+                }
+            }
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    private static String netStack(String subnets, String groups) {
+        Function<String, String> refs = names -> names.isEmpty() ? "" : "{\"Ref\": \""
+                + names.replace(", ", "\"}, {\"Ref\": \"") + "\"}";
+        return "{\"Resources\": {\"Vpc\": {\"Type\": \"AWS::EC2::VPC\", \"Properties\": {\"CidrBlock\": \"10.7.0.0/16\"}},"
+                + "\"Sg\": {\"Type\": \"AWS::EC2::SecurityGroup\", \"Properties\": {\"GroupDescription\": \"eks\","
+                + " \"VpcId\": {\"Ref\": \"Vpc\"}}}," + subnet("SubA", "10.7.1.0/24", "us-east-1a")
+                + subnet("SubB", "10.7.2.0/24", "us-east-1b") + subnet("SubC", "10.7.3.0/24", "us-east-1c")
+                + "\"Subject\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE
+                + "\"ResourcesVpcConfig\": {\"SubnetIds\": [" + refs.apply(subnets) + "]"
+                + (groups.isEmpty() ? "" : ", \"SecurityGroupIds\": [" + refs.apply(groups) + "]") + "}}}}}";
     }
 
     @Test
@@ -342,7 +421,8 @@ class CloudFormationEksIntegrationTest {
             + " \"ServiceIpv4Cidr\": \"172.20.0.0/16\"}";
 
     private static final String SETTINGS = "\"Logging\": {\"ClusterLogging\": {\"EnabledTypes\": ["
-            + "{\"Type\": \"api\"}, {\"Type\": \"audit\"}]}}, \"AccessConfig\": {\"AuthenticationMode\": \"API\"}";
+            + "{\"Type\": \"api\"}, {\"Type\": \"audit\"}]}}, \"AccessConfig\": {\"AuthenticationMode\": \"API\"},"
+            + " \"UpgradePolicy\": {\"SupportType\": \"STANDARD\"}";
 
     private static String subnet(String id, String cidr, String zone) {
         return "\"" + id + "\": {\"Type\": \"AWS::EC2::Subnet\", \"Properties\": {\"VpcId\": {\"Ref\": \"Vpc\"},"
@@ -352,6 +432,21 @@ class CloudFormationEksIntegrationTest {
     private static String vpcConfig(String subnetIds) {
         return "\"ResourcesVpcConfig\": {\"SubnetIds\": [" + subnetIds + "], \"EndpointPublicAccess\": false,"
                 + " \"EndpointPrivateAccess\": true}";
+    }
+
+    /** The cluster of the config test: its original settings, or the updated ones; a failing resource follows it when asked. */
+    private static String configStack(boolean updated, boolean fails) {
+        String settings = updated
+                ? "\"EndpointPublicAccess\": false, \"EndpointPrivateAccess\": true}, \"Logging\": {\"ClusterLogging\": "
+                        + "{\"EnabledTypes\": [{\"Type\": \"api\"}]}}, \"AccessConfig\": {\"AuthenticationMode\": \"API\"},"
+                        + " \"UpgradePolicy\": {\"SupportType\": \"STANDARD\"}"
+                : "\"EndpointPublicAccess\": true}, \"AccessConfig\": {\"AuthenticationMode\": \"API_AND_CONFIG_MAP\"}";
+        return "{\"Resources\": {"
+                + "\"Vpc\": {\"Type\": \"AWS::EC2::VPC\", \"Properties\": {\"CidrBlock\": \"10.7.0.0/16\"}},"
+                + subnet("SubA", "10.7.1.0/24", "us-east-1a") + subnet("SubB", "10.7.2.0/24", "us-east-1b")
+                + "\"Subject\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE
+                + "\"ResourcesVpcConfig\": {\"SubnetIds\": [{\"Ref\": \"SubA\"}, {\"Ref\": \"SubB\"}], " + settings
+                + "}}" + (fails ? CfnStackWaits.failingResourceAfter("Subject") : "") + "}}";
     }
 
     private static String cluster(String role, String team) {

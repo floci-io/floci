@@ -7,10 +7,13 @@ import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.services.lambda.launcher.BootstrapProcess;
 import io.floci.aws.testing.ExtraCaConfigs;
 import io.floci.aws.testing.LocalHttpsServer;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLHandshakeException;
@@ -53,6 +56,8 @@ import static org.mockito.Mockito.when;
  * The CA bundle handed to every container Floci launches: the JVM's public roots followed by
  * Floci's trust anchor, and the environment entries that make each runtime read it.
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class ContainerCaBundleTest {
 
     @TempDir
@@ -66,6 +71,41 @@ class ContainerCaBundleTest {
         System.setProperty("floci.tls.enabled", "false");
         new TlsConfigSource();
         System.clearProperty("floci.tls.enabled");
+    }
+
+    @Test
+    void endpointTrustIsTheConfiguredCertificatesThenTheLocalCa() throws Exception {
+        FlociCertificateAuthority configured = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("configured"));
+        CertificateGenerator.GeneratedCertificate leaf = configured.issueServerCertificate("localhost",
+                List.of("localhost"), KeyAlgorithm.RSA_2048, null);
+        Path chain = Files.writeString(tempDir.resolve("chain.pem"),
+                leaf.certificatePem() + leaf.privateKeyPem() + configured.caPem());
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.tls().enabled()).thenReturn(true);
+        when(config.tls().certPath()).thenReturn(Optional.of(chain.toString()));
+        when(config.tls().keyPath()).thenReturn(Optional.of(tempDir.resolve("server.key").toString()));
+
+        String trust = ContainerCaBundle.endpointTrustPem(config, "local-ca");
+
+        assertEquals(ContainerCaBundle.certificatePem(leaf.certificatePem() + configured.caPem()) + "local-ca", trust);
+        assertFalse(trust.contains("PRIVATE KEY"));
+    }
+
+    @Test
+    void endpointTrustKeepsLocalCaWithoutAnActiveConfiguredCertificate() throws Exception {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.tls().certPath()).thenReturn(Optional.of("unreadable.pem"));
+        when(config.tls().keyPath()).thenReturn(Optional.of("server.key"));
+        when(config.tls().enabled()).thenReturn(false);
+        assertEquals("local-ca", ContainerCaBundle.endpointTrustPem(config, "local-ca"));
+        when(config.tls().enabled()).thenReturn(true);
+        when(config.tls().keyPath()).thenReturn(Optional.of(" "));
+        assertEquals("local-ca", ContainerCaBundle.endpointTrustPem(config, "local-ca"));
+        when(config.tls().keyPath()).thenReturn(Optional.of("server.key"));
+        when(config.tls().certPath()).thenReturn(Optional.of(" "));
+        assertEquals("local-ca", ContainerCaBundle.endpointTrustPem(config, "local-ca"));
+        when(config.tls().certPath()).thenReturn(Optional.empty());
+        assertEquals("local-ca", ContainerCaBundle.endpointTrustPem(config, "local-ca"));
     }
 
     @Test

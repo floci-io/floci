@@ -6,7 +6,9 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.acm.AcmService;
 import io.floci.aws.services.cognito.model.UserPoolDomain;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -27,6 +29,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
  * Cloud, so one cannot be created or configured there, while a prefix domain works in every
  * partition that has user pools.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class CognitoCustomDomainPartitionTest {
 
     private static final String ACCOUNT = "000000000000";

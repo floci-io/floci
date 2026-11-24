@@ -156,9 +156,9 @@ wrapping key spec: `GetParametersForImport` rejects that combination with
 The hybrid `RSA_AES_KEY_WRAP_*` algorithms require a 256-bit AES key. `RSAES_PKCS1_V1_5` is
 rejected, matching AWS, which stopped supporting it on October 10, 2023.
 
-An import token is scoped to one key and spent by the import that uses it, and a second
-`GetParametersForImport` call invalidates the token the previous one returned. Tokens expire 24
-hours after they are issued.
+An import token is scoped to one key. It stays valid until it expires and can be used again; a
+reimport must carry the key's original material. Unlike AWS, a later `GetParametersForImport` call
+still replaces the earlier token. Tokens expire 24 hours after they are issued.
 
 `ExpirationModel=KEY_MATERIAL_EXPIRES` (the default) requires `ValidTo`, which must be in the
 future and no more than 365 days out. Once `ValidTo` passes, the material is dropped and the key
@@ -248,11 +248,21 @@ there.
 
 Grant lifecycle operations (`CreateGrant`, `ListGrants`, `ListRetirableGrants`, `RevokeGrant`, `RetireGrant`) are supported. However, grant lifecycle support **does not** imply grant-based authorization enforcement on cryptographic operations (`Encrypt`, `Decrypt`, `Sign`, `Verify`, `GenerateDataKey`, etc.). Grants are stored and queryable but are not evaluated during crypto operations.
 
+## DryRun
+
+`CreateGrant`, `RetireGrant`, `RevokeGrant`, `Encrypt`, `Decrypt`, `ReEncrypt`, the four `GenerateDataKey` actions, `Sign`, `Verify`, `GenerateMac` and `VerifyMac` take `DryRun`. A dry run is checked as the call is, so a request the call would refuse keeps its error. One the call would accept is answered with `DryRunOperationException` (HTTP 400) and changes nothing: no grant is created or removed, and no result is returned. `DryRun` is read as AWS reads it: a boolean, or a string naming one in any case (`true`, `yes`, `y`, `t`, `1`, `false`, `no`, `n`, `f`, `0`), with any other value refused with `SerializationException`. `DryRunModifiers` is not read, so a `Decrypt` or `ReEncrypt` dry run always checks its ciphertext.
+
 ## IAM Enforcement
 
-With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, an operation that names a key is evaluated against that key's ARN, as on AWS. A `KeyId` given as a key id, an alias name, an alias ARN or a key ARN resolves to the key it names, so a policy scoped to one key ARN allows that key and no other, and a `Deny` scoped to one fires for that key. A `Decrypt` that names no `KeyId` is evaluated against the key that encrypted its `CiphertextBlob`.
+With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, a KMS request is checked as AWS checks it, read from the generated tables like other services' requests. An operation that names a key is evaluated against that key's ARN. A `KeyId` given as a key id, an alias name, an alias ARN or a key ARN resolves to the key it names, whatever the key's state, so a policy scoped to one key ARN allows that key and no other, and a `Deny` scoped to one fires for that key. A key KMS holds none of is checked on its id in the request's partition. A `Decrypt` that names no `KeyId` is evaluated against the key that encrypted its `CiphertextBlob`, as the [API reference](https://docs.aws.amazon.com/kms/latest/APIReference/API_Decrypt.html) says KMS reads it from the ciphertext's metadata. A request whose ciphertext names no key KMS holds is checked on `*`.
 
-`CreateAlias`, `UpdateAlias` and `DeleteAlias` are evaluated against the alias ARN and the key it points at, `UpdateAlias` also against the key it will point at, the two resource types the Service Authorization Reference lists for them. `ReEncrypt` is evaluated against both keys it acts on, under the single `kms:ReEncrypt` action: the source its `SourceKeyId` names, or when it names none the key that encrypted its `CiphertextBlob` (never a `KeyId`, which the operation does not read), and the destination its `DestinationKeyId` names. AWS authorizes the two halves separately as `kms:ReEncryptFrom` and `kms:ReEncryptTo`, which Floci does not split yet. The grant operations name the key the grant they act on belongs to: a `RetireGrant` carrying a `GrantToken` the key that grant belongs to, since the handler finds the grant by the token alone, and a `RetireGrant` or `RevokeGrant` identifying its grant by `KeyId` and `GrantId` the key it names together with the key that grant belongs to. A request nothing resolves keeps the permissive `key/*` pattern, and the operation then fails with its own error. `CreateKey`, `GenerateRandom`, `ListKeys`, `ListAliases` and `ListRetirableGrants` name no key resource and are evaluated against `*`, the resource a policy must name for them on AWS too.
+Where an operation acts on several resources, the developer guide's [permissions table](https://docs.aws.amazon.com/kms/latest/developerguide/kms-api-permissions-reference.html) says which:
+
+- `ReEncrypt` is checked as `kms:ReEncryptFrom` on the key it decrypts with, its `SourceKeyId` or else the key that encrypted its `CiphertextBlob`, and as `kms:ReEncryptTo` on its `DestinationKeyId`. There is no `kms:ReEncrypt` permission; `kms:ReEncrypt*` grants both.
+- `CreateAlias` is checked on the alias and the key it associates, `UpdateAlias` on the alias, the key it will point at and the key it points at now, and `DeleteAlias` on the alias and the key it points at. An alias name, `alias/ExampleAlias`, is the alias ARN's resource: `arn:aws:kms:<region>:<account>:alias/ExampleAlias`.
+- `ReplicateKey` is checked as `kms:ReplicateKey` on the primary key and as `kms:CreateKey`.
+
+`RevokeGrant`, `RetireGrant` and `ListGrants` are evaluated against the key their `KeyId` names and the key the grant their `GrantId` names is on. A `RetireGrant` that names its grant by `GrantToken` alone names no key and is checked on `*`. `CreateKey`, `GenerateRandom`, `ListKeys`, `ListAliases`, `ListRetirableGrants` and the custom key store operations name no key resource and are evaluated against `*`, as on AWS. The `aws:ResourceTag/<key>` condition key holds the tags of the key a request is checked on.
 
 A key's policy is evaluated as its resource policy. An explicit `Deny` in it refuses the request, and an `Allow` naming the caller grants it. A key in another account needs both its key policy and the caller's own policies to allow the request. An `Allow` naming only the account, as the default key policy's does, leaves the decision to the account's IAM policies. Floci deviates from AWS here: a same-account identity policy grants access even when the key policy does not name the account, while AWS requires the key policy to allow it.
 

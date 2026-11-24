@@ -24,10 +24,12 @@ import software.amazon.awssdk.services.cloudwatchlogs.model.ResourceNotFoundExce
 import software.amazon.awssdk.services.cloudwatchlogs.model.StandardUnit;
 import software.amazon.awssdk.services.sts.StsClient;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -359,22 +361,28 @@ class CloudWatchLogsMetricFilterTest {
     }
 
     /**
-     * A present series is awaited: the publisher writes it shortly after PutLogEvents returns, as
+     * A present series is awaited until all recorded statistics match: separate log batches may
+     * become visible separately. The publisher writes shortly after PutLogEvents returns, as
      * AWS does. An absent series is asserted once; callers await a later positive control first.
      * The window ends at second 59 so a sample stamped on the next minute is never in scope.
      */
     private static void assertSeries(String metric, Instant minute, List<Dimension> dimensions, JsonNode expected)
             throws Exception {
         boolean present = expected != null && expected.has("Sum");
-        List<Statistic> statistics = MetricFilterQueryAssertions.STATISTICS.stream().map(Statistic::fromValue).toList();
-        List<Datapoint> points = statistics(metric, minute, dimensions, statistics);
-        long deadline = System.nanoTime() + 10_000_000_000L;
-        while (present && points.isEmpty() && System.nanoTime() < deadline) {
-            Thread.sleep(50);
-            points = statistics(metric, minute, dimensions, statistics);
-        }
-        assertThat(points).as(metric + " at " + minute + " " + dimensions).hasSize(present ? 1 : 0);
         List<String> recorded = present ? MetricFilterQueryAssertions.recorded(expected) : List.of();
+        List<Statistic> statistics = MetricFilterQueryAssertions.STATISTICS.stream().map(Statistic::fromValue).toList();
+        AtomicReference<List<Datapoint>> lastRead = new AtomicReference<>(List.of());
+        if (present) {
+            TestFixtures.await(() -> {
+                lastRead.set(statistics(metric, minute, dimensions, statistics));
+                return matchesSeries(lastRead.get(), expected, recorded);
+            }, metric + " at " + minute + " " + dimensions, "all recorded statistics " + expected,
+                    Duration.ofSeconds(10).toNanos(), 50, () -> "; last read: " + lastRead.get());
+        } else {
+            lastRead.set(statistics(metric, minute, dimensions, statistics));
+        }
+        List<Datapoint> points = lastRead.get();
+        assertThat(points).as(metric + " at " + minute + " " + dimensions).hasSize(present ? 1 : 0);
         if (present) {
             Datapoint point = points.get(0);
             assertThat(point.timestamp()).isEqualTo(minute);
@@ -404,6 +412,11 @@ class CloudWatchLogsMetricFilterTest {
             }
         }
         MetricFilterQueryAssertions.assertSeries(namespace, metric, minute, dimensions, expected);
+    }
+
+    private static boolean matchesSeries(List<Datapoint> points, JsonNode expected, List<String> recorded) {
+        return points.size() == 1 && recorded.stream()
+                .allMatch(stat -> Double.compare(value(points.get(0), stat), expected.get(stat).asDouble()) == 0);
     }
 
     private static List<Datapoint> statistics(String metric, Instant minute, List<Dimension> dimensions,

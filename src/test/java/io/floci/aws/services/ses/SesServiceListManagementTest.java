@@ -10,9 +10,12 @@ import io.floci.aws.services.ses.model.MessageHeader;
 import io.floci.aws.services.ses.model.SendEmailRequest;
 import io.floci.aws.services.ses.model.Topic;
 import io.floci.aws.services.ses.model.TopicPreference;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -34,6 +37,7 @@ import static org.mockito.Mockito.verify;
  * mock to observe exactly which recipients survive suppression.
  */
 @ExtendWith(MockitoExtension.class)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SesServiceListManagementTest {
 
     private static final String REGION = "us-east-1";

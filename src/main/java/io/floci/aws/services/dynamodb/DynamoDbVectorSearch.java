@@ -32,14 +32,17 @@ final class DynamoDbVectorSearch {
     /** A scored candidate, before the top-K cut decides whether it is worth projecting. */
     private record Candidate(JsonNode item, double score) {}
 
+    /**
+     * Runs the search once the request's expressions have passed {@link #parseSearchCondition} and
+     * the table and index are resolved. The search vector is checked first, then the condition
+     * against the index.
+     */
     static List<Hit> search(TableDefinition table, VectorIndex index, List<JsonNode> items,
-                            JsonNode searchVector, int topK, String searchConditionExpression,
+                            JsonNode searchVector, int topK, ExpressionEvaluator.Expr condition,
                             JsonNode exprAttrNames, JsonNode exprAttrValues,
                             String projectionExpression) {
         float[] query = parseSearchVector(searchVector, index);
-        ExpressionEvaluator.Expr condition = parseSearchCondition(index, searchConditionExpression,
-                exprAttrNames, exprAttrValues);
-        ProjectionEvaluator.validateExpression(projectionExpression, exprAttrNames);
+        checkConditionAgainstIndex(table, index, condition, exprAttrNames, exprAttrValues);
 
         String hashAttribute = index.getHashAttributeName();
         String distanceFunction = index.getDistanceFunction();
@@ -107,95 +110,231 @@ final class DynamoDbVectorSearch {
     // ── SearchConditionExpression ──
 
     /**
-     * Parses and validates the condition, returning null when there is none.
-     *
-     * <p>Only equality is supported, on HASH and INLINE_FILTER elements alike. The comparator is
-     * checked on every clause before any membership check, because AWS answers {@code tenant < :t}
-     * on an index that declares {@code tenant} with the comparator message and {@code tenant = :t}
-     * on an index with no SearchSchema with the membership one.
+     * Parses the condition and checks it without the table, returning null when there is none.
+     * AWS does this before it looks up the table: syntax, then the generic checks in written
+     * order, then each leaf for functions, nested attributes and the number of attribute names.
      */
-    private static ExpressionEvaluator.Expr parseSearchCondition(VectorIndex index, String expression,
-                                                                 JsonNode exprAttrNames,
-                                                                 JsonNode exprAttrValues) {
-        String hashAttribute = index.getHashAttributeName();
+    static ExpressionEvaluator.Expr parseSearchCondition(String expression, JsonNode exprAttrNames,
+                                                         JsonNode exprAttrValues) {
         if (expression == null || expression.isBlank()) {
-            if (hashAttribute != null) {
-                throw missingHashCondition();
-            }
             return null;
         }
-        ExpressionEvaluator.validateExpression(expression, "SearchConditionExpression",
+        ExpressionEvaluator.validateSyntax(expression, "SearchConditionExpression");
+        ExpressionEvaluator.validateSemantics(expression, "SearchConditionExpression",
                 exprAttrNames, exprAttrValues);
 
         ExpressionEvaluator.Expr condition = ExpressionEvaluator.parse(expression);
-        List<ExpressionEvaluator.CompareExpr> clauses = new ArrayList<>();
-        collectClauses(condition, clauses);
-        for (ExpressionEvaluator.CompareExpr clause : clauses) {
-            if (clause.op() != ExpressionEvaluator.TokenType.EQ) {
-                throw invalidComparator();
+        List<Leaf> leaves = new ArrayList<>();
+        collectLeaves(condition, false, leaves);
+        for (Leaf leaf : leaves) {
+            checkLeafShape(leaf.expr());
+        }
+        return condition;
+    }
+
+    /**
+     * The checks that need the index. A missing condition fails when the index has a HASH element.
+     * Then the conditions on the HASH element must be one equality reached through AND only. Last
+     * each leaf is checked in written order for membership in the SearchSchema, the operator
+     * against the attribute type, and the value types against the attribute type.
+     */
+    private static void checkConditionAgainstIndex(TableDefinition table, VectorIndex index,
+                                                   ExpressionEvaluator.Expr condition,
+                                                   JsonNode exprAttrNames, JsonNode exprAttrValues) {
+        String hashAttribute = index.getHashAttributeName();
+        if (condition == null) {
+            if (hashAttribute != null) {
+                throw missingHashCondition();
             }
+            return;
+        }
+        List<Leaf> leaves = new ArrayList<>();
+        collectLeaves(condition, false, leaves);
+        if (hashAttribute != null) {
+            checkHashConditions(leaves, hashAttribute, exprAttrNames);
         }
 
         Set<String> schemaAttributes = new HashSet<>(index.getSearchSchemaAttributeNames());
-        boolean hashConstrained = false;
-        for (ExpressionEvaluator.CompareExpr clause : clauses) {
-            String attribute = conditionAttribute(clause, exprAttrNames);
+        for (Leaf leaf : leaves) {
+            String attribute = leafAttribute(leaf.expr(), exprAttrNames);
             if (!schemaAttributes.contains(attribute)) {
                 throw new AwsException("ValidationException",
                         "SearchConditionExpression must not contain any attributes that is not in "
                         + "SearchSchema. Invalid attribute: " + attribute, 400);
             }
-            hashConstrained |= attribute.equals(hashAttribute);
-        }
-        if (hashAttribute != null && !hashConstrained) {
-            throw missingHashCondition();
-        }
-        return condition;
-    }
-
-    private static void collectClauses(ExpressionEvaluator.Expr expr,
-                                       List<ExpressionEvaluator.CompareExpr> clauses) {
-        if (expr instanceof ExpressionEvaluator.AndExpr and) {
-            for (ExpressionEvaluator.Expr operand : and.operands()) {
-                collectClauses(operand, clauses);
-            }
-        } else if (expr instanceof ExpressionEvaluator.CompareExpr compare) {
-            clauses.add(compare);
-        } else {
-            throw invalidComparator();
+            String attributeType = table.attributeType(attribute);
+            checkOperatorType(leaf.expr(), attribute, attributeType);
+            checkValueTypes(leaf.expr(), attribute, attributeType, exprAttrValues);
         }
     }
 
-    /** The attribute a clause constrains, with any {@code #alias} resolved. */
-    private static String conditionAttribute(ExpressionEvaluator.CompareExpr clause,
-                                             JsonNode exprAttrNames) {
-        ExpressionEvaluator.Operand operand = clause.left() instanceof ExpressionEvaluator.PathOperand
-                ? clause.left() : clause.right();
-        if (!(operand instanceof ExpressionEvaluator.PathOperand path)) {
-            throw invalidComparator();
-        }
-        StringBuilder name = new StringBuilder();
-        for (String segment : path.segments()) {
-            String resolved = segment.startsWith("#") && exprAttrNames != null
-                    && exprAttrNames.hasNonNull(segment)
-                    ? exprAttrNames.get(segment).asText() : segment;
-            if (!name.isEmpty() && !resolved.startsWith("[")) {
-                name.append('.');
+    /** A leaf condition, and whether an OR or NOT sits between it and the root. */
+    private record Leaf(ExpressionEvaluator.Expr expr, boolean underOrNot) {}
+
+    private static void collectLeaves(ExpressionEvaluator.Expr expr, boolean underOrNot,
+                                      List<Leaf> leaves) {
+        switch (expr) {
+            case ExpressionEvaluator.AndExpr and -> {
+                for (ExpressionEvaluator.Expr operand : and.operands()) {
+                    collectLeaves(operand, underOrNot, leaves);
+                }
             }
-            name.append(resolved);
+            case ExpressionEvaluator.OrExpr or -> {
+                for (ExpressionEvaluator.Expr operand : or.operands()) {
+                    collectLeaves(operand, true, leaves);
+                }
+            }
+            case ExpressionEvaluator.NotExpr not -> collectLeaves(not.operand(), true, leaves);
+            default -> leaves.add(new Leaf(expr, underOrNot));
         }
-        return name.toString();
+    }
+
+    private static List<ExpressionEvaluator.Operand> leafOperands(ExpressionEvaluator.Expr leaf) {
+        return switch (leaf) {
+            case ExpressionEvaluator.CompareExpr compare -> List.of(compare.left(), compare.right());
+            case ExpressionEvaluator.BetweenExpr between ->
+                    List.of(between.value(), between.low(), between.high());
+            case ExpressionEvaluator.InExpr in -> {
+                List<ExpressionEvaluator.Operand> operands = new ArrayList<>();
+                operands.add(in.value());
+                operands.addAll(in.candidates());
+                yield operands;
+            }
+            case ExpressionEvaluator.FunctionCallExpr call -> call.args();
+            default -> List.of();
+        };
+    }
+
+    private static void checkLeafShape(ExpressionEvaluator.Expr leaf) {
+        if (leaf instanceof ExpressionEvaluator.FunctionCallExpr call
+                && !call.functionName().equals("attribute_exists")
+                && !call.functionName().equals("attribute_not_exists")) {
+            throw functionNotAllowed(call.functionName());
+        }
+        List<ExpressionEvaluator.PathOperand> paths = new ArrayList<>();
+        for (ExpressionEvaluator.Operand operand : leafOperands(leaf)) {
+            if (operand instanceof ExpressionEvaluator.FunctionOperand function) {
+                throw functionNotAllowed(function.functionName());
+            }
+            if (operand instanceof ExpressionEvaluator.PathOperand path) {
+                paths.add(path);
+            }
+        }
+        for (ExpressionEvaluator.PathOperand path : paths) {
+            if (path.segments().size() > 1) {
+                throw invalidCondition("SearchConditionExpression cannot have conditions on "
+                        + "nested attributes");
+            }
+        }
+        if (paths.isEmpty()) {
+            throw invalidCondition("Invalid condition in SearchConditionExpression: No attribute "
+                    + "names used in a condition");
+        }
+        if (paths.size() > 1) {
+            throw invalidCondition("Invalid condition in SearchConditionExpression: Multiple "
+                    + "attribute names used in one condition");
+        }
+    }
+
+    private static void checkHashConditions(List<Leaf> leaves, String hashAttribute,
+                                            JsonNode exprAttrNames) {
+        int equalities = 0;
+        for (Leaf leaf : leaves) {
+            if (!leafAttribute(leaf.expr(), exprAttrNames).equals(hashAttribute)) {
+                continue;
+            }
+            boolean equality = leaf.expr() instanceof ExpressionEvaluator.CompareExpr compare
+                    && compare.op() == ExpressionEvaluator.TokenType.EQ;
+            if (!equality || leaf.underOrNot()) {
+                throw new AwsException("ValidationException",
+                        "SearchConditionExpression must use = on the HASH attribute, not inside "
+                        + "OR or NOT; HASH attribute: " + hashAttribute, 400);
+            }
+            equalities++;
+        }
+        if (equalities > 1) {
+            throw new AwsException("ValidationException",
+                    "SearchConditionExpression must contain only one condition on the HASH "
+                    + "attribute; to search more than one HASH value, make one SearchVectors call "
+                    + "for each value", 400);
+        }
+        if (equalities == 0) {
+            throw new AwsException("ValidationException",
+                    "SearchConditionExpression must have all HASH attributes in configured "
+                    + "SearchSchema", 400);
+        }
+    }
+
+    private static void checkOperatorType(ExpressionEvaluator.Expr leaf, String attribute,
+                                          String attributeType) {
+        String operator = switch (leaf) {
+            case ExpressionEvaluator.BetweenExpr between -> "BETWEEN";
+            case ExpressionEvaluator.CompareExpr compare -> switch (compare.op()) {
+                case LT -> "<";
+                case LE -> "<=";
+                case GT -> ">";
+                case GE -> ">=";
+                default -> null;
+            };
+            default -> null;
+        };
+        if (operator != null && !"N".equals(attributeType)) {
+            throw new AwsException("ValidationException",
+                    "SearchConditionExpression allows this operator only on Number (N) "
+                    + "attributes; operator: " + operator + ", attribute: " + attribute
+                    + ", attribute type: " + attributeType, 400);
+        }
+    }
+
+    private static void checkValueTypes(ExpressionEvaluator.Expr leaf, String attribute,
+                                        String attributeType, JsonNode exprAttrValues) {
+        if (attributeType == null) {
+            return;
+        }
+        for (ExpressionEvaluator.Operand operand : leafOperands(leaf)) {
+            if (!(operand instanceof ExpressionEvaluator.PlaceholderOperand placeholder)) {
+                continue;
+            }
+            JsonNode value = exprAttrValues == null ? null : exprAttrValues.get(placeholder.name());
+            if (value == null || !value.fieldNames().hasNext()) {
+                continue;
+            }
+            String valueType = value.fieldNames().next();
+            if (!valueType.equals(attributeType)) {
+                throw new AwsException("ValidationException",
+                        "Type of '" + attribute + "' attribute in SearchConditionExpression ("
+                        + valueType + ") does not match type in search schema (" + attributeType
+                        + ")", 400);
+            }
+        }
+    }
+
+    /** The attribute a leaf constrains, with any {@code #alias} resolved. */
+    private static String leafAttribute(ExpressionEvaluator.Expr leaf, JsonNode exprAttrNames) {
+        for (ExpressionEvaluator.Operand operand : leafOperands(leaf)) {
+            if (operand instanceof ExpressionEvaluator.PathOperand path) {
+                String segment = path.segments().get(0);
+                return segment.startsWith("#") && exprAttrNames != null
+                        && exprAttrNames.hasNonNull(segment)
+                        ? exprAttrNames.get(segment).asText() : segment;
+            }
+        }
+        throw new IllegalStateException("A search condition leaf has no attribute");
+    }
+
+    private static AwsException functionNotAllowed(String name) {
+        return invalidCondition("The function is not allowed in a search condition; function: "
+                + name);
+    }
+
+    private static AwsException invalidCondition(String detail) {
+        return new AwsException("ValidationException",
+                "Invalid SearchConditionExpression: " + detail, 400);
     }
 
     private static AwsException missingHashCondition() {
         return new AwsException("ValidationException",
                 "SearchConditionExpression must be provided when SearchSchema has a HASH key", 400);
-    }
-
-    private static AwsException invalidComparator() {
-        return new AwsException("ValidationException",
-                "Invalid SearchConditionExpression: Invalid comparator used in "
-                + "SearchConditionExpression", 400);
     }
 
     // ── Candidates ──

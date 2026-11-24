@@ -2,8 +2,13 @@ package io.floci.aws.core.common.docker;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.InspectContainerCmd;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.LogContainerCmd;
+import com.github.dockerjava.api.model.ContainerConfig;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.HostConfig;
+import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.StreamType;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.testutil.LogCapture;
@@ -13,24 +18,29 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
+import java.io.ByteArrayInputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
+import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -40,6 +50,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -130,6 +141,74 @@ class ContainerLogStreamerTest {
                 eq("555555555555"), eq("/aws/lambda/example"), eq("stream"), anyList(), eq("us-east-1"));
     }
 
+    private static DockerClient dockerWithLogTag(String containerId, String token, String gelfAddress) {
+        DockerClient docker = mock(DockerClient.class);
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse response = mock(InspectContainerResponse.class);
+        ContainerConfig containerConfig = mock(ContainerConfig.class);
+        when(docker.inspectContainerCmd(containerId)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(response);
+        when(response.getConfig()).thenReturn(containerConfig);
+        when(containerConfig.getLabels()).thenReturn(Map.of(GelfLogListener.LOG_TOKEN_LABEL, token));
+        when(response.getHostConfig()).thenReturn(new HostConfig().withLogConfig(
+                new LogConfig(LogConfig.LoggingType.GELF, Map.of("gelf-address", gelfAddress))));
+        when(docker.logContainerCmd(containerId)).thenReturn(mock(LogContainerCmd.class, RETURNS_SELF));
+        return docker;
+    }
+
+    private static ContainerLogStreamer streamerWith(DockerClient docker, CloudWatchLogsService cloudWatch,
+                                                     GelfLogListener listener) {
+        return new ContainerLogStreamer(docker, docker, cloudWatch, Duration.ofHours(1), listener);
+    }
+
+    // Catches: a container tagged for the log-driver mode not claimed by the listener, so its pushed log
+    // never reaches CloudWatch Logs.
+    @Test
+    void aTaggedContainerDialingThisListenerHasItsLogPushed() throws IOException {
+        GelfLogListener listener = new GelfLogListener(mock(DockerClient.class), true, "127.0.0.1");
+        try {
+            String address = listener.logConfigFor("token-a", Map.of()).getConfig().get("gelf-address");
+            CloudWatchLogsService cloudWatch = mock(CloudWatchLogsService.class);
+            ContainerLogStreamer streamer = streamerWith(
+                    dockerWithLogTag("container-1", "token-a", address), cloudWatch, listener);
+
+            Closeable handle = streamer.attachPolled("container-1", "/aws/rds/instance/db/error", "stream",
+                    "us-east-1", "rds:db");
+            listener.readMessages(new ByteArrayInputStream(
+                    utf8("{\"short_message\":\"ready\",\"level\":6,\"_tag\":\"token-a\"}\0")));
+
+            assertFalse(handle instanceof PolledLogHandle, "the log is pushed, not read on a timer");
+            verify(cloudWatch).putLogEventsForAccount(any(), eq("/aws/rds/instance/db/error"), eq("stream"),
+                    argThat(events -> "ready".equals(events.getFirst().get("message"))), eq("us-east-1"));
+        } finally {
+            listener.close();
+        }
+    }
+
+    // Catches: a container kept across a restart of Floci, which still dials the old listener's address,
+    // attached to a listener that never hears from it, instead of being read on a timer with a warning.
+    @Test
+    void aContainerDialingAnotherListenerIsReadOnATimerWithAWarning() throws IOException {
+        GelfLogListener listener = new GelfLogListener(mock(DockerClient.class), true, "127.0.0.1");
+        try {
+            listener.ensureStarted();
+            ContainerLogStreamer streamer = streamerWith(
+                    dockerWithLogTag("container-1", "token-a", "tcp://127.0.0.1:1"),
+                    mock(CloudWatchLogsService.class), listener);
+            List<Closeable> handles = new ArrayList<>();
+
+            List<LogRecord> records = LogCapture.capture(ContainerLogStreamer.class, () -> handles.add(
+                    streamer.attachPolled("container-1", "/aws/rds/instance/db/error", "stream", "us-east-1",
+                            "rds:db")));
+
+            assertInstanceOf(PolledLogHandle.class, handles.getFirst());
+            assertTrue(records.stream().anyMatch(record -> record.getLevel().intValue() >= Level.WARNING.intValue()), records.toString());
+            handles.getFirst().close();
+        } finally {
+            listener.close();
+        }
+    }
+
     @Test
     void attachedStreamStillReachesCloudWatchAndConsole() {
         DockerClient dockerClient = mock(DockerClient.class);
@@ -207,6 +286,30 @@ class ContainerLogStreamerTest {
                 eq("/jobs/1/SPARK_DRIVER/stderr"),
                 argThat(events -> "INFO SparkContext: stopped".equals(events.getFirst().get("message"))),
                 eq("us-east-1"));
+    }
+
+    @Test
+    void aByStreamAttachSendsAFramesLinesInOneCallEachAsWritten() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        LogContainerCmd command = mock(LogContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.logContainerCmd("container-1")).thenReturn(command);
+        CloudWatchLogsService cloudWatchLogsService = mock(CloudWatchLogsService.class);
+        ContainerLogStreamer streamer = new ContainerLogStreamer(dockerClient, cloudWatchLogsService);
+        streamer.attachByStreamForAccount("555555555555", "container-1", "/emr-on-eks/jobs", "driver/stdout",
+                "driver/stderr", "us-east-1", "emr-containers:1");
+        ArgumentCaptor<ContainerLogStreamer.LogReassemblyCallback> callback =
+                ArgumentCaptor.forClass(ContainerLogStreamer.LogReassemblyCallback.class);
+        verify(command).exec(callback.capture());
+
+        LogCapture.capture(ContainerLogStreamer.class, () -> callback.getValue()
+                .onNext(new Frame(StreamType.STDOUT, utf8("first\n   \n  indented  \r\n\nlast\n"))));
+
+        // One call for the frame's lines, which keep their whitespace; the empty one, which CloudWatch Logs refuses
+        // as an event, is left out.
+        verify(cloudWatchLogsService, times(1)).putLogEventsForAccount(any(), any(), any(), anyList(), any());
+        verify(cloudWatchLogsService).putLogEventsForAccount(eq("555555555555"), eq("/emr-on-eks/jobs"),
+                eq("driver/stdout"), argThat(events -> events.stream().map(event -> event.get("message")).toList()
+                        .equals(List.of("first", "   ", "  indented  ", "last"))), eq("us-east-1"));
     }
 
     @Test

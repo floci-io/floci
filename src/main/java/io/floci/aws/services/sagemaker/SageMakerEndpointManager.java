@@ -57,6 +57,7 @@ public class SageMakerEndpointManager implements ContainerTeardown, Resettable {
     private final S3Service s3Service;
     // Replaced by afterReset() after a state reset, whose container teardown shuts this pool down.
     private volatile ExecutorService executor = Executors.newCachedThreadPool();
+    // Keyed by account, Region and name, which together identify an endpoint.
     private final ConcurrentHashMap<String, String> containers = new ConcurrentHashMap<>();
     private final HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
 
@@ -87,7 +88,7 @@ public class SageMakerEndpointManager implements ContainerTeardown, Resettable {
             if (image == null) {
                 throw new IllegalArgumentException("PrimaryContainer.Image is required");
             }
-            String name = ContainerStorageHelper.dockerName(config, "sagemaker-endpoint-" + endpoint.endpointName);
+            String name = containerName(config, endpoint.accountId, endpoint.region, endpoint.endpointName);
             lifecycleManager.removeIfExists(name);
             ContainerBuilder.Builder builder = containerBuilder.newContainer(image)
                     .withName(name)
@@ -96,7 +97,9 @@ public class SageMakerEndpointManager implements ContainerTeardown, Resettable {
                     .withHostDockerInternalOnLinux()
                     .withEmbeddedDns()
                     .withPortBinding(PORT, 0)
-                    .withLogRotation();
+                    .withLogRotation()
+                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                            "sagemaker", endpoint.endpointName, endpoint.accountId, endpoint.region));
             applyEntrypoint(builder, c, "serve");
             ContainerSpec spec = builder.build();
             containerId = lifecycleManager.create(spec);
@@ -109,7 +112,7 @@ public class SageMakerEndpointManager implements ContainerTeardown, Resettable {
             endpoint.containerId = containerId;
             endpoint.invokeHost = ep.host();
             endpoint.invokePort = ep.port();
-            containers.put(endpoint.endpointName, containerId);
+            containers.put(identity(endpoint), containerId);
             waitForPing(endpoint.invokeHost, endpoint.invokePort);
             endpoint.endpointStatus = "InService";
             endpoint.failureReason = null;
@@ -137,17 +140,38 @@ public class SageMakerEndpointManager implements ContainerTeardown, Resettable {
         }
         LOG.infov("SageMaker endpoint {0} start superseded by a delete or newer update; discarding result",
                 endpoint.endpointName);
-        String containerId = endpoint.containerId != null ? endpoint.containerId : containers.remove(endpoint.endpointName);
+        String containerId = endpoint.containerId != null ? endpoint.containerId : containers.remove(identity(endpoint));
         if (containerId != null) {
             lifecycleManager.stopAndRemove(containerId, null);
         }
     }
 
+    /**
+     * Stops and removes the endpoint's container: the one its record names, else the one a start of this process
+     * brought up, else any container of the endpoint's name, which a crash can leave behind with no record of it.
+     */
     public void stopEndpoint(EndpointResource endpoint) {
-        String containerId = endpoint.containerId != null ? endpoint.containerId : containers.remove(endpoint.endpointName);
+        String tracked = containers.remove(identity(endpoint));
+        String containerId = endpoint.containerId != null ? endpoint.containerId : tracked;
         if (containerId != null) {
             lifecycleManager.stopAndRemove(containerId, null);
+        } else {
+            lifecycleManager.removeIfExists(containerName(config, endpoint.accountId, endpoint.region,
+                    endpoint.endpointName));
         }
+    }
+
+    /**
+     * The endpoint's container name. An endpoint is identified by its account, Region and name, so endpoints of the
+     * same name in two accounts or Regions get containers of their own.
+     */
+    static String containerName(EmulatorConfig config, String accountId, String region, String endpointName) {
+        return ContainerStorageHelper.dockerName(config,
+                "sagemaker-endpoint-" + accountId + "-" + region + "-" + endpointName);
+    }
+
+    private static String identity(EndpointResource endpoint) {
+        return endpoint.accountId + "/" + endpoint.region + "/" + endpoint.endpointName;
     }
 
     @Override

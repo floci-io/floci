@@ -79,6 +79,22 @@ class AccountAwareStorageBackendTest {
     }
 
     @Test
+    void deleteInAccountDeletesOnlyTheNamedAccountsEntry() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        AccountAwareStorageBackend<String> storage = new AccountAwareStorageBackend<>(raw, null, "000000000000");
+        raw.put("000000000000/resource", "default");
+        raw.put("111111111111/resource", "owned");
+
+        AccountAwareStorageBackend.deleteInAccount(storage, "111111111111", "resource");
+
+        assertEquals(Set.of("000000000000/resource"), raw.keys());
+        InMemoryStorage<String, String> plain = new InMemoryStorage<>();
+        plain.put("resource", "value");
+        AccountAwareStorageBackend.deleteInAccount(plain, "111111111111", "resource");
+        assertTrue(plain.keys().isEmpty());
+    }
+
+    @Test
     void inAccountHelpersUseTheAmbientAccountWithoutAnAccountId() {
         InMemoryStorage<String, String> raw = new InMemoryStorage<>();
         AccountAwareStorageBackend<String> storage = new AccountAwareStorageBackend<>(raw, null, "000000000000");

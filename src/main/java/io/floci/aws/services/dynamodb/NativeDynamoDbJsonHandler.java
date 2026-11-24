@@ -89,16 +89,24 @@ public class NativeDynamoDbJsonHandler {
     private final NativeDynamoDbTableService tableService;
     private final ObjectMapper objectMapper;
     private final EmulatorConfig config;
+    private final boolean randomizeOrder;
     private final DynamoDbPartiQLHandler partiQLHandler;
     private final Object importLock = new Object();
 
     @Inject
     public NativeDynamoDbJsonHandler(DynamoDbService dynamoDbService, NativeDynamoDbTableService tableService,
                                      ObjectMapper objectMapper, EmulatorConfig config) {
+        this(dynamoDbService, tableService, objectMapper, config,
+                config.services().dynamodb().randomizeAttributeOrder());
+    }
+
+    private NativeDynamoDbJsonHandler(DynamoDbService dynamoDbService, NativeDynamoDbTableService tableService,
+                                      ObjectMapper objectMapper, EmulatorConfig config, boolean randomizeOrder) {
         this.dynamoDbService = dynamoDbService;
         this.tableService = tableService;
         this.objectMapper = objectMapper;
         this.config = config;
+        this.randomizeOrder = randomizeOrder;
         this.partiQLHandler = new DynamoDbPartiQLHandler(dynamoDbService, objectMapper);
     }
 
@@ -106,7 +114,18 @@ public class NativeDynamoDbJsonHandler {
     NativeDynamoDbJsonHandler(DynamoDbService dynamoDbService, DynamoDbStreamService dynamoDbStreamService,
                               KinesisService kinesisService, ObjectMapper objectMapper) {
         this(dynamoDbService, new NativeDynamoDbTableService(dynamoDbService, dynamoDbStreamService, kinesisService),
-                objectMapper, null);
+                objectMapper, null, false);
+    }
+
+    private <T> T withShuffledFailureItem(Supplier<T> call) {
+        try {
+            return call.get();
+        } catch (ConditionalCheckFailedException e) {
+            if (e.getItem() == null || !randomizeOrder) {
+                throw e;
+            }
+            throw new ConditionalCheckFailedException(DynamoDbAttributeOrder.shuffled(e.getItem(), true));
+        }
     }
 
     public Response handle(String action, JsonNode request, String region) throws Exception {
@@ -839,12 +858,13 @@ public class NativeDynamoDbJsonHandler {
 
         Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, item, false, expected,
                 conditionalOperator, returnValuesOnConditionCheckFailure);
-        JsonNode previousItem = dynamoDbService.putItem(tableName, item, conditionExpression,
-                exprAttrNames, exprAttrValues, region, returnValuesOnConditionCheckFailure, expectedCheck);
+        JsonNode previousItem = withShuffledFailureItem(() -> dynamoDbService.putItem(tableName,
+                DynamoDbMapOrder.sortedItem(item), conditionExpression, exprAttrNames, exprAttrValues, region,
+                returnValuesOnConditionCheckFailure, expectedCheck));
 
         ObjectNode response = objectMapper.createObjectNode();
         if ("ALL_OLD".equals(returnValues) && previousItem != null) {
-            response.set("Attributes", previousItem);
+            response.set("Attributes", DynamoDbAttributeOrder.shuffled(previousItem, randomizeOrder));
         }
         addItemCollectionMetrics(response, request, tableName, item, region);
         addWriteConsumedCapacity(response, request, tableName, region, previousItem, item);
@@ -873,16 +893,8 @@ public class NativeDynamoDbJsonHandler {
             checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression));
             checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression));
         } catch (AwsException e) {
-            throw inValidationEnvelope(e);
+            throw SmithyValidationErrors.inEnvelope(e);
         }
-    }
-
-    // A size check and a BETWEEN error add the envelope themselves.
-    private static AwsException inValidationEnvelope(AwsException e) {
-        if (!"ValidationException".equals(e.getErrorCode()) || e.getMessage().startsWith(VALIDATION_ENVELOPE)) {
-            return e;
-        }
-        return SmithyValidationErrors.validationException(e.getMessage());
     }
 
     private static void requireNonEmptyMap(JsonNode map, String member) {
@@ -973,12 +985,13 @@ public class NativeDynamoDbJsonHandler {
                 ? request.get("ConditionalOperator").asText() : "AND";
         Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, key, true, expectedDel,
                 condOpDel, returnValuesOnConditionCheckFailure);
-        JsonNode oldItem = dynamoDbService.deleteItem(tableName, key, conditionExpression,
-                exprAttrNames, exprAttrValues, region, returnValuesOnConditionCheckFailure, expectedCheck);
+        JsonNode oldItem = withShuffledFailureItem(() -> dynamoDbService.deleteItem(tableName, key,
+                conditionExpression, exprAttrNames, exprAttrValues, region, returnValuesOnConditionCheckFailure,
+                expectedCheck));
 
         ObjectNode response = objectMapper.createObjectNode();
         if ("ALL_OLD" .equals(returnValues) && oldItem != null) {
-            response.set("Attributes", oldItem);
+            response.set("Attributes", DynamoDbAttributeOrder.shuffled(oldItem, randomizeOrder));
         }
         addItemCollectionMetrics(response, request, tableName, key, region);
         addWriteConsumedCapacity(response, request, tableName, region, oldItem, null);
@@ -1069,7 +1082,7 @@ public class NativeDynamoDbJsonHandler {
                 checkUnusedEav(exprAttrValues, colonTokensAll);
             }
         } catch (AwsException e) {
-            throw inValidationEnvelope(e);
+            throw SmithyValidationErrors.inEnvelope(e);
         }
 
         if (exprAttrValues != null) {
@@ -1079,20 +1092,21 @@ public class NativeDynamoDbJsonHandler {
 
         Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, key, true, expectedUpd,
                 conditionalOperatorUpd, returnValuesOnConditionCheckFailure);
-        DynamoDbService.UpdateResult result = dynamoDbService.updateItem(
-                tableName, key, updateData, updateExpression, exprAttrNames, exprAttrValues,
-                returnValues, conditionExpression, region, returnValuesOnConditionCheckFailure, expectedCheck);
+        DynamoDbService.UpdateResult result = withShuffledFailureItem(() -> dynamoDbService.updateItem(
+                tableName, key, DynamoDbMapOrder.sortedAttributeUpdates(updateData), updateExpression,
+                exprAttrNames, DynamoDbMapOrder.sortedItem(exprAttrValues), returnValues, conditionExpression, region,
+                returnValuesOnConditionCheckFailure, expectedCheck));
 
         ObjectNode response = objectMapper.createObjectNode();
         if ("ALL_NEW" .equals(returnValues) && result.newItem() != null) {
-            response.set("Attributes", result.newItem());
+            response.set("Attributes", DynamoDbAttributeOrder.shuffled(result.newItem(), randomizeOrder));
         } else if ("ALL_OLD" .equals(returnValues) && result.oldItem() != null) {
-            response.set("Attributes", result.oldItem());
+            response.set("Attributes", DynamoDbAttributeOrder.shuffled(result.oldItem(), randomizeOrder));
         } else if ("UPDATED_NEW".equals(returnValues) || "UPDATED_OLD".equals(returnValues)) {
             ObjectNode updated = DynamoDbUpdatedAttributes.collect(result.touched(), "UPDATED_NEW".equals(returnValues));
             // AWS omits Attributes when no touched path has a value on that side.
             if (!updated.isEmpty()) {
-                response.set("Attributes", updated);
+                response.set("Attributes", DynamoDbAttributeOrder.shuffled(updated, randomizeOrder));
             }
         }
         addItemCollectionMetrics(response, request, tableName, key, region);
@@ -1681,20 +1695,40 @@ public class NativeDynamoDbJsonHandler {
                     + "The value must be between 1 and " + MAX_VECTOR_SEARCH_TOP_K + " inclusive", 400);
         }
 
+        JsonNode exprAttrNames = request.hasNonNull("ExpressionAttributeNames")
+                ? request.get("ExpressionAttributeNames") : null;
+        JsonNode exprAttrValues = request.hasNonNull("ExpressionAttributeValues")
+                ? request.get("ExpressionAttributeValues") : null;
+        String searchCondition = request.hasNonNull("SearchConditionExpression")
+                ? request.get("SearchConditionExpression").asText() : null;
+        String projectionExpression = request.hasNonNull("ProjectionExpression")
+                ? request.get("ProjectionExpression").asText() : null;
+
+        // AWS answers all of these before it looks up the table.
+        requireNonEmptyMap(exprAttrNames, "ExpressionAttributeNames");
+        requireNonEmptyMap(exprAttrValues, "ExpressionAttributeValues");
+        boolean hasCondition = searchCondition != null && !searchCondition.isBlank();
+        if (!hasCondition) {
+            if (!ProjectionEvaluator.hasProjection(projectionExpression)) {
+                requireAbsentWithoutExpression(exprAttrNames, "ExpressionAttributeNames");
+            }
+            requireAbsentWithoutExpression(exprAttrValues, "ExpressionAttributeValues");
+        }
+        DynamoDbExpressionSize.checkRead(projectionExpression, "ProjectionExpression");
+        ProjectionEvaluator.validateExpression(projectionExpression, exprAttrNames);
+        DynamoDbExpressionSize.checkRead(searchCondition, "SearchConditionExpression");
+        ExpressionEvaluator.Expr condition =
+                DynamoDbVectorSearch.parseSearchCondition(searchCondition, exprAttrNames, exprAttrValues);
+        checkUnusedEan(exprAttrNames, extractHashTokens(searchCondition, projectionExpression));
+        checkUnusedEav(exprAttrValues, extractColonTokens(searchCondition));
+
         TableDefinition table = dynamoDbService.settledTable(tableName, region);
         VectorIndex index = requireSearchableVectorIndex(table, indexName);
 
-        JsonNode exprAttrNames = request.has("ExpressionAttributeNames")
-                ? request.get("ExpressionAttributeNames") : null;
-        JsonNode exprAttrValues = request.has("ExpressionAttributeValues")
-                ? request.get("ExpressionAttributeValues") : null;
         List<DynamoDbVectorSearch.Hit> hits = DynamoDbVectorSearch.search(table, index,
                 dynamoDbService.liveItems(table, region),
-                request.path("SearchVector"), topK,
-                request.has("SearchConditionExpression")
-                        ? request.get("SearchConditionExpression").asText() : null,
-                exprAttrNames, exprAttrValues,
-                request.has("ProjectionExpression") ? request.get("ProjectionExpression").asText() : null);
+                request.path("SearchVector"), topK, condition,
+                exprAttrNames, exprAttrValues, projectionExpression);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode searchResults = objectMapper.createArrayNode();
@@ -1806,7 +1840,7 @@ public class NativeDynamoDbJsonHandler {
             }
         }
 
-        dynamoDbService.batchWriteItem(items, region);
+        dynamoDbService.batchWriteItem(withSortedPutItems(items), region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("UnprocessedItems", objectMapper.createObjectNode());
@@ -1819,6 +1853,18 @@ public class NativeDynamoDbJsonHandler {
             response.set("ConsumedCapacity", ccArray);
         }
         return Response.ok(response).build();
+    }
+
+    private static Map<String, List<JsonNode>> withSortedPutItems(Map<String, List<JsonNode>> items) {
+        Map<String, List<JsonNode>> sorted = new LinkedHashMap<>();
+        for (Map.Entry<String, List<JsonNode>> entry : items.entrySet()) {
+            List<JsonNode> writes = new ArrayList<>(entry.getValue().size());
+            for (JsonNode writeReq : entry.getValue()) {
+                writes.add(DynamoDbMapOrder.withSortedMember(writeReq, "PutRequest", "Item"));
+            }
+            sorted.put(entry.getKey(), writes);
+        }
+        return sorted;
     }
 
     private Response handleBatchGetItem(JsonNode request, String region) {
@@ -2922,7 +2968,7 @@ public class NativeDynamoDbJsonHandler {
         List<JsonNode> transactItems = new ArrayList<>();
         transactItemsNode.forEach(transactItems::add);
         try {
-            dynamoDbService.cancelOnKeySchemaMismatch(transactItems, region);
+            dynamoDbService.validateTransactMemberKeysAndSizes(transactItems, region);
         } catch (TransactionCanceledException e) {
             return transactWriteCanceled(e);
         }
@@ -2956,13 +3002,24 @@ public class NativeDynamoDbJsonHandler {
 
         try {
             DynamoDbService.TransactWriteResult result =
-                    dynamoDbService.transactWriteItems(transactItems, region, clientRequestToken, request);
+                    dynamoDbService.transactWriteItems(withSortedMaps(transactItems), region,
+                            clientRequestToken, request);
             ObjectNode response = objectMapper.createObjectNode();
             addTransactWriteConsumedCapacity(response, request, result);
             return Response.ok(response).build();
         } catch (TransactionCanceledException e) {
             return transactWriteCanceled(e);
         }
+    }
+
+    private static List<JsonNode> withSortedMaps(List<JsonNode> transactItems) {
+        List<JsonNode> sorted = new ArrayList<>(transactItems.size());
+        for (JsonNode txItem : transactItems) {
+            sorted.add(DynamoDbMapOrder.withSortedMember(
+                    DynamoDbMapOrder.withSortedMember(txItem, "Put", "Item"),
+                    "Update", "ExpressionAttributeValues"));
+        }
+        return sorted;
     }
 
     // DynamoDB reads an action with more than one operation as the first one in this order.
@@ -3298,7 +3355,7 @@ public class NativeDynamoDbJsonHandler {
                 r.put("Message", reason.message() != null ? reason.message() : "The conditional request failed");
             }
             if (reason.item() != null) {
-                r.set("Item", reason.item());
+                r.set("Item", DynamoDbAttributeOrder.shuffled(reason.item(), randomizeOrder));
             }
             reasons.add(r);
         }
@@ -3365,7 +3422,7 @@ public class NativeDynamoDbJsonHandler {
                 ObjectNode r = objectMapper.createObjectNode();
                 r.put("Code", reason.code().isEmpty() ? "None" : reason.code());
                 if (!reason.code().isEmpty()) {
-                    r.put("Message", "");
+                    r.put("Message", reason.message() != null ? reason.message() : "");
                 }
                 if (reason.item() != null) {
                     r.set("Item", reason.item());
@@ -3380,7 +3437,7 @@ public class NativeDynamoDbJsonHandler {
         for (JsonNode item : result.items()) {
             ObjectNode entry = objectMapper.createObjectNode();
             if (item != null) {
-                entry.set("Item", item);
+                entry.set("Item", DynamoDbAttributeOrder.shuffled(item, randomizeOrder));
             }
             responsesArray.add(entry);
         }

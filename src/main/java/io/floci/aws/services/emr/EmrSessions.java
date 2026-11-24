@@ -273,6 +273,8 @@ final class EmrSessions {
         session.setEndedAt(at);
         session.setUpdatedAt(at);
         session.setIdleSince(null);
+        // Its server has gone, and with it the URL to reach it at.
+        session.setServerUrl(null);
     }
 
     /** Whether the session has ended, TERMINATED or FAILED. */

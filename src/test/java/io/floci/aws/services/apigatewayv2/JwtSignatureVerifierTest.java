@@ -12,6 +12,7 @@ import io.floci.aws.config.FlociCertificateAuthority;
 import io.floci.aws.config.TlsConfigSource;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.testing.LocalHttpsServer;
+import io.floci.aws.testing.ParallelLocks;
 import org.apache.hc.client5.http.DnsResolver;
 import org.apache.hc.client5.http.SystemDefaultDnsResolver;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
@@ -19,6 +20,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.math.BigInteger;
@@ -54,6 +56,8 @@ import static org.mockito.Mockito.when;
  * backend rather than a mock), and a real RS256-signed token - the same shape a real IdP's would
  * take, since this class exists specifically to check tokens against a live issuer's real keys.
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
+@ResourceLock(ParallelLocks.PORTS)
 class JwtSignatureVerifierTest {
 
     private HttpServer server;

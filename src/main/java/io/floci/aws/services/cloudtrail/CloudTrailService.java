@@ -10,6 +10,7 @@ import io.floci.aws.core.common.AwsEndpoints;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -32,6 +33,7 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -45,8 +47,10 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+
 @ApplicationScoped
-public class CloudTrailService implements StoredResourceArns {
+public class CloudTrailService implements StoredResourceArns, Resettable {
 
     private static final Logger LOG = Logger.getLogger(CloudTrailService.class);
 
@@ -74,6 +78,8 @@ public class CloudTrailService implements StoredResourceArns {
      * first read, silently discarding whatever the first call changed.
      */
     private final ConcurrentHashMap<String, Object> trailLocks = new ConcurrentHashMap<>();
+
+    private final CloudTrailEventHistory eventHistory = new CloudTrailEventHistory();
 
     @Inject
     public CloudTrailService(StorageFactory storageFactory, RegionResolver regionResolver,
@@ -482,16 +488,44 @@ public class CloudTrailService implements StoredResourceArns {
 
     // --- Data plane: called by S3 (and other services) when an op happens ---
 
+    /**
+     * One management API call. {@code requestParameters} and {@code responseElements} may be null,
+     * which the record carries as a JSON null, as CloudTrail does for a call without parameters and
+     * for a read-only call or a failed one. {@code sourceIp}, {@code userAgent} and
+     * {@code requestId} are left out of the record, or generated for the request ID, when null.
+     * {@code globalService} marks a call to a global service such as IAM, which a trail records only
+     * when it includes global service events: "Setting this value to true only delivers global service
+     * events to the trail if the trail is multi-Region or if the trail's home Region is the partition
+     * leader Region" (botocore's CloudTrail model, {@code IncludeGlobalServiceEvents}).
+     * {@code userIdentity} is the caller as {@link #userIdentity} read it before the call ran, for a call
+     * that can remove the key it was signed with; when null it is read from {@code accessKeyId} here.
+     */
     public record ManagementEventInput(String eventSource, String eventName, String region, String accessKeyId,
-                                       ObjectNode requestParameters, ObjectNode responseElements) {}
+                                       ObjectNode requestParameters, ObjectNode responseElements,
+                                       boolean readOnly, String sourceIp, String userAgent, String requestId,
+                                       String errorCode, String errorMessage, boolean globalService,
+                                       ObjectNode userIdentity) {
 
-    /** Records one management write and returns the event only when a logging trail selects it. */
+        /** A successful write, from a caller whose address and agent are not known. */
+        public ManagementEventInput(String eventSource, String eventName, String region, String accessKeyId,
+                                    ObjectNode requestParameters, ObjectNode responseElements) {
+            this(eventSource, eventName, region, accessKeyId, requestParameters, responseElements, false,
+                    null, null, null, null, null, false, null);
+        }
+    }
+
+    /**
+     * Records one management call in the account's event history and returns the event only when
+     * a logging trail also selects it.
+     */
     public Optional<ObjectNode> emitManagementEvent(ManagementEventInput in) {
         try {
             String region = in.region() != null ? in.region() : regionResolver.getDefaultRegion();
+            Instant eventTime = Instant.now();
             ObjectNode record = mapper.createObjectNode();
             record.put("eventVersion", EVENT_VERSION);
-            record.put("eventTime", Instant.now().toString());
+            // ISO 8601 to the second, as every record CloudTrail's guide shows ("2014-07-16T15:49:27Z").
+            record.put("eventTime", DateTimeFormatter.ISO_INSTANT.format(eventTime.truncatedTo(ChronoUnit.SECONDS)));
             record.put("eventSource", in.eventSource());
             record.put("eventName", in.eventName());
             record.put("awsRegion", region);
@@ -499,13 +533,31 @@ public class CloudTrailService implements StoredResourceArns {
             record.put("eventType", "AwsApiCall");
             record.put("eventCategory", "Management");
             record.put("managementEvent", true);
-            record.put("readOnly", false);
+            record.put("readOnly", in.readOnly());
             record.put("eventID", UUID.randomUUID().toString());
-            record.put("requestID", UUID.randomUUID().toString());
-            record.set("userIdentity", buildUserIdentity(in.accessKeyId()));
-            record.set("requestParameters", in.requestParameters().deepCopy());
-            record.set("responseElements", in.responseElements().deepCopy());
-            List<MatchedTrail> matched = trailsMatching(region, entry -> matchesManagementEvent(entry, record));
+            record.put("requestID", in.requestId() != null ? in.requestId() : UUID.randomUUID().toString());
+            record.set("userIdentity", in.userIdentity() != null
+                    ? in.userIdentity().deepCopy() : buildUserIdentity(in.accessKeyId()));
+            if (in.sourceIp() != null) {
+                record.put("sourceIPAddress", in.sourceIp());
+            }
+            if (in.userAgent() != null) {
+                record.put("userAgent", in.userAgent());
+            }
+            if (in.errorCode() != null) {
+                record.put("errorCode", in.errorCode());
+                if (in.errorMessage() != null) {
+                    record.put("errorMessage", in.errorMessage());
+                }
+            }
+            record.set("requestParameters", in.requestParameters() == null
+                    ? mapper.nullNode() : in.requestParameters().deepCopy());
+            record.set("responseElements", in.responseElements() == null
+                    ? mapper.nullNode() : in.responseElements().deepCopy());
+            eventHistory.record(regionResolver.getAccountId(), region, eventTime, record);
+            List<MatchedTrail> matched = trailsMatching(region, entry ->
+                    (!in.globalService() || entry.trail().includeGlobalServiceEvents())
+                            && matchesManagementEvent(entry, record));
             if (matched.isEmpty()) {
                 return Optional.empty();
             }
@@ -517,6 +569,22 @@ public class CloudTrailService implements StoredResourceArns {
             LOG.warnv(e, "Failed to record CloudTrail management event {0}", in.eventName());
             return Optional.empty();
         }
+    }
+
+    /**
+     * The current account's management events in {@code region}, newest first, as event history
+     * holds them: no trail is needed. A null attribute or bound does not filter.
+     */
+    public List<CloudTrailEventHistory.HistoryEvent> lookupEvents(String region,
+                                                                  CloudTrailEventHistory.LookupAttribute attribute,
+                                                                  Instant startTime, Instant endTime) {
+        return eventHistory.lookup(regionResolver.getAccountId(), region, attribute, startTime, endTime, Instant.now());
+    }
+
+    /** Trails live in storage, which reset wipes; the event history is held here. */
+    @Override
+    public void clear() {
+        eventHistory.clear();
     }
 
     /** Whether the current account has a trail, so a caller can skip building an event. */
@@ -845,9 +913,10 @@ public class CloudTrailService implements StoredResourceArns {
         if (selectors == null || selectors.isEmpty()) {
             return !entry.trail().hasCustomEventSelectors();
         }
+        String recordType = record.path("readOnly").asBoolean() ? "ReadOnly" : "WriteOnly";
         return selectors.stream().anyMatch(selector -> !Boolean.FALSE.equals(selector.includeManagementEvents())
                 && (selector.readWriteType() == null || "All".equalsIgnoreCase(selector.readWriteType())
-                    || "WriteOnly".equalsIgnoreCase(selector.readWriteType()))
+                    || recordType.equalsIgnoreCase(selector.readWriteType()))
                 && (selector.excludeManagementEventSources() == null
                     || !selector.excludeManagementEventSources().contains(record.path("eventSource").asText())));
     }
@@ -1082,11 +1151,16 @@ public class CloudTrailService implements StoredResourceArns {
         return record;
     }
 
+    /** The {@code userIdentity} a record names the caller signing with {@code accessKeyId} by, as IAM holds it now. */
+    public ObjectNode userIdentity(String accessKeyId) {
+        return buildUserIdentity(accessKeyId);
+    }
+
     private ObjectNode buildUserIdentity(String accessKeyId) {
         ObjectNode identity = mapper.createObjectNode();
         String accountId = regionResolver.getAccountId();
 
-        if (accessKeyId == null || "test".equals(accessKeyId)) {
+        if (accessKeyId == null || LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
             identity.put("type", "IAMUser");
             identity.put("principalId", "AIDA" + repeat('A', 17));
             identity.put("arn", regionResolver.buildGlobalArn("iam", accountId, "root"));

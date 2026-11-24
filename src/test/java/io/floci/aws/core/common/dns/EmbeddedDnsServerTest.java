@@ -1,9 +1,11 @@
 package io.floci.aws.core.common.dns;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Vertx;
 import io.vertx.core.WorkerExecutor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -19,6 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@ResourceLock(ParallelLocks.PORTS)
 class EmbeddedDnsServerTest {
 
     private EmbeddedDnsServer dns;

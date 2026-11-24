@@ -14,8 +14,10 @@ import io.floci.aws.services.emrserverless.model.StartSessionRequest;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -48,6 +50,7 @@ import static org.mockito.Mockito.when;
  * EMR Serverless sessions in the docker runner mode, each running a Spark Connect server through the runner: the
  * session's states as its server starts, answers, takes calls and stops, with a runner that stands in for Docker.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class EmrServerlessSessionServerTest {
 
     private static final String REGION = "us-east-1";
@@ -171,7 +174,7 @@ class EmrServerlessSessionServerTest {
 
         Session failed = awaitState(applicationId, sessionId, "FAILED");
 
-        assertEquals(String.format(SparkConnectServers.SERVER_NOT_STARTED, "java.lang.IllegalStateException"),
+        assertEquals(String.format(SparkConnectSessionOwner.SERVER_NOT_STARTED, "java.lang.IllegalStateException"),
                 failed.getStateDetails());
     }
 
@@ -272,7 +275,7 @@ class EmrServerlessSessionServerTest {
         runner.end(sessionId).complete(SparkJobRunner.Outcome.exitedWith(1));
         Session failed = awaitState(applicationId, sessionId, "FAILED");
 
-        assertEquals(String.format(SparkConnectServers.SERVER_EXITED, 1), failed.getStateDetails());
+        assertEquals(String.format(SparkConnectSessionOwner.SERVER_EXITED, 1), failed.getStateDetails());
     }
 
     @Test

@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_iam_shapes.py",
-    "botocore": "botocore 1.43.118 (installed package)"
+    "botocore": "botocore 1.44.9 (local/aws/botocore)"
   },
   "operations": {
     "AcceptDelegationRequest": "AcceptDelegationRequestRequest",
@@ -336,6 +336,28 @@
     "ContextKeyValueType": {
       "type": "string"
     },
+    "ContextProvider": {
+      "type": "structure",
+      "required": [
+        "SubjectSourceKey"
+      ],
+      "members": {
+        "KeyDefinitionList": "keyDefinitionListType",
+        "SubjectSourceKey": "contextProviderSourceKeyType",
+        "SubjectTypeValue": "subjectTypeValueType",
+        "SubjectTypeSourceKey": "contextProviderSourceKeyType"
+      }
+    },
+    "ContextProviderKeyDefinition": {
+      "type": "structure",
+      "required": [
+        "SourceKey"
+      ],
+      "members": {
+        "SourceKey": "contextProviderSourceKeyType",
+        "TargetKey": "contextProviderTargetKeyType"
+      }
+    },
     "CreateAccessKeyRequest": {
       "type": "structure",
       "members": {
@@ -389,7 +411,8 @@
       "members": {
         "UserName": "userNameType",
         "Password": "passwordType",
-        "PasswordResetRequired": "booleanType"
+        "PasswordResetRequired": "booleanType",
+        "MaxSigninSessionDuration": "maxSigninSessionDurationType"
       }
     },
     "CreateOpenIDConnectProviderRequest": {
@@ -398,7 +421,9 @@
         "Url": "OpenIDConnectProviderUrlType",
         "ClientIDList": "clientIDListType",
         "ThumbprintList": "thumbprintListType",
-        "Tags": "tagListType"
+        "Tags": "tagListType",
+        "ContextProvider": "ContextProvider",
+        "IdentityCenterInstanceArn": "identityCenterInstanceArnType"
       }
     },
     "CreatePolicyRequest": {
@@ -439,6 +464,7 @@
         "AssumeRolePolicyDocument": "policyDocumentType",
         "Description": "roleDescriptionType",
         "MaxSessionDuration": "roleMaxSessionDurationType",
+        "MaxSigninSessionDuration": "maxSigninSessionDurationType",
         "PermissionsBoundary": "arnType",
         "Tags": "tagListType"
       }
@@ -454,7 +480,9 @@
         "Name": "SAMLProviderNameType",
         "Tags": "tagListType",
         "AssertionEncryptionMode": "assertionEncryptionModeType",
-        "AddPrivateKey": "privateKeyType"
+        "AddPrivateKey": "privateKeyType",
+        "ContextProvider": "ContextProvider",
+        "IdentityCenterInstanceArn": "identityCenterInstanceArnType"
       }
     },
     "CreateServiceLinkedRoleRequest": {
@@ -1927,7 +1955,9 @@
       "members": {
         "UserName": "userNameType",
         "Password": "passwordType",
-        "PasswordResetRequired": "booleanObjectType"
+        "PasswordResetRequired": "booleanObjectType",
+        "MaxSigninSessionDuration": "maxSigninSessionDurationType",
+        "ResetMaxSigninSessionDuration": "booleanObjectType"
       }
     },
     "UpdateOpenIDConnectProviderThumbprintRequest": {
@@ -1956,7 +1986,9 @@
       "members": {
         "RoleName": "roleNameType",
         "Description": "roleDescriptionType",
-        "MaxSessionDuration": "roleMaxSessionDurationType"
+        "MaxSessionDuration": "roleMaxSessionDurationType",
+        "MaxSigninSessionDuration": "maxSigninSessionDurationType",
+        "ResetMaxSigninSessionDuration": "booleanObjectType"
       }
     },
     "UpdateSAMLProviderRequest": {
@@ -1969,7 +2001,11 @@
         "SAMLProviderArn": "arnType",
         "AssertionEncryptionMode": "assertionEncryptionModeType",
         "AddPrivateKey": "privateKeyType",
-        "RemovePrivateKey": "privateKeyIdType"
+        "RemovePrivateKey": "privateKeyIdType",
+        "ContextProvider": "ContextProvider",
+        "IdentityCenterInstanceArn": "identityCenterInstanceArnType",
+        "RemoveContextProvider": "booleanType",
+        "RemoveIdentityCenterInstance": "booleanType"
       }
     },
     "UpdateSSHPublicKeyRequest": {
@@ -2151,6 +2187,16 @@
       "min": 1,
       "max": 255
     },
+    "contextProviderSourceKeyType": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
+    "contextProviderTargetKeyType": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
     "credentialAgeDays": {
       "type": "integer",
       "min": 1,
@@ -2190,6 +2236,11 @@
       "max": 128,
       "pattern": "[\\w+=,.@-]+"
     },
+    "identityCenterInstanceArnType": {
+      "type": "string",
+      "min": 1,
+      "max": 1224
+    },
     "instanceProfileNameType": {
       "type": "string",
       "min": 1,
@@ -2203,6 +2254,12 @@
       "type": "string",
       "min": 36,
       "max": 36
+    },
+    "keyDefinitionListType": {
+      "type": "list",
+      "min": 0,
+      "max": 10,
+      "member": "ContextProviderKeyDefinition"
     },
     "localeType": {
       "type": "string",
@@ -2230,6 +2287,11 @@
       "type": "integer",
       "min": 1,
       "max": 1095
+    },
+    "maxSigninSessionDurationType": {
+      "type": "integer",
+      "min": 3600,
+      "max": 7776000
     },
     "minimumPasswordLengthType": {
       "type": "integer",
@@ -2462,6 +2524,11 @@
     },
     "stringType": {
       "type": "string"
+    },
+    "subjectTypeValueType": {
+      "type": "string",
+      "min": 0,
+      "max": 128
     },
     "tagKeyType": {
       "type": "string",

@@ -20,6 +20,7 @@ import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasItems;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
@@ -138,6 +139,71 @@ class Route53ResolverIntegrationTest {
                 .statusCode(400).body("__type", equalTo("InvalidParameterException"));
         dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"vpc-missing\"}")
                 .statusCode(400).body("__type", equalTo("AccessDeniedException"));
+    }
+
+    @Test
+    void listResolverDnssecConfigs_listsTheUpdatedConfiguration() {
+        String vpc = ec2Ok("CreateVpc", "CidrBlock", "10.82.0.0/16")
+                .extract().path("CreateVpcResponse.vpc.vpcId");
+        try {
+            dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"" + vpc
+                    + "\",\"Validation\":\"ENABLE\"}").statusCode(200);
+            String id = dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}")
+                    .statusCode(200).extract().path("ResolverDNSSECConfig.Id");
+
+            dnssec("ListResolverDnssecConfigs", "{}")
+                .statusCode(200)
+                .body("ResolverDnssecConfigs.ResourceId", hasItems(vpc))
+                .body("ResolverDnssecConfigs.findAll { it.ResourceId == '%s' }"
+                        .formatted(vpc) + "[0].Id", equalTo(id))
+                .body("ResolverDnssecConfigs.findAll { it.ResourceId == '%s' }"
+                        .formatted(vpc) + "[0].OwnerId", notNullValue())
+                .body("ResolverDnssecConfigs.findAll { it.ResourceId == '%s' }"
+                        .formatted(vpc) + "[0].ValidationStatus", equalTo("ENABLED"));
+
+            dnssecConfigsOf(vpc)
+                .body("ResolverDnssecConfigs.size()", equalTo(1))
+                .body("ResolverDnssecConfigs[0].ResourceId", equalTo(vpc));
+
+            String nextToken = dnssec("ListResolverDnssecConfigs", "{\"MaxResults\":1}")
+                    .statusCode(200)
+                    .body("ResolverDnssecConfigs.size()", lessThanOrEqualTo(1))
+                    .extract().path("NextToken");
+            if (nextToken != null) {
+                dnssec("ListResolverDnssecConfigs", "{\"NextToken\":\"" + nextToken + "\"}")
+                        .statusCode(200);
+            }
+            dnssec("ListResolverDnssecConfigs", "{\"NextToken\":\"no-such-token\"}")
+                    .statusCode(400).body("__type", equalTo("InvalidNextTokenException"));
+        } finally {
+            ec2Ok("DeleteVpc", "VpcId", vpc);
+        }
+    }
+
+    @Test
+    void listResolverDnssecConfigs_leavesOutDisabledConfigs() {
+        String vpc = ec2Ok("CreateVpc", "CidrBlock", "10.83.0.0/16")
+                .extract().path("CreateVpcResponse.vpc.vpcId");
+        try {
+            dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}")
+                    .statusCode(200).body("ResolverDNSSECConfig.ValidationStatus", equalTo("DISABLED"));
+            dnssecConfigsOf(vpc).body("ResolverDnssecConfigs.size()", equalTo(0));
+
+            dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"" + vpc
+                    + "\",\"Validation\":\"ENABLE\"}").statusCode(200);
+            dnssecConfigsOf(vpc).body("ResolverDnssecConfigs.size()", equalTo(1));
+
+            dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"" + vpc
+                    + "\",\"Validation\":\"DISABLE\"}").statusCode(200);
+            dnssecConfigsOf(vpc).body("ResolverDnssecConfigs.size()", equalTo(0));
+        } finally {
+            ec2Ok("DeleteVpc", "VpcId", vpc);
+        }
+    }
+
+    private static ValidatableResponse dnssecConfigsOf(String vpc) {
+        return dnssec("ListResolverDnssecConfigs", "{\"Filters\":[{\"Name\":\"ResourceId\","
+                + "\"Values\":[\"" + vpc + "\"]}]}").statusCode(200);
     }
 
     private static ValidatableResponse dnssec(String action, String body) {

@@ -80,9 +80,11 @@ final class IamManagedPolicyDeletes {
     }
 
     /**
-     * Detaches the policy from every target, then deletes it. Deletion is idempotent: a principal,
-     * attachment or the policy itself already being gone (NoSuchEntity) is tolerated, while a
-     * permission or service failure propagates so the stack stays DELETE_FAILED.
+     * Detaches the policy from every target, clears the versions its updates left behind and then
+     * deletes it, which is the order AWS's own steps for deleting a managed policy give. Deletion
+     * is idempotent: a principal, attachment or the policy itself already being gone
+     * (NoSuchEntity) is tolerated, while a permission or service failure propagates so the stack
+     * stays DELETE_FAILED.
      */
     static void detachAndDeletePolicy(IamService iamService, StackResource resource) {
         String policyArn = resource.getPhysicalId();
@@ -134,9 +136,16 @@ final class IamManagedPolicyDeletes {
         }
     }
 
-    /** Deletes the policy, tolerating one already gone. */
+    /**
+     * Clears the versions AWS asks a caller to clear and then deletes the policy, tolerating one
+     * already gone. Every update of a stack-owned policy publishes the new document as a new
+     * default version and leaves the version before it stored, and IAM refuses to delete a policy
+     * that still has one, so a delete that cleared nothing would leave a stack able to create and
+     * update a policy it could never take down again.
+     */
     static void deletePolicyTolerating(IamService iamService, String policyArn) {
         try {
+            iamService.clearNonDefaultPolicyVersions(policyArn);
             iamService.deletePolicy(policyArn);
         } catch (AwsException e) {
             if (!"NoSuchEntity".equals(e.getErrorCode())) {

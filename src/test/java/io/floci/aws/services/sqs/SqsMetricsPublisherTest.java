@@ -10,8 +10,11 @@ import io.floci.aws.services.cloudwatch.metrics.model.MetricDatum;
 import io.floci.aws.services.sqs.model.Message;
 import io.floci.aws.services.sqs.model.Queue;
 import io.floci.aws.testing.InMemoryStorageFactory;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Answers;
 
 import java.time.Duration;
@@ -29,6 +32,7 @@ import static org.mockito.Mockito.*;
  * sample of each depth gauge, and for each counter one sample per API call, valued at the
  * messages that call handled, plus the zero sample AWS adds to every minute.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SqsMetricsPublisherTest {
 
     private static final String REGION = "eu-west-1";

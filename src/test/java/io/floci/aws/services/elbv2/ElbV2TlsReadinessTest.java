@@ -1,7 +1,9 @@
 package io.floci.aws.services.elbv2;
 
+import io.floci.aws.testing.ParallelLocks;
 import org.awaitility.core.ConditionTimeoutException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import javax.net.ssl.SSLHandshakeException;
 import java.io.IOException;
@@ -15,6 +17,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@ResourceLock(ParallelLocks.PORTS)
 class ElbV2TlsReadinessTest {
 
     @Test

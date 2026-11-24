@@ -2004,7 +2004,8 @@ class CloudFormationIntegrationTest {
                                     ],
                                     "Projection": {"ProjectionType": "KEYS_ONLY"}
                                 }
-                            ]
+                            ],
+                            "BillingMode": "PAY_PER_REQUEST"
                         }
                     }
                 }
@@ -2868,7 +2869,8 @@ class CloudFormationIntegrationTest {
                     ],
                     "KeySchema": [
                       {"AttributeName": "pk", "KeyType": "HASH"}
-                    ]
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
                   }
                 },
                 "TableNameParam": {
@@ -3041,7 +3043,8 @@ class CloudFormationIntegrationTest {
                     ],
                     "KeySchema": [
                       {"AttributeName": "id", "KeyType": "HASH"}
-                    ]
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
                   }
                 }
               }
@@ -3230,7 +3233,8 @@ class CloudFormationIntegrationTest {
                     ],
                     "KeySchema": [
                       {"AttributeName": "id", "KeyType": "HASH"}
-                    ]
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
                   }
                 },
                 "TableB": {
@@ -3241,7 +3245,8 @@ class CloudFormationIntegrationTest {
                     ],
                     "KeySchema": [
                       {"AttributeName": "id", "KeyType": "HASH"}
-                    ]
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
                   }
                 }
               }
@@ -3354,7 +3359,8 @@ class CloudFormationIntegrationTest {
                     ],
                     "KeySchema": [
                       {"AttributeName": "pk", "KeyType": "HASH"}
-                    ]
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
                   }
                 },
                 "ArnParam": {
@@ -4579,7 +4585,8 @@ class CloudFormationIntegrationTest {
                     ],
                     "KeySchema": [
                       {"AttributeName": "pk", "KeyType": "HASH"}
-                    ]
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
                   }
                 }
               }
@@ -7748,9 +7755,9 @@ class CloudFormationIntegrationTest {
     private static final String ECS_CONTENT_TYPE = "application/x-amz-json-1.1";
     // The service's tasks must be able to start, since CloudFormation waits for them: an awsvpc
     // task gets its ENI in a subnet and security group that exist, here the default VPC's.
-    private static final String ECS_SUBNET_A = Ec2Service.defaultSubnetId("us-east-1", "a");
-    private static final String ECS_SUBNET_B = Ec2Service.defaultSubnetId("us-east-1", "b");
-    private static final String ECS_SECURITY_GROUP = Ec2Service.defaultSecurityGroupId("us-east-1");
+    private static final String ECS_SUBNET_A = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
+    private static final String ECS_SUBNET_B = Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000");
+    private static final String ECS_SECURITY_GROUP = Ec2Service.defaultSecurityGroupId("us-east-1", "000000000000");
 
     private static String outputValue(String describeXml, String key) {
         return describeXml.split("<OutputKey>" + key + "</OutputKey>")[1]
@@ -8081,7 +8088,7 @@ class CloudFormationIntegrationTest {
                     }
                   }
                 }
-                """.formatted(groupName, Ec2Service.defaultVpcId("us-east-1"));
+                """.formatted(groupName, Ec2Service.defaultVpcId("us-east-1", "000000000000"));
 
         given()
                 .formParam("Action", "CreateStack")
@@ -8299,8 +8306,8 @@ class CloudFormationIntegrationTest {
                 "RuleRef": { "Value": { "Ref": "Rule" } }
               }
             }
-            """.formatted(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b"),
-                Ec2Service.defaultVpcId("us-east-1"));
+            """.formatted(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"), Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000"),
+                Ec2Service.defaultVpcId("us-east-1", "000000000000"));
 
         String stackName = "cfn-elbv2-stack";
 
@@ -8403,8 +8410,8 @@ class CloudFormationIntegrationTest {
     @Test
     void updateStack_elbV2Listener_modifiesPort() {
         String stackName = "cfn-elbv2-update-stack";
-        String subnetA = Ec2Service.defaultSubnetId("us-east-1", "a");
-        String subnetB = Ec2Service.defaultSubnetId("us-east-1", "b");
+        String subnetA = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
+        String subnetB = Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000");
         String template = """
             {
               "Resources": {
@@ -8528,7 +8535,7 @@ class CloudFormationIntegrationTest {
                 }
               }
             }
-            """.formatted(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b"));
+            """.formatted(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"), Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000"));
 
         given()
             .contentType("application/x-www-form-urlencoded")

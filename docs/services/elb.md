@@ -149,6 +149,8 @@ Gateway Load Balancer listeners require omitted `Port` and `Protocol` fields on 
 - Target health starts in `initial` state with reason `Elb.RegistrationInProgress` and is updated by Floci's health checker when monitoring is active.
 - A newly registered Application Load Balancer target (HTTP/HTTPS target group or Lambda target) becomes healthy after its first successful check. Network and Gateway target groups retain `HealthyThresholdCount` for initial admission. The threshold applies to every group when recovering from `unhealthy`.
 - Health checks probe the target group's `HealthCheckPort` when it is a port number, and each target's own port when it is `traffic-port` (the default).
+- `HealthCheckProtocol` defaults to `HTTP` for `HTTP` and `HTTPS` target groups and for target type `alb`, and to `TCP` for every other protocol, as for Network and Gateway Load Balancers. A health check uses `HTTP`, `HTTPS` or `TCP`. `TCP` is refused for `HTTP` and `HTTPS` target groups and for target type `alb`. `GENEVE`, `TLS`, `UDP`, `TCP_UDP`, `QUIC` and `TCP_QUIC` are refused for every target group. Each refusal is a `ValidationError` naming the protocols the target group takes, such as `Health check protocol 'TCP' must be one of 'HTTP, HTTPS'`, from `CreateTargetGroup` and `ModifyTargetGroup` alike, and changes nothing.
+- A `TCP` check has no `HealthCheckPath` or `Matcher`. Naming either for one, the default `TCP` check included, is refused with `InvalidConfigurationRequest` (`Health check paths are not supported for TCP health checks`, and the same for matchers). Moving a `TCP` check to `HTTP` or `HTTPS` takes both, or `ModifyTargetGroup` answers `ValidationError` `Path and return code are required for layer 7 health checks.`. Moving a check to `TCP` drops its path and matcher.
 - Each `CreateListener` automatically creates an immutable default rule (`priority=default`, `isDefault=true`). This rule cannot be deleted; use `ModifyListener` to change its action.
 - Rule priorities are unique per listener: `CreateRule` and `SetRulePriorities` only reject a priority held by another rule on the same listener. `SetRulePriorities` is atomic: all priority assignments are validated before any change is committed.
 - `DeleteTargetGroup` is rejected with `ResourceInUse` while the target group is referenced by any listener or rule.
@@ -212,12 +214,13 @@ on the listener socket.
 
 ### Health checks
 
-For non-Lambda targets, the checker sends an HTTP or HTTPS GET to `HealthCheckPath`
-on `HealthCheckPort`, or the target's traffic port when configured as `traffic-port`.
+For non-Lambda targets, the checker probes `HealthCheckPort`, or the target's traffic
+port when configured as `traffic-port`. With `HealthCheckProtocol=TCP` it opens a
+connection and passes once the target accepts it; `HealthCheckPath` and the matcher are
+not used. Otherwise it sends an HTTP or HTTPS GET to `HealthCheckPath`, and
 `HealthCheckProtocol` selects TLS independently of the target's application protocol.
-The response-code matcher and healthy/unhealthy thresholds affect target health.
-`HealthCheckProtocol=TCP` does not perform a TCP-only probe: it sends the same GET with the
-stored path and matcher, which `DescribeTargetGroups` omits for TCP checks, as AWS does.
+The response-code matcher (HTTP and HTTPS checks) and healthy/unhealthy thresholds
+affect target health.
 Lambda targets are not actively probed. In ELBv2 mock mode, sockets
 and active monitoring are disabled. While a target group has a `healthy` target, the
 proxy routes only to its `healthy` targets, so a newly registered target in `initial`

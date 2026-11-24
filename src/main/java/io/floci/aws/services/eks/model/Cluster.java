@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.JsonNode;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -22,6 +23,14 @@ public class Cluster {
 
     @JsonProperty("arn")
     private String arn;
+
+    @JsonProperty("clientRequestToken")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String clientRequestToken;
+
+    @JsonProperty("createRequest")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private JsonNode createRequest;
 
     @JsonProperty("createdAt")
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)
@@ -116,6 +125,11 @@ public class Cluster {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private String nodePrivateIp;
 
+    /** The IPv4 /28 prefixes leased for the cluster node's pods in its subnet. Internal persisted metadata. */
+    @JsonProperty("nodePodPrefixes")
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private List<String> nodePodPrefixes;
+
     /**
      * Caller-supplied k3s arguments passed at creation via reserved floci tags.
      * Internal persisted metadata omitted from AWS API responses.
@@ -158,6 +172,17 @@ public class Cluster {
     @JsonProperty("storageConfig")
     private StorageConfig storageConfig;
 
+    @JsonProperty("upgradePolicy")
+    private UpgradePolicy upgradePolicy;
+
+    /** A cluster stored before Floci kept the policy reports EKS's default, which existing clusters were given too. */
+    public UpgradePolicy getUpgradePolicy() { return upgradePolicy == null ? UpgradePolicy.DEFAULT : upgradePolicy; }
+    public void setUpgradePolicy(UpgradePolicy upgradePolicy) { this.upgradePolicy = upgradePolicy; }
+
+    /** Whether the cluster holds a policy of its own, which one stored before Floci kept the policy does not. */
+    @JsonIgnore
+    public boolean hasStoredUpgradePolicy() { return upgradePolicy != null; }
+
     public AccessConfig getAccessConfig() { return accessConfig; }
     public void setAccessConfig(AccessConfig accessConfig) { this.accessConfig = accessConfig; }
 
@@ -192,6 +217,12 @@ public class Cluster {
 
     public String getArn() { return arn; }
     public void setArn(String arn) { this.arn = arn; }
+
+    public String getClientRequestToken() { return clientRequestToken; }
+    public void setClientRequestToken(String clientRequestToken) { this.clientRequestToken = clientRequestToken; }
+
+    public JsonNode getCreateRequest() { return createRequest; }
+    public void setCreateRequest(JsonNode createRequest) { this.createRequest = createRequest; }
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
@@ -235,6 +266,9 @@ public class Cluster {
     public String getNodePrivateIp() { return nodePrivateIp; }
     public void setNodePrivateIp(String nodePrivateIp) { this.nodePrivateIp = nodePrivateIp; }
 
+    public List<String> getNodePodPrefixes() { return nodePodPrefixes; }
+    public void setNodePodPrefixes(List<String> nodePodPrefixes) { this.nodePodPrefixes = nodePodPrefixes; }
+
     public List<String> getClusterArgs() { return clusterArgs; }
     public void setClusterArgs(List<String> clusterArgs) { this.clusterArgs = clusterArgs; }
 
@@ -275,6 +309,8 @@ public class Cluster {
         Cluster c = new Cluster();
         c.name = this.name;
         c.arn = this.arn;
+        c.clientRequestToken = this.clientRequestToken;
+        c.createRequest = this.createRequest;
         c.createdAt = this.createdAt;
         c.version = this.version;
         c.endpoint = this.endpoint;
@@ -299,12 +335,14 @@ public class Cluster {
         c.dockerNameRegion = this.dockerNameRegion;
         c.nodeInstanceType = this.nodeInstanceType;
         c.nodePrivateIp = this.nodePrivateIp;
+        c.nodePodPrefixes = this.nodePodPrefixes != null ? new ArrayList<>(this.nodePodPrefixes) : null;
         c.clusterArgs = this.clusterArgs != null ? new ArrayList<>(this.clusterArgs) : null;
         c.defaultStorageClass = this.defaultStorageClass;
         c.joinedInstanceIds = this.joinedInstanceIds != null ? new ConcurrentHashMap<>(this.joinedInstanceIds) : null;
         c.accessConfig = this.accessConfig;
         c.computeConfig = this.computeConfig;
         c.storageConfig = this.storageConfig;
+        c.upgradePolicy = this.upgradePolicy;
         return c;
     }
 }

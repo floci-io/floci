@@ -5,6 +5,7 @@ import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.elbv2.model.TargetDescription;
 import io.floci.aws.services.elbv2.model.TargetGroup;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.Promise;
@@ -13,11 +14,16 @@ import io.vertx.core.VertxOptions;
 import io.vertx.core.WorkerExecutor;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerResponse;
+import io.vertx.core.net.NetServer;
+import io.vertx.core.net.NetSocket;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.net.InetAddress;
+import java.net.ServerSocket;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -32,17 +38,50 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class ElbV2HealthCheckerTest {
 
     private final Vertx vertx = Vertx.vertx();
+
+    @Test
+    void replacingMonitoringCancelsPreviousTimerAndIgnoresItsCallback() {
+        Vertx timers = mock(Vertx.class);
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        WorkerExecutor workers = mock(WorkerExecutor.class);
+        when(timers.createSharedWorkerExecutor(any(), anyInt())).thenReturn(workers);
+        List<Handler<Long>> callbacks = new ArrayList<>();
+        when(timers.setPeriodic(anyLong(), any())).thenAnswer(call -> {
+            callbacks.add(call.getArgument(1));
+            return (long) callbacks.size();
+        });
+        ElbV2HealthChecker checker = spy(
+                new ElbV2HealthChecker(timers, config, mock(Ec2Service.class)));
+        TargetGroup group = targetGroup(8080, "200", 1, 1);
+        group.setHealthCheckIntervalSeconds(30);
+        checker.startMonitoring(group);
+        group.setHealthCheckIntervalSeconds(7);
+        checker.startMonitoring(group);
+        verify(timers).setPeriodic(eq(30_000L), any());
+        verify(timers).setPeriodic(eq(7_000L), any());
+        verify(timers).cancelTimer(1L);
+        callbacks.getFirst().handle(1L);
+        verify(checker, never()).probeAll(group.getTargetGroupArn(), group);
+        callbacks.get(1).handle(2L);
+        verify(checker).probeAll(group.getTargetGroupArn(), group);
+        checker.stopMonitoring(group.getTargetGroupArn());
+        verify(timers).cancelTimer(2L);
+    }
 
     @AfterEach
     void closeVertx() {
@@ -111,6 +150,44 @@ class ElbV2HealthCheckerTest {
         } finally {
             close(server);
         }
+    }
+
+    @Test
+    void tcpCheckPassesOnAnOpenConnectionWithoutSpeakingHttp() throws Exception {
+        NetServer server = vertx.createNetServer().connectHandler(NetSocket::close)
+                .listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        try {
+            ElbV2HealthChecker checker = healthChecker();
+            TargetGroup targetGroup = tcpTargetGroup(server.actualPort());
+            TargetDescription target = target("127.0.0.1", server.actualPort());
+
+            checker.addTargets(targetGroup.getTargetGroupArn(), List.of(target), targetGroup);
+
+            await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertEquals("healthy",
+                    checker.getHealth(targetGroup.getTargetGroupArn(), target.getId(), target.getPort()).state()));
+        } finally {
+            server.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void tcpCheckFailsWhenTheConnectionIsRefused() throws Exception {
+        int closedPort;
+        try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+            closedPort = socket.getLocalPort();
+        }
+        ElbV2HealthChecker checker = healthChecker();
+        TargetGroup targetGroup = tcpTargetGroup(closedPort);
+        TargetDescription target = target("127.0.0.1", closedPort);
+
+        checker.addTargets(targetGroup.getTargetGroupArn(), List.of(target), targetGroup);
+
+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
+            ElbV2HealthChecker.TargetHealthStatus health = checker.getHealth(
+                    targetGroup.getTargetGroupArn(), target.getId(), target.getPort());
+            assertEquals("unhealthy", health.state());
+            assertEquals("Target.FailedHealthChecks", health.reason());
+        });
     }
 
     @Test
@@ -520,6 +597,13 @@ class ElbV2HealthCheckerTest {
         targetGroup.setHealthCheckTimeoutSeconds(1);
         targetGroup.setHealthyThresholdCount(healthyThreshold);
         targetGroup.setUnhealthyThresholdCount(unhealthyThreshold);
+        return targetGroup;
+    }
+
+    private static TargetGroup tcpTargetGroup(int port) {
+        TargetGroup targetGroup = targetGroup(port, "200", 1, 1);
+        targetGroup.setProtocol("TCP");
+        targetGroup.setHealthCheckProtocol("TCP");
         return targetGroup;
     }
 

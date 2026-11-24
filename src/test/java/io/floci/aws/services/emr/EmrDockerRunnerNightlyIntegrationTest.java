@@ -2,6 +2,7 @@ package io.floci.aws.services.emr;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.github.dockerjava.api.command.TopContainerResponse;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
@@ -37,6 +38,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -132,6 +134,59 @@ class EmrDockerRunnerNightlyIntegrationTest {
                 "-files", side("mapper.py", "reducer.py"), "-mapper", "python3 mapper.py",
                 "-reducer", "python3 reducer.py", "-input", s3Uri("in/"), "-output", s3Uri("out/")));
         assertEquals(WORD_COUNTS, counts("out/"));
+    }
+
+    /**
+     * CancelSteps' options (Management Guide, "Cancel steps"): SEND_INTERRUPT "sends a SIGTERM signal to the step",
+     * which a handler may catch to clean up, and TERMINATE_PROCESS "a SIGKILL signal to the step and all its descendant
+     * processes". Each step's command traps SIGTERM to print a line and exit; only the interrupted one's log holds it.
+     */
+    @Test
+    void aSendInterruptCancelLetsTheStepHandleSigtermWhereTerminateProcessKillsIt() {
+        startCluster("[]", s3Uri("logs/"));
+        String script = "trap 'echo interrupted-cleanly; exit 0' TERM; echo started; sleep 300 & wait";
+
+        for (String option : List.of("SEND_INTERRUPT", "TERMINATE_PROCESS")) {
+            String stepId = EmrRequests.addStep(clusterId, option, "command-runner.jar", "bash", "-c", script);
+            awaitSleeping(stepId);
+            emr("CancelSteps", "{\"ClusterId\":\"" + clusterId + "\",\"StepIds\":[\"" + stepId + "\"],"
+                    + "\"StepCancellationOption\":\"" + option + "\"}").then().statusCode(200);
+
+            assertEquals("CANCELLED", awaitCancelEnded(stepId));
+            String stdout = S3TestClients.gunzipped(s3, bucket,
+                    "logs/" + clusterId + "/steps/" + stepId + "/stdout.gz");
+            assertTrue(stdout.contains("started"), stdout);
+            assertEquals("SEND_INTERRUPT".equals(option), stdout.contains("interrupted-cleanly"),
+                    option + ": " + stdout);
+        }
+    }
+
+    // Waits until the step is no longer RUNNING nor CANCEL_PENDING, its driver gone, and gives its state then.
+    private String awaitCancelEnded(String stepId) {
+        return await("step " + stepId + "'s cancel to end").atMost(Duration.ofMinutes(5))
+                .pollInterval(Duration.ofSeconds(1))
+                .until(() -> emr("DescribeStep", "{\"ClusterId\":\"" + clusterId + "\",\"StepId\":\"" + stepId + "\"}")
+                                .then().statusCode(200).extract().jsonPath().getString("Step.Status.State"),
+                        state -> !"RUNNING".equals(state) && !"CANCEL_PENDING".equals(state));
+    }
+
+    // Waits until the step's command sleeps in its container, its SIGTERM handler set before that.
+    private void awaitSleeping(String stepId) {
+        // Named as the runner names a step's driver: its service, "emr", and its id.
+        String container = ContainerStorageHelper.dockerName(config, "emr-" + stepId);
+        await("step " + stepId + "'s command to sleep").atMost(Duration.ofMinutes(5))
+                .pollInterval(Duration.ofSeconds(1))
+                .until(() -> sleeping(container));
+    }
+
+    private boolean sleeping(String container) {
+        try {
+            TopContainerResponse top = lifecycle.getDockerClient().topContainerCmd(container).exec();
+            return top.getProcesses() != null && Arrays.stream(top.getProcesses())
+                    .anyMatch(process -> String.join(" ", process).contains("sleep 300"));
+        } catch (RuntimeException notRunningYet) {
+            return false;
+        }
     }
 
     @Test

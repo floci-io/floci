@@ -3,8 +3,11 @@ package io.floci.aws.lifecycle;
 import io.floci.aws.services.floci.ui.FlociUiManager;
 import io.floci.aws.services.floci.ui.FlociUiManager.UiStatus;
 import io.floci.aws.services.floci.ui.UiPages;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
@@ -17,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class UiControllerTest {
 
     private FlociUiManager uiManager;

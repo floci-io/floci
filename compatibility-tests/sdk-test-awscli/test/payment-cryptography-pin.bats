@@ -79,6 +79,9 @@ create_pvk() {
         --generation-attributes 'VisaPin={PinVerificationKeyIndex=1}'
     assert_success
     BLOCK=$(json_get "$output" '.EncryptedPinBlock')
+    PVV=$(json_get "$output" '.PinData.VerificationValue')
+    # The PIN's own verification value with another first digit, so it can't be the key's own.
+    INVALID="$([ "${PVV:0:1}" = 0 ] && echo 1 || echo 0)${PVV:1}"
 
     # The verification value is not the one over the PIN, so the verification fails.
     run aws_cmd payment-cryptography-data verify-pin-data \
@@ -87,7 +90,7 @@ create_pvk() {
         --pin-block-format ISO_FORMAT_0 \
         --primary-account-number "5081470082639564" \
         --encrypted-pin-block "$BLOCK" \
-        --verification-attributes 'VisaPin={PinVerificationKeyIndex=1,VerificationValue=9999}'
+        --verification-attributes "VisaPin={PinVerificationKeyIndex=1,VerificationValue=$INVALID}"
     assert_failure
     # A PIN that does not verify is a verification that failed, not a malformed request.
     [[ "$output" == *"VerificationFailedException"* ]]

@@ -5,11 +5,14 @@ import com.github.dockerjava.api.command.ConnectToNetworkCmd;
 import com.github.dockerjava.api.command.CreateNetworkCmd;
 import com.github.dockerjava.api.command.CreateNetworkResponse;
 import com.github.dockerjava.api.command.DisconnectFromNetworkCmd;
+import com.github.dockerjava.api.command.InspectContainerCmd;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.InspectNetworkCmd;
 import com.github.dockerjava.api.command.ListNetworksCmd;
 import com.github.dockerjava.api.command.RemoveNetworkCmd;
 import com.github.dockerjava.api.exception.ConflictException;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Network;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
@@ -44,6 +47,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -428,6 +433,114 @@ class VpcNetworkManagerTest {
                 "a terminated instance's address must come back into circulation");
     }
 
+    // ─── Prefixes: /28 blocks a container hands its own addresses out of ────
+
+    @Test
+    void prefixesAreTheHighestFreeSlashTwentyEightsOfTheSubnet() {
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+
+        // .240/28 would hold .255, which AWS reserves; a block one of whose addresses something else holds is skipped.
+        assertEquals(List.of("10.0.1.224/28", "10.0.1.192/28"), manager.allocatePrefixes(ACCOUNT, REGION, "subnet-a",
+                2, Set.of("10.0.1.215")).stream().map(Cidr4::toString).toList());
+        // The prefixes' addresses are leased until they are released.
+        assertFalse(manager.reservePrivateIp(ACCOUNT, REGION, "subnet-a", "10.0.1.230"));
+        manager.releasePrefix(ACCOUNT, REGION, "subnet-a", Cidr4.parse("10.0.1.224/28").orElseThrow());
+        assertTrue(manager.reservePrivateIp(ACCOUNT, REGION, "subnet-a", "10.0.1.230"));
+    }
+
+    @Test
+    void aSubnetWithNoSlashTwentyEightClearOfReservedAddressesLeasesNoPrefix() {
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-small", "10.0.9.0/27");
+
+        assertTrue(manager.allocatePrefixes(ACCOUNT, REGION, "subnet-small", 1, Set.of()).isEmpty());
+    }
+
+    @Test
+    void theAddressesContainersHoldOnTheVpcNetworkAreReadFromDocker() {
+        Network.ContainerNetworkConfig endpoint = mock(Network.ContainerNetworkConfig.class);
+        when(endpoint.getIpv4Address()).thenReturn("10.0.1.231/16");
+        existingNetwork(manager.networkName(ACCOUNT, REGION, "vpc-1"), "10.0.0.0/16", ourLabels("vpc-1", "4650"),
+                Map.of("container-1", endpoint));
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+
+        assertEquals(Optional.of(Set.of("10.0.1.231")),
+                manager.networkEndpointAddresses(ACCOUNT, REGION, "subnet-a"));
+    }
+
+    @Test
+    void aNetworkNotCreatedYetHoldsNoAddressAndOneDockerCannotDescribeHoldsUnknownOnes() {
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        assertEquals(Optional.of(Set.of()), manager.networkEndpointAddresses(ACCOUNT, REGION, "subnet-a"));
+
+        InspectNetworkCmd failing = mock(InspectNetworkCmd.class, RETURNS_SELF);
+        when(failing.exec()).thenThrow(new RuntimeException("daemon timed out"));
+        when(docker.inspectNetworkCmd()).thenReturn(failing);
+        assertEquals(Optional.empty(), manager.networkEndpointAddresses(ACCOUNT, REGION, "subnet-a"));
+    }
+
+    @Test
+    void aRestartReservesAPrefixOnlyWhenNoneOfItsAddressesIsLeasedOrHeld() {
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        Cidr4 held = Cidr4.parse("10.0.1.224/28").orElseThrow();
+
+        assertTrue(manager.reservePrivateIp(ACCOUNT, REGION, "subnet-a", "10.0.1.20"));
+        assertFalse(manager.reservePrefix(ACCOUNT, REGION, "subnet-a", held, Set.of("10.0.1.233")),
+                "a container holds 10.0.1.233");
+        assertTrue(manager.reservePrefix(ACCOUNT, REGION, "subnet-a", held, Set.of()));
+        assertFalse(manager.reservePrefix(ACCOUNT, REGION, "subnet-a", held, Set.of()), "its addresses are leased now");
+        assertFalse(manager.reservePrefix(ACCOUNT, REGION, "subnet-a", Cidr4.parse("10.0.1.16/28").orElseThrow(),
+                Set.of()), "10.0.1.20 is leased");
+        assertFalse(manager.reservePrefix(ACCOUNT, REGION, "subnet-a", Cidr4.parse("10.0.2.0/28").orElseThrow(),
+                Set.of()), "outside the subnet");
+        assertFalse(manager.reservePrefix(ACCOUNT, REGION, "subnet-a", Cidr4.parse("10.0.1.64/27").orElseThrow(),
+                Set.of()), "not a /28");
+    }
+
+    @Test
+    void aContainerAttachedWithoutAnAddressTakesTheLowestOneNothingLeasesOrHolds() {
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-low", "10.0.0.0/24");
+        assertTrue(manager.reservePrivateIp(ACCOUNT, REGION, "subnet-low", "10.0.0.2"));
+        assertTrue(manager.reservePrivateIp(ACCOUNT, REGION, "subnet-low", "10.0.0.3"));
+        Network.ContainerNetworkConfig endpoint = mock(Network.ContainerNetworkConfig.class);
+        when(endpoint.getIpv4Address()).thenReturn("10.0.0.4/16");
+        String networkName = manager.networkName(ACCOUNT, REGION, "vpc-1");
+        existingNetwork(networkName, "10.0.0.0/16", ourLabels("vpc-1", "4650"), Map.of("container-1", endpoint));
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(inspect.exec()).thenReturn(mock(InspectContainerResponse.class, RETURNS_DEEP_STUBS));
+        when(docker.inspectContainerCmd("node-1")).thenReturn(inspect);
+        ConnectToNetworkCmd connect = docker.connectToNetworkCmd();
+
+        assertTrue(manager.attachContainer(ACCOUNT, REGION, "vpc-1", "node-1"));
+
+        ArgumentCaptor<ContainerNetwork> placed = ArgumentCaptor.forClass(ContainerNetwork.class);
+        verify(connect).withContainerNetwork(placed.capture());
+        assertEquals("10.0.0.5", placed.getValue().getIpamConfig().getIpv4Address());
+    }
+
+    @Test
+    void aContainerDockerRefusesAtThePickedAddressIsAttachedWhereDockerPutsIt() {
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-low", "10.0.0.0/24");
+        existingNetwork(manager.networkName(ACCOUNT, REGION, "vpc-1"), "10.0.0.0/16", ourLabels("vpc-1", "4650"),
+                Map.of());
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(inspect.exec()).thenReturn(mock(InspectContainerResponse.class, RETURNS_DEEP_STUBS));
+        when(docker.inspectContainerCmd("node-1")).thenReturn(inspect);
+        ConnectToNetworkCmd connect = docker.connectToNetworkCmd();
+        doThrow(new ConflictException("Address already in use")).doNothing().when(connect).exec();
+
+        assertTrue(manager.attachContainer(ACCOUNT, REGION, "vpc-1", "node-1"));
+
+        verify(connect, times(2)).exec();
+        verify(connect, times(1)).withContainerNetwork(any());
+    }
+
     // ─── Restart: addresses persisted instances still hold ───────────────────
 
     @Test
@@ -648,6 +761,27 @@ class VpcNetworkManagerTest {
         verify(connect).withContainerId("floci-container");
         verify(connect).withContainerId("instance-1");
         verify(connect, times(2)).withNetworkId(networkName);
+    }
+
+    @Test
+    void theCurrentFlociContainerTakesTheLowestAddressNoOtherContainerOnTheNetworkHolds() {
+        CurrentContainerNetworkResolver currentContainerNetworkResolver = mock(CurrentContainerNetworkResolver.class);
+        when(currentContainerNetworkResolver.resolveContainerId()).thenReturn(Optional.of("floci-container"));
+        VpcNetworkManager dockerHostedManager = new VpcNetworkManager(config, docker, currentContainerNetworkResolver);
+        Network.ContainerNetworkConfig endpoint = mock(Network.ContainerNetworkConfig.class);
+        when(endpoint.getIpv4Address()).thenReturn("10.0.0.2/16");
+        existingNetwork(dockerHostedManager.networkName(ACCOUNT, REGION, "vpc-1"), "10.0.0.0/16",
+                ourLabels("vpc-1", "4650"), Map.of("instance-0", endpoint));
+        dockerHostedManager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        dockerHostedManager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = dockerHostedManager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
+
+        assertTrue(dockerHostedManager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
+
+        ArgumentCaptor<ContainerNetwork> placed = ArgumentCaptor.forClass(ContainerNetwork.class);
+        verify(docker.connectToNetworkCmd(), times(2)).withContainerNetwork(placed.capture());
+        assertEquals(List.of("10.0.0.3", address), placed.getAllValues().stream()
+                .map(network -> network.getIpamConfig().getIpv4Address()).toList());
     }
 
     @Test

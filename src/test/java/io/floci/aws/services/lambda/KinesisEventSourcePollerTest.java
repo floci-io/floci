@@ -17,9 +17,12 @@ import io.floci.aws.services.pipes.PipesFilterMatcher;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.services.sqs.SqsService;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Vertx;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -70,6 +73,7 @@ import static org.mockito.Mockito.when;
  * Tests that drive several polls in a row wait for each one with {@link #pollOnce}, and move the injected
  * clock past the retry backoff themselves.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class KinesisEventSourcePollerTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

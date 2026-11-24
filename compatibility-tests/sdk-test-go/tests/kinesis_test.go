@@ -20,7 +20,10 @@ func TestKinesis(t *testing.T) {
 	streamName := "go-test-stream"
 
 	t.Cleanup(func() {
-		svc.DeleteStream(ctx, &kinesis.DeleteStreamInput{StreamName: aws.String(streamName)})
+		svc.DeleteStream(ctx, &kinesis.DeleteStreamInput{
+			StreamName:              aws.String(streamName),
+			EnforceConsumerDeletion: aws.Bool(true),
+		})
 	})
 
 	t.Run("CreateStream", func(t *testing.T) {
@@ -154,7 +157,10 @@ func TestKinesis(t *testing.T) {
 	})
 
 	t.Run("DeleteStream", func(t *testing.T) {
-		_, err := svc.DeleteStream(ctx, &kinesis.DeleteStreamInput{StreamName: aws.String(streamName)})
+		_, err := svc.DeleteStream(ctx, &kinesis.DeleteStreamInput{
+			StreamName:              aws.String(streamName),
+			EnforceConsumerDeletion: aws.Bool(true),
+		})
 		require.NoError(t, err)
 	})
 }

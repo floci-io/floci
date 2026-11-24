@@ -23,8 +23,13 @@ import java.util.Optional;
  * <p>Implemented by the service that owns such resources or whose requests name them (EventBridge, for its
  * connections and API destinations; Application Auto Scaling, for its scalable targets and their tags; Redshift
  * Data, for the Redshift Serverless workgroups it runs statements on and the targets of its sessions; Payment
- * Cryptography, for the key an alias names and the tags of a key; EMR, for the clusters of its instance groups and a
- * tag call's resource and the tags of a cluster or a session; IAM Identity Center, for the accounts its permission
+ * Cryptography, for the key an alias names and the tags of a key; KMS, for the key an id, an alias or an
+ * ARN names, the key an alias points at, a grant is on or a ciphertext was encrypted under, and the tags of a key;
+ * EMR, for the clusters of its instance groups and a
+ * tag call's resource and the tags of a cluster or a session; IAM, for the user, group, role, instance profile or
+ * server certificate a name names, path included, the user an access key, an SSH public key or a service-specific
+ * credential belongs to, the role a service-linked role deletion task deleted and the user who signs a request; IAM
+ * Identity Center, for the accounts its permission
  * sets are provisioned to and the tags of an instance,
  * a permission set, an application or a trusted token issuer; Resource Explorer, for its default view and the tags
  * of an index or a view; OAM and RAM, for the sinks, invitations and shares of other accounts they act on, OAM for
@@ -61,7 +66,11 @@ import java.util.Optional;
  * group, a listener, a rule or a Classic Load Balancer; SQS, for the tags of a queue; SNS, for the tags of a topic;
  * Kinesis Data Streams, for the tags of a stream or a consumer; EventBridge Pipes, for the tags of a pipe; Aurora DSQL,
  * for the tags of a cluster; EKS, for the tags of a cluster, a node group, a Fargate profile, an add-on, a Pod Identity
- * association or an access entry; Resource Groups, for the tags of a group); looked up lazily by
+ * association or an access entry; Resource Groups, for the tags of a group; CloudWatch Logs, for a delivery, the
+ * delivery destinations of a delivery source and the tags of a log group, a destination, a delivery source, a
+ * delivery destination or a delivery; Pricing Calculator, for the tags of a workload estimate; Amazon Managed Service
+ * for Prometheus, for the tags of a workspace or a rule groups namespace; AWS Config, for the config rule,
+ * configuration recorder or conformance pack a name names, whose id it minted); looked up lazily by
  * {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for
  * the namespace a request or an ARN is of, so IAM never depends on that service directly.</p>
  *
@@ -136,6 +145,41 @@ public interface StoredResourceArns {
     }
 
     /**
+     * A statement a request carries, as its service's parser reads it: its {@code verb} ({@code SELECT}) and the names
+     * of what it acts on, by the word the table gives each ({@code table}, {@code index}).
+     */
+    record Statement(String verb, Map<String, String> names) {
+    }
+
+    /**
+     * The verb of {@code statement} and the names of what it acts on, as the service's own parser reads the
+     * statement it runs (a DynamoDB PartiQL statement's table and index), which the table checks as the action of
+     * that verb; empty when it reads no such statement, which its handler then refuses.
+     */
+    default Optional<Statement> statement(String statement) {
+        return Optional.empty();
+    }
+
+    /**
+     * The ARN of the user whose access key {@code accessKeyId} is, as the service that issued the key stores the user,
+     * path included, or its account's root user's for a key of the root: the user an operation acting on the user who
+     * signs it acts on (IAM's {@code GetUser} with no {@code UserName}). Empty for a key of no user, as a role
+     * session's, which such an operation refuses, and for one the service did not issue.
+     */
+    default Optional<String> signedBy(String accessKeyId) {
+        return Optional.empty();
+    }
+
+    /**
+     * Whether the service acts on the resource {@code arn} names, one {@link #find} gave, for a request another service
+     * forwards as the caller: false for a KMS key disabled or pending deletion, which KMS refuses such a request with,
+     * as for a resource it does not hold. True for any other.
+     */
+    default boolean usable(String arn) {
+        return true;
+    }
+
+    /**
      * Whether the resource {@code arn} names, one {@link #find} gave, lets every principal of its account have a
      * service act on it through that service, as the key policy AWS writes for an AWS managed KMS key does: a request
      * another service forwards as the caller then needs no permission of the caller's on it. False for any other.
@@ -182,5 +226,14 @@ public interface StoredResourceArns {
      */
     default Optional<String> findByMembers(String type, List<String> names, String region) {
         return find(type, names, region);
+    }
+
+    /**
+     * As {@link #findByMembers(String, List, String)}, with the paths of the members the values come from, as the
+     * table writes them ({@code AlternateIdentifier.ExternalId.Id}), for a service whose request may name the resource
+     * in more than one way, each the same number of values.
+     */
+    default Optional<String> findByMembers(String type, List<String> members, List<String> names, String region) {
+        return findByMembers(type, names, region);
     }
 }

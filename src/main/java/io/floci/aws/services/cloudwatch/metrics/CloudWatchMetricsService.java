@@ -16,6 +16,7 @@ import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
@@ -58,7 +59,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @ApplicationScoped
-public class CloudWatchMetricsService {
+public class CloudWatchMetricsService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(CloudWatchMetricsService.class);
 
@@ -84,6 +85,7 @@ public class CloudWatchMetricsService {
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
     private final StorageBackend<String, MetricDatum> metricStore;
+    private final MetricKeyIndex metricKeys = new MetricKeyIndex();
     private final StorageBackend<String, Alarm> alarmStore;
     private final StorageBackend<String, AlarmHistoryItem> historyStore;
     private final RegionResolver regionResolver;
@@ -131,6 +133,45 @@ public class CloudWatchMetricsService {
         this.historyStore = historyStore;
         this.regionResolver = regionResolver;
         this.alarmSnsNotifier = alarmSnsNotifier;
+        // A store handed in directly has nothing left to load.
+        buildMetricKeyIndex();
+    }
+
+    /**
+     * Adds the store's keys to the metric key index and starts reading through it.
+     * {@code EmulatorLifecycle} calls it once storage has loaded; reads scan the store until then.
+     */
+    public void buildMetricKeyIndex() {
+        if (metricStore instanceof AccountAwareStorageBackend<MetricDatum> aware) {
+            aware.forEachKeyInAllAccounts(metricKeys::add);
+        } else {
+            String account = metricKeyAccount(null);
+            metricStore.keys().forEach(key -> metricKeys.add(account, key));
+        }
+        metricKeys.markBuilt();
+    }
+
+    /** Empties the metric key index before storage is wiped, so a datum written after the wipe keeps its key. */
+    @Override
+    public void beforeReset() {
+        metricKeys.clear();
+    }
+
+    @Override
+    public void clear() {
+    }
+
+    @Override
+    public void afterReset() {
+        buildMetricKeyIndex();
+    }
+
+    /** The account whose index partition holds {@code accountId}'s keys; the request's when null. */
+    private String metricKeyAccount(String accountId) {
+        if (metricStore instanceof AccountAwareStorageBackend<?> aware) {
+            return accountId != null ? accountId : aware.accountId();
+        }
+        return "";
     }
 
     public void putMetricData(String namespace, List<MetricDatum> datums, String region) {
@@ -191,7 +232,7 @@ public class CloudWatchMetricsService {
     private void storeDatum(String accountId, String namespace, MetricDatum datum, String region, String id) {
         String key = region + "::" + namespace + "::" + datum.getMetricName()
                 + "::" + buildDimKey(datum.getDimensions()) + "::"
-                + String.format("%013d", datum.getTimestamp()) + "::" + id;
+                + MetricKeyIndex.timestampSegment(datum.getTimestamp()) + "::" + id;
         if (accountId != null && metricStore instanceof AccountAwareStorageBackend<?> rawAware) {
             @SuppressWarnings("unchecked")
             AccountAwareStorageBackend<MetricDatum> aware = (AccountAwareStorageBackend<MetricDatum>) rawAware;
@@ -199,6 +240,7 @@ public class CloudWatchMetricsService {
         } else {
             metricStore.put(key, datum);
         }
+        metricKeys.add(metricKeyAccount(accountId), key);
     }
 
     /**
@@ -207,7 +249,35 @@ public class CloudWatchMetricsService {
      */
     public void deleteMetricDataBefore(String namespace, Instant cutoff) {
         long cutoffSeconds = cutoff.getEpochSecond();
+        // Index first: a read skips a key whose datum is gone, but cannot find a datum without a key.
+        metricKeys.removeBefore(namespace, cutoffSeconds);
         deleteInEveryAccount(metricStore, d -> namespace.equals(d.getNamespace()) && d.getTimestamp() < cutoffSeconds);
+    }
+
+    /**
+     * Drops the oldest {@code namespace} datapoints of every account holding more than {@code ceiling} of
+     * them, down to nine tenths of it so that the next calls find nothing to sort. A service that writes
+     * its own metrics each minute calls it: that history grows without a request, and would outgrow the
+     * heap well inside the 15 days it is kept for. Counting reads the key index, so nothing is dropped
+     * before storage has loaded.
+     */
+    public void deleteOldestMetricData(String namespace, int ceiling) {
+        if (!metricKeys.isBuilt()) {
+            return;
+        }
+        // Index first, as in deleteMetricDataBefore.
+        Map<String, Set<String>> oldestByAccount = metricKeys.removeOldest(namespace, ceiling, ceiling - ceiling / 10);
+        if (oldestByAccount.isEmpty()) {
+            return;
+        }
+        if (metricStore instanceof AccountAwareStorageBackend<MetricDatum> aware) {
+            aware.deleteAllAtomicallyForAccounts(oldestByAccount);
+        } else {
+            oldestByAccount.values().forEach(metricStore::deleteAllAtomically);
+        }
+        oldestByAccount.forEach((account, oldest) -> LOG.debugv(
+                "Dropped the {0} oldest {1} datapoint(s) of account {2} to stay within the ceiling of {3}",
+                oldest.size(), namespace, account, ceiling));
     }
 
     private static <V> void deleteInEveryAccount(StorageBackend<String, V> store, Predicate<V> expired) {
@@ -314,22 +384,13 @@ public class CloudWatchMetricsService {
         String prefix = region + "::" + namespace + "::" + metricName + "::" + dimKey + "::";
 
         long startEpoch = startTime != null ? startTime.getEpochSecond() : 0;
-        long endEpoch = endTime != null ? endTime.getEpochSecond() : Long.MAX_VALUE;
+        // An end time with a fractional second includes datapoints stamped in that second.
+        long endExclusive = endTime == null ? Long.MAX_VALUE
+                : endTime.getEpochSecond() + (endTime.getNano() > 0 ? 1 : 0);
 
-        List<MetricDatum> matching = metricStore.scan(k -> {
-            if (!k.startsWith(prefix)) return false;
-            // Extract timestamp from key segment
-            String[] parts = k.split("::");
-            if (parts.length < 6) return false;
-            try {
-                long ts = Long.parseLong(parts[parts.length - 2]);
-                boolean beforeEnd = endTime == null || ts < endEpoch
-                        || (ts == endEpoch && endTime.getNano() > 0);
-                return ts >= startEpoch && beforeEnd;
-            } catch (NumberFormatException e) {
-                return false;
-            }
-        });
+        List<MetricDatum> matching = metricKeys.isBuilt()
+                ? indexedDatapoints(prefix, startEpoch, endExclusive)
+                : scannedDatapoints(prefix, startEpoch, endExclusive);
 
         if (unit != null && !unit.isBlank() && !"None".equals(unit)) {
             matching = matching.stream()
@@ -363,6 +424,33 @@ public class CloudWatchMetricsService {
         }
         result.sort(Comparator.comparing(Datapoint::timestamp));
         return result;
+    }
+
+    private List<MetricDatum> indexedDatapoints(String prefix, long startEpoch, long endExclusive) {
+        List<MetricDatum> matching = new ArrayList<>();
+        for (String key : metricKeys.keysBetween(metricKeyAccount(null), prefix, startEpoch, endExclusive)) {
+            // A key deleted since the index listed it is skipped.
+            metricStore.get(key).ifPresent(matching::add);
+        }
+        return matching;
+    }
+
+    private List<MetricDatum> scannedDatapoints(String prefix, long startEpoch, long endExclusive) {
+        return metricStore.scan(k -> {
+            if (!k.startsWith(prefix)) {
+                return false;
+            }
+            String[] parts = k.split("::");
+            if (parts.length < 6) {
+                return false;
+            }
+            try {
+                long ts = Long.parseLong(parts[parts.length - 2]);
+                return ts >= startEpoch && ts < endExclusive;
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        });
     }
 
     public List<MetricDataResult> getMetricData(
@@ -435,6 +523,12 @@ public class CloudWatchMetricsService {
         if (evaluationInterval != null) {
             rejectEvaluationInterval(alarm.getAlarmName(), evaluationInterval,
                     alarm.getMetricName() != null || !alarm.getMetrics().isEmpty());
+        }
+        if (alarm.getStatistic() != null && !alarm.getStatistic().isBlank()
+                && alarm.getExtendedStatistic() != null && !alarm.getExtendedStatistic().isBlank()) {
+            throw new AwsException("ValidationError",
+                    "PutMetricAlarm request can not be made with both Statistic and ExtendedStatistic parameters. "
+                            + "Only one of them should be present", 400);
         }
         boolean created = alarmStore.get(region + "::" + alarm.getAlarmName()).isEmpty();
         putAlarm(alarm, region);

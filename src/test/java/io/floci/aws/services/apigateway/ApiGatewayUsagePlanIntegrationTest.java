@@ -35,6 +35,7 @@ class ApiGatewayUsagePlanIntegrationTest {
     @Test @Order(2)
     void getUsagePlans_returnsTagsWithoutReservedKeys() {
         given()
+                .queryParam("limit", 500)
                 .when().get("/usageplans")
                 .then()
                 .statusCode(200)

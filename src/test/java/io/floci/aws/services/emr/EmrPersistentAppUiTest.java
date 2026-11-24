@@ -10,7 +10,9 @@ import io.floci.aws.services.emr.model.EmrPersistentAppUi;
 import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.URI;
 import java.time.Duration;
@@ -30,6 +32,7 @@ import static org.mockito.Mockito.mock;
  * primary node's interface; once it has ended, for 30 days, its kept history's, served by a container of its own
  * that starts on the link and stops once no link to it is valid.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class EmrPersistentAppUiTest {
 
     private static final int SPARK_HISTORY = EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT;

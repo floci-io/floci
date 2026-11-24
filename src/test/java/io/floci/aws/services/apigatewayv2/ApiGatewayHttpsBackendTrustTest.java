@@ -15,10 +15,13 @@ import io.floci.aws.services.apigatewayv2.websocket.WebSocketIntegrationInvoker.
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.testing.ExtraCaConfigs;
 import io.floci.aws.testing.LocalHttpsServer;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -38,6 +41,7 @@ import static org.mockito.Mockito.mock;
  * HTTP and HTTP_PROXY integrations reach an https:// backend through Floci's outbound trust, so a certificate from
  * a CA in floci.tls.extra-ca-path is accepted, with TLS off.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class ApiGatewayHttpsBackendTrustTest {
 
     @TempDir

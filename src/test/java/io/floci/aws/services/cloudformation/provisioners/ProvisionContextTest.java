@@ -300,6 +300,23 @@ class ProvisionContextTest {
     }
 
     @Test
+    void resolveOptionalWrittenKeepsALiteralBlankButNotOneAnIntrinsicResolvesTo() {
+        ProvisionContext ctx = context(null);
+        JsonNode blankParameter = props("{\"Ref\": \"Empty\"}");
+        when(engine.resolve(blankParameter)).thenReturn("");
+
+        assertEquals("Lambda", ctx.resolveOptionalWritten(props("{\"P\": \"Lambda\"}"), "P"), "a value");
+        assertEquals("", ctx.resolveOptionalWritten(props("{\"P\": \"\"}"), "P"), "a blank written into the template");
+        assertNull(ctx.resolveOptionalWritten(props("{}"), "P"), "absent");
+        assertNull(ctx.resolveOptionalWritten(props("{\"P\": null}"), "P"), "explicitly null");
+        assertNull(ctx.resolveOptionalWritten(null, "P"), "no properties at all");
+        assertNull(ctx.resolveOptionalWritten(props("{\"P\": {\"Ref\": \"AWS::NoValue\"}}"), "P"),
+                "an intrinsic that resolves to blank, as AWS::NoValue does");
+        assertNull(ctx.resolveOptionalWritten(props("{\"P\": {\"Ref\": \"Empty\"}}"), "P"),
+                "a Ref to a blank parameter, which cannot be told apart from AWS::NoValue");
+    }
+
+    @Test
     void resolveOptionalBigIntegerReadsAnyWidthAndTakesTheAbsentRuleOfResolveOptionalInt() {
         ProvisionContext ctx = context(null);
         JsonNode size = props("{\"Ref\": \"Size\"}");

@@ -9,6 +9,7 @@ import io.floci.aws.services.docdb.DocDbQueryHandler;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.neptune.NeptuneQueryHandler;
 import io.floci.aws.services.rds.export.RdsExportTaskService;
+import io.floci.aws.services.rds.integration.RdsIntegrationService;
 import io.floci.aws.services.rds.model.DatabaseEngine;
 import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.services.rds.model.DbClusterParameterGroup;
@@ -60,6 +61,7 @@ class RdsQueryHandlerTest {
 
     private RdsService service;
     private RdsExportTaskService exportTaskService;
+    private RdsIntegrationService integrationService;
     private DocDbQueryHandler docDbHandler;
     private NeptuneQueryHandler neptuneHandler;
     private RdsQueryHandler handler;
@@ -68,6 +70,9 @@ class RdsQueryHandlerTest {
     @BeforeEach
     void setUp() {
         service = mock(RdsService.class);
+        when(service.getDbCluster(any(), any())).thenAnswer(inv -> makeCluster(inv.getArgument(0)));
+        when(service.setDbClusterRequestSettings(any(), any(), any(), any(), any()))
+                .thenAnswer(inv -> makeCluster(inv.getArgument(0)));
         when(service.instanceCertificate(any())).thenReturn(
                 new RdsService.InstanceCertificate("rds-ca-rsa2048-g1", Instant.parse("2061-05-25T23:34:57Z")));
         EmulatorConfig config = mock(EmulatorConfig.class);
@@ -79,8 +84,9 @@ class RdsQueryHandlerTest {
         docDbHandler = mock(DocDbQueryHandler.class);
         neptuneHandler = mock(NeptuneQueryHandler.class);
         exportTaskService = mock(RdsExportTaskService.class);
-        handler = new RdsQueryHandler(service, exportTaskService, config, regionResolver, docDbHandler,
-                neptuneHandler);
+        integrationService = mock(RdsIntegrationService.class);
+        handler = new RdsQueryHandler(service, exportTaskService, integrationService, config,
+                regionResolver, docDbHandler, neptuneHandler);
     }
 
     @ParameterizedTest
@@ -912,7 +918,7 @@ class RdsQueryHandlerTest {
                 any(DbInstanceSettings.class), isNull(), any(DbInstanceScalingChanges.class), isNull(), isNull());
         verify(service).rebootDbInstance("mydb", "us-west-2");
         verify(service).listDbClusters(null, "us-west-2");
-        verify(service).getDbCluster("mycluster", "us-west-2");
+        verify(service, times(2)).getDbCluster("mycluster", "us-west-2");
         verify(service).deleteDbCluster("mycluster", "us-west-2", true);
         verify(service).modifyDbCluster("mycluster", null, null,
                 null, null, null, null, null, null, false, false, "us-west-2");
@@ -924,6 +930,7 @@ class RdsQueryHandlerTest {
         cluster.setMasterUserSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:rds!cluster-ABC");
         cluster.setMasterUserSecretStatus("active");
         cluster.setMasterUserSecretKmsKeyId("kms-key-1");
+        when(service.setDbClusterRequestSettings(any(), any(), any(), any(), any())).thenReturn(cluster);
         when(service.createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("omni_admin"), isNull(), eq("omni"), eq(false), isNull(),
                 isNull(), isNull(), eq(false), any(),
@@ -1032,6 +1039,7 @@ class RdsQueryHandlerTest {
     @CsvSource({"true,true", "true,false", "false,true", "false,false"})
     void modifyDbClusterForwardsRotationAndApplyImmediately(boolean rotatePassword, boolean applyImmediately) {
         DbCluster cluster = makeCluster("mycluster");
+        when(service.setDbClusterRequestSettings(any(), any(), any(), any(), any())).thenReturn(cluster);
         when(service.modifyDbCluster("mycluster", null, null, null, null, null,
                 null, null, null, rotatePassword, applyImmediately, "us-west-2")).thenReturn(cluster);
         MultivaluedMap<String, String> p = params();
@@ -3582,8 +3590,8 @@ class RdsQueryHandlerTest {
         group.setDbSubnetGroupArn("arn:aws:rds:us-east-1:123456789012:subgrp:default");
         group.setVpcId("vpc-default");
         group.setSubnetGroupStatus("Complete");
-        group.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")));
-        group.setSubnetAvailabilityZones(Map.of(Ec2Service.defaultSubnetId("us-east-1", "a"), "us-east-1a", Ec2Service.defaultSubnetId("us-east-1", "b"), "us-east-1b"));
+        group.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"), Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000")));
+        group.setSubnetAvailabilityZones(Map.of(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"), "us-east-1a", Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000"), "us-east-1b"));
         return group;
     }
 
@@ -4031,5 +4039,32 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<Type>Receiver</Type>"), body);
         assertTrue(body.contains("<Code>InternalFailure</Code>"), body);
         assertTrue(body.contains("<Message>Unexpected error: Docker daemon connection failed</Message>"), body);
+    }
+
+    @Test
+    void createIntegration_rejectsIncompleteEncryptionContextEntry() {
+        MultivaluedMap<String, String> missingValue = params();
+        missingValue.add("IntegrationName", "orders-zero-etl");
+        missingValue.add("SourceArn", "arn:aws:rds:us-east-1:000000000000:cluster:orders-src");
+        missingValue.add("TargetArn", "arn:aws:redshift-serverless:us-east-1:000000000000:namespace/ns-1");
+        missingValue.add("KMSKeyId", "alias/orders");
+        missingValue.add("AdditionalEncryptionContext.entry.1.key", "purpose");
+
+        Response missingValueResponse = handler.handle("CreateIntegration", missingValue);
+        assertEquals(400, missingValueResponse.getStatus());
+        assertTrue(((String) missingValueResponse.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+
+        MultivaluedMap<String, String> missingKey = params();
+        missingKey.add("IntegrationName", "orders-zero-etl");
+        missingKey.add("SourceArn", "arn:aws:rds:us-east-1:000000000000:cluster:orders-src");
+        missingKey.add("TargetArn", "arn:aws:redshift-serverless:us-east-1:000000000000:namespace/ns-1");
+        missingKey.add("KMSKeyId", "alias/orders");
+        missingKey.add("AdditionalEncryptionContext.entry.1.value", "analytics");
+
+        Response missingKeyResponse = handler.handle("CreateIntegration", missingKey);
+        assertEquals(400, missingKeyResponse.getStatus());
+        assertTrue(((String) missingKeyResponse.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+
+        verifyNoInteractions(integrationService);
     }
 }

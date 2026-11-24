@@ -91,13 +91,18 @@ public final class EksPodNetworkRouting {
                 flociPort, hostsFile, podIdentityProbeCommand("http://" + POD_IDENTITY_ENDPOINT.ip()));
     }
 
-    /** {@code podCidr}, or {@link #DEFAULT_POD_CIDR} if null or blank, which must be an IPv4 CIDR. */
+    /**
+     * {@code podCidr}, or {@link #DEFAULT_POD_CIDR} if null or blank: an IPv4 CIDR, or several separated by commas, as
+     * the VPC prefixes a node's pods take addresses from are, which {@code iptables -s} takes as one rule each.
+     */
     private static String podCidrOf(String podCidr) {
-        String cidr = (podCidr != null && !podCidr.isBlank()) ? podCidr.trim() : DEFAULT_POD_CIDR;
-        if (!IPV4_CIDR.matcher(cidr).matches()) {
-            throw new IllegalArgumentException("podCidr must be an IPv4 CIDR: " + podCidr);
+        String cidrs = (podCidr != null && !podCidr.isBlank()) ? podCidr.trim() : DEFAULT_POD_CIDR;
+        for (String cidr : cidrs.split(",", -1)) {
+            if (!IPV4_CIDR.matcher(cidr).matches()) {
+                throw new IllegalArgumentException("podCidr must be IPv4 CIDRs separated by commas: " + podCidr);
+            }
         }
-        return cidr;
+        return cidrs;
     }
 
     /**

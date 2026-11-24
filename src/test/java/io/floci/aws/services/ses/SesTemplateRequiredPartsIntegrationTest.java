@@ -20,10 +20,6 @@ import static org.hamcrest.Matchers.nullValue;
 @QuarkusTest
 class SesTemplateRequiredPartsIntegrationTest {
 
-    private static final String V1_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
-    private static final String V2_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String NO_SUBJECT = "The subject must be specified.";
     private static final String NO_PART = "Template must specify at least one of the parts.";
 
@@ -39,9 +35,7 @@ class SesTemplateRequiredPartsIntegrationTest {
     @ParameterizedTest
     @MethodSource("refusedV2Contents")
     void v2Create_refusesTheContent(String content, String message) {
-        given()
-            .contentType("application/json")
-            .header("Authorization", V2_AUTH)
+        SesV2Requests.v2()
             .body("{\"TemplateName\": \"required-parts-refused\", \"TemplateContent\": " + content + "}")
         .when()
             .post("/v2/email/templates")
@@ -54,9 +48,7 @@ class SesTemplateRequiredPartsIntegrationTest {
     @ParameterizedTest
     @MethodSource("refusedV2Contents")
     void v2Update_refusesTheContentOfAnUnknownTemplate(String content, String message) {
-        given()
-            .contentType("application/json")
-            .header("Authorization", V2_AUTH)
+        SesV2Requests.v2()
             .body("{\"TemplateContent\": " + content + "}")
         .when()
             .put("/v2/email/templates/required-parts-ghost")
@@ -68,9 +60,7 @@ class SesTemplateRequiredPartsIntegrationTest {
 
     @Test
     void v2Create_readsAnEmptyPartBackAsNoPart() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", V2_AUTH)
+        SesV2Requests.v2()
             .body("""
                 {"TemplateName": "required-parts-html-only",
                  "TemplateContent": {"Subject": "S", "Text": "", "Html": "<p>h</p>"}}
@@ -81,7 +71,7 @@ class SesTemplateRequiredPartsIntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .get("/v2/email/templates/required-parts-html-only")
         .then()
@@ -90,7 +80,7 @@ class SesTemplateRequiredPartsIntegrationTest {
             .body("TemplateContent.Text", nullValue());
 
         given()
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .delete("/v2/email/templates/required-parts-html-only")
         .then()
@@ -101,7 +91,7 @@ class SesTemplateRequiredPartsIntegrationTest {
     void v1Create_requiresASubject() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "CreateTemplate")
             .formParam("Template.TemplateName", "required-parts-v1")
             .formParam("Template.TextPart", "t")
@@ -117,7 +107,7 @@ class SesTemplateRequiredPartsIntegrationTest {
     void v1Create_requiresAPart() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "CreateTemplate")
             .formParam("Template.TemplateName", "required-parts-v1")
             .formParam("Template.SubjectPart", "S")
@@ -134,7 +124,7 @@ class SesTemplateRequiredPartsIntegrationTest {
     void v1Update_requiresAPartBeforeTheTemplateIsLookedUp() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "UpdateTemplate")
             .formParam("Template.TemplateName", "required-parts-ghost")
             .formParam("Template.SubjectPart", "S")

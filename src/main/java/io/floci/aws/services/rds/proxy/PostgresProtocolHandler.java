@@ -41,7 +41,7 @@ import java.util.function.BiConsumer;
  *   <li>For IAM logins, hand the session over to the role named in the token, then apply the
  *       client's startup parameters as that role
  *   <li>Send AuthOK + buffered messages to client, then bridge, guarding an IAM
- *       session against being handed back to the master role
+ *       session against being handed back to the role the proxy connected as
  * </ol>
  */
 public class PostgresProtocolHandler {
@@ -91,7 +91,12 @@ public class PostgresProtocolHandler {
     }
 
     /** The username/password the proxy opens the backend PostgreSQL connection with. */
-    record BackendLogin(String user, String password) {}
+    public record BackendLogin(String user, String password) {
+        @Override
+        public String toString() {
+            return "BackendLogin[user=" + user + "]";
+        }
+    }
 
     /**
      * Opens the backend connection. Called only once the client's startup message and credentials
@@ -223,6 +228,27 @@ public class PostgresProtocolHandler {
                                       StartupObserver startupObserver,
                                       SessionRoleHandover roleHandover,
                                       boolean requireSsl) throws IOException {
+        return authenticate(client, backendConnector, masterUsername, masterPassword, dbName,
+                iamEnabled, sigV4, binding, tlsCertificates, passwordValidator, handshakeTimeoutMillis,
+                forwardStartupParameters, databaseIamAuthentication, startupObserver, roleHandover, requireSsl,
+                null);
+    }
+
+    /**
+     * {@code handoverLogin} is the superuser an IAM session for a role other than the master is opened as and
+     * handed over from, {@code rdsadmin} in an instance initialized as RDS initializes one, since only a
+     * superuser may {@code SET SESSION AUTHORIZATION}; null when the master user is that superuser. No client
+     * may log in as it.
+     */
+    public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
+                                      String masterUsername, String masterPassword, String dbName,
+                                      boolean iamEnabled, RdsSigV4Validator sigV4,
+                                      RdsProxyBinding binding, RdsProxyTlsCertificates tlsCertificates,
+                                      PasswordValidator passwordValidator, int handshakeTimeoutMillis,
+                                      boolean forwardStartupParameters, boolean databaseIamAuthentication,
+                                      StartupObserver startupObserver,
+                                      SessionRoleHandover roleHandover,
+                                      boolean requireSsl, BackendLogin handoverLogin) throws IOException {
 
         client.setSoTimeout(handshakeTimeoutMillis);
 
@@ -262,6 +288,17 @@ public class PostgresProtocolHandler {
         //   RdsService, so a master login still reflects modifyDBInstance password changes.
         boolean isIam = iamEnabled && clientPassword.contains("X-Amz-Signature");
         boolean isMaster = masterUsername.equals(clientUsername);
+
+        // The superuser IAM sessions are handed over from is RDS's own role, which no client logs in as.
+        if (handoverLogin != null && !isMaster && handoverLogin.user().equals(clientUsername)) {
+            LOG.infov("RDS login refused for the internal superuser {0}",
+                    SigV4RequestValidator.sanitizeForLog(clientUsername));
+            sendErrorResponse(clientOut, "FATAL", "28P01",
+                    "password authentication failed for user \"" + clientUsername + "\"");
+            clientOut.flush();
+            closeQuietly(client);
+            return null;
+        }
 
         PasswordValidator.AuthResult authResult = PasswordValidator.AuthResult.PASSTHROUGH;
         if (isIam) {
@@ -350,11 +387,15 @@ public class PostgresProtocolHandler {
                 backendUser = handoverOutcome.databaseRole();
                 backendPass = handoverOutcome.backendPassword() != null
                         ? handoverOutcome.backendPassword() : masterPassword;
+            } else if (iamHandover && handoverLogin != null) {
+                backendUser = handoverLogin.user();
+                backendPass = handoverLogin.password();
             }
-            // An IAM login for any role but the master runs on a session opened as the master and
-            // handed over below, so PostgreSQL would apply the client's parameters with the
-            // master's privileges: a "-c role=<master>" would outlive the handover and RESET ROLE
-            // would regain the master. Those logins open with only "replication", which cannot be
+            // An IAM login for any role but the master runs on a session opened as a superuser
+            // (rdsadmin, or the master where it is the bootstrap superuser) and handed over below, so
+            // PostgreSQL would apply the client's parameters with that superuser's privileges: a
+            // "-c role=<superuser>" would outlive the handover and RESET ROLE would regain it.
+            // Those logins open with only "replication", which cannot be
             // chosen later, and their other parameters are applied once the session belongs to the
             // role (Phase 5c). The proxy reads that session's results and sends it SQL of its own,
             // so it fixes the encoding to UTF-8.
@@ -459,7 +500,7 @@ public class PostgresProtocolHandler {
             }
 
             // Phase 5b: An IAM token is issued for one specific database role, so the session must
-            // run as that role even though the backend connection was opened as master. Handing it
+            // run as that role even though the backend connection was opened as a superuser. Handing it
             // over gives the session the role's own privileges and object ownership, and refuses a
             // token naming a role the database does not have instead of silently granting a master
             // session.
@@ -502,7 +543,7 @@ public class PostgresProtocolHandler {
                 // does when the role logs in directly. A parameter PostgreSQL refuses fails the
                 // login with PostgreSQL's own reason, as it would at startup. One check cannot be
                 // left to PostgreSQL: it authorizes session_authorization against the user the
-                // backend connection authenticated as, the superuser master, so a change of it is
+                // backend connection authenticated as, a superuser, so a change of it is
                 // refused here before anything is applied, and the outcome is checked again below.
                 if (forwardStartupParameters) {
                     List<SessionSetting> settings;
@@ -577,7 +618,7 @@ public class PostgresProtocolHandler {
                     return null;
                 }
                 // PostgreSQL checks the replication privilege only when the WAL sender starts,
-                // which it did as the master, and never again for replication commands.
+                // which it did as the superuser, and never again for replication commands.
                 if (requestsReplication(startup.parameters()) && !hasReplicationPrivilege(backendIn, backendOut)) {
                     LOG.infov("RDS IAM replication connection refused for role {0}: replication privilege required",
                             SigV4RequestValidator.sanitizeForLog(clientUsername));
@@ -897,9 +938,22 @@ public class PostgresProtocolHandler {
     /**
      * Follow catalog membership edges, including indirect grants. pg_has_role treats a
      * superuser as privileged without a grant, which is not an IAM authentication opt-in.
+     * A grant of ADMIN OPTION alone (PostgreSQL 16 and later), such as the one a role gets on each
+     * role it creates, or rds_superuser's on rds_iam, which lets the master grant it, makes no
+     * member, so it is not followed; servers before 16 record no such grant.
      * All SQL is ASCII even when the client selected a non-UTF8 encoding, and catalog
      * objects and operators are qualified independently of the client's search_path.
      */
+    /**
+     * Whether a {@code pg_auth_members} row {@code a} makes its member a member of its role: a grant with INHERIT
+     * or SET. The options are read through {@code to_jsonb}, so the query also runs on a server before 16, whose
+     * rows have neither column and are memberships.
+     */
+    private static final String MAKES_MEMBER = "(COALESCE((pg_catalog.to_jsonb(a) "
+            + "OPERATOR(pg_catalog.->>) 'inherit_option')::pg_catalog.bool, true) "
+            + "OR COALESCE((pg_catalog.to_jsonb(a) OPERATOR(pg_catalog.->>) 'set_option')"
+            + "::pg_catalog.bool, true))";
+
     static String databaseRoleQuery(String role, boolean iam, boolean sessionRole) {
         return databaseRoleQuery(role, iam, sessionRole, true);
     }
@@ -920,8 +974,9 @@ public class PostgresProtocolHandler {
         return "WITH RECURSIVE memberships(oid) AS ("
                 + "SELECT a.roleid FROM pg_catalog.pg_auth_members a JOIN pg_catalog.pg_roles r "
                 + "ON r.oid OPERATOR(pg_catalog.=) a.member WHERE r.rolname OPERATOR(pg_catalog.=) " + name
+                + " AND " + MAKES_MEMBER
                 + " UNION SELECT a.roleid FROM pg_catalog.pg_auth_members a JOIN memberships m "
-                + "ON a.member OPERATOR(pg_catalog.=) m.oid) "
+                + "ON a.member OPERATOR(pg_catalog.=) m.oid WHERE " + MAKES_MEMBER + ") "
                 + "SELECT r.oid::pg_catalog.text, " + admission
                 + " FROM pg_catalog.pg_roles r WHERE r.rolname OPERATOR(pg_catalog.=) " + name;
     }
@@ -1226,7 +1281,7 @@ public class PostgresProtocolHandler {
     }
 
     /**
-     * The StartupMessage parameters of a backend session opened as the master for a handover:
+     * The StartupMessage parameters of a backend session opened as a superuser for a handover:
      * {@code base}, UTF-8 for the proxy's own queries, and the client's {@code replication},
      * which can only be chosen at connection start.
      */
@@ -1293,7 +1348,7 @@ public class PostgresProtocolHandler {
     /**
      * Refuses a {@code session_authorization} setting naming anyone but {@code role}. PostgreSQL
      * would authorize it against the superuser the backend connection authenticated as, not the
-     * token's role, so it would hand the session back to the master.
+     * token's role, so it would hand the session back to that superuser.
      */
     static void refuseSessionAuthorizationChange(List<SessionSetting> settings, String role)
             throws StartupParameterException {
@@ -1509,8 +1564,8 @@ public class PostgresProtocolHandler {
      * Relays the authenticated session until either side closes.
      *
      * <p>An IAM session gets its backend→client direction read message by message so the proxy
-     * sees PostgreSQL report the session's identity. The backend connection underneath is the
-     * master one, so a client that talks the session back to the master role, via {@code RESET
+     * sees PostgreSQL report the session's identity. The backend connection underneath is a
+     * superuser's, so a client that talks the session back to that role, via {@code RESET
      * SESSION AUTHORIZATION} and its variants, would otherwise regain superuser, which the
      * token never granted. Watching the server's own {@code session_authorization} report catches
      * that whatever SQL produced it; the session is then terminated, since a handover that already

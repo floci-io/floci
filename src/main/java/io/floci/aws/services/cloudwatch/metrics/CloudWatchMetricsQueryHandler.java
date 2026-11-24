@@ -827,6 +827,7 @@ public class CloudWatchMetricsQueryHandler {
         a.setMetricName(params.getFirst("MetricName"));
         a.setNamespace(params.getFirst("Namespace"));
         a.setStatistic(params.getFirst("Statistic"));
+        a.setExtendedStatistic(params.getFirst("ExtendedStatistic"));
         a.setMetrics(parseAlarmMetricQueries(params));
         a.setPeriod(a.getMetrics().isEmpty() ? parseIntParam(params, "Period", 60) : null);
         a.setUnit(params.getFirst("Unit"));
@@ -924,6 +925,7 @@ public class CloudWatchMetricsQueryHandler {
                     .elem("MetricName", a.getMetricName())
                     .elem("Namespace", a.getNamespace())
                     .elem("Statistic", a.getStatistic())
+                    .elem("ExtendedStatistic", a.getExtendedStatistic())
                     .elem("Period", a.getPeriod() == null ? null : a.getPeriod().toString())
                     .elem("Unit", a.getUnit());
         }

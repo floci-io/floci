@@ -43,6 +43,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
@@ -72,6 +73,7 @@ class ElbV2CfnProvisionerTest {
     private static final String DECLARED_TARGETS = "__FlociTargetGroupTargets";
     private static final String DECLARED_TARGETS_PRIOR = "__FlociTargetGroupTargetsPrior";
     private static final String TARGETS_SNAPSHOT = CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR;
+    private static final String HEALTH_SNAPSHOT = ElbV2CfnProvisioner.HEALTH_UPDATE_SNAPSHOT_ATTR;
 
     private final ElbV2Service elb = mock(ElbV2Service.class);
     private final ElbV2CfnProvisioner provisioner = new ElbV2CfnProvisioner(elb);
@@ -1102,6 +1104,161 @@ class ElbV2CfnProvisionerTest {
         TargetGroup tg = targetGroup("web-tg");
         tg.setPort(80);
         return tg;
+    }
+
+    private void priorHealth() {
+        group.setHealthCheckProtocol("TCP");
+        group.setHealthCheckPort("traffic-port");
+        group.setHealthCheckEnabled(true);
+        group.setHealthCheckPath("/");
+        group.setHealthCheckIntervalSeconds(30);
+        group.setHealthCheckTimeoutSeconds(5);
+        group.setHealthyThresholdCount(5);
+        group.setUnhealthyThresholdCount(2);
+        group.setMatcher("200");
+    }
+
+    private ObjectNode changedHealth(TargetDescription... targets) {
+        ObjectNode props = declaring(targets).put("HealthCheckProtocol", "HTTP")
+                .put("HealthCheckPort", "8888").put("HealthCheckEnabled", false)
+                .put("HealthCheckPath", "/ready").put("HealthCheckIntervalSeconds", 15)
+                .put("HealthCheckTimeoutSeconds", 4).put("HealthyThresholdCount", 4)
+                .put("UnhealthyThresholdCount", 5);
+        props.putObject("Matcher").put("HttpCode", "200-299");
+        return props;
+    }
+
+    private void verifyHealthRestored(int calls) {
+        verify(elb, times(calls)).restoreHealthCheck(eq(REGION), eq(TG_ARN),
+                argThat(ElbV2CfnProvisionerTest::isPriorHealth));
+    }
+
+    private static boolean isPriorHealth(TargetGroup prior) {
+        return "TCP".equals(prior.getHealthCheckProtocol()) && "traffic-port".equals(prior.getHealthCheckPort())
+                && Boolean.TRUE.equals(prior.getHealthCheckEnabled()) && "/".equals(prior.getHealthCheckPath())
+                && Integer.valueOf(30).equals(prior.getHealthCheckIntervalSeconds())
+                && Integer.valueOf(5).equals(prior.getHealthCheckTimeoutSeconds())
+                && Integer.valueOf(5).equals(prior.getHealthyThresholdCount())
+                && Integer.valueOf(2).equals(prior.getUnhealthyThresholdCount()) && "200".equals(prior.getMatcher());
+    }
+
+    @Test
+    void keptGroupUpdatesHealthAndRetainsSnapshotUntilCommit() {
+        priorHealth();
+        keptTargetGroupUpdatedTo(List.of(), changedHealth(), null);
+
+        verify(elb).modifyTargetGroup(REGION, TG_ARN, "HTTP", "8888", false,
+                "/ready", 15, 4, 4, 5, "200-299");
+        assertTrue(tgResource.getAttributes().containsKey(HEALTH_SNAPSHOT));
+        provisioner.completeUpdate(tgResource);
+        assertFalse(tgResource.getAttributes().containsKey(HEALTH_SNAPSHOT));
+        provisioner.rollbackUpdate(tgResource);
+        verifyHealthRestored(0);
+    }
+
+    @Test
+    void omittedHealthFieldsRemainUnsetInTheUpdate() {
+        priorHealth();
+        keptTargetGroupUpdatedTo(List.of(), declaring().put("HealthCheckPath", "/ready"), null);
+
+        verify(elb).modifyTargetGroup(REGION, TG_ARN, null, null, null,
+                "/ready", null, null, null, null, null);
+        assertTrue(provisioner.rollbackUpdate(tgResource));
+        verifyHealthRestored(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void createOrDuplicateWithoutPriorOwnershipDoesNotModifyHealth(boolean duplicate) {
+        priorHealth();
+        if (duplicate) {
+            when(anyCreateTargetGroup(elb)).thenThrow(new AwsException("DuplicateTargetGroupName", "exists", 400));
+            when(elb.describeTargetGroups(REGION, null, null, List.of("web-tg"))).thenReturn(List.of(group));
+        } else {
+            when(anyCreateTargetGroup(elb)).thenReturn(group);
+        }
+        provisioner.provision(tgResource, changedHealth().put("Name", "web-tg"), ctx());
+
+        verify(elb, never()).modifyTargetGroup(any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any());
+        assertFalse(tgResource.getAttributes().containsKey(HEALTH_SNAPSHOT));
+    }
+
+    @Test
+    void registrationFailureRestoresHealthImmediately() {
+        priorHealth();
+        AwsException refusal = refusingRegistration();
+        assertEquals(refusal, assertThrows(AwsException.class, () -> keptTargetGroupUpdatedTo(
+                List.of(), changedHealth(target("10.0.0.5", 70000, null)), null)));
+
+        verifyHealthRestored(1);
+        assertFalse(tgResource.getAttributes().containsKey(HEALTH_SNAPSHOT));
+        verify(elb, never()).deleteTargetGroup(any(), any());
+    }
+
+    @Test
+    void laterRollbackRestoresBothHealthAndRegistrations() {
+        priorHealth();
+        keptTargetGroupUpdatedTo(List.of(target("10.0.0.1", 80, null)),
+                changedHealth(target("10.0.0.2")), recordOf(target("10.0.0.1")));
+
+        assertTrue(provisioner.rollbackUpdate(tgResource));
+
+        assertSecondTargetSwappedBack();
+        verifyHealthRestored(1);
+        assertFalse(tgResource.getAttributes().containsKey(HEALTH_SNAPSHOT));
+    }
+
+    @Test
+    void failedHealthUndoSurvivesRestoringThePreviousResourceAndCanBeRetried() {
+        priorHealth();
+        doThrow(internalFailure()).doNothing().when(elb).restoreHealthCheck(eq(REGION), eq(TG_ARN),
+                argThat(ElbV2CfnProvisionerTest::isPriorHealth));
+        refusingRegistration();
+        assertThrows(AwsException.class, () -> keptTargetGroupUpdatedTo(
+                List.of(), changedHealth(target("10.0.0.5", 70000, null)), null));
+
+        assertTrue(tgResource.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+        restored.setPhysicalId(TG_ARN);
+        restored.setResourceType(tgResource.getResourceType());
+        provisioner.mergeFailedUpdateResourceTracking(restored, tgResource);
+        assertTrue(restored.getAttributes().containsKey(HEALTH_SNAPSHOT));
+        assertTrue(provisioner.rollbackUpdate(restored));
+        verifyHealthRestored(2);
+        assertFalse(restored.getAttributes().containsKey(HEALTH_SNAPSHOT));
+    }
+
+    @Test
+    void failedRegistrationUndoStillRestoresHealthAndRetainsRegistrationRetry() {
+        priorHealth();
+        keptTargetGroupUpdatedTo(List.of(target("10.0.0.1", 80, null)),
+                changedHealth(target("10.0.0.2")), recordOf(target("10.0.0.1")));
+        failingDeregistration(internalFailure(), 1);
+
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(tgResource));
+
+        verifyHealthRestored(1);
+        assertFalse(tgResource.getAttributes().containsKey(HEALTH_SNAPSHOT));
+        assertTrue(tgResource.getAttributes().containsKey(TARGETS_SNAPSHOT));
+        assertTrue(provisioner.rollbackUpdate(tgResource));
+        verifyHealthRestored(1);
+        assertFalse(tgResource.getAttributes().containsKey(TARGETS_SNAPSHOT));
+    }
+
+    @Test
+    void mutationBeforePersistenceFailureStillRestoresThePriorHealthSnapshot() {
+        priorHealth();
+        Mockito.doAnswer(invocation -> {
+            group.setHealthCheckProtocol("HTTP");
+            group.setHealthCheckPort("8888");
+            throw internalFailure();
+        }).when(elb).modifyTargetGroup(REGION, TG_ARN, "HTTP", "8888", false,
+                "/ready", 15, 4, 4, 5, "200-299");
+
+        assertThrows(AwsException.class, () -> keptTargetGroupUpdatedTo(List.of(), changedHealth(), null));
+
+        verifyHealthRestored(1);
+        assertFalse(tgResource.getAttributes().containsKey(HEALTH_SNAPSHOT));
     }
 
     /** Replaces what is registered on {@link #group}. */

@@ -17,11 +17,13 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.common.docker.PortAllocator;
 import io.floci.aws.services.msk.model.MskCluster;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -51,6 +53,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
+@ResourceLock(ParallelLocks.PORTS)
 class RedpandaManagerTest {
 
     private static final int KAFKA_PORT = 9092;
@@ -638,7 +641,7 @@ class RedpandaManagerTest {
         ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
         manager.startContainer(newCluster());
 
-        verify(logStreamer).attachForAccount(eq("000000000000"), eq("container-789"),
+        verify(logStreamer).attachPolledForAccount(eq("000000000000"), eq("container-789"),
                 eq("/aws/msk/cluster/test-cluster"), eq("log-stream"), eq("us-east-1"),
                 eq("msk:test-cluster"));
         verify(lifecycleManager).createAndStart(specCaptor.capture());

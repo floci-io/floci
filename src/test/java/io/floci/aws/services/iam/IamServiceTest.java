@@ -54,6 +54,7 @@ import java.util.function.Predicate;
 
 import static io.floci.aws.services.iam.InlinePolicyTestHelper.policyWithNonWhitespaceLength;
 import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
+import static io.floci.aws.testing.IamTestPolicies.TRUST_POLICY;
 import static io.floci.aws.testing.IamTestPolicies.policyDocument;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -554,7 +555,7 @@ class IamServiceTest {
     }
 
     @Test
-    void userSessionTokensCarryUserTagsButFederatedAndRootSessionsDoNot() {
+    void userAndFederatedSessionsCarryTheUsersTagsButRootSessionsDoNot() {
         IamUser user = iamService.createUser("tagged", "/");
         user.setTags(Map.of("Team", "platform"));
         String key = iamService.createAccessKey("tagged").getAccessKeyId();
@@ -566,13 +567,128 @@ class IamServiceTest {
         iamService.registerIssuedSession("ASIAROOT", "secret", "token", null, expiration,
                 null, "000000000000", "test");
         Map<String, List<String>> context = new LinkedHashMap<>();
-        iamService.resolveCallerArns("ASIAUSER").orElseThrow().putPrincipalKeys(context);
-        assertEquals(List.of("platform"), context.get("aws:PrincipalTag/Team"));
-        for (String session : List.of("ASIAFEDERATED", "ASIAROOT")) {
+        // The federated user's own half of what the guide gives it: "the session principal tags
+        // include the user tags and the passed session tags".
+        for (String session : List.of("ASIAUSER", "ASIAFEDERATED")) {
             context.clear();
             iamService.resolveCallerArns(session).orElseThrow().putPrincipalKeys(context);
-            assertFalse(context.containsKey("aws:PrincipalTag/Team"));
+            assertEquals(List.of("platform"), context.get("aws:PrincipalTag/Team"));
         }
+        context.clear();
+        iamService.resolveCallerArns("ASIAROOT").orElseThrow().putPrincipalKeys(context);
+        assertFalse(context.containsKey("aws:PrincipalTag/Team"));
+    }
+
+    /**
+     * A session's own tags are principal tags of its requests, over the tags of the identity it
+     * acts as: "when you request a session, you can specify principal tags as the session tags.
+     * The tags apply to requests that you make using the session's credentials."
+     */
+    @Test
+    void sessionTagsArePublishedOverTheTagsOfTheIdentityTheSessionActsAs() {
+        IamRole role = iamService.createRole("Tagged", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
+        role.setTags(Map.of("Team", "role-team", "Owner", "platform"));
+        iamService.registerSession("ASIASESSIONTAGS", "secret", "token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000", "tagged", "AROATAGGED:tagged");
+        iamService.recordSessionTags("ASIASESSIONTAGS", Map.of("Team", "session-team", "Project", "atlas"),
+                List.of());
+
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        iamService.resolveCallerArns("ASIASESSIONTAGS").orElseThrow().putPrincipalKeys(context);
+
+        assertEquals(List.of("session-team"), context.get("aws:PrincipalTag/Team"));
+        assertEquals(List.of("atlas"), context.get("aws:PrincipalTag/Project"));
+        assertEquals(List.of("platform"), context.get("aws:PrincipalTag/Owner"));
+    }
+
+    /**
+     * The key a session tag replaces is matched without case, as IAM matches a tag key on a user or
+     * a role: a new session tag overrides an existing one "regardless of character case", and the
+     * spelling published is the session's own.
+     */
+    @Test
+    void aSessionTagReplacesTheIdentityTagOfThatKeyWhateverItsCase() {
+        IamRole role = iamService.createRole("CaseTagged", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
+        role.setTags(Map.of("department", "finance"));
+        iamService.registerSession("ASIACASETAGS", "secret", "token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000", "cased", "AROACASED:cased");
+        iamService.recordSessionTags("ASIACASETAGS", Map.of("Department", "engineering"), List.of());
+
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        iamService.resolveCallerArns("ASIACASETAGS").orElseThrow().putPrincipalKeys(context);
+
+        assertEquals(List.of("engineering"), context.get("aws:PrincipalTag/Department"));
+        assertFalse(context.containsKey("aws:PrincipalTag/department"));
+    }
+
+    /**
+     * Two session tags whose keys differ only in case are one tag, the later winning, as a tag key
+     * on an identity is: "you cannot have separate Department and department tag keys". Kept as two
+     * they would reach a policy as one key with the other's value dropped.
+     */
+    @Test
+    void sessionTagsThatDifferOnlyInCaseAreOneTag() {
+        IamRole role = iamService.createRole("OneTag", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
+        iamService.registerSession("ASIAONETAG", "secret", "token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000", "one", "AROAONE:one");
+        Map<String, String> sent = new LinkedHashMap<>();
+        sent.put("Team", "first");
+        sent.put("team", "second");
+        iamService.recordSessionTags("ASIAONETAG", sent, List.of());
+
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        iamService.resolveCallerArns("ASIAONETAG").orElseThrow().putPrincipalKeys(context);
+
+        assertEquals(List.of("second"), context.get("aws:PrincipalTag/team"));
+        assertFalse(context.containsKey("aws:PrincipalTag/Team"));
+    }
+
+    /**
+     * Only the tags whose keys a session set as transitive pass down to a session assumed from it:
+     * "if you set a tag key as transitive, the corresponding key and value passes to subsequent
+     * sessions in a role chain", and by default none does. A key naming no tag of the session
+     * selects nothing, there being no tag of that key to carry, and the keys are matched against
+     * the tags without regard to case, as a tag key is everywhere else here.
+     */
+    @Test
+    void onlyTheTagsNamedTransitivePassDownFromASession() {
+        IamRole role = iamService.createRole("Chained", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
+        iamService.registerSession("ASIATRANSITIVE", "secret", "token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000", "chain", "AROACHAIN:chain");
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put("Team", "platform");
+        tags.put("Scratch", "local");
+        iamService.recordSessionTags("ASIATRANSITIVE", tags, List.of("team", "Absent"));
+
+        assertEquals(Map.of("Team", "platform"),
+                iamService.callerTransitiveSessionTags("ASIATRANSITIVE"));
+
+        iamService.registerSession("ASIAUNTRANSITIVE", "secret", "token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000", "none", "AROANONE:none");
+        iamService.recordSessionTags("ASIAUNTRANSITIVE", tags, List.of());
+
+        assertTrue(iamService.callerTransitiveSessionTags("ASIAUNTRANSITIVE").isEmpty(),
+                "no transitive key named means nothing passes down");
+        assertTrue(iamService.callerTransitiveSessionTags("AKIALONGTERMKEY").isEmpty(),
+                "a long-term key has no session behind it to pass anything down");
+    }
+
+    /** A federated user's session tags join the tags of the user whose key minted the session. */
+    @Test
+    void federatedSessionTagsJoinTheIssuingUsersTags() {
+        IamUser user = iamService.createUser("federated-tagged", "/");
+        user.setTags(Map.of("Team", "platform"));
+        String key = iamService.createAccessKey("federated-tagged").getAccessKeyId();
+        iamService.registerIssuedSession("ASIAFEDTAGS", "secret", "token",
+                "arn:aws:sts::000000000000:federated-user/federated-tagged",
+                Instant.now().plusSeconds(3600), null, "000000000000", key);
+        iamService.recordSessionTags("ASIAFEDTAGS", Map.of("Project", "atlas"), List.of());
+
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        iamService.resolveCallerArns("ASIAFEDTAGS").orElseThrow().putPrincipalKeys(context);
+
+        assertEquals(List.of("platform"), context.get("aws:PrincipalTag/Team"));
+        assertEquals(List.of("atlas"), context.get("aws:PrincipalTag/Project"));
     }
 
     @Test
@@ -1806,7 +1922,7 @@ class IamServiceTest {
     @Test
     void updateAssumeRolePolicyWithMatchingExpectedIdApplies() {
         IamRole role = iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
-        String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+        String newDoc = TRUST_POLICY;
 
         iamService.updateAssumeRolePolicy("LambdaExec", newDoc, role.getRoleId());
 
@@ -1816,7 +1932,7 @@ class IamServiceTest {
     @Test
     void updateAssumeRolePolicyWithNullExpectedIdSkipsCheck() {
         iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
-        String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+        String newDoc = TRUST_POLICY;
 
         iamService.updateAssumeRolePolicy("LambdaExec", newDoc, null);
 
@@ -1831,7 +1947,7 @@ class IamServiceTest {
         // silently applied to a role the caller never actually verified owning.
         IamRole role = iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         String originalDoc = role.getAssumeRolePolicyDocument();
-        String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+        String newDoc = TRUST_POLICY;
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> iamService.updateAssumeRolePolicy("LambdaExec", newDoc, "AROAWRONGID"));
@@ -2211,6 +2327,81 @@ class IamServiceTest {
         source.put("k2", "v2");
         assertFalse(profile.getTags().containsKey("k2"),
                 "setTags should defensively copy, not alias the caller's map");
+    }
+
+    @Test
+    void deletePolicyWithAVersionBesideItsDefaultNamesTheVersions() {
+        IamPolicy policy = iamService.createPolicy("P", "/", null, policyDocument("one"), null);
+        iamService.createPolicyVersion(policy.getArn(), policyDocument("two"), false);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.deletePolicy(policy.getArn()));
+        assertEquals("DeleteConflict", ex.getErrorCode());
+        assertEquals("This policy has more than one version. Before you delete a policy, you must"
+                + " delete the policy's versions. The default version is deleted with the policy.",
+                ex.getMessage());
+    }
+
+    /**
+     * What a stack's own cleanup does before it deletes a policy it owns: the default survives
+     * with its document, every other version is gone, and the delete goes through.
+     */
+    @Test
+    void clearingTheOtherVersionsKeepsTheDefaultAndFreesTheDelete() {
+        String current = policyDocument("current");
+        IamPolicy policy = iamService.createPolicy("P", "/", null, policyDocument("first"), null);
+        String policyArn = policy.getArn();
+        iamService.createPolicyVersion(policyArn, policyDocument("second"), false);
+        iamService.createPolicyVersion(policyArn, current, true);
+
+        iamService.clearNonDefaultPolicyVersions(policyArn);
+
+        List<PolicyVersion> left = iamService.listPolicyVersions(policyArn);
+        assertEquals(1, left.size());
+        assertEquals("v3", left.getFirst().getVersionId());
+        assertEquals(current, left.getFirst().getDocument());
+        iamService.deletePolicy(policyArn);
+        AwsException gone = assertThrows(AwsException.class, () -> iamService.getPolicy(policyArn));
+        assertEquals("NoSuchEntity", gone.getErrorCode());
+    }
+
+    /**
+     * The clearing is on the way to a delete that an attachment refuses, so it asks about the
+     * attachment first: a stack whose policy some principal it never recorded still holds keeps
+     * every version it had, and hears the same sentence the delete would have given it.
+     */
+    @Test
+    void clearingIsRefusedWhileThePolicyIsAttachedAndKeepsEveryVersion() {
+        iamService.createUser("outsider", "/");
+        IamPolicy policy = iamService.createPolicy("P", "/", null, policyDocument("one"), null);
+        String policyArn = policy.getArn();
+        iamService.createPolicyVersion(policyArn, policyDocument("two"), false);
+        iamService.attachUserPolicy("outsider", policyArn);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.clearNonDefaultPolicyVersions(policyArn));
+        assertEquals("DeleteConflict", ex.getErrorCode());
+        assertEquals("Cannot delete a policy attached to entities. Detach it first.",
+                ex.getMessage());
+        assertEquals(2, iamService.listPolicyVersions(policyArn).size());
+    }
+
+    /** The version a SetDefaultPolicyVersion just chose is the one the clearing keeps. */
+    @Test
+    void clearingKeepsTheVersionJustMadeDefault() {
+        String second = policyDocument("second");
+        IamPolicy policy = iamService.createPolicy("P", "/", null, policyDocument("first"), null);
+        String policyArn = policy.getArn();
+        iamService.createPolicyVersion(policyArn, second, false);
+        iamService.setDefaultPolicyVersion(policyArn, "v2");
+
+        iamService.clearNonDefaultPolicyVersions(policyArn);
+
+        List<PolicyVersion> left = iamService.listPolicyVersions(policyArn);
+        assertEquals(1, left.size());
+        assertEquals("v2", left.getFirst().getVersionId());
+        assertEquals(second, left.getFirst().getDocument());
+        assertEquals("v2", iamService.getPolicy(policyArn).getDefaultVersionId());
     }
 
     @Test
@@ -2769,6 +2960,23 @@ class IamServiceTest {
     }
 
     @Test
+    void anExecutionRoleSessionWithAnInlinePolicyIsScopedByItAsAnAssumedRolesIs() {
+        String accountId = "222233334444";
+        String accessKeyId = "ASIAEXECUTIONSCOPED";
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+
+        service.registerLambdaExecutionRoleSession(accountId, accessKeyId, "secret", "token",
+                "arn:aws:iam::222233334444:role/JobRole", "run-1", null, policy);
+
+        assertEquals(policy, sessions.getForAccount(accountId, accessKeyId).orElseThrow().getSessionPolicyDocument());
+        assertEquals(policy, service.resolveCallerContext(accessKeyId).sessionPolicyDocument());
+    }
+
+    @Test
     void temporarySessionUsesExplicitAccountNamespace() {
         String accountId = "222233334444";
         String accessKeyId = "ASIASIGNINEXPLICIT";
@@ -2919,6 +3127,59 @@ class IamServiceTest {
         List<InstanceProfile> profiles = iamService.listInstanceProfilesForRole("R");
         assertEquals(1, profiles.size());
         assertEquals("P1", profiles.getFirst().getInstanceProfileName());
+    }
+
+    /**
+     * A role delete asks which profiles hold the role rather than reading every profile in the
+     * account, so clearing out many roles while many profiles are about costs one lookup each and
+     * still refuses exactly the role that is paired.
+     */
+    @Test
+    void deletingManyRolesWithManyProfilesRefusesOnlyThePairedOne() {
+        for (int i = 0; i < 40; i++) {
+            iamService.createInstanceProfile("BulkProfile" + i, "/");
+            iamService.createRole("BulkRole" + i, "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
+        }
+        iamService.addRoleToInstanceProfile("BulkProfile7", "BulkRole7");
+
+        for (int i = 0; i < 40; i++) {
+            if (i != 7) {
+                iamService.deleteRole("BulkRole" + i);
+            }
+        }
+        assertEquals("DeleteConflict", assertThrows(AwsException.class,
+                () -> iamService.deleteRole("BulkRole7")).getErrorCode());
+
+        iamService.removeRoleFromInstanceProfile("BulkProfile7", "BulkRole7");
+        iamService.deleteRole("BulkRole7");
+    }
+
+    /**
+     * A pairing the store already carried is seen by a service that did not write it: the lookup
+     * is filled from the profiles it finds, so a restart does not make a held role deletable.
+     */
+    @Test
+    void aPairingAlreadyInStorageStillBlocksTheDelete() {
+        StorageBackend<String, IamRole> roles = new InMemoryStorage<>();
+        StorageBackend<String, InstanceProfile> profiles = new InMemoryStorage<>();
+        IamService before = iamServiceOn(roles, profiles);
+        before.createRole("CarriedRole", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
+        before.createInstanceProfile("CarriedProfile", "/");
+        before.addRoleToInstanceProfile("CarriedProfile", "CarriedRole");
+
+        IamService after = iamServiceOn(roles, profiles);
+
+        assertEquals("DeleteConflict", assertThrows(AwsException.class,
+                () -> after.deleteRole("CarriedRole")).getErrorCode());
+        after.removeRoleFromInstanceProfile("CarriedProfile", "CarriedRole");
+        after.deleteRole("CarriedRole");
+    }
+
+    private static IamService iamServiceOn(StorageBackend<String, IamRole> roles,
+                                           StorageBackend<String, InstanceProfile> instanceProfiles) {
+        return new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), roles, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), instanceProfiles, new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), false);
     }
 
     // =========================================================================

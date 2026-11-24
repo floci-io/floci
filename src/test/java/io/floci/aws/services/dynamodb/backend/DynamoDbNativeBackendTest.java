@@ -29,6 +29,8 @@ import io.floci.aws.services.kinesis.KinesisService;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.InOrder;
 
 import java.util.ArrayList;
@@ -72,11 +74,13 @@ class DynamoDbNativeBackendTest {
         });
         EmulatorConfig streamConfig = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(streamConfig.services().dynamodb().streamShardCount()).thenReturn(1);
+        when(streamConfig.services().dynamodb().streamMaxRecords()).thenReturn(1000);
         DynamoDbStreamService streams = new DynamoDbStreamService(mapper, storageFactory, streamConfig);
         DynamoDbService service = new DynamoDbService(storageFactory, new RegionResolver(REGION, ACCOUNT), streams,
                 forwarder, null, mapper, mock(EmulatorConfig.class, RETURNS_DEEP_STUBS));
         NativeDynamoDbTableService tables = new NativeDynamoDbTableService(service, streams, mock(KinesisService.class));
-        backend = new NativeDynamoDbBackend(new NativeDynamoDbJsonHandler(service, tables, mapper, mock(EmulatorConfig.class)),
+        backend = new NativeDynamoDbBackend(new NativeDynamoDbJsonHandler(service, tables, mapper,
+                        mock(EmulatorConfig.class, RETURNS_DEEP_STUBS)),
                 new NativeDynamoDbStreamsJsonHandler(streams, service, new RegionResolver(REGION, ACCOUNT), mapper),
                 tables, service, streams, ttl, mapper);
     }
@@ -158,6 +162,66 @@ class DynamoDbNativeBackendTest {
         assertTrue(backend.findTable(SCOPE, TABLE).isEmpty());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            attribute_not_exist(id) | attribute_not_exist
+            NOT attribute_exist(id) | attribute_exist
+            ATTRIBUTE_EXISTS(id)    | ATTRIBUTE_EXISTS
+            """)
+    void typedScanRefusesAnUnknownFilterFunction(String filter, String function) throws Exception {
+        createTable("");
+        backend.putItem(SCOPE, TABLE, json("{\"id\":{\"S\":\"k\"}}"), null, null, null);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> backend.scan(SCOPE, TABLE, filter, null, null, null, null, null));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals("Invalid FilterExpression: Invalid function name; function: " + function, refused.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            putItem    | nope(id)             | nope
+            putItem    | ATTRIBUTE_EXISTS(id) | ATTRIBUTE_EXISTS
+            updateItem | nope(id)             | nope
+            updateItem | ATTRIBUTE_EXISTS(id) | ATTRIBUTE_EXISTS
+            deleteItem | nope(id)             | nope
+            deleteItem | ATTRIBUTE_EXISTS(id) | ATTRIBUTE_EXISTS
+            """)
+    void typedWritesRefuseAnUnknownConditionFunction(String call, String condition, String function)
+            throws Exception {
+        createTable("");
+        JsonNode key = json("{\"id\":{\"S\":\"k\"}}");
+        backend.putItem(SCOPE, TABLE, key, null, null, null);
+
+        AwsException refused = assertThrows(AwsException.class, () -> {
+            switch (call) {
+                case "putItem" -> backend.putItem(SCOPE, TABLE, key, condition, null, null);
+                case "updateItem" -> backend.updateItem(SCOPE, TABLE, key, null, "SET n = :v", null,
+                        json("{\":v\":{\"N\":\"1\"}}"), "NONE", condition);
+                default -> backend.deleteItem(SCOPE, TABLE, key, condition, null, null);
+            }
+        });
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals("1 validation error detected: Invalid ConditionExpression: Invalid function name; function: "
+                + function, refused.getMessage());
+    }
+
+    @Test
+    void typedPutRefusesBetweenBoundsOfDifferentTypes() throws Exception {
+        createTable("");
+        JsonNode key = json("{\"id\":{\"S\":\"k\"}}");
+
+        AwsException refused = assertThrows(AwsException.class, () -> backend.putItem(SCOPE, TABLE, key,
+                "n BETWEEN :a AND :b", null, json("{\":a\":{\"N\":\"3\"},\":b\":{\"S\":\"3\"}}")));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals("1 validation error detected: Invalid ConditionExpression: The BETWEEN operator requires "
+                + "same data type for lower and upper bounds; lower bound operand: AttributeValue: {N:3}, "
+                + "upper bound operand: AttributeValue: {S:3}", refused.getMessage());
+    }
+
     @Test
     void typedUpdateItemReturnsOnlyTheRequestedImage() throws Exception {
         backend.createTable(SCOPE, TABLE, List.of(new KeySchemaElement("id", "HASH")),
@@ -180,6 +244,33 @@ class DynamoDbNativeBackendTest {
         assertNull(none);
         assertNull(updatedNew);
         assertEquals(json("{\"id\":{\"S\":\"k\"},\"n\":{\"N\":\"5\"}}"), backend.getItem(SCOPE, TABLE, key));
+    }
+
+    @Test
+    void typedWritesStoreMapKeysInCodePointOrder() throws Exception {
+        backend.createTable(SCOPE, TABLE, List.of(new KeySchemaElement("id", "HASH")),
+                List.of(new AttributeDefinition("id", "S")), 5L, 5L, List.of(), List.of());
+        JsonNode key = json("{\"id\":{\"S\":\"k\"}}");
+
+        backend.putItem(SCOPE, TABLE,
+                json("{\"id\":{\"S\":\"k\"},\"m\":{\"M\":{\"z\":{\"S\":\"1\"},\"b\":{\"S\":\"2\"}}}}"),
+                null, null, null);
+        assertEquals("b,z", keys(backend.getItem(SCOPE, TABLE, key).get("m").get("M")));
+
+        backend.updateItem(SCOPE, TABLE, key, null, "SET p = :p", null,
+                json("{\":p\":{\"M\":{\"z\":{\"S\":\"1\"},\"b\":{\"S\":\"2\"}}}}"), "NONE", null);
+        assertEquals("b,z", keys(backend.getItem(SCOPE, TABLE, key).get("p").get("M")));
+
+        backend.updateItem(SCOPE, TABLE, key,
+                json("{\"q\":{\"Action\":\"PUT\",\"Value\":{\"M\":{\"z\":{\"S\":\"1\"},\"b\":{\"S\":\"2\"}}}}}"),
+                null, null, null, "NONE", null);
+        assertEquals("b,z", keys(backend.getItem(SCOPE, TABLE, key).get("q").get("M")));
+    }
+
+    private static String keys(JsonNode node) {
+        List<String> names = new ArrayList<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return String.join(",", names);
     }
 
     @Test

@@ -20,10 +20,12 @@ import io.floci.aws.services.ecr.model.Repository;
 import io.floci.aws.services.ecr.model.RepositoryCreationTemplate;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.services.ecr.registry.RegistryHttpClient;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Mockito;
 
 import java.io.IOException;
@@ -62,11 +64,13 @@ import static org.mockito.Mockito.when;
  * Unit tests for {@link EcrService}. Uses an in-memory storage backend and a
  * mocked {@link EcrRegistryManager} so the test never touches Docker.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class EcrServiceTest {
 
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT = "000000000000";
     private static final String REPO = "floci-it/svc-test";
+    private static final String OTHER_ACCOUNT = "111111111111";
 
     private EcrService service;
     private EcrRegistryManager registryManager;
@@ -395,6 +399,54 @@ class EcrServiceTest {
         assertThrows(AwsException.class, () -> service.describeRepositories(List.of("legacy"), null, REGION));
     }
 
+    @Test
+    void theDataPlaneReadsARepositoryInTheAccountItsRegistryHostNames() {
+        AccountAwareStorageBackend<Repository> repositories = AccountAwareStorageBackend.inMemory(ACCOUNT);
+        EcrService accountAware = accountAwareService(repositories, new RegionResolver(REGION, ACCOUNT));
+        // Where account 111111111111's own CreateRepository keeps it: in that account's partition.
+        repositories.putForAccount(OTHER_ACCOUNT, REGION + "::" + OTHER_ACCOUNT + "::app",
+                repository("app", OTHER_ACCOUNT, "IMMUTABLE"));
+
+        assertTrue(accountAware.isImageTagImmutable("app", OTHER_ACCOUNT, REGION));
+        assertEquals(OTHER_ACCOUNT + "/" + REGION + "/app",
+                accountAware.registryRepositoryName("app", OTHER_ACCOUNT, REGION));
+        assertFalse(accountAware.isImageTagImmutable("app", ACCOUNT, REGION));
+    }
+
+    @Test
+    void aNameNobodyCreatedIsUnknownOnceTheCatalogIsReadAndUnavailableBefore() {
+        when(registryManager.isCatalogReconciled()).thenReturn(false);
+        assertThrows(IllegalStateException.class,
+                () -> service.registryRepositoryName("never-created", ACCOUNT, REGION));
+
+        when(registryManager.isCatalogReconciled()).thenReturn(true);
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.registryRepositoryName("never-created", ACCOUNT, REGION));
+
+        assertEquals("RepositoryNotFoundException", missing.getErrorCode());
+        assertEquals("The repository with name 'never-created' does not exist in the registry with id '"
+                + ACCOUNT + "'", missing.getMessage());
+        verify(registryManager, never()).internalRepoName(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void theCatalogReconcileKeepsANamespacedRepositoryInItsOwnAccount() {
+        AccountAwareStorageBackend<Repository> repositories = AccountAwareStorageBackend.inMemory(ACCOUNT);
+        EcrService accountAware = accountAwareService(repositories, new RegionResolver(REGION, ACCOUNT));
+        String keptKey = REGION + "::" + OTHER_ACCOUNT + "::kept";
+        repositories.putForAccount(OTHER_ACCOUNT, keptKey, repository("kept", OTHER_ACCOUNT, "IMMUTABLE"));
+
+        accountAware.reconcileFromCatalog(List.of(
+                OTHER_ACCOUNT + "/" + REGION + "/kept", OTHER_ACCOUNT + "/" + REGION + "/recovered"));
+
+        assertEquals("IMMUTABLE", repositories.getForAccount(OTHER_ACCOUNT, keptKey).orElseThrow()
+                .getImageTagMutability());
+        assertEquals(OTHER_ACCOUNT, repositories.getForAccount(OTHER_ACCOUNT, REGION + "::" + OTHER_ACCOUNT
+                + "::recovered").orElseThrow().getRegistryId());
+        assertTrue(repositories.scanAllAccountEntries(key -> true).stream()
+                .allMatch(entry -> OTHER_ACCOUNT.equals(entry.accountId())));
+    }
+
     // ------------------------------------------------------------
     // Registry unavailable (Floci inside Docker with no Docker daemon)
     // ------------------------------------------------------------
@@ -663,13 +715,7 @@ class EcrServiceTest {
     @Test
     void deleteRepository_keepsSharedStorageForRepositoriesOwnedByAnotherAccount() {
         AccountAwareStorageBackend<Repository> repositories = AccountAwareStorageBackend.inMemory(ACCOUNT);
-        EcrService accountAwareService = new EcrService(
-                repositories,
-                new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                registryManager,
-                Mockito.mock(EmulatorConfig.class),
-                new RegionResolver(REGION, ACCOUNT));
+        EcrService accountAwareService = accountAwareService(repositories, new RegionResolver(REGION, ACCOUNT));
         accountAwareService.createRepository(REPO, null, null, null, null, null, null, REGION);
         repositories.putForAccount("111111111111", REGION + "::111111111111::other", new Repository());
 
@@ -1559,6 +1605,8 @@ class EcrServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.getLifecyclePolicy(REPO, null, REGION));
         assertEquals("LifecyclePolicyNotFoundException", ex.getErrorCode());
+        assertEquals("Lifecycle policy does not exist for the repository with name '" + REPO
+                + "' in the registry with id '" + ACCOUNT + "'", ex.getMessage());
     }
 
     // ------------------------------------------------------------
@@ -1604,6 +1652,20 @@ class EcrServiceTest {
         Repository existing = service.describeRepositories(List.of(REPO), null, REGION).get(0);
         // Tag is still present → existing entry was NOT overwritten by reconcile
         assertEquals("yes", existing.getTags().get("preserved"));
+    }
+
+    private EcrService accountAwareService(AccountAwareStorageBackend<Repository> repositories,
+                                           RegionResolver regionResolver) {
+        return new EcrService(repositories, new InMemoryStorage<>(), new InMemoryStorage<>(), registryManager,
+                Mockito.mock(EmulatorConfig.class), regionResolver);
+    }
+
+    private static Repository repository(String name, String account, String imageTagMutability) {
+        Repository repository = new Repository();
+        repository.setRepositoryName(name);
+        repository.setRegistryId(account);
+        repository.setImageTagMutability(imageTagMutability);
+        return repository;
     }
 
     private static final class FakeRegistryServer implements AutoCloseable {
@@ -2199,7 +2261,7 @@ class EcrServiceTest {
     private static RegistrySettings.ReplicationRule replicateTo(String region, String registryId, String prefix) {
         return new RegistrySettings.ReplicationRule(
                 List.of(new RegistrySettings.ReplicationDestination(region, registryId)),
-                prefix == null ? null : List.of(new RegistrySettings.RepositoryFilter(prefix, "PREFIX_MATCH")));
+                prefix == null ? null : List.of(new RegistrySettings.RepositoryFilter(prefix, "PREFIX_MATCH")), null);
     }
 
     private static RegistrySettings.ScanningRule scan(String frequency, String filter) {

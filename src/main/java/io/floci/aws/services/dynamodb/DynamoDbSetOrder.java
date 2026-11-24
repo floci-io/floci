@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -23,6 +24,8 @@ final class DynamoDbSetOrder {
 
     private record Keyed<K>(JsonNode member, K key) {}
 
+    private record Named(String name, byte[] key) {}
+
     private record Order<K>(Function<String, K> key, Comparator<K> compare) {}
 
     private static final Order<BigDecimal> BY_VALUE = new Order<>(DynamoDbSetOrder::numberOf, Comparator.naturalOrder());
@@ -30,6 +33,20 @@ final class DynamoDbSetOrder {
     private static final Order<byte[]> BY_CODE_POINT = new Order<>(DynamoDbSetOrder::utf8Of, Arrays::compareUnsigned);
 
     private DynamoDbSetOrder() {}
+
+    /** Orders strings by code point, the order of a string set and of a map's keys. */
+    static List<String> byCodePoint(Collection<String> strings) {
+        List<Named> named = new ArrayList<>(strings.size());
+        for (String string : strings) {
+            named.add(new Named(string, BY_CODE_POINT.key().apply(string)));
+        }
+        named.sort(Comparator.comparing(Named::key, BY_CODE_POINT.compare()));
+        List<String> result = new ArrayList<>(named.size());
+        for (Named entry : named) {
+            result.add(entry.name());
+        }
+        return result;
+    }
 
     /** Returns the members in DynamoDB's order, or the input itself when it is not an array. */
     static JsonNode sorted(String setType, JsonNode members) {

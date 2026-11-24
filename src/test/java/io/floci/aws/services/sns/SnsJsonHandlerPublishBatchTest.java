@@ -9,9 +9,12 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.SqsServiceFactory;
 import io.floci.aws.services.sqs.model.Message;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.Map;
@@ -25,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * (with InvalidParameterValue + SenderFault=true) instead of aborting the
  * whole batch with a top-level error.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SnsJsonHandlerPublishBatchTest {
 
     private static final String REGION = "us-east-1";

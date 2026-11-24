@@ -52,6 +52,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.clearInvocations;
@@ -124,7 +125,7 @@ class RedshiftContainerManagerTest {
         } else {
             when(lifecycleManager.adopt(eq("cont-survivor"), any(), any())).thenReturn(
                     new ContainerInfo("cont-survivor", Map.of(5432, new EndpointInfo("localhost", 5432))));
-            when(logStreamer.attach(anyString(), anyString(), anyString(), anyString(), anyString())).thenReturn(stream);
+            when(logStreamer.attachPolled(anyString(), anyString(), anyString(), anyString(), anyString())).thenReturn(stream);
             if ("readiness".equals(failureStage)) {
                 when(dockerClient.execCreateCmd(anyString())).thenThrow(new IllegalStateException("not ready"));
                 Thread.currentThread().interrupt();
@@ -242,6 +243,21 @@ class RedshiftContainerManagerTest {
                 manager.restoreSnapshot(ACCOUNT_ID, (Cluster) null, Path.of("dummy.sql")));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
+    }
+
+    // Catches: a Redshift cluster's container without its io.floci.service label, which leaves it outside
+    // floci.docker.service-max-containers.redshift and its InsufficientClusterCapacity error.
+    @Test
+    void theClusterContainerCarriesTheRedshiftServiceLabel() {
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
+        when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(
+                new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432))));
+
+        manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
+
+        verify(specBuilder).withLabels(argThat(labels -> "redshift".equals(labels.get("io.floci.service"))
+                && "test-cluster".equals(labels.get("io.floci.resource-id"))));
     }
 
     @Test
@@ -683,17 +699,17 @@ class RedshiftContainerManagerTest {
         ContainerInfo info = new ContainerInfo("cont-stream", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(info);
         Closeable stream = mock(Closeable.class);
-        when(logStreamer.attach("cont-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster"))
+        when(logStreamer.attachPolled("cont-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster"))
                 .thenReturn(stream);
 
         RedshiftContainerHandle handle = manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
         assertNotNull(handle);
         assertEquals(stream, handle.getLogStream());
-        verify(logStreamer).attach("cont-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster");
+        verify(logStreamer).attachPolled("cont-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster");
 
         // When logStreamer throws, start still completes successfully
         doThrow(new RuntimeException("stream error"))
-                .when(logStreamer).attach(anyString(), anyString(), anyString(), anyString(), anyString());
+                .when(logStreamer).attachPolled(anyString(), anyString(), anyString(), anyString(), anyString());
         RedshiftContainerHandle handleTolerated = manager.start(ACCOUNT_ID, "test-cluster-2", "admin", "pass");
         assertNotNull(handleTolerated);
         assertNull(handleTolerated.getLogStream());
@@ -708,17 +724,17 @@ class RedshiftContainerManagerTest {
         ContainerInfo adopted = new ContainerInfo("cont-adopt-stream", Map.of(5432, new EndpointInfo("localhost", 6000)));
         when(lifecycleManager.adopt(eq("cont-adopt-stream"), any(), eq(Optional.empty()))).thenReturn(adopted);
         Closeable stream = mock(Closeable.class);
-        when(logStreamer.attach("cont-adopt-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster"))
+        when(logStreamer.attachPolled("cont-adopt-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster"))
                 .thenReturn(stream);
 
         RedshiftContainerHandle handle = manager.adoptOrStart(ACCOUNT_ID, "test-cluster", "admin", "pass");
         assertNotNull(handle);
         assertEquals(stream, handle.getLogStream());
-        verify(logStreamer).attach("cont-adopt-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster");
+        verify(logStreamer).attachPolled("cont-adopt-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster");
 
         // When logStreamer throws, adoptOrStart still completes successfully
         doThrow(new RuntimeException("stream error"))
-                .when(logStreamer).attach(anyString(), anyString(), anyString(), anyString(), anyString());
+                .when(logStreamer).attachPolled(anyString(), anyString(), anyString(), anyString(), anyString());
         RedshiftContainerHandle handleTolerated = manager.adoptOrStart(ACCOUNT_ID, "test-cluster", "admin", "pass");
         assertNotNull(handleTolerated);
         assertNull(handleTolerated.getLogStream());
@@ -787,6 +803,24 @@ class RedshiftContainerManagerTest {
         verify(stream).close();
     }
 
+    // Catches: the cluster's last log lines lost, since the forced removal leaves its polled log nothing to read.
+    @Test
+    void stopReadsThePolledLogBeforeTheRemoval() {
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
+        when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(
+                new ContainerInfo("cont-owned", Map.of(5432, new EndpointInfo("localhost", 5432))));
+        RedshiftContainerHandle handle = manager.start(ACCOUNT_ID, "owned", "admin", "pass");
+        Closeable stream = mock(Closeable.class);
+        handle.setLogStream(stream);
+
+        manager.stop(ACCOUNT_ID, "owned");
+
+        InOrder order = inOrder(lifecycleManager);
+        order.verify(lifecycleManager).readLogBeforeRemoval(stream);
+        order.verify(lifecycleManager).removeIfExistsStrict("cont-owned", true);
+    }
+
     @Test
     void staleRemovalFailurePreventsReplacementCreation() {
         doThrow(new IllegalStateException("Docker unavailable")).when(lifecycleManager)
@@ -802,7 +836,7 @@ class RedshiftContainerManagerTest {
         when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(
                 new ContainerInfo("cont-unready", Map.of(5432, new EndpointInfo("localhost", 5432))));
         Closeable stream = mock(Closeable.class);
-        when(logStreamer.attach(anyString(), anyString(), anyString(), anyString(), anyString())).thenReturn(stream);
+        when(logStreamer.attachPolled(anyString(), anyString(), anyString(), anyString(), anyString())).thenReturn(stream);
         when(dockerClient.execCreateCmd(anyString())).thenThrow(new IllegalStateException("not ready"));
         Thread.currentThread().interrupt();
         try {

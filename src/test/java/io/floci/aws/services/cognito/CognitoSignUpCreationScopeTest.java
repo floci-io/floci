@@ -12,7 +12,10 @@ import io.floci.aws.services.cognito.model.UserPoolClient;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.enterprise.inject.Instance;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -41,6 +44,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CognitoSignUpCreationScopeTest {
     private static final String FIRST_ACCOUNT = "111111111111";
     private static final String SECOND_ACCOUNT = "222222222222";

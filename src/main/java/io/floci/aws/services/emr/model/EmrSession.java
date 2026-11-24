@@ -31,6 +31,8 @@ public class EmrSession implements SparkConnectSession {
     private Instant startedAt;
     private Instant endedAt;
     private Instant idleSince;
+    // The Spark Connect server URL, once its server answers.
+    private String serverUrl;
     private String engineConfigurations;
     private String monitoringConfiguration;
     private long sessionIdleTimeoutInMinutes;
@@ -70,6 +72,8 @@ public class EmrSession implements SparkConnectSession {
     public void setStartedAt(Instant startedAt) { this.startedAt = startedAt; }
     public Instant getEndedAt() { return endedAt; }
     public void setEndedAt(Instant endedAt) { this.endedAt = endedAt; }
+    public String getServerUrl() { return serverUrl; }
+    public void setServerUrl(String serverUrl) { this.serverUrl = serverUrl; }
     public Instant getIdleSince() { return idleSince; }
     public void setIdleSince(Instant idleSince) { this.idleSince = idleSince; }
     public String getEngineConfigurations() { return engineConfigurations; }

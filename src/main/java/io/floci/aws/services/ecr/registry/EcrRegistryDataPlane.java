@@ -2,6 +2,9 @@ package io.floci.aws.services.ecr.registry;
 
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.NetworkExposureGuard;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsPartitions;
+import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.services.ecr.EcrService;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -41,6 +44,12 @@ public class EcrRegistryDataPlane {
     private static final Logger LOG = Logger.getLogger(EcrRegistryDataPlane.class);
     private static final Pattern ECR_HOST = Pattern.compile(
             "^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.localhost(?:\\.floci\\.io)?(?::[0-9]+)?$");
+    /**
+     * An account's registry host as AWS names it, {@code <account>.dkr.ecr.<region>.<dnsSuffix>}, which containerd sends
+     * as a mirror request's {@code ns} when an EKS node's registries.yaml mirrors it to Floci.
+     */
+    private static final Pattern AWS_ECR_HOST = Pattern.compile(
+            "^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.(" + AwsPartitions.dnsSuffixRegex() + ")(?::[0-9]+)?$");
     private static final String MANIFESTS_PATH = "/manifests/";
     private static final long REPOSITORY_LOCK_POLL_MILLIS = 5;
     /**
@@ -91,19 +100,105 @@ public class EcrRegistryDataPlane {
             return;
         }
 
-        boolean writeAdmissionHeld = isWrite;
+        context.request().pause();
+        RegistryRequest registryRequest = request.get();
+        if (registryRequest.repositoryName().isEmpty()) {
+            admit(context, registryRequest, isWrite);
+        } else if (registryManager.isCatalogReconciled()) {
+            String storage;
+            try {
+                storage = ecrService.registryRepositoryName(
+                        registryRequest.repositoryName(), registryRequest.accountId(), registryRequest.region());
+            } catch (RuntimeException e) {
+                // The registry may have been recovered since its catalog was read, so a name that catalog does
+                // not place is checked against the registry running now before it is refused.
+                resolveAfterTheCatalogThenAdmit(context, registryRequest, isWrite);
+                return;
+            }
+            admit(context, registryRequest.withStorageRepositoryName(storage), isWrite);
+        } else {
+            resolveAfterTheCatalogThenAdmit(context, registryRequest, isWrite);
+        }
+    }
+
+    /**
+     * Until the catalog of the registry running now has been read, a name with no metadata cannot be told from a
+     * repository whose images the registry holds, so the registry is started, or recovered, and its catalog read
+     * first, off the event loop, before the name is resolved.
+     *
+     * <p>Exactly one of the client leaving and the read finishing takes the request on: a client that goes away
+     * meanwhile gives its write admission back at once, so garbage collection does not wait on a write that can
+     * no longer come.
+     */
+    private void resolveAfterTheCatalogThenAdmit(RoutingContext context, RegistryRequest registryRequest,
+                                                 boolean writeAdmitted) {
+        AtomicBoolean waiting = new AtomicBoolean(true);
+        context.response().closeHandler(closed -> {
+            if (waiting.compareAndSet(true, false) && writeAdmitted) {
+                registryManager.releaseWriteAdmission();
+            }
+        });
+        vertx.<String>executeBlocking(promise -> {
+            try {
+                registryManager.ensureStarted();
+                registryManager.ensureCatalogReconciled();
+                promise.complete(ecrService.registryRepositoryName(
+                        registryRequest.repositoryName(), registryRequest.accountId(), registryRequest.region()));
+            } catch (Exception e) {
+                promise.fail(e);
+            }
+        }).onComplete(result -> {
+            if (!waiting.compareAndSet(true, false)) {
+                return;
+            }
+            if (context.response().closed()) {
+                if (writeAdmitted) {
+                    registryManager.releaseWriteAdmission();
+                }
+            } else if (result.failed()) {
+                refuseUnresolved(context, registryRequest, writeAdmitted, result.cause());
+            } else {
+                try {
+                    admit(context, registryRequest.withStorageRepositoryName(result.result()), writeAdmitted);
+                } catch (Throwable t) {
+                    // admit gave back what it took. Off the router's call stack nothing else answers the failure,
+                    // so it gets the 500 the synchronous path's would.
+                    context.request().resume();
+                    context.fail(t);
+                }
+            }
+        });
+    }
+
+    /**
+     * Answers a request whose repository could not be resolved: {@code 404 NAME_UNKNOWN} for one nobody created, as
+     * ECR answers before any byte reaches the registry, and unavailable for anything else.
+     */
+    private void refuseUnresolved(RoutingContext context, RegistryRequest registryRequest,
+                                  boolean writeAdmissionHeld, Throwable failure) {
+        if (writeAdmissionHeld) {
+            registryManager.releaseWriteAdmission();
+        }
+        context.request().resume();
+        if (failure instanceof AwsException aws && "RepositoryNotFoundException".equals(aws.getErrorCode())) {
+            if (!context.response().ended() && !context.response().closed()) {
+                context.response().putHeader("Docker-Distribution-API-Version", "registry/2.0");
+                registryError(context, 404, "NAME_UNKNOWN", aws.getMessage());
+            }
+            return;
+        }
+        LOG.debugv(failure, "Could not resolve ECR repository {0} in registry {1}",
+                registryRequest.repositoryName(), registryRequest.accountId());
+        registryUnavailable(context);
+    }
+
+    /** Takes a resolved request on to its immutable-tag claim, its repository write lock and the registry. */
+    private void admit(RoutingContext context, RegistryRequest registryRequest, boolean writeAdmitted) {
+        boolean writeAdmissionHeld = writeAdmitted;
         Exchange activeExchange = null;
         String immutableTag = null;
         boolean tagClaimed = false;
         try {
-            context.request().pause();
-
-            RegistryRequest registryRequest = request.get();
-            if (!registryRequest.repositoryName().isEmpty()) {
-                registryRequest = registryRequest.withStorageRepositoryName(
-                        ecrService.registryRepositoryName(
-                                registryRequest.repositoryName(), registryRequest.accountId(), registryRequest.region()));
-            }
             immutableTag = immutableTag(context, registryRequest);
             if (immutableTag != null) {
                 if (!ecrService.claimImmutableTag(immutableTag)) {
@@ -118,7 +213,8 @@ public class EcrRegistryDataPlane {
                 tagClaimed = true;
             }
 
-            Exchange exchange = new Exchange(immutableTag, manifestWriteRepository(context, registryRequest), isWrite);
+            Exchange exchange = new Exchange(immutableTag, manifestWriteRepository(context, registryRequest),
+                    isWriteRequest(context.request().method()));
             activeExchange = exchange;
             writeAdmissionHeld = false;
             context.response().closeHandler(closed -> exchange.end());
@@ -133,7 +229,6 @@ public class EcrRegistryDataPlane {
                     release(immutableTag);
                 }
                 if (writeAdmissionHeld) {
-                    writeAdmissionHeld = false;
                     registryManager.releaseWriteAdmission();
                 }
             }
@@ -608,11 +703,8 @@ public class EcrRegistryDataPlane {
         if (!registryPath.startsWith("/v2/")) {
             return Optional.empty();
         }
-        Matcher hostMatch = ECR_HOST.matcher(host == null ? "" : host);
-        if (!hostMatch.matches()) {
-            hostMatch = ECR_HOST.matcher(queryParameter(query, "ns"));
-        }
-        if (hostMatch.matches()) {
+        Matcher hostMatch = registryHost(host, query);
+        if (hostMatch != null) {
             String repository = "/v2/".equals(registryPath) ? "" : repositoryName(registryPath.substring("/v2/".length()));
             String storageRepositoryName = hostMatch.group(1) + "/" + hostMatch.group(2) + "/" + repository;
             String backendUri = repository.isEmpty()
@@ -645,6 +737,25 @@ public class EcrRegistryDataPlane {
         return Optional.of(new RegistryRequest(segments[0], segments[1], repository,
                 storageRepositoryName, storageRepositoryName,
                 registryPath + querySuffix(query, true), tag(registryPath)));
+    }
+
+    /**
+     * The registry a request is for: its host when that is a Floci repository host, else the registry a mirror request
+     * names in {@code ns}, a Floci repository host or an account's AWS registry host in that region's partition. A request
+     * with an AWS registry host in its {@code Host} header is not routed here.
+     */
+    private static Matcher registryHost(String host, String query) {
+        Matcher byHost = ECR_HOST.matcher(host == null ? "" : host);
+        if (byHost.matches()) {
+            return byHost;
+        }
+        String namespace = queryParameter(query, "ns");
+        Matcher byNamespace = ECR_HOST.matcher(namespace);
+        if (byNamespace.matches()) {
+            return byNamespace;
+        }
+        Matcher mirrored = AWS_ECR_HOST.matcher(namespace);
+        return mirrored.matches() && AwsRegions.dnsSuffixFor(mirrored.group(2)).equals(mirrored.group(3)) ? mirrored : null;
     }
 
     private static boolean isLoopbackHost(String host) {

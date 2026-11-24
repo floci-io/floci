@@ -278,13 +278,22 @@ public final class EnforcementFixtures {
     }
 
     /**
-     * Deletes a role, and first the policies it carries: Floci answers {@code DeleteConflict},
-     * "must detach all policies first", for a role holding either an inline or a managed one.
+     * Deletes a role, and first what IAM wants gone before it will: any instance profile holding
+     * it, then its managed attachments and its inline policies. Each of those is refused with its
+     * own {@code DeleteConflict} sentence, and the profile is reported ahead of the policies, so a
+     * teardown that left one in place would be told to remedy something else.
      */
     public static void removeRole(int port, String authorization, String roleName) {
         if (iam(port, authorization, "GetRole", "RoleName", roleName)
                 .extract().statusCode() == 404) {
             return;
+        }
+        for (String profileName : iam(port, authorization, "ListInstanceProfilesForRole",
+                "RoleName", roleName).statusCode(200).extract().xmlPath()
+                .getList("ListInstanceProfilesForRoleResponse.ListInstanceProfilesForRoleResult"
+                        + ".InstanceProfiles.member.InstanceProfileName", String.class)) {
+            iam(port, authorization, "RemoveRoleFromInstanceProfile",
+                    "InstanceProfileName", profileName, "RoleName", roleName).statusCode(200);
         }
         for (String policyName : iam(port, authorization, "ListRolePolicies", "RoleName", roleName)
                 .statusCode(200).extract().xmlPath()

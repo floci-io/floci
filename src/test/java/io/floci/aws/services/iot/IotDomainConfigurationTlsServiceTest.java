@@ -7,7 +7,10 @@ import io.floci.aws.config.TlsCertificateManager;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -29,6 +32,7 @@ import static org.mockito.Mockito.when;
  * no service lock held; an ENDPOINT configuration, the AWS-managed configurations, a rejected
  * request and every later operation register nothing.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class IotDomainConfigurationTlsServiceTest {
 
     private static final String REGION = "us-east-1";

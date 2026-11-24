@@ -8,8 +8,10 @@ import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
+import io.floci.aws.testing.ParallelLocks;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.io.BufferedReader;
@@ -42,6 +44,7 @@ import static org.mockito.Mockito.when;
  * {@code floci.services.elasticache.shell-less-backend}: the server flags go to the container as
  * arguments or through the image's {@code VALKEY_EXTRA_FLAGS} hook, never both.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class ElastiCacheShellLessContainerManagerTest {
 
     private static final Logger LOG = Logger.getLogger(ElastiCacheShellLessContainerManagerTest.class);
@@ -134,19 +137,8 @@ class ElastiCacheShellLessContainerManagerTest {
     void theDefaultPathStillUsesTheValkeyExtraFlagsHook() throws IOException {
         startAgainstFakeBackend(manager(false), CLUSTER_FLAGS);
 
-        verify(builder).withEnv("VALKEY_EXTRA_FLAGS", "--loglevel verbose --enable-debug-command local "
-                + String.join(" ", CLUSTER_FLAGS));
+        verify(builder).withEnv("VALKEY_EXTRA_FLAGS", "--loglevel verbose " + String.join(" ", CLUSTER_FLAGS));
         verify(builder, never()).withCmd(any(List.class));
-    }
-
-    @Test
-    void aSnapshotIsLoadedAtStartupOnlyWithTheShellLessBackend() {
-        ElastiCacheContainerManager manager = manager(false);
-
-        assertThrows(IllegalArgumentException.class,
-                () -> manager.start("my-group", "valkey/valkey:8", List.of(), "us-east-1", "UkVESVM="));
-
-        verify(lifecycleManager, never()).createAndStart(any(ContainerSpec.class));
     }
 
     @Test
@@ -209,6 +201,11 @@ class ElastiCacheShellLessContainerManagerTest {
     }
 
     private ElastiCacheContainerManager seededManager(ServerSocket backend, String configuredFileName) {
+        return seededManager(backend, configuredFileName, true);
+    }
+
+    private ElastiCacheContainerManager seededManager(ServerSocket backend, String configuredFileName,
+                                                      boolean shellLess) {
         DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
         when(docker.inspectContainerCmd(anyString()).exec().getConfig().getWorkingDir()).thenReturn("/data");
         when(lifecycleManager.getDockerClient()).thenReturn(docker);
@@ -218,9 +215,24 @@ class ElastiCacheShellLessContainerManagerTest {
             return new ContainerLifecycleManager.ContainerInfo("container-id", Map.of(6379,
                     new ContainerLifecycleManager.EndpointInfo("127.0.0.1", backend.getLocalPort())));
         });
-        ElastiCacheContainerManager manager = manager(true);
+        ElastiCacheContainerManager manager = manager(shellLess);
         when(elasticache.shellLessBackendDbfilename()).thenReturn(configuredFileName);
         return manager;
+    }
+
+    // Catches: the default path loading a snapshot with DEBUG RELOAD, which needs
+    // --enable-debug-command, a flag a Redis before 7 refuses to start with.
+    @Test
+    void theDefaultPathPlacesTheSnapshotBeforeTheServerStartsWithoutTheDebugCommand() throws IOException {
+        try (ServerSocket backend = fakeBackend("/data", "dump.rdb")) {
+            ElastiCacheContainerManager manager = seededManager(backend, "dump.rdb", false);
+
+            manager.start("my-group", "valkey/valkey:8", List.of(), "us-east-1", "UkVESVM=");
+
+            verify(lifecycleManager.getDockerClient()).copyArchiveToContainerCmd("container-id");
+            verify(builder).withEnv("VALKEY_EXTRA_FLAGS", "--loglevel verbose");
+            verify(builder, never()).withCmd(any(List.class));
+        }
     }
 
     @Test

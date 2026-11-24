@@ -1,10 +1,12 @@
 package io.floci.aws.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
@@ -23,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * (order-independent) - Handles read/parse failures gracefully (returns true) - Proper logging for
  * different scenarios
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class TlsConfigSourceMetadataComparisonTest {
 
     @TempDir

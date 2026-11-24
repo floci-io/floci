@@ -8,7 +8,7 @@ public class GetApplicationResponse {
 
     // The application is stored with the clientToken CreateApplication's retries are matched on, which
     // GetApplication's Application does not have. It is left out here, not on Application, so storage keeps it.
-    @JsonIgnoreProperties({"clientToken", "pinnedImages"})
+    @JsonIgnoreProperties({"clientToken", "pinnedImages", "schedulerOff"})
     private Application application;
 
     public Application getApplication() {

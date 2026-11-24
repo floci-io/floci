@@ -55,6 +55,14 @@ public final class SmithyValidationErrors {
         return validationException(List.of(violation));
     }
 
+    /** The error inside the one-violation envelope. Other errors, and messages already inside it, pass through. */
+    public static AwsException inEnvelope(AwsException e) {
+        if (!"ValidationException".equals(e.getErrorCode()) || e.getMessage().startsWith(message(List.of("")))) {
+            return e;
+        }
+        return validationException(e.getMessage());
+    }
+
     /** The awsQuery protocol's code. */
     public static AwsException validationError(List<String> violations) {
         return exception("ValidationError", violations);
@@ -265,6 +273,10 @@ public final class SmithyValidationErrors {
          */
         public String mapKeys(String path, String value, List<String> rules) {
             return constraint(path, value, "Map keys must satisfy constraint: " + rules);
+        }
+
+        public String mapValues(String path, String value, List<String> rules) {
+            return constraint(path, value, "Map value must satisfy constraint: " + rules);
         }
 
         /** The violation for a value outside its enum, the values in the model's order. */

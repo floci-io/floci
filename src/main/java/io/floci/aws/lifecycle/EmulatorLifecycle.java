@@ -10,6 +10,7 @@ import io.floci.aws.lifecycle.inithook.InitializationHook;
 import io.floci.aws.lifecycle.inithook.InitializationHooksRunner;
 import io.floci.aws.services.amazonmq.container.RabbitMqManager;
 import io.floci.aws.services.appsync.graphql.SchemaCreationWorker;
+import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.floci.aws.services.codeartifact.CodeArtifactService;
 import io.floci.aws.services.docdb.container.DocDbContainerManager;
 import io.floci.aws.services.dynamodb.DynamoDbRuntime;
@@ -42,6 +43,7 @@ import io.floci.aws.services.rds.RdsService;
 import io.floci.aws.services.rds.container.RdsContainerManager;
 import io.floci.aws.services.rds.proxy.RdsProxyManager;
 import io.floci.aws.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
+import io.floci.aws.services.sagemaker.SageMakerService;
 import io.floci.aws.services.stepfunctions.StepFunctionsService;
 import io.floci.aws.services.timestreaminfluxdb.TimestreamInfluxDbService;
 import io.quarkus.runtime.Quarkus;
@@ -101,6 +103,7 @@ public class EmulatorLifecycle {
     private final NeptuneProxyManager neptuneProxyManager;
     private final RabbitMqManager rabbitMqManager;
     private final FlinkContainerManager flinkContainerManager;
+    private final SageMakerService sageMakerService;
     private final RdsService rdsService;
     private final TimestreamInfluxDbService timestreamInfluxDbService;
     private final ElbV2Service elbV2Service;
@@ -123,6 +126,7 @@ public class EmulatorLifecycle {
     private final PersistentPathValidator persistentPathValidator;
     private final EksService eksService;
     private final CodeArtifactService codeArtifactService;
+    private final CloudWatchMetricsService cloudWatchMetricsService;
     private final DynamoDbRuntime dynamoDbRuntime;
     private final RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer;
     // Set on the boot thread, read by the async HttpServerStart observer.
@@ -147,6 +151,7 @@ public class EmulatorLifecycle {
                              NeptuneProxyManager neptuneProxyManager,
                              RabbitMqManager rabbitMqManager,
                              FlinkContainerManager flinkContainerManager,
+                             SageMakerService sageMakerService,
                              RdsService rdsService,
                              TimestreamInfluxDbService timestreamInfluxDbService,
                              ElbV2Service elbV2Service,
@@ -170,7 +175,8 @@ public class EmulatorLifecycle {
                              DynamoDbRuntime dynamoDbRuntime,
                              RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer,
                              EksService eksService,
-                             CodeArtifactService codeArtifactService) {
+                             CodeArtifactService codeArtifactService,
+                             CloudWatchMetricsService cloudWatchMetricsService) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -190,6 +196,7 @@ public class EmulatorLifecycle {
         this.neptuneProxyManager = neptuneProxyManager;
         this.rabbitMqManager = rabbitMqManager;
         this.flinkContainerManager = flinkContainerManager;
+        this.sageMakerService = sageMakerService;
         this.rdsService = rdsService;
         this.timestreamInfluxDbService = timestreamInfluxDbService;
         this.elbV2Service = elbV2Service;
@@ -212,6 +219,7 @@ public class EmulatorLifecycle {
         this.persistentPathValidator = persistentPathValidator;
         this.eksService = eksService;
         this.codeArtifactService = codeArtifactService;
+        this.cloudWatchMetricsService = cloudWatchMetricsService;
         this.dynamoDbRuntime = dynamoDbRuntime;
         this.redshiftZeroEtlConsumer = redshiftZeroEtlConsumer;
     }
@@ -243,6 +251,7 @@ public class EmulatorLifecycle {
 
         serviceRegistry.logEnabledServices();
         storageFactory.loadAll();
+        cloudWatchMetricsService.buildMetricKeyIndex();
         int sweptSessions = iamService.sweepOrphanedLambdaExecutionRoleSessions();
         if (sweptSessions > 0) {
             LOG.infov("Removed {0} orphaned Lambda execution-role session(s)", sweptSessions);
@@ -288,6 +297,14 @@ public class EmulatorLifecycle {
                 LOG.warnv("ElastiCache Memcached restore failed: {0}", ex.getMessage());
                 return null;
             });
+        }
+        if (config.services().sagemaker().enabled()) {
+            // Restores every endpoint it can and throws the ones it could not, which must not stop Floci starting.
+            try {
+                sageMakerService.restorePersistedRuntime();
+            } catch (RuntimeException e) {
+                LOG.error("Failed to restore persisted SageMaker endpoints at startup", e);
+            }
         }
         if (config.services().elbv2().enabled()) {
             elbV2Service.restorePersistedRuntime();

@@ -14,7 +14,9 @@ import java.security.interfaces.RSAPublicKey;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -36,6 +38,15 @@ public class WebIdentityTokenVerifier {
 
     /** Tolerance for clock drift between Floci and a token minted elsewhere. */
     private static final long CLOCK_SKEW_SECONDS = 60;
+    /** The namespace AWS publishes a token's session tags under, whichever format they take. */
+    private static final String TAGS_CLAIM = "https://aws.amazon.com/tags";
+    private static final String FLATTENED_TAG_CLAIM = TAGS_CLAIM + "/principal_tags/";
+    /** The nested member, and the flattened claim, naming the keys to set as transitive. */
+    private static final String TRANSITIVE_KEYS = "transitive_tag_keys";
+    private static final String FLATTENED_TRANSITIVE_CLAIM = TAGS_CLAIM + "/" + TRANSITIVE_KEYS;
+    /** What a transitive tag key claim of any other shape is refused with, Floci's own wording. */
+    static final String TRANSITIVE_KEYS_MALFORMED =
+            "The web identity token's transitive tag keys do not read as an array of strings";
 
     private final ObjectMapper objectMapper;
 
@@ -121,7 +132,8 @@ public class WebIdentityTokenVerifier {
             throw new InvalidTokenException("The web identity token has no subject claim");
         }
 
-        return new WebIdentityToken(issuer, subject, audiences);
+        return new WebIdentityToken(issuer, subject, audiences, readPrincipalTags(claims),
+                readTransitiveTagKeys(claims));
     }
 
     private void verifyValidityWindow(JsonNode claims) throws InvalidTokenException {
@@ -153,6 +165,90 @@ public class WebIdentityTokenVerifier {
             LOG.debugv("Web identity token signature check failed: {0}", e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * The session tags the token passes, in either format AWS reads them in. The nested format
+     * puts them "under the principal_tags key" inside the {@code https://aws.amazon.com/tags}
+     * namespace; the flattened one, "compatible with identity providers that don't support nested
+     * objects in JWT claims", carries each as its own claim "with the prefix
+     * https://aws.amazon.com/tags/principal_tags/". Both "achieve the same result", so both are
+     * read, the flattened claims last for a token that somehow carries both.
+     *
+     * <p>A tag's value is one string: "each principal tag is a single string value", while the
+     * published nested example writes each as an array holding that one value, so a single-element
+     * array is read as the value it holds. Anything else is a multi-valued session tag, which "AWS
+     * STS does not support", and the token is refused rather than verified with that tag dropped:
+     * a tag a policy would have been evaluated with cannot go missing quietly.
+     */
+    private Map<String, String> readPrincipalTags(JsonNode claims) throws InvalidTokenException {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (Map.Entry<String, JsonNode> tag : claims.path(TAGS_CLAIM).path("principal_tags").properties()) {
+            tags.put(tag.getKey(), singleValue(tag.getKey(), tag.getValue()));
+        }
+        for (Map.Entry<String, JsonNode> claim : claims.properties()) {
+            if (!claim.getKey().startsWith(FLATTENED_TAG_CLAIM)) {
+                continue;
+            }
+            String key = claim.getKey().substring(FLATTENED_TAG_CLAIM.length());
+            if (key.isEmpty()) {
+                throw new InvalidTokenException("The web identity token carries a session tag with no key");
+            }
+            tags.put(key, singleValue(key, claim.getValue()));
+        }
+        return tags;
+    }
+
+    /**
+     * The keys the token asks to set as transitive, in the order the claim lists them, read in
+     * both formats as the tags are: nested, where "transitive tag keys are represented in an array
+     * under the transitive_tag_keys key" of the same namespace, and flattened, "in a single claim
+     * as an array of strings with the prefix https://aws.amazon.com/tags/transitive_tag_keys".
+     *
+     * <p>Both published examples write an array, and a lone string is read as the one key it names
+     * rather than refused, which is the same reading {@link #singleValue} gives a tag written
+     * without its array. A claim of any other shape, or one holding something that is not a
+     * string, is refused rather than read past: a key dropped quietly would leave a chained
+     * session short of a tag whose absence a policy can turn on. Which keys select a tag is the
+     * session's business, not this one's.
+     */
+    private static List<String> readTransitiveTagKeys(JsonNode claims) throws InvalidTokenException {
+        List<String> keys = new ArrayList<>();
+        readTransitiveKeysInto(claims.path(TAGS_CLAIM).path(TRANSITIVE_KEYS), keys);
+        readTransitiveKeysInto(claims.path(FLATTENED_TRANSITIVE_CLAIM), keys);
+        return keys;
+    }
+
+    private static void readTransitiveKeysInto(JsonNode claim, List<String> keys)
+            throws InvalidTokenException {
+        if (claim.isMissingNode() || claim.isNull()) {
+            return;
+        }
+        if (claim.isTextual()) {
+            keys.add(claim.asText());
+            return;
+        }
+        if (!claim.isArray()) {
+            throw new InvalidTokenException(TRANSITIVE_KEYS_MALFORMED);
+        }
+        for (JsonNode key : claim) {
+            if (!key.isTextual()) {
+                throw new InvalidTokenException(TRANSITIVE_KEYS_MALFORMED);
+            }
+            keys.add(key.asText());
+        }
+    }
+
+    /** The one value a tag claim carries, written as a string or as an array holding it alone. */
+    private static String singleValue(String key, JsonNode value) throws InvalidTokenException {
+        if (value.isTextual()) {
+            return value.asText();
+        }
+        if (value.isArray() && value.size() == 1 && value.get(0).isTextual()) {
+            return value.get(0).asText();
+        }
+        throw new InvalidTokenException("The web identity token's session tag " + key
+                + " does not carry a single value");
     }
 
     private List<String> readAudiences(JsonNode claims) {

@@ -1,13 +1,29 @@
 package io.floci.aws.core.common.docker;
 
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.core.DefaultDockerClientConfig;
+import com.github.dockerjava.transport.DockerHttpClient;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class DockerPoolGaugeLoggerTest {
 
     private static final FlociDockerHttpClient.PoolGauges IDLE =
@@ -47,26 +63,74 @@ class DockerPoolGaugeLoggerTest {
                 DockerPoolGaugeLogger.line(Map.of("control-plane", waiting), () -> 0));
     }
 
+    // Catches: a docker-java stream read on a platform thread of its own again, or the gauge losing count
+    // of the virtual ones, which no thread-group listing sees.
     @Test
-    void streamThreadsAreCountedByTheDockerJavaPrefix() throws InterruptedException {
-        int before = DockerPoolGaugeLogger.countStreamThreads();
-        Object release = new Object();
-        Thread thread = new Thread(() -> {
-            synchronized (release) {
-                try {
-                    release.wait();
-                } catch (InterruptedException expected) {
-                    // The test interrupts it once counted.
-                }
+    void aStreamCallbackRunsOnAVirtualThreadAndIsCountedWhileItRuns() throws Exception {
+        CountDownLatch inCallback = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicBoolean virtual = new AtomicBoolean();
+        byte[] frame = {1, 0, 0, 0, 0, 0, 0, 5, 'h', 'e', 'l', 'l', 'o'};
+        DockerHttpClient transport = new DockerHttpClient() {
+            @Override
+            public Response execute(Request request) {
+                return new Response() {
+                    @Override
+                    public int getStatusCode() {
+                        return 200;
+                    }
+
+                    @Override
+                    public Map<String, List<String>> getHeaders() {
+                        return Map.of();
+                    }
+
+                    @Override
+                    public InputStream getBody() {
+                        return new ByteArrayInputStream(frame);
+                    }
+
+                    @Override
+                    public void close() {
+                        // Nothing to release.
+                    }
+                };
             }
-        }, DockerPoolGaugeLogger.STREAM_THREAD_PREFIX + "test");
-        thread.setDaemon(true);
-        thread.start();
-        try {
+
+            @Override
+            public void close() {
+                // Nothing to release.
+            }
+        };
+        DefaultDockerClientConfig config = DefaultDockerClientConfig.createDefaultConfigBuilder()
+                .withDockerHost("tcp://127.0.0.1:2375").build();
+        int before = DockerPoolGaugeLogger.countStreamThreads();
+
+        try (DockerClient client = DockerClientProducer.newDockerClient(config, transport);
+             ResultCallback.Adapter<Frame> callback = client.logContainerCmd("c1").withStdOut(true)
+                     .withFollowStream(true).exec(new ResultCallback.Adapter<>() {
+                         @Override
+                         public void onNext(Frame received) {
+                             virtual.set(Thread.currentThread().isVirtual());
+                             inCallback.countDown();
+                             try {
+                                 release.await(5, TimeUnit.SECONDS);
+                             } catch (InterruptedException e) {
+                                 Thread.currentThread().interrupt();
+                             }
+                         }
+                     })) {
+            assertTrue(inCallback.await(5, TimeUnit.SECONDS), "the frame should reach the callback");
+            assertTrue(virtual.get(), "the stream callback should run on a virtual thread");
             assertEquals(before + 1, DockerPoolGaugeLogger.countStreamThreads());
-        } finally {
-            thread.interrupt();
-            thread.join(5_000);
+
+            release.countDown();
+            assertTrue(callback.awaitCompletion(5, TimeUnit.SECONDS));
         }
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (DockerPoolGaugeLogger.countStreamThreads() != before && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        assertEquals(before, DockerPoolGaugeLogger.countStreamThreads(), "an ended stream is no longer counted");
     }
 }

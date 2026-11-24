@@ -80,9 +80,11 @@ public class SageMakerRuntimeController {
             response.headers().firstValue("Content-Type").ifPresent(out::type);
             return out.build();
         } catch (Exception e) {
-            LOG.warnv("SageMaker endpoint invocation failed for {0}: {1}", endpointName, e.getMessage());
+            // A refused connection, as to an endpoint whose container is gone, carries no message.
+            String message = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            LOG.warnv("SageMaker endpoint invocation failed for {0}: {1}", endpointName, message);
             return Response.status(424).type(MediaType.APPLICATION_JSON)
-                    .entity(Map.of("__type", "ModelError", "message", e.getMessage())).build();
+                    .entity(Map.of("__type", "ModelError", "message", message)).build();
         }
     }
 

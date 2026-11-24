@@ -321,9 +321,9 @@ further divergences, both deliberate:
 - **`SUPPRESS`** sends nothing. **`RESEND`** sets the request's `TemporaryPassword`, or a
   generated one, and sends the invitation again.
 - **Delivery failure** returns `CodeDeliveryFailureException`, as `SignUp` does. The invitation is
-  sent before anything is stored, so a failed one creates no user, leaves a resent user's previous
-  temporary password working, and leaves a `ForceAliasCreation` alias with its holder. When one
-  medium fails and another delivers, the request succeeds.
+  sent before anything is stored, so a failed one creates no user and leaves a resent user's
+  previous temporary password working. When one medium fails and another delivers, the request
+  succeeds.
 - **CloudFormation:** `AWS::Cognito::UserPoolUser` has no `TemporaryPassword`, so its user gets a
   generated one, and the template's `DesiredDeliveryMediums`, `ValidationData` and `ClientMetadata`
   are passed on.
@@ -977,9 +977,9 @@ Floci follows real Cognito semantics for pools created with `UsernameAttributes`
   verifier, which has to use the `USER_ID_FOR_SRP` of the challenge, as AWS documents.
 - `AdminUpdateUserAttributes` can change the email; afterwards sign-in works with the new email and
   fails with the old one, while `Username`/`sub` stay fixed.
-- Duplicate email/phone on `AdminCreateUser`: `UsernameExistsException` when the incoming alias is
-  unverified, `AliasExistsException` when it is verified (`email_verified=true`); pass
-  `ForceAliasCreation=true` to migrate a verified alias off the previous owner. On
+- Duplicate email/phone on `AdminCreateUser`: `UsernameExistsException` ("User account already
+  exists"), as on AWS, whether or not either address is verified. `ForceAliasCreation=true` does not
+  move the address off the previous owner, because it is that user's username. On
   `AdminUpdateUserAttributes`, changing to an in-use alias throws `AliasExistsException`.
 
 Pools **without** `UsernameAttributes` (classic pools, and pools using `AliasAttributes`) keep the

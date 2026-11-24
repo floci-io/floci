@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
@@ -21,8 +23,6 @@ import static org.hamcrest.Matchers.nullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesIdentityPolicyV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String IDENTITY = "policy-v2.floci.test";
     private static final String BASE = "/v2/email/identities/" + IDENTITY + "/policies";
     private static final String DOC = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
@@ -34,7 +34,7 @@ class SesIdentityPolicyV2IntegrationTest {
     @Test
     @Order(0)
     void setup_createIdentity() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"EmailIdentity\": \"" + IDENTITY + "\"}")
         .when().post("/v2/email/identities")
         .then().statusCode(200);
@@ -43,7 +43,7 @@ class SesIdentityPolicyV2IntegrationTest {
     @Test
     @Order(1)
     void createPolicy_thenGet() {
-        given().contentType("application/json").header("Authorization", AUTH).body(policyBody(DOC))
+        v2().body(policyBody(DOC))
         .when().post(BASE + "/p1")
         .then().statusCode(200);
 
@@ -56,7 +56,7 @@ class SesIdentityPolicyV2IntegrationTest {
     @Test
     @Order(2)
     void createDuplicateName_throwsAlreadyExists() {
-        given().contentType("application/json").header("Authorization", AUTH).body(policyBody(DOC))
+        v2().body(policyBody(DOC))
         .when().post(BASE + "/p1")
         .then().statusCode(400)
                 .body("__type", equalTo("AlreadyExistsException"))
@@ -66,7 +66,7 @@ class SesIdentityPolicyV2IntegrationTest {
     @Test
     @Order(3)
     void createSameContentDifferentName_ok() {
-        given().contentType("application/json").header("Authorization", AUTH).body(policyBody(DOC))
+        v2().body(policyBody(DOC))
         .when().post(BASE + "/p2")
         .then().statusCode(200);
     }
@@ -75,7 +75,7 @@ class SesIdentityPolicyV2IntegrationTest {
     @Order(4)
     void updatePolicy_replaces() {
         String updated = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"X\"}]}";
-        given().contentType("application/json").header("Authorization", AUTH).body(policyBody(updated))
+        v2().body(policyBody(updated))
         .when().put(BASE + "/p1")
         .then().statusCode(200);
 
@@ -88,7 +88,7 @@ class SesIdentityPolicyV2IntegrationTest {
     @Test
     @Order(5)
     void updateMissing_throwsNotFound() {
-        given().contentType("application/json").header("Authorization", AUTH).body(policyBody(DOC))
+        v2().body(policyBody(DOC))
         .when().put(BASE + "/nope")
         .then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"))
@@ -121,7 +121,7 @@ class SesIdentityPolicyV2IntegrationTest {
     @Order(8)
     void operationsOnMissingIdentity_throwNotFound() {
         String ghost = "/v2/email/identities/ghost-v2.floci.test/policies";
-        given().contentType("application/json").header("Authorization", AUTH).body(policyBody(DOC))
+        v2().body(policyBody(DOC))
         .when().post(ghost + "/p")
         .then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"))
@@ -132,7 +132,7 @@ class SesIdentityPolicyV2IntegrationTest {
     @Test
     @Order(9)
     void invalidPolicyName_chars_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH).body(policyBody(DOC))
+        v2().body(policyBody(DOC))
         .when().post(BASE + "/bad%20name")
         .then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
@@ -143,7 +143,7 @@ class SesIdentityPolicyV2IntegrationTest {
     @Test
     @Order(10)
     void invalidPolicyName_tooLong_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH).body(policyBody(DOC))
+        v2().body(policyBody(DOC))
         .when().post(BASE + "/" + "a".repeat(65))
         .then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
@@ -156,11 +156,11 @@ class SesIdentityPolicyV2IntegrationTest {
     void perIdentityLimit_21stThrowsLimitExceeded() {
         // p1 already exists (Order 4). Fill to 20, then the 21st create fails.
         for (int i = 2; i <= 20; i++) {
-            given().contentType("application/json").header("Authorization", AUTH).body(policyBody(DOC))
+            v2().body(policyBody(DOC))
             .when().post(BASE + "/lp" + i)
             .then().statusCode(200);
         }
-        given().contentType("application/json").header("Authorization", AUTH).body(policyBody(DOC))
+        v2().body(policyBody(DOC))
         .when().post(BASE + "/overflow")
         .then().statusCode(400)
                 .body("__type", equalTo("LimitExceededException"))
@@ -173,17 +173,17 @@ class SesIdentityPolicyV2IntegrationTest {
     void deleteIdentity_purgesPolicies_noResurrectOnRecreate() {
         String id = "cascade.floci.test";
         String base = "/v2/email/identities/" + id + "/policies";
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"EmailIdentity\": \"" + id + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
-        given().contentType("application/json").header("Authorization", AUTH).body(policyBody(DOC))
+        v2().body(policyBody(DOC))
         .when().post(base + "/c1").then().statusCode(200);
 
         given().header("Authorization", AUTH)
         .when().delete("/v2/email/identities/" + id).then().statusCode(200);
 
         // Recreate the same-named identity: the old policy must not leak back in.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"EmailIdentity\": \"" + id + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
         given().header("Authorization", AUTH)
@@ -195,7 +195,7 @@ class SesIdentityPolicyV2IntegrationTest {
     @Order(13)
     void policyWrongType_returns400() {
         // Policy is a string field; a non-string must be rejected, not coerced to "123".
-        given().contentType("application/json").header("Authorization", AUTH).body("{\"Policy\": 123}")
+        v2().body("{\"Policy\": 123}")
         .when().post(BASE + "/wrongtype")
         .then().statusCode(400)
                 .body("__type", equalTo("SerializationException"));
@@ -206,10 +206,10 @@ class SesIdentityPolicyV2IntegrationTest {
     void policyMissingOrNull_returnsValidationError() {
         String expected = "1 validation error detected: Value at 'policy' failed to satisfy "
                 + "constraint: Member must not be null";
-        given().contentType("application/json").header("Authorization", AUTH).body("{}")
+        v2().body("{}")
         .when().post(BASE + "/missing")
         .then().statusCode(400).body("message", equalTo(expected));
-        given().contentType("application/json").header("Authorization", AUTH).body("{\"Policy\": null}")
+        v2().body("{\"Policy\": null}")
         .when().post(BASE + "/nullpol")
         .then().statusCode(400).body("message", equalTo(expected));
     }

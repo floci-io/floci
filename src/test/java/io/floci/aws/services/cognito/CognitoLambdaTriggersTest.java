@@ -26,10 +26,12 @@ import io.floci.aws.services.ses.model.EmailContent;
 import io.floci.aws.services.ses.model.SendEmailRequest;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.NullSource;
@@ -86,6 +88,7 @@ import static org.mockito.Mockito.when;
  * triggerSource, and that their responses are correctly applied to the auth flow.
  */
 @Execution(ExecutionMode.CONCURRENT)
+@ResourceLock(ParallelLocks.PORTS)
 class CognitoLambdaTriggersTest {
     private static final List<String> AUTH_FLOWS = List.of("ALLOW_USER_PASSWORD_AUTH",
             "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_CUSTOM_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH");
@@ -832,30 +835,6 @@ class CognitoLambdaTriggersTest {
     }
 
     @Test
-    void preSignUpLambdaErrorOnForcedAliasCreationKeepsTheExistingAlias() {
-        Map<String, Object> poolRequest = new HashMap<>();
-        poolRequest.put("PoolName", "alias-trigger-pool");
-        poolRequest.put("UsernameAttributes", List.of("email"));
-        poolRequest.put("LambdaConfig", Map.of("PreSignUp", "arn:aws:lambda:::pre-signup"));
-        UserPool pool = service.createUserPool(poolRequest, "us-east-1");
-        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
-                any(byte[].class), any()))
-                .thenReturn(ok(Map.of()))
-                .thenReturn(lambdaError("Unhandled", "Refused"));
-        CognitoUser holder = service.adminCreateUser(pool.getId(), "alice@example.com",
-                Map.of("email_verified", "true"), null, "SUPPRESS");
-
-        AwsException ex = assertThrows(AwsException.class, () ->
-                service.adminCreateUser(pool.getId(), "alice@example.com",
-                        Map.of("email_verified", "true"), null, "SUPPRESS", true));
-        assertEquals("UserLambdaValidationException", ex.getErrorCode());
-
-        CognitoUser after = service.adminGetUser(pool.getId(), holder.getUsername());
-        assertEquals("alice@example.com", after.getAttributes().get("email"));
-        assertEquals("true", after.getAttributes().get("email_verified"));
-    }
-
-    @Test
     void preSignUpFunctionCallingBackForTheSameUsernameIsNotBlocked() {
         UserPool pool = createPoolWithLambdaConfig(Map.of("PreSignUp", "arn:aws:lambda:::pre-signup"));
         AtomicReference<Throwable> callbackFailure = new AtomicReference<>();
@@ -914,7 +893,7 @@ class CognitoLambdaTriggersTest {
             AwsException second = assertThrows(AwsException.class, () -> service.adminCreateUser(pool.getId(),
                     "alice", Map.of("name", "second"), null, "SUPPRESS"));
             assertEquals("UsernameExistsException", second.getErrorCode());
-            assertEquals("User already exists", second.getMessage());
+            assertEquals("User account already exists", second.getMessage());
 
             releaseFirst.countDown();
             assertEquals("alice", first.get(10, TimeUnit.SECONDS).getUsername());
@@ -971,66 +950,6 @@ class CognitoLambdaTriggersTest {
 
         assertEquals(List.of("first", "retry"), invokedFor);
         assertEquals("retry", service.adminGetUser(pool.getId(), "alice").getAttributes().get("name"));
-    }
-
-    @Test
-    void forcedAliasCreationDoesNotRestoreAHolderThePreSignUpFunctionDeleted() {
-        UserPool pool = createEmailUsernamePoolWithPreSignUp();
-        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
-                any(byte[].class), any()))
-                .thenReturn(ok(Map.of()))
-                .thenAnswer(invocation -> {
-                    callFromFunction(() -> {
-                        service.adminDeleteUser(pool.getId(), "alice@example.com");
-                        return null;
-                    });
-                    return ok(Map.of());
-                });
-        CognitoUser holder = service.adminCreateUser(pool.getId(), "alice@example.com",
-                Map.of("email_verified", "true"), null, "SUPPRESS");
-
-        CognitoUser created = service.adminCreateUser(pool.getId(), "alice@example.com",
-                Map.of("email_verified", "true"), null, "SUPPRESS", true);
-
-        AwsException lookup = assertThrows(AwsException.class, () ->
-                service.adminGetUser(pool.getId(), holder.getUsername()));
-        assertEquals("UserNotFoundException", lookup.getErrorCode());
-        assertEquals(created.getUsername(),
-                service.adminGetUser(pool.getId(), "alice@example.com").getUsername());
-    }
-
-    @Test
-    void forcedAliasCreationKeepsTheEmailThePreSignUpFunctionGaveTheHolder() {
-        UserPool pool = createEmailUsernamePoolWithPreSignUp();
-        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
-                any(byte[].class), any()))
-                .thenReturn(ok(Map.of()))
-                .thenAnswer(invocation -> {
-                    callFromFunction(() -> {
-                        service.adminUpdateUserAttributes(pool.getId(), "alice@example.com",
-                                Map.of("email", "alice.new@example.com"));
-                        return null;
-                    });
-                    return ok(Map.of());
-                });
-        CognitoUser holder = service.adminCreateUser(pool.getId(), "alice@example.com",
-                Map.of("email_verified", "true"), null, "SUPPRESS");
-
-        CognitoUser created = service.adminCreateUser(pool.getId(), "alice@example.com",
-                Map.of("email_verified", "true"), null, "SUPPRESS", true);
-
-        assertEquals("alice.new@example.com",
-                service.adminGetUser(pool.getId(), holder.getUsername()).getAttributes().get("email"));
-        assertEquals(created.getUsername(),
-                service.adminGetUser(pool.getId(), "alice@example.com").getUsername());
-    }
-
-    private UserPool createEmailUsernamePoolWithPreSignUp() {
-        Map<String, Object> poolRequest = new HashMap<>();
-        poolRequest.put("PoolName", "alias-trigger-pool");
-        poolRequest.put("UsernameAttributes", List.of("email"));
-        poolRequest.put("LambdaConfig", Map.of("PreSignUp", "arn:aws:lambda:::pre-signup"));
-        return service.createUserPool(poolRequest, "us-east-1");
     }
 
     /**

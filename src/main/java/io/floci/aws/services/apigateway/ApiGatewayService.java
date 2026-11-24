@@ -1775,6 +1775,15 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 .toList();
     }
 
+    /**
+     * One {@code GetUsagePlans} page: the {@code keyId}-filtered plans, paged by {@code limit} and
+     * {@code position} like the other API Gateway collections.
+     */
+    public PaginatedResult<UsagePlan> getUsagePlanPage(String region, String keyId, Integer limit,
+                                                       String position) {
+        return pageById(getUsagePlans(region, keyId), UsagePlan::getId, limit, position);
+    }
+
     /** Its key associations go with it, or a plan recreated with its id would inherit the old keys. */
     public void deleteUsagePlan(String region, String usagePlanId) {
         synchronized (usagePlanLock) {
@@ -2506,6 +2515,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         getRestApi(region, apiId);
         String prefix = region + "::" + apiId + "::";
         return modelStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public PaginatedResult<Model> getModelPage(String region, String apiId, Integer limit, String position) {
+        return pageById(getModels(region, apiId), Model::getId, limit, position);
     }
 
     public void deleteModel(String region, String apiId, String modelName) {
@@ -5281,6 +5294,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     public List<VpcLink> getVpcLinks(String region) {
         return vpcLinkStore.scan(k -> k.startsWith(region + "::"));
+    }
+
+    public PaginatedResult<VpcLink> getVpcLinkPage(String region, Integer limit, String position) {
+        return pageById(getVpcLinks(region), VpcLink::getId, limit, position);
     }
 
     /**

@@ -35,7 +35,7 @@ public class AccountService implements Resettable, StoredResourceArns, AccountPl
     private static final String ACCOUNT_NAME_KEY = "name";
     private static final String ACCOUNT_STATE_ACTIVE = "ACTIVE";
     private static final String JOINED_METHOD_CREATED = "CREATED";
-    private static final String ORGANIZATIONS_STATUS_PENDING_CLOSURE = "PENDING_CLOSURE";
+    private static final String ORGANIZATIONS_STATE_PENDING_CLOSURE = "PENDING_CLOSURE";
 
     private final AccountAwareStorageBackend<AlternateContact> contacts;
     private final AccountAwareStorageBackend<ContactInformation> contactInformation;
@@ -154,10 +154,11 @@ public class AccountService implements Resettable, StoredResourceArns, AccountPl
         Instant created = JOINED_METHOD_CREATED.equals(account.getJoinedMethod())
                 ? account.getJoinedTimestamp()
                 : null;
-        // Account Management has no PENDING_CLOSURE, and such an account is still usable.
-        String state = ORGANIZATIONS_STATUS_PENDING_CLOSURE.equals(account.getStatus())
+        // Account Management has no PENDING_CLOSURE, which only an account closed by an earlier Floci still has.
+        String organizationsState = OrganizationsService.accountState(account);
+        String state = ORGANIZATIONS_STATE_PENDING_CLOSURE.equals(organizationsState)
                 ? ACCOUNT_STATE_ACTIVE
-                : account.getStatus();
+                : organizationsState;
         return new AccountInformation(account.getId(), account.getName(), created, state);
     }
 

@@ -2,8 +2,11 @@ package io.floci.aws.services.redshift.spectrum;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.glue.GlueService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.Optional;
@@ -11,6 +14,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SpectrumQueryPreparationTest {
     private static final SpectrumSession SESSION = new SpectrumSession("000000000000", "000000000000:c",
             "dev", List.of(), false);

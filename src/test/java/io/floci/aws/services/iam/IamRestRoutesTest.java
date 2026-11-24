@@ -25,8 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class IamRestRoutesTest {
 
     private static final String ROUTES = """
-            {"handRouted": {"hand": "the rules route it alone"},
-             "models": {
+            {"models": {
                "svc": {"credentialScope": "svc", "operations": {
                  "ListThings": {"method": "GET", "requestUri": "/things/"},
                  "GetThing": {"method": "GET", "requestUri": "/things/{ThingName}"},
@@ -40,9 +39,6 @@ class IamRestRoutesTest {
                  "ListVersionsV2": {"method": "GET", "requestUri": "/versions?list-type=2"},
                  "ValidateThing": {"method": "GET", "requestUri": "/from.data/validation"},
                  "GetRoot": {"method": "GET", "requestUri": "/"}
-               }},
-               "hand": {"credentialScope": "hand", "operations": {
-                 "Ping": {"method": "GET", "requestUri": "/ping"}
                }}
              }}""";
 
@@ -143,7 +139,7 @@ class IamRestRoutesTest {
     void denialStatusComesFromTheModelAndFallsBackWhenMissing() {
         IamRestRoutes modelled = routes(ROUTES.replace("\"credentialScope\": \"svc\"", "\"credentialScope\": \"svc\", \"accessDeniedStatus\": 402"));
         assertEquals(402, modelled.accessDeniedStatus("svc", 403));
-        assertEquals(403, modelled.accessDeniedStatus("hand", 403));
+        assertEquals(403, modelled.accessDeniedStatus("other", 403));
         assertEquals(400, modelled.accessDeniedStatus("unknown", 400));
         assertEquals(403, modelled.accessDeniedStatus(null, 403));
     }
@@ -157,8 +153,13 @@ class IamRestRoutesTest {
 
     @Test
     void modelsSharingAScopeMustAgreeOnTheDenialStatus() {
-        String document = ROUTES.replace("\"credentialScope\": \"svc\"", "\"credentialScope\": \"svc\", \"accessDeniedStatus\": 401")
-                .replace("\"credentialScope\": \"hand\"", "\"credentialScope\": \"svc\", \"accessDeniedStatus\": 403");
+        String document = """
+                {"models": {
+                   "one": {"credentialScope": "svc", "accessDeniedStatus": 401,
+                           "operations": {"GetOne": {"method": "GET", "requestUri": "/one"}}},
+                   "two": {"credentialScope": "svc", "accessDeniedStatus": 403,
+                           "operations": {"GetTwo": {"method": "GET", "requestUri": "/two"}}}
+                 }}""";
         assertThrows(IllegalStateException.class, () -> routes(document));
     }
 
@@ -210,6 +211,57 @@ class IamRestRoutesTest {
                 query("list-type", "1")));
     }
 
+    /**
+     * Operations sharing a route are told apart by what botocore requires their request to carry: S3's UploadPart, on
+     * {@code PUT /{Bucket}/{Key+}} with PutObject, requires {@code partNumber} and {@code uploadId}, and CopyObject the
+     * {@code x-amz-copy-source} header. The route requiring more wins when the request carries it all, a header is
+     * matched whatever its case, and with no headers known a route requiring one cannot be told to match.
+     */
+    @Test
+    void operationsSharingARouteAreToldApartByWhatTheirRequestMustCarry() {
+        IamRestRoutes table = routes("""
+                {"models": {"objects": {"credentialScope": "obj", "operations": {
+                  "PutObject": {"method": "PUT", "requestUri": "/{Bucket}/{Key+}"},
+                  "CopyObject": {"method": "PUT", "requestUri": "/{Bucket}/{Key+}",
+                                 "requires": {"headers": ["x-amz-copy-source"]}},
+                  "UploadPart": {"method": "PUT", "requestUri": "/{Bucket}/{Key+}",
+                                 "requires": {"query": ["partNumber", "uploadId"]}},
+                  "UploadPartCopy": {"method": "PUT", "requestUri": "/{Bucket}/{Key+}",
+                                     "requires": {"query": ["partNumber", "uploadId"], "headers": ["x-amz-copy-source"]}}
+                }}}}""");
+        MultivaluedMap<String, String> part = query("partNumber", "1");
+        part.add("uploadId", "u");
+        MultivaluedMap<String, String> copy = new MultivaluedHashMap<>();
+        copy.add("X-Amz-Copy-Source", "b/k");
+        MultivaluedMap<String, String> none = new MultivaluedHashMap<>();
+        assertEquals(Optional.of("PutObject"), operation(table, null, none));
+        assertEquals(Optional.of("CopyObject"), operation(table, null, copy));
+        assertEquals(Optional.of("UploadPart"), operation(table, part, none));
+        assertEquals(Optional.of("UploadPartCopy"), operation(table, part, copy));
+        // One of the two query parameters is not enough, and without headers a copy is read as the plain write.
+        assertEquals(Optional.of("PutObject"), operation(table, query("partNumber", "1"), none));
+        assertEquals(Optional.of("PutObject"), table.operation("obj", "PUT", "/b/k", null));
+        assertEquals(Optional.of("objects"), table.match("obj", "PUT", "/b/k", null, false, copy)
+                .map(IamRestRoutes.Match::model));
+    }
+
+    /** A deprecated operation yields to the current one of the same route and conditions. */
+    @Test
+    void aDeprecatedOperationYieldsToTheCurrentOneOfItsRoute() {
+        IamRestRoutes table = routes("""
+                {"models": {"objects": {"credentialScope": "obj", "operations": {
+                  "GetBucketLifecycle": {"method": "GET", "requestUri": "/{Bucket}?lifecycle", "deprecated": true},
+                  "GetBucketLifecycleConfiguration": {"method": "GET", "requestUri": "/{Bucket}?lifecycle"}
+                }}}}""");
+        assertEquals(Optional.of("GetBucketLifecycleConfiguration"),
+                table.operation("obj", "GET", "/b", query("lifecycle", "")));
+    }
+
+    private static Optional<String> operation(IamRestRoutes table, MultivaluedMap<String, String> query,
+                                              MultivaluedMap<String, String> headers) {
+        return table.match("obj", "PUT", "/b/k", query, false, headers).map(IamRestRoutes.Match::operation);
+    }
+
     /** A trailing slash is dropped, as the router drops it, and an encoded slash stays inside its label. */
     @Test
     void aPathIsReadAsTheRouterMatchedIt() {
@@ -248,14 +300,16 @@ class IamRestRoutesTest {
     }
 
     @Test
-    void aRequestOfAnotherMethodOrScopeOrOfAHandRoutedScopeMatchesNothing() {
+    void aRequestOfAnotherMethodOrScopeMatchesNothing() {
         assertEquals(Optional.empty(), routes.operation("svc", "DELETE", "/things/web", null));
         assertEquals(Optional.empty(), routes.operation("other", "GET", "/things/web", null));
-        assertEquals(Optional.empty(), routes.operation("hand", "GET", "/ping", null));
         assertEquals(Optional.empty(), get("/nothing"));
     }
 
-    /** The vendored routes load, a model routed under the scope it signs with, and S3 is left to its rules. */
+    /**
+     * The vendored routes load, a model routed under the scope it signs with: S3 and S3 Control under the s3 scope, a
+     * route several operations share told apart by what each requires.
+     */
     @Test
     void theVendoredRoutesAreRead() {
         assertEquals(Optional.of("GetFunction"),
@@ -266,11 +320,36 @@ class IamRestRoutesTest {
                 IamRestRoutes.vendored().operation("es", "GET", "/2021-01-01/opensearch/domain/logs", null));
         assertEquals(Optional.of("DescribeElasticsearchDomain"),
                 IamRestRoutes.vendored().operation("es", "GET", "/2015-01-01/es/domain/logs", null));
-        assertEquals(Optional.empty(), IamRestRoutes.vendored().operation("s3", "GET", "/bucket", null));
+        assertEquals(Optional.of("ListObjects"), IamRestRoutes.vendored().operation("s3", "GET", "/bucket", null));
+        MultivaluedMap<String, String> upload = new MultivaluedHashMap<>();
+        upload.add("uploadId", "u");
+        assertEquals(Optional.of("ListParts"), IamRestRoutes.vendored().operation("s3", "GET", "/bucket/key", upload));
+        assertEquals(Optional.of("GetPublicAccessBlock"), IamRestRoutes.vendored()
+                .match("s3", "GET", "/v20180820/configuration/publicAccessBlock", null)
+                .filter(match -> "s3control".equals(match.model())).map(IamRestRoutes.Match::operation));
+    }
+
+    /**
+     * A request two operations' routes take alike, none outranking the other, is ambiguous: one naming two of S3's
+     * sub-resources. One a route requiring more takes over one requiring less is not.
+     */
+    @Test
+    void aRequestTwoOperationsRoutesTakeAlikeIsAmbiguous() {
+        MultivaluedMap<String, String> both = new MultivaluedHashMap<>();
+        both.add("cors", "");
+        both.add("policy", "");
+        assertTrue(IamRestRoutes.vendored().ambiguous("s3", "PUT", "/bucket", both, false, null));
+        MultivaluedMap<String, String> one = new MultivaluedHashMap<>();
+        one.add("cors", "");
+        assertFalse(IamRestRoutes.vendored().ambiguous("s3", "PUT", "/bucket", one, false, null));
+        MultivaluedMap<String, String> part = new MultivaluedHashMap<>();
+        part.add("partNumber", "1");
+        part.add("uploadId", "u");
+        assertFalse(IamRestRoutes.vendored().ambiguous("s3", "PUT", "/bucket/key", part, false, null));
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"", "{}", "{\"models\":[]}", "{\"handRouted\": {}, \"models\":{}}"})
+    @ValueSource(strings = {"", "{}", "{\"models\":[]}", "{\"models\":{}}"})
     void missingRouteDataFailsRatherThanProvidingAnEmptyAuthorizationTable(String document) {
         assertThrows(IllegalStateException.class, () -> routes(document));
     }
@@ -278,14 +357,13 @@ class IamRestRoutesTest {
     @Test
     void aMalformedFileFailsToLoad() {
         for (String bad : List.of("{\"models\": {\"svc\": {\"credentialScope\": \"svc\", \"operations\": {}}}}",
-                "{\"handRouted\": {}, \"models\": {\"svc\": {\"credentialScope\": \"svc\", \"operations\": {}}}}",
-                "{\"handRouted\": {}, \"models\": {\"svc\": {\"operations\": {}}}}",
-                "{\"handRouted\": {}, \"models\": {\"svc\": {\"credentialScope\": \"svc\"}}}",
-                "{\"handRouted\": {}, \"models\": {\"svc\": {\"credentialScope\": \"svc\", \"operations\": "
+                "{\"models\": {\"svc\": {\"operations\": {}}}}",
+                "{\"models\": {\"svc\": {\"credentialScope\": \"svc\"}}}",
+                "{\"models\": {\"svc\": {\"credentialScope\": \"svc\", \"operations\": "
                         + "{\"Op\": {\"requestUri\": \"/op\"}}}}}",
-                "{\"handRouted\": {}, \"models\": {\"svc\": {\"credentialScope\": \"svc\", \"operations\": "
+                "{\"models\": {\"svc\": {\"credentialScope\": \"svc\", \"operations\": "
                         + "{\"Op\": {\"method\": \"INVALID\", \"requestUri\": \"/op\"}}}}}",
-                "{\"handRouted\": {}, \"models\": {\"svc\": {\"credentialScope\": \"svc\", \"operations\": "
+                "{\"models\": {\"svc\": {\"credentialScope\": \"svc\", \"operations\": "
                         + "{\"Op\": {\"method\": \"GET\", \"requestUri\": \"op\"}}}}}")) {
             assertThrows(IllegalStateException.class, () -> routes(bad), bad);
         }

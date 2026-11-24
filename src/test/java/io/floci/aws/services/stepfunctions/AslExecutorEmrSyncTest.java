@@ -94,13 +94,13 @@ class AslExecutorEmrSyncTest {
 
         assertEquals("FAILED", execution.getStatus());
         assertEquals("States.Timeout", execution.getError());
-        verify(emrService).cancelSteps(CLUSTER_ID, List.of(STEP_ID));
+        verify(emrService).cancelSteps(CLUSTER_ID, List.of(STEP_ID), null);
     }
 
     @Test
     void addStepSyncStillTimesOutWhenEmrNoLongerHasTheCluster() {
         when(emrService.describeStep(CLUSTER_ID, STEP_ID)).thenReturn(step("RUNNING"));
-        when(emrService.cancelSteps(CLUSTER_ID, List.of(STEP_ID))).thenThrow(new AwsException(
+        when(emrService.cancelSteps(CLUSTER_ID, List.of(STEP_ID), null)).thenThrow(new AwsException(
                 "InvalidRequestException", "Cluster id 'j-SYNCTEST00001' is not valid.", 400));
 
         Execution execution = run("""
@@ -110,13 +110,13 @@ class AslExecutorEmrSyncTest {
 
         // Best effort: nothing left to cancel leaves the Task ending as it was.
         assertEquals("States.Timeout", execution.getError());
-        verify(emrService).cancelSteps(CLUSTER_ID, List.of(STEP_ID));
+        verify(emrService).cancelSteps(CLUSTER_ID, List.of(STEP_ID), null);
     }
 
     @Test
     void addStepSyncStillTimesOutWhenEmrWillNotCancelTheStep() {
         when(emrService.describeStep(CLUSTER_ID, STEP_ID)).thenReturn(step("RUNNING"));
-        when(emrService.cancelSteps(CLUSTER_ID, List.of(STEP_ID))).thenReturn(List.of(
+        when(emrService.cancelSteps(CLUSTER_ID, List.of(STEP_ID), null)).thenReturn(List.of(
                 new EmrService.CancelStepInfo(STEP_ID, "FAILED", "Step is not in a cancellable state: RUNNING")));
 
         Execution execution = run("""
@@ -126,13 +126,13 @@ class AslExecutorEmrSyncTest {
 
         // A step EMR will not cancel comes back FAILED in an answer that succeeds, which the cleanup passes over.
         assertEquals("States.Timeout", execution.getError());
-        verify(emrService).cancelSteps(CLUSTER_ID, List.of(STEP_ID));
+        verify(emrService).cancelSteps(CLUSTER_ID, List.of(STEP_ID), null);
     }
 
     @Test
     void anInternalErrorCancellingTheStepFailsTheTaskWithIt() {
         when(emrService.describeStep(CLUSTER_ID, STEP_ID)).thenReturn(step("RUNNING"));
-        when(emrService.cancelSteps(CLUSTER_ID, List.of(STEP_ID)))
+        when(emrService.cancelSteps(CLUSTER_ID, List.of(STEP_ID), null))
                 .thenThrow(new AwsException("InternalServerException", "Request processing failed", 500));
 
         Execution execution = run("""
@@ -157,7 +157,7 @@ class AslExecutorEmrSyncTest {
         JsonNode cause = objectMapper.readTree(execution.getCause());
         assertEquals(STEP_ID, cause.path("Step").path("Id").asText());
         assertEquals("FAILED", cause.path("Step").path("Status").path("State").asText());
-        verify(emrService, never()).cancelSteps(any(), any());
+        verify(emrService, never()).cancelSteps(any(), any(), any());
     }
 
     @Test

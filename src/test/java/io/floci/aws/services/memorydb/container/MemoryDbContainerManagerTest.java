@@ -7,8 +7,11 @@ import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
@@ -43,6 +46,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class MemoryDbContainerManagerTest {
 
     @Test
@@ -262,12 +266,12 @@ class MemoryDbContainerManagerTest {
                 assertEquals(List.of("floci-aws-memorydb-cache",
                         "floci-aws-memorydb-111111111111-eu-west-1-same",
                         "floci-aws-memorydb-111111111111_eu-west-1_same"), names.getAllValues());
-                verify(logs).attach("default-cid", "/aws/memorydb/cluster/cache/engine-log", "engine",
+                verify(logs).attachPolled("default-cid", "/aws/memorydb/cluster/cache/engine-log", "engine",
                         "us-east-1", "memorydb:" + defaultIdentity);
-                verify(logs).attach("collision-cid",
+                verify(logs).attachPolled("collision-cid",
                         "/aws/memorydb/cluster/111111111111-eu-west-1-same/engine-log", "engine",
                         "us-east-1", "memorydb:" + collisionIdentity);
-                verify(logs).attach("foreign-cid",
+                verify(logs).attachPolled("foreign-cid",
                         "/aws/memorydb/cluster/111111111111-eu-west-1-same/engine-log", "engine",
                         "eu-west-1", "memorydb:" + foreignIdentity);
                 responder.get(5, TimeUnit.SECONDS);

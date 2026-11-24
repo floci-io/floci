@@ -173,6 +173,11 @@ public class CloudMapService implements StoredResourceArns {
         return requireNamespace(id);
     }
 
+    /** Whether a namespace is a DNS one, public or private, whose service names are DNS labels. */
+    public static boolean isDnsNamespace(Namespace namespace) {
+        return "DNS_PRIVATE".equals(namespace.getType()) || "DNS_PUBLIC".equals(namespace.getType());
+    }
+
     public List<Namespace> listNamespaces(String region) {
         List<Namespace> result = new ArrayList<>();
         for (Namespace n : scan(namespaceStore)) {
@@ -235,14 +240,11 @@ public class CloudMapService implements StoredResourceArns {
             // DnsConfig may carry the namespace id when the top-level field is absent.
             resolvedNamespaceId = dnsConfigNode.path("NamespaceId").textValue();
         }
-        Namespace namespace = resolvedNamespaceId == null ? null : requireNamespace(resolvedNamespaceId);
-        boolean dnsNamespace = namespace != null && ("DNS_PRIVATE".equals(namespace.getType())
-                || "DNS_PUBLIC".equals(namespace.getType()));
+        if (resolvedNamespaceId != null) {
+            requireNamespace(resolvedNamespaceId);
+        }
         final String nsId = resolvedNamespaceId;
-        boolean exists = scan(serviceStore).stream()
-                .anyMatch(s -> region.equals(s.getRegion()) && Objects.equals(nsId, s.getNamespaceId())
-                        && (dnsNamespace ? name.equalsIgnoreCase(s.getName()) : name.equals(s.getName())));
-        if (exists) {
+        if (findServiceByName(name, nsId, region).isPresent()) {
             throw new AwsException("ServiceAlreadyExists",
                     "A service named \"" + name + "\" already exists.", 400);
         }
@@ -276,6 +278,19 @@ public class CloudMapService implements StoredResourceArns {
 
     public Service getService(String id) {
         return requireService(id);
+    }
+
+    /**
+     * The service named {@code name} in the namespace {@code namespaceId} of {@code region}, of
+     * which there is at most one. A DNS namespace compares names without case, as DNS labels are.
+     */
+    public Optional<Service> findServiceByName(String name, String namespaceId, String region) {
+        Namespace namespace = namespaceId == null ? null : namespaceStore.get(namespaceId).orElse(null);
+        boolean dnsNamespace = namespace != null && isDnsNamespace(namespace);
+        return scan(serviceStore).stream()
+                .filter(s -> region.equals(s.getRegion()) && Objects.equals(namespaceId, s.getNamespaceId())
+                        && (dnsNamespace ? name.equalsIgnoreCase(s.getName()) : name.equals(s.getName())))
+                .findFirst();
     }
 
     public List<Service> listServices(String region, String namespaceIdFilter) {
@@ -351,7 +366,7 @@ public class CloudMapService implements StoredResourceArns {
         }
         if (dnsRecordTtl(service, "SRV") >= 0 && service.getNamespaceId() != null) {
             Namespace namespace = requireNamespace(service.getNamespaceId());
-            if ("DNS_PRIVATE".equals(namespace.getType()) || "DNS_PUBLIC".equals(namespace.getType())) {
+            if (isDnsNamespace(namespace)) {
                 try {
                     DnsRecord.encodeName(instanceId + "." + service.getName() + "." + namespace.getName());
                 } catch (IllegalArgumentException e) {
@@ -745,7 +760,7 @@ public class CloudMapService implements StoredResourceArns {
     private List<Namespace> dnsNamespacesByLongestName() {
         return scan(namespaceStore).stream()
                 .filter(n -> n.getName() != null && !n.getName().isBlank())
-                .filter(n -> "DNS_PRIVATE".equals(n.getType()) || "DNS_PUBLIC".equals(n.getType()))
+                .filter(CloudMapService::isDnsNamespace)
                 .sorted(Comparator.comparingInt((Namespace n) -> n.getName().length()).reversed())
                 .toList();
     }

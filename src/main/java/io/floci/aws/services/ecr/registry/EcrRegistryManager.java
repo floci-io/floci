@@ -36,10 +36,12 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
@@ -65,7 +67,9 @@ public class EcrRegistryManager {
     private static final int REPOSITORY_DELETION_KILL_GRACE_SECONDS = 1;
     private static final String NAMED_VOLUME = "ecr-registry-data";
     private static final String REPOSITORIES_PATH = "/var/lib/registry/docker/registry/v2/repositories/";
+    private static final Pattern REVISION_LINK = Pattern.compile(".*/_manifests/revisions/sha256/([a-f0-9]{64})/link");
     private static final int GC_KILL_GRACE_SECONDS = 2;
+    static final long RECONCILE_RETRY_MILLIS = 30_000;
 
     /**
      * Matches an AWS-shaped ECR image URI in any partition:
@@ -112,6 +116,8 @@ public class EcrRegistryManager {
     private volatile boolean started;
     private volatile boolean ready;
     private volatile boolean reconciled;
+    /** When a reconcile retry last failed, by {@link #clock}; 0 while none has. */
+    private volatile long reconcileRetryFailedAt;
     // Bug #6150: Track active garbage collection window
     private volatile boolean garbageCollecting;
     private final Object writeAdmissionLock = new Object();
@@ -403,6 +409,33 @@ public class EcrRegistryManager {
     }
 
     /**
+     * Reads the catalog into the reconcile hook again when the read at start failed, so a
+     * registry that answered its health check but not its catalog does not leave the
+     * repositories it holds without metadata. A no-op once a read succeeded, with no hook,
+     * or before the registry started. A retry that fails waits {@link #RECONCILE_RETRY_MILLIS}
+     * before the next, so a lookup made meanwhile does not pay a catalog read each time.
+     *
+     * <p>Holds the monitor {@link #ensureStarted()} and the storage deletes take, so the
+     * hook's metadata writes cannot interleave with a forced repository delete.
+     */
+    public synchronized void ensureCatalogReconciled() {
+        if (reconciled || reconcileHook == null || !started) {
+            return;
+        }
+        long now = clock.millis();
+        if (reconcileRetryFailedAt != 0 && now - reconcileRetryFailedAt < RECONCILE_RETRY_MILLIS) {
+            return;
+        }
+        runReconcileOnce();
+        reconcileRetryFailedAt = reconciled ? 0 : now;
+    }
+
+    /** Whether the registry's catalog has been read into the reconcile hook since it started. */
+    public boolean isCatalogReconciled() {
+        return reconciled;
+    }
+
+    /**
      * Attempts {@link #ensureStarted()} and reports whether the backing registry is
      * usable, instead of propagating the failure. Callers that only need repository
      * metadata (ARN, URI, tags) use this so ECR's control plane keeps working when
@@ -468,6 +501,9 @@ public class EcrRegistryManager {
             registryAddress = null;
             started = false;
             ready = false;
+            // The recovered registry's catalog is read again: it can hold images the one read before did not.
+            reconciled = false;
+            reconcileRetryFailedAt = 0;
             if (presence == ContainerPresence.ABSENT) {
                 portAllocator.release(hostPort);
                 hostPort = config.services().ecr().registryBasePort();
@@ -539,6 +575,7 @@ public class EcrRegistryManager {
                 .withLoopbackPortBinding(CONTAINER_INTERNAL_PORT, port)
                 .withDockerNetwork(resolveRegistryDockerNetwork())
                 .withLogRotation()
+                .withPushedLogs()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "ecr", null, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
         addPersistenceMounts(specBuilder, env);
@@ -597,8 +634,8 @@ public class EcrRegistryManager {
         String region = regionResolver.getDefaultRegion();
 
         this.logStream = adopted
-                ? logStreamer.attachFromNow(containerId, logGroup, logStreamName, region, "ecr:registry")
-                : logStreamer.attach(containerId, logGroup, logStreamName, region, "ecr:registry");
+                ? logStreamer.attachPolledFromNow(containerId, logGroup, logStreamName, region, "ecr:registry")
+                : logStreamer.attachPolled(containerId, logGroup, logStreamName, region, "ecr:registry");
     }
 
     private void closeLogStream() {
@@ -630,7 +667,9 @@ public class EcrRegistryManager {
             return;
         }
         try {
-            List<String> repos = httpClient().catalog();
+            // The strict read: a catalog the registry failed to give is not an empty one, and taking
+            // it as one would leave the repositories it holds without metadata.
+            List<String> repos = httpClient().catalogStrict();
             reconcileHook.accept(repos);
             reconciled = true;
         } catch (Exception e) {
@@ -804,13 +843,47 @@ public class EcrRegistryManager {
             throw new IllegalStateException("ECR registry is not started");
         }
         String path = repositoryStoragePath(internalRepoName);
+        execInRegistry(containerId, "repository deletion", "rm", "-rf",
+                path + "/_layers", path + "/_manifests", path + "/_uploads");
+    }
+
+    /**
+     * The digests of every manifest the registry holds for one repository, untagged ones included, read from the
+     * revision links of its storage, since the distribution API lists tags only. A deleted manifest's link is gone,
+     * and a repository the registry never stored holds none.
+     */
+    public Set<String> heldManifestDigests(String internalRepoName) {
+        String id = containerId;
+        if (!started || id == null) {
+            throw new IllegalStateException("ECR registry is not started");
+        }
+        String revisions = repositoryStoragePath(internalRepoName) + "/_manifests/revisions/sha256";
+        String output = execInRegistry(id, "manifest listing", "sh", "-c",
+                "[ -d '" + revisions + "' ] || exit 0; find '" + revisions + "' -mindepth 2 -maxdepth 2 -name link");
+        Set<String> digests = new LinkedHashSet<>();
+        for (String line : output.split("\n")) {
+            Matcher revision = REVISION_LINK.matcher(line.trim());
+            if (revision.matches()) {
+                digests.add("sha256:" + revision.group(1));
+            }
+        }
+        return digests;
+    }
+
+    /**
+     * Runs {@code command} in the registry container under a bounded {@code timeout}, returning its output; one that
+     * times out, is interrupted or exits non-zero fails as {@code what}.
+     */
+    private String execInRegistry(String container, String what, String... command) {
+        List<String> bounded = new ArrayList<>(List.of("timeout", "-k",
+                String.valueOf(REPOSITORY_DELETION_KILL_GRACE_SECONDS),
+                String.valueOf(REPOSITORY_DELETION_TIMEOUT_SECONDS)));
+        bounded.addAll(List.of(command));
         StringBuilder output = new StringBuilder();
         DockerClient dockerClient = lifecycleManager.getDockerClient();
         ExecCreateCmdResponse exec = dockerClient
-                .execCreateCmd(containerId)
-                .withCmd("timeout", "-k", String.valueOf(REPOSITORY_DELETION_KILL_GRACE_SECONDS),
-                        String.valueOf(REPOSITORY_DELETION_TIMEOUT_SECONDS), "rm", "-rf",
-                        path + "/_layers", path + "/_manifests", path + "/_uploads")
+                .execCreateCmd(container)
+                .withCmd(bounded.toArray(String[]::new))
                 .withAttachStdout(true)
                 .withAttachStderr(true)
                 .exec();
@@ -825,16 +898,17 @@ public class EcrRegistryManager {
                     .awaitCompletion(REPOSITORY_DELETION_TIMEOUT_SECONDS
                             + REPOSITORY_DELETION_KILL_GRACE_SECONDS + 1, TimeUnit.SECONDS);
             if (!completed) {
-                throw new RuntimeException("repository deletion timed out");
+                throw new RuntimeException(what + " timed out");
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new RuntimeException("repository deletion interrupted", e);
+            throw new RuntimeException(what + " interrupted", e);
         }
         Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
         if (exitCode == null || exitCode != 0) {
-            throw new RuntimeException("repository deletion failed: " + output);
+            throw new RuntimeException(what + " failed: " + output);
         }
+        return output.toString();
     }
 
     /** Stops the container if {@code keepRunningOnShutdown=false}. Called from EmulatorLifecycle hooks. */
@@ -870,6 +944,7 @@ public class EcrRegistryManager {
         started = false;
         ready = false;
         reconciled = false;
+        reconcileRetryFailedAt = 0;
         reopenWriteAdmission();
         hostPort = config.services().ecr().registryBasePort();
     }

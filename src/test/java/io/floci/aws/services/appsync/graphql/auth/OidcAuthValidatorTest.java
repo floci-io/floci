@@ -8,9 +8,12 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.services.apigatewayv2.JwtSignatureVerifier;
 import io.floci.aws.services.appsync.graphql.AppSyncTransportException;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.math.BigInteger;
@@ -40,6 +43,7 @@ import static org.mockito.Mockito.when;
  * discovery/JWKS fixture and genuinely RS256-signed tokens, since {@link OidcAuthValidator} now
  * delegates its signature check to the real {@link JwtSignatureVerifier} rather than a fake.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class OidcAuthValidatorTest {
 
     private static final Instant NOW = Instant.parse("2026-01-01T00:00:00Z");

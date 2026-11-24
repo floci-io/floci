@@ -17,8 +17,6 @@ import static org.hamcrest.Matchers.nullValue;
 @QuarkusTest
 class SesSendAddressSyntaxIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     private static final String TO = "success@simulator.amazonses.com";
     // A sender of its own: an identity under example.com would outlive this class and reach the
     // other SES classes that share the application.
@@ -27,7 +25,7 @@ class SesSendAddressSyntaxIntegrationTest {
     private static void verifySender() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "VerifyEmailIdentity")
             .formParam("EmailAddress", VERIFIED_SENDER)
         .when()
@@ -40,7 +38,7 @@ class SesSendAddressSyntaxIntegrationTest {
     void v1SendEmail_sourceWithoutAt_returnsInvalidParameterValue() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendEmail")
             .formParam("Source", "sender.example.com")
             .formParam("Destination.ToAddresses.member.1", TO)
@@ -58,7 +56,7 @@ class SesSendAddressSyntaxIntegrationTest {
     void v1SendRawEmail_nonAsciiDomainDestination_returnsInvalidParameterValue() {
         given()
             .contentType("application/x-www-form-urlencoded; charset=UTF-8")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendRawEmail")
             .formParam("Source", "sender@example.com")
             .formParam("Destinations.member.1", "success@例え.jp")
@@ -74,9 +72,7 @@ class SesSendAddressSyntaxIntegrationTest {
 
     @Test
     void v2SendEmail_nonAsciiLocalRecipient_returnsBadRequestException() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        SesV2Requests.v2()
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",
@@ -94,9 +90,7 @@ class SesSendAddressSyntaxIntegrationTest {
 
     @Test
     void v2SendBulkEmail_fromWithEmptyDomain_returnsInvalidEmailAddress() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        SesV2Requests.v2()
             .body("""
                 {
                     "FromEmailAddress": "sender@",
@@ -117,9 +111,7 @@ class SesSendAddressSyntaxIntegrationTest {
     @Test
     void v2SendBulkEmail_malformedEntryRecipient_failsOnlyThatEntry() {
         verifySender();
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        SesV2Requests.v2()
             .body("""
                 {
                     "FromEmailAddress": "%2$s",
@@ -150,7 +142,7 @@ class SesSendAddressSyntaxIntegrationTest {
         verifySender();
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "CreateTemplate")
             .formParam("Template.TemplateName", "address-syntax-bulk")
             .formParam("Template.SubjectPart", "s")
@@ -162,7 +154,7 @@ class SesSendAddressSyntaxIntegrationTest {
 
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", VERIFIED_SENDER)
             .formParam("Template", "address-syntax-bulk")
@@ -182,7 +174,7 @@ class SesSendAddressSyntaxIntegrationTest {
 
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "DeleteTemplate")
             .formParam("TemplateName", "address-syntax-bulk")
         .when()
@@ -195,7 +187,7 @@ class SesSendAddressSyntaxIntegrationTest {
     void v1SendBulkTemplatedEmail_malformedSourceIsReportedBeforeMissingTemplate() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", "Alice <sender@>")
             .formParam("Template", "address-syntax-missing")
@@ -211,9 +203,7 @@ class SesSendAddressSyntaxIntegrationTest {
 
     @Test
     void v2SendBulkEmail_malformedFromIsReportedBeforeMissingTemplate() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        SesV2Requests.v2()
             .body("""
                 {
                     "FromEmailAddress": "sender.example.com",
@@ -231,9 +221,7 @@ class SesSendAddressSyntaxIntegrationTest {
 
     @Test
     void v2SendEmail_newlineInQuotedLocalPart_returnsInvalidEmailAddress() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        SesV2Requests.v2()
             .body("""
                 {
                     "FromEmailAddress": "\\"a\\nb\\"@example.com",
@@ -251,9 +239,7 @@ class SesSendAddressSyntaxIntegrationTest {
 
     @Test
     void v2SendBulkEmail_malformedFeedbackForwarding_rejectsTheRequest() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        SesV2Requests.v2()
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",
@@ -276,7 +262,7 @@ class SesSendAddressSyntaxIntegrationTest {
     void v1SendBulkTemplatedEmail_malformedReturnPath_rejectsTheRequest() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", "sender@example.com")
             .formParam("ReturnPath", "bounce@")
@@ -301,7 +287,7 @@ class SesSendAddressSyntaxIntegrationTest {
     void v2SendEmailRaw_malformedFromHeaderWithoutFromEmailAddress(String from, String message) {
         given()
             .contentType("application/json; charset=UTF-8")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("""
                 {
                     "Destination": {"ToAddresses": ["%s"]},
@@ -322,7 +308,7 @@ class SesSendAddressSyntaxIntegrationTest {
         verifySender();
         given()
             .contentType("application/json; charset=UTF-8")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "%s",
@@ -344,7 +330,7 @@ class SesSendAddressSyntaxIntegrationTest {
 
         given()
             .contentType("application/json; charset=UTF-8")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "%s",
@@ -370,7 +356,7 @@ class SesSendAddressSyntaxIntegrationTest {
 
         given()
             .contentType("application/json; charset=UTF-8")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("""
                 {"Content": {"Raw": {"Data": "%s"}}}
                 """.formatted(raw))
@@ -392,7 +378,7 @@ class SesSendAddressSyntaxIntegrationTest {
     void v1SendRawEmail_malformedFromHeader_keepsJavaMailMessages(String from, String message) {
         given()
             .contentType("application/x-www-form-urlencoded; charset=UTF-8")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendRawEmail")
             .formParam("Destinations.member.1", TO)
             .formParam("RawMessage.Data", rawMessage(from))
@@ -423,7 +409,7 @@ class SesSendAddressSyntaxIntegrationTest {
     void v1SendRawEmail_fromHeaderWithoutAtAndSource_isAMissingUserName(String from, String message) {
         given()
             .contentType("application/x-www-form-urlencoded; charset=UTF-8")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendRawEmail")
             .formParam("Source", "sender@example.com")
             .formParam("Destinations.member.1", TO)
@@ -440,7 +426,7 @@ class SesSendAddressSyntaxIntegrationTest {
     void v1SendRawEmail_otherFromHeaderViolationIsReportedBeforeMissingUserName() {
         given()
             .contentType("application/x-www-form-urlencoded; charset=UTF-8")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendRawEmail")
             .formParam("Source", "sender@example.com")
             .formParam("Destinations.member.1", TO)

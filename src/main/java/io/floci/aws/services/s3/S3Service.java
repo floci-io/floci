@@ -109,6 +109,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+
 @ApplicationScoped
 public class S3Service implements Resettable, ResourceProvider {
     private static final int MAX_LIST_BUCKETS = 10000;
@@ -138,7 +140,6 @@ public class S3Service implements Resettable, ResourceProvider {
     public static final String TABLE_WAREHOUSE_BUCKET_SUFFIX = "--table-s3";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
     private static final String LOG_DELIVERY_GROUP_URI = "http://acs.amazonaws.com/groups/s3/LogDelivery";
-    private static final String LEGACY_ACCESS_KEY_ID = "test";
     private static final String S3_XML_SCHEMA_ERROR =
             "The XML you provided was not well-formed or did not validate against our published schema.";
     private static final Set<String> OBJECT_OWNERSHIP_VALUES = Set.of(
@@ -850,10 +851,11 @@ public class S3Service implements Resettable, ResourceProvider {
                 .orElseThrow(() -> noSuchBucket());
         rejectUploadAclWhenOwnershipEnforced(checkedBucket.value(), checkedBucket.account(), effectiveOptions, ownerId());
         rejectObjectLockWithoutLockEnabled(checkedBucket.value(), effectiveOptions);
-        rejectConflictingServerSideEncryption(
-                normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption()),
+        String normalizedServerSideEncryption = normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption());
+        rejectConflictingServerSideEncryption(normalizedServerSideEncryption,
                 validateSseCustomerKey(effectiveOptions.getSseCustomerAlgorithm(),
                         effectiveOptions.getSseCustomerKey(), effectiveOptions.getSseCustomerKeyMd5()));
+        rejectKmsKeyIdWithoutKmsEncryption(normalizedServerSideEncryption, effectiveOptions.getSseKmsKeyId());
         ChecksumAlgorithm declared = ChecksumAlgorithm.fromWireValue(effectiveOptions.getChecksumAlgorithm());
         // Checked again under the bucket lock when the object is stored; this only spares a transfer.
         checkWritePreconditions(bucketName, key, effectiveOptions.getIfMatch(), effectiveOptions.getIfNoneMatch());
@@ -1017,6 +1019,7 @@ public class S3Service implements Resettable, ResourceProvider {
         String normalizedServerSideEncryption = normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption());
         SseCustomerKey sseCustomerKey = validateSseCustomerKey(effectiveOptions.getSseCustomerAlgorithm(), effectiveOptions.getSseCustomerKey(), effectiveOptions.getSseCustomerKeyMd5());
         rejectConflictingServerSideEncryption(normalizedServerSideEncryption, sseCustomerKey);
+        rejectKmsKeyIdWithoutKmsEncryption(normalizedServerSideEncryption, effectiveOptions.getSseKmsKeyId());
         checkWritePreconditions(bucketName, key, effectiveOptions.getIfMatch(), effectiveOptions.getIfNoneMatch());
 
         byte[] data = body instanceof BytesBody bytes ? bytes.data() : null;
@@ -1039,11 +1042,13 @@ public class S3Service implements Resettable, ResourceProvider {
         object.setContentEncoding(effectiveOptions.getContentEncoding());
         object.setContentDisposition(effectiveOptions.getContentDisposition());
         object.setCacheControl(effectiveOptions.getCacheControl());
-        object.setServerSideEncryption(normalizedServerSideEncryption);
-        object.setSseKmsKeyId("aws:kms".equals(normalizedServerSideEncryption)
-            || "aws:kms:dsse".equals(normalizedServerSideEncryption)
-                ? effectiveOptions.getSseKmsKeyId()
-                : null);
+        // An object written with neither an encryption header nor an SSE-C key is encrypted with the
+        // bucket's default encryption.
+        ObjectEncryption encryption = normalizedServerSideEncryption == null && sseCustomerKey == null
+                ? defaultEncryption(bucket)
+                : new ObjectEncryption(normalizedServerSideEncryption, effectiveOptions.getSseKmsKeyId());
+        object.setServerSideEncryption(encryption.algorithm());
+        object.setSseKmsKeyId(encryption.keptKmsKeyId());
         if (sseCustomerKey != null) {
             object.setSseCustomerAlgorithm(sseCustomerKey.algorithm());
             object.setSseCustomerKeyMd5(sseCustomerKey.keyMd5());
@@ -4834,8 +4839,14 @@ public class S3Service implements Resettable, ResourceProvider {
             upload.setContentDisposition(contentDisposition);
             upload.setContentEncoding(objectOptions.getContentEncoding());
             upload.setCacheControl(objectOptions.getCacheControl());
-            upload.setServerSideEncryption(normalizedServerSideEncryption);
-            upload.setSseKmsKeyId("aws:kms".equals(normalizedServerSideEncryption) ? sseKmsKeyId : null);
+            ObjectEncryption requested = new ObjectEncryption(normalizedServerSideEncryption, sseKmsKeyId);
+            upload.setServerSideEncryption(requested.algorithm());
+            upload.setSseKmsKeyId(requested.keptKmsKeyId());
+            if (normalizedServerSideEncryption == null && customerKey == null) {
+                ObjectEncryption encryption = defaultEncryption(destination);
+                upload.setDefaultServerSideEncryption(encryption.algorithm());
+                upload.setDefaultSseKmsKeyId(encryption.keptKmsKeyId());
+            }
             if (customerKey != null) {
                 upload.setSseCustomerAlgorithm(customerKey.algorithm());
                 upload.setSseCustomerKeyMd5(customerKey.keyMd5());
@@ -5362,8 +5373,8 @@ public class S3Service implements Resettable, ResourceProvider {
                                     .withContentDisposition(upload.getContentDisposition())
                                     .withContentEncoding(upload.getContentEncoding())
                                     .withCacheControl(upload.getCacheControl())
-                                    .withServerSideEncryption(upload.getServerSideEncryption())
-                                    .withSseKmsKeyId(upload.getSseKmsKeyId())
+                                    .withServerSideEncryption(upload.effectiveServerSideEncryption())
+                                    .withSseKmsKeyId(upload.effectiveSseKmsKeyId())
                                     .withAcl(upload.getAcl())
                                     .withGrantRead(upload.getGrantRead())
                                     .withGrantWrite(upload.getGrantWrite())
@@ -5388,6 +5399,9 @@ public class S3Service implements Resettable, ResourceProvider {
                 if (upload.getSseCustomerAlgorithm() != null) {
                     object.setSseCustomerAlgorithm(upload.getSseCustomerAlgorithm());
                     object.setSseCustomerKeyMd5(upload.getSseCustomerKeyMd5());
+                    // Encrypted with the customer's key, not the bucket default the store applied.
+                    object.setServerSideEncryption(null);
+                    object.setSseKmsKeyId(null);
                 }
                 String bucketOwnerAccount = resolveBucketEntry(bucket)
                         .map(AccountAwareStorageBackend.OwnedEntry::account)
@@ -5625,7 +5639,7 @@ public class S3Service implements Resettable, ResourceProvider {
     /** The encryption condition keys of an upload's parts and completion: what it recorded when created. */
     public Map<String, List<String>> multipartEncryptionConditions(String bucket, String key, String uploadId) {
         MultipartUpload upload = getMultipartUpload(bucket, key, uploadId);
-        return S3ObjectActions.encryptionConditions(upload.getServerSideEncryption(), upload.getSseKmsKeyId());
+        return S3ObjectActions.encryptionConditions(upload.effectiveServerSideEncryption(), upload.effectiveSseKmsKeyId());
     }
 
     /** Checks a part or a completion against the bucket policy by the encryption its upload recorded. */
@@ -7254,6 +7268,25 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
+    /**
+     * Whether a request or a stored object carries a KMS key id without {@code aws:kms} or
+     * {@code aws:kms:dsse} encryption: the id only means something with one of those algorithms,
+     * and AWS refuses a write that carries it with any other algorithm or with none, an empty
+     * value included.
+     */
+    static boolean kmsKeyIdWithoutKmsEncryption(String serverSideEncryption, String sseKmsKeyId) {
+        return sseKmsKeyId != null
+                && !"aws:kms".equals(serverSideEncryption)
+                && !"aws:kms:dsse".equals(serverSideEncryption);
+    }
+
+    private static void rejectKmsKeyIdWithoutKmsEncryption(String serverSideEncryption, String sseKmsKeyId) {
+        if (kmsKeyIdWithoutKmsEncryption(serverSideEncryption, sseKmsKeyId)) {
+            throw new AwsException("InvalidArgument",
+                    "Server Side Encryption with AWS KMS managed key requires HTTP header x-amz-server-side-encryption : aws:kms", 400);
+        }
+    }
+
     private static String computeSseCustomerKeyMd5(String key) {
         try {
             byte[] decodedKey = Base64.getDecoder().decode(key.trim());
@@ -7270,6 +7303,34 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     record SseCustomerKey(String algorithm, String keyMd5) {}
+
+    /** A server-side encryption and the KMS key id that came with it; {@link #keptKmsKeyId()} applies the rule that keeps it. */
+    record ObjectEncryption(String algorithm, String kmsKeyId) {
+
+        /** The key id this encryption keeps: only {@code aws:kms} and {@code aws:kms:dsse} carry one. */
+        String keptKmsKeyId() {
+            return "aws:kms".equals(algorithm) || "aws:kms:dsse".equals(algorithm) ? kmsKeyId : null;
+        }
+    }
+
+    /**
+     * The encryption S3 applies to an object written to {@code bucket} without encryption headers: the
+     * bucket's default encryption, read from the first rule's {@code ApplyServerSideEncryptionByDefault},
+     * or SSE-S3 ({@code AES256}) for a bucket with none, the base level of encryption S3 has applied to
+     * every bucket since January 5, 2023. A stored configuration that does not parse everywhere, or has no
+     * supported algorithm there, counts as none.
+     */
+    private static ObjectEncryption defaultEncryption(Bucket bucket) {
+        XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(bucket.getEncryptionConfiguration());
+        XmlParser.XmlElement rule = root == null ? null : root.child("Rule");
+        XmlParser.XmlElement byDefault = rule == null ? null : rule.child("ApplyServerSideEncryptionByDefault");
+        XmlParser.XmlElement algorithm = byDefault == null ? null : byDefault.child("SSEAlgorithm");
+        if (algorithm == null || !SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES.contains(algorithm.text())) {
+            return new ObjectEncryption("AES256", null);
+        }
+        XmlParser.XmlElement key = byDefault.child("KMSMasterKeyID");
+        return new ObjectEncryption(algorithm.text(), key == null || key.text().isBlank() ? null : key.text());
+    }
 
     record SseCustomerHeaders(String algorithm, String key, String keyMd5) {
         static final SseCustomerHeaders EMPTY = new SseCustomerHeaders(null, null, null);
@@ -7399,13 +7460,14 @@ public class S3Service implements Resettable, ResourceProvider {
 
         if (config.isEventBridgeEnabled() && eventBridgeService != null) {
             try {
-                String detailType = eventName.startsWith("ObjectCreated") ? "Object Created"
-                        : eventName.startsWith("ObjectAnnotation") ? "Object Annotation"
-                        : "Object Deleted";
-                Map<String, Object> entry = new java.util.HashMap<>();
-                entry.put("Source", "aws.s3");
-                entry.put("DetailType", detailType);
-                entry.put("Detail", buildS3EventBridgeDetail(bucketName, key, eventName, obj, region));
+                String detailType = switch (eventName) {
+                    case "ObjectAnnotation:Put" -> "Object Annotation Created";
+                    case "ObjectAnnotation:Delete" -> "Object Annotation Removed";
+                    default -> eventName.startsWith("ObjectCreated") ? "Object Created" : "Object Deleted";
+                };
+                Map<String, Object> entry = EventBridgeService.serviceEventEntry("aws.s3", detailType,
+                        buildS3EventBridgeDetail(bucketName, key, eventName, obj, region),
+                        S3ResourceArns.bucket(bucketPartition(bucketName), bucketName));
                 eventBridgeService.putEvents(List.of(entry), region);
                 LOG.debugv("Fired S3 event {0} to EventBridge default bus", eventName);
             } catch (Exception e) {
@@ -7450,9 +7512,18 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    /** The EventBridge {@code reason}: {@code Lifecycle Expiration} for a deletion by a lifecycle rule. */
+    /** EventBridge names the API rather than the classic notification event. */
     private static String eventBridgeReason(String eventName) {
-        return isLifecycleEvent(eventName) ? "Lifecycle Expiration" : eventName;
+        return switch (eventName) {
+            case "ObjectCreated:Put" -> "PutObject";
+            case "ObjectCreated:Post" -> "POST Object";
+            case "ObjectCreated:Copy" -> "CopyObject";
+            case "ObjectCreated:CompleteMultipartUpload" -> "CompleteMultipartUpload";
+            case "ObjectRemoved:Delete", "ObjectRemoved:DeleteMarkerCreated" -> "DeleteObject";
+            case "ObjectAnnotation:Put" -> "PutObjectAnnotation";
+            case "ObjectAnnotation:Delete" -> "DeleteObjectAnnotation";
+            default -> isLifecycleEvent(eventName) ? "Lifecycle Expiration" : eventName;
+        };
     }
 
     private static boolean isLifecycleEvent(String eventName) {
@@ -8666,14 +8737,8 @@ public class S3Service implements Resettable, ResourceProvider {
         String effectiveCacheControl = replaceMetadata && effectiveOptions.getCacheControl() != null
                 ? effectiveOptions.getCacheControl()
                 : source.getCacheControl();
-        String effectiveServerSideEncryption = destinationCustomerKey != null
-                ? null
-                : (normalizedServerSideEncryption != null ? normalizedServerSideEncryption : source.getServerSideEncryption());
-        String effectiveSseKmsKeyId = "aws:kms".equals(effectiveServerSideEncryption)
-                ? (normalizedServerSideEncryption != null
-                    ? effectiveOptions.getSseKmsKeyId()
-                    : source.getSseKmsKeyId())
-                : null;
+        String effectiveSseKmsKeyId = new ObjectEncryption(normalizedServerSideEncryption,
+                effectiveOptions.getSseKmsKeyId()).keptKmsKeyId();
         boolean replaceTags = "REPLACE".equalsIgnoreCase(effectiveOptions.getTaggingDirective());
         Map<String, String> effectiveTags = replaceTags
                 ? effectiveOptions.getReplacementTagging()
@@ -8728,7 +8793,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 }
                 result[0] = storeObjectCopy(destBucket, destKey, body, metadata,
                         effectiveContentType, effectiveStorageClass, effectiveContentEncoding,
-                        effectiveContentDisposition, effectiveCacheControl, effectiveServerSideEncryption,
+                        effectiveContentDisposition, effectiveCacheControl, normalizedServerSideEncryption,
                         effectiveSseKmsKeyId, effectiveOptions, copyChecksumAlgorithm, effectiveTags);
                 if (copyAnnotations) {
                     restoreAnnotations(sourceAnnotations, destBucket, destKey, result[0]);
@@ -8752,7 +8817,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 .orElseThrow(() -> noSuchBucket())) {
             result[0] = storeObjectCopy(destBucket, destKey, body, metadata,
                     effectiveContentType, effectiveStorageClass, effectiveContentEncoding,
-                    effectiveContentDisposition, effectiveCacheControl, effectiveServerSideEncryption,
+                    effectiveContentDisposition, effectiveCacheControl, normalizedServerSideEncryption,
                     effectiveSseKmsKeyId, effectiveOptions, copyChecksumAlgorithm, effectiveTags);
             if (copyAnnotations) {
                 restoreAnnotations(sourceAnnotations, destBucket, destKey, result[0]);

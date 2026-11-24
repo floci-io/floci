@@ -9,6 +9,7 @@ import io.floci.aws.core.common.AwsCanonicalUserId;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsNamespaces;
 import io.floci.aws.core.common.AwsRegions;
+import io.floci.aws.core.common.ClosedAccountLookup;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.IamEnforcementFilter;
 import io.floci.aws.core.common.MultipartFormParser;
@@ -16,6 +17,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
+import io.floci.aws.core.common.RequestSourceAddress;
 import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.StreamingResponses;
 import io.floci.aws.core.common.UuidShapes;
@@ -47,6 +49,7 @@ import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.services.s3.model.TopicNotification;
 import io.floci.aws.services.s3.model.WebsiteConfiguration;
 import io.floci.aws.services.sns.SnsQueryHandler;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Context;
@@ -146,6 +149,7 @@ public class S3Controller {
     private final RequestContext requestContext;
     private final IamService iamService;
     private final IamEnforcementFilter iamEnforcementFilter;
+    private final Instance<ClosedAccountLookup> closedAccountLookup;
     private final EmulatorConfig config;
     private final S3VirtualHostFilter virtualHostFilter;
     private final Clock clock;
@@ -161,6 +165,7 @@ public class S3Controller {
                         RequestContext requestContext,
                         IamService iamService,
                         IamEnforcementFilter iamEnforcementFilter,
+                        Instance<ClosedAccountLookup> closedAccountLookup,
                         EmulatorConfig config,
                         S3VirtualHostFilter virtualHostFilter,
                         Clock clock) {
@@ -175,6 +180,7 @@ public class S3Controller {
         this.requestContext = requestContext;
         this.iamService = iamService;
         this.iamEnforcementFilter = iamEnforcementFilter;
+        this.closedAccountLookup = closedAccountLookup;
         this.config = config;
         this.virtualHostFilter = virtualHostFilter;
         this.clock = clock;
@@ -197,13 +203,7 @@ public class S3Controller {
                     if (req != null) {
                         authHeader = req.getHeader("Authorization");
                         userAgent = req.getHeader("User-Agent");
-                        String fwd = req.getHeader("X-Forwarded-For");
-                        if (fwd != null && !fwd.isBlank()) {
-                            int comma = fwd.indexOf(',');
-                            sourceIp = (comma > 0 ? fwd.substring(0, comma) : fwd).trim();
-                        } else if (req.remoteAddress() != null) {
-                            sourceIp = req.remoteAddress().host();
-                        }
+                        sourceIp = RequestSourceAddress.of(req);
                     }
                 }
             } catch (Exception e) {
@@ -949,10 +949,12 @@ public class S3Controller {
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
                 Response.ResponseBuilder response = Response.ok().header("ETag", part.getETag());
                 // S3 echoes the part checksum only when the upload declared an algorithm.
-                ChecksumAlgorithm declared = s3Service.getMultipartUpload(bucket, key, uploadId).getChecksumAlgorithm();
+                MultipartUpload upload = s3Service.getMultipartUpload(bucket, key, uploadId);
+                ChecksumAlgorithm declared = upload.getChecksumAlgorithm();
                 if (declared != null) {
                     response.header(declared.headerName(), part.getChecksum().valueFor(declared));
                 }
+                appendServerSideEncryptionHeaders(response, upload);
                 appendSseCustomerHeaders(response,
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
@@ -1080,10 +1082,9 @@ public class S3Controller {
                 return handleGetObjectTagging(bucket, key, versionId);
             }
             if (params.has("annotation")) {
-                String annotationNameParam = params.first("annotationName");
-                // An empty annotationName is not a Get request for the empty name: it falls
-                // through to ListObjectAnnotations, matching the blank-name put semantics.
-                if (annotationNameParam != null && !annotationNameParam.isEmpty()) {
+                // A request naming an annotation is GetObjectAnnotation, as botocore's model, which requires the
+                // name, reads it and IAM checks it: an empty name is refused as one, not listed.
+                if (params.first("annotationName") != null) {
                     s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectAnnotation", authorization);
                     return handleGetObjectAnnotation(bucket, key, uriInfo, httpHeaders);
                 }
@@ -1421,19 +1422,8 @@ public class S3Controller {
                 }
             }
             checkVersionId(bucket, params.first("versionId"));
-            // HEAD honors the annotation subresource so a HEAD probe reports the same status and
-            // annotation metadata a GET would, instead of falling through to the object's headers.
-            if (params.has("annotation")) {
-                String annotationNameParam = params.first("annotationName");
-                // An empty annotationName is not a Get request for the empty name: it falls
-                // through to ListObjectAnnotations, matching the blank-name put semantics.
-                if (annotationNameParam != null && !annotationNameParam.isEmpty()) {
-                    s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectAnnotation", authorization);
-                    return headOnlyResponse(handleGetObjectAnnotation(bucket, key, uriInfo, httpHeaders));
-                }
-                s3Service.authorizeObjectRead(bucket, key, versionId, "s3:ListObjectAnnotations", authorization);
-                return headOnlyResponse(handleListObjectAnnotations(bucket, key, uriInfo));
-            }
+            // Botocore models no HEAD of an annotation, so a HEAD is HeadObject whatever its query names, as IAM
+            // checks it.
             s3Service.authorizeGetObject(bucket, key, versionId, authorization);
 
             S3Object obj = s3Service.headObject(bucket, key, versionId);
@@ -1735,6 +1725,7 @@ public class S3Controller {
                     response.header("x-amz-checksum-algorithm", upload.getChecksumAlgorithm().name());
                     response.header("x-amz-checksum-type", upload.getChecksumType().name());
                 }
+                appendServerSideEncryptionHeaders(response, upload);
                 appendSseCustomerHeaders(response, upload);
                 return response.build();
             }
@@ -1747,12 +1738,15 @@ public class S3Controller {
                 return started ? Response.accepted().build() : Response.ok().build();
             }
 
-            if (hasQueryParam(uriInfo, "select")) {
-                s3Service.authorizeGetObject(bucket, key, versionId, authorization);
+            // SelectObjectContent is POST ?select&select-type=2, as botocore routes it and IAM checks it, and its
+            // request names no version, so it reads the current one.
+            if (hasQueryParam(uriInfo, "select")
+                    && "2".equals(ResteasyRequests.queryParameters(uriInfo).getFirst("select-type"))) {
+                s3Service.authorizeGetObject(bucket, key, null, authorization);
                 // The object and its metadata are opened as one snapshot, as for GetObject, and the
                 // query reads it as the response is written, so the object is never held in memory.
                 S3SelectService.EventStream events = s3SelectService.select(
-                        s3Service.openObject(bucket, key, versionId), new String(body, StandardCharsets.UTF_8));
+                        s3Service.openObject(bucket, key, null), new String(body, StandardCharsets.UTF_8));
                 StreamingOutput entity = events::writeTo;
                 return Response.ok(entity)
                         .type("application/octet-stream")
@@ -3269,6 +3263,15 @@ public class S3Controller {
         appendSseCustomerHeaders(resp, obj.getSseCustomerAlgorithm(), obj.getSseCustomerKeyMd5());
     }
 
+    private static void appendServerSideEncryptionHeaders(Response.ResponseBuilder response, MultipartUpload upload) {
+        if (upload.effectiveServerSideEncryption() != null) {
+            response.header("x-amz-server-side-encryption", upload.effectiveServerSideEncryption());
+        }
+        if (upload.effectiveSseKmsKeyId() != null) {
+            response.header("x-amz-server-side-encryption-aws-kms-key-id", upload.effectiveSseKmsKeyId());
+        }
+    }
+
     private void appendSseCustomerHeaders(Response.ResponseBuilder resp, MultipartUpload upload) {
         appendSseCustomerHeaders(resp, upload.getSseCustomerAlgorithm(), upload.getSseCustomerKeyMd5());
     }
@@ -3420,12 +3423,7 @@ public class S3Controller {
         }
         Response.ResponseBuilder response = Response.ok(xml.end("CopyPartResult").build())
                 .type(MediaType.APPLICATION_XML);
-        if (destinationUpload.getServerSideEncryption() != null) {
-            response.header("x-amz-server-side-encryption", destinationUpload.getServerSideEncryption());
-        }
-        if (destinationUpload.getSseKmsKeyId() != null) {
-            response.header("x-amz-server-side-encryption-aws-kms-key-id", destinationUpload.getSseKmsKeyId());
-        }
+        appendServerSideEncryptionHeaders(response, destinationUpload);
         appendSseCustomerHeaders(response,
                 httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                 httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
@@ -4162,7 +4160,7 @@ public class S3Controller {
         String encryption = S3Service.normalizeServerSideEncryption(
             lcFields.get("x-amz-server-side-encryption"));
         String kmsKeyId = lcFields.get("x-amz-server-side-encryption-aws-kms-key-id");
-        if (kmsKeyId != null && !"aws:kms".equals(encryption) && !"aws:kms:dsse".equals(encryption)) {
+        if (S3Service.kmsKeyIdWithoutKmsEncryption(encryption, kmsKeyId)) {
             throw new AwsException("InvalidArgument",
                 "KMS key ID requires aws:kms or aws:kms:dsse server-side encryption.", 400);
         }
@@ -4180,6 +4178,7 @@ public class S3Controller {
          */
         String credential = lcFields.get("x-amz-credential");
         rejectUnknownPostRegion(credential);
+        rejectClosedPostAccount(credential);
         if (credential != null && !credential.isEmpty()) {
             iamEnforcementFilter.authorizePostObject(AccountResolver.SIGV4_SCHEME + " Credential=" + credential,
                     S3ResourceArns.object(s3Service.bucketPartition(bucket), bucket, key),
@@ -4263,6 +4262,21 @@ public class S3Controller {
                     + "' must not contain ':'." : "The authorization header is malformed; "
                     + "the region '" + region + "' is wrong; expecting a region AWS publishes.";
             throw new AwsException("AuthorizationHeaderMalformed", message, 400);
+        }
+    }
+
+    /**
+     * A presigned POST carries its credential in the form, which AccountContextFilter never sees, so a closed
+     * account's POST is refused here as the filter refuses its other requests.
+     */
+    private void rejectClosedPostAccount(String credential) {
+        if (credential == null || credential.isEmpty() || !closedAccountLookup.isResolvable()) {
+            return;
+        }
+        String akid = accountResolver.extractPresignedAccessKeyId(credential);
+        String accountId = AccountResolver.isAccountId(akid) ? akid : iamService.resolveAccountId(akid).orElse(null);
+        if (closedAccountLookup.get().isClosed(accountId)) {
+            throw IamEnforcementFilter.unrecognizedClientException("s3");
         }
     }
 

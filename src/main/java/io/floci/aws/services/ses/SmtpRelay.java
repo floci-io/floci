@@ -2,9 +2,9 @@ package io.floci.aws.services.ses;
 
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.ses.mime.SesMimeParser;
+import io.floci.aws.services.ses.mime.SesRawMessage;
 import io.floci.aws.services.ses.model.MessageAttachment;
 import io.floci.aws.services.ses.model.MessageHeader;
-import io.floci.aws.services.ses.model.MessageTag;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.ext.mail.MailAttachment;
@@ -38,7 +38,6 @@ import java.net.URLConnection;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -65,16 +64,6 @@ public class SmtpRelay {
     private static final Logger LOG = Logger.getLogger(SmtpRelay.class);
     private static final long RELAY_TIMEOUT_SECONDS = 30;
 
-    /** SES control header naming the configuration set to apply to a raw send. */
-    public static final String HEADER_CONFIGURATION_SET = "X-SES-CONFIGURATION-SET";
-    /** SES control header carrying {@code name=value} message tags for a raw send. */
-    public static final String HEADER_MESSAGE_TAGS = "X-SES-MESSAGE-TAGS";
-
-    private static final String X_SES_PREFIX = "x-ses-";
-    private static final String HEADER_RETURN_PATH = "Return-Path";
-    private static final String HEADER_SOURCE_ARN = "X-SES-SOURCE-ARN";
-    private static final String HEADER_FROM_ARN = "X-SES-FROM-ARN";
-    private static final String HEADER_RETURN_PATH_ARN = "X-SES-RETURN-PATH-ARN";
     private static final String MESSAGE_ID_DOMAIN = "email.amazonses.com";
     private static final String DEFAULT_ATTACHMENT_CONTENT_TYPE = "application/octet-stream";
 
@@ -246,7 +235,8 @@ public class SmtpRelay {
         /** Parses {@code rawMessage} (plain or base64-encoded) for callers that hold only the text. */
         public RawRelayMessage(String from, String returnPath, List<String> destinations,
                                String rawMessage, String messageId) {
-            this(from, returnPath, destinations, SesMimeParser.parse(tryBase64Decode(rawMessage)), messageId);
+            this(from, returnPath, destinations,
+                    SesMimeParser.parse(SesRawMessage.tryBase64Decode(rawMessage)), messageId);
         }
     }
 
@@ -492,7 +482,7 @@ public class SmtpRelay {
     private static void applyBounceAddress(MailMessage mail, String returnPath, String fallback) {
         String bounce = firstNonBlank(returnPath, fallback);
         if (bounce != null) {
-            mail.setBounceAddress(extractAngleAddress(bounce));
+            mail.setBounceAddress(SesRawMessage.extractAngleAddress(bounce));
         }
     }
 
@@ -595,7 +585,7 @@ public class SmtpRelay {
     private static boolean isAttachmentPart(Entity entity) {
         return "attachment".equalsIgnoreCase(entity.getDispositionType())
                 || entity.getFilename() != null
-                || headerValue(entity, FieldName.CONTENT_ID) != null;
+                || SesRawMessage.headerValue(entity, FieldName.CONTENT_ID) != null;
     }
 
     private static MailAttachment toAttachment(Entity entity, Body body) {
@@ -611,11 +601,11 @@ public class SmtpRelay {
         if (disposition != null && !disposition.isBlank()) {
             attachment.setDisposition(disposition);
         }
-        String description = headerValue(entity, FieldName.CONTENT_DESCRIPTION);
+        String description = SesRawMessage.headerValue(entity, FieldName.CONTENT_DESCRIPTION);
         if (description != null) {
             attachment.setDescription(description);
         }
-        String contentId = headerValue(entity, FieldName.CONTENT_ID);
+        String contentId = SesRawMessage.headerValue(entity, FieldName.CONTENT_ID);
         if (contentId != null) {
             attachment.setContentId(contentId);
         }
@@ -672,7 +662,7 @@ public class SmtpRelay {
                 continue;
             }
             String lower = name.toLowerCase(Locale.ROOT);
-            if (SUPPRESSED_RELAY_HEADERS.contains(lower) || lower.startsWith(X_SES_PREFIX)) {
+            if (SUPPRESSED_RELAY_HEADERS.contains(lower) || SesRawMessage.isControlHeader(name)) {
                 continue;
             }
             String value = field.getBody();
@@ -700,151 +690,6 @@ public class SmtpRelay {
         }
     }
 
-    // ──────────────────────────── Raw header parsing ────────────────────────────
-
-    /**
-     * Structured headers extracted from a raw RFC 5322 MIME message: the first From address, the
-     * subject, separate To / Cc / Bcc address lists, the {@code Return-Path} envelope sender, the
-     * {@code X-SES-CONFIGURATION-SET} / {@code X-SES-MESSAGE-TAGS} control headers, every
-     * mailbox the From header names, the Sender mailbox, and the sending-authorization headers
-     * {@code X-SES-SOURCE-ARN}, {@code X-SES-FROM-ARN} and {@code X-SES-RETURN-PATH-ARN}. Of a
-     * header given more than once, only the first is read, as SES does for the X-headers. Empty
-     * fields when the corresponding header is missing.
-     */
-    public record RawMessageHeaders(String from, String subject,
-                                    List<String> to, List<String> cc, List<String> bcc,
-                                    String returnPath, String configurationSet,
-                                    List<MessageTag> messageTags, List<String> fromAddresses,
-                                    String sender, String sourceArn, String fromArn,
-                                    String returnPathArn) {
-        public static RawMessageHeaders empty() {
-            return new RawMessageHeaders("", "", List.of(), List.of(), List.of(),
-                    "", "", List.of(), List.of(), "", "", "", "");
-        }
-    }
-
-    /**
-     * Parses a raw RFC 5322 MIME message (plain or base64-encoded) into
-     * {@link RawMessageHeaders}. Returns an empty result when the input is blank
-     * or unparseable.
-     */
-    public static RawMessageHeaders parseRawHeaders(String rawMessage) {
-        return parseRawMessage(rawMessage).headers();
-    }
-
-    /**
-     * The decoded bytes of a raw message, the parsed message ({@code null} when the parser cannot
-     * read it) and the headers read off it, from one parse that the send path shares between
-     * header extraction and the content scan.
-     */
-    public record ParsedRawMessage(byte[] bytes, Message message, RawMessageHeaders headers) {}
-
-    public static ParsedRawMessage parseRawMessage(String rawMessage) {
-        if (rawMessage == null || rawMessage.isBlank()) {
-            return new ParsedRawMessage(new byte[0], null, RawMessageHeaders.empty());
-        }
-        byte[] mimeBytes = tryBase64Decode(rawMessage);
-        Message message = SesMimeParser.parse(mimeBytes);
-        return new ParsedRawMessage(mimeBytes, message,
-                message == null ? RawMessageHeaders.empty() : headersOf(message));
-    }
-
-    private static RawMessageHeaders headersOf(Message message) {
-        try {
-            String subject = message.getSubject() != null ? message.getSubject() : "";
-            List<String> from = message.getFrom() != null
-                    ? toMailboxAddresses(message.getFrom()) : List.of();
-            List<String> to = message.getTo() != null
-                    ? toMailboxAddresses(message.getTo().flatten()) : List.of();
-            List<String> cc = message.getCc() != null
-                    ? toMailboxAddresses(message.getCc().flatten()) : List.of();
-            List<String> bcc = message.getBcc() != null
-                    ? toMailboxAddresses(message.getBcc().flatten()) : List.of();
-            String returnPath = extractAngleAddress(headerValue(message, HEADER_RETURN_PATH));
-            String configurationSet = headerValue(message, HEADER_CONFIGURATION_SET);
-            List<MessageTag> messageTags = parseMessageTagsHeader(
-                    headerValue(message, HEADER_MESSAGE_TAGS));
-            Mailbox sender = message.getSender();
-            return new RawMessageHeaders(from.isEmpty() ? "" : from.get(0), subject, to, cc, bcc,
-                    returnPath == null ? "" : returnPath,
-                    configurationSet == null ? "" : configurationSet,
-                    messageTags, from,
-                    sender == null ? "" : sender.getAddress(),
-                    headerValueOrEmpty(message, HEADER_SOURCE_ARN),
-                    headerValueOrEmpty(message, HEADER_FROM_ARN),
-                    headerValueOrEmpty(message, HEADER_RETURN_PATH_ARN));
-        } catch (Exception ignored) {
-            // A message whose addresses cannot be read is treated like one without headers.
-            return RawMessageHeaders.empty();
-        }
-    }
-
-    /**
-     * Parses an {@code X-SES-MESSAGE-TAGS} header body: a comma-separated list of
-     * {@code name=value} pairs. Entries without a name are skipped.
-     */
-    static List<MessageTag> parseMessageTagsHeader(String value) {
-        if (value == null || value.isBlank()) {
-            return List.of();
-        }
-        List<MessageTag> tags = new ArrayList<>();
-        for (String pair : value.split(",")) {
-            int separator = pair.indexOf('=');
-            if (separator < 0) {
-                continue;
-            }
-            String name = pair.substring(0, separator).trim();
-            if (name.isEmpty()) {
-                continue;
-            }
-            tags.add(new MessageTag(name, pair.substring(separator + 1).trim()));
-        }
-        return List.copyOf(tags);
-    }
-
-    /**
-     * Returns the flat list of recipients (To + Cc + Bcc) parsed from a raw RFC 5322
-     * MIME message. Convenience wrapper around {@link #parseRawHeaders}.
-     */
-    public static List<String> parseRawRecipients(String rawMessage) {
-        RawMessageHeaders h = parseRawHeaders(rawMessage);
-        List<String> all = new ArrayList<>();
-        all.addAll(h.to());
-        all.addAll(h.cc());
-        all.addAll(h.bcc());
-        return all;
-    }
-
-    private static String headerValue(Entity entity, String name) {
-        Header header = entity.getHeader();
-        if (header == null) {
-            return null;
-        }
-        Field field = header.getField(name);
-        if (field == null || field.getBody() == null) {
-            return null;
-        }
-        String value = field.getBody().trim();
-        return value.isEmpty() ? null : value;
-    }
-
-    private static String headerValueOrEmpty(Entity entity, String name) {
-        String value = headerValue(entity, name);
-        return value == null ? "" : value;
-    }
-
-    /** Unwraps the {@code <addr@example.com>} form used by Return-Path and friends. */
-    static String extractAngleAddress(String value) {
-        if (value == null) {
-            return null;
-        }
-        String trimmed = value.trim();
-        if (trimmed.startsWith("<") && trimmed.endsWith(">") && trimmed.length() > 2) {
-            return trimmed.substring(1, trimmed.length() - 1).trim();
-        }
-        return trimmed;
-    }
-
     private static String firstNonBlank(String... values) {
         for (String value : values) {
             if (value != null && !value.isBlank()) {
@@ -855,9 +700,9 @@ public class SmtpRelay {
     }
 
     /**
-     * Renders a mailbox for a relayed header, keeping any display name. Distinct from
-     * {@link #toMailboxAddresses}, which yields the bare addresses that the envelope, the
-     * suppression checks and the published events work with.
+     * Renders a mailbox for a relayed header, keeping any display name. Distinct from the bare
+     * addresses {@link SesRawMessage#parseRawHeaders} yields, which the envelope, the suppression
+     * checks and the published events work with.
      */
     private static String formatMailbox(Mailbox mailbox) {
         return AddressFormatter.DEFAULT.encode(mailbox);
@@ -869,52 +714,5 @@ public class SmtpRelay {
             addresses.add(formatMailbox(mailbox));
         }
         return addresses;
-    }
-
-    private static List<String> toMailboxAddresses(MailboxList list) {
-        List<String> addresses = new ArrayList<>();
-        for (Mailbox mailbox : list) {
-            addresses.add(mailbox.getAddress());
-        }
-        return addresses;
-    }
-
-    /**
-     * Decodes the {@code RawMessage.Data} blob, which SDK callers send base64-encoded but which
-     * Floci also accepts as plain RFC 5322 text.
-     *
-     * <p>The alphabet is checked before decoding rather than relying on the decoder to reject
-     * plain text: {@link Base64#getMimeDecoder()} skips characters outside the base64 alphabet, so
-     * a plain-text message decodes into garbage whenever the remaining alphabet characters happen
-     * to form a valid length. A real RFC 5322 message always carries a header separator, which is
-     * not in the alphabet, so the check separates the two cases reliably.
-     */
-    static byte[] tryBase64Decode(String data) {
-        if (looksBase64Encoded(data)) {
-            try {
-                return Base64.getMimeDecoder().decode(data);
-            } catch (IllegalArgumentException e) {
-                LOG.debugv("SES raw message looked base64-encoded but did not decode, "
-                        + "treating it as plain text");
-            }
-        }
-        return data.getBytes(StandardCharsets.UTF_8);
-    }
-
-    private static boolean looksBase64Encoded(String data) {
-        boolean sawPayload = false;
-        for (int i = 0; i < data.length(); i++) {
-            char c = data.charAt(i);
-            if (c == '\r' || c == '\n' || c == ' ' || c == '\t' || c == '=') {
-                continue;
-            }
-            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-                    || c == '+' || c == '/') {
-                sawPayload = true;
-                continue;
-            }
-            return false;
-        }
-        return sawPayload;
     }
 }
