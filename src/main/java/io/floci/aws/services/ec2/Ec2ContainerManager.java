@@ -86,6 +86,9 @@ public class Ec2ContainerManager {
     // Guest-created /tmp mounts hide files copied through Docker's archive API.
     private static final String USER_DATA_SCRIPT_PATH = UserDataPipeline.USER_DATA_SCRIPT_PATH;
     private static final List<String> ALLOWED_SSHD_PATHS = List.of("/usr/sbin/sshd", "/usr/local/sbin/sshd", "/sbin/sshd");
+    // Inside containers, systemd's generators read PID 1's arguments instead of /proc/cmdline,
+    // so these arguments apply runtime unit masks when container=docker is set.
+    // https://github.com/systemd/systemd/blob/v252/src/basic/proc-cmdline.c#L17-L36
     private static final List<String> SYSTEMD_INIT_COMMAND = List.of(
             "/sbin/init",
             "systemd.mask=getty@.service",
