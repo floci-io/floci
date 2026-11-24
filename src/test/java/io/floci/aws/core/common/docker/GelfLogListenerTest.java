@@ -4,6 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.StreamType;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -11,12 +12,18 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 
 import static org.awaitility.Awaitility.await;
@@ -113,6 +120,64 @@ class GelfLogListenerTest {
         String elsewhere = listener.logConfigFor("token-b", ROTATION).getConfig().get("gelf-address");
         assertFalse(restarted.listensAt(elsewhere), "a listener answers only for its own address");
         assertFalse(restarted.listensAt(null));
+    }
+
+    @Test
+    void closeWaitsForTheAcceptThreadToReleaseItsSocket() throws Exception {
+        CountDownLatch exiting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicReference<Throwable> workerFailure = new AtomicReference<>();
+        ThreadFactory threads = task -> Thread.ofVirtual().unstarted(() -> {
+            task.run();
+            exiting.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                workerFailure.set(e);
+            }
+        });
+        restarted = new GelfLogListener(mock(DockerClient.class), true, "127.0.0.1", 0, 8, threads);
+        restarted.ensureStarted();
+        Thread closing = Thread.ofVirtual().start(restarted::close);
+        try {
+            assertTrue(exiting.await(5, TimeUnit.SECONDS));
+            assertEquals(Thread.State.TIMED_WAITING, ThreadStates.awaitParkedOrDone(closing),
+                    "close waits for the accept worker, not only ServerSocket.close");
+        } finally {
+            release.countDown();
+            assertTrue(closing.join(Duration.ofSeconds(5)));
+        }
+        assertNull(workerFailure.get());
+    }
+
+    @Test
+    void aPendingAcceptReleasesThePortBeforeCloseReturns() throws Exception {
+        AtomicReference<Thread> accepting = new AtomicReference<>();
+        ThreadFactory threads = task -> {
+            Thread thread = Thread.ofVirtual().unstarted(task);
+            accepting.set(thread);
+            return thread;
+        };
+        restarted = new GelfLogListener(mock(DockerClient.class), true, "127.0.0.1", 0, 8, threads);
+        String address = restarted.ensureStarted();
+        int port = Integer.parseInt(address.substring(address.lastIndexOf(':') + 1));
+        assertEquals(Thread.State.WAITING, ThreadStates.awaitParkedOrDone(accepting.get()));
+        restarted.close();
+        assertFalse(accepting.get().isAlive(), "accept has returned and released the bound descriptor");
+        try (ServerSocket replacement = new ServerSocket(port, 8, InetAddress.getLoopbackAddress())) {
+            assertEquals(port, replacement.getLocalPort());
+        }
+    }
+
+    @Test
+    void aPortOwnedByAnotherListenerIsNotClaimed() throws IOException {
+        String address = listener.ensureStarted();
+        int port = Integer.parseInt(address.substring(address.lastIndexOf(':') + 1));
+        restarted = new GelfLogListener(mock(DockerClient.class), true, "127.0.0.1", port, 8);
+        assertFalse(restarted.listensAt("tcp://" + address));
+        assertFalse(restarted.started());
+        assertTrue(listener.listensAt("tcp://" + address));
     }
 
     // Catches: the log configuration not pointing the daemon at the listener it opened.
