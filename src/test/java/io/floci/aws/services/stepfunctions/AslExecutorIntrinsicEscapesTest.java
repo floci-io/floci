@@ -53,6 +53,18 @@ class AslExecutorIntrinsicEscapesTest {
     }
 
     @Test
+    void escapedDoubleQuoteStaysInsideDoubleQuotedArgument() {
+        JsonNode result = executor.resolvePath("States.Array(\"a\\\"b,c\", \"C:\\\\\", \"a\\q\", 'x')",
+                mapper.createObjectNode());
+
+        assertEquals(4, result.size());
+        assertEquals("a\"b,c", result.get(0).asText());
+        assertEquals("C:\\", result.get(1).asText());
+        assertEquals("a\\q", result.get(2).asText());
+        assertEquals("x", result.get(3).asText());
+    }
+
+    @Test
     void pathValuesAreNotDecodedAsIntrinsicLiterals() throws Exception {
         JsonNode input = mapper.readTree("{\"value\":\"\\\\{\\\\}\\\\'\"}");
 
