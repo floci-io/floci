@@ -250,7 +250,7 @@ class SesAccountDetailsV2IntegrationTest {
         // regardless of the value sent to PutAccountDetails, and it never appears inside Details. Use a
         // dedicated region so this is independent of the other ordered cases.
         String euAuth = SesV2Requests.authFor("eu-west-2");
-        given().contentType("application/json").header("Authorization", euAuth)
+        v2(euAuth)
                 .body("""
                     {"MailType":"MARKETING","WebsiteURL":"https://example.org",
                      "ProductionAccessEnabled":false}
