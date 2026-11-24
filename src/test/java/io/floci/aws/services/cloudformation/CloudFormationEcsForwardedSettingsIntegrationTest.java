@@ -327,6 +327,20 @@ class CloudFormationEcsForwardedSettingsIntegrationTest {
     }
 
     @Test
+    void updateStack_omittedDeploymentCircuitBreaker_removesItFromTheDeclaredConfiguration() {
+        String name = stackName();
+        createServiceStack(name, "\"DeploymentConfiguration\": {\"MaximumPercent\": 150,"
+                + " \"MinimumHealthyPercent\": 0, \"DeploymentCircuitBreaker\": "
+                + "{\"Enable\": true, \"Rollback\": true}}");
+
+        updateServiceStack(name, 1, DEPLOYMENT_SETTING);
+
+        describeService(name)
+            .body("services[0].deploymentConfiguration.maximumPercent", equalTo(150))
+            .body("services[0].deploymentConfiguration", not(hasKey("deploymentCircuitBreaker")));
+    }
+
+    @Test
     void updateStack_settingsSetThroughTheApi_surviveAnUpdateThatStillDoesNotDeclareThem() {
         String name = stackName();
         createServiceStack(name);

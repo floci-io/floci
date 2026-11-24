@@ -3327,7 +3327,19 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     svc.setHealthCheckGracePeriodSeconds(request.getHealthCheckGracePeriodSeconds());
                 }
                 if (request.getDeploymentConfiguration() != null) {
-                    svc.setDeploymentConfiguration(request.getDeploymentConfiguration());
+                    Map<String, Object> configuration = new LinkedHashMap<>();
+                    if (svc.getDeploymentConfiguration() != null) {
+                        configuration.putAll(svc.getDeploymentConfiguration());
+                    }
+                    for (Map.Entry<String, Object> entry : request.getDeploymentConfiguration().entrySet()) {
+                        if ("deploymentCircuitBreaker".equals(entry.getKey())
+                                && entry.getValue() instanceof Map<?, ?> breaker && breaker.isEmpty()) {
+                            configuration.remove(entry.getKey());
+                        } else {
+                            configuration.put(entry.getKey(), entry.getValue());
+                        }
+                    }
+                    svc.setDeploymentConfiguration(configuration);
                 }
                 if (request.getLoadBalancers() != null) {
                     rollingChange |= loadBalancersChanged(svc.getLoadBalancers(), request.getLoadBalancers());
