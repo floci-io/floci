@@ -43,7 +43,7 @@ class ApiGatewayV2ModelsJson11Test {
                 .header("X-Amz-Target", TARGET_PREFIX + "CreateApi")
                 .header("Authorization", AUTH_HEADER)
                 .body("""
-                        {"Name":"models-json11-test","ProtocolType":"HTTP"}
+                        {"Name":"models-json11-test","ProtocolType":"WEBSOCKET","RouteSelectionExpression":"$request.body.action"}
                         """)
                 .when().post("/")
                 .then()
