@@ -28,6 +28,7 @@ import regen_ecr_shapes
 import regen_ecs_shapes
 import regen_eks_shapes
 import regen_emr_containers_shapes
+import regen_eventbridgev2_shapes
 import regen_emr_serverless_shapes
 import regen_iam_shapes
 import regen_cloudfront_keyvaluestore_shapes
@@ -319,6 +320,18 @@ def test_build_constraints_keeps_the_named_operations_with_their_constraints():
     assert doc["shapes"]["TagMap"] == {"type": "map", "key": "Name", "value": "Kind"}
 
 
+def test_build_constraints_keeps_the_sensitive_mark_only_when_asked():
+    model = deepcopy(CONSTRAINED_MODEL)
+    model["shapes"]["Name"]["sensitive"] = True
+
+    asked = r.build_constraints(model, ("Put",), "botocore test", "tools/aws/regen_x_shapes.py", sensitive=True)
+    default = r.build_constraints(model, ("Put",), "botocore test", "tools/aws/regen_x_shapes.py")
+
+    assert asked["shapes"]["Name"] == {"type": "string", "min": 1, "max": 5, "pattern": "[a-z]+", "sensitive": True}
+    assert "sensitive" not in default["shapes"]["Name"]
+    assert "sensitive" not in asked["shapes"]["Kind"]
+
+
 def test_build_constraints_refuses_an_operation_the_model_does_not_name():
     # A misspelled name in a generator's OPERATIONS fails the generation rather than vendoring a
     # file quietly missing that operation, which --check would then call up to date.
@@ -459,6 +472,7 @@ def vendored(script) -> tuple[str, ...]:
     regen_emr_containers_shapes,
     regen_lambda_microvm_shapes,
     regen_account_shapes,
+    regen_eventbridgev2_shapes,
 ])
 def test_each_vendored_constraints_file_carries_its_operations_and_resolves_its_shapes(script):
     doc = json.loads(script.OUTPUT.read_text(encoding="utf-8"))
@@ -572,6 +586,18 @@ def test_kinesis_shapes_keep_tag_bounds_and_leave_wire_types_to_handlers():
     assert "Data" in shapes["PutRecordInput"]["required"]
     assert "Data" in shapes["PutRecordsRequestEntry"]["required"]
     assert "Timestamp" not in shapes["GetShardIteratorInput"]["members"]
+
+
+def test_eventbridgev2_shapes_keep_sorted_enums_and_the_sensitive_mark():
+    doc = json.loads(regen_eventbridgev2_shapes.OUTPUT.read_text(encoding="utf-8"))
+    shapes = doc["shapes"]
+
+    assert sorted(doc["operations"]) == ["CreateEventSource", "DeleteEventSource", "DescribeEventSource",
+                                         "UpdateEventSource"]
+    assert shapes["WebhookSecretValue"] == {"type": "string", "min": 6, "max": 512, "sensitive": True}
+    assert shapes["LogLevel"]["enum"] == ["ERROR", "INFO", "OFF"]
+    assert shapes["WebhookMetadataHttpHeaderList"]["max"] == 20
+    assert shapes["TagMap"]["max"] == 200
 
 
 def test_config_shapes_keep_arn_bounds_and_leave_timestamps_to_handlers():
