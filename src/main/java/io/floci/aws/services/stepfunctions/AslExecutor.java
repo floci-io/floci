@@ -5599,12 +5599,20 @@ public class AslExecutor {
                 // reference path written there is resolved the same way every other argument is,
                 // and a path that matches nothing fails the state instead of formatting as the
                 // path string itself.
-                JsonNode templateArg = resolveIntrinsicArg(parts.get(0), root, context);
-                String template = templateArg.isTextual() ? templateArg.asText() : templateArg.toString();
+                String templateExpression = parts.get(0).trim();
+                boolean literalTemplate = templateExpression.startsWith("'") && templateExpression.endsWith("'");
+                JsonNode templateArg = resolveIntrinsicArg(templateExpression, root, context);
+                String template = literalTemplate
+                        ? templateExpression.substring(1, templateExpression.length() - 1)
+                        : templateArg.isTextual() ? templateArg.asText() : templateArg.toString();
                 StringBuilder sb = new StringBuilder();
                 int argIdx = 1;
                 for (int i = 0; i < template.length(); i++) {
-                    if (i + 1 < template.length() && template.charAt(i) == '{' && template.charAt(i + 1) == '}') {
+                    if (literalTemplate && template.charAt(i) == '\\' && i + 1 < template.length()
+                            && isIntrinsicEscapedCharacter(template.charAt(i + 1))) {
+                        sb.append(template.charAt(++i));
+                    } else if (i + 1 < template.length() && template.charAt(i) == '{'
+                            && template.charAt(i + 1) == '}') {
                         if (argIdx >= parts.size()) {
                             throw new FailStateException("States.Runtime", "States.Format: not enough arguments");
                         }
@@ -6089,7 +6097,8 @@ public class AslExecutor {
             return applyIntrinsic(arg, root, context);
         }
         if (arg.startsWith("'") && arg.endsWith("'")) {
-            return objectMapper.getNodeFactory().textNode(arg.substring(1, arg.length() - 1));
+            return objectMapper.getNodeFactory().textNode(
+                    unescapeIntrinsicLiteral(arg.substring(1, arg.length() - 1)));
         }
         if (arg.startsWith("\"") && arg.endsWith("\"")) {
             return objectMapper.getNodeFactory().textNode(arg.substring(1, arg.length() - 1));
@@ -6110,6 +6119,24 @@ public class AslExecutor {
                 return resolvePath(arg, root, context);
             }
         }
+    }
+
+    private static String unescapeIntrinsicLiteral(String literal) {
+        StringBuilder value = new StringBuilder(literal.length());
+        for (int i = 0; i < literal.length(); i++) {
+            char c = literal.charAt(i);
+            if (c == '\\' && i + 1 < literal.length()
+                    && isIntrinsicEscapedCharacter(literal.charAt(i + 1))) {
+                value.append(literal.charAt(++i));
+            } else {
+                value.append(c);
+            }
+        }
+        return value.toString();
+    }
+
+    private static boolean isIntrinsicEscapedCharacter(char c) {
+        return c == '\'' || c == '{' || c == '}' || c == '\\';
     }
 
     /**
@@ -6157,12 +6184,18 @@ public class AslExecutor {
         int start = 0;
         for (int i = 0; i < argsStr.length(); i++) {
             char c = argsStr.charAt(i);
-            if (c == '\'' && !inDoubleQuote) inSingleQuote = !inSingleQuote;
-            else if (c == '"' && !inSingleQuote) inDoubleQuote = !inDoubleQuote;
-            else if (!inSingleQuote && !inDoubleQuote) {
-                if (c == '(') depth++;
-                else if (c == ')') depth--;
-                else if (c == ',' && depth == 0) {
+            if (c == '\\' && (inSingleQuote || inDoubleQuote) && i + 1 < argsStr.length()) {
+                i++;
+            } else if (c == '\'' && !inDoubleQuote) {
+                inSingleQuote = !inSingleQuote;
+            } else if (c == '"' && !inSingleQuote) {
+                inDoubleQuote = !inDoubleQuote;
+            } else if (!inSingleQuote && !inDoubleQuote) {
+                if (c == '(') {
+                    depth++;
+                } else if (c == ')') {
+                    depth--;
+                } else if (c == ',' && depth == 0) {
                     result.add(argsStr.substring(start, i).trim());
                     start = i + 1;
                 }
