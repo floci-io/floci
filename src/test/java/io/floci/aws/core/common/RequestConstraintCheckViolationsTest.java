@@ -311,6 +311,25 @@ class RequestConstraintCheckViolationsTest {
     }
 
     @Test
+    void listOrMapHoldingASensitiveStringIsRefused() {
+        RequestConstraintCheck check = RequestConstraintCheck.of(json("""
+                {"operations": {"Listy": "ListyInput", "Mappy": "MappyInput"},
+                 "shapes": {
+                   "ListyInput": {"type": "structure", "members": {"Tokens": "Tokens"}},
+                   "Tokens": {"type": "list", "member": "Token"},
+                   "MappyInput": {"type": "structure", "members": {"Marks": "Marks"}},
+                   "Marks": {"type": "map", "key": "Plain", "value": "Token"},
+                   "Plain": {"type": "string"},
+                   "Token": {"type": "string", "sensitive": true}}}
+                """), RequestConstraintCheck.standardMessages("InvalidInputException"));
+
+        assertEquals("Listy's Tokens[] is a sensitive string, which this check does not word yet",
+                assertThrows(IllegalStateException.class, () -> check.violations("Listy", json("{}"))).getMessage());
+        assertEquals("Mappy's Marks.value is a sensitive string, which this check does not word yet",
+                assertThrows(IllegalStateException.class, () -> check.violations("Mappy", json("{}"))).getMessage());
+    }
+
+    @Test
     void shapeHoldingItselfIsWalkedOnce() {
         assertEquals(List.of(), CHECK.violations("Loop",
                 json("{\"Name\": \"abc\", \"Self\": {\"Name\": \"abc\", \"Self\": {}}}")));

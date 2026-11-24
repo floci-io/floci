@@ -288,12 +288,19 @@ public final class RequestConstraintCheck {
                 if (!SCALAR_TYPES.contains(elementType) || bounded && !"string".equals(elementType)) {
                     throw unwordable(operation, member + "[]", elementType);
                 }
+                if (element.path("sensitive").asBoolean(false)) {
+                    throw unwordable(operation, member + "[]", "sensitive " + elementType);
+                }
             }
             case "map" -> {
                 for (String side : List.of("key", "value")) {
-                    String sideType = model.path("shapes").path(shape.path(side).asText()).path("type").asText();
+                    JsonNode sideShape = model.path("shapes").path(shape.path(side).asText());
+                    String sideType = sideShape.path("type").asText();
                     if (!"string".equals(sideType)) {
                         throw unwordable(operation, member + "." + side, sideType);
+                    }
+                    if (sideShape.path("sensitive").asBoolean(false)) {
+                        throw unwordable(operation, member + "." + side, "sensitive " + sideType);
                     }
                 }
             }
@@ -408,9 +415,7 @@ public final class RequestConstraintCheck {
             broken |= item.isNull() || scalarBroken(memberName, item, errorPath + "[]");
         }
         if (broken) {
-            List<String> rules = new ArrayList<>(rulesOf(memberName));
-            rules.add("Member must not be null");
-            found.add(form.constraint(path, listText, "Member must satisfy constraint: " + rules));
+            found.add(form.constraint(path, listText, "Member must satisfy constraint: " + nullableRules(memberName)));
         }
     }
 
@@ -441,9 +446,7 @@ public final class RequestConstraintCheck {
             found.add(form.mapKeys(path, mapText, rulesOf(keyName)));
         }
         if (brokenValue) {
-            List<String> rules = new ArrayList<>(rulesOf(valueName));
-            rules.add("Member must not be null");
-            found.add(form.mapValues(path, mapText, rules));
+            found.add(form.mapValues(path, mapText, nullableRules(valueName)));
         }
     }
 
@@ -510,6 +513,12 @@ public final class RequestConstraintCheck {
         if (shape.has("enum")) {
             rules.add("Member must satisfy enum value set: " + enumValues(shape));
         }
+        return rules;
+    }
+
+    private List<String> nullableRules(String name) {
+        List<String> rules = rulesOf(name);
+        rules.add("Member must not be null");
         return rules;
     }
 
