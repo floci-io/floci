@@ -1044,8 +1044,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 }
             }
 
-            ensureAutoModeNodeEntry(cluster);
             storage.put(clusterKey(region, name), cluster);
+            // After the cluster is stored, so a failed create leaves no entry its cluster can't delete.
+            ensureAutoModeNodeEntry(cluster);
         } catch (RuntimeException e) {
             if (clusterSg != null) {
                 try {
@@ -1317,7 +1318,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 && !config.services().eks().mock() && clusterManager != null && cluster.getContainerId() != null) {
             replaceNodeForServiceLb(requireClusterInRequestRegion(name));
         }
-        if (nextAutoMode != null && nextAutoMode.computeOn()) {
+        if ((nextAutoMode != null && nextAutoMode.computeOn()) || requestedMode != null) {
+            // Turning compute on, or moving off CONFIG_MAP while it is on, gives the node role its entry.
             ensureAutoModeNodeEntry(requireClusterInRequestRegion(name));
         }
         LOG.infov("Updated the configuration of EKS cluster {0}: {1}", cluster.getName(),
@@ -1375,8 +1377,15 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
      */
     private void ensureAutoModeNodeEntry(Cluster cluster) {
         ComputeConfig compute = cluster.getComputeConfig();
-        if (accessEntries != null && compute != null && Boolean.TRUE.equals(compute.enabled())) {
-            accessEntries.ensureAutoModeNodeEntry(cluster, compute.nodeRoleArn());
+        if (accessEntries == null || compute == null || !Boolean.TRUE.equals(compute.enabled())) {
+            return;
+        }
+        // A cluster being deleted, or gone, gets no entry: its delete removes entries under this lock.
+        synchronized (clustersBeingDeleted) {
+            if (!isClusterDeleting(cluster.getAccountId(), cluster)
+                    && findClusterForAccount(cluster.getAccountId(), clusterKey(cluster)).isPresent()) {
+                accessEntries.ensureAutoModeNodeEntry(cluster, compute.nodeRoleArn());
+            }
         }
     }
 
@@ -1756,7 +1765,6 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             deleteClusterSecurityGroup(cluster);
             deleteNodeGroupAutoScalingGroups(cluster.getAccountId(), cluster);
             deleteAutoModeLoadBalancers(cluster);
-            accessEntries.deleteClusterEntries(cluster);
             if (podIdentityAssociations != null) {
                 podIdentityAssociations.deleteClusterAssociations(cluster);
             }
@@ -1768,6 +1776,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     .toList().forEach(deletedFargateArns::delete);
             synchronized (clustersBeingDeleted) {
                 storage.delete(clusterKey(cluster));
+                // Under the lock ensureAutoModeNodeEntry takes, so an entry it makes meanwhile goes too.
+                accessEntries.deleteClusterEntries(cluster);
                 clearAppliedClusterUserData(cluster, name);
                 oidcService.deleteKey(clusterKey(cluster));
             }

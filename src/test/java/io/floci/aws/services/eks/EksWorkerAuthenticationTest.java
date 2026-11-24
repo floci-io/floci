@@ -189,6 +189,19 @@ class EksWorkerAuthenticationTest {
         return auth.authenticate(verified, "demo", ACCOUNT, REGION, CREATED.toString());
     }
 
+    /** An EKS Auto Mode node role's EC2 entry names the node by {{SessionName}}: the instance profile's, its ID. */
+    @Test
+    void anAutoModeNodeRolesEc2EntryNamesTheNodeByItsSessionName() {
+        entries.delete(cluster, ROLE);
+        entries.ensureAutoModeNodeEntry(cluster, ROLE);
+        instance.setPrivateDnsName(null);
+
+        Map<String, Object> user = auth.authenticate(verified, "demo", ACCOUNT, REGION, CREATED.toString()).orElseThrow();
+
+        assertEquals("system:node:i-worker", user.get("username"));
+        assertEquals(List.of("system:bootstrappers", "system:nodes"), user.get("groups"));
+    }
+
     private void createEntry(String type) {
         entries.create(cluster, new CreateAccessEntryRequest(ROLE, type, null, null, null, null));
     }

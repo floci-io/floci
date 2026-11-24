@@ -459,6 +459,48 @@ class EksServiceTest {
         verify(clusterManager, times(2)).replaceNodeForServiceLb(running);
     }
 
+    /**
+     * A delete that starts while an update is past its status check, and has removed the cluster's entries before
+     * the update makes the node's, leaves no entry to outlive the cluster.
+     */
+    @Test
+    void anUpdateTurningComputeOnDuringADeleteMakesNoNodeEntry() {
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Cluster> clusterStore = new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+        Cluster cluster = new Cluster();
+        cluster.setName("deleting");
+        cluster.setArn("arn:aws:eks:us-east-1:000000000000:cluster/deleting");
+        cluster.setStatus(ClusterStatus.ACTIVE);
+        cluster.setAccessConfig(new AccessConfig("API", false));
+        cluster.setKubernetesNetworkConfig(new KubernetesNetworkConfig());
+        cluster.setContainerId("k3s-deleting");
+        clusterStore.putForAccount("000000000000", EksService.clusterKey("us-east-1", "deleting"), cluster);
+        EksAccessEntryService accessEntries = mock(EksAccessEntryService.class);
+        EksPodIdentityAssociationService podIdentity = mock(EksPodIdentityAssociationService.class);
+        EksAddonService addons = mock(EksAddonService.class);
+        when(addons.recordUpdate(any(), anyString(), any(), any(), any()))
+                .thenReturn(new Update("u", "Successful", "AutoModeUpdate", List.of(), 0, List.of()));
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        // A delete begins (its first step marks the cluster DELETING) after the update stored the configuration and
+        // before it makes the node entry: the block storage the update turns on is applied to the node in between.
+        doAnswer(inv -> {
+            cluster.setStatus(ClusterStatus.DELETING);
+            return null;
+        }).when(clusterManager).applyBlockStorage(anyString(), any());
+        EksService service = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
+                new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
+                new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
+                        new ObjectMapper()), accessEntries, podIdentity, addons);
+        KubernetesNetworkConfig loadBalancing = new KubernetesNetworkConfig();
+        loadBalancing.setElasticLoadBalancing(new ElasticLoadBalancing(true));
+
+        service.updateClusterConfig("deleting", new UpdateClusterConfigRequest(null, null, null, null, null,
+                new ComputeConfig(true, List.of("general-purpose"), "arn:aws:iam::000000000000:role/node"),
+                new StorageConfig(new BlockStorage(true)), loadBalancing));
+
+        verify(accessEntries, never()).ensureAutoModeNodeEntry(any(), any());
+    }
+
     @Test
     void initRestoresPersistedClustersAfterARestart() {
         // A cluster restored from eks-clusters.json after a Floci/Docker restart (#2609) has no

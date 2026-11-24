@@ -5,6 +5,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.eks.model.AccessEntry;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.IamService.EksSessionIdentity;
@@ -70,22 +71,30 @@ class EksWorkerAuthentication {
         if (role.isEmpty()) {
             return Optional.empty();
         }
+        Optional<AccessEntry> entry;
         try {
-            if (entries.workerEntry(cluster.get(), account, identity.roleArn(), identity.roleId()).isEmpty()) {
-                return Optional.empty();
-            }
+            entry = entries.workerEntry(cluster.get(), account, identity.roleArn(), identity.roleId());
         } catch (AwsException rejected) {
+            return Optional.empty();
+        }
+        if (entry.isEmpty()) {
             return Optional.empty();
         }
         Optional<Instance> instance = ec2.findInstanceForAccount(account, region, identity.instanceId())
                 .filter(value -> value.getState() != null && "running".equals(value.getState().getName()))
                 .filter(value -> region.equals(value.getRegion()))
                 .filter(value -> profileMatches(value, account, roleName));
-        if (instance.isEmpty() || instance.get().getPrivateDnsName() == null
-                || instance.get().getPrivateDnsName().isBlank()) {
+        if (instance.isEmpty()) {
             return Optional.empty();
         }
-        return Optional.of(Map.of("username", "system:node:" + instance.get().getPrivateDnsName(),
+        // An EC2_LINUX entry names the node by its private DNS name, an EKS Auto Mode node's EC2 entry by
+        // {{SessionName}}, which an instance profile's session is named for: the instance ID.
+        String node = EksAccessEntryService.AUTO_MODE_NODE_TYPE.equals(entry.get().type())
+                ? identity.instanceId() : instance.get().getPrivateDnsName();
+        if (node == null || node.isBlank()) {
+            return Optional.empty();
+        }
+        return Optional.of(Map.of("username", "system:node:" + node,
                 "uid", account + ":" + identity.roleId() + ":" + identity.instanceId(),
                 "groups", List.of("system:bootstrappers", "system:nodes")));
     }

@@ -296,7 +296,8 @@ public class EksAccessEntryService {
         Optional<StoredEntry> stored = entries instanceof AccountAwareStorageBackend<StoredEntry> aware
                 ? aware.getForAccount(accountId, key) : entries.get(key);
         return stored.filter(value -> roleId != null && roleId.equals(value.principalId()))
-                .map(StoredEntry::entry).filter(entry -> "EC2_LINUX".equals(entry.type()));
+                .map(StoredEntry::entry)
+                .filter(entry -> "EC2_LINUX".equals(entry.type()) || AUTO_MODE_NODE_TYPE.equals(entry.type()));
     }
 
     public synchronized AccessEntry describe(Cluster cluster, String principal) {
