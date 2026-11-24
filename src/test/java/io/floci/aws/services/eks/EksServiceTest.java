@@ -91,6 +91,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -459,6 +460,47 @@ class EksServiceTest {
         verify(clusterManager, times(2)).replaceNodeForServiceLb(running);
     }
 
+    @Test
+    void aCreateWhoseNodeEntryFailsStoresNoClusterAndLeavesNoEntry() {
+        EksAccessEntryService accessEntries = mock(EksAccessEntryService.class);
+        doThrow(new IllegalStateException("entry write failed")).when(accessEntries).ensureAutoModeNodeEntry(any(), any());
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, ec2Service,
+                new EksOidcService(storageFactory, new ObjectMapper()), accessEntries,
+                mock(EksPodIdentityAssociationService.class));
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName("auto-failing");
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        request.setAccessConfig(new AccessConfig("API", false));
+        request.setComputeConfig(new ComputeConfig(true, List.of("general-purpose"), "arn:aws:iam::000000000000:role/node"));
+        request.setStorageConfig(new StorageConfig(new BlockStorage(true)));
+        KubernetesNetworkConfig loadBalancing = new KubernetesNetworkConfig();
+        loadBalancing.setElasticLoadBalancing(new ElasticLoadBalancing(true));
+        request.setKubernetesNetworkConfig(loadBalancing);
+
+        assertThrows(IllegalStateException.class, () -> service.createCluster(request));
+
+        assertThrows(AwsException.class, () -> service.describeCluster("auto-failing"));
+        verify(accessEntries).deleteClusterEntries(argThat(cluster -> "auto-failing".equals(cluster.getName())));
+    }
+
+    @Test
+    void aDeleteWhoseEntryCleanupFailsKeepsTheClusterForARetry() {
+        Cluster cluster = activeCluster();
+        EksAccessEntryService accessEntries = mock(EksAccessEntryService.class);
+        doThrow(new IllegalStateException("entry delete failed")).doNothing()
+                .when(accessEntries).deleteClusterEntries(cluster);
+        EksService service = new EksService(fixedStorageFactory(clusterStoreWith(cluster)), testConfig(true),
+                new RegionResolver("us-east-1", "000000000000"), mock(EksClusterManager.class), null,
+                new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
+                        new ObjectMapper()), accessEntries);
+
+        assertThrows(IllegalStateException.class, () -> service.deleteCluster("running-cluster"));
+        assertEquals("running-cluster", service.describeCluster("running-cluster").getName());
+
+        service.deleteCluster("running-cluster");
+        assertThrows(AwsException.class, () -> service.describeCluster("running-cluster"));
+    }
+
     /**
      * A delete that starts while an update is past its status check, and has removed the cluster's entries before
      * the update makes the node's, leaves no entry to outlive the cluster.
@@ -783,6 +825,14 @@ class EksServiceTest {
         cluster.setName("running-cluster");
         cluster.setStatus(ClusterStatus.ACTIVE);
         return cluster;
+    }
+
+    private AccountAwareStorageBackend<Cluster> clusterStoreWith(Cluster cluster) {
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
+        clusterStore.putForAccount("000000000000", EksService.clusterKey(
+                AwsArnUtils.regionOrDefault(cluster.getArn(), "us-east-1"), cluster.getName()), cluster);
+        return clusterStore;
     }
 
     private EksService serviceWithCluster(Cluster cluster, EksClusterManager clusterManager,

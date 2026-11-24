@@ -89,7 +89,8 @@ Access entries use EKS storage and retain the IAM principal's stable ID internal
 ### EC2 Linux worker authentication
 
 IMDS instance-profile credentials authenticate through a matching `EC2_LINUX` entry as
-`system:node:<private-DNS-name>` with `system:bootstrappers` and `system:nodes` groups.
+`system:node:<private-DNS-name>`, or through an EKS Auto Mode node role's `EC2` entry as
+`system:node:<instance-ID>` (its `{{SessionName}}`), with `system:bootstrappers` and `system:nodes` groups.
 The webhook verifies the signed token, cluster account/region/incarnation, stored role ID,
 running EC2 instance, and attached instance profile. Missing/deleted entries, recreated roles,
 revoked sessions and terminated instances are rejected without falling back to administrator access.
@@ -613,7 +614,7 @@ aws eks update-kubeconfig --name my-cluster
 kubectl get nodes
 ```
 
-`aws eks update-kubeconfig` wires `aws eks get-token` into the kubeconfig as an exec credential. The bearer token contains a SigV4-presigned STS `GetCallerIdentity` request. Floci validates its signature and 15-minute token lifetime matching `aws-iam-authenticator` rather than the presigned expiry, then verifies the signed `x-k8s-aws-id` header against the cluster-specific `/_floci/eks/clusters/<cluster-name>/token-webhook` endpoint before resolving the caller identity. Instance-profile sessions require an EC2_LINUX access entry as described above; non-worker callers retain the `system:masters` mapping (bound to `cluster-admin`). A long-term access key gets it only on clusters of its own account, so a default-account key is refused on another account's cluster; on the older unscoped webhook path only the default account's keys get it. No `aws-iam-authenticator` is required.
+`aws eks update-kubeconfig` wires `aws eks get-token` into the kubeconfig as an exec credential. The bearer token contains a SigV4-presigned STS `GetCallerIdentity` request. Floci validates its signature and 15-minute token lifetime matching `aws-iam-authenticator` rather than the presigned expiry, then verifies the signed `x-k8s-aws-id` header against the cluster-specific `/_floci/eks/clusters/<cluster-name>/token-webhook` endpoint before resolving the caller identity. Instance-profile sessions require an EC2_LINUX or EC2 access entry as described above; non-worker callers retain the `system:masters` mapping (bound to `cluster-admin`). A long-term access key gets it only on clusters of its own account, so a default-account key is refused on another account's cluster; on the older unscoped webhook path only the default account's keys get it. No `aws-iam-authenticator` is required.
 
 Create an IAM access key before using EKS authentication. The public local-development pair `test`/`test` and the seeded deployer's key, whose secret `floci` is public whatever access key ID it was seeded under, are deliberately rejected because the webhook grants cluster-admin access.
 
