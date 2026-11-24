@@ -110,4 +110,40 @@ class S3EncryptionIntegrationTest {
             .body(containsString("<SSEAlgorithm>AES256</SSEAlgorithm>"))
             .body(not(containsString("aws:kms")));
     }
+
+    @Test
+    @Order(7)
+    void putEncryptionRefusesAKmsKeyIdThatWouldBreakTheBucket() {
+        String aesWithKey = SSE_KMS_XML.replace("aws:kms", "AES256");
+        String keyWithLineBreak = SSE_KMS_XML.replace("key/abc", "key/a\nbc");
+
+        for (String body : new String[] {aesWithKey, keyWithLineBreak}) {
+            given()
+                .body(body)
+            .when()
+                .put("/" + BUCKET + "?encryption")
+            .then()
+                .statusCode(400)
+                .body(containsString("InvalidArgument"));
+        }
+
+        given()
+        .when()
+            .get("/" + BUCKET + "?encryption")
+        .then()
+            .statusCode(200)
+            .body(containsString("<SSEAlgorithm>AES256</SSEAlgorithm>"))
+            .body(not(containsString("KMSMasterKeyID")));
+        given()
+            .body("data")
+        .when()
+            .put("/" + BUCKET + "/after-refusal.txt")
+        .then()
+            .statusCode(200);
+        given()
+        .when()
+            .head("/" + BUCKET + "/after-refusal.txt")
+        .then()
+            .statusCode(200);
+    }
 }

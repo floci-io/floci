@@ -1,5 +1,6 @@
 package io.floci.aws.services.s3;
 
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.s3.model.CopyObjectOptions;
 import io.floci.aws.services.s3.model.MultipartUpload;
@@ -17,8 +18,11 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * An object written without encryption headers is encrypted with its bucket's default encryption:
@@ -238,6 +242,53 @@ class S3DefaultEncryptionServiceTest {
 
         s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY) + "<Broken>");
         assertEquals("AES256", put("truncated-configuration.txt", new PutObjectOptions()).getServerSideEncryption());
+    }
+
+    @Test
+    void aKmsKeyIdNextToAnAlgorithmThatTakesNoneIsRefused() {
+        for (String algorithm : List.of("AES256", "aws:fsx")) {
+            AwsException refused = assertThrows(AwsException.class,
+                    () -> s3Service.putBucketEncryption(BUCKET, configuration(algorithm, KMS_KEY)), algorithm);
+            assertEquals("InvalidArgument", refused.getErrorCode());
+            assertEquals(400, refused.getHttpStatus());
+        }
+
+        assertFalse(s3Service.getBucketEncryption(BUCKET).contains("KMSMasterKeyID"));
+        assertEquals("AES256", put("after-refusal.txt", new PutObjectOptions()).getServerSideEncryption());
+    }
+
+    @Test
+    void aKmsKeyIdWithAControlCharacterIsRefusedSoTheBucketStaysReadable() {
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", "key\nid")));
+        assertEquals("InvalidArgument", refused.getErrorCode());
+        assertEquals(400, refused.getHttpStatus());
+
+        assertTrue(s3Service.getBucketEncryption(BUCKET).contains(KMS_KEY));
+        assertEquals(KMS_KEY, put("after-refusal.txt", new PutObjectOptions()).getSseKmsKeyId());
+    }
+
+    @Test
+    void anEmptyKmsKeyIdNextToSseS3StaysValid() {
+        s3Service.putBucketEncryption(BUCKET, configuration("AES256", " "));
+
+        S3Object put = put("empty-key.txt", new PutObjectOptions());
+
+        assertEquals("AES256", put.getServerSideEncryption());
+        assertNull(put.getSseKmsKeyId());
+    }
+
+    @Test
+    void aRuleWithoutADefaultStaysValid() {
+        String blockedOnly = "<ServerSideEncryptionConfiguration><Rule><BlockedEncryptionTypes>"
+                + "<EncryptionType>SSE-C</EncryptionType></BlockedEncryptionTypes></Rule></ServerSideEncryptionConfiguration>";
+
+        s3Service.putBucketEncryption(BUCKET, blockedOnly);
+
+        assertEquals(blockedOnly, s3Service.getBucketEncryption(BUCKET));
+        assertEquals("AES256", put("blocked-only.txt", new PutObjectOptions()).getServerSideEncryption());
     }
 
     @Test

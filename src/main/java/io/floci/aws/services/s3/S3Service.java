@@ -6543,8 +6543,37 @@ public class S3Service implements Resettable, ResourceProvider {
     public void putBucketEncryption(String bucketName, String encryptionXml) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> noSuchBucket());
+        validateDefaultKmsKeyIds(encryptionXml);
         bucket.setEncryptionConfiguration(encryptionXml);
         bucketStore.put(bucketName, bucket);
+    }
+
+    /**
+     * Refuses a {@code KMSMasterKeyID} S3 would not accept: AWS allows one only with {@code aws:kms} or
+     * {@code aws:kms:dsse}, and a key id holding a control character is later written into a response
+     * header, which fails every write and read of the bucket that does not name its own encryption.
+     */
+    private static void validateDefaultKmsKeyIds(String encryptionXml) {
+        XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(encryptionXml);
+        if (root == null) {
+            return;
+        }
+        for (XmlParser.XmlElement rule : root.children()) {
+            XmlParser.XmlElement byDefault = "Rule".equals(rule.name()) ? rule.child("ApplyServerSideEncryptionByDefault") : null;
+            XmlParser.XmlElement key = byDefault == null ? null : byDefault.child("KMSMasterKeyID");
+            if (key == null || key.text().isBlank()) {
+                continue;
+            }
+            XmlParser.XmlElement algorithm = byDefault.child("SSEAlgorithm");
+            String algorithmName = algorithm == null ? null : algorithm.text();
+            if (!"aws:kms".equals(algorithmName) && !"aws:kms:dsse".equals(algorithmName)) {
+                throw new AwsException("InvalidArgument",
+                        "KMSMasterKeyID is allowed only with an SSEAlgorithm of aws:kms or aws:kms:dsse.", 400);
+            }
+            if (key.text().chars().anyMatch(Character::isISOControl)) {
+                throw new AwsException("InvalidArgument", "The KMSMasterKeyID is not valid.", 400);
+            }
+        }
     }
 
     public void deleteBucketEncryption(String bucketName) {
