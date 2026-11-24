@@ -3748,9 +3748,19 @@ public class DynamoDbService {
 
     // --- Condition expression evaluation ---
 
+    public void validateFilterExpression(String filterExpression, JsonNode exprAttrNames, JsonNode exprAttrValues) {
+        validateExpression(filterExpression, "FilterExpression", exprAttrNames, exprAttrValues);
+    }
+
+    private static void validateExpression(String expression, String exprType,
+                                           JsonNode exprAttrNames, JsonNode exprAttrValues) {
+        DynamoDbReservedWords.check(expression, exprType);
+        ExpressionEvaluator.validateExpression(expression, exprType, exprAttrNames, exprAttrValues);
+    }
+
     private void evaluateCondition(JsonNode existingItem, String conditionExpression,
                                     JsonNode exprAttrNames, JsonNode exprAttrValues, String returnValuesOnConditionCheckFailure) {
-        DynamoDbReservedWords.check(conditionExpression, "ConditionExpression");
+        validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
         if (!matchesFilterExpression(existingItem, conditionExpression, exprAttrNames, exprAttrValues)) {
             if ("ALL_OLD".equals(returnValuesOnConditionCheckFailure)){
                 throw new ConditionalCheckFailedException(existingItem);

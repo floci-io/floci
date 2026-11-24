@@ -158,6 +158,7 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     public ScanPage scan(Scope scope, String tableName, String filterExpression, JsonNode expressionAttributeNames,
                          JsonNode expressionAttributeValues, JsonNode scanFilter, Integer limit,
                          JsonNode exclusiveStartKey) {
+        dynamoDbService.validateFilterExpression(filterExpression, expressionAttributeNames, expressionAttributeValues);
         DynamoDbService.ScanResult result = RequestScopes.callAs(scope.accountId(), () ->
                 dynamoDbService.scan(tableName, filterExpression, expressionAttributeNames,
                         expressionAttributeValues, scanFilter, limit, exclusiveStartKey, scope.region()));

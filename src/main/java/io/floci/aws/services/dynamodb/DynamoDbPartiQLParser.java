@@ -1248,6 +1248,10 @@ public class DynamoDbPartiQLParser {
                 + function + ", number of operands: " + count;
     }
 
+    static String invalidFunctionName(String function) {
+        return "Invalid function name; function: " + function;
+    }
+
     static String documentPathRequired(String function) {
         return "Operator or function requires a document path; operator or function: " + function;
     }
