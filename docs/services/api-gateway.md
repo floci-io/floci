@@ -130,6 +130,7 @@ Object properties use two-space indentation and sample values, including `"foo"`
 strings and `3.1415` for numbers. Arrays contain a `##TODO:` comment and a
 `#foreach($elem in $inputRoot.TODO)` placeholder to customize for the source payload.
 This is a starting point for a mapping template, not a projection of the input JSON.
+Top-level array directives are unindented, with one space surrounding each sample element.
 
 Nested objects, typed arrays and finite local JSON Pointer references
 (`#/definitions/...`) are supported. Updating a model changes its next template;
@@ -151,6 +152,8 @@ with `Unsupported data type for mapping template: <type>`. Schema admission at
 model creation and update is unchanged; valid schemas outside the generator's
 subset remain storable. HTTP APIs reject model creation because models are only
 supported for WebSocket APIs in API Gateway v2.
+Template reads for a missing WebSocket model return `NotFoundException` (HTTP 404)
+with `Invalid model identifier specified: <id>`.
 
 Local generation limits are 1,048,576 schema characters, 4,096 visited schema nodes,
 32 levels of nesting and 262,144 output characters. These are Floci limits, not

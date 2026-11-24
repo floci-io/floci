@@ -1480,7 +1480,9 @@ public class ApiGatewayV2Service {
 
     public String getModelTemplate(String region, String apiId, String modelId) {
         getApi(region, apiId);
-        Model model = getModel(region, apiId, modelId);
+        Model model = modelStore.get(modelKey(region, apiId, modelId))
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Invalid model identifier specified: " + modelId, 404));
         return ModelTemplateGenerator.generate(model.getSchema(), model.getContentType());
     }
 

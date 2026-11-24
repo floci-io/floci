@@ -132,7 +132,7 @@ class ApiGatewayModelTemplateSdkIntegrationTest {
             String model = fixture.createModel("TypedModel", SCHEMA);
             String template = fixture.template(model);
             assertTrue(template.contains("\n  \"name\" : \"foo\","));
-            assertTrue(template.contains("##TODO: Update this placeholder input path to match your source data"));
+            assertTrue(template.contains("##TODO: Update this foreach loop to reference array from input json"));
             assertTrue(template.contains("#foreach($elem in $inputRoot.TODO)"));
             JsonNode output = render(template, "{\"TODO\":[{},{}]}");
             assertEquals("foo", output.get("name").textValue());
@@ -172,6 +172,52 @@ class ApiGatewayModelTemplateSdkIntegrationTest {
                 }""";
         try (Fixture fixture = new Fixture(websocket)) {
             assertEquals(expected, fixture.template(fixture.createModel("DocumentedSample", schema)));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void bothSdkRoutesReturnTheAwsStringArraySkeleton(boolean websocket) throws Exception {
+        String schema = """
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+                """;
+        String expected = """
+                #set($inputRoot = $input.path('$'))
+                [
+                ##TODO: Update this foreach loop to reference array from input json
+                #foreach($elem in $inputRoot.TODO)
+                 "foo"\s
+                #if($foreach.hasNext),#end
+                #end
+                ]""";
+        try (Fixture fixture = new Fixture(websocket)) {
+            String template = fixture.template(fixture.createModel("StringArray", schema));
+            assertEquals(expected, template);
+            assertEquals(json.readTree("[]"), render(template, "{\"TODO\":[]}"));
+            assertEquals(json.readTree("[\"foo\"]"), render(template, "{\"TODO\":[{}]}"));
+            assertEquals(json.readTree("[\"foo\",\"foo\"]"), render(template, "{\"TODO\":[{},{}]}"));
+        }
+    }
+
+    @Test
+    void websocketMissingModelUsesTemplateSpecificError() {
+        try (Fixture fixture = new Fixture(true)) {
+            String model = "missing-model";
+            String message = "Invalid model identifier specified: " + model;
+            AwsServiceException error = assertThrows(AwsServiceException.class, () -> fixture.template(model));
+            assertEquals(404, error.statusCode());
+            assertEquals("NotFoundException", error.awsErrorDetails().errorCode());
+            assertEquals(message, error.awsErrorDetails().errorMessage());
+            jsonTemplate(fixture.apiId, model).statusCode(404).body(containsString(message));
+
+            AwsServiceException modelError = assertThrows(AwsServiceException.class,
+                    () -> fixture.socket.getModel(request -> request.apiId(fixture.apiId).modelId(model)));
+            assertEquals("Model not found", modelError.awsErrorDetails().errorMessage());
         }
     }
 

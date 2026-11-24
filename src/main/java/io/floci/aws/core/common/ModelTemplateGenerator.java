@@ -72,12 +72,12 @@ public final class ModelTemplateGenerator {
                 output.append("}");
             }
             case "array" -> {
-                output.append("[\n" + childIndent
-                        + "##TODO: Update this placeholder input path to match your source data\n"
-                        + childIndent + "#foreach($elem in $inputRoot.TODO)\n" + childIndent);
+                output.append("[\n" + indent
+                        + "##TODO: Update this foreach loop to reference array from input json\n"
+                        + indent + "#foreach($elem in $inputRoot.TODO)\n" + indent + " ");
                 render(shape.items(), depth + 1, output);
-                output.append("\n" + childIndent + "#if($foreach.hasNext),#end\n"
-                        + childIndent + "#end\n" + indent + "]");
+                output.append(" \n" + indent + "#if($foreach.hasNext),#end\n"
+                        + indent + "#end\n" + indent + "]");
             }
             case "string" -> output.append("\"foo\"");
             case "integer" -> output.append("1");
