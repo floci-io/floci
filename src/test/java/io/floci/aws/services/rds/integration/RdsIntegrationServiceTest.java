@@ -265,6 +265,22 @@ class RdsIntegrationServiceTest {
     }
 
     @Test
+    void describeIntegrations_prefersIdMatchOverAnotherIntegrationsName() {
+        Integration first = create("orders-zero-etl");
+        Integration second = service.createIntegration(
+                request("other-zero-etl", CLUSTER_ARN, REDSHIFT_CLUSTER_ARN), REGION);
+        String secondId = second.integrationId();
+        String firstKey = "integration::" + REGION + "::" + first.integrationId();
+        Integration renamed = new Integration(storage.get(firstKey).orElseThrow());
+        renamed.setIntegrationName(secondId);
+        storage.put(firstKey, renamed);
+
+        List<Integration> found = service.describeIntegrations(secondId, Map.of(), REGION);
+        assertThat(found.stream().map(Integration::getIntegrationArn).toList(),
+                contains(second.getIntegrationArn()));
+    }
+
+    @Test
     void describeIntegrations_isScopedToTheRegionAndFiltered() {
         Integration orders = create("orders-zero-etl");
         service.createIntegration(request("other-zero-etl", CLUSTER_ARN, REDSHIFT_CLUSTER_ARN), REGION);

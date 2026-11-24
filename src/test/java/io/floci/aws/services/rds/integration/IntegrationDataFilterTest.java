@@ -27,7 +27,8 @@ class IntegrationDataFilterTest {
                 "include: books.science_fiction.*, exclude: books.*./.*king.*/",
                 "include: books.*.*, exclude: books./sci.*/.*",
                 "include: books.*./table_.*/, exclude: books.*.table_stephen_king",
-                "include: mydb.myschema./table_\\d+/")) {
+                "include: mydb.myschema./table_\\d+/",
+                "include: mydb./sales team/.*")) {
             IntegrationDataFilter parsed = IntegrationDataFilter.parsePostgres(filter);
             assertFalse(parsed.rules().isEmpty(), filter);
         }
@@ -67,6 +68,8 @@ class IntegrationDataFilterTest {
         assertInvalid("include: books.*.//");
         assertInvalid("include: books.public.a/b/c");
         assertInvalid("include: books.*./a/b/c/");
+        assertInvalid("include: books.public.bad table");
+        assertInvalid("include: books. /sales team/.*");
     }
 
     @Test

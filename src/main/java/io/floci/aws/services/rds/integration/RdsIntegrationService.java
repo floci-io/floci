@@ -207,22 +207,24 @@ public class RdsIntegrationService implements Resettable {
         String resource = arn.resource();
         int separator = resource.indexOf(':');
         if (!"rds".equals(arn.service()) || separator < 0) {
-            throw new AwsException("InvalidParameterValue",
-                    "SourceArn must identify an RDS DB instance or an Aurora DB cluster.", 400);
+            throw invalidSource();
         }
         requireInScope(arn, region, accountId, "SourceArn");
         String type = resource.substring(0, separator);
         String identifier = resource.substring(separator + 1);
         if (identifier.isBlank()) {
-            throw new AwsException("InvalidParameterValue",
-                    "SourceArn must identify an RDS DB instance or an Aurora DB cluster.", 400);
+            throw invalidSource();
         }
         switch (type) {
             case "cluster" -> requireClusterSource(rdsService.getDbCluster(identifier, region));
             case "db" -> requireInstanceSource(rdsService.getDbInstance(identifier, region));
-            default -> throw new AwsException("InvalidParameterValue",
-                    "SourceArn must identify an RDS DB instance or an Aurora DB cluster.", 400);
+            default -> throw invalidSource();
         }
+    }
+
+    private static AwsException invalidSource() {
+        return new AwsException("InvalidParameterValue",
+                "SourceArn must identify an RDS DB instance or an Aurora DB cluster.", 400);
     }
 
     private static void requireClusterSource(DbCluster cluster) {
@@ -324,11 +326,11 @@ public class RdsIntegrationService implements Resettable {
         if (identifier == null || identifier.isBlank()) {
             throw new AwsException("InvalidParameterValue", "IntegrationIdentifier is required.", 400);
         }
-        return regionIntegrations(region).stream()
-                .filter(integration -> identifier.equals(integration.getIntegrationArn())
-                        || identifier.equals(integration.integrationId())
-                        || identifier.equals(integration.getIntegrationName()))
-                .findFirst()
+        List<Integration> all = regionIntegrations(region);
+        return all.stream().filter(integration -> identifier.equals(integration.getIntegrationArn())).findFirst()
+                .or(() -> all.stream().filter(integration -> identifier.equals(integration.integrationId())).findFirst())
+                .or(() -> all.stream()
+                        .filter(integration -> identifier.equals(integration.getIntegrationName())).findFirst())
                 .orElseThrow(() -> new AwsException("IntegrationNotFoundFault",
                         "Integration " + identifier + " not found.", 404));
     }

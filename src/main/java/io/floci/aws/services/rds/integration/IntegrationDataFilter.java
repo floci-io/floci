@@ -101,8 +101,7 @@ public record IntegrationDataFilter(List<Rule> rules) {
             throw invalid("A data filter pattern can be at most " + MAX_PATTERN_LENGTH + " characters.");
         }
         List<String> parts = splitOutsideRegex(pattern, '.');
-        if (parts.size() != POSTGRES_PARTS || parts.stream().anyMatch(part -> part.isBlank()
-                || part.chars().anyMatch(Character::isWhitespace))) {
+        if (parts.size() != POSTGRES_PARTS || parts.stream().anyMatch(String::isBlank)) {
             throw invalid("The data filter pattern " + pattern + " is not valid: a PostgreSQL pattern has the "
                     + "form database.schema.table.");
         }
@@ -123,6 +122,9 @@ public record IntegrationDataFilter(List<Rule> rules) {
                     throw invalid("The data filter pattern " + pattern + " is not valid: " + part
                             + " is not a valid regular expression.");
                 }
+            } else if (part.chars().anyMatch(Character::isWhitespace)) {
+                throw invalid("The data filter pattern " + pattern + " is not valid: a PostgreSQL pattern has the "
+                        + "form database.schema.table.");
             } else if (part.indexOf('/') >= 0) {
                 throw invalid("The data filter pattern " + pattern + " is not valid: " + part
                         + " has an unexpected '/'.");

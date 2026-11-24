@@ -2469,11 +2469,19 @@ public class RdsQueryHandler {
         Map<String, String> context = new LinkedHashMap<>();
         for (int i = 1; ; i++) {
             String key = params.getFirst("AdditionalEncryptionContext.entry." + i + ".key");
-            if (key == null) {
+            String value = params.getFirst("AdditionalEncryptionContext.entry." + i + ".value");
+            if (key == null && value == null) {
                 break;
             }
-            String value = params.getFirst("AdditionalEncryptionContext.entry." + i + ".value");
-            context.put(key, value == null ? "" : value);
+            if (key == null) {
+                throw new AwsException("InvalidParameterValue",
+                        "AdditionalEncryptionContext.entry." + i + ".key is required.", 400);
+            }
+            if (value == null) {
+                throw new AwsException("InvalidParameterValue",
+                        "AdditionalEncryptionContext.entry." + i + ".value is required.", 400);
+            }
+            context.put(key, value);
         }
         return context;
     }

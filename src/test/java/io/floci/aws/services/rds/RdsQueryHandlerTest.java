@@ -61,6 +61,7 @@ class RdsQueryHandlerTest {
 
     private RdsService service;
     private RdsExportTaskService exportTaskService;
+    private RdsIntegrationService integrationService;
     private DocDbQueryHandler docDbHandler;
     private NeptuneQueryHandler neptuneHandler;
     private RdsQueryHandler handler;
@@ -83,7 +84,8 @@ class RdsQueryHandlerTest {
         docDbHandler = mock(DocDbQueryHandler.class);
         neptuneHandler = mock(NeptuneQueryHandler.class);
         exportTaskService = mock(RdsExportTaskService.class);
-        handler = new RdsQueryHandler(service, exportTaskService, mock(RdsIntegrationService.class), config,
+        integrationService = mock(RdsIntegrationService.class);
+        handler = new RdsQueryHandler(service, exportTaskService, integrationService, config,
                 regionResolver, docDbHandler, neptuneHandler);
     }
 
@@ -4037,5 +4039,32 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<Type>Receiver</Type>"), body);
         assertTrue(body.contains("<Code>InternalFailure</Code>"), body);
         assertTrue(body.contains("<Message>Unexpected error: Docker daemon connection failed</Message>"), body);
+    }
+
+    @Test
+    void createIntegration_rejectsIncompleteEncryptionContextEntry() {
+        MultivaluedMap<String, String> missingValue = params();
+        missingValue.add("IntegrationName", "orders-zero-etl");
+        missingValue.add("SourceArn", "arn:aws:rds:us-east-1:000000000000:cluster:orders-src");
+        missingValue.add("TargetArn", "arn:aws:redshift-serverless:us-east-1:000000000000:namespace/ns-1");
+        missingValue.add("KMSKeyId", "alias/orders");
+        missingValue.add("AdditionalEncryptionContext.entry.1.key", "purpose");
+
+        Response missingValueResponse = handler.handle("CreateIntegration", missingValue);
+        assertEquals(400, missingValueResponse.getStatus());
+        assertTrue(((String) missingValueResponse.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+
+        MultivaluedMap<String, String> missingKey = params();
+        missingKey.add("IntegrationName", "orders-zero-etl");
+        missingKey.add("SourceArn", "arn:aws:rds:us-east-1:000000000000:cluster:orders-src");
+        missingKey.add("TargetArn", "arn:aws:redshift-serverless:us-east-1:000000000000:namespace/ns-1");
+        missingKey.add("KMSKeyId", "alias/orders");
+        missingKey.add("AdditionalEncryptionContext.entry.1.value", "analytics");
+
+        Response missingKeyResponse = handler.handle("CreateIntegration", missingKey);
+        assertEquals(400, missingKeyResponse.getStatus());
+        assertTrue(((String) missingKeyResponse.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+
+        verifyNoInteractions(integrationService);
     }
 }
