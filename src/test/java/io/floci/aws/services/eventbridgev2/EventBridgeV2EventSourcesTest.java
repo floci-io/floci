@@ -23,12 +23,14 @@ import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -37,6 +39,7 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -63,6 +66,7 @@ class EventBridgeV2EventSourcesTest {
             secret.setArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:" + call.getArgument(0) + "-AbCdEf");
             return secret;
         });
+        when(secrets.describeSecret(any(), any())).thenReturn(new Secret());
         clock = new TestClock(NOW);
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(
@@ -88,10 +92,7 @@ class EventBridgeV2EventSourcesTest {
         String url = service.webhookUrl(source);
         String host = "[a-z][a-z2-7]{37}\\.c01\\.events-webhook\\.us-east-1\\.localhost:4566";
         assertTrue(url.matches("http://" + host + "/k1[A-Za-z0-9_-]{64}/"), url);
-        String hostId = source.getWebhookHostId();
-        assertTrue(hostId.startsWith("a"));
-        assertTrue(WebhookTokens.isValidToken(hostId, source.getWebhookToken()));
-        assertFalse(WebhookTokens.isValidToken("a".repeat(38), source.getWebhookToken()));
+        assertTrue(source.getWebhookHostId().startsWith("a"));
     }
 
     @Test
@@ -247,7 +248,7 @@ class EventBridgeV2EventSourcesTest {
         EventSourceV2 retried = service.createEventSource(request, REGION);
         assertEquals(first.getArn(), retried.getArn());
         verify(secrets, times(1)).createSecret(any(), any(), any(), any(), any(), any(), any(), any());
-        assertEquals(64, first.getCreateRequestHash().length());
+        assertEquals(first.getCreateRequestHash(), retried.getCreateRequestHash());
     }
 
     @Test
@@ -266,6 +267,26 @@ class EventBridgeV2EventSourcesTest {
                 "{\"StaticTokenAuthConfiguration\":{\"TokenHttpHeader\":\"X-Token\",\"SecretValue\":\"s3cret!!\"}}",
                 "\"ClientToken\":\"t-1\""), REGION);
         assertFalse(source.getCreateRequestHash().contains("s3cret"));
+    }
+
+    @Test
+    void createDeletesItsSecretWhenTheSourceCannotBeStored() {
+        AccountAwareStorageBackend<EventSourceV2> failing = spy(
+                AccountAwareStorageBackend.<EventSourceV2>inMemory(ACCOUNT));
+        IllegalStateException failure = new IllegalStateException("disk full");
+        doThrow(failure).when(failing).put(any(), any());
+        EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(failing, secrets,
+                new RegionResolver(REGION, ACCOUNT), clock, "http://localhost:4566");
+
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> eventSources.create(
+                create("hook", bus, STATIC_AUTH), REGION, arn -> Optional.of(new EventBusV2())));
+
+        assertSame(failure, e);
+        ArgumentCaptor<String> secretName = ArgumentCaptor.forClass(String.class);
+        verify(secrets).createSecret(secretName.capture(), any(), any(), any(), any(), any(), any(), any());
+        verify(secrets).deleteSecret(
+                eq("arn:aws:secretsmanager:us-east-1:000000000000:secret:" + secretName.getValue() + "-AbCdEf"),
+                isNull(), eq(true), eq(REGION));
     }
 
     // ──────────────────────────── Describe ────────────────────────────
@@ -442,6 +463,39 @@ class EventBridgeV2EventSourcesTest {
                 .deleteSecret(any(), any(), eq(false), any());
         service.deleteEventSource(arn(source.getArn()), REGION);
         assertEquals(Set.of(), names(service.listEventSources(json("{}"), REGION)));
+    }
+
+    @Test
+    void deleteToleratesASecretThatDescribeCannotFind() {
+        EventSourceV2 source = service.createEventSource(create("hook", bus, STATIC_AUTH), REGION);
+        when(secrets.describeSecret(any(), any()))
+                .thenThrow(new AwsException("ResourceNotFoundException", "gone", 400));
+        service.deleteEventSource(arn(source.getArn()), REGION);
+        assertEquals(Set.of(), names(service.listEventSources(json("{}"), REGION)));
+        verify(secrets, never()).deleteSecret(any(), any(), eq(false), any());
+    }
+
+    @Test
+    void deleteKeepsTheSourceWhenTheSecretFailsToDeleteForAnotherReason() {
+        EventSourceV2 source = service.createEventSource(create("hook", bus, STATIC_AUTH), REGION);
+        AwsException failure = new AwsException("InternalServiceError", "boom", 500);
+        doThrow(failure).when(secrets).deleteSecret(any(), any(), eq(false), any());
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.deleteEventSource(arn(source.getArn()), REGION));
+        assertSame(failure, e);
+        assertEquals(Set.of("hook"), names(service.listEventSources(json("{}"), REGION)));
+        assertEquals(source.getArn(), service.describeEventSource(arn(source.getArn()), REGION).getArn());
+    }
+
+    @Test
+    void deleteDoesNotScheduleASecretThatIsAlreadyScheduledForDeletion() {
+        EventSourceV2 source = service.createEventSource(create("hook", bus, STATIC_AUTH), REGION);
+        Secret scheduled = new Secret();
+        scheduled.setDeletedDate(NOW.plus(Duration.ofDays(7)));
+        when(secrets.describeSecret(any(), any())).thenReturn(scheduled);
+        service.deleteEventSource(arn(source.getArn()), REGION);
+        assertEquals(Set.of(), names(service.listEventSources(json("{}"), REGION)));
+        verify(secrets, never()).deleteSecret(any(), any(), eq(false), any());
     }
 
     @Test

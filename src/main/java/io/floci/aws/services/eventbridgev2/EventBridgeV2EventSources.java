@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.SmithyValidationErrors;
@@ -21,15 +22,11 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.Comparator;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -47,8 +44,6 @@ public class EventBridgeV2EventSources implements Resettable {
     static final String OWNING_SERVICE = "events-webhook";
 
     private static final Logger LOG = Logger.getLogger(EventBridgeV2EventSources.class);
-    private static final String ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
-    private static final int ID_LENGTH = 25;
     private static final int GENERATED_SECRET_BYTES = 32;
 
     private final AccountAwareStorageBackend<EventSourceV2> sources;
@@ -95,18 +90,14 @@ public class EventBridgeV2EventSources implements Resettable {
         JsonNode webhook = WebhookEventsConfigurations.validateForCreate(configuration);
 
         String clientToken = request.hasNonNull("ClientToken") ? request.get("ClientToken").textValue() : null;
-        String requestHash = sha256(EventBridgeV2Service.withoutClientToken(request));
-        if (clientToken != null) {
-            Optional<EventSourceV2> retried = inRegion(region).stream()
-                    .filter(source -> clientToken.equals(source.getClientToken()))
-                    .findFirst();
-            if (retried.isPresent()) {
-                if (!requestHash.equals(retried.get().getCreateRequestHash())) {
-                    throw new AwsException("IdempotentParameterMismatchException",
-                            "ClientToken was used by a previous request with different parameters", 409);
-                }
-                return retried.get();
-            }
+        // The request carries credentials, so only its hash is kept.
+        String requestHash = Digests.sha256Hex(EventBridgeV2Service.withoutClientToken(request));
+        Optional<EventSourceV2> retried = EventBridgeV2Service.retried(inRegion(region), clientToken, requestHash,
+                EventSourceV2::getClientToken, EventSourceV2::getCreateRequestHash,
+                () -> new AwsException("IdempotentParameterMismatchException",
+                        "ClientToken was used by a previous request with different parameters", 409));
+        if (retried.isPresent()) {
+            return retried.get();
         }
         findBus.apply(eventBusArn).orElseThrow(() -> new AwsException("ResourceNotFoundException",
                 "Event bus not found: " + AwsArnUtils.parse(eventBusArn).resource().split("/")[1], 404));
@@ -119,7 +110,8 @@ public class EventBridgeV2EventSources implements Resettable {
         Instant now = clock.instant();
         EventSourceV2 source = new EventSourceV2();
         source.setName(name);
-        source.setArn(regionResolver.buildArn("events", region, "event-sourcev2/webhook/" + name + "/" + newId()));
+        source.setArn(regionResolver.buildArn("events", region,
+                "event-sourcev2/webhook/" + name + "/" + EventBridgeV2Service.newId(random)));
         source.setEventBusArn(eventBusArn);
         source.setDescription(request.hasNonNull("Description") ? request.get("Description").textValue() : null);
         source.setConfiguration(WebhookEventsConfigurations.echo(webhook));
@@ -132,7 +124,12 @@ public class EventBridgeV2EventSources implements Resettable {
         source.setWebhookHostId(hostId);
         source.setWebhookToken(WebhookTokens.newToken(hostId, random));
         source.setSecretArn(createSecret(webhook, region));
-        sources.put(key, source);
+        try {
+            sources.put(key, source);
+        } catch (RuntimeException e) {
+            deleteOrphanedSecret(source.getSecretArn(), region);
+            throw e;
+        }
         return source;
     }
 
@@ -173,11 +170,13 @@ public class EventBridgeV2EventSources implements Resettable {
         return require(arn, region);
     }
 
-    /** Deletes the source and schedules its secret for deletion. */
+    /** Deletes the source and schedules its secret for deletion, unless the secret is already scheduled. */
     void delete(JsonNode request, String region) {
         EventSourceV2 source = describe(request, region);
         try {
-            secrets.deleteSecret(source.getSecretArn(), null, false, region);
+            if (secrets.describeSecret(source.getSecretArn(), region).getDeletedDate() == null) {
+                secrets.deleteSecret(source.getSecretArn(), null, false, region);
+            }
         } catch (AwsException e) {
             if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
                 throw e;
@@ -235,6 +234,14 @@ public class EventBridgeV2EventSources implements Resettable {
                 region).getArn();
     }
 
+    private void deleteOrphanedSecret(String secretArn, String region) {
+        try {
+            secrets.deleteSecret(secretArn, null, true, region);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "The secret {0} of an event source that was not stored could not be deleted", secretArn);
+        }
+    }
+
     private String generated() {
         byte[] bytes = new byte[GENERATED_SECRET_BYTES];
         random.nextBytes(bytes);
@@ -290,27 +297,10 @@ public class EventBridgeV2EventSources implements Resettable {
     }
 
     static String id(EventSourceV2 source) {
-        return source.getArn().substring(source.getArn().length() - ID_LENGTH);
-    }
-
-    private String newId() {
-        StringBuilder id = new StringBuilder(ID_LENGTH);
-        for (int i = 0; i < ID_LENGTH; i++) {
-            id.append(ID_ALPHABET.charAt(random.nextInt(ID_ALPHABET.length())));
-        }
-        return id.toString();
+        return source.getArn().substring(source.getArn().length() - EventBridgeV2Service.ID_LENGTH);
     }
 
     private static String storageKey(String region, String name) {
         return region + "::" + name;
-    }
-
-    private static String sha256(String value) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 is always available", e);
-        }
     }
 }

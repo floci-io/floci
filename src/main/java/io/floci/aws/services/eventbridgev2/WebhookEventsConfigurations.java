@@ -76,14 +76,12 @@ final class WebhookEventsConfigurations {
     private static final List<String> LOG_LEVELS = List.of("OFF", "ERROR", "INFO");
     private static final List<String> INCLUDE_PAYLOADS = List.of("FULL", "ON_ERROR_ONLY");
 
-    private static final Set<String> REFUSED_AUTH_HEADERS = lowerCased("Host", "X-Forwarded-For",
-            "X-Forwarded-Host", "X-Forwarded-Proto", "Connection", "Content-Length", "Transfer-Encoding", "Cookie",
-            "Set-Cookie", "Via", "Upgrade", "TE", "Keep-Alive", "Forwarded", "Proxy-Authorization", "Trailer",
-            "Proxy-Connection", "Max-Forwards");
-    private static final Set<String> REFUSED_METADATA_HEADERS = lowerCased("Authorization", "Proxy-Authorization",
-            "Cookie", "Host", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Connection",
-            "Transfer-Encoding", "Via", "Forwarded", "TE", "Upgrade", "Keep-Alive", "Trailer", "Proxy-Connection",
-            "Max-Forwards");
+    private static final Set<String> REFUSED_COMMON_HEADERS = lowerCased("Host", "X-Forwarded-For",
+            "X-Forwarded-Host", "X-Forwarded-Proto", "Connection", "Transfer-Encoding", "Cookie", "Via", "Upgrade",
+            "TE", "Keep-Alive", "Forwarded", "Proxy-Authorization", "Trailer", "Proxy-Connection", "Max-Forwards");
+    private static final Set<String> REFUSED_AUTH_HEADERS = withExtras(REFUSED_COMMON_HEADERS,
+            "Content-Length", "Set-Cookie");
+    private static final Set<String> REFUSED_METADATA_HEADERS = withExtras(REFUSED_COMMON_HEADERS, "Authorization");
 
     /** The length and pattern a string member must satisfy, and whether AWS leaves its value out of a message. */
     private record StringRule(int min, int max, String pattern, boolean sensitive, Pattern compiled) {
@@ -611,6 +609,12 @@ final class WebhookEventsConfigurations {
         for (String name : names) {
             set.add(name.toLowerCase(Locale.ROOT));
         }
+        return Set.copyOf(set);
+    }
+
+    private static Set<String> withExtras(Set<String> common, String... extras) {
+        Set<String> set = new HashSet<>(common);
+        set.addAll(lowerCased(extras));
         return Set.copyOf(set);
     }
 

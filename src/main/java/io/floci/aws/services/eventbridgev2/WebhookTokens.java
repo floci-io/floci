@@ -9,7 +9,7 @@ import java.util.Base64;
 
 /**
  * The host id and the path token of a webhook URL. The token holds 32 random bytes and the first 16 bytes of the
- * SHA-256 of the host id and those bytes, so a token is checked against its host id without a lookup.
+ * SHA-256 of the host id and those bytes.
  */
 final class WebhookTokens {
     static final int HOST_ID_LENGTH = 38;
@@ -36,24 +36,6 @@ final class WebhookTokens {
         byte[] token = Arrays.copyOf(payload, RANDOM_BYTES + CHECK_BYTES);
         System.arraycopy(check(hostId, payload), 0, token, RANDOM_BYTES, CHECK_BYTES);
         return TOKEN_PREFIX + Base64.getUrlEncoder().withoutPadding().encodeToString(token);
-    }
-
-    static boolean isValidToken(String hostId, String token) {
-        if (token == null || !token.startsWith(TOKEN_PREFIX)) {
-            return false;
-        }
-        byte[] decoded;
-        try {
-            decoded = Base64.getUrlDecoder().decode(token.substring(TOKEN_PREFIX.length()));
-        } catch (IllegalArgumentException ignored) {
-            // Not Base64, so not a token Floci minted.
-            return false;
-        }
-        if (decoded.length != RANDOM_BYTES + CHECK_BYTES) {
-            return false;
-        }
-        byte[] expected = check(hostId, Arrays.copyOf(decoded, RANDOM_BYTES));
-        return MessageDigest.isEqual(expected, Arrays.copyOfRange(decoded, RANDOM_BYTES, decoded.length));
     }
 
     private static byte[] check(String hostId, byte[] payload) {

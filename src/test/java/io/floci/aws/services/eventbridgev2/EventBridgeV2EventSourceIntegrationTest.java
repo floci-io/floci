@@ -1,11 +1,8 @@
 package io.floci.aws.services.eventbridgev2;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.RestAssured;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.eventbridgev2.EventBridgeV2Client;
 import software.amazon.awssdk.services.eventbridgev2.model.CreateEventSourceResponse;
@@ -22,7 +19,6 @@ import software.amazon.awssdk.services.eventbridgev2.model.WebhookAuthConfigurat
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.model.DescribeSecretResponse;
 
-import java.net.URI;
 import java.util.List;
 import java.util.Map;
 
@@ -188,31 +184,37 @@ class EventBridgeV2EventSourceIntegrationTest {
         }
     }
 
+    @Test
+    void aSourceWhoseSecretIsAlreadyScheduledForDeletionCanBeDeleted() {
+        String suffix = suffix();
+        try (EventBridgeV2Client events = events(); SecretsManagerClient secrets = secrets()) {
+            String bus = events.createEventBus(request -> request.name("v2-sched-" + suffix)).eventBusArn();
+            CreateEventSourceResponse created = events.createEventSource(request -> request.name("sched-" + suffix)
+                    .eventBusArn(bus).configuration(EventSourceConfiguration.fromWebhookEventsConfiguration(
+                            webhook -> webhook.roleArn(ROLE).authConfiguration(staticToken("X-Token", null)))));
+            String secretArn = created.eventSourceDetails().webhookDetails().secretArn();
+
+            secrets.deleteSecret(request -> request.secretId(secretArn));
+            events.deleteEventSource(request -> request.eventSourceArn(created.eventSourceArn()));
+
+            assertNotNull(secrets.describeSecret(request -> request.secretId(secretArn)).deletedDate());
+            assertThrows(ResourceNotFoundException.class, () -> events.describeEventSource(
+                    request -> request.eventSourceArn(created.eventSourceArn())));
+            events.deleteEventBus(request -> request.eventBusArn(bus));
+        }
+    }
+
     private static WebhookAuthConfiguration staticToken(String header, String secretValue) {
         return WebhookAuthConfiguration.builder().staticTokenAuthConfiguration(
                 token -> token.tokenHttpHeader(header).secretValue(secretValue)).build();
     }
 
     private static EventBridgeV2Client events() {
-        return EventBridgeV2Client.builder()
-                .endpointOverride(endpoint())
-                .httpClientBuilder(UrlConnectionHttpClient.builder())
-                .region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
-                .build();
+        return AwsTestClients.create(EventBridgeV2Client.builder(), "000000000000", Region.US_EAST_1);
     }
 
     private static SecretsManagerClient secrets() {
-        return SecretsManagerClient.builder()
-                .endpointOverride(endpoint())
-                .httpClientBuilder(UrlConnectionHttpClient.builder())
-                .region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
-                .build();
-    }
-
-    private static URI endpoint() {
-        return URI.create("http://localhost:" + RestAssured.port);
+        return AwsTestClients.create(SecretsManagerClient.builder(), "000000000000", Region.US_EAST_1);
     }
 
     private static String suffix() {
