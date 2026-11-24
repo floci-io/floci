@@ -1461,6 +1461,12 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void javaBaseOpensOpensEachPackageToTheClassPath() {
+        assertEquals("--add-opens=java.base/java.util.jar=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED",
+                EmrServerlessSparkRunner.javaBaseOpens(List.of("java.util.jar", "java.io")));
+    }
+
+    @Test
     void aHadoopCommandOnAClusterWhoseCoreNodesHoldItsHdfsWritesTheirCopies() {
         ContainerBuilder builder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);

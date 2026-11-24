@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.services.emrserverless.EmrServerlessJobRunService;
+import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
 import io.floci.aws.services.emrserverless.SessionServers;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 
@@ -108,6 +109,10 @@ final class EmrContainersGateways {
     // What the launcher's additional-info says to load the %%configure magic.
     private static final String CONFIGURE_MAGIC_ENABLED = Base64.getEncoder()
             .encodeToString("{\"configure_magic_enabled\": \"true\"}".getBytes(StandardCharsets.UTF_8));
+    // Toree finds its magics, %AddJar and the rest, through a reflective read of its jar's entries that Java 17
+    // refuses unless java.util.jar is open to it, and without them a cell can use none. The Scala kernel gets the
+    // option through JDK_JAVA_OPTIONS, which Java reads itself, so the image's spark.driver.extraJavaOptions stay.
+    private static final String TOREE_JAVA_OPTIONS = EmrServerlessSparkRunner.javaBaseOpens(List.of("java.util.jar"));
 
     /** The servers' kind, in the answers to the calls they cannot take. */
     static final SessionServers.Kind KIND = new SessionServers.Kind("Jupyter Enterprise Gateway", "Endpoint",
@@ -160,6 +165,8 @@ final class EmrContainersGateways {
             MAGICS = "/usr/local/bin/kernel-launchers/python/scripts"
             # The image's Apache Toree, which Jupyter Enterprise Gateway's Scala launcher runs.
             TOREE = "/usr/local/bin/kernel-launchers/scala/lib/toree-assembly-*.jar"
+            # What Toree's JVM needs to find its magics.
+            TOREE_JAVA_OPTIONS = "@TOREE_JAVA_OPTIONS@"
             # Where the magic posts its cell's settings when no ENDPOINT_IP names its gateway: its own host's port.
             CONFIGURE_PORT = 18888
             # The magic's signature of a post: the SHA-256 of its body, encrypted with its kernel's AES key.
@@ -218,7 +225,8 @@ final class EmrContainersGateways {
                 "display_name": "Apache Spark with Scala",
                 "language": "scala",
                 "argv": ["/bin/bash", "-c",
-                         'exec "$SPARK_HOME/bin/spark-submit" $KERNEL_EXTRA_SPARK_OPTS --class org.apache.toree.Main '
+                         'export JDK_JAVA_OPTIONS="${JDK_JAVA_OPTIONS:+$JDK_JAVA_OPTIONS }' + TOREE_JAVA_OPTIONS + '"; '
+                         + 'exec "$SPARK_HOME/bin/spark-submit" $KERNEL_EXTRA_SPARK_OPTS --class org.apache.toree.Main '
                          + TOREE + ' --profile "$0"',
                          "{connection_file}"],
             }))
@@ -589,7 +597,8 @@ final class EmrContainersGateways {
             .replace("@PROGRAM_VARIABLE@", PROGRAM_VARIABLE).replace("@SESSION_HEADER@", SESSION_HEADER)
             .replace("@OVERRIDES_VARIABLE@", OVERRIDES_VARIABLE)
             .replace("@KERNEL_CONTAINERS_VARIABLE@", KERNEL_CONTAINERS_VARIABLE)
-            .replace("@SECRET_VARIABLE@", SECRET_VARIABLE).replace("@SECRET_HEADER@", SECRET_HEADER);
+            .replace("@SECRET_VARIABLE@", SECRET_VARIABLE).replace("@SECRET_HEADER@", SECRET_HEADER)
+            .replace("@TOREE_JAVA_OPTIONS@", TOREE_JAVA_OPTIONS);
 
     private EmrContainersGateways() {
     }

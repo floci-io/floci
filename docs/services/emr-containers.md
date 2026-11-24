@@ -236,8 +236,10 @@ remote kernel lifecycle management capability that interactive clients need" (EM
 * **Kernels**: the image's `python3` ("Python 3"); `spark-python-kubernetes` ("PySpark on Kubernetes", the name the
   guide's `jupyter-kernel-overrides` example gives it); and `spark-scala-kubernetes` ("Apache Spark with Scala", a
   name of Floci's beside it, as the guide gives the Scala kernel none), which runs the image's Apache Toree under
-  `spark-submit`, as Toree's own kernel spec does. The Spark kernels' `spark` and `sc` are a Spark session in Spark's
-  local mode, where EMR on EKS runs each kernel and its executors in pods of their own. The PySpark kernel runs on
+  `spark-submit`, as Toree's own kernel spec does, with `java.util.jar` open to it: Toree finds its magics,
+  `%AddJar` and the rest, by reading its jar in a way Java 17 refuses otherwise, and a cell would have none. The
+  Spark kernels' `spark` and `sc` are a Spark session in Spark's local mode, where EMR on EKS runs each kernel and
+  its executors in pods of their own. The PySpark kernel runs on
   the image's Python, with `spark.pyspark.virtualenv.enabled` set to `false`: the image's `spark-defaults.conf` turns
   the virtualenv on, and `spark-submit` makes one on YARN and Kubernetes alone. Every kernel runs with the endpoint's
   execution role, as "All kernels and users that connect to the interactive endpoint utilize the role that you
