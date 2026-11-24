@@ -64,7 +64,7 @@ class EventBridgeV2ServiceTest {
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(
                 AccountAwareStorageBackend.inMemory(ACCOUNT), mock(SecretsManagerService.class), regionResolver, clock,
-                "http://localhost:4566");
+                "http://floci.test:4566");
         service = new EventBridgeV2Service(AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT), regionResolver, delivery, eventSources, clock, true);
     }

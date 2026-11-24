@@ -70,7 +70,7 @@ class EventBridgeV2EventSourcesTest {
         clock = new TestClock(NOW);
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(
-                AccountAwareStorageBackend.inMemory(ACCOUNT), secrets, regionResolver, clock, "http://localhost:4566");
+                AccountAwareStorageBackend.inMemory(ACCOUNT), secrets, regionResolver, clock, "http://floci.test:4566");
         service = new EventBridgeV2Service(AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT), regionResolver, mock(EventBridgeV2Delivery.class),
                 eventSources, clock, true);
@@ -90,7 +90,7 @@ class EventBridgeV2EventSourcesTest {
         assertEquals(NOW, source.getCreationTime());
         assertEquals(NOW, source.getLastModifiedTime());
         String url = service.webhookUrl(source);
-        String host = "[a-z][a-z2-7]{37}\\.c01\\.events-webhook\\.us-east-1\\.localhost:4566";
+        String host = "[a-z][a-z2-7]{37}\\.c01\\.events-webhook\\.us-east-1\\.floci\\.test:4566";
         assertTrue(url.matches("http://" + host + "/k1[A-Za-z0-9_-]{64}/"), url);
         assertTrue(source.getWebhookHostId().startsWith("a"));
     }
@@ -276,7 +276,7 @@ class EventBridgeV2EventSourcesTest {
         IllegalStateException failure = new IllegalStateException("disk full");
         doThrow(failure).when(failing).put(any(), any());
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(failing, secrets,
-                new RegionResolver(REGION, ACCOUNT), clock, "http://localhost:4566");
+                new RegionResolver(REGION, ACCOUNT), clock, "http://floci.test:4566");
 
         IllegalStateException e = assertThrows(IllegalStateException.class, () -> eventSources.create(
                 create("hook", bus, STATIC_AUTH), REGION, arn -> Optional.of(new EventBusV2())));
