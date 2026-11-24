@@ -317,8 +317,9 @@ public class EmbeddedDnsServer {
             short qtype = buf.getShort();
             short qclass = buf.getShort();
             int questionEnd = buf.position();
+            boolean standardQuery = qdCount == 1 && qclass == 1 && (flags & 0x7840) == 0;
 
-            vertx.<QueryPlan>executeBlocking(() -> planQuery(qname, senderHost, myIp, qtype), false)
+            vertx.<QueryPlan>executeBlocking(() -> planQuery(qname, senderHost, myIp, qtype, standardQuery), false)
                     .onSuccess(plan -> {
                         if (plan.answer().isEmpty()) {
                             if (!plan.ruleTargets().isEmpty()) {
@@ -334,8 +335,7 @@ public class EmbeddedDnsServer {
                             return;
                         }
                         DnsAnswer records = plan.answer().orElseThrow();
-                        if (records.isPublicAuthorityAnswer()
-                                && (qdCount != 1 || qclass != 1 || (flags & 0x7840) != 0)) {
+                        if (records.isPublicAuthorityAnswer() && !standardQuery) {
                             records = DnsAnswer.refused();
                         }
                         byte[] response = records.isPublicAuthorityAnswer()
@@ -427,6 +427,10 @@ public class EmbeddedDnsServer {
         }
     }
 
+    QueryPlan planQuery(String name, String clientAddress, String myIp, int type) {
+        return planQuery(name, clientAddress, myIp, type, true);
+    }
+
     /**
      * Stored public authority answers take precedence over broad emulator suffix spoofing.
      * Other names the emulator itself owns come first, whatever the rules say. Route 53 Resolver does
@@ -438,9 +442,10 @@ public class EmbeddedDnsServer {
      * the name from a record source, because a Resolver rule takes precedence over a private
      * hosted zone that matches the same name. An address query under an emulator suffix that the
      * stored zone refuses, such as an alias to a target Floci does not serve, is then answered as
-     * the emulator's own name.
+     * the emulator's own name, unless the packet has a shape the zone refuses on its own: more
+     * than one question, a class other than IN, or a non-standard opcode or flag.
      */
-    QueryPlan planQuery(String name, String clientAddress, String myIp, int type) {
+    QueryPlan planQuery(String name, String clientAddress, String myIp, int type, boolean standardQuery) {
         Optional<DnsAnswer> stored = resolveFromRecordSources(name, type, true, myIp);
         Optional<DnsAnswer> emulatorName = resolveEmulatorName(name, myIp, type);
         if (emulatorName.isPresent() && stored.isEmpty()) {
@@ -452,7 +457,7 @@ public class EmbeddedDnsServer {
         if (rule.isPresent() && rule.orElseThrow().forwards()) {
             return QueryPlan.forwardingTo(rule.orElseThrow().targets());
         }
-        if (matchesSuffix(name) && (type == 1 || type == 28)
+        if (standardQuery && matchesSuffix(name) && (type == 1 || type == 28)
                 && stored.filter(answer -> answer.responseCode() == 5).isPresent()) {
             return QueryPlan.answering(emulatorName.orElseThrow());
         }

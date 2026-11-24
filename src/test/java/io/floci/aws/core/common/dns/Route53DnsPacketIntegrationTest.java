@@ -319,6 +319,9 @@ class Route53DnsPacketIntegrationTest {
             assertArrayEquals(new DnsRecord.Address(1, "127.0.0.1").data(),
                     Arrays.copyOfRange(response, response.length - 4, response.length));
         }
+        for (int field : List.of(2, 4, -1, -2)) {
+            assertHeader(query(malformed(DnsTestQuery.query(name, type, 0x1234), field)), 5, false, 0, 0);
+        }
     }
 
     @Test
@@ -327,16 +330,7 @@ class Route53DnsPacketIntegrationTest {
         String id = createZone(name);
         change(id, "CREATE", record("marker." + name, "TXT", 60, "\"public\""));
         for (int field : List.of(2, 4, -1, -2)) {
-            byte[] request = DnsTestQuery.query("marker." + name, 16, 0x1234);
-            ByteBuffer packet = ByteBuffer.wrap(request);
-            if (field == -2) {
-                packet.putShort(2, (short) 0x0140);
-            } else if (field == -1) {
-                packet.putShort(request.length - 2, (short) 3);
-            } else {
-                packet.putShort(field, (short) (field == 2 ? 0x0900 : 2));
-            }
-            assertHeader(query(request), 5, false, 0, 0);
+            assertHeader(query(malformed(DnsTestQuery.query("marker." + name, 16, 0x1234), field)), 5, false, 0, 0);
         }
         String privateId = route53.createHostedZone(name, UUID.randomUUID().toString(), null,
                 new VpcAssociation("vpc-dns-packet", "us-east-1")).zone().getId();
@@ -413,6 +407,19 @@ class Route53DnsPacketIntegrationTest {
 
     private static String uniqueName() {
         return "dns-" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    /** A shape a public zone refuses: opcode 1, two questions, class CH, or the reserved Z bit. */
+    private static byte[] malformed(byte[] request, int field) {
+        ByteBuffer packet = ByteBuffer.wrap(request);
+        if (field == -2) {
+            packet.putShort(2, (short) 0x0140);
+        } else if (field == -1) {
+            packet.putShort(request.length - 2, (short) 3);
+        } else {
+            packet.putShort(field, (short) (field == 2 ? 0x0900 : 2));
+        }
+        return request;
     }
 
 
