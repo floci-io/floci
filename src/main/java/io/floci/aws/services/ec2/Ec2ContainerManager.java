@@ -86,6 +86,17 @@ public class Ec2ContainerManager {
     // Guest-created /tmp mounts hide files copied through Docker's archive API.
     private static final String USER_DATA_SCRIPT_PATH = UserDataPipeline.USER_DATA_SCRIPT_PATH;
     private static final List<String> ALLOWED_SSHD_PATHS = List.of("/usr/sbin/sshd", "/usr/local/sbin/sshd", "/sbin/sshd");
+    // Inside containers, systemd's generators read PID 1's arguments instead of /proc/cmdline,
+    // so these arguments apply runtime unit masks when container=docker is set.
+    // https://github.com/systemd/systemd/blob/v252/src/basic/proc-cmdline.c#L17-L36
+    private static final List<String> SYSTEMD_INIT_COMMAND = List.of(
+            "/sbin/init",
+            "systemd.mask=getty@.service",
+            "systemd.mask=autovt@.service",
+            "systemd.mask=console-getty.service",
+            "systemd.mask=container-getty@.service",
+            "systemd.mask=serial-getty@.service",
+            "systemd.mask=getty-static.service");
     /** Exit code the sshd install probe uses for "sshd is present but scp is not". See startSshd. */
     static final int SSH_CLIENT_MISSING_EXIT_CODE = 2;
     private static final int LAUNCH_CORE_THREADS = 4;
@@ -759,7 +770,7 @@ public class Ec2ContainerManager {
                 // EC2 instances expose IMDS on 169.254.169.254. Floci needs network administration
                 // privileges in the local container to attach that link-local address.
                 .withPrivileged(namespace == null)
-                .withCmd(image.systemd() ? List.of("/sbin/init") : List.of("tail", "-f", "/dev/null"));
+                .withCmd(image.systemd() ? SYSTEMD_INIT_COMMAND : List.of("tail", "-f", "/dev/null"));
         if (config.services().ec2().instanceResourceLimits() && instanceType != null && !instanceType.isBlank()) {
             Optional<CatalogInstanceType> catalogType = instanceTypeCatalog.find(instanceType);
             if (catalogType.isPresent()) {
@@ -780,8 +791,15 @@ public class Ec2ContainerManager {
         if (image.systemd()) {
             applySystemdCgroup(specBuilder, namespace == null);
             specBuilder
+                    .withEnv("container", "docker")
                     .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run"))
                     .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run/lock"));
+            // Privileged guests can see the host's virtual consoles. Mask those device paths
+            // so a guest getty cannot hang up a host session, and leave pseudo-terminals available.
+            specBuilder.withReadOnlyBind("/dev/null", "/dev/console");
+            for (int tty = 0; tty < 64; tty++) {
+                specBuilder.withReadOnlyBind("/dev/null", "/dev/tty" + tty);
+            }
             // The guest shares the Docker host's kernel but ships none of its modules, so
             // `modprobe br_netfilter` (Kubernetes node setup) fails with "not found" even
             // when the module is built in. Only the running kernel's directory is bound: the
