@@ -270,8 +270,21 @@ final class EmrSparkSteps {
         return installs(releaseLabel, applications, objectMapper, PIG);
     }
 
+    /**
+     * Whether a cluster installs Trino: its {@code Applications} name it, unless its release is of the AWS runtime for
+     * Apache Spark, whose applications do not include it.
+     */
+    static boolean installsTrino(String releaseLabel, String applications, ObjectMapper objectMapper) {
+        return installs(releaseLabel, applications, objectMapper, EmrTrino.APPLICATION);
+    }
+
+    /** The properties of a cluster's {@code trino-connector-hive}, which its Trino's {@code hive} catalog gets. */
+    static Map<String, String> trinoHiveConnector(String configurations, ObjectMapper objectMapper) {
+        return properties(configurations, objectMapper, EmrTrino.HIVE_CONNECTOR);
+    }
+
     // Whether a cluster's Applications name any of names, in any case, unless its release is of the AWS runtime for
-    // Apache Spark, which installs neither Hive, HCatalog nor Pig.
+    // Apache Spark, which installs none of Hive, HCatalog, Pig and Trino.
     private static boolean installs(String releaseLabel, String applications, ObjectMapper objectMapper,
                                     String... names) {
         return (releaseLabel == null || !EmrServerlessSparkRunner.sparkRuntime(releaseLabel))

@@ -201,6 +201,11 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private final String dockerNetwork;
     // Whether a cluster whose Applications name Pig gets Apache Pig in its image (floci.services.emr.pig.enabled).
     private final boolean pigEnabled;
+    // Whether a cluster whose Applications name Trino runs it (floci.services.emr.trino.enabled), from which image, the
+    // release's Trino version for %s, and with how much memory.
+    private final boolean trinoEnabled;
+    private final String trinoImageTemplate;
+    private final int trinoMemoryMb;
     // What the NodeManager of a cluster that runs YARN offers its containers.
     private final ClusterStorage.Yarn nodeManager;
     private final int maxWorkerNodes;
@@ -383,6 +388,9 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         this.hiveImageTemplate = config.services().emr().hiveImageTemplate().orElse(null);
         this.dockerNetwork = config.services().emr().dockerNetwork().orElse(null);
         this.pigEnabled = config.services().emr().pig().enabled();
+        this.trinoEnabled = config.services().emr().trino().enabled();
+        this.trinoImageTemplate = trinoEnabled ? config.services().emr().trino().image() : null;
+        this.trinoMemoryMb = trinoEnabled ? config.services().emr().trino().memoryMb() : 0;
         this.nodeManager = new ClusterStorage.Yarn(config.services().emr().yarnNodeMemoryMb(),
                 config.services().emr().yarnNodeVcores());
         this.maxWorkerNodes = config.services().emr().yarnMaxWorkerNodes();
@@ -3097,10 +3105,12 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         String hdfsHost = masterPrivateDnsName(cluster);
         String hdfsImage = hdfsImage(cluster.getReleaseLabel());
         Supplier<ClusterStorage.Yarn> nodeYarn = runsYarn(cluster) ? currentYarn(cluster, accountId, region) : null;
-        ClusterStorage.HiveMetastore hiveMetastore = EmrSparkSteps.installsHive(cluster.getReleaseLabel(),
-                cluster.getApplications(), SNAPSHOT_MAPPER)
+        String trinoImage = trinoImage(cluster);
+        ClusterStorage.Trino trino = trinoImage == null ? null : new ClusterStorage.Trino(trinoImage, trinoMemoryMb,
+                EmrSparkSteps.trinoHiveConnector(cluster.getConfigurations(), SNAPSHOT_MAPPER));
+        ClusterStorage.HiveMetastore hiveMetastore = withHiveImage(cluster)
                 ? new ClusterStorage.HiveMetastore(instanceProfileRole(cluster, accountId),
-                        EmrSparkSteps.hiveMetastoreSettings(cluster.getConfigurations(), SNAPSHOT_MAPPER))
+                        EmrSparkSteps.hiveMetastoreSettings(cluster.getConfigurations(), SNAPSHOT_MAPPER), trino)
                 : null;
         BiFunction<String, BooleanSupplier, SparkJobRunner.Storage> hdfs = volumes == null ? null
                 : (stepImage, stopped) -> clusterStorage.hdfs(clusterId, accountId, region, hdfsHost,
@@ -3154,7 +3164,9 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         EmrSparkSteps.sparkDefaults(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                         application != null ? application : List.of(), command, Duration.ZERO,
                         EmrSparkSteps.logFolder(cluster, step), null,
-                        stepEnvironment(step, cluster, command != null && pig), List.of(),
+                        stepEnvironment(step, cluster, command != null && pig,
+                                trinoImage(cluster) != null ? EmrTrino.server(masterPrivateDnsName(cluster)) : null),
+                        List.of(),
                         storage, EmrSparkSteps.coreSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                         EmrSparkSteps.sparkLog4j2(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                         EmrSparkSteps.mapredSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
@@ -3358,8 +3370,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         if (releaseImages == null) {
             return null;
         }
-        boolean withHive = EmrSparkSteps.installsHive(cluster.getReleaseLabel(), cluster.getApplications(),
-                SNAPSHOT_MAPPER);
+        boolean withHive = withHiveImage(cluster);
         boolean withPig = withPig(cluster);
         if (!withHive && !withPig && !runsYarn(cluster)) {
             return null;
@@ -3367,7 +3378,25 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         String release = cluster.getReleaseLabel();
         String spark = EmrServerlessSparkRunner.image(imageTemplate, release);
         String hive = hdfsImage(release);
-        return () -> releaseImages.image(release, spark, hive, withHive, withPig);
+        String trino = trinoImage(cluster);
+        return () -> releaseImages.image(release, spark, hive, withHive, withPig, trino);
+    }
+
+    // Whether a cluster's image has Hive, and its primary node Hive's metastore service: it installs Hive or HCatalog,
+    // or runs Floci's Trino, with which EMR installs hive-client and hcatalog-server.
+    private boolean withHiveImage(EmrCluster cluster) {
+        return EmrSparkSteps.installsHive(cluster.getReleaseLabel(), cluster.getApplications(), SNAPSHOT_MAPPER)
+                || trinoImage(cluster) != null;
+    }
+
+    // The image a cluster's Trino runs from: it installs Trino, floci.services.emr.trino.enabled runs it, and its
+    // release's Trino version is known (EmrTrino.image); null otherwise.
+    private String trinoImage(EmrCluster cluster) {
+        if (!trinoEnabled || !EmrSparkSteps.installsTrino(cluster.getReleaseLabel(), cluster.getApplications(),
+                SNAPSHOT_MAPPER)) {
+            return null;
+        }
+        return EmrTrino.image(trinoImageTemplate, cluster.getReleaseLabel());
     }
 
     // Whether a cluster's image has Floci's Pig: it installs Pig, and floci.services.emr.pig.enabled adds it.
@@ -3377,11 +3406,16 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     }
 
     // The variables a step that is not a Hive step runs with: its cluster's spark-env exports and its own Properties
-    // (see EmrSparkSteps.environment), and for a command on a cluster with Floci's Pig, its Pig configuration.
-    private static Map<String, String> stepEnvironment(EmrStep step, EmrCluster cluster, boolean pig) {
+    // (see EmrSparkSteps.environment), for a command on a cluster with Floci's Pig, its Pig configuration, and on one
+    // with Floci's Trino, where its trino-cli reaches the coordinator, unless trinoServer is null.
+    private static Map<String, String> stepEnvironment(EmrStep step, EmrCluster cluster, boolean pig,
+                                                       String trinoServer) {
         Map<String, String> variables = EmrSparkSteps.environment(step, cluster.getConfigurations(), SNAPSHOT_MAPPER);
         if (pig) {
             variables.putAll(EmrSparkSteps.pigEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER));
+        }
+        if (trinoServer != null) {
+            variables.put(EmrTrino.SERVER_VARIABLE, trinoServer);
         }
         return variables;
     }
@@ -3393,14 +3427,13 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
      */
     // The YARN timeline server runs on a cluster with Hadoop, and the Tez UI on one with Tez too, as their persistent
     // interfaces are there (EmrAppUiService), but for a release of the AWS runtime for Apache Spark; the Tez UI only
-    // where the cluster's image has Tez, which one with Hive or Floci's Pig has (releaseImage).
+    // where the cluster's image has Tez, which one with Hive, Floci's Trino or Floci's Pig has (releaseImage).
     private ClusterStorage.Yarn yarnOf(EmrCluster cluster) {
         List<ClusterStorage.Node> nodes = workerNodes(cluster);
         boolean timeline = EmrSparkSteps.names(cluster.getApplications(), SNAPSHOT_MAPPER, "Hadoop")
                 && !(cluster.getReleaseLabel() != null
                         && EmrServerlessSparkRunner.sparkRuntime(cluster.getReleaseLabel()));
-        boolean tezImage = EmrSparkSteps.installsHive(cluster.getReleaseLabel(), cluster.getApplications(),
-                SNAPSHOT_MAPPER) || withPig(cluster);
+        boolean tezImage = withHiveImage(cluster) || withPig(cluster);
         long coreNodes = nodes.stream().filter(ClusterStorage.Node::core).count();
         return nodeManager.withHadoopFolder(EmrReleaseImages.hadoopFolder(cluster.getReleaseLabel()))
                 .onNodes(nodes, (int) Math.max(1, Math.min(replication(cluster), coreNodes)),

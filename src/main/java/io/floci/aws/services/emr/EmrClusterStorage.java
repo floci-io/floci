@@ -108,7 +108,7 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // The cluster's core-site and hive-site, as --hiveconf settings one to a line, which the service gets after its
     // own.
     private static final String HIVE_METASTORE_SITE_VARIABLE = "FLOCI_HIVE_METASTORE_SITE";
-    private static final int HIVE_METASTORE_PORT = 9083;
+    static final int HIVE_METASTORE_PORT = 9083;
     // The folder a Hive session uploads Hive's exec jar to when it is not there, named after its SHA-256, under the
     // image's hive.user.install.directory: the primary node puts it there first, as two sessions uploading it at once
     // can leave one with a jar that changed under it, whose Tez tasks then fail to launch.
@@ -192,6 +192,13 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // gives up.
     private static final Duration HDFS_START_TIMEOUT = Duration.ofSeconds(120);
     private static final Duration HDFS_POLL_INTERVAL = Duration.ofMillis(500);
+    // How long Trino's coordinator has to answer once its container starts: it took 18 s on a laptop, its image's
+    // catalogs loaded.
+    private static final Duration TRINO_START_TIMEOUT = Duration.ofMinutes(3);
+    // How long Trino keeps running a query before it counts as ready. A query that reads a catalog needs a node that
+    // serves it, which Trino's node manager learns from the nodes' announcements as it refreshes, every five seconds
+    // (DiscoveryNodeManager), and Trino runs a query with no catalog before then: twice that, from its first answer.
+    private static final Duration TRINO_SETTLE = Duration.ofSeconds(10);
     // How long a node being decommissioned may take before it goes anyway: EMR's default for a graceful one, "3600s
     // (one hour)", and a minute more for the ResourceManager's own timeout to pass first.
     private static final Duration GRACEFUL_DECOMMISSION = Duration.ofHours(1);
@@ -545,6 +552,11 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     private final Set<String> running = ConcurrentHashMap.newKeySet();
     // The core and task nodes' containers this process has started or found, by name.
     private final Set<String> runningNodes = ConcurrentHashMap.newKeySet();
+    // The Trino containers this process has started, which a reset or a shutdown removes before the primary nodes whose
+    // network they share.
+    private final Set<String> runningTrino = ConcurrentHashMap.newKeySet();
+    // Those of them that have become ready, which a later step finds running and has at once.
+    private final Set<String> readyTrino = ConcurrentHashMap.newKeySet();
     // What each cluster's last step started its nodes from, which a resize starts new ones from.
     private final Map<String, NodeRequest> nodeRequests = new ConcurrentHashMap<>();
     // For each cluster, the nodes being decommissioned, by container name.
@@ -846,6 +858,11 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         String imageId = lifecycleManager.resolveImageForLaunch(containerBuilder.resolveImage(image),
                 ImagePullBehavior.PREFER_CACHED, null).imageId();
         boolean shared = sharesNamespace(network);
+        // Trino's too, about 1 GB at its first pull, where it runs: beside the metastore, on a network of the
+        // cluster's own.
+        Trino trino = hiveMetastore != null && !shared ? hiveMetastore.trino() : null;
+        String trinoImageId = trino == null ? null : lifecycleManager.resolveImageForLaunch(
+                containerBuilder.resolveImage(trino.image()), ImagePullBehavior.PREFER_CACHED, null).imageId();
         long deadline = nanoTime.getAsLong() + hdfsStartTimeout.toNanos();
         synchronized (starting.computeIfAbsent(clusterId, id -> new Object())) {
             // Read here, so a resize before this took the lock counts, and one after it waits and finds these nodes.
@@ -890,6 +907,11 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             if (nodeRequest != null) {
                 awaitNodes(nodeRequest, nodes, deadline, teardown, stopped);
                 nodeRequests.put(clusterId, nodeRequest);
+            }
+            // After the nodes, whose wait has the HDFS's deadline, as Trino's has its own.
+            if (trino != null) {
+                trino(clusterId, accountId, region, containerId, trinoImageId, hiveMetastore.role(), trino, teardown,
+                        stopped);
             }
             SparkJobRunner.Storage storage = volumes(clusterId).withHdfs(host, address(clusterId, containerId), name);
             if (hiveMetastore != null) {
@@ -1442,7 +1464,9 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     private String createContainer(String clusterId, String accountId, String region, String host, String imageId,
                                    String network, boolean shared, HiveMetastore hiveMetastore, Yarn yarn) {
         String name = hdfsName(clusterId);
-        // One left stopped goes first, and a removal Docker refuses fails the start as it is, not as a name clash.
+        // One left stopped goes first, and a removal Docker refuses fails the start as it is, not as a name clash: the
+        // Trino on its network before it.
+        removeTrino(trinoName(clusterId));
         lifecycleManager.removeIfExistsStrict(name);
         releaseSession(name);
         lifecycleManager.ensureVolume(name, labels(clusterId, accountId, region, COMPONENT));
@@ -1548,6 +1572,149 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         }
         LOG.infov("Started the HDFS of EMR cluster {0} as {1}", clusterId, host);
         return containerId;
+    }
+
+    // Trino's coordinator beside the metastore on cluster clusterId's primary node, the container primary, in a
+    // container of its own that shares that node's network, as a daemon of the node does, reaching Floci's S3 and Glue
+    // with a session for role, as the metastore does: one there is kept when it runs on this primary node with a
+    // session of this process's, else another starts. Until it has become ready it is waited for, as the step that
+    // asks runs trino-cli at once.
+    private void trino(String clusterId, String accountId, String region, String primary, String imageId, String role,
+                       Trino trino, long teardown, BooleanSupplier stopped) {
+        String name = trinoName(clusterId);
+        String network = CONTAINER_NETWORK_PREFIX
+                + lifecycleManager.getDockerClient().inspectContainerCmd(primary).exec().getId();
+        boolean current = trinoCurrent(name, network);
+        if (current && readyTrino.contains(name)) {
+            // It became ready for an earlier step, and runs on.
+            return;
+        }
+        if (!current) {
+            removeTrino(name);
+            String endpoint = flociEndpointOn(hdfsName(clusterId));
+            Optional<SessionCreds> credentials = roleCredentials.forRole(role, accountId, name);
+            sessions.put(name, new MetastoreSession(accountId,
+                    credentials.map(SessionCreds::accessKeyId).orElse(null), endpoint));
+            // Known before it starts, so a teardown while it starts removes it.
+            runningTrino.add(name);
+            try {
+                lifecycleManager.createAndStart(containerBuilder.newContainer(imageId)
+                        .withName(name)
+                        .withNetworkMode(network)
+                        .withMemoryMb(trino.memoryMb())
+                        .withEntrypoint(List.of("/bin/bash", "-c", EmrTrino.ENTRYPOINT))
+                        .withEnv(awsEnv.sdkBaselineEnv(region, Optional.empty(), endpoint, credentials, accountId))
+                        .withEnv(EmrTrino.CONFIG_VARIABLE, EmrTrino.CONFIG)
+                        .withEnv(EmrTrino.CATALOG_VARIABLE,
+                                EmrTrino.properties(EmrTrino.hiveCatalog(trino.hiveConnector(), endpoint, region)))
+                        .withJavaTrustStore()
+                        .withLogRotation()
+                        .withLabels(labels(clusterId, accountId, region, EmrTrino.COMPONENT))
+                        .build());
+            } catch (RuntimeException e) {
+                releaseSession(name);
+                throw e;
+            }
+            // A teardown that looked for it before Docker made it has passed it by: it goes now, with the HDFS.
+            stopIfStopped(clusterId, teardown, stopped);
+            LOG.infov("Started the Trino of EMR cluster {0}", clusterId);
+        }
+        awaitTrino(clusterId, name, teardown, stopped);
+        readyTrino.add(name);
+    }
+
+    // Whether the Trino container named so runs on network, the namespace of the primary node now running, with a
+    // session of this process's; one an earlier process left has none.
+    private boolean trinoCurrent(String name, String network) {
+        if (!sessions.containsKey(name) || lifecycleManager.probeContainer(name) != ContainerLiveness.RUNNING) {
+            return false;
+        }
+        try {
+            HostConfig hostConfig = lifecycleManager.getDockerClient().inspectContainerCmd(name).exec()
+                    .getHostConfig();
+            return hostConfig != null && network.equals(hostConfig.getNetworkMode());
+        } catch (NotFoundException e) {
+            return false;
+        }
+    }
+
+    // Removes the Trino container named so, and its session, a removal Docker refuses thrown.
+    private void removeTrino(String name) {
+        lifecycleManager.removeIfExistsStrict(name);
+        releaseSession(name);
+        runningTrino.remove(name);
+        readyTrino.remove(name);
+    }
+
+    // Removes the Trino container named so, a removal Docker refuses logged and the container kept known, so the next
+    // reset or shutdown tries again. Whether it is gone.
+    private boolean removeTrinoKnown(String name) {
+        try {
+            removeTrino(name);
+            return true;
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not remove the Trino container {0}: {1}", name, e.getMessage());
+            return false;
+        }
+    }
+
+    // Waits for the Trino container named so to have run a query for TRINO_SETTLE, within TRINO_START_TIMEOUT: until
+    // its node manager has learnt that it serves its catalogs, a query that reads one fails "No nodes available to run
+    // query", one with none running already.
+    private void awaitTrino(String clusterId, String name, long teardown, BooleanSupplier stopped) {
+        long deadline = nanoTime.getAsLong() + TRINO_START_TIMEOUT.toNanos();
+        long answering = Long.MIN_VALUE;
+        while (teardowns.get() == teardown && !stopped.getAsBoolean()) {
+            // Docker refuses an exec into a container that has stopped, so that is looked at first.
+            if (lifecycleManager.probeContainer(name) == ContainerLiveness.NOT_RUNNING) {
+                logTrinoOutput(clusterId, name);
+                throw new IllegalStateException("The Trino of EMR cluster " + clusterId
+                        + " stopped before it was ready");
+            }
+            ContainerExec.Result query;
+            try {
+                query = ContainerExec.run(lifecycleManager.getDockerClient(), name,
+                        EmrTrino.READY_QUERY.toArray(String[]::new), 30);
+            } catch (RuntimeException e) {
+                // It may have stopped after it was looked at, which makes Docker refuse the exec: the next look
+                // says so.
+                if (lifecycleManager.probeContainer(name) == ContainerLiveness.NOT_RUNNING) {
+                    continue;
+                }
+                throw e;
+            }
+            long now = nanoTime.getAsLong();
+            if (query.exitCode() != 0) {
+                answering = Long.MIN_VALUE;
+            } else if (answering == Long.MIN_VALUE) {
+                answering = now;
+            }
+            if (answering != Long.MIN_VALUE && now - answering >= TRINO_SETTLE.toNanos()) {
+                return;
+            }
+            if (now >= deadline) {
+                logTrinoOutput(clusterId, name);
+                throw new IllegalStateException("The Trino of EMR cluster " + clusterId + " did not start within "
+                        + TRINO_START_TIMEOUT.toSeconds() + " seconds");
+            }
+            try {
+                Thread.sleep(HDFS_POLL_INTERVAL.toMillis());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Stopped waiting for the Trino of EMR cluster " + clusterId, e);
+            }
+        }
+        stopIfStopped(clusterId, teardown, stopped);
+    }
+
+    // What a Trino that did not become ready last wrote, in Floci's log, as its container goes with its cluster.
+    private void logTrinoOutput(String clusterId, String name) {
+        LOG.warnv("The Trino of EMR cluster {0} did not become ready. It last wrote:\n{1}", clusterId,
+                lifecycleManager.lastLogLines(name, NODE_LOG_LINES, NODE_LOG_READ));
+    }
+
+    private String trinoName(String clusterId) {
+        return ContainerStorageHelper.dockerName(config, SERVICE + "-" + clusterId + "-trino");
     }
 
     // The subnet of a cluster's own network, which exists, as Docker says it: where it is known, the cluster's nodes join
@@ -1920,6 +2087,8 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // cluster's end or a teardown that has not reached the HDFS yet, stops and leaves it to the cluster's other steps.
     private void stopIfStopped(String clusterId, long teardown, BooleanSupplier stopped) {
         if (teardowns.get() != teardown) {
+            // Its Trino first, which shares the HDFS container's network.
+            removeTrinoKnown(trinoName(clusterId));
             removeKnown(hdfsName(clusterId));
             throw new ClusterStorage.Stopped("Floci stopped the HDFS of EMR cluster " + clusterId);
         }
@@ -1978,7 +2147,9 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             LOG.warnv(e, "Could not find the nodes of EMR cluster {0} to remove: {1}", clusterId, e.getMessage());
             nodesGone = false;
         }
-        boolean containerGone = removeKnown(hdfsName(clusterId));
+        // Its Trino before its primary node, whose network it shares.
+        boolean trinoGone = removeTrinoKnown(trinoName(clusterId));
+        boolean containerGone = trinoGone && removeKnown(hdfsName(clusterId));
         // Its relay goes, trusted no more, and every address given on its network with it.
         boolean relayGone = relays == null || relays.stop(clusterId);
         identities.remove(clusterId);
@@ -1990,7 +2161,7 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         boolean homeGone = lifecycleManager.removeVolume(storage.home());
         boolean mntGone = lifecycleManager.removeVolume(storage.mnt());
         return lifecycleManager.removeVolume(hdfsName(clusterId)) && mntGone && homeGone && networkGone
-                && containerGone && nodesGone && relayGone;
+                && containerGone && trinoGone && nodesGone && relayGone;
     }
 
     /**
@@ -2007,6 +2178,9 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         departed.clear();
         for (String name : List.copyOf(runningNodes)) {
             removeNode(name, false);
+        }
+        for (String name : List.copyOf(runningTrino)) {
+            removeTrinoKnown(name);
         }
         for (String name : List.copyOf(running)) {
             // What its history interfaces show goes into its kept history first, as nothing reads its HDFS after.
@@ -2053,7 +2227,21 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
 
     @Override
     public void removeAllBut(Set<String> kept) {
-        // Each sweep on its own, so Docker refusing one list does not keep the others from going.
+        // Each sweep on its own, so Docker refusing one list does not keep the others from going. The Trino an earlier
+        // process left goes whatever its cluster, as its session went with that process: its cluster's next step
+        // starts another. It goes first, as it shares its primary node's network.
+        try {
+            for (Container container : lifecycleManager.getDockerClient().listContainersCmd().withShowAll(true)
+                    .withLabelFilter(Map.of(ContainerStorageHelper.COMPONENT_LABEL, EmrTrino.COMPONENT,
+                            ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
+                    .exec()) {
+                String name = container.getNames()[0].substring(1);
+                runningTrino.add(name);
+                removeTrinoKnown(name);
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not remove the Trino an earlier Floci left: {0}", e.getMessage());
+        }
         try {
             for (Container container : lifecycleManager.getDockerClient().listContainersCmd().withShowAll(true)
                     .withLabelFilter(Map.of(ContainerStorageHelper.COMPONENT_LABEL, NODE_COMPONENT,
