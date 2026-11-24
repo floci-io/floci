@@ -22,7 +22,7 @@ Floci supports alternate contacts, primary contact information and account infor
 
 Alternate contacts and primary contact information are isolated by caller account and stored through `StorageFactory`.
 
-An account in an organization takes its name, creation date and state from its Organizations record. `PutAccountName` renames that record, so `DescribeAccount` and `ListAccounts` answer the new name at once. `AccountCreatedDate` is the `JoinedTimestamp` of an account that Organizations `CreateAccount` made; an invited account and the management account have none. An account that `CloseAccount` left `PENDING_CLOSURE`, a state Account Management does not have, reports `ACTIVE`.
+An account in an organization takes its name, creation date and state from its Organizations record. `PutAccountName` renames that record, so `DescribeAccount` and `ListAccounts` answer the new name at once. `AccountCreatedDate` is the `JoinedTimestamp` of an account that Organizations `CreateAccount` made; an invited account and the management account have none. An account that `CloseAccount` closed reports `CLOSED`.
 
 Account Management also keeps a name for each account through `StorageFactory`: the one `PutAccountName` last set, or else the name the account had in Organizations when it was created in or invited into an organization. An account that leaves its organization answers that name. The management account keeps one only if `PutAccountName` gave it one, so it has none after `DeleteOrganization` otherwise. An account in no organization is `ACTIVE`. It has no creation date, and no name until it is given one, because Floci has no sign-up to take them from.
 
