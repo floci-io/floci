@@ -87,8 +87,9 @@ jobs:
   aws-data:
     name: Vendored AWS data in sync
     runs-on: ubuntu-latest
-    # The IAM request-resources check alone takes about four and a half minutes.
-    timeout-minutes: 10
+    # Nearly all of the job's time is the IAM request-resources check, which grows with each namespace
+    # the generated table reads; the limit leaves room for that growth.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
