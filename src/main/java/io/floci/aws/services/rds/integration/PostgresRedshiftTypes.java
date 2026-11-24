@@ -1,5 +1,7 @@
 package io.floci.aws.services.rds.integration;
 
+import io.floci.aws.core.common.PostgresWire;
+
 import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Matcher;
@@ -77,7 +79,7 @@ final class PostgresRedshiftTypes {
     private PostgresRedshiftTypes() {}
 
     static Optional<MappedColumn> map(SourceColumn column) {
-        String quoted = quoteIdentifier(column.name());
+        String quoted = PostgresWire.quoteIdentifier(column.name());
         if (!column.builtin()) {
             return Optional.empty();
         }
@@ -149,9 +151,5 @@ final class PostgresRedshiftTypes {
 
     private static Optional<MappedColumn> mapped(SourceColumn column, String redshiftType, String expression) {
         return Optional.of(new MappedColumn(column.name(), redshiftType, expression));
-    }
-
-    static String quoteIdentifier(String name) {
-        return "\"" + name.replace("\"", "\"\"") + "\"";
     }
 }

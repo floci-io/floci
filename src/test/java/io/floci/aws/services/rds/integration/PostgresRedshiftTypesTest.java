@@ -76,6 +76,8 @@ class PostgresRedshiftTypesTest {
 
     @Test
     void quotesIdentifiers() {
-        assertEquals("\"Order \"\"Items\"\"\"", PostgresRedshiftTypes.quoteIdentifier("Order \"Items\""));
+        MappedColumn column = mapped(new SourceColumn("Order \"Items\"", "int4", "b", "N", true,
+                null, null, false, "integer"));
+        assertEquals("\"Order \"\"Items\"\"\"", column.selectExpression());
     }
 }

@@ -156,7 +156,7 @@ class RdsIntegrationLoaderTest {
     }
 
     @Test
-    void carriesOnWithTheOtherTablesWhenOneFailsToLoad() {
+    void carriesOnWithTheOtherTablesWhenOneFailsToLoadAndReportsFailure() {
         catalog(column("public", "broken", "id", "int4", "integer", 1),
                 column("public", "items", "id", "int4", "integer", 1));
         doThrow(new IllegalStateException("value too long")).doReturn(1L).when(writer)
@@ -165,6 +165,38 @@ class RdsIntegrationLoaderTest {
         loader(false).submit(integration, "orders", "orders_dw");
 
         verify(writer, times(2)).loadTable(anyString(), anyString(), anyString(), any(), any());
+        ArgumentCaptor<String> failure = ArgumentCaptor.forClass(String.class);
+        verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), failure.capture());
+        assertThat(failure.getValue(), containsString("public.broken"));
+    }
+
+    @Test
+    void retriesWhenTargetIsUnavailableDuringCopy() {
+        catalog(column("public", "items", "id", "int4", "integer", 1));
+        doThrow(new RedshiftZeroEtlWriter.TargetUnavailableException("connection refused", null))
+                .doReturn(1L)
+                .when(writer).loadTable(anyString(), anyString(), anyString(), any(), any());
+
+        loader(false).submit(integration, "orders", "orders_dw");
+
+        verify(writer, times(2)).loadTable(anyString(), anyString(), anyString(), any(), any());
+        verify(integrations).finishDestination(integration, "orders", "orders_dw", null);
+    }
+
+    @Test
+    void retriesWhenSourceFailsDuringCopyAfterCatalogDiscovery() {
+        catalog(column("public", "items", "id", "int4", "integer", 1));
+        doThrow(new IllegalStateException("source container stopped"))
+                .doAnswer(invocation -> {
+                    invocation.<OutputStream>getArgument(4).write("1\n".getBytes(StandardCharsets.UTF_8));
+                    return null;
+                })
+                .when(containers).queryPostgres(eq("container-1"), eq("postgres"), eq("orders"),
+                        startsWith("COPY"), any(OutputStream.class), anyInt());
+
+        loader(false).submit(integration, "orders", "orders_dw");
+
+        verify(writer, times(1)).loadTable(anyString(), anyString(), anyString(), any(), any());
         verify(integrations).finishDestination(integration, "orders", "orders_dw", null);
     }
 

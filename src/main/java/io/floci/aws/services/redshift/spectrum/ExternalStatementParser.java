@@ -90,6 +90,10 @@ public class ExternalStatementParser {
         }
         Matcher integrationDatabase = CREATE_INTEGRATION_DATABASE.matcher(viewText);
         if (integrationDatabase.matches()) {
+            if (hasStatementSeparator(viewText.replaceFirst("[\\s;]+$", ""))) {
+                throw new SpectrumSqlException("42601",
+                        "CREATE DATABASE ... FROM INTEGRATION must be a single statement");
+            }
             String source = integrationDatabase.group(3);
             return Optional.of(new ExternalStatement.CreateIntegrationDatabase(identifier(integrationDatabase.group(1)),
                     integrationDatabase.group(2).replace("''", "'"),

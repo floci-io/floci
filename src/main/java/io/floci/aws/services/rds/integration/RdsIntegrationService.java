@@ -249,7 +249,7 @@ public class RdsIntegrationService implements Resettable {
             }
             current.getDestinations().add(new Integration.Destination(databaseName, sourceDatabase,
                     Integration.Destination.STATE_SYNCING, Instant.now(clock)));
-            current.setErrors(List.of());
+            current.getErrors().removeIf(error -> isErrorForSourceDatabase(error, sourceDatabase));
             refreshStatus(current);
             integrations.put(key(current.getRegion(), current.integrationId()), current);
             LOG.infov("Integration {0} syncs source database {1} into Redshift database {2}",
@@ -260,14 +260,39 @@ public class RdsIntegrationService implements Resettable {
 
     /** Forgets a destination whose database could not be created, as if it had never been asked for. */
     public void removeDestination(Integration integration, String sourceDatabase) {
+        restoreDestination(integration, sourceDatabase, null, List.of());
+    }
+
+    /**
+     * Reverts a destination registration when creating its database on the target failed, restoring any replaced
+     * destination and its errors rather than clearing a prior failure.
+     */
+    public void restoreDestination(Integration integration, String sourceDatabase,
+                                   Integration.Destination previousDestination,
+                                   List<Integration.IntegrationError> previousErrors) {
         synchronized (lock) {
             findCurrent(integration).ifPresent(current -> {
                 current.getDestinations().removeIf(
                         destination -> sourceDatabase.equals(destination.getSourceDatabase()));
+                if (previousDestination != null) {
+                    current.getDestinations().add(new Integration.Destination(previousDestination));
+                }
+                if (previousErrors != null && !previousErrors.isEmpty()) {
+                    current.getErrors().removeIf(error -> isErrorForSourceDatabase(error, sourceDatabase));
+                    for (Integration.IntegrationError error : previousErrors) {
+                        current.getErrors().add(new Integration.IntegrationError(
+                                error.getErrorCode(), error.getErrorMessage()));
+                    }
+                }
                 refreshStatus(current);
                 integrations.put(key(current.getRegion(), current.integrationId()), current);
             });
         }
+    }
+
+    static boolean isErrorForSourceDatabase(Integration.IntegrationError error, String sourceDatabase) {
+        return error != null && error.getErrorMessage() != null
+                && error.getErrorMessage().startsWith("The initial load of source database " + sourceDatabase + " ");
     }
 
     /** Whether the integration still exists and still loads {@code sourceDatabase} into {@code databaseName}. */

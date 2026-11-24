@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.services.rds.RdsService;
@@ -152,8 +153,13 @@ public class RdsIntegrationLoader implements Resettable {
         String failure = null;
         for (int attempt = 1; attempt <= attempts; attempt++) {
             try {
-                copyTables(integration, sourceDatabase, databaseName, startedIn);
-                failure = null;
+                List<String> failedTables = copyTables(integration, sourceDatabase, databaseName, startedIn);
+                if (!failedTables.isEmpty()) {
+                    failure = "Could not load " + failedTables.size() + " table(s): "
+                            + String.join(", ", failedTables);
+                } else {
+                    failure = null;
+                }
                 break;
             } catch (RuntimeException e) {
                 LOG.warnv(e, "Attempt {0} of {1} at the initial load of {2} into {3} for integration {4} failed",
@@ -186,13 +192,15 @@ public class RdsIntegrationLoader implements Resettable {
         }
     }
 
-    private void copyTables(Integration integration, String sourceDatabase, String databaseName, long startedIn) {
+    private List<String> copyTables(Integration integration, String sourceDatabase, String databaseName,
+                                    long startedIn) {
         Source source = source(integration);
         IntegrationDataFilter filter = IntegrationDataFilter.parsePostgres(integration.getDataFilter());
+        List<String> failedTables = new ArrayList<>();
         for (SourceTable table : catalog(source, sourceDatabase)) {
             if (generation.get() != startedIn || !integrations.isLoading(integration, sourceDatabase, databaseName)) {
                 LOG.infov("Integration {0} stopped loading {1}", integration.getIntegrationArn(), sourceDatabase);
-                return;
+                return List.of();
             }
             if (!filter.includes(sourceDatabase, table.schema(), table.table())) {
                 continue;
@@ -211,13 +219,17 @@ public class RdsIntegrationLoader implements Resettable {
                     LOG.infov("Integration {0} loaded {1} rows of {2}.{3}.{4} into {5}",
                             integration.getIntegrationArn(), rows, sourceDatabase, table.schema(), table.table(),
                             databaseName);
+                } catch (RedshiftZeroEtlWriter.TargetUnavailableException | SourceUnavailableException e) {
+                    throw e;
                 } catch (RuntimeException e) {
-                    // As on AWS, a table that cannot be replicated fails on its own and the others still load.
+                    // Continue copying remaining tables, then report the destination as failed.
                     LOG.warnv(e, "Integration {0} could not load table {1}.{2}.{3}", integration.getIntegrationArn(),
                             sourceDatabase, table.schema(), table.table());
+                    failedTables.add(table.schema() + "." + table.table());
                 }
             }
         }
+        return failedTables;
     }
 
     private long copyTable(Integration integration, Source source, String sourceDatabase, String databaseName,
@@ -229,16 +241,21 @@ public class RdsIntegrationLoader implements Resettable {
             select.append(i > 0 ? ", " : "").append(column.selectExpression());
             replicated.add(new ReplicatedTable.Column(column.name(), column.redshiftType()));
         }
-        select.append(" FROM ").append(PostgresRedshiftTypes.quoteIdentifier(table.schema())).append('.')
-                .append(PostgresRedshiftTypes.quoteIdentifier(table.table()))
+        select.append(" FROM ").append(PostgresWire.quoteIdentifier(table.schema())).append('.')
+                .append(PostgresWire.quoteIdentifier(table.table()))
                 .append(") TO STDOUT WITH (FORMAT csv)");
         ReplicatedTable target = new ReplicatedTable(table.schema(), table.table(), replicated, table.primaryKey());
         Path staged = null;
         try {
             staged = Files.createTempFile("floci-rds-integration-", ".csv");
             try (OutputStream out = Files.newOutputStream(staged)) {
-                containerManager.queryPostgres(source.containerId(), source.masterUsername(), sourceDatabase,
-                        select.toString(), out, TABLE_READ_TIMEOUT_SECONDS);
+                try {
+                    containerManager.queryPostgres(source.containerId(), source.masterUsername(), sourceDatabase,
+                            select.toString(), out, TABLE_READ_TIMEOUT_SECONDS);
+                } catch (RuntimeException e) {
+                    throw new SourceUnavailableException("Could not read table " + table.schema() + "."
+                            + table.table() + " from source: " + e.getMessage(), e);
+                }
             }
             try (InputStream in = Files.newInputStream(staged)) {
                 return writer.loadTable(integration.getAccountId(), integration.getTargetArn(), databaseName,
@@ -248,6 +265,12 @@ public class RdsIntegrationLoader implements Resettable {
             throw new UncheckedIOException("Could not stage the rows of " + table.schema() + "." + table.table(), e);
         } finally {
             deleteStaged(staged);
+        }
+    }
+
+    private static final class SourceUnavailableException extends RuntimeException {
+        private SourceUnavailableException(String message, Throwable cause) {
+            super(message, cause);
         }
     }
 

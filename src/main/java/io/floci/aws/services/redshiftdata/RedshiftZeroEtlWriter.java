@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.services.redshift.RedshiftService;
 import io.floci.aws.services.redshift.RedshiftZeroEtlEndpoints;
 import io.floci.aws.services.redshift.model.Cluster;
@@ -293,6 +294,13 @@ public class RedshiftZeroEtlWriter {
         }
     }
 
+    /** The Redshift target could not be resolved or reached, so the caller may retry once it is back. */
+    public static final class TargetUnavailableException extends RuntimeException {
+        public TargetUnavailableException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
     /** A table an RDS zero-ETL integration replicates: its columns' Redshift types and its primary key. */
     public record ReplicatedTable(String schema, String table, List<Column> columns, List<String> primaryKey) {
         public ReplicatedTable {
@@ -303,17 +311,17 @@ public class RedshiftZeroEtlWriter {
         public record Column(String name, String type) {}
 
         String qualifiedName() {
-            return quoteIdentifier(schema) + "." + quoteIdentifier(table);
+            return PostgresWire.quoteIdentifier(schema) + "." + PostgresWire.quoteIdentifier(table);
         }
 
         String ddl() {
             StringBuilder ddl = new StringBuilder("CREATE TABLE ").append(qualifiedName()).append(" (");
             for (Column column : columns) {
-                ddl.append(quoteIdentifier(column.name())).append(' ').append(column.type()).append(", ");
+                ddl.append(PostgresWire.quoteIdentifier(column.name())).append(' ').append(column.type()).append(", ");
             }
             ddl.append("PRIMARY KEY (");
             for (int i = 0; i < primaryKey.size(); i++) {
-                ddl.append(i > 0 ? ", " : "").append(quoteIdentifier(primaryKey.get(i)));
+                ddl.append(i > 0 ? ", " : "").append(PostgresWire.quoteIdentifier(primaryKey.get(i)));
             }
             return ddl.append("))").toString();
         }
@@ -328,10 +336,24 @@ public class RedshiftZeroEtlWriter {
      */
     public long loadTable(String accountId, String targetArn, String database, ReplicatedTable table,
                           InputStream csv) {
-        try (Connection connection = connectionFactory.open(target(accountId, targetArn, database))) {
+        RedshiftDataResourceResolver.DatabaseTarget resolved;
+        try {
+            resolved = target(accountId, targetArn, database);
+        } catch (RuntimeException e) {
+            throw new TargetUnavailableException("Could not resolve Redshift target " + targetArn
+                    + ": " + e.getMessage(), e);
+        }
+        Connection opened;
+        try {
+            opened = connectionFactory.open(resolved);
+        } catch (SQLException e) {
+            throw new TargetUnavailableException("Could not connect to Redshift database " + database
+                    + ": " + e.getMessage(), e);
+        }
+        try (Connection connection = opened) {
             connection.setAutoCommit(false);
             try (Statement statement = connection.createStatement()) {
-                statement.executeUpdate("CREATE SCHEMA IF NOT EXISTS " + quoteIdentifier(table.schema()));
+                statement.executeUpdate("CREATE SCHEMA IF NOT EXISTS " + PostgresWire.quoteIdentifier(table.schema()));
                 statement.executeUpdate("DROP TABLE IF EXISTS " + table.qualifiedName());
                 statement.executeUpdate(table.ddl());
                 long rows = connection.unwrap(PGConnection.class).getCopyAPI()
@@ -347,6 +369,10 @@ public class RedshiftZeroEtlWriter {
                 throw e;
             }
         } catch (SQLException e) {
+            if (isConnectionFailure(e)) {
+                throw new TargetUnavailableException("Connection to Redshift database " + database
+                        + " failed while loading " + table.qualifiedName() + ": " + e.getMessage(), e);
+            }
             LOG.warnv(e, "Could not load zero-ETL table {0} into database {1}", table.qualifiedName(), database);
             throw new AwsException("InternalFailure", "Could not load table " + table.qualifiedName()
                     + " into database " + database + ": " + e.getMessage(), 500);
@@ -355,8 +381,9 @@ public class RedshiftZeroEtlWriter {
         }
     }
 
-    private static String quoteIdentifier(String name) {
-        return "\"" + name.replace("\"", "\"\"") + "\"";
+    private static boolean isConnectionFailure(SQLException e) {
+        String state = e.getSQLState();
+        return state != null && (state.startsWith("08") || state.startsWith("57P"));
     }
 
     private RedshiftDataResourceResolver.DatabaseTarget target(String accountId, String targetArn) {

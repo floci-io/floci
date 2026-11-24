@@ -428,6 +428,44 @@ class RdsIntegrationServiceTest {
     }
 
     @Test
+    void addDestination_preservesErrorsOfOtherFailedDestinations() {
+        Integration created = create("orders-zero-etl");
+        Integration integration = service.findById(created.integrationId()).orElseThrow();
+        service.addDestination(integration, "orders_dw", "orders", false);
+        service.finishDestination(integration, "orders", "orders_dw", "orders load failed");
+
+        service.addDestination(integration, "billing_dw", "billing", false);
+        service.finishDestination(integration, "billing", "billing_dw", null);
+
+        Integration described = describe(created);
+        assertEquals(Integration.STATUS_FAILED, described.getStatus());
+        assertEquals(1, described.getErrors().size());
+        assertThat(described.getErrors().get(0).getErrorMessage(), containsString("orders load failed"));
+    }
+
+    @Test
+    void restoreDestination_restoresPreviousFailedDestinationAndErrors() {
+        Integration created = create("orders-zero-etl");
+        Integration integration = service.findById(created.integrationId()).orElseThrow();
+        service.addDestination(integration, "orders_dw", "orders", false);
+        service.finishDestination(integration, "orders", "orders_dw", "source is down");
+        Integration failed = describe(created);
+        Integration.Destination previous = failed.destinationFor("orders").orElseThrow();
+        List<Integration.IntegrationError> previousErrors = List.copyOf(failed.getErrors());
+
+        service.addDestination(integration, "orders_dw_v2", "orders", false);
+        service.restoreDestination(integration, "orders", previous, previousErrors);
+
+        Integration restored = describe(created);
+        assertEquals(Integration.STATUS_FAILED, restored.getStatus());
+        assertEquals("orders_dw", restored.destinationFor("orders").orElseThrow().getDatabaseName());
+        assertEquals(Integration.Destination.STATE_FAILED,
+                restored.destinationFor("orders").orElseThrow().getState());
+        assertEquals(1, restored.getErrors().size());
+        assertThat(restored.getErrors().get(0).getErrorMessage(), containsString("source is down"));
+    }
+
+    @Test
     void removeDestination_putsTheIntegrationBackToActive() {
         Integration created = create("orders-zero-etl");
         Integration integration = service.findById(created.integrationId()).orElseThrow();

@@ -3,8 +3,10 @@ package io.floci.aws.services.rds;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessService;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.awaitility.Awaitility;
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.postgresql.Driver;
@@ -38,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @QuarkusTest
 class RdsZeroEtlInitialLoadIntegrationTest {
 
+    private static final Logger LOG = Logger.getLogger(RdsZeroEtlInitialLoadIntegrationTest.class);
     private static final String MASTER_USER = "master";
     private static final String MASTER_PASSWORD = "Master123!";
     private static final String ADMIN_PASSWORD = "Secret123";
@@ -74,16 +77,19 @@ class RdsZeroEtlInitialLoadIntegrationTest {
                     "CREATE TABLE no_key (id int)",
                     "CREATE TABLE left_out (id int PRIMARY KEY)");
 
-            String namespaceArn = RestAssuredJsonUtils.awsAction("RedshiftServerless", "CreateNamespace", """
+            Response namespaceResponse = RestAssuredJsonUtils.awsAction("RedshiftServerless", "CreateNamespace", """
                     {"namespaceName":"%s","adminUsername":"admin","adminUserPassword":"%s"}
-                    """.formatted(namespace, ADMIN_PASSWORD)).then().statusCode(200)
+                    """.formatted(namespace, ADMIN_PASSWORD));
+            namespaceCreated = namespaceResponse.statusCode() < 300;
+            String namespaceArn = namespaceResponse.then().statusCode(200)
                     .extract().path("namespace.namespaceArn");
-            namespaceCreated = true;
-            int workgroupPort = RestAssuredJsonUtils.awsAction("RedshiftServerless", "CreateWorkgroup", """
+
+            Response workgroupResponse = RestAssuredJsonUtils.awsAction("RedshiftServerless", "CreateWorkgroup", """
                     {"workgroupName":"%s","namespaceName":"%s"}
-                    """.formatted(workgroup, namespace)).then().statusCode(200)
+                    """.formatted(workgroup, namespace));
+            workgroupCreated = workgroupResponse.statusCode() < 300;
+            int workgroupPort = workgroupResponse.then().statusCode(200)
                     .extract().path("workgroup.endpoint.port");
-            workgroupCreated = true;
 
             integrationArn = rds("CreateIntegration")
                     .formParam("IntegrationName", "zetl-" + suffix)
@@ -136,16 +142,26 @@ class RdsZeroEtlInitialLoadIntegrationTest {
                             "CREATE DATABASE appdb_dw2 FROM INTEGRATION '" + integrationId + "' DATABASE 'appdb'"));
             assertThat(again.getSQLState(), equalTo("42P04"));
         } finally {
-            if (integrationArn != null) {
-                rds("DeleteIntegration").formParam("IntegrationIdentifier", integrationArn).when().post("/");
+            String arnToDelete = integrationArn;
+            if (arnToDelete != null) {
+                cleanUpStep("DeleteIntegration " + arnToDelete, () -> rds("DeleteIntegration")
+                        .formParam("IntegrationIdentifier", arnToDelete).when().post("/"));
             }
             if (workgroupCreated) {
-                serverless.deleteWorkgroup(workgroup, REGION);
+                cleanUpStep("deleteWorkgroup " + workgroup, () -> serverless.deleteWorkgroup(workgroup, REGION));
             }
             if (namespaceCreated) {
-                serverless.deleteNamespace(namespace, REGION);
+                cleanUpStep("deleteNamespace " + namespace, () -> serverless.deleteNamespace(namespace, REGION));
             }
-            deleteInstance(dbId);
+            cleanUpStep("deleteInstance " + dbId, () -> deleteInstance(dbId));
+        }
+    }
+
+    private static void cleanUpStep(String description, Runnable step) {
+        try {
+            step.run();
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Teardown step failed: {0}", description);
         }
     }
 

@@ -2,6 +2,7 @@ package io.floci.aws.services.rds.integration;
 
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.services.rds.model.Integration;
 import io.floci.aws.services.redshift.RedshiftService;
 import io.floci.aws.services.redshift.RedshiftZeroEtlEndpoints;
@@ -14,6 +15,9 @@ import io.floci.aws.services.redshiftserverless.RedshiftServerlessRuntime;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+
+import java.util.List;
+import java.util.Optional;
 
 /**
  * {@code CREATE DATABASE <name> FROM INTEGRATION '<id>' DATABASE <source>} on the Redshift cluster or
@@ -61,10 +65,18 @@ public class RdsIntegrationDatabases implements IntegrationDatabaseCreator {
             throw new SpectrumSqlException(INVALID_PARAMETER_VALUE, "Source database \"" + sourceDatabase
                     + "\" is not included in the data filter of integration " + integrationId);
         }
+        Optional<Integration.Destination> existing = integration.destinationFor(sourceDatabase);
+        boolean previousGone = previousDatabaseGone(integration, sourceDatabase, backend);
+        boolean reuseFailedDatabase = existing.isPresent()
+                && Integration.Destination.STATE_FAILED.equals(existing.get().getState())
+                && statement.databaseName().equals(existing.get().getDatabaseName())
+                && !previousGone;
+        List<Integration.IntegrationError> previousErrors = integration.getErrors().stream()
+                .filter(error -> RdsIntegrationService.isErrorForSourceDatabase(error, sourceDatabase))
+                .toList();
         Integration syncing;
         try {
-            syncing = integrations.addDestination(integration, statement.databaseName(), sourceDatabase,
-                    previousDatabaseGone(integration, sourceDatabase, backend));
+            syncing = integrations.addDestination(integration, statement.databaseName(), sourceDatabase, previousGone);
         } catch (AwsException e) {
             String state = switch (e.getErrorCode()) {
                 case "IntegrationAlreadyExistsFault" -> DUPLICATE_DATABASE;
@@ -73,11 +85,17 @@ public class RdsIntegrationDatabases implements IntegrationDatabaseCreator {
             };
             throw new SpectrumSqlException(state, e.getMessage());
         }
-        try {
-            backend.execute("CREATE DATABASE " + quoteIdentifier(statement.databaseName()));
-        } catch (RuntimeException e) {
-            integrations.removeDestination(integration, sourceDatabase);
-            throw e;
+        if (!reuseFailedDatabase) {
+            try {
+                backend.execute("CREATE DATABASE " + PostgresWire.quoteIdentifier(statement.databaseName()));
+            } catch (RuntimeException e) {
+                if (existing.isPresent()) {
+                    integrations.restoreDestination(integration, sourceDatabase, existing.get(), previousErrors);
+                } else {
+                    integrations.removeDestination(integration, sourceDatabase);
+                }
+                throw e;
+            }
         }
         loader.submit(syncing, sourceDatabase, statement.databaseName());
     }
@@ -125,9 +143,5 @@ public class RdsIntegrationDatabases implements IntegrationDatabaseCreator {
         }
         return new SpectrumSqlException(UNDEFINED_OBJECT, "Integration " + integrationId
                 + " does not exist or does not replicate into this database");
-    }
-
-    private static String quoteIdentifier(String name) {
-        return "\"" + name.replace("\"", "\"\"") + "\"";
     }
 }

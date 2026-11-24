@@ -395,6 +395,13 @@ class ExternalStatementParserTest {
     }
 
     @Test
+    void rejectsTrailingStatementsAfterIntegrationDatabaseOptions() {
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class, () -> parser.parse(
+                "CREATE DATABASE dw FROM INTEGRATION 'abc' DATABASE 'orders' SET x = 1; SELECT 1"));
+        assertThat(error.sqlState(), equalTo("42601"));
+    }
+
+    @Test
     void leavesPlainCreateDatabaseToTheBackend() {
         assertThat(parser.parse("CREATE DATABASE dw").isPresent(), equalTo(false));
         assertThat(parser.parse("CREATE DATABASE dw WITH OWNER admin").isPresent(), equalTo(false));

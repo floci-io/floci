@@ -186,6 +186,41 @@ class RdsIntegrationDatabasesTest {
         verify(loader, never()).submit(any(), anyString(), anyString());
     }
 
+    @Test
+    void reusesExistingDatabaseWhenRetryingAFailedLoadWithTheSameName() {
+        integration.getDestinations().add(new Integration.Destination("orders_dw", "orders",
+                Integration.Destination.STATE_FAILED, null));
+        backend.existingDatabase = true;
+
+        databases.create(statement("orders"), session("orders-dw"), backend);
+
+        assertThat(backend.statements, empty());
+        verify(integrations).addDestination(integration, "orders_dw", "orders", false);
+        verify(loader).submit(integration, "orders", "orders_dw");
+    }
+
+    @Test
+    void restoresPreviousFailedDestinationAndErrorsWhenRetryDatabaseCreationFails() {
+        Integration.Destination failed = new Integration.Destination("orders_dw", "orders",
+                Integration.Destination.STATE_FAILED, null);
+        Integration.IntegrationError error = new Integration.IntegrationError(
+                RdsIntegrationService.INITIAL_LOAD_FAILED,
+                "The initial load of source database orders into orders_dw failed: source is down");
+        integration.getDestinations().add(failed);
+        integration.getErrors().add(error);
+        RecordingBackend failing = new RecordingBackend();
+        failing.existingDatabase = true;
+        failing.failure = new SpectrumSqlException("42P04", "database \"orders_dw_v2\" already exists");
+
+        assertState("42P04", () -> databases.create(
+                new ExternalStatement.CreateIntegrationDatabase("orders_dw_v2", INTEGRATION_ID, "orders"),
+                session("orders-dw"), failing));
+
+        verify(integrations).restoreDestination(integration, "orders", failed, List.of(error));
+        verify(integrations, never()).removeDestination(any(), anyString());
+        verify(loader, never()).submit(any(), anyString(), anyString());
+    }
+
     private static final class RecordingBackend implements BackendSql {
         private final List<String> statements = new ArrayList<>();
         private RuntimeException failure;
