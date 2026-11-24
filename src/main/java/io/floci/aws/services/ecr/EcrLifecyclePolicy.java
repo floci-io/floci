@@ -10,26 +10,47 @@ import io.floci.aws.core.common.AwsException;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
+import java.util.function.Function;
 
 /**
- * A lifecycle policy document as {@code PutLifecyclePolicy} takes it, checked against the rules the ECR user guide
- * gives for lifecycle policy properties and their evaluation. Enum values are matched without regard to case.
+ * A lifecycle policy document as {@code PutLifecyclePolicy} takes it, checked in the stages ECR's refusals show: the
+ * JSON is parsed, checked against a JSON schema whose validator's own text ECR quotes, mapped onto ECR's rule types,
+ * and then checked against the rules the ECR user guide states. Values are matched exactly as the guide spells them.
  *
  * @see <a href="https://docs.aws.amazon.com/AmazonECR/latest/userguide/lifecycle_policy_parameters.html">Lifecycle
  *     policy properties</a>
+ * @see <a href="https://docs.aws.amazon.com/AmazonECR/latest/userguide/LifecyclePolicies.html">Lifecycle policy
+ *     evaluation rules</a>
  */
 public record EcrLifecyclePolicy(List<Rule> rules) {
 
     /** Which images a rule's selection looks at by their tags. */
-    public enum TagStatus { TAGGED, UNTAGGED, ANY }
+    public enum TagStatus {
+        TAGGED("tagged"), UNTAGGED("untagged"), ANY("any");
+
+        private final String wireName;
+
+        TagStatus(String wireName) {
+            this.wireName = wireName;
+        }
+    }
 
     /** The storage class a rule selects images of. */
-    public enum StorageClass { STANDARD, ARCHIVE }
+    public enum StorageClass {
+        STANDARD("standard"), ARCHIVE("archive");
+
+        private final String wireName;
+
+        StorageClass(String wireName) {
+            this.wireName = wireName;
+        }
+    }
 
     /** What a rule counts against {@code countNumber}. */
     public enum CountType {
@@ -47,10 +68,6 @@ public record EcrLifecyclePolicy(List<Rule> rules) {
         public String wireName() {
             return wireName;
         }
-
-        boolean countsDays() {
-            return this != IMAGE_COUNT_MORE_THAN;
-        }
     }
 
     /** What a rule does to the images it selects. */
@@ -65,9 +82,18 @@ public record EcrLifecyclePolicy(List<Rule> rules) {
 
     private static final ObjectReader SINGLE_JSON_VALUE =
             new ObjectMapper().reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+    private static final int MAX_RULES = 50;
+    private static final int MAX_TAG_PREFIXES = 10;
     private static final int MAX_PATTERN_WILDCARDS = 4;
+    /** "Images must be in archive storage for a minimum of 90 days before deletion." */
+    private static final int MIN_ARCHIVE_DAYS = 90;
+    private static final Set<String> SELECTION_MEMBERS = Set.of("tagStatus", "tagPatternList", "tagPrefixList",
+            "storageClass", "countType", "countUnit", "countNumber");
+    /** The alternatives of the selection and action schemas, which ECR counts in its oneOf message. */
+    private static final int SELECTION_SCHEMAS = CountType.values().length;
+    private static final int ACTION_SCHEMAS = ActionType.values().length;
 
-    /** Parses and checks {@code text}; a document ECR would refuse is refused with ECR's message form. */
+    /** Parses and checks {@code text}; a document ECR would refuse is refused with ECR's message. */
     public static EcrLifecyclePolicy parse(String text) {
         JsonNode policy;
         try {
@@ -75,146 +101,251 @@ public record EcrLifecyclePolicy(List<Rule> rules) {
         } catch (JsonProcessingException e) {
             throw parsingFailure();
         }
-        if (policy == null || !policy.isObject()) {
+        if (policy == null || policy.isMissingNode()) {
             throw parsingFailure();
         }
-        JsonNode rules = present(policy.get("rules"));
-        if (rules != null && !rules.isArray()) {
-            throw parsingFailure();
+        checkSchema(policy);
+        List<Rule> rules = new ArrayList<>();
+        for (JsonNode rule : policy.get("rules")) {
+            rules.add(map(rule));
         }
-        if (rules == null || rules.isEmpty()) {
-            throw validationFailure("A lifecycle policy must have at least one rule.");
-        }
-        List<Rule> parsed = new ArrayList<>();
-        Set<Integer> priorities = new HashSet<>();
-        for (JsonNode rule : rules) {
-            Rule next = rule(rule);
-            if (!priorities.add(next.priority())) {
-                throw validationFailure("Each rule must have a unique rulePriority.");
-            }
-            parsed.add(next);
-        }
-        checkRulesOfEachStorageClass(parsed);
-        return new EcrLifecyclePolicy(List.copyOf(parsed));
+        checkRules(rules);
+        return new EcrLifecyclePolicy(List.copyOf(rules));
     }
 
-    private static Rule rule(JsonNode rule) {
-        if (!rule.isObject()) {
+    // ------------------------------------------------------------
+    // The JSON schema: ECR quotes its validator, newline included
+    // ------------------------------------------------------------
+
+    private static void checkSchema(JsonNode policy) {
+        requireType(policy, "object");
+        requireMembers(policy, "rules");
+        JsonNode rules = policy.get("rules");
+        requireType(rules, "array");
+        if (rules.isEmpty()) {
+            throw schemaFailure("array is too short: must have at least 1 elements but instance has 0 elements");
+        }
+        requireAtMost(rules, MAX_RULES);
+        for (JsonNode rule : rules) {
+            requireType(rule, "object");
+            requireMembers(rule, "action", "rulePriority", "selection");
+            requirePositiveInteger(rule.get("rulePriority"));
+            requireType(rule.get("selection"), "object");
+            checkSelectionSchema(rule.get("selection"));
+            requireType(rule.get("action"), "object");
+            checkActionSchema(rule.get("action"));
+        }
+    }
+
+    private static void checkSelectionSchema(JsonNode selection) {
+        requireMembers(selection, "countNumber", "countType", "tagStatus");
+        for (String list : List.of("tagPatternList", "tagPrefixList")) {
+            JsonNode values = selection.get(list);
+            if (values != null) {
+                requireType(values, "array");
+                values.forEach(value -> requireType(value, "string"));
+            }
+        }
+        if (selection.has("tagPrefixList")) {
+            requireAtMost(selection.get("tagPrefixList"), MAX_TAG_PREFIXES);
+        }
+        requirePositiveInteger(selection.get("countNumber"));
+        if (!matchesACountSchema(selection)) {
+            throw schemaFailure(noSchemaMatched(SELECTION_SCHEMAS));
+        }
+    }
+
+    /**
+     * Each count type has a schema of its own: {@code imageCountMoreThan} takes no {@code countUnit}, the others take
+     * {@code days}, and none takes a member the guide does not list.
+     */
+    private static boolean matchesACountSchema(JsonNode selection) {
+        for (Iterator<String> members = selection.fieldNames(); members.hasNext(); ) {
+            if (!SELECTION_MEMBERS.contains(members.next())) {
+                return false;
+            }
+        }
+        CountType countType = wireValue(selection.get("countType"), CountType.values(), CountType::wireName);
+        if (countType == null) {
+            return false;
+        }
+        JsonNode countUnit = selection.get("countUnit");
+        return countType == CountType.IMAGE_COUNT_MORE_THAN
+                ? countUnit == null
+                : countUnit != null && countUnit.isTextual() && countUnit.asText().equals("days");
+    }
+
+    /** An expire action carries only its type; a transition can also carry where it moves images to. */
+    private static void checkActionSchema(JsonNode action) {
+        String type = action.path("type").isTextual() ? action.get("type").asText() : "";
+        JsonNode target = action.get("targetStorageClass");
+        boolean matched = switch (type) {
+            case "expire" -> action.size() == 1;
+            case "transition" -> action.size() == 1 || action.size() == 2 && target != null && target.isTextual()
+                    && target.asText().equals(StorageClass.ARCHIVE.wireName);
+            default -> false;
+        };
+        if (!matched) {
+            throw schemaFailure(noSchemaMatched(ACTION_SCHEMAS));
+        }
+    }
+
+    private static void requireMembers(JsonNode object, String... members) {
+        Set<String> missing = new TreeSet<>();
+        for (String member : members) {
+            if (!object.has(member)) {
+                missing.add(member);
+            }
+        }
+        if (!missing.isEmpty()) {
+            throw schemaFailure("object has missing required properties ([\"" + String.join("\",\"", missing)
+                    + "\"])");
+        }
+    }
+
+    private static void requireType(JsonNode node, String type) {
+        if (!typeOf(node).equals(type)) {
+            throw schemaFailure("instance type (" + typeOf(node)
+                    + ") does not match any allowed primitive type (allowed: [\"" + type + "\"])");
+        }
+    }
+
+    /** An integer of at least 1; one too large for ECR's rule types passes the schema and fails the mapping. */
+    private static void requirePositiveInteger(JsonNode node) {
+        requireType(node, "integer");
+        if (node.bigIntegerValue().signum() < 1) {
+            throw schemaFailure("numeric instance is lower than the required minimum (minimum: 1, found: "
+                    + node.asText() + ")");
+        }
+    }
+
+    private static void requireAtMost(JsonNode array, int max) {
+        if (array.size() > max) {
+            throw schemaFailure("array is too long: must have at most " + max + " elements but instance has "
+                    + array.size() + " elements");
+        }
+    }
+
+    private static String typeOf(JsonNode node) {
+        return switch (node.getNodeType()) {
+            case ARRAY -> "array";
+            case BOOLEAN -> "boolean";
+            case NULL -> "null";
+            case NUMBER -> node.isIntegralNumber() ? "integer" : "number";
+            case OBJECT -> "object";
+            case STRING -> "string";
+            default -> "unknown";
+        };
+    }
+
+    private static String noSchemaMatched(int schemas) {
+        return "instance failed to match exactly one schema (matched 0 out of " + schemas + ")";
+    }
+
+    // ------------------------------------------------------------
+    // Mapping onto ECR's rule types: what does not fit is unmapped
+    // ------------------------------------------------------------
+
+    private static Rule map(JsonNode rule) {
+        JsonNode selection = rule.get("selection");
+        JsonNode action = rule.get("action");
+        TagStatus tagStatus = wireValue(selection.get("tagStatus"), TagStatus.values(), status -> status.wireName);
+        StorageClass storageClass = selection.has("storageClass")
+                ? wireValue(selection.get("storageClass"), StorageClass.values(), storage -> storage.wireName)
+                : StorageClass.STANDARD;
+        boolean transition = action.get("type").asText().equals("transition");
+        if (tagStatus == null || storageClass == null || !rule.get("rulePriority").canConvertToInt()
+                || !selection.get("countNumber").canConvertToInt()
+                || transition && !action.has("targetStorageClass")) {
             throw parsingFailure();
         }
-        Integer priority = positiveInteger(rule.get("rulePriority"));
-        if (priority == null) {
-            throw validationFailure("rulePriority must be a positive integer.");
-        }
-        JsonNode selection = object(rule, "selection", "Every rule must have a selection.");
-        TagStatus tagStatus = enumValue(selection.get("tagStatus"), TagStatus.class);
-        if (tagStatus == null) {
-            throw validationFailure("tagStatus must be tagged, untagged or any.");
-        }
-        List<String> patterns = strings(selection, "tagPatternList");
-        List<String> prefixes = strings(selection, "tagPrefixList");
-        checkTagFilters(tagStatus, patterns, prefixes);
+        return new Rule(rule.get("rulePriority").intValue(), tagStatus, strings(selection.get("tagPatternList")),
+                strings(selection.get("tagPrefixList")), storageClass,
+                wireValue(selection.get("countType"), CountType.values(), CountType::wireName),
+                selection.get("countNumber").intValue(), transition ? ActionType.TRANSITION : ActionType.EXPIRE);
+    }
 
-        CountType countType = countType(selection.get("countType"));
-        StorageClass storageClass = storageClass(selection.get("storageClass"), countType);
-        checkCountUnit(present(selection.get("countUnit")), countType);
-        int countNumber = countNumber(selection.get("countNumber"));
-
-        JsonNode action = object(rule, "action", "Every rule must have an action.");
-        ActionType actionType = enumValue(action.get("type"), ActionType.class);
-        if (actionType == null) {
-            throw validationFailure("The action type must be expire or transition.");
+    private static List<String> strings(JsonNode values) {
+        List<String> strings = new ArrayList<>();
+        if (values != null) {
+            values.forEach(value -> strings.add(value.asText()));
         }
-        if (actionType == ActionType.TRANSITION) {
-            if (enumValue(action.get("targetStorageClass"), StorageClass.class) != StorageClass.ARCHIVE) {
-                throw validationFailure("targetStorageClass must be archive when the action type is transition.");
+        return List.copyOf(strings);
+    }
+
+    private static <E> E wireValue(JsonNode node, E[] values, Function<E, String> wireName) {
+        if (node == null || !node.isTextual()) {
+            return null;
+        }
+        for (E value : values) {
+            if (wireName.apply(value).equals(node.asText())) {
+                return value;
             }
-            if (countType == CountType.SINCE_IMAGE_TRANSITIONED) {
+        }
+        return null;
+    }
+
+    // ------------------------------------------------------------
+    // The user guide's rules, in ECR's sentences where known
+    // ------------------------------------------------------------
+
+    private static void checkRules(List<Rule> rules) {
+        Set<Integer> priorities = new HashSet<>();
+        for (Rule rule : rules) {
+            if (!priorities.add(rule.priority())) {
+                throw validationFailure("Duplicate priority in multiple rules");
+            }
+        }
+        for (Rule rule : rules) {
+            checkTagFilters(rule);
+            checkStorageClass(rule);
+            if (rule.countType() == CountType.SINCE_IMAGE_TRANSITIONED && rule.action() == ActionType.TRANSITION) {
                 throw validationFailure("countType sinceImageTransitioned can only be used with the expire action.");
             }
         }
-        return new Rule(priority, tagStatus, patterns, prefixes, storageClass, countType, countNumber, actionType);
+        checkRulesOfEachStorageClass(rules);
     }
 
-    private static void checkTagFilters(TagStatus tagStatus, List<String> patterns, List<String> prefixes) {
-        if (tagStatus != TagStatus.TAGGED) {
-            if (!patterns.isEmpty() || !prefixes.isEmpty()) {
+    private static void checkTagFilters(Rule rule) {
+        if (rule.tagStatus() != TagStatus.TAGGED) {
+            if (!rule.tagPatterns().isEmpty() || !rule.tagPrefixes().isEmpty()) {
                 throw validationFailure("tagPrefixList and tagPatternList can only be used when tagStatus=TAGGED.");
             }
             return;
         }
-        if (!patterns.isEmpty() && !prefixes.isEmpty()) {
+        if (!rule.tagPatterns().isEmpty() && !rule.tagPrefixes().isEmpty()) {
             throw validationFailure("A rule can specify tagPrefixList or tagPatternList, but not both.");
         }
-        if (patterns.isEmpty() && prefixes.isEmpty()) {
+        if (rule.tagPatterns().isEmpty() && rule.tagPrefixes().isEmpty()) {
             throw validationFailure("Must specify tagPrefixList or tagPatternList when tagStatus=TAGGED.");
         }
-        for (String pattern : patterns) {
+        for (String pattern : rule.tagPatterns()) {
             if (pattern.chars().filter(c -> c == '*').count() > MAX_PATTERN_WILDCARDS) {
-                throw validationFailure("A tag pattern can have at most " + MAX_PATTERN_WILDCARDS + " wildcards.");
+                throw validationFailure("Invalid tag pattern provided. Total number of * must not exceed "
+                        + MAX_PATTERN_WILDCARDS);
             }
         }
     }
 
-    private static CountType countType(JsonNode node) {
-        String value = node != null && node.isTextual() ? node.asText() : null;
-        for (CountType countType : CountType.values()) {
-            if (countType.wireName().equalsIgnoreCase(value)) {
-                return countType;
-            }
-        }
-        throw validationFailure(
-                "countType must be imageCountMoreThan, sinceImagePushed, sinceImagePulled or sinceImageTransitioned.");
-    }
-
-    /** Archived images are selected only by age in the archive, and only that count selects them. */
-    private static StorageClass storageClass(JsonNode node, CountType countType) {
-        StorageClass storageClass = StorageClass.STANDARD;
-        if (present(node) != null) {
-            storageClass = enumValue(node, StorageClass.class);
-            if (storageClass == null) {
-                throw validationFailure("storageClass must be standard or archive.");
-            }
-        }
-        boolean archive = countType == CountType.SINCE_IMAGE_TRANSITIONED;
-        if (archive && storageClass != StorageClass.ARCHIVE) {
+    /** Archived images are selected only by age in the archive, and only after their minimum stay there. */
+    private static void checkStorageClass(Rule rule) {
+        boolean archive = rule.countType() == CountType.SINCE_IMAGE_TRANSITIONED;
+        if (archive && rule.storageClass() != StorageClass.ARCHIVE) {
             throw validationFailure("storageClass must be archive when countType is sinceImageTransitioned.");
         }
-        if (!archive && storageClass != StorageClass.STANDARD) {
-            throw validationFailure("storageClass must be standard when countType is " + countType.wireName() + ".");
+        if (!archive && rule.storageClass() != StorageClass.STANDARD) {
+            throw validationFailure("storageClass must be standard when countType is "
+                    + rule.countType().wireName() + ".");
         }
-        return storageClass;
-    }
-
-    private static void checkCountUnit(JsonNode countUnit, CountType countType) {
-        if (!countType.countsDays()) {
-            if (countUnit != null) {
-                throw validationFailure("countUnit can only be used when countType is sinceImagePushed, "
-                        + "sinceImagePulled or sinceImageTransitioned.");
-            }
-            return;
+        if (archive && rule.countNumber() < MIN_ARCHIVE_DAYS) {
+            throw validationFailure("countNumber must be at least " + MIN_ARCHIVE_DAYS
+                    + " when countType is sinceImageTransitioned.");
         }
-        if (countUnit == null || !countUnit.isTextual() || !"days".equalsIgnoreCase(countUnit.asText())) {
-            throw validationFailure("countUnit must be days when countType is " + countType.wireName() + ".");
-        }
-    }
-
-    /** A countNumber below 1 is refused with the JSON schema validator's own text, as ECR quotes it. */
-    private static int countNumber(JsonNode node) {
-        if (node != null && node.isIntegralNumber() && node.canConvertToInt() && node.intValue() < 1) {
-            throw validationFailure("numeric instance is lower than the required minimum (minimum: 1, found: "
-                    + node.intValue() + ")\n");
-        }
-        Integer countNumber = positiveInteger(node);
-        if (countNumber == null) {
-            throw validationFailure("countNumber must be a positive integer.");
-        }
-        return countNumber;
     }
 
     /**
-     * Checks across the rules selecting one storage class: a rule selecting any image has a higher rulePriority than
-     * every rule that does not, at most one rule selects untagged images, and no tag prefix appears in two rules.
+     * Checks across the rules selecting one storage class: a rule selecting any image has the highest rulePriority of
+     * them all, so only one can, at most one rule selects untagged images, and no tag prefix appears in two rules.
      */
     private static void checkRulesOfEachStorageClass(List<Rule> rules) {
         Map<StorageClass, List<Rule>> byStorageClass = new EnumMap<>(StorageClass.class);
@@ -222,19 +353,16 @@ public record EcrLifecyclePolicy(List<Rule> rules) {
             byStorageClass.computeIfAbsent(rule.storageClass(), ignored -> new ArrayList<>()).add(rule);
         }
         for (List<Rule> group : byStorageClass.values()) {
-            int highestSelective = Integer.MIN_VALUE;
+            int highest = Integer.MIN_VALUE;
             int lowestAny = Integer.MAX_VALUE;
             int untagged = 0;
             Set<String> prefixes = new HashSet<>();
             for (Rule rule : group) {
+                highest = Math.max(highest, rule.priority());
                 switch (rule.tagStatus()) {
                     case ANY -> lowestAny = Math.min(lowestAny, rule.priority());
-                    case UNTAGGED -> {
-                        highestSelective = Math.max(highestSelective, rule.priority());
-                        untagged++;
-                    }
+                    case UNTAGGED -> untagged++;
                     case TAGGED -> {
-                        highestSelective = Math.max(highestSelective, rule.priority());
                         for (String prefix : new LinkedHashSet<>(rule.tagPrefixes())) {
                             if (!prefixes.add(prefix)) {
                                 throw validationFailure("The rules selecting a storage class must have a unique set "
@@ -244,71 +372,26 @@ public record EcrLifecyclePolicy(List<Rule> rules) {
                     }
                 }
             }
-            if (lowestAny < highestSelective) {
-                throw validationFailure("A rule with tagStatus=ANY must have the highest rulePriority.");
+            if (lowestAny < highest) {
+                throw validationFailure("Rule for tagStatus=ANY must have the lowest priority per storage class.");
             }
             if (untagged > 1) {
-                throw validationFailure("Only one rule selecting a storage class can select untagged images.");
+                throw validationFailure("Only one rule can select Untagged images per storage class.");
             }
         }
     }
 
-    /** A member that must be an object when given: one left out or null is refused, one of another type unmapped. */
-    private static JsonNode object(JsonNode parent, String member, String missing) {
-        JsonNode node = present(parent.get(member));
-        if (node == null) {
-            throw validationFailure(missing);
-        }
-        if (!node.isObject()) {
-            throw parsingFailure();
-        }
-        return node;
-    }
-
-    /** A list of strings, empty when left out or null; anything but an array of strings cannot be mapped. */
-    private static List<String> strings(JsonNode parent, String member) {
-        JsonNode node = present(parent.get(member));
-        if (node == null) {
-            return List.of();
-        }
-        if (!node.isArray()) {
-            throw parsingFailure();
-        }
-        List<String> values = new ArrayList<>();
-        for (JsonNode value : node) {
-            if (!value.isTextual()) {
-                throw parsingFailure();
-            }
-            values.add(value.asText());
-        }
-        return List.copyOf(values);
-    }
-
-    private static <E extends Enum<E>> E enumValue(JsonNode node, Class<E> type) {
-        if (node == null || !node.isTextual()) {
-            return null;
-        }
-        try {
-            return Enum.valueOf(type, node.asText().toUpperCase(Locale.ROOT));
-        } catch (IllegalArgumentException e) {
-            return null;
-        }
-    }
-
-    /** The value of an integer node of 1 or more that fits an int; null for anything else. */
-    private static Integer positiveInteger(JsonNode node) {
-        if (node == null || !node.isIntegralNumber() || !node.canConvertToInt() || node.intValue() < 1) {
-            return null;
-        }
-        return node.intValue();
-    }
-
-    private static JsonNode present(JsonNode node) {
-        return node == null || node.isNull() ? null : node;
-    }
+    // ------------------------------------------------------------
+    // ECR's message forms
+    // ------------------------------------------------------------
 
     private static AwsException parsingFailure() {
         return invalid("Lifecycle policy parsing failure: Could not map policyString into LifecyclePolicy.");
+    }
+
+    /** The validator's own text, which ECR quotes with the newline the validator ends it with. */
+    private static AwsException schemaFailure(String report) {
+        return validationFailure(report + "\n");
     }
 
     private static AwsException validationFailure(String reason) {
