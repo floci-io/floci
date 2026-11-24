@@ -61,6 +61,7 @@ class AslExecutorExecutionBudgetTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final AtomicLong offset = new AtomicLong();
+    private final List<Long> sleeps = new CopyOnWriteArrayList<>();
     private final CountDownLatch branchParked = new CountDownLatch(1);
     private final CountDownLatch releaseBranches = new CountDownLatch(1);
     private final RecordingHistory history = new RecordingHistory();
@@ -150,6 +151,10 @@ class AslExecutorExecutionBudgetTest {
         assertTimedOut(execution);
         assertEquals("ExecutionTimedOut", history.getLast().getType());
         assertEquals(1, types().stream().filter("LambdaFunctionFailed"::equals).count(), types().toString());
+        // The test clock takes any sleep, so the sleeps themselves show the backoff stopped at the budget.
+        long budget = TimeUnit.SECONDS.toNanos(1);
+        assertTrue(!sleeps.isEmpty() && sleeps.stream().allMatch(nanos -> nanos <= budget),
+                "the backoff must sleep no longer than the one-second budget: " + sleeps);
     }
 
     @ParameterizedTest
@@ -194,6 +199,7 @@ class AslExecutorExecutionBudgetTest {
     }
 
     private void sleep(long nanos) throws InterruptedException {
+        sleeps.add(nanos);
         offset.addAndGet(nanos);
         if (Thread.currentThread() != history.runningThread) {
             branchParked.countDown();
