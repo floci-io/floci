@@ -7,10 +7,12 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.DockerBuildContext;
 import io.floci.aws.core.common.docker.DockerClientProducer;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.TestImages;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
@@ -23,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /** Reads the working directory's permissions from a created, unstarted container of a real image. */
+@ResourceLock(ParallelLocks.CONFIG_MAPPING)
 class WorkingDirectoryAccessDockerIntegrationTest {
 
     private static final String DOCKERFILE = """

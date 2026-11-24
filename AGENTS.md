@@ -261,8 +261,10 @@ Guidelines:
 - Plain test classes (no `@QuarkusTest`) run four at a time in CI, in a Surefire pass before the
   Quarkus classes. A plain class that opens a socket declares `@ResourceLock(ParallelLocks.PORTS)`:
   the default mode when it releases a port and binds or dials it later (`FreePorts`, a port expected
-  to refuse), `mode = ResourceAccessMode.READ` otherwise. `ParallelLocksInventoryTest` enforces it. A
-  class that shares other process-wide state takes a lock named in `ParallelLocks` (`TLS_CONFIG` for
+  to refuse), `mode = ResourceAccessMode.READ` otherwise. A plain class that builds the
+  `EmulatorConfig` mapping with a `SmallRyeConfigBuilder` declares
+  `@ResourceLock(ParallelLocks.CONFIG_MAPPING)`. `ParallelLocksInventoryTest` enforces both. A class
+  that shares other process-wide state takes a lock named in `ParallelLocks` (`TLS_CONFIG` for
   `TlsConfigSource`)
 - Prefer package-private constructors for testability
 - Integration tests may use ordered execution when stateful behavior requires it
