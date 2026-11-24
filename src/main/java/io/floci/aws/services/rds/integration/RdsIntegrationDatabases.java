@@ -63,10 +63,14 @@ public class RdsIntegrationDatabases implements IntegrationDatabaseCreator {
         }
         Integration syncing;
         try {
-            syncing = integrations.addDestination(integration, statement.databaseName(), sourceDatabase);
+            syncing = integrations.addDestination(integration, statement.databaseName(), sourceDatabase,
+                    previousDatabaseGone(integration, sourceDatabase, backend));
         } catch (AwsException e) {
-            String state = "IntegrationAlreadyExistsFault".equals(e.getErrorCode())
-                    ? DUPLICATE_DATABASE : NOT_IN_PREREQUISITE_STATE;
+            String state = switch (e.getErrorCode()) {
+                case "IntegrationAlreadyExistsFault" -> DUPLICATE_DATABASE;
+                case "IntegrationNotFoundFault" -> UNDEFINED_OBJECT;
+                default -> NOT_IN_PREREQUISITE_STATE;
+            };
             throw new SpectrumSqlException(state, e.getMessage());
         }
         try {
@@ -76,6 +80,17 @@ public class RdsIntegrationDatabases implements IntegrationDatabaseCreator {
             throw e;
         }
         loader.submit(syncing, sourceDatabase, statement.databaseName());
+    }
+
+    /**
+     * Whether a database was created from {@code sourceDatabase} before and has since been dropped on the target,
+     * so that it can be created and loaded again.
+     */
+    private static boolean previousDatabaseGone(Integration integration, String sourceDatabase, BackendSql backend) {
+        return integration.destinationFor(sourceDatabase)
+                .map(destination -> backend.queryString("SELECT 1 FROM pg_catalog.pg_database WHERE datname = '"
+                        + destination.getDatabaseName().replace("'", "''") + "'").isEmpty())
+                .orElse(false);
     }
 
     /** Whether the integration's target is the provisioned cluster or the workgroup the session runs on. */
@@ -96,8 +111,10 @@ public class RdsIntegrationDatabases implements IntegrationDatabaseCreator {
                 return false;
             }
         }
-        String resource = AwsArnUtils.parse(targetArn).resource();
-        return sessionTarget.equals(resource.substring("cluster:".length()));
+        String clusterIdentifier = AwsArnUtils.parse(targetArn).resource().substring("cluster:".length());
+        return sessionTarget.equals(clusterIdentifier)
+                && redshiftService.clusterRegion(session.accountId(), clusterIdentifier)
+                        .map(integration.getRegion()::equals).orElse(false);
     }
 
     private SpectrumSqlException notFound(String integrationId, SpectrumSession session) {

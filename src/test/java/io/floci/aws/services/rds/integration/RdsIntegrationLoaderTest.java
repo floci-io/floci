@@ -16,6 +16,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -30,6 +31,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -89,7 +91,7 @@ class RdsIntegrationLoaderTest {
 
     private RdsIntegrationLoader loader(boolean mock) {
         return new RdsIntegrationLoader(integrations, rdsService, containers, writer, new ObjectMapper(), mock,
-                Runnable::run);
+                Runnable::run, 2, Duration.ZERO);
     }
 
     private void catalog(String... rows) {
@@ -150,6 +152,31 @@ class RdsIntegrationLoaderTest {
         loader(false).submit(integration, "orders", "orders_dw");
 
         verify(writer, never()).loadTable(anyString(), anyString(), anyString(), any(), any());
+        verify(integrations).finishDestination(integration, "orders", "orders_dw", null);
+    }
+
+    @Test
+    void carriesOnWithTheOtherTablesWhenOneFailsToLoad() {
+        catalog(column("public", "broken", "id", "int4", "integer", 1),
+                column("public", "items", "id", "int4", "integer", 1));
+        doThrow(new IllegalStateException("value too long")).doReturn(1L).when(writer)
+                .loadTable(anyString(), anyString(), anyString(), any(), any());
+
+        loader(false).submit(integration, "orders", "orders_dw");
+
+        verify(writer, times(2)).loadTable(anyString(), anyString(), anyString(), any(), any());
+        verify(integrations).finishDestination(integration, "orders", "orders_dw", null);
+    }
+
+    @Test
+    void triesAgainWhenTheSourceIsNotBackYet() {
+        when(containers.queryPostgres("container-1", "postgres", "orders", RdsIntegrationLoader.CATALOG_SQL))
+                .thenThrow(new IllegalStateException("container not running"))
+                .thenReturn(column("public", "items", "id", "int4", "integer", 1));
+
+        loader(false).submit(integration, "orders", "orders_dw");
+
+        verify(writer).loadTable(anyString(), anyString(), anyString(), any(), any());
         verify(integrations).finishDestination(integration, "orders", "orders_dw", null);
     }
 

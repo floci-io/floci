@@ -136,7 +136,11 @@ final class PostgresRedshiftTypes {
 
     private static Optional<MappedColumn> character(SourceColumn column, String quoted) {
         Matcher matcher = CHARACTER.matcher(column.formattedType());
-        int length = matcher.matches() ? Integer.parseInt(matcher.group(1)) : 1;
+        if (!matcher.matches()) {
+            // A bpchar without a length takes any length, so it is read as text.
+            return mapped(column, LONG_VARCHAR, quoted + "::text");
+        }
+        int length = Integer.parseInt(matcher.group(1));
         if (length > MAX_CHAR_LENGTH) {
             return Optional.empty();
         }

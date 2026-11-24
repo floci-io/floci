@@ -27,6 +27,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
@@ -68,6 +69,8 @@ class RdsZeroEtlInitialLoadIntegrationTest {
                             + "attrs jsonb, PRIMARY KEY (id, line))",
                     "INSERT INTO sales.orders VALUES (1, 1, 'first', 12.30, '{\"rush\": true}'), "
                             + "(1, 2, NULL, 0.50, NULL)",
+                    "CREATE TABLE customers (id serial PRIMARY KEY, name text)",
+                    "INSERT INTO customers (name) VALUES ('ada'), ('grace')",
                     "CREATE TABLE no_key (id int)",
                     "CREATE TABLE left_out (id int PRIMARY KEY)");
 
@@ -97,9 +100,13 @@ class RdsZeroEtlInitialLoadIntegrationTest {
 
             String arn = integrationArn;
             Awaitility.await().atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofMillis(500))
-                    .untilAsserted(() -> rds("DescribeIntegrations").formParam("IntegrationIdentifier", arn)
-                            .when().post("/").then().statusCode(200)
-                            .body(containsString("<Status>active</Status>")));
+                    .until(() -> {
+                        String body = rds("DescribeIntegrations").formParam("IntegrationIdentifier", arn)
+                                .when().post("/").then().statusCode(200).extract().asString();
+                        assertThat("the load failed: " + body, body,
+                                not(containsString("<Status>failed</Status>")));
+                        return body.contains("<Status>active</Status>");
+                    });
 
             assertThat(query(workgroupPort, "appdb_dw",
                             "SELECT id || ':' || line || ':' || COALESCE(note, '-') || ':' || total || ':' "
@@ -108,7 +115,17 @@ class RdsZeroEtlInitialLoadIntegrationTest {
             assertThat(query(workgroupPort, "appdb_dw",
                             "SELECT string_agg(table_schema || '.' || table_name, ',' ORDER BY table_name) "
                                     + "FROM information_schema.tables WHERE table_schema IN ('public', 'sales')"),
-                    contains("sales.orders"));
+                    contains("public.customers,sales.orders"));
+            assertThat(query(workgroupPort, "appdb_dw", "SELECT name FROM public.customers ORDER BY id"),
+                    contains("ada", "grace"));
+            assertThat(query(workgroupPort, "appdb_dw",
+                            "SELECT k.table_name || ':' || string_agg(k.column_name, ',' ORDER BY k.ordinal_position) "
+                                    + "FROM information_schema.table_constraints c "
+                                    + "JOIN information_schema.key_column_usage k "
+                                    + "ON k.constraint_name = c.constraint_name AND k.table_schema = c.table_schema "
+                                    + "WHERE c.constraint_type = 'PRIMARY KEY' "
+                                    + "GROUP BY k.table_name ORDER BY k.table_name"),
+                    contains("customers:id", "orders:id,line"));
             assertThat(query(workgroupPort, "appdb_dw",
                             "SELECT data_type FROM information_schema.columns "
                                     + "WHERE table_name = 'orders' AND column_name = 'note'"),

@@ -1205,13 +1205,16 @@ The statement fails with:
 - SQLSTATE `42704` when the integration does not exist or replicates into another cluster or
   workgroup, and `0A000` for a DynamoDB integration's id.
 - `42601` without `DATABASE`, and `22023` for a source database the filter does not include.
-- `42P04` when a database was already created from that source database, and `55000` while the
-  integration is not `active`.
+- `42P04` when a database created from that source database still exists on the target. Once that
+  database is dropped, or after its load failed, the statement creates and loads it again.
 - `25001` inside a transaction block.
 
-The `SET` and `WITH` options are accepted and ignored. A load that a restart interrupts starts
-again from the beginning. A load that fails, for example because the source database does not
-exist, leaves the integration `failed`, with the cause under `Errors` (`InitialLoadFailed`).
+Databases from several source databases of one integration can be created one after the other,
+also while an earlier one is still loading. The `SET` and `WITH` options are accepted and ignored.
+A load that a restart interrupts starts again from the beginning. A table that cannot be loaded, for
+example because a value is longer than its Redshift column, is logged as a warning and the other
+tables still load. When the source or the target cannot be reached, Floci tries the load again a few
+times, then leaves the integration `failed`, with the cause under `Errors` (`InitialLoadFailed`).
 
 What differs from RDS:
 

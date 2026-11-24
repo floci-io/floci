@@ -26,6 +26,7 @@ import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -60,7 +61,10 @@ public class RdsIntegrationLoader implements Resettable {
             + "'element', e.typname, 'elementtype', e.typtype, "
             + "'elementbuiltin', COALESCE(e.typnamespace = 'pg_catalog'::regnamespace, false), "
             + "'formatted', format_type(a.atttypid, a.atttypmod), "
-            + "'key', COALESCE(array_position(i.indkey::int2[], a.attnum), 0)) "
+            // indkey is an int2vector, whose subscripts start at 0, so the position is counted rather than read
+            // off the subscript.
+            + "'key', COALESCE((SELECT k.n FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS k(att, n) "
+            + "WHERE k.att = a.attnum), 0)) "
             + "FROM pg_class c "
             + "JOIN pg_namespace n ON n.oid = c.relnamespace "
             + "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped "
@@ -73,6 +77,8 @@ public class RdsIntegrationLoader implements Resettable {
 
     // How long one table may take to read out of the source.
     static final int TABLE_READ_TIMEOUT_SECONDS = 3600;
+    private static final int LOAD_ATTEMPTS = 5;
+    private static final Duration RETRY_DELAY = Duration.ofSeconds(5);
 
     private final RdsIntegrationService integrations;
     private final RdsService rdsService;
@@ -81,6 +87,8 @@ public class RdsIntegrationLoader implements Resettable {
     private final ObjectMapper objectMapper;
     private final boolean mock;
     private final Executor workers;
+    private final int attempts;
+    private final Duration retryDelay;
     /** Bumped by a reset, so a load started before it stops writing. */
     private final AtomicLong generation = new AtomicLong();
 
@@ -89,12 +97,13 @@ public class RdsIntegrationLoader implements Resettable {
                                 RdsContainerManager containerManager, RedshiftZeroEtlWriter writer,
                                 ObjectMapper objectMapper, EmulatorConfig config) {
         this(integrations, rdsService, containerManager, writer, objectMapper, config.services().rds().mock(),
-                task -> Thread.ofVirtual().name("rds-integration-load").start(task));
+                task -> Thread.ofVirtual().name("rds-integration-load").start(task), LOAD_ATTEMPTS, RETRY_DELAY);
     }
 
     RdsIntegrationLoader(RdsIntegrationService integrations, RdsService rdsService,
                          RdsContainerManager containerManager, RedshiftZeroEtlWriter writer,
-                         ObjectMapper objectMapper, boolean mock, Executor workers) {
+                         ObjectMapper objectMapper, boolean mock, Executor workers, int attempts,
+                         Duration retryDelay) {
         this.integrations = integrations;
         this.rdsService = rdsService;
         this.containerManager = containerManager;
@@ -102,6 +111,8 @@ public class RdsIntegrationLoader implements Resettable {
         this.objectMapper = objectMapper;
         this.mock = mock;
         this.workers = workers;
+        this.attempts = attempts;
+        this.retryDelay = retryDelay;
     }
 
     /** Starts loading {@code sourceDatabase} of the integration into {@code databaseName} in the background. */
@@ -126,20 +137,50 @@ public class RdsIntegrationLoader implements Resettable {
         }
     }
 
+    /**
+     * Loads the destination, trying again a few times when the source or the target cannot be reached: a load
+     * resumed at startup may start before the containers it reads and writes are back, and loading replaces each
+     * table, so a retry leaves the same rows.
+     */
     void load(Integration integration, String sourceDatabase, String databaseName, long startedIn) {
-        String failure = null;
-        try {
-            if (mock) {
-                LOG.infov("RDS runs without database containers, so integration {0} copies no rows into {1}",
-                        integration.getIntegrationArn(), databaseName);
-            } else {
-                copyTables(integration, sourceDatabase, databaseName, startedIn);
-            }
-        } catch (RuntimeException e) {
-            LOG.warnv(e, "The initial load of {0} into {1} for integration {2} failed", sourceDatabase,
-                    databaseName, integration.getIntegrationArn());
-            failure = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+        if (mock) {
+            LOG.infov("RDS runs without database containers, so integration {0} copies no rows into {1}",
+                    integration.getIntegrationArn(), databaseName);
+            finish(integration, sourceDatabase, databaseName, startedIn, null);
+            return;
         }
+        String failure = null;
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            try {
+                copyTables(integration, sourceDatabase, databaseName, startedIn);
+                failure = null;
+                break;
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Attempt {0} of {1} at the initial load of {2} into {3} for integration {4} failed",
+                        attempt, attempts, sourceDatabase, databaseName, integration.getIntegrationArn());
+                failure = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            }
+            if (attempt < attempts && !waitBeforeRetry(integration, sourceDatabase, databaseName, startedIn)) {
+                return;
+            }
+        }
+        finish(integration, sourceDatabase, databaseName, startedIn, failure);
+    }
+
+    /** Waits before the next attempt; false when the load should stop instead. */
+    private boolean waitBeforeRetry(Integration integration, String sourceDatabase, String databaseName,
+                                    long startedIn) {
+        try {
+            Thread.sleep(retryDelay);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        return generation.get() == startedIn && integrations.isLoading(integration, sourceDatabase, databaseName);
+    }
+
+    private void finish(Integration integration, String sourceDatabase, String databaseName, long startedIn,
+                        String failure) {
         if (generation.get() == startedIn) {
             integrations.finishDestination(integration, sourceDatabase, databaseName, failure);
         }
@@ -165,9 +206,16 @@ public class RdsIntegrationLoader implements Resettable {
                                 + "replicate", integration.getIntegrationArn(), sourceDatabase, table.schema(),
                         table.table());
             } else {
-                long rows = copyTable(integration, source, sourceDatabase, databaseName, table, columns.get());
-                LOG.infov("Integration {0} loaded {1} rows of {2}.{3}.{4} into {5}", integration.getIntegrationArn(),
-                        rows, sourceDatabase, table.schema(), table.table(), databaseName);
+                try {
+                    long rows = copyTable(integration, source, sourceDatabase, databaseName, table, columns.get());
+                    LOG.infov("Integration {0} loaded {1} rows of {2}.{3}.{4} into {5}",
+                            integration.getIntegrationArn(), rows, sourceDatabase, table.schema(), table.table(),
+                            databaseName);
+                } catch (RuntimeException e) {
+                    // As on AWS, a table that cannot be replicated fails on its own and the others still load.
+                    LOG.warnv(e, "Integration {0} could not load table {1}.{2}.{3}", integration.getIntegrationArn(),
+                            sourceDatabase, table.schema(), table.table());
+                }
             }
         }
     }

@@ -22,6 +22,7 @@ import static org.hamcrest.Matchers.empty;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -63,7 +64,8 @@ class RdsIntegrationDatabasesTest {
         integration.setRegion("us-east-1");
         when(integrations.findById(anyString())).thenReturn(Optional.empty());
         when(integrations.findById(INTEGRATION_ID)).thenReturn(Optional.of(integration));
-        when(integrations.addDestination(any(), anyString(), anyString())).thenReturn(integration);
+        when(integrations.addDestination(any(), anyString(), anyString(), anyBoolean())).thenReturn(integration);
+        when(redshiftService.clusterRegion(ACCOUNT, "orders-dw")).thenReturn(Optional.of("us-east-1"));
     }
 
     private static SpectrumSession session(String clusterIdentifier) {
@@ -84,7 +86,7 @@ class RdsIntegrationDatabasesTest {
         databases.create(statement("orders"), session("orders-dw"), backend);
 
         assertThat(backend.statements, contains("CREATE DATABASE \"orders_dw\""));
-        verify(integrations).addDestination(integration, "orders_dw", "orders");
+        verify(integrations).addDestination(integration, "orders_dw", "orders", false);
         verify(loader).submit(integration, "orders", "orders_dw");
     }
 
@@ -104,6 +106,40 @@ class RdsIntegrationDatabasesTest {
     void refusesAnotherClustersSession() {
         assertState("42704", () -> databases.create(statement("orders"), session("other-dw"), backend));
         assertThat(backend.statements, empty());
+    }
+
+    @Test
+    void refusesASameNamedClusterInAnotherRegion() {
+        when(redshiftService.clusterRegion(ACCOUNT, "orders-dw")).thenReturn(Optional.of("eu-west-1"));
+        assertState("42704", () -> databases.create(statement("orders"), session("orders-dw"), backend));
+    }
+
+    @Test
+    void replacesTheDestinationOfADroppedDatabase() {
+        integration.getDestinations().add(new Integration.Destination("orders_dw", "orders",
+                Integration.Destination.STATE_SYNCED, null));
+
+        databases.create(statement("orders"), session("orders-dw"), backend);
+
+        verify(integrations).addDestination(integration, "orders_dw", "orders", true);
+    }
+
+    @Test
+    void keepsTheDestinationOfADatabaseThatStillExists() {
+        integration.getDestinations().add(new Integration.Destination("orders_dw", "orders",
+                Integration.Destination.STATE_SYNCED, null));
+        backend.existingDatabase = true;
+
+        databases.create(statement("orders"), session("orders-dw"), backend);
+
+        verify(integrations).addDestination(integration, "orders_dw", "orders", false);
+    }
+
+    @Test
+    void mapsAnIntegrationDeletedMeanwhileToUndefinedObject() {
+        when(integrations.addDestination(any(), anyString(), anyString(), anyBoolean())).thenThrow(
+                new AwsException("IntegrationNotFoundFault", "gone", 404));
+        assertState("42704", () -> databases.create(statement("orders"), session("orders-dw"), backend));
     }
 
     @Test
@@ -133,7 +169,7 @@ class RdsIntegrationDatabasesTest {
 
     @Test
     void mapsADuplicateSourceDatabaseToDuplicateDatabase() {
-        when(integrations.addDestination(any(), anyString(), anyString())).thenThrow(
+        when(integrations.addDestination(any(), anyString(), anyString(), anyBoolean())).thenThrow(
                 new AwsException("IntegrationAlreadyExistsFault", "already", 400));
         assertState("42P04", () -> databases.create(statement("orders"), session("orders-dw"), backend));
         assertThat(backend.statements, empty());
@@ -153,6 +189,12 @@ class RdsIntegrationDatabasesTest {
     private static final class RecordingBackend implements BackendSql {
         private final List<String> statements = new ArrayList<>();
         private RuntimeException failure;
+        private boolean existingDatabase;
+
+        @Override
+        public Optional<String> queryString(String sql) {
+            return existingDatabase ? Optional.of("1") : Optional.empty();
+        }
 
         @Override
         public void execute(String sql) {

@@ -339,7 +339,11 @@ public class RedshiftZeroEtlWriter {
                 connection.commit();
                 return rows;
             } catch (SQLException | IOException | RuntimeException e) {
-                connection.rollback();
+                try {
+                    connection.rollback();
+                } catch (SQLException rollbackFailure) {
+                    e.addSuppressed(rollbackFailure);
+                }
                 throw e;
             }
         } catch (SQLException e) {

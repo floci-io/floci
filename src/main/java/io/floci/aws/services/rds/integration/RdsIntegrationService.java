@@ -219,23 +219,33 @@ public class RdsIntegrationService implements Resettable {
 
     /**
      * Records that {@code databaseName} is being created on the target from {@code sourceDatabase}, which
-     * puts the integration in {@code syncing} until its initial load ends. Only an {@code active}
-     * integration takes a new destination, and only one for each source database.
+     * puts the integration in {@code syncing} until its initial load ends. An {@code active}, {@code syncing}
+     * or {@code failed} integration takes a new destination, one for each source database. The destination
+     * already recorded for that source database is replaced when its load failed, or when the caller found
+     * that its database no longer exists ({@code previousDatabaseGone}); otherwise it is refused.
      *
      * @return the integration as it now is
      */
-    public Integration addDestination(Integration integration, String databaseName, String sourceDatabase) {
+    public Integration addDestination(Integration integration, String databaseName, String sourceDatabase,
+                                      boolean previousDatabaseGone) {
         synchronized (lock) {
             Integration current = findCurrent(integration).orElseThrow(() -> new AwsException(
                     "IntegrationNotFoundFault", "Integration " + integration.integrationId() + " not found.", 404));
-            if (!Integration.STATUS_ACTIVE.equals(current.getStatus())) {
+            if (!Set.of(Integration.STATUS_ACTIVE, Integration.STATUS_SYNCING, Integration.STATUS_FAILED)
+                    .contains(current.getStatus())) {
                 throw new AwsException("InvalidIntegrationStateFault", "Integration " + current.integrationId()
                         + " can't take a database because its status is " + current.getStatus() + ".", 400);
             }
-            if (current.destinationFor(sourceDatabase).isPresent()) {
-                throw new AwsException("IntegrationAlreadyExistsFault", "A database was already created from "
-                        + "source database " + sourceDatabase + " of integration " + current.integrationId() + ".",
-                        400);
+            Optional<Integration.Destination> previous = current.destinationFor(sourceDatabase);
+            if (previous.isPresent()) {
+                boolean replaceable = previousDatabaseGone
+                        || Integration.Destination.STATE_FAILED.equals(previous.get().getState());
+                if (!replaceable) {
+                    throw new AwsException("IntegrationAlreadyExistsFault", "Database "
+                            + previous.get().getDatabaseName() + " was already created from source database "
+                            + sourceDatabase + " of integration " + current.integrationId() + ".", 400);
+                }
+                current.getDestinations().remove(previous.get());
             }
             current.getDestinations().add(new Integration.Destination(databaseName, sourceDatabase,
                     Integration.Destination.STATE_SYNCING, Instant.now(clock)));
