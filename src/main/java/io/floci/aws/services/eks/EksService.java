@@ -795,8 +795,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private static void requireCapabilitiesTogether(ComputeConfig compute, StorageConfig storage,
                                                     ElasticLoadBalancing loadBalancing) {
         boolean computeEnabled = compute != null && Boolean.TRUE.equals(compute.enabled());
-        boolean blockStorageEnabled = storage != null && storage.blockStorage() != null
-                && Boolean.TRUE.equals(storage.blockStorage().enabled());
+        boolean blockStorageEnabled = StorageConfig.blockStorageOn(storage);
         boolean loadBalancingEnabled = loadBalancing != null && Boolean.TRUE.equals(loadBalancing.enabled());
         if (computeEnabled != blockStorageEnabled || computeEnabled != loadBalancingEnabled) {
             throw new AwsException("InvalidParameterException", "For EKS Auto Mode, please ensure that all "
@@ -1149,7 +1148,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
         AutoMode nextAutoMode = request.changesAutoMode() ? requireAutoModeChange(cluster, request) : null;
         // Read before the write below, which may change this very object.
-        boolean blockStorageWasOn = blockStorageOn(cluster.getStorageConfig());
+        boolean blockStorageWasOn = StorageConfig.blockStorageOn(cluster.getStorageConfig());
 
         Boolean finalPublicAccess = publicAccess;
         Boolean finalPrivateAccess = privateAccess;
@@ -1205,7 +1204,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     + "logging, accessConfig.authenticationMode, upgradePolicy.supportType and the EKS Auto Mode "
                     + "configuration only", 400);
         }
-        if (nextAutoMode != null && blockStorageOn(nextAutoMode.storage()) != blockStorageWasOn
+        if (nextAutoMode != null && StorageConfig.blockStorageOn(nextAutoMode.storage()) != blockStorageWasOn
                 && !config.services().eks().mock() && clusterManager != null && cluster.getContainerId() != null) {
             // The running node gets the block storage provisioner, or loses it, as it would when it next starts.
             clusterManager.applyBlockStorage(cluster.getContainerId(), requireClusterInRequestRegion(name));
@@ -1254,14 +1253,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             }
             return List.of(true, compute.nodePools() == null ? Set.of() : Set.copyOf(compute.nodePools()),
                     String.valueOf(compute.nodeRoleArn()),
-                    storage != null && storage.blockStorage() != null
-                            && Boolean.TRUE.equals(storage.blockStorage().enabled()),
+                    StorageConfig.blockStorageOn(storage),
                     loadBalancing != null && Boolean.TRUE.equals(loadBalancing.enabled()));
         }
-    }
-
-    private static boolean blockStorageOn(StorageConfig storage) {
-        return storage != null && storage.blockStorage() != null && Boolean.TRUE.equals(storage.blockStorage().enabled());
     }
 
     private static AutoMode autoMode(Cluster cluster) {

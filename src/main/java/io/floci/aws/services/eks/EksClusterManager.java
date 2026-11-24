@@ -66,6 +66,7 @@ import io.floci.aws.services.eks.model.Nodegroup;
 import io.floci.aws.services.eks.model.NodegroupStatus;
 import io.floci.aws.services.eks.model.OidcIdentity;
 import io.floci.aws.services.eks.model.ResourcesVpcConfig;
+import io.floci.aws.services.eks.model.StorageConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -3034,8 +3035,7 @@ public class EksClusterManager
      * the manifest lives on the cluster's data volume, which outlives a restart, and k3s prunes what it created.
      */
     void applyBlockStorage(String containerId, Cluster cluster) {
-        boolean enabled = cluster.getStorageConfig() != null && cluster.getStorageConfig().blockStorage() != null
-                && Boolean.TRUE.equals(cluster.getStorageConfig().blockStorage().enabled());
+        boolean enabled = StorageConfig.blockStorageOn(cluster.getStorageConfig());
         try {
             if (!enabled && !Files.exists(localClusterFile(cluster, "auto-mode", BLOCK_STORAGE_MANIFEST_FILE))) {
                 return;
