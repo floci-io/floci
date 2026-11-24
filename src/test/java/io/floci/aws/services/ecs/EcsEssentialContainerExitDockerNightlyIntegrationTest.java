@@ -13,6 +13,7 @@ import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.regions.Region;
@@ -35,6 +36,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 @QuarkusTest
 @TestProfile(ScopedServiceSettingsProfile.class)
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class EcsEssentialContainerExitDockerNightlyIntegrationTest {
 
     @Inject

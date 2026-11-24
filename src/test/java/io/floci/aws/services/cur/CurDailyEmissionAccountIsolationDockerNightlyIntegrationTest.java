@@ -11,6 +11,7 @@ import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.util.List;
 import java.util.Map;
@@ -37,6 +38,7 @@ import static org.hamcrest.Matchers.hasKey;
  */
 @QuarkusTest
 @TestProfile(SidecarContainersProfile.class)
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class CurDailyEmissionAccountIsolationDockerNightlyIntegrationTest {
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";

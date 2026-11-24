@@ -13,6 +13,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.time.Duration;
 import java.util.UUID;
@@ -28,6 +29,7 @@ import java.util.UUID;
  */
 @QuarkusTest
 @TestProfile(RdsMockProfile.class)
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class EksNodeMountPropagationDockerNightlyIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(EksNodeMountPropagationDockerNightlyIntegrationTest.class);

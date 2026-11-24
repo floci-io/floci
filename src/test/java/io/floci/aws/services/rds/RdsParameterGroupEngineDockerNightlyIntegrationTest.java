@@ -6,6 +6,7 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -33,6 +34,7 @@ import static org.hamcrest.Matchers.equalTo;
  */
 @QuarkusTest
 @Tag("docker")
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class RdsParameterGroupEngineDockerNightlyIntegrationTest {
 
     private static final String MASTER_USER = "admin";

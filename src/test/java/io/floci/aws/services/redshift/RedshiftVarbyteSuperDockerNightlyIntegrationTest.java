@@ -8,6 +8,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
@@ -24,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** The VARBYTE and SUPER types and their functions, with the examples of the Amazon Redshift documentation. */
 @QuarkusTest
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class RedshiftVarbyteSuperDockerNightlyIntegrationTest {
 
     @Inject

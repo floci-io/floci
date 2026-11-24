@@ -10,6 +10,7 @@ import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -30,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
 @TestProfile(SidecarContainersProfile.class)
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class RedshiftUnloadParquetDockerNightlyIntegrationTest {
     @Inject
     RedshiftService redshift;

@@ -14,6 +14,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.postgresql.util.PSQLException;
 
 import java.sql.Connection;
@@ -47,6 +48,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 @TestProfile(SidecarServiceSettingsProfile.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @Tag("docker")
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class DsqlExternalBackendDockerNightlyIntegrationTest {
 
     @Inject

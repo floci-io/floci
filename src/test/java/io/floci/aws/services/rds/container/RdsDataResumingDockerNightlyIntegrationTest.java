@@ -10,6 +10,7 @@ import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.time.Duration;
 import java.util.List;
@@ -31,6 +32,7 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 @TestProfile(IndependentServiceSettingsProfile.class)
 @Tag("docker")
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class RdsDataResumingDockerNightlyIntegrationTest {
 
     private static final String RDS_AUTH =

@@ -21,6 +21,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -53,6 +54,7 @@ import static org.mockito.Mockito.when;
  * checkpoints, error states); a refresh against a real Redpanda broker is not covered here.
  */
 @QuarkusTest
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class RedshiftMskStreamingViewDockerNightlyIntegrationTest {
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/MskViewItRole";
     private static final URI REST = URI.create("http://localhost:18082/");

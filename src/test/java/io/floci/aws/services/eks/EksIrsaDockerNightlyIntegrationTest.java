@@ -15,6 +15,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.time.Duration;
 import java.util.UUID;
@@ -41,6 +42,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
  */
 @QuarkusTest
 @TestProfile(S3IamEnforcementProfile.class)
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class EksIrsaDockerNightlyIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(EksIrsaDockerNightlyIntegrationTest.class);

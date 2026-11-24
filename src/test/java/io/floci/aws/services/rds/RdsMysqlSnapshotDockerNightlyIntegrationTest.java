@@ -3,6 +3,7 @@ package io.floci.aws.services.rds;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -30,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  */
 @QuarkusTest
 @Tag("docker")
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class RdsMysqlSnapshotDockerNightlyIntegrationTest {
 
     private static final String MASTER_USER = "admin";

@@ -22,6 +22,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -46,6 +47,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 @TestProfile(DynamoDbLocalBackendDockerNightlyIntegrationTest.LocalProfile.class)
 @EnabledIfEnvironmentVariable(named = DynamoDbLocalBackendDockerNightlyIntegrationTest.ENDPOINT_VARIABLE, matches = ".+")
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class DynamoDbLocalBackendDockerNightlyIntegrationTest {
 
     static final String ENDPOINT_VARIABLE = "FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT";

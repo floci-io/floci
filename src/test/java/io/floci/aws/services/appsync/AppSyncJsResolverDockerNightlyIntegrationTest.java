@@ -10,6 +10,7 @@ import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.util.UUID;
 
@@ -34,6 +35,7 @@ import static org.hamcrest.Matchers.nullValue;
  */
 @QuarkusTest
 @TestProfile(SidecarContainersProfile.class)
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class AppSyncJsResolverDockerNightlyIntegrationTest {
 
     private static final String AUTH =

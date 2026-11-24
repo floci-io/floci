@@ -10,6 +10,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.time.Duration;
 import java.util.UUID;
@@ -23,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * the test config to 1 s then 2 s) and that Invoke's Qualifier selects the alias's asynchronous settings.
  */
 @QuarkusTest
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class LambdaAsyncRetryDockerNightlyIntegrationTest {
 
     private static final String BASE_PATH = "/2015-03-31";

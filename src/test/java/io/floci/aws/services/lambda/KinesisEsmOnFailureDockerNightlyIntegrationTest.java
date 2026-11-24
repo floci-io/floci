@@ -13,6 +13,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -30,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.fail;
  * SQS OnFailure destination, and the shard goes on with the next record.
  */
 @QuarkusTest
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class KinesisEsmOnFailureDockerNightlyIntegrationTest {
 
     private static final String BASE_PATH = "/2015-03-31";

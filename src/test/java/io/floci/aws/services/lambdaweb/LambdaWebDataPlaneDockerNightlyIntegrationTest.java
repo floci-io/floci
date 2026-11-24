@@ -23,6 +23,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -67,6 +68,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * a crash.
  */
 @QuarkusTest
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class LambdaWebDataPlaneDockerNightlyIntegrationTest {
 
     private static final String BASE = "/2025-03-07";

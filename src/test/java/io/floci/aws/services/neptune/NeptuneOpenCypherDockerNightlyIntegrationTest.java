@@ -4,6 +4,7 @@ import io.floci.aws.testing.IndependentServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.neo4j.driver.AuthTokens;
 import org.neo4j.driver.Driver;
 import org.neo4j.driver.GraphDatabase;
@@ -28,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  */
 @QuarkusTest
 @TestProfile(IndependentServiceSettingsProfile.class)
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class NeptuneOpenCypherDockerNightlyIntegrationTest {
 
     private static final String FORM = "application/x-www-form-urlencoded";

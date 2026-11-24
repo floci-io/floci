@@ -22,6 +22,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
@@ -49,6 +50,7 @@ import static org.mockito.Mockito.when;
 
 /** Creates, invokes and drops scalar Lambda UDFs through both the PostgreSQL wire and Redshift Data API. */
 @QuarkusTest
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class RedshiftExternalFunctionDockerNightlyIntegrationTest {
     private static final String ACCOUNT = "000000000000";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/FunctionItRole";

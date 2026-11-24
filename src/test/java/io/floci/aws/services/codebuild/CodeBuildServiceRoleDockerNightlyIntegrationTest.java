@@ -24,6 +24,7 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -69,6 +70,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 @TestProfile(CodeBuildServiceRoleDockerNightlyIntegrationTest.Profile.class)
 @Timeout(value = 10, unit = TimeUnit.MINUTES)
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class CodeBuildServiceRoleDockerNightlyIntegrationTest {
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";

@@ -26,6 +26,7 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.ByteArrayOutputStream;
@@ -60,6 +61,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 @TestProfile(RdsMockProfile.class)
 // Bounded cluster/workload waits total 285 s; allow Docker setup and cleanup as well.
 @Timeout(value = 6, unit = TimeUnit.MINUTES)
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class EksRegistryHostsDockerNightlyIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(EksRegistryHostsDockerNightlyIntegrationTest.class);

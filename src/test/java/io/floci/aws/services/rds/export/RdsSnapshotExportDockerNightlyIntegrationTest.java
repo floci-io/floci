@@ -13,6 +13,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.postgresql.Driver;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
@@ -55,6 +56,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 @QuarkusTest
 @TestProfile(SidecarContainersProfile.class)
 @Tag("docker")
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class RdsSnapshotExportDockerNightlyIntegrationTest {
 
     private static final String MASTER_USER = "master";

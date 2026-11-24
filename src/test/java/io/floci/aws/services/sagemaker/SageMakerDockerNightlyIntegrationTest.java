@@ -17,6 +17,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -38,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 // Real containers may take up to awaitTerminalStatus's 150 s, past the suite's 2-minute default.
 @Timeout(value = 3, unit = TimeUnit.MINUTES)
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class SageMakerDockerNightlyIntegrationTest {
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/sagemaker/aws4_request";

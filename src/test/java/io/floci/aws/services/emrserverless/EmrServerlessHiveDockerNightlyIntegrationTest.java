@@ -12,6 +12,7 @@ import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
@@ -39,6 +40,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 @QuarkusTest
 @TestProfile(CloudFormationSettingsProfile.class)
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class EmrServerlessHiveDockerNightlyIntegrationTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();

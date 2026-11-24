@@ -10,6 +10,7 @@ import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.function.Executable;
 import org.postgresql.Driver;
 import org.postgresql.PGConnection;
@@ -39,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @QuarkusTest
 @Tag("docker")
 @TestProfile(IamEnforcementProfile.class)
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class RdsPostgresIamRoleDockerNightlyIntegrationTest {
     private static final String MASTER = "master";
     private static final String PASSWORD = "Master123!";

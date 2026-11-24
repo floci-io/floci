@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
@@ -25,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Creates and drops external schemas over Kinesis through a real cluster connection. */
 @QuarkusTest
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class RedshiftKinesisSchemaDockerNightlyIntegrationTest {
     private static final String ACCOUNT = "000000000000";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/KinesisSchemaItRole";

@@ -21,6 +21,7 @@ import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.time.Duration;
 import java.util.List;
@@ -40,6 +41,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 @QuarkusTest
 @TestProfile(EcsAwsvpcTaskAddressDockerNightlyIntegrationTest.VpcNetworksProfile.class)
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class EcsAwsvpcTaskAddressDockerNightlyIntegrationTest {
 
     private static final String REGION = "us-east-1";

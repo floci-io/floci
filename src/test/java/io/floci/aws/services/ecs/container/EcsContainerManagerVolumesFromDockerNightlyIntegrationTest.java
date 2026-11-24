@@ -28,6 +28,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -58,6 +59,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Docker volume inheritance the app cannot even start because {@code /shared/wrapper} is absent.
  */
 @QuarkusTest
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class EcsContainerManagerVolumesFromDockerNightlyIntegrationTest {
 
     private static final String BUSYBOX_IMAGE = TestImages.BUSYBOX;
