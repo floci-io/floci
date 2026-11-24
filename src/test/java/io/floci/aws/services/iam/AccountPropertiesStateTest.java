@@ -260,4 +260,34 @@ class AccountPropertiesStateTest {
         assertEquals(Map.of("RoleManager/Kept", "yes"), service.getAccountProperties(),
                 "the refused key may not have landed");
     }
+
+    /**
+     * A value outside what its key publishes is refused and nothing of that request is written,
+     * the entry beside it included: "the service validates each value based on the property key's
+     * expected type", and role manager's switch is the one property whose type is published, "a
+     * value of true enables role manager; false disables it". This is the state half of that
+     * refusal, which the wire test cannot see past the response.
+     */
+    @Test
+    void aValueOutsideWhatItsKeyPublishesWritesNothing() {
+        IamService service = inMemory(ACCOUNT_A);
+        service.putAccountProperties(Map.of("RoleManager/Enabled", "true"));
+
+        Map<String, String> refusedRequest = new LinkedHashMap<>();
+        refusedRequest.put("RoleManager/Mode", "strict");
+        refusedRequest.put("RoleManager/Enabled", "maybe");
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.putAccountProperties(refusedRequest));
+
+        assertEquals("InvalidInput", refused.getErrorCode());
+        assertEquals(400, refused.getHttpStatus());
+        assertEquals("Property RoleManager/Enabled expects true or false: maybe",
+                refused.getMessage());
+        assertEquals(Map.of("RoleManager/Enabled", "true"), service.getAccountProperties(),
+                "neither entry of the refused request may have landed, and the flag keeps its value");
+
+        // A property with no published type takes the value as it comes.
+        service.putAccountProperties(Map.of("RoleManager/Mode", "strict"));
+        assertEquals("strict", service.getAccountProperties().get("RoleManager/Mode"));
+    }
 }

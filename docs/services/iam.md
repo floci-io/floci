@@ -1874,6 +1874,29 @@ mixing them even when neither is recognised, because a request names one namespa
 a namespace to look up; that order is also the one that leaves every request already being refused
 with the answer it already had.
 
+### What a bad account property value answers
+
+The value is the key's business: "the service validates each value based on the property key's
+expected type. For example, boolean properties expect `true` or `false`." So a value is held to
+what its key publishes, after the key itself has been read, and only one property publishes
+anything. Role manager is "controlled by the account-level property `RoleManager/Enabled`", where
+"a value of true enables role manager; false disables it"; the API Reference says to call the
+operation "with the `RoleManager/Enabled` property set to true or false", and its own example
+response carries `true`. Both spellings are lowercase on every page that writes them, the guide's
+two CLI examples included.
+
+That property takes those two values and nothing else, answering `InvalidInput` 400 with
+`Property <key> expects true or false: <value>`, the value as the request sent it. The sentence is
+this package's own: AWS publishes that a value is validated against its key's type and nothing of
+what it answers when one is not. A request is refused whole, so an entry beside the bad one is not
+stored either, which is how a request refused for its keys already behaves. Storing the value
+instead left a flag holding something nothing can read as one, under the key AWS gives the feature.
+
+What is held this way is the pair of values rather than a type, because a type is the thing this
+would be inventing: what AWS publishes for this property is `true` and `false`. Every other
+property takes any value the declared length admits, since no page says what any of them is for,
+which is the looser answer and the direction to be wrong in here.
+
 ### Organizations Root Access
 
 | Action | Description |

@@ -233,6 +233,25 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * AWS was recorded giving at all; see {@link #putAccountProperties}.
      */
     private static final Set<String> ACCOUNT_PROPERTY_NAMESPACES = Set.of("RoleManager");
+    /**
+     * The values each account property AWS publishes a type for takes, which is one property.
+     *
+     * <p>{@code Properties} says that "the service validates each value based on the property
+     * key's expected type. For example, boolean properties expect true or false", and the only
+     * property whose type is written down anywhere is role manager's switch: the feature is
+     * "controlled by the account-level property RoleManager/Enabled", where "a value of true
+     * enables role manager; false disables it". Both spellings are lowercase everywhere they are
+     * written, in the guide's two CLI examples, in the API Reference's instruction to call this
+     * operation "with the RoleManager/Enabled property set to true or false", and in the response
+     * its own example shows.
+     *
+     * <p>The published values are kept rather than a type, since a type is a thing this would be
+     * inventing: what AWS publishes for this property is the pair. A key absent from here takes
+     * any value the declared length admits, which is the looser answer where nothing says what the
+     * property is for.
+     */
+    private static final Map<String, List<String>> ACCOUNT_PROPERTY_VALUES =
+            Map.of("RoleManager/Enabled", List.of("true", "false"));
     /** AWS-documented bounds for the account password policy's numeric fields. */
     /**
      * AWS's documented {@code passwordType} pattern for Create/UpdateLoginProfile: printable
@@ -3737,11 +3756,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * property as it was. Storing the property instead left the account holding a key AWS never
      * accepted, with the caller never told, and a later read reporting it.
      *
-     * <p>The two refusals are in that order, so a request naming two namespaces is answered for
-     * mixing them whether or not either is recognised: a request names one namespace before there
-     * is a namespace to look up. Which one AWS answers first is not recorded, so the order is this
-     * package's reading, and it is the one that leaves every request already being refused with
-     * the answer it already had.
+     * <p>A value is then held to what its key publishes, where its key publishes anything: "the
+     * service validates each value based on the property key's expected type". Only the key says
+     * what a value may be, so the key is read first, and a request is refused whole here as it is
+     * for its keys, since a property a request was refused for cannot be left stored.
+     *
+     * <p>The refusals are in that order, so a request naming two namespaces is answered for mixing
+     * them whether or not either is recognised: a request names one namespace before there is a
+     * namespace to look up, and a value's type before that. Which one AWS answers first is not
+     * recorded, so the order is this package's reading, and it is the one that leaves every
+     * request already being refused with the answer it already had.
      */
     public void putAccountProperties(Map<String, String> properties) {
         if (properties == null || properties.isEmpty()) {
@@ -3764,6 +3788,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             // spellings reach it is this package's reading, since only the one namespace is
             // published and nothing says how AWS reads its case.
             throw new AwsException("InvalidInput", "Unsupported namespace: " + namespace, 400);
+        }
+        for (Map.Entry<String, String> entry : properties.entrySet()) {
+            List<String> published = ACCOUNT_PROPERTY_VALUES.get(entry.getKey());
+            if (published != null && !published.contains(entry.getValue())) {
+                // This package's own sentence: AWS publishes that a value is validated against its
+                // key's type and nothing of what it answers when one is not. It names the key and
+                // carries the value as the request sent it, as the refusals above carry theirs,
+                // and the values in the order every page writes them.
+                throw new AwsException("InvalidInput", "Property " + entry.getKey() + " expects "
+                        + String.join(" or ", published) + ": " + entry.getValue(), 400);
+            }
         }
         synchronized (accountPropertiesLock) {
             for (Map.Entry<String, String> entry : properties.entrySet()) {
