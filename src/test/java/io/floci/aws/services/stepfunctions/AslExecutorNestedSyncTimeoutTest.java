@@ -323,6 +323,7 @@ class AslExecutorNestedSyncTimeoutTest {
 
         assertEquals(1, waits.get());
         assertEquals("TIMED_OUT", execution.getStatus());
+        assertEquals("ExecutionTimedOut", history.getLast().getType());
         assertTrue(history.stream().noneMatch(event -> "TaskTimedOut".equals(event.getType())));
         verify(sfnService).stopExecution(eq(CHILD_ARN), eq(ABORT_CAUSE), isNull());
     }

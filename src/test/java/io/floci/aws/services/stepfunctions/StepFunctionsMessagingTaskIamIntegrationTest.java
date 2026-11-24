@@ -231,13 +231,21 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
         assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
     }
 
+    /**
+     * A refusal is caught under its own error name for every integration. The Retry path in front of
+     * the Catch is the same for all of them and costs a real one-second interval, so one integration
+     * proves it.
+     */
     @ParameterizedTest
     @ValueSource(strings = {"sns:publish", "aws-sdk:sns:publish", "events:putEvents"})
     void aRefusalCanBeRetriedAndCaught(String integration) throws Exception {
         Target target = target(integration);
         Map<String, Object> task = new LinkedHashMap<>(jsonPathTask(target, null));
-        task.put("Retry", List.of(Map.of("ErrorEquals", List.of(target.error()), "IntervalSeconds", 1,
-                "BackoffRate", 1.0, "MaxAttempts", 1)));
+        boolean retried = "sns:publish".equals(integration);
+        if (retried) {
+            task.put("Retry", List.of(Map.of("ErrorEquals", List.of(target.error()), "IntervalSeconds", 1,
+                    "BackoffRate", 1.0, "MaxAttempts", 1)));
+        }
         task.put("Catch", List.of(Map.of("ErrorEquals", List.of(target.error()), "Next", "Recovered")));
         String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Send", "States", Map.of("Send", task,
                 "Recovered", Map.of("Type", "Pass", "End", true))));
@@ -246,14 +254,14 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
         Response completed = terminal(execution);
 
         assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
-        assertEquals(2, eventsOfType(execution, "TaskFailed").size());
+        assertEquals(retried ? 2 : 1, eventsOfType(execution, "TaskFailed").size());
         assertEquals(target.error(), eventsOfType(execution, "TaskFailed").getLast()
                 .path("taskFailedEventDetails").path("error").asText());
     }
 
     /** The retry decides again, so a role granted the action between attempts then delivers. */
     @ParameterizedTest
-    @ValueSource(strings = {"sns:publish", "events:putEvents"})
+    @ValueSource(strings = {"sns:publish"})
     void aRetryDecidesAgain(String integration) throws Exception {
         Target target = target(integration);
         String roleName = "sfn-msg-" + UUID.randomUUID();

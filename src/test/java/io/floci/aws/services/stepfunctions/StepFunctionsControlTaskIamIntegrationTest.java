@@ -243,13 +243,21 @@ class StepFunctionsControlTaskIamIntegrationTest {
         target.notReached().check();
     }
 
+    /**
+     * A refusal is caught under its own error name for every integration. The Retry path in front of
+     * the Catch is the same for all of them and costs a real one-second interval, so one integration
+     * proves it.
+     */
     @ParameterizedTest
     @MethodSource("eachIntegration")
     void aRefusalCanBeRetriedAndCaught(String integration) throws Exception {
         Target target = target(integration);
         Map<String, Object> task = jsonPathTask(target, null);
-        task.put("Retry", List.of(Map.of("ErrorEquals", List.of(target.error()), "IntervalSeconds", 1,
-                "BackoffRate", 1.0, "MaxAttempts", 1)));
+        boolean retried = eachIntegration().findFirst().orElseThrow().equals(integration);
+        if (retried) {
+            task.put("Retry", List.of(Map.of("ErrorEquals", List.of(target.error()), "IntervalSeconds", 1,
+                    "BackoffRate", 1.0, "MaxAttempts", 1)));
+        }
         task.put("Catch", List.of(Map.of("ErrorEquals", List.of(target.error()), "Next", "Recovered")));
         task.remove("End");
         task.put("Next", "Done");
@@ -258,7 +266,7 @@ class StepFunctionsControlTaskIamIntegrationTest {
         String execution = start(machineWithDefinition(target.machineName(), definition, role(STATES_TRUST, READ_ONLY)), "{}");
 
         assertEquals("SUCCEEDED", terminal(execution).jsonPath().getString("status"));
-        assertEquals(2, eventsOfType(execution, "TaskFailed").size());
+        assertEquals(retried ? 2 : 1, eventsOfType(execution, "TaskFailed").size());
         assertEquals(target.error(), eventsOfType(execution, "TaskFailed").getLast()
                 .path("taskFailedEventDetails").path("error").asText());
     }

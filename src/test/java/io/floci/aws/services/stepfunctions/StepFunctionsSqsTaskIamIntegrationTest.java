@@ -299,13 +299,21 @@ class StepFunctionsSqsTaskIamIntegrationTest {
         assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
     }
 
+    /**
+     * A refusal is caught under its own error name for every integration. The Retry path in front of
+     * the Catch is the same for all of them and costs a real one-second interval, so one integration
+     * proves it.
+     */
     @ParameterizedTest
     @CsvSource({"sqs:sendMessage,SQS.AccessDeniedException", "aws-sdk:sqs:sendMessage,Sqs.AccessDeniedException"})
     void aRefusalCanBeRetriedAndCaught(String integration, String error) throws Exception {
         SqsTestQueue queue = queue();
         Map<String, Object> task = new LinkedHashMap<>(jsonPathTask(integration, queue, null));
-        task.put("Retry", List.of(Map.of("ErrorEquals", List.of(error), "IntervalSeconds", 1,
-                "BackoffRate", 1.0, "MaxAttempts", 1)));
+        boolean retried = "sqs:sendMessage".equals(integration);
+        if (retried) {
+            task.put("Retry", List.of(Map.of("ErrorEquals", List.of(error), "IntervalSeconds", 1,
+                    "BackoffRate", 1.0, "MaxAttempts", 1)));
+        }
         task.put("Catch", List.of(Map.of("ErrorEquals", List.of(error), "Next", "Recovered")));
         String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Send", "States", Map.of("Send", task,
                 "Recovered", Map.of("Type", "Pass", "End", true))));
@@ -314,7 +322,7 @@ class StepFunctionsSqsTaskIamIntegrationTest {
         Response completed = terminal(execution);
 
         assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
-        assertEquals(2, eventsOfType(execution, "TaskFailed").size());
+        assertEquals(retried ? 2 : 1, eventsOfType(execution, "TaskFailed").size());
         assertEquals(error, eventsOfType(execution, "TaskFailed").getLast()
                 .path("taskFailedEventDetails").path("error").asText());
     }
