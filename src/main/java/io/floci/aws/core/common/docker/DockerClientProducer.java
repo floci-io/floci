@@ -58,11 +58,8 @@ public class DockerClientProducer {
     /** Bounds the connect and the answer of the Docker circuit breaker's confirming ping. */
     static final Duration PING_TIMEOUT = Duration.ofSeconds(5);
 
-    /**
-     * The wrapped control-plane transport behind the {@link #dockerClient()} bean, shared with the
-     * {@link #controlPlaneHttpClient()} bean so both never build two pools for one role.
-     */
-    private volatile DockerHttpClient controlPlaneClient;
+    /** The stat probe pool's connections: one HEAD per working directory parent, so a handful. */
+    private static final int STAT_POOL_MAX_CONNECTIONS = 4;
 
     private final EmulatorConfig config;
     private final DockerPoolGaugeLogger gaugeLogger;
@@ -484,15 +481,27 @@ public class DockerClientProducer {
     }
 
     /**
-     * The control-plane transport, for callers that issue requests docker-java has no command for.
-     * The same wrapped instance the {@link #dockerClient()} bean runs on: whichever producer runs
-     * first caches it in {@link #controlPlaneClient}, so the two never create two pools for one role.
+     * A small pool of its own for the archive stat probes issued beside the control-plane client's
+     * commands: docker-java has no command for the HEAD the working directory check needs, so the
+     * transport is called directly. Not the {@link #dockerClient()} bean's own pool: each produced
+     * client owns its connection evictor thread, whose release on CDI disposal the
+     * {@code DockerClientDisposalIntegrationTest} asserts, and sharing one transport between two
+     * beans would take the thread's context classloader from whichever built it first.
      */
     @Produces
     @ApplicationScoped
     public DockerHttpClient controlPlaneHttpClient() {
-        return buildWrappedTransport(buildClientConfig(),
-                validateMaxConnections(config.docker().maxConnections()), "control-plane");
+        DefaultDockerClientConfig clientConfig = buildClientConfig();
+        Duration apiTimeout = Duration.ofSeconds(validateApiTimeoutSeconds(config.docker().apiTimeoutSeconds()));
+        FlociDockerHttpClient transport = newHttpClient(clientConfig, STAT_POOL_MAX_CONNECTIONS, apiTimeout,
+                Duration.ofSeconds(validateConnectionRequestTimeoutSeconds(
+                        config.docker().connectionRequestTimeoutSeconds())));
+        return wrapForRole(transport, "control-plane", apiTimeout, breaker, 0,
+                Duration.ofSeconds(config.docker().connectionRequestTimeoutSeconds()));
+    }
+
+    void disposeControlPlaneHttpClient(@Disposes DockerHttpClient client) throws IOException {
+        client.close();
     }
 
     /**
@@ -513,7 +522,6 @@ public class DockerClientProducer {
     }
 
     void disposeDockerClient(@Disposes DockerClient client) throws IOException {
-        controlPlaneClient = null;
         gaugeLogger.unregister("control-plane");
         breaker.close();
         client.close();
@@ -596,54 +604,24 @@ public class DockerClientProducer {
     private DockerClient buildDockerClient(DefaultDockerClientConfig clientConfig, int maxConnections, String role) {
         LOG.infov("Creating {0} DockerClient pool (maxConnections={1}) for host: {2}",
                 role, maxConnections, clientConfig.getDockerHost());
-        return newDockerClient(clientConfig, buildWrappedTransport(clientConfig, maxConnections, role));
-    }
 
-    /**
-     * The transport one role runs on: the raw pool wrapped in its retry, breaker and bulkhead
-     * layers. The control-plane one is cached in {@link #controlPlaneClient}, so the two producer
-     * methods that need it never build it twice; the streaming one is built per call.
-     */
-    private DockerHttpClient buildWrappedTransport(DefaultDockerClientConfig clientConfig, int maxConnections,
-                                                   String role) {
-        if ("control-plane".equals(role)) {
-            DockerHttpClient cached = controlPlaneClient;
-            if (cached != null) {
-                return cached;
-            }
-            DockerHttpClient client = wrapControlPlaneTransport(clientConfig, maxConnections);
-            controlPlaneClient = client;
-            return client;
-        }
-        return wrapStreamingTransport(clientConfig, maxConnections);
-    }
-
-    private DockerHttpClient wrapControlPlaneTransport(DefaultDockerClientConfig clientConfig, int maxConnections) {
         Duration apiTimeout = Duration.ofSeconds(validateApiTimeoutSeconds(config.docker().apiTimeoutSeconds()));
         FlociDockerHttpClient transport = newHttpClient(clientConfig, maxConnections, apiTimeout,
                 Duration.ofSeconds(validateConnectionRequestTimeoutSeconds(
                         config.docker().connectionRequestTimeoutSeconds())));
-        gaugeLogger.register("control-plane", transport::gauges);
-        int launchSlots = LaunchBulkheadDockerHttpClient.resolveSize(
-                validateMaxConcurrentLaunches(config.docker().maxConcurrentLaunches()),
-                Runtime.getRuntime().availableProcessors());
+        gaugeLogger.register(role, transport::gauges);
+        int launchSlots = "control-plane".equals(role)
+                ? LaunchBulkheadDockerHttpClient.resolveSize(
+                        validateMaxConcurrentLaunches(config.docker().maxConcurrentLaunches()),
+                        Runtime.getRuntime().availableProcessors())
+                : 0;
         if (launchSlots > 0) {
             LOG.infov("At most {0} container creates and starts run at once", launchSlots);
         }
         Duration launchWait = Duration.ofSeconds(config.docker().connectionRequestTimeoutSeconds());
         usePingTransport(clientConfig);
-        return wrapForRole(transport, "control-plane", apiTimeout, breaker, launchSlots, launchWait);
-    }
-
-    private DockerHttpClient wrapStreamingTransport(DefaultDockerClientConfig clientConfig, int maxConnections) {
-        Duration apiTimeout = Duration.ofSeconds(validateApiTimeoutSeconds(config.docker().apiTimeoutSeconds()));
-        FlociDockerHttpClient transport = newHttpClient(clientConfig, maxConnections, apiTimeout,
-                Duration.ofSeconds(validateConnectionRequestTimeoutSeconds(
-                        config.docker().connectionRequestTimeoutSeconds())));
-        gaugeLogger.register("streaming", transport::gauges);
-        Duration launchWait = Duration.ofSeconds(config.docker().connectionRequestTimeoutSeconds());
-        usePingTransport(clientConfig);
-        return wrapForRole(transport, "streaming", apiTimeout, breaker, 0, launchWait);
+        return newDockerClient(clientConfig,
+                wrapForRole(transport, role, apiTimeout, breaker, launchSlots, launchWait));
     }
 
     /**
