@@ -10,6 +10,7 @@ import io.floci.aws.core.common.AwsEventStreamEncoder;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.EpochSeconds;
+import io.floci.aws.core.common.JsonBooleanCoercion;
 import io.floci.aws.services.kinesis.model.KinesisConsumer;
 import io.floci.aws.services.kinesis.model.KinesisRecord;
 import io.floci.aws.services.kinesis.model.KinesisShard;
@@ -53,7 +54,17 @@ public class KinesisJsonHandler {
         this.nextTokenTtlMillis = nextTokenTtlMillis;
     }
 
+    /**
+     * The operations whose request takes {@code DryRun}. A dry run is checked as the call is, up to what AWS checks
+     * for one (the stream or consumer, the records, the iterator, but not the shard), and then answered with
+     * DryRunOperationException, changing and returning nothing.
+     */
+    private static final Set<String> DRY_RUN_OPERATIONS =
+            Set.of("PutRecord", "PutRecords", "GetShardIterator", "GetRecords", "SubscribeToShard");
+
     public Response handle(String action, JsonNode request, String region) {
+        boolean dryRun = DRY_RUN_OPERATIONS.contains(action) && JsonBooleanCoercion.fromJson(request.path("DryRun"),
+                "NUMBER_VALUE can not be converted to a Boolean");
         Supplier<Response> operation = switch (action) {
             case "CreateStream" -> () -> handleCreateStream(request, region);
             case "DeleteStream" -> () -> handleDeleteStream(request, region);
@@ -64,7 +75,7 @@ public class KinesisJsonHandler {
             case "DeregisterStreamConsumer" -> () -> handleDeregisterStreamConsumer(request, region);
             case "DescribeStreamConsumer" -> () -> handleDescribeStreamConsumer(request, region);
             case "ListStreamConsumers" -> () -> handleListStreamConsumers(request, region);
-            case "SubscribeToShard" -> () -> handleSubscribeToShard(request, region);
+            case "SubscribeToShard" -> () -> handleSubscribeToShard(request, region, dryRun);
             case "AddTagsToStream" -> () -> handleAddTagsToStream(request, region);
             case "RemoveTagsFromStream" -> () -> handleRemoveTagsFromStream(request, region);
             case "ListTagsForStream" -> () -> handleListTagsForStream(request, region);
@@ -75,10 +86,10 @@ public class KinesisJsonHandler {
             case "StopStreamEncryption" -> () -> handleStopStreamEncryption(request, region);
             case "SplitShard" -> () -> handleSplitShard(request, region);
             case "MergeShards" -> () -> handleMergeShards(request, region);
-            case "PutRecord" -> () -> handlePutRecord(request, region);
-            case "PutRecords" -> () -> handlePutRecords(request, region);
-            case "GetShardIterator" -> () -> handleGetShardIterator(request, region);
-            case "GetRecords" -> () -> handleGetRecords(request, region);
+            case "PutRecord" -> () -> handlePutRecord(request, region, dryRun);
+            case "PutRecords" -> () -> handlePutRecords(request, region, dryRun);
+            case "GetShardIterator" -> () -> handleGetShardIterator(request, region, dryRun);
+            case "GetRecords" -> () -> handleGetRecords(request, region, dryRun);
             case "ListShards" -> () -> handleListShards(request, region);
             case "IncreaseStreamRetentionPeriod" -> () -> handleIncreaseStreamRetentionPeriod(request, region);
             case "DecreaseStreamRetentionPeriod" -> () -> handleDecreaseStreamRetentionPeriod(request, region);
@@ -94,7 +105,9 @@ public class KinesisJsonHandler {
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
         }
-        KinesisRequestShapes.check(action, request);
+        // DryRun was read above as Kinesis's deserializer reads it, a string such as "yes" included, which the
+        // modeled type check would refuse.
+        KinesisRequestShapes.check(action, dryRunRead(action, request));
         return operation.get();
     }
 
@@ -383,7 +396,7 @@ public class KinesisJsonHandler {
     }
 
     @SuppressWarnings("unchecked")
-    private Response handleSubscribeToShard(JsonNode request, String region) {
+    private Response handleSubscribeToShard(JsonNode request, String region, boolean dryRun) {
         String consumerArn = request.path("ConsumerARN").asText(null);
         String shardId = request.path("ShardId").asText(null);
         JsonNode startPos = request.path("StartingPosition");
@@ -393,6 +406,9 @@ public class KinesisJsonHandler {
                 ? Math.round(startPos.path("Timestamp").asDouble() * 1000) : null;
 
         KinesisConsumer consumer = service.describeStreamConsumer(null, null, consumerArn, region);
+        if (dryRun) {
+            throw KinesisService.dryRunOperation("SubscribeToShard");
+        }
         String streamName = parseStreamNameFromArn(consumer.getStreamArn());
 
         String shardIterator = service.getShardIterator(streamName, shardId, startType, seqNumber, timestampMs, region);
@@ -577,7 +593,16 @@ public class KinesisJsonHandler {
         return explicitHashKeyNode.asText();
     }
 
-    private Response handlePutRecord(JsonNode request, String region) {
+    private static JsonNode dryRunRead(String action, JsonNode request) {
+        if (!DRY_RUN_OPERATIONS.contains(action) || !(request instanceof ObjectNode object) || !object.has("DryRun")) {
+            return request;
+        }
+        ObjectNode checked = object.deepCopy();
+        checked.remove("DryRun");
+        return checked;
+    }
+
+    private Response handlePutRecord(JsonNode request, String region, boolean dryRun) {
         String streamName = resolveStreamName(request);
         JsonNode dataNode = request.path("Data");
         // The CBOR transports (the AWS SDK for Java's default for Kinesis) decode Data
@@ -593,6 +618,10 @@ public class KinesisJsonHandler {
         }
         String partitionKey = request.path("PartitionKey").asText();
         String explicitHashKey = readExplicitHashKey(request);
+        if (dryRun) {
+            service.checkPutRecord(streamName, data, partitionKey, explicitHashKey, region);
+            throw KinesisService.dryRunOperation("PutRecord");
+        }
 
         KinesisService.PutRecordResult result = service.putRecordWithShardId(
                 streamName, data, partitionKey, explicitHashKey, region);
@@ -603,7 +632,7 @@ public class KinesisJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response handlePutRecords(JsonNode request, String region) {
+    private Response handlePutRecords(JsonNode request, String region, boolean dryRun) {
         String streamName = resolveStreamName(request);
         KinesisStream stream = service.describeStream(streamName, region);
         JsonNode recordsNode = request.path("Records");
@@ -647,6 +676,9 @@ public class KinesisJsonHandler {
             service.validateRequestSize(totalBytes);
             entries.add(new Entry(node, data, explicitHashKey));
         }
+        if (dryRun) {
+            throw KinesisService.dryRunOperation("PutRecords");
+        }
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode results = response.putArray("Records");
@@ -679,7 +711,7 @@ public class KinesisJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleGetShardIterator(JsonNode request, String region) {
+    private Response handleGetShardIterator(JsonNode request, String region, boolean dryRun) {
         String streamName = resolveStreamName(request);
         String shardId = request.path("ShardId").asText();
         String type = request.path("ShardIteratorType").asText();
@@ -700,6 +732,11 @@ public class KinesisJsonHandler {
             throw new AwsException("InvalidArgumentException",
                     "ShardIteratorType AT_TIMESTAMP requires a Timestamp", 400);
         }
+        if (dryRun) {
+            // AWS checks the stream for a dry run, but not the shard (measured).
+            service.describeStream(streamName, region);
+            throw KinesisService.dryRunOperation("GetShardIterator");
+        }
 
         String iterator = service.getShardIterator(streamName, shardId, type, seq, timestampMillis, region);
 
@@ -709,11 +746,16 @@ public class KinesisJsonHandler {
     }
 
     @SuppressWarnings("unchecked")
-    private Response handleGetRecords(JsonNode request, String region) {
+    private Response handleGetRecords(JsonNode request, String region, boolean dryRun) {
         String iterator = request.path("ShardIterator").asText();
         Integer limit = request.has("Limit") ? request.path("Limit").asInt() : null;
 
+        // Reading changes nothing, so a dry run reads, refusing an invalid iterator as the call does, and answers
+        // in place of the records.
         Map<String, Object> result = service.getRecords(iterator, limit, region);
+        if (dryRun) {
+            throw KinesisService.dryRunOperation("GetRecords");
+        }
         List<KinesisRecord> records = (List<KinesisRecord>) result.get("Records");
 
         ObjectNode response = objectMapper.createObjectNode();
