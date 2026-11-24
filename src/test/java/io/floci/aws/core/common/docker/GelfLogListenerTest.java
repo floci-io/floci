@@ -4,8 +4,10 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.StreamType;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -27,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class GelfLogListenerTest {
 
     private final List<String> lines = new CopyOnWriteArrayList<>();
