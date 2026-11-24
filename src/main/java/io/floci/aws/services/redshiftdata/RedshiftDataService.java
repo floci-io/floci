@@ -548,7 +548,10 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
                 }
                 boolean autoCommit = AUTO_COMMIT_SQL.matcher(sql).find() || CopyJobSql.requiresAutoCommit(sql)
                         || preparation != null && target.spectrum() != null
-                        && preparation.handlesDdl(sql, target.spectrum());
+                        && (preparation.needsBackendForDdl(sql, target.spectrum())
+                                ? preparation.handlesDdl(sql, target.spectrum(),
+                                        new RedshiftDataBackendSql(connection, execution))
+                                : preparation.handlesDdl(sql, target.spectrum()));
                 if (autoCommit) {
                     if (session != null && session.inTransaction()) {
                         throw new SQLException("Statement cannot run inside a transaction block", "25001");

@@ -1,0 +1,930 @@
+{
+  "_source": {
+    "pages": [
+      "https://docs.aws.amazon.com/kms/latest/developerguide/kms-api-permissions-reference.html",
+      "https://docs.aws.amazon.com/kms/latest/developerguide/concepts.html"
+    ],
+    "fetcher": "tools/aws/fetch_kms_api_permissions.py",
+    "retrieved": "2026-11-22",
+    "note": "Each operation of the developer guide's permissions table, copied as it stands (the API reference page it links to, the actions it names, its description, the items of its list, and the policy type and resources column of each row it spans), and each request parameter sentence of those API reference pages saying KMS gets a resource from metadata, and each key identifier the concepts page gives a format of, each variable written {name}."
+  },
+  "permissions": [
+    {
+      "operation": "CancelKeyDeletion",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_CancelKeyDeletion.html",
+      "actions": [
+        "kms:CancelKeyDeletion"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "ConnectCustomKeyStore",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_ConnectCustomKeyStore.html",
+      "actions": [
+        "kms:ConnectCustomKeyStore"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "IAM policy",
+          "resources": "*"
+        }
+      ]
+    },
+    {
+      "operation": "CreateAlias",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_CreateAlias.html",
+      "actions": [
+        "kms:CreateAlias"
+      ],
+      "description": [
+        "To use this operation, the caller needs kms:CreateAlias permission on two resources:",
+        "For details, see Controlling access to aliases ."
+      ],
+      "items": [
+        "The alias (in an IAM policy)",
+        "The KMS key (in a key policy)"
+      ],
+      "policies": [
+        {
+          "policyType": "IAM policy (for the alias)",
+          "resources": "Alias"
+        },
+        {
+          "policyType": "Key policy (for the KMS key)",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "CreateCustomKeyStore",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_CreateCustomKeyStore.html",
+      "actions": [
+        "kms:CreateCustomKeyStore"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "IAM policy",
+          "resources": "*"
+        }
+      ]
+    },
+    {
+      "operation": "CreateGrant",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_CreateGrant.html",
+      "actions": [
+        "kms:CreateGrant"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "CreateKey",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_CreateKey.html",
+      "actions": [
+        "kms:CreateKey"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "IAM policy",
+          "resources": "*"
+        }
+      ]
+    },
+    {
+      "operation": "Decapsulate",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_Decapsulate.html",
+      "actions": [
+        "kms:Decapsulate"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "Decrypt",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_Decrypt.html",
+      "actions": [
+        "kms:Decrypt"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "DeleteAlias",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_DeleteAlias.html",
+      "actions": [
+        "kms:DeleteAlias"
+      ],
+      "description": [
+        "To use this operation, the caller needs kms:DeleteAlias permission on two resources:",
+        "For details, see Controlling access to aliases ."
+      ],
+      "items": [
+        "The alias (in an IAM policy)",
+        "The KMS key (in a key policy)"
+      ],
+      "policies": [
+        {
+          "policyType": "IAM policy (for the alias)",
+          "resources": "Alias"
+        },
+        {
+          "policyType": "Key policy (for the KMS key)",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "DeleteCustomKeyStore",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_DeleteCustomKeyStore.html",
+      "actions": [
+        "kms:DeleteCustomKeyStore"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "IAM policy",
+          "resources": "*"
+        }
+      ]
+    },
+    {
+      "operation": "DeleteImportedKeyMaterial",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_DeleteImportedKeyMaterial.html",
+      "actions": [
+        "kms:DeleteImportedKeyMaterial"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "DeriveSharedSecret",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_DeriveSharedSecret.html",
+      "actions": [
+        "kms:DeriveSharedSecret"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "DescribeCustomKeyStores",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_DescribeCustomKeyStores.html",
+      "actions": [
+        "kms:DescribeCustomKeyStores"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "IAM policy",
+          "resources": "*"
+        }
+      ]
+    },
+    {
+      "operation": "DescribeKey",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_DescribeKey.html",
+      "actions": [
+        "kms:DescribeKey"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "DisableKey",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_DisableKey.html",
+      "actions": [
+        "kms:DisableKey"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "DisableKeyRotation",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_DisableKeyRotation.html",
+      "actions": [
+        "kms:DisableKeyRotation"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "DisconnectCustomKeyStore",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_DisconnectCustomKeyStore.html",
+      "actions": [
+        "kms:DisconnectCustomKeyStore"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "IAM policy",
+          "resources": "*"
+        }
+      ]
+    },
+    {
+      "operation": "EnableKey",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_EnableKey.html",
+      "actions": [
+        "kms:EnableKey"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "EnableKeyRotation",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_EnableKeyRotation.html",
+      "actions": [
+        "kms:EnableKeyRotation"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "Encapsulate",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_Encapsulate.html",
+      "actions": [
+        "kms:Encapsulate"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "Encrypt",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_Encrypt.html",
+      "actions": [
+        "kms:Encrypt"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "GenerateDataKey",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_GenerateDataKey.html",
+      "actions": [
+        "kms:GenerateDataKey"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "GenerateDataKeyPair",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_GenerateDataKeyPair.html",
+      "actions": [
+        "kms:GenerateDataKeyPair"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key Generates an asymmetric data key pair that is protected by a symmetric encryption KMS key."
+        }
+      ]
+    },
+    {
+      "operation": "GenerateDataKeyPairWithoutPlaintext",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_GenerateDataKeyPairWithoutPlaintext.html",
+      "actions": [
+        "kms:GenerateDataKeyPairWithoutPlaintext"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key Generates an asymmetric data key pair that is protected by a symmetric encryption KMS key."
+        }
+      ]
+    },
+    {
+      "operation": "GenerateDataKeyWithoutPlaintext",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_GenerateDataKeyWithoutPlaintext.html",
+      "actions": [
+        "kms:GenerateDataKeyWithoutPlaintext"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "GenerateMac",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_GenerateMac.html",
+      "actions": [
+        "kms:GenerateMac"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "GenerateRandom",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_GenerateRandom.html",
+      "actions": [
+        "kms:GenerateRandom"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "IAM policy",
+          "resources": "*"
+        }
+      ]
+    },
+    {
+      "operation": "GetKeyLastUsage",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_GetKeyLastUsage.html",
+      "actions": [
+        "kms:GetKeyLastUsage"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "GetKeyPolicy",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_GetKeyPolicy.html",
+      "actions": [
+        "kms:GetKeyPolicy"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "GetKeyRotationStatus",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_GetKeyRotationStatus.html",
+      "actions": [
+        "kms:GetKeyRotationStatus"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "GetParametersForImport",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_GetParametersForImport.html",
+      "actions": [
+        "kms:GetParametersForImport"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "GetPublicKey",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_GetPublicKey.html",
+      "actions": [
+        "kms:GetPublicKey"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "ImportKeyMaterial",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_ImportKeyMaterial.html",
+      "actions": [
+        "kms:ImportKeyMaterial"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "ListAliases",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_ListAliases.html",
+      "actions": [
+        "kms:ListAliases"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "IAM policy",
+          "resources": "*"
+        }
+      ]
+    },
+    {
+      "operation": "ListGrants",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_ListGrants.html",
+      "actions": [
+        "kms:ListGrants"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "ListKeyPolicies",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_ListKeyPolicies.html",
+      "actions": [
+        "kms:ListKeyPolicies"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "ListKeyRotations",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_ListKeyRotations.html",
+      "actions": [
+        "kms:ListKeyRotations"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "ListKeys",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_ListKeys.html",
+      "actions": [
+        "kms:ListKeys"
+      ],
+      "description": [
+        "You can use the same permission to list the KMS keys that other AWS accounts shared with you through AWS Resource Access Manager (AWS RAM) (the ResourceOwners parameter). For more information about identifying KMS keys that are shared with you, see Identifying a shared KMS key ."
+      ],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "IAM policy",
+          "resources": "*"
+        }
+      ]
+    },
+    {
+      "operation": "ListResourceTags",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_ListResourceTags.html",
+      "actions": [
+        "kms:ListResourceTags"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "ListRetirableGrants",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_ListRetirableGrants.html",
+      "actions": [
+        "kms:ListRetirableGrants"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "IAM policy",
+          "resources": "*"
+        }
+      ]
+    },
+    {
+      "operation": "PutKeyPolicy",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_PutKeyPolicy.html",
+      "actions": [
+        "kms:PutKeyPolicy"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "ReEncrypt",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_ReEncrypt.html",
+      "actions": [
+        "kms:ReEncryptFrom",
+        "kms:ReEncryptTo"
+      ],
+      "description": [
+        "To use this operation, the caller needs permission on two KMS keys:"
+      ],
+      "items": [
+        "kms:ReEncryptFrom on the KMS key used to decrypt",
+        "kms:ReEncryptTo on the KMS key used to encrypt"
+      ],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "ReplicateKey",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_ReplicateKey.html",
+      "actions": [
+        "kms:ReplicateKey"
+      ],
+      "description": [
+        "To use this operation, the caller needs the following permissions:"
+      ],
+      "items": [
+        "kms:ReplicateKey on the multi-Region primary key",
+        "kms:CreateKey in an IAM policy in the replica Region"
+      ],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "RetireGrant",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_RetireGrant.html",
+      "actions": [
+        "kms:RetireGrant"
+      ],
+      "description": [
+        "Permission to retire a grant is determined primarily by the grant. A policy alone cannot allow access to this operation. For more information, see Retiring and revoking grants ."
+      ],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "IAM policy (This permission is not effective in a key policy.)",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "RevokeGrant",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_RevokeGrant.html",
+      "actions": [
+        "kms:RevokeGrant"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "RotateKeyOnDemand",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_RotateKeyOnDemand.html",
+      "actions": [
+        "kms:RotateKeyOnDemand"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "ScheduleKeyDeletion",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_ScheduleKeyDeletion.html",
+      "actions": [
+        "kms:ScheduleKeyDeletion"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "Sign",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_Sign.html",
+      "actions": [
+        "kms:Sign"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "TagResource",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_TagResource.html",
+      "actions": [
+        "kms:TagResource"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "UntagResource",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_UntagResource.html",
+      "actions": [
+        "kms:UntagResource"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "UpdateAlias",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_UpdateAlias.html",
+      "actions": [
+        "kms:UpdateAlias"
+      ],
+      "description": [
+        "To use this operation, the caller needs kms:UpdateAlias permission on three resources:",
+        "For details, see Controlling access to aliases ."
+      ],
+      "items": [
+        "The alias",
+        "The currently associated KMS key",
+        "The newly associated KMS key"
+      ],
+      "policies": [
+        {
+          "policyType": "IAM policy (for the alias)",
+          "resources": "Alias"
+        },
+        {
+          "policyType": "Key policy (for the KMS keys)",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "UpdateCustomKeyStore",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_UpdateCustomKeyStore.html",
+      "actions": [
+        "kms:UpdateCustomKeyStore"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "IAM policy",
+          "resources": "*"
+        }
+      ]
+    },
+    {
+      "operation": "UpdateKeyDescription",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_UpdateKeyDescription.html",
+      "actions": [
+        "kms:UpdateKeyDescription"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "UpdatePrimaryRegion",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_UpdatePrimaryRegion.html",
+      "actions": [
+        "kms:UpdatePrimaryRegion"
+      ],
+      "description": [
+        "To use this operation, the caller needs kms:UpdatePrimaryRegion permission on both the multi-Region primary key that will become a replica key and the multi-Region replica key that will become the primary key."
+      ],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "Verify",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_Verify.html",
+      "actions": [
+        "kms:Verify"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    },
+    {
+      "operation": "VerifyMac",
+      "apiReference": "https://docs.aws.amazon.com/kms/latest/APIReference/API_VerifyMac.html",
+      "actions": [
+        "kms:VerifyMac"
+      ],
+      "description": [],
+      "items": [],
+      "policies": [
+        {
+          "policyType": "Key policy",
+          "resources": "KMS key"
+        }
+      ]
+    }
+  ],
+  "fromMetadata": [
+    {
+      "operation": "Decrypt",
+      "parameter": "KeyId",
+      "sentence": "If you used a symmetric encryption KMS key, AWS KMS can get the KMS key from metadata that it adds to the symmetric ciphertext blob."
+    },
+    {
+      "operation": "ReEncrypt",
+      "parameter": "SourceKeyId",
+      "sentence": "If you used a symmetric encryption KMS key, AWS KMS can get the KMS key from metadata that it adds to the symmetric ciphertext blob."
+    }
+  ],
+  "identifiers": [
+    {
+      "identifier": "Key ARN",
+      "sentence": "The format of a key ARN is as follows:",
+      "format": "arn:{partition}:kms:{region}:{account-id}:key/{key-id}"
+    },
+    {
+      "identifier": "Alias ARN",
+      "sentence": "The format of an alias ARN is as follows:",
+      "format": "arn:{partition}:kms:{region}:{account-id}:alias/{alias-name}"
+    },
+    {
+      "identifier": "Alias name",
+      "sentence": "The format of an alias name is as follows:",
+      "format": "alias/{alias-name}"
+    }
+  ]
+}

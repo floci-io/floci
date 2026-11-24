@@ -2,6 +2,7 @@ package com.floci.test;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
+import org.eclipse.paho.client.mqttv3.IMqttMessageListener;
 import org.eclipse.paho.client.mqttv3.MqttClient;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
@@ -67,7 +68,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -290,6 +290,12 @@ class IotCustomAuthorizerTest {
                     big = json.loads(policy)
                     big["Statement"][1]["Resource"] = [ARN_PREFIX + ":topic/big/%040d" % i for i in range(60)]
                     return response([json.dumps(big)])
+                if secret == "scoped":
+                    return response([json.dumps({"Version": "2012-10-17", "Statement": [
+                        {"Effect": "Allow", "Action": "iot:Connect", "Resource": ARN_PREFIX + ":client/" + NAME_PREFIX + "-other"},
+                        {"Effect": "Allow", "Action": "iot:Subscribe", "Resource": ARN_PREFIX + ":topicfilter/" + NAME_PREFIX + "/*"},
+                        {"Effect": "Allow", "Action": ["iot:Publish", "iot:Receive"],
+                         "Resource": ARN_PREFIX + ":topic/" + NAME_PREFIX + "/scoped/*"}]})])
                 if secret == "objpolicy":
                     return response([json.loads(policy)])
                 return {"isAuthenticated": False}
@@ -656,6 +662,53 @@ class IotCustomAuthorizerTest {
         }
     }
 
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Mqtt.class)
+    @DisplayName("a SUBSCRIBE outside the returned policies is refused")
+    void mqttSubscribeOutsideTheReturnedPolicyIsRefused(Mqtt version) throws Exception {
+        String filter = prefix + "-outside/" + version.name().toLowerCase() + "/#";
+        try (Session scoped = open(version, scopedTarget())) {
+            if (version == Mqtt.V3_1_1) {
+                assertThat(catchThrowable(() -> scoped.subscribe(filter))).isInstanceOf(MqttException.class);
+            } else {
+                assertThat(scoped.subscribe(filter)).isEqualTo(MQTT5_NOT_AUTHORIZED);
+            }
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Mqtt.class)
+    @DisplayName("a PUBLISH outside the returned policies is refused and not delivered")
+    void mqttPublishOutsideTheReturnedPolicyIsRefused(Mqtt version) throws Exception {
+        String topic = prefix + "/published/" + version.name().toLowerCase();
+        try (Session observer = open(version, target(namedUsername(authorizer), "allow-me"));
+             Session scoped = open(version, scopedTarget())) {
+            observer.subscribe(topic);
+            if (version == Mqtt.V3_1_1) {
+                assertThat(catchThrowable(() -> scoped.publish(topic, "denied"))).isInstanceOf(MqttException.class);
+            } else {
+                assertThat(scoped.publish(topic, "denied")).isEqualTo(MQTT5_NOT_AUTHORIZED);
+            }
+            observer.publish(topic, "marker");
+            assertThat(observer.nextMessage()).isEqualTo("marker");
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Mqtt.class)
+    @DisplayName("a subscriber receives only on topics the returned policies allow")
+    void mqttReceiveOutsideTheReturnedPolicyIsSkipped(Mqtt version) throws Exception {
+        String level = version.name().toLowerCase();
+        try (Session scoped = open(version, scopedTarget());
+             Session observer = open(version, target(namedUsername(authorizer), "allow-me"))) {
+            assertThat(scoped.subscribe(prefix + "/+/" + level)).isEqualTo(1);
+            observer.publish(prefix + "/outside/" + level, "outside");
+            observer.publish(prefix + "/scoped/" + level, "inside");
+            assertThat(scoped.nextMessage()).isEqualTo("inside");
+            assertThat(scoped.roundTrip(prefix + "/scoped/own-" + level, "own")).isEqualTo("own");
+        }
+    }
+
     enum Refusal {
         DENY("deny", AuthorizerKind.ACTIVE, false),
         CLIENT_ID_NOT_IN_POLICY("allow-me", AuthorizerKind.ACTIVE, true),
@@ -990,6 +1043,11 @@ class IotCustomAuthorizerTest {
         return new Target(mqttUri, clientId, username, secret.getBytes(StandardCharsets.UTF_8), Map.of());
     }
 
+    private Target scopedTarget() {
+        return new Target(mqttUri, otherClientId, otherClientId + "?" + NAME_PARAM + authorizer,
+                "scoped".getBytes(StandardCharsets.UTF_8), Map.of());
+    }
+
     private static String sign(PrivateKey key, String token) throws GeneralSecurityException {
         Signature signature = Signature.getInstance("SHA256withRSA");
         signature.initSign(key);
@@ -1032,7 +1090,17 @@ class IotCustomAuthorizerTest {
             Map<String, String> headers) {}
 
     private interface Session extends AutoCloseable {
-        String roundTrip(String topic, String payload) throws Exception;
+        int subscribe(String topicFilter) throws Exception;
+
+        int publish(String topic, String payload) throws Exception;
+
+        String nextMessage() throws InterruptedException;
+
+        default String roundTrip(String topic, String payload) throws Exception {
+            subscribe(topic);
+            publish(topic, payload);
+            return nextMessage();
+        }
 
         @Override
         void close();
@@ -1115,14 +1183,25 @@ class IotCustomAuthorizerTest {
             closeV3(client);
             throw new ConnectRefused(e);
         }
+        BlockingQueue<String> messages = new LinkedBlockingQueue<>();
         return new Session() {
             @Override
-            public String roundTrip(String topic, String payload) throws Exception {
-                CompletableFuture<String> received = new CompletableFuture<>();
-                client.subscribe(topic, 1, (t, message) ->
-                        received.complete(new String(message.getPayload(), StandardCharsets.UTF_8)));
+            public int subscribe(String topicFilter) throws Exception {
+                int[] granted = {1};
+                client.subscribe(new String[] {topicFilter}, granted, new IMqttMessageListener[] {(t, message) ->
+                        messages.add(new String(message.getPayload(), StandardCharsets.UTF_8))});
+                return granted[0];
+            }
+
+            @Override
+            public int publish(String topic, String payload) throws Exception {
                 client.publish(topic, payload.getBytes(StandardCharsets.UTF_8), 1, false);
-                return received.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                return 0;
+            }
+
+            @Override
+            public String nextMessage() throws InterruptedException {
+                return messages.poll(TIMEOUT_SECONDS, TimeUnit.SECONDS);
             }
 
             @Override
@@ -1187,10 +1266,21 @@ class IotCustomAuthorizerTest {
         }
         return new Session() {
             @Override
-            public String roundTrip(String topic, String payload) throws Exception {
-                client.subscribe(topic, 1).waitForCompletion(TimeUnit.SECONDS.toMillis(TIMEOUT_SECONDS));
-                client.publish(topic, payload.getBytes(StandardCharsets.UTF_8), 1, false)
-                        .waitForCompletion(TimeUnit.SECONDS.toMillis(TIMEOUT_SECONDS));
+            public int subscribe(String topicFilter) throws Exception {
+                IMqttToken token = client.subscribe(topicFilter, 1);
+                token.waitForCompletion(TimeUnit.SECONDS.toMillis(TIMEOUT_SECONDS));
+                return token.getReasonCodes()[0];
+            }
+
+            @Override
+            public int publish(String topic, String payload) throws Exception {
+                IMqttToken token = client.publish(topic, payload.getBytes(StandardCharsets.UTF_8), 1, false);
+                token.waitForCompletion(TimeUnit.SECONDS.toMillis(TIMEOUT_SECONDS));
+                return token.getReasonCodes()[0];
+            }
+
+            @Override
+            public String nextMessage() throws InterruptedException {
                 return messages.poll(TIMEOUT_SECONDS, TimeUnit.SECONDS);
             }
 

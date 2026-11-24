@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
@@ -28,10 +29,8 @@ import static org.hamcrest.Matchers.nullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesIdentityPagingIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/ap-south-1/ses/aws4_request";
-    private static final String OTHER_REGION_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-north-1/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("ap-south-1");
+    private static final String OTHER_REGION_AUTH = SesV2Requests.authFor("eu-north-1");
     private static final String V1_ROOT = "ListIdentitiesResponse.ListIdentitiesResult.";
 
     @Test
@@ -156,7 +155,7 @@ class SesIdentityPagingIntegrationTest {
     }
 
     private static void create(String identity) {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"EmailIdentity\": \"" + identity + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
     }

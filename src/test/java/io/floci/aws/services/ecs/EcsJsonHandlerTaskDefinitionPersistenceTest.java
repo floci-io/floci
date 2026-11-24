@@ -16,9 +16,12 @@ import io.floci.aws.services.ecs.model.FirelensConfiguration;
 import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.services.ecs.model.LogConfiguration;
 import io.floci.aws.services.ecs.model.TaskDefinition;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -42,6 +45,7 @@ import static org.mockito.Mockito.when;
  * reloads from the file the first one wrote — the in-memory backend used elsewhere keeps the live
  * object reference and cannot detect the miss.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EcsJsonHandlerTaskDefinitionPersistenceTest {
 
     private static final String REGION = "us-east-1";

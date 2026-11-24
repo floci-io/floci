@@ -2,7 +2,6 @@ package io.floci.aws.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -11,7 +10,8 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
@@ -24,8 +24,6 @@ import static org.hamcrest.Matchers.equalTo;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesTenantSendOrderV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String TENANT = "floci-order-tenant";
     private static final String DOMAIN = "floci-order.example.com";
     private static final String FROM = "sender@" + DOMAIN;
@@ -39,10 +37,6 @@ class SesTenantSendOrderV2IntegrationTest {
             "\"Destination\":{\"ToAddresses\":[\"success@simulator.amazonses.com\"]},";
     private static final String SIMPLE =
             "\"Content\":{\"Simple\":{\"Subject\":{\"Data\":\"s\"},\"Body\":{\"Text\":{\"Data\":\"t\"}}}}";
-
-    private static RequestSpecification v2() {
-        return given().contentType("application/json").header("Authorization", AUTH);
-    }
 
     private static String member(String name, String value) {
         return "\"" + name + "\":\"" + value + "\",";

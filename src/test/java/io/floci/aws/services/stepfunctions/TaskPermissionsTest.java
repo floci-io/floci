@@ -6,7 +6,9 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.services.stepfunctions.LambdaTaskAuthorizer.Permission;
 import io.floci.aws.services.stepfunctions.model.StateMachine;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -27,6 +29,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class TaskPermissionsTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -205,13 +208,15 @@ class TaskPermissionsTest {
         assertEquals(Optional.empty(), TaskPermissions.of(integration("dynamodb:query"), json("{\"TableName\":\"t\"}"), machine("aws")));
     }
 
+    /** A table named by its ARN is checked as given and as the state machine's own, the table execution reaches. */
     @Test
-    void aTableNamedByItsArnIsEvaluatedAsGiven() throws Exception {
+    void aTableNamedByItsArnIsEvaluatedAsGivenAndAsTheMachinesOwn() throws Exception {
         String arn = "arn:aws:dynamodb:eu-west-1:444455556666:table/orders";
-        assertEquals(List.of(new Permission("dynamodb:PutItem", arn)), sdkPermissions("putItem", "{\"TableName\":\"" + arn + "\"}"));
-        assertEquals(List.of(new Permission("dynamodb:PutItem", arn)),
-                TaskPermissions.of(integration("dynamodb:putItem"), json("{\"TableName\":\"" + arn + "\"}"), machine("aws"))
-                        .orElseThrow().permissions());
+        List<Permission> both = List.of(new Permission("dynamodb:PutItem", arn),
+                new Permission("dynamodb:PutItem", table("orders")));
+        assertEquals(both, sdkPermissions("putItem", "{\"TableName\":\"" + arn + "\"}"));
+        assertEquals(both, TaskPermissions.of(integration("dynamodb:putItem"), json("{\"TableName\":\"" + arn + "\"}"),
+                machine("aws")).orElseThrow().permissions());
     }
 
     @Test
@@ -233,10 +238,10 @@ class TaskPermissionsTest {
     @Test
     void aTransactWriteNeedsEachItemsOwnActionOnItsTable() throws Exception {
         Map<String, List<String>> enclosing = Map.of("dynamodb:EnclosingOperation", List.of("TransactWriteItems"));
-        assertEquals(List.of(new Permission("dynamodb:PutItem", table("aaa"), enclosing),
+        assertEquals(List.of(new Permission("dynamodb:ConditionCheckItem", table("ccc"), enclosing),
+                new Permission("dynamodb:PutItem", table("aaa"), enclosing),
                 new Permission("dynamodb:DeleteItem", table("bbb"), enclosing),
-                new Permission("dynamodb:UpdateItem", table("aaa"), enclosing),
-                new Permission("dynamodb:ConditionCheckItem", table("ccc"), enclosing)),
+                new Permission("dynamodb:UpdateItem", table("aaa"), enclosing)),
                 sdkPermissions("transactWriteItems", """
                         {"TransactItems":[{"Put":{"TableName":"aaa"}},{"Delete":{"TableName":"bbb"}},
                          {"Update":{"TableName":"aaa"}},{"ConditionCheck":{"TableName":"ccc"}}]}"""));
@@ -250,22 +255,20 @@ class TaskPermissionsTest {
                 sdkPermissions("transactGetItems", "{\"TransactItems\":[{\"Get\":{\"TableName\":\"aaa\"}},{\"Get\":{\"TableName\":\"bbb\"}}]}"));
     }
 
-    /** Execution resolves an ARN within the request's account, so that is the table the item is checked on. */
+    /** Execution resolves an ARN within the request's account, so the item is checked on that table too. */
     @Test
-    void aTransactItemNamedByAnArnIsTheTableItsExecutionReaches() throws Exception {
-        assertEquals(List.of(new Permission("dynamodb:PutItem", table("aaa"),
-                Map.of("dynamodb:EnclosingOperation", List.of("TransactWriteItems")))),
+    void aTransactItemNamedByAnArnIsAlsoTheTableItsExecutionReaches() throws Exception {
+        Map<String, List<String>> enclosing = Map.of("dynamodb:EnclosingOperation", List.of("TransactWriteItems"));
+        assertEquals(List.of(new Permission("dynamodb:PutItem", "arn:aws:dynamodb:eu-west-1:444455556666:table/aaa",
+                        enclosing), new Permission("dynamodb:PutItem", table("aaa"), enclosing)),
                 sdkPermissions("transactWriteItems", """
                         {"TransactItems":[{"Put":{"TableName":"arn:aws:dynamodb:eu-west-1:444455556666:table/aaa"}}]}"""));
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"{}", "{\"TransactItems\":\"x\"}", "{\"TransactItems\":[{\"Put\":{}}]}",
-            "{\"TransactItems\":[{\"Get\":{\"TableName\":\"aaa\"}}]}",
-            "{\"TransactItems\":[{\"Put\":{\"TableName\":\"arn:aws:dynamodb:ap-south-1:444455556666:table/aaa\"}}]}",
-            "{\"TransactItems\":[{\"Put\":{\"TableName\":\"a\"}}]}",
-            "{\"TransactItems\":[{\"Put\":{\"TableName\":\"arn:aws:s3:::aaa\"}}]}"})
-    void aTransactionNamingNoTableItCanReachNeedsNoPermission(String request) throws Exception {
+            "{\"TransactItems\":[{\"Get\":{\"TableName\":\"aaa\"}}]}"})
+    void aTransactionNamingNoTableNeedsNoPermission(String request) throws Exception {
         assertEquals(List.of(), sdkPermissions("transactWriteItems", request));
     }
 
@@ -287,9 +290,40 @@ class TaskPermissionsTest {
                 sdkPermissions("executeStatement", "{\"Statement\":\"INSERT INTO \\\"a\\\" VALUE {'pk':'x'}\"}"));
     }
 
+    /** Each statement of a batch or a transaction is checked apart, a transaction's as enclosed by it. */
     @Test
-    void aResourceThatIsNotAnArnNeedsNoPermission() throws Exception {
-        assertEquals(List.of(), sdkPermissions("tagResource", "{\"ResourceArn\":\"not-an-arn\"}"));
+    void eachStatementOfABatchIsAuthorizedByWhatItDoesOnWhatItNames() throws Exception {
+        assertEquals(List.of(new Permission("dynamodb:PartiQLSelect", table("a") + "/index/byName"),
+                new Permission("dynamodb:PartiQLDelete", table("b"))),
+                sdkPermissions("batchExecuteStatement", """
+                        {"Statements":[{"Statement":"DELETE FROM \\"b\\" WHERE pk = 'x'"},
+                         {"Statement":"SELECT * FROM \\"a\\".\\"byName\\" WHERE pk = 'x'"}]}"""));
+        Map<String, List<String>> enclosing = Map.of("dynamodb:EnclosingOperation", List.of("ExecuteTransaction"));
+        assertEquals(List.of(new Permission("dynamodb:PartiQLInsert", table("a"), enclosing),
+                new Permission("dynamodb:PartiQLDelete", table("b"), enclosing)),
+                sdkPermissions("executeTransaction", """
+                        {"TransactStatements":[{"Statement":"DELETE FROM \\"b\\" WHERE pk = 'x'"},
+                         {"Statement":"INSERT INTO \\"a\\" VALUE {'pk':'x'}"}]}"""));
+    }
+
+    /** An EXISTS statement runs the SELECT it evaluates, so it needs PartiQLSelect on that SELECT's table. */
+    @Test
+    void anExistsStatementIsAuthorizedAsTheSelectItEvaluates() throws Exception {
+        Map<String, List<String>> enclosing = Map.of("dynamodb:EnclosingOperation", List.of("ExecuteTransaction"));
+        assertEquals(List.of(new Permission("dynamodb:PartiQLSelect", table("b"), enclosing),
+                new Permission("dynamodb:PartiQLInsert", table("a"), enclosing)),
+                sdkPermissions("executeTransaction", """
+                        {"TransactStatements":[{"Statement":"INSERT INTO \\"a\\" VALUE {'pk':'x'}"},
+                         {"Statement":"EXISTS(SELECT * FROM \\"b\\" WHERE pk = 'x' AND v = 1)"}]}"""));
+        assertEquals(List.of(),
+                sdkPermissions("executeTransaction", "{\"TransactStatements\":[{\"Statement\":\"-- nothing\"}]}"));
+    }
+
+    /** A value naming no resource of the action's types names none, so the call is checked on any resource. */
+    @Test
+    void aResourceThatIsNotAnArnIsCheckedOnAnyResource() throws Exception {
+        assertEquals(List.of(new Permission("dynamodb:TagResource", "*")),
+                sdkPermissions("tagResource", "{\"ResourceArn\":\"not-an-arn\"}"));
     }
 
     @ParameterizedTest

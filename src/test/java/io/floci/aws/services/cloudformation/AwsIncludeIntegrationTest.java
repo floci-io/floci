@@ -674,6 +674,123 @@ class AwsIncludeIntegrationTest {
             .body(containsString("<LogicalResourceId>DependentParam</LogicalResourceId>"));
     }
 
+    @Test
+    void fnSubLocationWithPseudoParameterMergesSnippetOnCreateStack() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucketPrefix = "aws-include-sub-" + suffix;
+        String bucket = bucketPrefix + "-us-east-1";
+        String key = "names.yaml";
+        String stackName = "aws-include-sub-stack-" + suffix;
+        String expectedParamName = "/aws-include-it/sub-" + suffix;
+        stacksToDelete.add(stackName);
+
+        putSnippet(bucket, key, "Params:\n  Name: " + expectedParamName + "\n");
+
+        String template = """
+            {
+              "Mappings": {
+                "Names": {
+                  "Fn::Transform": {
+                    "Name": "AWS::Include",
+                    "Parameters": {
+                      "Location": {
+                        "Fn::Sub": "s3://%s-${AWS::Region}/%s"
+                      }
+                    }
+                  }
+                }
+              },
+              "Resources": {
+                "IncludedParam": {
+                  "Type": "AWS::SSM::Parameter",
+                  "Properties": {
+                    "Name": { "Fn::FindInMap": ["Names", "Params", "Name"] },
+                    "Type": "String",
+                    "Value": "from-fn-sub-include"
+                  }
+                }
+              }
+            }
+            """.formatted(bucketPrefix, key);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<PhysicalResourceId>" + expectedParamName + "</PhysicalResourceId>"));
+    }
+
+    @Test
+    void describeChangeSetWithIncludeToleratesUnrelatedMissingSsmParameter() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "aws-include-cs-ssm-" + suffix;
+        String key = "meta.yaml";
+        String stackName = "aws-include-cs-ssm-stack-" + suffix;
+        String location = putSnippet(bucket, key, "mergedFlag: merged-value\n");
+        stacksToDelete.add(stackName);
+
+        String template = """
+            Parameters:
+              IncludeLocation:
+                Type: String
+                Default: %s
+              MissingSsm:
+                Type: AWS::SSM::Parameter::Value<String>
+                Default: /aws-include-it/does-not-exist-%s
+            Resources:
+              IncludedParam:
+                Type: AWS::SSM::Parameter
+                Metadata:
+                  Fn::Transform:
+                    Name: AWS::Include
+                    Parameters:
+                      Location: !Ref IncludeLocation
+                Properties:
+                  Name: !Ref MissingSsm
+                  Type: String
+                  Value: preview-value
+            """.formatted(location, suffix);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "preview-cs")
+            .formParam("ChangeSetType", "CREATE")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "preview-cs")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LogicalResourceId>IncludedParam</LogicalResourceId>"));
+    }
+
     private static String stateMachineTemplate(String stateMachineName, String location) {
         return """
             Resources:

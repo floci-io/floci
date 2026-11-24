@@ -1,13 +1,12 @@
 package io.floci.aws.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.ses.SesV1Requests.query;
 import static org.hamcrest.Matchers.containsString;
 
 /**
@@ -20,16 +19,9 @@ import static org.hamcrest.Matchers.containsString;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesSendCustomVerificationEmailV1IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     private static final String FROM = "scve-v1-sender@floci.test";
     private static final String RECIPIENT = "scve-v1-recipient@floci.test";
     private static final String NAME = "scve-v1-template";
-
-    private static RequestSpecification query(String action) {
-        return given().contentType("application/x-www-form-urlencoded").header("Authorization", AUTH)
-                .formParam("Action", action);
-    }
 
     @Test
     @Order(0)

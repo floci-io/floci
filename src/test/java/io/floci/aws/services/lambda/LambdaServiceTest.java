@@ -20,9 +20,11 @@ import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.services.s3.model.S3ObjectUpdatedEvent;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.LambdaCodeFixtures;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -62,6 +64,7 @@ import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+@ResourceLock(ParallelLocks.PORTS)
 class LambdaServiceTest {
 
     private static final String REGION = "us-east-1";

@@ -181,11 +181,7 @@ class IotMqttMutualTlsIntegrationTest {
     void thingPolicyVariableAdmitsOnlyTheAttachedThingName() throws Exception {
         IotDeviceIdentity device = provisionWithPolicy(true, CONNECT_AS_ATTACHED_THING);
         String thingName = "thing" + System.nanoTime();
-        given().contentType("application/json").body("{}").when().post("/things/" + thingName).then().statusCode(200);
-        cleanup.register(() -> given().when().delete("/things/" + thingName).then().statusCode(200));
-        given().header("x-amzn-principal", device.certificateArn).when().put("/things/" + thingName + "/principals").then().statusCode(200);
-        cleanup.register(() -> given().header("x-amzn-principal", device.certificateArn)
-                .when().delete("/things/" + thingName + "/principals").then().statusCode(200));
+        device.attachNewThing(thingName, cleanup);
 
         MqttClient asThing = connectTls(device, thingName);
         assertTrue(asThing.isConnected());
@@ -279,22 +275,14 @@ class IotMqttMutualTlsIntegrationTest {
         return device;
     }
 
-    private static MqttClient connectTls(IotDeviceIdentity device, String clientId) throws Exception {
+    static MqttClient connectTls(IotDeviceIdentity device, String clientId) throws Exception {
         return connect("ssl://127.0.0.1:" + TLS_PORT, clientId, device.sslContext(TLS_DIR).getSocketFactory());
     }
 
-    private static MqttClient connect(String uri, String clientId, SSLSocketFactory socketFactory) throws Exception {
+    static MqttClient connect(String uri, String clientId, SSLSocketFactory socketFactory) throws Exception {
         MqttClient client = new MqttClient(uri, clientId, new MemoryPersistence());
-        MqttConnectOptions options = new MqttConnectOptions();
-        options.setMqttVersion(MqttConnectOptions.MQTT_VERSION_3_1_1);
-        options.setCleanSession(true);
-        options.setConnectionTimeout(10);
-        options.setAutomaticReconnect(false);
-        if (socketFactory != null) {
-            options.setSocketFactory(socketFactory);
-        }
         try {
-            client.connect(options);
+            client.connect(mqtt3Options(socketFactory, true));
         } catch (MqttException e) {
             client.close();
             throw e;
@@ -302,11 +290,23 @@ class IotMqttMutualTlsIntegrationTest {
         return client;
     }
 
+    static MqttConnectOptions mqtt3Options(SSLSocketFactory socketFactory, boolean cleanSession) {
+        MqttConnectOptions options = new MqttConnectOptions();
+        options.setMqttVersion(MqttConnectOptions.MQTT_VERSION_3_1_1);
+        options.setCleanSession(cleanSession);
+        options.setConnectionTimeout(10);
+        options.setAutomaticReconnect(false);
+        if (socketFactory != null) {
+            options.setSocketFactory(socketFactory);
+        }
+        return options;
+    }
+
     private static org.eclipse.paho.mqttv5.client.MqttClient mqtt5Client(String clientId) throws Exception {
         return new org.eclipse.paho.mqttv5.client.MqttClient("ssl://127.0.0.1:" + TLS_PORT, clientId, null);
     }
 
-    private static MqttConnectionOptions mqtt5Options(SSLSocketFactory socketFactory) {
+    static MqttConnectionOptions mqtt5Options(SSLSocketFactory socketFactory) {
         MqttConnectionOptions options = new MqttConnectionOptions();
         options.setCleanStart(true);
         options.setConnectionTimeout(10);

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -24,8 +25,7 @@ import static org.hamcrest.Matchers.not;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesListManagementOptionsV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-west-2/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("us-west-2");
     private static final String LIST = "lmo-newsletter";
     private static final String FROM = "lmo-sender@floci.test";
 
@@ -41,7 +41,7 @@ class SesListManagementOptionsV2IntegrationTest {
     @Test
     @Order(0)
     void setup_contactList() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {
                       "ContactListName": "%s",
@@ -58,7 +58,7 @@ class SesListManagementOptionsV2IntegrationTest {
     @Order(1)
     void sendWithListManagementOptions_autoCreatesAbsentRecipient() {
         String recipient = "lmo-newcontact@floci.test";
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -79,7 +79,7 @@ class SesListManagementOptionsV2IntegrationTest {
     @Test
     @Order(2)
     void sendWithUnknownContactList_returns404() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -95,7 +95,7 @@ class SesListManagementOptionsV2IntegrationTest {
     @Test
     @Order(3)
     void listManagementOptionsWithoutContactListName_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -111,7 +111,7 @@ class SesListManagementOptionsV2IntegrationTest {
     @Test
     @Order(4)
     void listManagementOptionsWithNonStringTopicName_returnsSerializationException() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -129,7 +129,7 @@ class SesListManagementOptionsV2IntegrationTest {
     @Order(5)
     void singleRecipientSend_replacesUnsubscribePlaceholderWithFunctionalUrl() {
         String recipient = "lmo-unsub-body@floci.test";
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -179,7 +179,7 @@ class SesListManagementOptionsV2IntegrationTest {
     @Order(8)
     void unsubscribeEndpoint_get_rendersConfirmationWithoutOptingOut() {
         String recipient = "lmo-get@floci.test";
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"EmailAddress\":\"" + recipient + "\",\"TopicPreferences\":["
                         + "{\"TopicName\":\"Sports\",\"SubscriptionStatus\":\"OPT_IN\"}]}")
         .when().post("/v2/email/contact-lists/" + LIST + "/contacts").then().statusCode(200);
@@ -211,7 +211,7 @@ class SesListManagementOptionsV2IntegrationTest {
         String recipient = "lmo-unsafe-hdr@floci.test";
         // A user-supplied header whose value carries CR/LF must not survive on any surface: the SMTP
         // relay already drops it, and the stored SentEmail (GET /_aws/ses) must not retain it either.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -237,7 +237,7 @@ class SesListManagementOptionsV2IntegrationTest {
         // AWS enforces Content.Simple.Headers[].Value as a required member: a header object that omits
         // Value is rejected with BadRequestException and a Smithy constraint message, rather than being
         // silently dropped.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -256,7 +256,7 @@ class SesListManagementOptionsV2IntegrationTest {
     @Test
     @Order(11)
     void send_headerMissingName_isRejectedLikeAws() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {
                       "FromEmailAddress": "%s",

@@ -60,11 +60,13 @@ import io.floci.aws.services.rds.proxy.RdsProxyTlsCertificates;
 import io.floci.aws.services.rds.proxy.RdsSigV4Validator;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -132,6 +134,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class RdsServiceTest {
 
     private static final String PROXY_ROLE_ARN = "arn:aws:iam::123456789012:role/proxy";
@@ -1789,6 +1792,43 @@ class RdsServiceTest {
         rdsService.modifyDbInstance("mydb", null, null, null, List.of("sg-app"));
         assertEquals(List.of("sg-app"), rdsService.modifyDbInstance("mydb", null, null, "app-subnets", null)
                 .getVpcSecurityGroupIds());
+    }
+
+    @Test
+    void clusterCreatedWithNoGroupsGetsTheVpcDefaultAndModifyOnlyStoresWhatItNames() {
+        SecurityGroup defaultGroup = new SecurityGroup();
+        defaultGroup.setGroupId("sg-default");
+        when(ec2Service.defaultSecurityGroupOf(eq("us-east-1"), any())).thenReturn(Optional.of(defaultGroup));
+        DbCluster created = rdsService.createDbCluster("sg-cluster", "aurora-postgresql", null,
+                "admin", "password", "dbname", false, null);
+        assertEquals(List.of("sg-default"), created.getVpcSecurityGroupIds());
+
+        // an unrelated Modify leaves a null-groups request alone
+        assertEquals(List.of("sg-default"), rdsService.setDbClusterRequestSettings(
+                "sg-cluster", "us-east-1", null, null, null).getVpcSecurityGroupIds());
+        rdsService.setDbClusterRequestSettings("sg-cluster", "us-east-1", List.of(), null, null);
+        assertEquals(List.of(), rdsService.getDbCluster("sg-cluster").getVpcSecurityGroupIds());
+        // ... and does not re-assign the default to a cluster stored with no groups
+        rdsService.setDbClusterRequestSettings("sg-cluster", "us-east-1", null, null, null);
+        assertEquals(List.of(), rdsService.getDbCluster("sg-cluster").getVpcSecurityGroupIds());
+    }
+
+    @Test
+    void restoredAndGlobalMemberClustersGetTheVpcDefaultGroup() {
+        SecurityGroup defaultGroup = new SecurityGroup();
+        defaultGroup.setGroupId("sg-default");
+        when(ec2Service.defaultSecurityGroupOf(eq("us-east-1"), any())).thenReturn(Optional.of(defaultGroup));
+
+        clusterSnapshotOfNewCluster("csnap");
+        assertEquals(List.of("sg-default"), rdsService.restoreDbClusterFromSnapshot("restored-sg", "csnap",
+                "aurora-postgresql", null, null, null, null, null, null, null, null, false, null, "us-east-1")
+                .getVpcSecurityGroupIds());
+
+        rdsService.createGlobalCluster("sg-global", null, "aurora-postgresql", "16.3",
+                "dbname", false, false, Map.of(), "us-east-1");
+        assertEquals(List.of("sg-default"), rdsService.createDbClusterInGlobalCluster("sg-global", "global-member",
+                "aurora-postgresql", null, "admin", "password", "dbname", false, null, null, null, false,
+                "us-east-1", null, null, null, false, null, null, false).getVpcSecurityGroupIds());
     }
 
     @Test

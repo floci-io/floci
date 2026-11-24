@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_ecs_shapes.py",
-    "botocore": "botocore 1.43.118 (local/aws/botocore)"
+    "botocore": "botocore 1.44.9 (local/aws/botocore)"
   },
   "operations": {
     "AssociateGatewayWithCluster": "AssociateGatewayWithClusterRequest",
@@ -699,7 +699,8 @@
       "type": "structure",
       "members": {
         "name": "String",
-        "host": "HostVolumeProperties"
+        "host": "HostVolumeProperties",
+        "logDriverVolumeConfiguration": "LogDriverVolumeConfiguration"
       }
     },
     "DaemonVolumeList": {
@@ -1285,8 +1286,18 @@
       "members": {
         "portName": "String",
         "healthCheck": "GatewayConnectorHealthCheck",
-        "filters": "GatewayConnectorFilters"
+        "filters": "GatewayConnectorFilters",
+        "deregistrationDelay": "GatewayConnectorDeregistrationDelay"
       }
+    },
+    "GatewayConnectorDeregistrationDelay": {
+      "type": "structure",
+      "members": {
+        "timeoutSeconds": "GatewayConnectorDeregistrationDelayTimeoutSecondsInteger"
+      }
+    },
+    "GatewayConnectorDeregistrationDelayTimeoutSecondsInteger": {
+      "type": "integer"
     },
     "GatewayConnectorFilters": {
       "type": "structure",
@@ -1480,7 +1491,8 @@
         "instanceMetadataTagsPropagation": "BoxedBoolean",
         "instanceRequirements": "InstanceRequirementsRequest",
         "fipsEnabled": "BoxedBoolean",
-        "capacityReservations": "CapacityReservationRequest"
+        "capacityReservations": "CapacityReservationRequest",
+        "nitroEnclavesEnabled": "BoxedBoolean"
       }
     },
     "InstanceLaunchTemplateUpdate": {
@@ -1533,6 +1545,9 @@
       "member": "BoxedInteger"
     },
     "IpcMode": {
+      "type": "string"
+    },
+    "IsolationMode": {
       "type": "string"
     },
     "KernelCapabilities": {
@@ -1781,6 +1796,12 @@
     "LogDriver": {
       "type": "string"
     },
+    "LogDriverVolumeConfiguration": {
+      "type": "structure",
+      "members": {
+        "driver": "LogDriver"
+      }
+    },
     "Long": {
       "type": "long"
     },
@@ -1947,6 +1968,19 @@
     },
     "NetworkMode": {
       "type": "string"
+    },
+    "NvidiaMpsAllocation": {
+      "type": "structure",
+      "members": {
+        "memory": "NvidiaMpsAllocationMemoryInteger",
+        "maxComputePercent": "NvidiaMpsAllocationMaxComputePercentInteger"
+      }
+    },
+    "NvidiaMpsAllocationMaxComputePercentInteger": {
+      "type": "integer"
+    },
+    "NvidiaMpsAllocationMemoryInteger": {
+      "type": "integer"
     },
     "OSFamily": {
       "type": "string"
@@ -2117,7 +2151,8 @@
         "inferenceAccelerators": "InferenceAccelerators",
         "ephemeralStorage": "EphemeralStorage",
         "runtimePlatform": "RuntimePlatform",
-        "enableFaultInjection": "BoxedBoolean"
+        "enableFaultInjection": "BoxedBoolean",
+        "trustedExecutionConfiguration": "TrustedExecutionConfiguration"
       }
     },
     "RepositoryCredentials": {
@@ -2144,7 +2179,8 @@
       "type": "structure",
       "members": {
         "value": "String",
-        "type": "ResourceType"
+        "type": "ResourceType",
+        "sharingStrategy": "SharingStrategy"
       }
     },
     "ResourceRequirements": {
@@ -2381,6 +2417,12 @@
     },
     "SettingName": {
       "type": "string"
+    },
+    "SharingStrategy": {
+      "type": "structure",
+      "members": {
+        "nvidiaMps": "NvidiaMpsAllocation"
+      }
     },
     "SortOrder": {
       "type": "string"
@@ -2643,6 +2685,13 @@
     },
     "TransportProtocol": {
       "type": "string"
+    },
+    "TrustedExecutionConfiguration": {
+      "type": "structure",
+      "members": {
+        "isolationMode": "IsolationMode",
+        "attestationPolicy": "String"
+      }
     },
     "Ulimit": {
       "type": "structure",

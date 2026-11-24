@@ -14,6 +14,7 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.common.docker.PortAllocator;
+import io.floci.aws.services.ec2.Ec2ImageCatalog;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
@@ -126,7 +127,7 @@ class EksClusterManagerArchiveRetryTest {
         manager = new EksClusterManager(containerBuilder, lifecycleManager,
                 mock(ContainerDetector.class), mock(PortAllocator.class), dockerHostResolver,
                 mock(EcrRegistryManager.class), config, regionResolver, null, oidcService, certificateAuthority,
-                null, null, 0L);
+                null, null, 0L, new Ec2ImageCatalog(), EksTestEndpoints.dockerHostEndpoint());
     }
 
     @Test

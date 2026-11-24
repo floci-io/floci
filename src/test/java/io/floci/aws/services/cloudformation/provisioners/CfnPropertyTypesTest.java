@@ -407,6 +407,27 @@ class CfnPropertyTypesTest {
                 .read("AWS::SES::ConfigurationSetEventDestination", properties));
     }
 
+    /**
+     * A schema pattern is searched for, as the validator CloudFormation runs does, not matched whole: the Studio
+     * schema's Name pattern {@code [a-zA-Z0-9_-]+} takes a name with spaces, and refuses one with none of its
+     * characters.
+     */
+    @Test
+    void handlerReaderLooksForAPatternInTheValue() {
+        String studio = """
+                {"Name": "%s", "AuthMode": "IAM", "VpcId": "vpc-0123456789abcdef0", "SubnetIds": ["subnet-1"],
+                 "ServiceRole": "arn:aws:iam::000000000000:role/EMRStudio", "WorkspaceSecurityGroupId": "sg-1",
+                 "EngineSecurityGroupId": "sg-2", "DefaultS3Location": "s3://bucket/studio"}
+                """;
+        JsonNode spaced = json(studio.formatted("notebooks for etl"));
+
+        assertEquals(spaced, new CfnPropertyTypes.HandlerReader(engine()).read("AWS::EMR::Studio", spaced));
+        AwsException failure = assertThrows(AwsException.class, () -> new CfnPropertyTypes.HandlerReader(engine())
+                .read("AWS::EMR::Studio", json(studio.formatted("!!!"))));
+        assertEquals("Model validation failed (#/Name: failed validation constraint for keyword [pattern])",
+                failure.getMessage());
+    }
+
     @ParameterizedTest(name = "{0}")
     @MethodSource("unknownSesMembers")
     void handlerReaderRejectsExtraneousMembers(String caseName, String properties, String violation) {

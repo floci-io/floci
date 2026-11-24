@@ -6,6 +6,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -20,8 +21,7 @@ import static org.hamcrest.Matchers.equalTo;
 class SesBooleanCoercionV2IntegrationTest {
 
     private static final String REGION = "il-central-1";
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + REGION + "/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor(REGION);
     private static final String DOMAIN = "coercion.example.com";
     private static final String CS = "coercion-cs";
     private static final String ED = "coercion-ed";
@@ -171,7 +171,7 @@ class SesBooleanCoercionV2IntegrationTest {
     }
 
     private static ValidatableResponse send(String method, String path, String body) {
-        return given().contentType("application/json").header("Authorization", AUTH).body(body)
+        return v2(AUTH).body(body)
                 .when().request(method, path).then();
     }
 

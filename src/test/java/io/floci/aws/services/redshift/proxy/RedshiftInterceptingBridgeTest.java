@@ -2,15 +2,18 @@ package io.floci.aws.services.redshift.proxy;
 
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
+import io.floci.aws.services.redshift.spectrum.BackendSql;
 import io.floci.aws.services.redshift.spectrum.SpectrumInterceptor;
 import io.floci.aws.services.redshift.spectrum.SpectrumQueryPreparation;
 import io.floci.aws.services.redshift.spectrum.SpectrumSession;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
+import io.floci.aws.testing.ParallelLocks;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mockito;
@@ -26,7 +29,10 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static io.floci.aws.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -37,6 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
+@ResourceLock(ParallelLocks.PORTS)
 class RedshiftInterceptingBridgeTest {
 
     @Test
@@ -72,6 +79,15 @@ class RedshiftInterceptingBridgeTest {
     }
 
     private void startBridge(SpectrumInterceptor spectrumInterceptor, RedshiftAuditLogPublisher audit) throws IOException {
+        openSockets();
+        s3Stub = Mockito.mock(S3Service.class);
+        RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(
+                bridgeClientEnd, bridgeBackendEnd, s3Stub, Mockito.mock(IamService.class), "000000000000", List.of(),
+                spectrumInterceptor, "000000000000:c", "dev", null, audit, "analyst", null);
+        bridgeThread = Thread.ofVirtual().name("bridge-under-test").start(bridge::run);
+    }
+
+    private void openSockets() throws IOException {
         clientListener = new ServerSocket(0);
         testClientEnd = new Socket("localhost", clientListener.getLocalPort());
         bridgeClientEnd = clientListener.accept();
@@ -79,12 +95,6 @@ class RedshiftInterceptingBridgeTest {
         backendListener = new ServerSocket(0);
         bridgeBackendEnd = new Socket("localhost", backendListener.getLocalPort());
         testBackendEnd = backendListener.accept();
-
-        s3Stub = Mockito.mock(S3Service.class);
-        RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(
-                bridgeClientEnd, bridgeBackendEnd, s3Stub, Mockito.mock(IamService.class), "000000000000", List.of(),
-                spectrumInterceptor, "000000000000:c", "dev", null, audit, "analyst", null);
-        bridgeThread = Thread.ofVirtual().name("bridge-under-test").start(bridge::run);
     }
 
     @Test
@@ -667,6 +677,59 @@ class RedshiftInterceptingBridgeTest {
         Mockito.verify(preparation, Mockito.never()).prepare(Mockito.anyString(), Mockito.any(), Mockito.any(),
                 Mockito.any());
         Mockito.verify(interceptor, Mockito.never()).execute(Mockito.any(), Mockito.anyString(), Mockito.anyString(), Mockito.any());
+    }
+
+    @Test
+    @Timeout(20)
+    void aRegisteredDropFunctionIsRefusedNotForwardedWhenTheBackendStaysBusy() throws Exception {
+        String sql = "DROP FUNCTION exfunc_sum(INT)";
+        SpectrumInterceptor interceptor = inlineMock(SpectrumInterceptor.class);
+        SpectrumQueryPreparation preparation = Mockito.mock(SpectrumQueryPreparation.class);
+        Mockito.when(interceptor.preparation()).thenReturn(preparation);
+        Mockito.when(preparation.needsBackendForDdl(Mockito.eq(sql), Mockito.any())).thenReturn(true);
+        openSockets();
+        // a held backend lock stands in for a busy backend; the short budget keeps the test from waiting out 2 s
+        ReentrantLock backendLock = new ReentrantLock(true);
+        RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(
+                bridgeClientEnd, bridgeBackendEnd, interceptor, backendLock, 100);
+        CountDownLatch held = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = Thread.ofVirtual().start(() -> {
+            backendLock.lock();
+            try {
+                held.countDown();
+                release.await();
+            } catch (InterruptedException expected) {
+                // Only an interrupt from outside the test ends the wait early; keep its status.
+                Thread.currentThread().interrupt();
+            } finally {
+                backendLock.unlock();
+            }
+        });
+        assertTrue(held.await(1, TimeUnit.SECONDS));
+        bridgeThread = Thread.ofVirtual().name("bridge-under-test").start(bridge::run);
+        PostgresWireDecoder backendIn = new PostgresWireDecoder(testBackendEnd.getInputStream());
+        PostgresWireDecoder.ParseMessage parse = new PostgresWireDecoder.ParseMessage("drop", sql, List.of());
+        testClientEnd.getOutputStream().write(PostgresWireDecoder.encodeParse(parse, sql));
+        testClientEnd.getOutputStream().flush();
+
+        // the flush the bridge sends to look for the backend's replies is all that reaches it
+        assertEquals('H', backendIn.nextMessage().type());
+
+        InputStream response = testClientEnd.getInputStream();
+        assertEquals('E', response.read());
+        int length = ByteBuffer.wrap(response.readNBytes(4)).getInt();
+        String error = new String(response.readNBytes(length - 4), StandardCharsets.UTF_8);
+
+        release.countDown();
+        holder.join(1000);
+        assertTrue(error.contains("58030"), error);
+        assertTrue(error.contains("Unable to prepare external function DDL"), error);
+        Mockito.verify(interceptor, Mockito.never()).plan(Mockito.anyString(), Mockito.any(SpectrumSession.class),
+                Mockito.any(BackendSql.class));
+        // the Parse itself never reaches the backend, so PostgreSQL cannot drop the stub behind the registry
+        testBackendEnd.setSoTimeout(500);
+        assertThrows(SocketTimeoutException.class, backendIn::nextMessage);
     }
 
     private static void skipFrameBody(InputStream in) throws IOException {

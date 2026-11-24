@@ -96,7 +96,8 @@ class DynamoDbFacadeTest {
         DynamoDbCfnProvisioner provisioner = new DynamoDbCfnProvisioner(facade);
         StackResource table = cfnResource("Orders", "AWS::DynamoDB::Table");
 
-        provisioner.provision(table, mapper.readTree("{\"TableName\":\"orders\"}"),
+        provisioner.provision(table, mapper.readTree("{\"TableName\":\"orders\",\"ProvisionedThroughput\":"
+                + "{\"ReadCapacityUnits\":1,\"WriteCapacityUnits\":1}}"),
                 cfnContext(DEFAULT_ACCOUNT, OTHER_REGION));
         provisioner.delete("AWS::DynamoDB::Table", "orders", OTHER_REGION);
 

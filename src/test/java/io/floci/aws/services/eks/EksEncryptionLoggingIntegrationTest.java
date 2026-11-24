@@ -268,6 +268,12 @@ class EksEncryptionLoggingIntegrationTest {
             "{\"resourcesVpcConfig\":{\"endpointPublicAccess\":true},"
                     + "\"logging\":{\"clusterLogging\":[{\"types\":[\"audit\"],\"enabled\":true}]}}"
                     + "|400|InvalidParameterException|Only one type of update can be allowed.",
+            "{\"upgradePolicy\":{\"supportType\":\"STANDARD\"},"
+                    + "\"accessConfig\":{\"authenticationMode\":\"API\"}}"
+                    + "|400|InvalidParameterException|Only one type of update can be allowed.",
+            // upgradePolicy: an unknown support type, and none at all
+            "{\"upgradePolicy\":{\"supportType\":\"BOGUS\"}}|400|InvalidParameterException|null",
+            "{\"upgradePolicy\":{}}|400|InvalidParameterException|null",
             // a number where the model has a boolean, as createCluster refuses it
             "{\"resourcesVpcConfig\":{\"endpointPublicAccess\":1}}|400|SerializationException|null",
             // members UpdateClusterConfig does not support here
@@ -290,6 +296,83 @@ class EksEncryptionLoggingIntegrationTest {
             if (message != null) {
                 response.body("message", equalTo(message));
             }
+        } finally {
+            deleteCluster(name);
+        }
+    }
+
+    @Test
+    void aClusterGetsExtendedSupportUnlessItAsksForStandardAndAnUpdateChangesIt() {
+        String standard = "it-upgrade-standard-" + UUID.randomUUID();
+        String name = "it-upgrade-policy-" + UUID.randomUUID();
+        try {
+            createClusterFrom(standard, ",\"upgradePolicy\":{\"supportType\":\"STANDARD\"}");
+            createClusterFrom(name, "");
+            given().when().get("/clusters/" + standard).then().statusCode(200)
+                    .body("cluster.upgradePolicy.supportType", equalTo("STANDARD"));
+            given().when().get("/clusters/" + name).then().statusCode(200)
+                    .body("cluster.upgradePolicy.supportType", equalTo("EXTENDED"));
+
+            String id = given().contentType(JSON)
+                    .body("{\"upgradePolicy\":{\"supportType\":\"STANDARD\"}}")
+                    .when().post("/clusters/" + name + "/update-config")
+                    .then().statusCode(200)
+                    .body("update.type", equalTo("UpgradePolicyUpdate"))
+                    .body("update.status", equalTo("Successful"))
+                    .body("update.params", hasSize(1))
+                    .body("update.params[0].type", equalTo("UpgradePolicy"))
+                    .body("update.params[0].value", equalTo("{\"supportType\":\"STANDARD\"}"))
+                    .extract().path("update.id");
+            given().when().get("/clusters/" + name + "/updates/" + id).then().statusCode(200)
+                    .body("update.type", equalTo("UpgradePolicyUpdate"));
+            given().when().get("/clusters/" + name).then().statusCode(200)
+                    .body("cluster.upgradePolicy.supportType", equalTo("STANDARD"));
+        } finally {
+            deleteCluster(standard);
+            deleteCluster(name);
+        }
+    }
+
+    @Test
+    void standardSupportIsRefusedOnAVersionPastItsEndOfStandardSupport() {
+        String name = "it-upgrade-retired-" + UUID.randomUUID();
+        try {
+            given().contentType(JSON)
+                    .body("{\"name\":\"" + name + "\",\"roleArn\":\"" + ROLE_ARN + "\",\"version\":\"1.30\","
+                            + "\"upgradePolicy\":{\"supportType\":\"STANDARD\"}}")
+                    .when().post("/clusters")
+                    .then().statusCode(400).body("__type", equalTo("InvalidParameterException"))
+                    .body("message", equalTo("The requested Kubernetes version \"1.30\" is only supported under "
+                            + "extended support. Please change the supportType to extended support to create the "
+                            + "cluster."));
+            createClusterFrom(name, ",\"version\":\"1.30\"");
+            given().contentType(JSON)
+                    .body("{\"upgradePolicy\":{\"supportType\":\"STANDARD\"}}")
+                    .when().post("/clusters/" + name + "/update-config")
+                    .then().statusCode(400).body("__type", equalTo("InvalidParameterException"))
+                    .body("message", equalTo("The Kubernetes version \"1.30\" is not in standard support. Please "
+                            + "update the cluster to a version in standard support to change the supportType"));
+            given().when().get("/clusters/" + name).then().statusCode(200)
+                    .body("cluster.upgradePolicy.supportType", equalTo("EXTENDED"));
+        } finally {
+            deleteCluster(name);
+        }
+    }
+
+    @Test
+    void aClientRequestTokenReusedForAnotherUpgradePolicyIsRefused() {
+        String name = createClusterFrom("it-upgrade-token-" + UUID.randomUUID(), "");
+        try {
+            given().contentType(JSON)
+                    .body("{\"clientRequestToken\":\"policy-1\",\"upgradePolicy\":{\"supportType\":\"STANDARD\"}}")
+                    .when().post("/clusters/" + name + "/update-config")
+                    .then().statusCode(200);
+            given().contentType(JSON)
+                    .body("{\"clientRequestToken\":\"policy-1\",\"upgradePolicy\":{\"supportType\":\"EXTENDED\"}}")
+                    .when().post("/clusters/" + name + "/update-config")
+                    .then().statusCode(400).body("__type", equalTo("InvalidParameterException"));
+            given().when().get("/clusters/" + name).then().statusCode(200)
+                    .body("cluster.upgradePolicy.supportType", equalTo("STANDARD"));
         } finally {
             deleteCluster(name);
         }

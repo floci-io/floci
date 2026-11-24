@@ -352,6 +352,43 @@ class Ec2PortForwardManagerTest {
         verify(forwarding.portAllocator()).release(30000);
     }
 
+    @Test
+    void unrestrictedEgressRequiresWorldOpenSourceFamilyAndEveryTcpPort() {
+        SecurityGroup group = new SecurityGroup();
+        group.setIpPermissionsEgress(List.of(tcpCidr(0, 65534, "0.0.0.0/0"),
+                tcpCidr(0, 65535, "10.0.0.0/8"), IpPermissions.tcp(0, 65535, "::/0")));
+        assertFalse(Ec2PortForwardManager.hasUnrestrictedEgress(List.of(group), PublishedPortFamily.IPV4));
+        assertTrue(Ec2PortForwardManager.hasUnrestrictedEgress(List.of(group), PublishedPortFamily.IPV6));
+
+        IpPermission all = tcpCidr(0, 65535, "0.0.0.0/0");
+        all.setIpProtocol("-1");
+        all.setFromPort(null);
+        all.setToPort(null);
+        group.setIpPermissionsEgress(List.of(all));
+        assertTrue(Ec2PortForwardManager.hasUnrestrictedEgress(List.of(group), PublishedPortFamily.IPV4));
+        assertFalse(Ec2PortForwardManager.hasUnrestrictedEgress(List.of(group), PublishedPortFamily.IPV6));
+    }
+
+    @Test
+    void failedCloseOfRunningRelayFallsBackToRemoval() {
+        DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
+        Forwarding forwarding = forwarding(docker);
+        when(forwarding.config().network().securityGroupEnforcement().enabled()).thenReturn(true);
+        Instance instance = running();
+        instance.getPublishedPorts().put(8080, 30000);
+        InspectContainerResponse relay = docker.inspectContainerCmd("floci-aws-ec2-fwd-i-1-8080").exec();
+        when(relay.getId()).thenReturn("relay");
+        when(relay.getHostConfig().getAutoRemove()).thenReturn(true);
+        when(docker.execCreateCmd("relay")).thenThrow(new IllegalStateException("Docker unavailable"));
+        when(docker.inspectContainerCmd("relay").exec().getState().getRunning()).thenReturn(true);
+
+        forwarding.manager().reconcileNow(instance, Ec2PortForwardManager.DesiredPorts.NONE);
+
+        assertTrue(instance.getPublishedPorts().isEmpty());
+        verify(forwarding.lifecycle()).removeIfExistsStrict("relay");
+        verify(forwarding.portAllocator()).release(30000);
+    }
+
     /** A manager that builds real sidecar specs, allocating host port 30000 for every forward. */
     private record Forwarding(Ec2PortForwardManager manager, ContainerLifecycleManager lifecycle,
                               PortAllocator portAllocator, EmulatorConfig config) {

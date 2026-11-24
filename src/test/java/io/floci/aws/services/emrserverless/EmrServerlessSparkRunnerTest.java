@@ -25,11 +25,13 @@ import io.floci.aws.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatcher;
 import org.mockito.InOrder;
@@ -46,6 +48,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -88,6 +91,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class EmrServerlessSparkRunnerTest {
 
     private static final String ENDPOINT = "http://floci:4566";
@@ -111,8 +115,21 @@ class EmrServerlessSparkRunnerTest {
     private final DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
     private final SparkJobRunner.Progress progress = mock(SparkJobRunner.Progress.class);
     private final S3Service s3 = mock(S3Service.class);
+    // What the runner put in S3 by bucket and key, read during each put.
+    private final Map<String, byte[]> put = new HashMap<>();
     private final ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
     private final EcrRegistryManager ecr = mock(EcrRegistryManager.class);
+
+    EmrServerlessSparkRunnerTest() {
+        when(s3.putObjectFromStream(any(), any(), any(), any(), any())).thenAnswer(putting -> {
+            // Null as a test stubs the put over again, which calls it with its matchers.
+            InputStream body = putting.getArgument(2);
+            if (body != null) {
+                put.put(putting.getArgument(0) + "/" + putting.getArgument(1), body.readAllBytes());
+            }
+            return null;
+        });
+    }
 
     @Test
     void sparkSubmitRunsLocallyOnFlocisS3ThenTheRunsOwnSettings() {
@@ -1447,6 +1464,12 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void javaBaseOpensOpensEachPackageToTheClassPath() {
+        assertEquals("--add-opens=java.base/java.util.jar=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED",
+                EmrServerlessSparkRunner.javaBaseOpens(List.of("java.util.jar", "java.io")));
+    }
+
+    @Test
     void aHadoopCommandOnAClusterWhoseCoreNodesHoldItsHdfsWritesTheirCopies() {
         ContainerBuilder builder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
@@ -2402,11 +2425,11 @@ class EmrServerlessSparkRunnerTest {
                 });
     }
 
-    // The object the runner put at key, gunzipped.
+    // The object the runner put at key, gunzipped; read as S3 reads it, during the put, the runner closing its stream
+    // after.
     private String written(String bucket, String key) throws IOException {
-        ArgumentCaptor<InputStream> data = ArgumentCaptor.forClass(InputStream.class);
-        verify(s3).putObjectFromStream(eq(bucket), eq(key), data.capture(), eq("application/x-gzip"), eq(Map.of()));
-        try (GZIPInputStream gunzip = new GZIPInputStream(data.getValue())) {
+        verify(s3).putObjectFromStream(eq(bucket), eq(key), any(), eq("application/x-gzip"), eq(Map.of()));
+        try (GZIPInputStream gunzip = new GZIPInputStream(new ByteArrayInputStream(put.get(bucket + "/" + key)))) {
             return new String(gunzip.readAllBytes(), StandardCharsets.UTF_8);
         }
     }

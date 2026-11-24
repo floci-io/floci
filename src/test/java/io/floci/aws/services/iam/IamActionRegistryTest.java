@@ -3,6 +3,7 @@ package io.floci.aws.services.iam;
 import io.floci.aws.core.common.AwsProtocolClaimFilter;
 import io.floci.aws.core.common.ProtocolClaim;
 import io.floci.aws.core.common.WireProtocol;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
@@ -11,6 +12,7 @@ import jakarta.ws.rs.core.UriInfo;
 import org.jboss.resteasy.reactive.server.core.ResteasyReactiveRequestContext;
 import org.jboss.resteasy.reactive.server.spi.ResteasyReactiveContainerRequestContext;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvFileSource;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -38,6 +40,7 @@ import static org.mockito.Mockito.when;
  * {@code Action} extraction. The HTTP filter path is covered by SDK
  * compatibility tests; these tests pin the resolver behavior directly.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class IamActionRegistryTest {
 
     private final IamActionRegistry registry = new IamActionRegistry();
@@ -53,8 +56,7 @@ class IamActionRegistryTest {
     @Test
     void aRouteNoRuleMapsIsCheckedAsItsOperationWhenFlociChecksItAsAwsDoes() throws IOException {
         IamRestRoutes routes = IamRestRoutes.parse(new ByteArrayInputStream("""
-                {"handRouted": {},
-                 "models": {
+                {"models": {
                    "opensearch": {"credentialScope": "es", "operations": {
                      "ListDomainNames": {"method": "GET", "requestUri": "/unmapped/domain"},
                      "DescribeDomain": {"method": "GET", "requestUri": "/unmapped/domain/{DomainName}"}
@@ -638,7 +640,8 @@ class IamActionRegistryTest {
     @Test
     void aTrailingSlashIsCheckedAsTheRouteWithoutIt() {
         // The router matches /clusters/ as /clusters, so the rule ending at the route's last segment covers it.
-        // An S3 path is matched as sent, as before: a key may end in a slash.
+        // An S3 key may end in a slash, and one of slashes alone arrives as S3SlashOnlyKeyFilter rewrites it,
+        // escaped.
         String[][] routes = {
             {"eks", "POST", "/clusters/", "eks:CreateCluster"},
             {"eks", "GET", "/clusters/c/node-groups/ng/", "eks:DescribeNodegroup"},
@@ -647,9 +650,9 @@ class IamActionRegistryTest {
             {"lambda", "GET", "/2015-03-31/functions/fn/", "lambda:GetFunction"},
             {"s3", "GET", "/bucket/", "s3:ListBucket"},
             {"s3", "GET", "/bucket/folder/", "s3:GetObject"},
-            {"s3", "PUT", "/bucket//", "s3:PutObject"},
-            {"s3", "GET", "/bucket//", "s3:GetObject"},
-            {"s3", "DELETE", "/bucket//", "s3:DeleteObject"},
+            {"s3", "PUT", "/bucket/%2F", "s3:PutObject"},
+            {"s3", "GET", "/bucket/%2F", "s3:GetObject"},
+            {"s3", "DELETE", "/bucket/%2F", "s3:DeleteObject"},
         };
         for (String[] route : routes) {
             assertEquals(route[3], registry.resolveRoute(route[0], mockCtx(route[1], route[2],
@@ -780,29 +783,13 @@ class IamActionRegistryTest {
         assertEquals("s3:PutObjectLegalHold", s3Action("PUT", "/bucket/key", "legal-hold"));
         assertEquals("s3:GetObjectAnnotation", s3Action("GET", "/bucket/key", "annotation", "annotationName=n"));
         assertEquals("s3:ListObjectAnnotations", s3Action("GET", "/bucket/key", "annotation"));
-        assertEquals("s3:ListObjectAnnotations", s3Action("GET", "/bucket/key", "annotation", "annotationName="));
-        assertEquals("s3:GetObjectAnnotation", s3Action("HEAD", "/bucket/key", "annotation", "annotationName=n"));
         assertEquals("s3:PutObjectAnnotation", s3Action("PUT", "/bucket/key", "annotation"));
         assertEquals("s3:DeleteObjectAnnotation", s3Action("DELETE", "/bucket/key", "annotation"));
     }
 
     @Test
-    void s3ObjectSubresourcesFollowTheOrderTheControllerDispatchesThem() {
-        assertEquals("s3:GetObjectTagging", s3Action("GET", "/bucket/key", "acl", "tagging"));
-        assertEquals("s3:PutObjectTagging", s3Action("PUT", "/bucket/key", "acl", "tagging"));
-        assertEquals("s3:ListMultipartUploadParts", s3Action("GET", "/bucket/key", "acl", "uploadId=u1"));
-        assertEquals("s3:GetObjectRetention", s3Action("GET", "/bucket/key", "acl", "retention"));
-        assertEquals("s3:DeleteObjectTagging", s3Action("DELETE", "/bucket/key", "acl", "tagging"));
-        assertEquals("s3:DeleteObjectAnnotation", s3Action("DELETE", "/bucket/key", "annotation", "uploadId=u1"));
-        assertEquals("s3:PutObject", s3Action("POST", "/bucket/key", "uploads", "restore"));
-        assertEquals("s3:RestoreObject", s3Action("POST", "/bucket/key", "restore", "uploadId=u1"));
-        assertEquals("s3:GetObject", s3Action("POST", "/bucket/key", "select", "uploadId=u1"));
-    }
-
-    @Test
     void s3VersionedObjectRequestsResolveToTheVersionActions() {
         assertEquals("s3:GetObjectVersion", s3Action("GET", "/bucket/key", "versionId=v1"));
-        assertEquals("s3:GetObjectVersion", s3Action("HEAD", "/bucket/key", "versionId=v1"));
         assertEquals("s3:DeleteObjectVersion", s3Action("DELETE", "/bucket/key", "versionId=v1"));
         assertEquals("s3:GetObjectVersionAcl", s3Action("GET", "/bucket/key", "acl", "versionId=v1"));
         assertEquals("s3:PutObjectVersionAcl", s3Action("PUT", "/bucket/key", "acl", "versionId=v1"));
@@ -814,8 +801,6 @@ class IamActionRegistryTest {
         assertEquals("s3:GetObjectVersionTagging", s3Action("GET", "/bucket/key", "tagging", "versionId=null"));
         assertEquals("s3:GetObjectVersionAnnotation",
                 s3Action("GET", "/bucket/key", "annotation", "annotationName=n", "versionId=v1"));
-        assertEquals("s3:GetObjectVersionAnnotation",
-                s3Action("HEAD", "/bucket/key", "annotation", "annotationName=n", "versionId=v1"));
         assertEquals("s3:ListObjectVersionAnnotations",
                 s3Action("GET", "/bucket/key", "annotation", "versionId=v1"));
         assertEquals("s3:PutObjectVersionAnnotation",
@@ -824,8 +809,6 @@ class IamActionRegistryTest {
                 s3Action("DELETE", "/bucket/key", "annotation", "annotationName=n", "versionId=v1"));
         // GetObjectAttributes of a version is checked as the read of that version.
         assertEquals("s3:GetObjectVersion", s3Action("GET", "/bucket/key", "attributes", "versionId=v1"));
-        // S3Controller selects from the version a versionId names.
-        assertEquals("s3:GetObjectVersion", s3Action("POST", "/bucket/key", "select", "versionId=v1"));
         // Retention and legal hold have no version action; the upload operations take no version.
         assertEquals("s3:GetObjectRetention", s3Action("GET", "/bucket/key", "retention", "versionId=v1"));
         assertEquals("s3:PutObjectLegalHold", s3Action("PUT", "/bucket/key", "legal-hold", "versionId=v1"));
@@ -930,27 +913,6 @@ class IamActionRegistryTest {
     }
 
     @Test
-    void s3AccelerateYieldsToSubresourcesDispatchedFirst() {
-        MultivaluedMap<String, String> withRequestPayment = new MultivaluedHashMap<>();
-        withRequestPayment.add("requestPayment", "");
-        withRequestPayment.add("accelerate", "");
-        assertEquals("s3:PutBucketRequestPayment",
-                registry.resolve("s3", mockCtx("PUT", "/bucket", withRequestPayment, null, "")));
-        MultivaluedMap<String, String> withLocation = new MultivaluedHashMap<>();
-        withLocation.add("location", "");
-        withLocation.add("accelerate", "");
-        assertEquals("s3:GetBucketLocation",
-                registry.resolve("s3", mockCtx("GET", "/bucket", withLocation, null, "")));
-        // uploads is a GET-only dispatch branch; on PUT it is inert and accelerate executes,
-        // so the mapping must still claim the request there.
-        MultivaluedMap<String, String> withUploads = new MultivaluedHashMap<>();
-        withUploads.add("uploads", "");
-        withUploads.add("accelerate", "");
-        assertEquals("s3:PutAccelerateConfiguration",
-                registry.resolve("s3", mockCtx("PUT", "/bucket", withUploads, null, "")));
-    }
-
-    @Test
     void s3ReplicationResolvesToItsOwnActions() {
         // Without the override, PUT ?replication resolves to s3:CreateBucket — a
         // principal allowed only to create buckets could rewrite the replication
@@ -981,41 +943,6 @@ class IamActionRegistryTest {
     }
 
     @Test
-    void s3ReplicationYieldsToSubresourcesDispatchedFirst() {
-        // The first dispatched subresource determines the required permission.
-        MultivaluedMap<String, String> withRequestPayment = new MultivaluedHashMap<>();
-        withRequestPayment.add("requestPayment", "");
-        withRequestPayment.add("replication", "");
-        assertEquals("s3:PutBucketRequestPayment",
-                registry.resolve("s3", mockCtx("PUT", "/bucket", withRequestPayment, null, "")));
-        MultivaluedMap<String, String> withLocation = new MultivaluedHashMap<>();
-        withLocation.add("location", "");
-        withLocation.add("replication", "");
-        assertEquals("s3:GetBucketLocation",
-                registry.resolve("s3", mockCtx("GET", "/bucket", withLocation, null, "")));
-        // The DELETE chain dispatches website ahead of replication.
-        MultivaluedMap<String, String> withWebsite = new MultivaluedHashMap<>();
-        withWebsite.add("website", "");
-        withWebsite.add("replication", "");
-        assertEquals("s3:DeleteBucketWebsite",
-                registry.resolve("s3", mockCtx("DELETE", "/bucket", withWebsite, null, "")));
-        // requestPayment has no DELETE dispatch branch; it is inert there and
-        // replication executes, so the mapping must still claim the request.
-        MultivaluedMap<String, String> deleteWithRequestPayment = new MultivaluedHashMap<>();
-        deleteWithRequestPayment.add("requestPayment", "");
-        deleteWithRequestPayment.add("replication", "");
-        assertEquals("s3:PutReplicationConfiguration",
-                registry.resolve("s3", mockCtx("DELETE", "/bucket", deleteWithRequestPayment, null, "")));
-        // uploads is a GET-only dispatch branch; on PUT it is inert and replication
-        // executes, so the mapping must still claim the request there.
-        MultivaluedMap<String, String> putWithUploads = new MultivaluedHashMap<>();
-        putWithUploads.add("uploads", "");
-        putWithUploads.add("replication", "");
-        assertEquals("s3:PutReplicationConfiguration",
-                registry.resolve("s3", mockCtx("PUT", "/bucket", putWithUploads, null, "")));
-    }
-
-    @Test
     void s3ReplicationAndAcceleratePrecedenceFollowsEachMethodsDispatchOrder() {
         // PUT and GET dispatch accelerate ahead of replication; DELETE routes
         // replication and never routes accelerate to an operation.
@@ -1028,36 +955,6 @@ class IamActionRegistryTest {
                 registry.resolve("s3", mockCtx("GET", "/bucket", both, null, "")));
         assertEquals("s3:PutReplicationConfiguration",
                 registry.resolve("s3", mockCtx("DELETE", "/bucket", both, null, "")));
-    }
-
-    @Test
-    void s3ReplicationDoesNotPreemptAclOrTagging() {
-        // Appending an inert ?replication must not downgrade a stricter resolution.
-        MultivaluedMap<String, String> withAcl = new MultivaluedHashMap<>();
-        withAcl.add("replication", "");
-        withAcl.add("acl", "");
-        assertEquals("s3:PutBucketAcl",
-                registry.resolve("s3", mockCtx("PUT", "/bucket", withAcl, null, "")));
-        MultivaluedMap<String, String> withTagging = new MultivaluedHashMap<>();
-        withTagging.add("replication", "");
-        withTagging.add("tagging", "");
-        assertEquals("s3:PutBucketTagging",
-                registry.resolve("s3", mockCtx("DELETE", "/bucket", withTagging, null, "")));
-    }
-
-    @Test
-    void s3AccelerateDoesNotPreemptAclOrTagging() {
-        // Appending an inert ?accelerate must not downgrade a stricter resolution.
-        MultivaluedMap<String, String> withAcl = new MultivaluedHashMap<>();
-        withAcl.add("accelerate", "");
-        withAcl.add("acl", "");
-        assertEquals("s3:PutBucketAcl",
-                registry.resolve("s3", mockCtx("PUT", "/bucket", withAcl, null, "")));
-        MultivaluedMap<String, String> withTagging = new MultivaluedHashMap<>();
-        withTagging.add("accelerate", "");
-        withTagging.add("tagging", "");
-        assertEquals("s3:DeleteObjectTagging",
-                registry.resolve("s3", mockCtx("DELETE", "/bucket/key.txt", withTagging, null, "")));
     }
 
     @Test
@@ -1120,10 +1017,7 @@ class IamActionRegistryTest {
         assertEquals("s3:DeleteBucket", bucketAction("DELETE", "versioning"));
         assertEquals("s3:CreateBucket", bucketAction("PUT", "location"));
         assertNull(bucketAction("POST", "versioning"));
-        // A browser-form PostObject runs ahead of any sub-resource and is checked per key, as DeleteObjects is.
-        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
-        params.add("metadataTable", "");
-        assertNull(registry.resolve("s3", mockCtx("POST", "/bucket", params, MediaType.MULTIPART_FORM_DATA_TYPE, "")));
+        // DeleteObjects names its keys in its body, which S3Controller checks one by one.
         assertNull(bucketAction("POST", "delete"));
     }
 

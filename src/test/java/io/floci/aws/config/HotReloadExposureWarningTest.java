@@ -1,6 +1,8 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.Optional;
@@ -10,6 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class HotReloadExposureWarningTest {
 
     private static EmulatorConfig configWith(boolean enabled, List<String> allowedPaths) {

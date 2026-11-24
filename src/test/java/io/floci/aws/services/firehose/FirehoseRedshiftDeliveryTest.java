@@ -7,6 +7,7 @@ import io.floci.aws.services.firehose.model.RedshiftDestination;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.ServiceRoleAuthorizer;
 import io.floci.aws.services.iam.model.IamRole;
+import io.floci.aws.services.redshift.RedshiftJdbcTargets;
 import io.floci.aws.services.redshift.RedshiftService;
 import io.floci.aws.services.redshift.model.Cluster;
 import io.floci.aws.services.redshift.model.Endpoint;
@@ -14,8 +15,10 @@ import io.floci.aws.services.redshiftserverless.RedshiftServerlessService;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessService.WorkgroupTarget;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.SecretVersion;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -43,6 +46,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class FirehoseRedshiftDeliveryTest {
 
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
@@ -53,6 +57,7 @@ class FirehoseRedshiftDeliveryTest {
     private IamService iamService;
     private final List<String[]> executed = new ArrayList<>();
     private FirehoseRedshiftDelivery delivery;
+    private RedshiftJdbcTargets jdbcTargets;
 
     @BeforeEach
     void setUp() {
@@ -65,7 +70,8 @@ class FirehoseRedshiftDeliveryTest {
         serverless = mock(RedshiftServerlessService.class);
         roleAuthorizer = mock(ServiceRoleAuthorizer.class);
         iamService = mock(IamService.class);
-        delivery = new FirehoseRedshiftDelivery(redshift, serverless, secrets, roleAuthorizer, iamService, mapper,
+        jdbcTargets = new RedshiftJdbcTargets(redshift, serverless, secrets, mapper);
+        delivery = new FirehoseRedshiftDelivery(jdbcTargets, roleAuthorizer, iamService,
                 (url, user, password, sql) -> executed.add(new String[] {url, user, password, sql}));
     }
 
@@ -282,8 +288,8 @@ class FirehoseRedshiftDeliveryTest {
     void aFailedCopyNeitherLeaksCredentialsIntoTheErrorNorKeepsTheSession() throws Exception {
         knownLoadRole();
         List<String> sent = new ArrayList<>();
-        FirehoseRedshiftDelivery failing = new FirehoseRedshiftDelivery(redshift, serverless, secrets,
-                roleAuthorizer, iamService, mapper, (url, user, password, sql) -> {
+        FirehoseRedshiftDelivery failing = new FirehoseRedshiftDelivery(jdbcTargets,
+                roleAuthorizer, iamService, (url, user, password, sql) -> {
                     sent.add(sql);
                     throw new SQLException("rejected: " + sql, "XX000");
                 });
@@ -348,8 +354,8 @@ class FirehoseRedshiftDeliveryTest {
 
     @Test
     void jdbcFailureIsWrappedWithTableClusterAndSqlState() {
-        FirehoseRedshiftDelivery failing = new FirehoseRedshiftDelivery(redshift, serverless, secrets,
-                roleAuthorizer, iamService, mapper,
+        FirehoseRedshiftDelivery failing = new FirehoseRedshiftDelivery(jdbcTargets,
+                roleAuthorizer, iamService,
                 (url, user, password, sql) -> {
                     throw new SQLException("relation \"events\" does not exist", "42P01");
                 });

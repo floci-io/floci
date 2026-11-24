@@ -9,6 +9,8 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
+import static io.floci.aws.services.ses.SesV1Requests.AUTH;
+import static io.floci.aws.services.ses.SesV1Requests.authFor;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -23,18 +25,10 @@ class SesIntegrationTest {
     // identity under example.com, so the later sends use a sender of their own.
     private static final String INSPECTION_SENDER = "inspection-sender@floci.test";
 
-    private static String authorization(String service) {
-        return authorization(service, "us-east-1");
-    }
-
-    private static String authorization(String service, String region) {
-        return "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + region + "/" + service + "/aws4_request";
-    }
-
     private static void verifySender(String address) {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "VerifyEmailIdentity")
             .formParam("EmailAddress", address)
         .when()
@@ -48,7 +42,7 @@ class SesIntegrationTest {
     void verifyEmailIdentity() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "VerifyEmailIdentity")
             .formParam("EmailAddress", "sender@example.com")
         .when()
@@ -64,7 +58,7 @@ class SesIntegrationTest {
     void verifyEmailIdentity_second() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "VerifyEmailIdentity")
             .formParam("EmailAddress", "recipient@example.com")
         .when()
@@ -78,7 +72,7 @@ class SesIntegrationTest {
     void verifyDomainIdentity() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "VerifyDomainIdentity")
             .formParam("Domain", "example.com")
         .when()
@@ -93,7 +87,7 @@ class SesIntegrationTest {
     void listIdentities() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "ListIdentities")
         .when()
             .post("/")
@@ -109,7 +103,7 @@ class SesIntegrationTest {
     void listIdentities_filteredByType() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "ListIdentities")
             .formParam("IdentityType", "Domain")
         .when()
@@ -125,7 +119,7 @@ class SesIntegrationTest {
     void getIdentityVerificationAttributes() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "GetIdentityVerificationAttributes")
             .formParam("Identities.member.1", "sender@example.com")
         .when()
@@ -141,7 +135,7 @@ class SesIntegrationTest {
     void getIdentityVerificationAttributes_unknownIdentity() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "GetIdentityVerificationAttributes")
             .formParam("Identities.member.1", "unknown@example.com")
         .when()
@@ -156,7 +150,7 @@ class SesIntegrationTest {
     void getIdentityVerificationAttributes_domainStartsPending() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "GetIdentityVerificationAttributes")
             .formParam("Identities.member.1", "example.com")
         .when()
@@ -172,7 +166,7 @@ class SesIntegrationTest {
     void listVerifiedEmailAddresses() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "ListVerifiedEmailAddresses")
         .when()
             .post("/")
@@ -187,7 +181,7 @@ class SesIntegrationTest {
     void sendEmail() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "SendEmail")
             .formParam("Source", "sender@example.com")
             .formParam("Destination.ToAddresses.member.1", "recipient@example.com")
@@ -205,7 +199,7 @@ class SesIntegrationTest {
     void sendEmail_withHtmlBody() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "SendEmail")
             .formParam("Source", "sender@example.com")
             .formParam("Destination.ToAddresses.member.1", "recipient@example.com")
@@ -223,7 +217,7 @@ class SesIntegrationTest {
     void sendRawEmail() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "SendRawEmail")
             .formParam("Source", "sender@example.com")
             .formParam("Destinations.member.1", "recipient@example.com")
@@ -244,7 +238,7 @@ class SesIntegrationTest {
         verifySender(INSPECTION_SENDER);
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "SendRawEmail")
             .formParam("Destinations.member.1", "recipient@example.com")
             .formParam("RawMessage.Data",
@@ -264,7 +258,7 @@ class SesIntegrationTest {
         // Verified against real AWS: v1 returns InvalidParameterValue "Missing required header 'From'." (400).
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "SendRawEmail")
             .formParam("Destinations.member.1", "recipient@example.com")
             .formParam("RawMessage.Data", "Subject: hello\r\n\r\nbody\r\n")
@@ -282,7 +276,7 @@ class SesIntegrationTest {
     void getSendQuota() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "GetSendQuota")
         .when()
             .post("/")
@@ -298,7 +292,7 @@ class SesIntegrationTest {
     void getSendStatistics() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "GetSendStatistics")
         .when()
             .post("/")
@@ -313,7 +307,7 @@ class SesIntegrationTest {
     void getAccountSendingEnabled() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "GetAccountSendingEnabled")
         .when()
             .post("/")
@@ -327,7 +321,7 @@ class SesIntegrationTest {
     void getAccountSendingEnabled_acceptsTheSesCredentialScope() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("ses"))
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request")
             .formParam("Action", "GetAccountSendingEnabled")
         .when()
             .post("/")
@@ -341,7 +335,7 @@ class SesIntegrationTest {
     void getIdentityDkimAttributes() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "GetIdentityDkimAttributes")
             .formParam("Identities.member.1", "example.com")
         .when()
@@ -371,7 +365,7 @@ class SesIntegrationTest {
 
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "SetIdentityNotificationTopic")
             .formParam("Identity", "sender@example.com")
             .formParam("NotificationType", "Bounce")
@@ -388,7 +382,7 @@ class SesIntegrationTest {
     void getIdentityNotificationAttributes() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "GetIdentityNotificationAttributes")
             .formParam("Identities.member.1", "sender@example.com")
         .when()
@@ -404,7 +398,7 @@ class SesIntegrationTest {
     void deleteVerifiedEmailAddress() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "DeleteVerifiedEmailAddress")
             .formParam("EmailAddress", "recipient@example.com")
         .when()
@@ -415,7 +409,7 @@ class SesIntegrationTest {
         // Verify it's gone
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "ListVerifiedEmailAddresses")
         .when()
             .post("/")
@@ -429,7 +423,7 @@ class SesIntegrationTest {
     void deleteIdentity() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "DeleteIdentity")
             .formParam("Identity", "sender@example.com")
         .when()
@@ -441,7 +435,7 @@ class SesIntegrationTest {
         // Verify it's gone
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "ListIdentities")
         .when()
             .post("/")
@@ -458,7 +452,7 @@ class SesIntegrationTest {
 
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "SendEmail")
             .formParam("Source", INSPECTION_SENDER)
             .formParam("Destination.ToAddresses.member.1", "recipient@example.com")
@@ -488,7 +482,7 @@ class SesIntegrationTest {
 
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "SendEmail")
             .formParam("Source", INSPECTION_SENDER)
             .formParam("Destination.ToAddresses.member.1", "recipient@example.com")
@@ -524,7 +518,7 @@ class SesIntegrationTest {
 
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "SendRawEmail")
             .formParam("Source", INSPECTION_SENDER)
             .formParam("Destinations.member.1", "recipient@example.com")
@@ -547,7 +541,7 @@ class SesIntegrationTest {
     void deleteDomainIdentity() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "DeleteIdentity")
             .formParam("Identity", "example.com")
         .when()
@@ -558,7 +552,7 @@ class SesIntegrationTest {
 
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "ListIdentities")
         .when()
             .post("/")
@@ -572,7 +566,7 @@ class SesIntegrationTest {
     void verifyEmailIdentity_rejectsLeadingTrailingWhitespace() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "VerifyEmailIdentity")
             .formParam("EmailAddress", " sender@example.com ")
         .when()
@@ -588,7 +582,7 @@ class SesIntegrationTest {
     void verifyDomainIdentity_rejectsLeadingTrailingWhitespace() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "VerifyDomainIdentity")
             .formParam("Domain", " example.com ")
         .when()
@@ -604,7 +598,7 @@ class SesIntegrationTest {
     void unsupportedAction_returns400() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", AUTH)
             .formParam("Action", "UnknownSesAction")
         .when()
             .post("/")
@@ -619,7 +613,7 @@ class SesIntegrationTest {
         // Missing Enabled parameter defaults to false (probed against real AWS 2026-09-05)
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "UpdateAccountSendingEnabled")
         .when()
             .post("/")
@@ -628,7 +622,7 @@ class SesIntegrationTest {
 
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "GetAccountSendingEnabled")
         .when()
             .post("/")
@@ -640,7 +634,7 @@ class SesIntegrationTest {
         // unlike the absent case (probed against real AWS 2026-09-05)
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "UpdateAccountSendingEnabled")
             .formParam("Enabled", "")
         .when()
@@ -653,7 +647,7 @@ class SesIntegrationTest {
         // restore default state for downstream tests
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "UpdateAccountSendingEnabled")
             .formParam("Enabled", "true")
         .when()
@@ -668,7 +662,7 @@ class SesIntegrationTest {
         // Disable sending in us-west-2 only; also exercises the response envelope shape
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email", "us-west-2"))
+            .header("Authorization", authFor("us-west-2"))
             .formParam("Action", "UpdateAccountSendingEnabled")
             .formParam("Enabled", "false")
         .when()
@@ -680,7 +674,7 @@ class SesIntegrationTest {
         // us-west-2 reflects the disable
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email", "us-west-2"))
+            .header("Authorization", authFor("us-west-2"))
             .formParam("Action", "GetAccountSendingEnabled")
         .when()
             .post("/")
@@ -691,7 +685,7 @@ class SesIntegrationTest {
         // us-east-1 is unaffected
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "GetAccountSendingEnabled")
         .when()
             .post("/")
@@ -702,7 +696,7 @@ class SesIntegrationTest {
         // re-enable us-west-2 and confirm the toggle round-tripped
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email", "us-west-2"))
+            .header("Authorization", authFor("us-west-2"))
             .formParam("Action", "UpdateAccountSendingEnabled")
             .formParam("Enabled", "true")
         .when()
@@ -712,7 +706,7 @@ class SesIntegrationTest {
 
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email", "us-west-2"))
+            .header("Authorization", authFor("us-west-2"))
             .formParam("Action", "GetAccountSendingEnabled")
         .when()
             .post("/")
@@ -727,7 +721,7 @@ class SesIntegrationTest {
         // Probed against real AWS 2026-09-05: non-xsd boolean values are MalformedInput
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
+            .header("Authorization", AUTH)
             .formParam("Action", "UpdateAccountSendingEnabled")
             .formParam("Enabled", "yes")
         .when()

@@ -23,6 +23,7 @@ import io.floci.aws.services.rds.proxy.RdsProxyTlsCertificates;
 import io.floci.aws.services.rds.proxy.RdsSigV4Validator;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.SecretVersion;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.TestDockerClients;
 import io.floci.aws.testutil.FreePorts;
 import org.junit.jupiter.api.AfterAll;
@@ -32,6 +33,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -59,6 +61,7 @@ import static org.mockito.Mockito.when;
 
 @Tag("docker")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@ResourceLock(ParallelLocks.PORTS)
 class RdsBackendEndpointRefreshIntegrationTest {
 
     private static final String IMAGE = "postgres:16.3-alpine";

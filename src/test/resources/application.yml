@@ -162,6 +162,7 @@ floci:
       vector-index-allocation-seconds: 0
       vector-index-backfill-seconds: 0
       latest-restorable-lag-seconds: 0
+      randomize-attribute-order: true
       backend: native
     sns:
       enabled: true
@@ -394,6 +395,7 @@ floci:
     ecr:
       enabled: true
       tls-uri: false
+      lifecycle-sweep-enabled: false   # tests run the sweep themselves, so no repository's policy applies behind another test's back
     ui:
       enabled: true
     bedrock:
@@ -550,6 +552,7 @@ floci:
     emrcontainers:
       enabled: true
       job-run-duration-seconds: 0   # 0 = a job run completes as soon as it is submitted
+      runner-mode: immediate
     ssoadmin:
       enabled: true
     ssooidc:

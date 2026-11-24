@@ -10,6 +10,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.ServiceRegistry;
 import io.floci.aws.services.eventbridge.EventBridgeService;
+import io.floci.aws.services.kinesis.KinesisService;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
@@ -42,12 +43,14 @@ public class PipesTargetInvoker {
             Pattern.compile("<(\\$[^>]+|aws\\.pipes\\.event\\.ingestion-time)>");
     private static final Pattern ARRAY_INDEX = Pattern.compile("^(.*?)\\[(\\d+)]$");
     private static final String PIPES_PRINCIPAL = ServicePrincipals.of("pipes");
+    static final int MAX_PARTITION_KEY_LENGTH = 256;
     private static final Pattern DYNAMIC_PARAMETER_PATH =
             Pattern.compile("\\$(?:\\.[\\w*/-]+|\\[\\d+\\])+");
 
     private final LambdaService lambdaService;
     private final SqsService sqsService;
     private final SnsService snsService;
+    private final KinesisService kinesisService;
     private final EventBridgeService eventBridgeService;
     private final StepFunctionsService stepFunctionsService;
     private final RedshiftDataTargetSubmitter redshiftSubmitter;
@@ -60,6 +63,7 @@ public class PipesTargetInvoker {
     public PipesTargetInvoker(LambdaService lambdaService,
                               SqsService sqsService,
                               SnsService snsService,
+                              KinesisService kinesisService,
                               EventBridgeService eventBridgeService,
                               StepFunctionsService stepFunctionsService,
                               RedshiftDataTargetSubmitter redshiftSubmitter,
@@ -70,6 +74,7 @@ public class PipesTargetInvoker {
         this.lambdaService = lambdaService;
         this.sqsService = sqsService;
         this.snsService = snsService;
+        this.kinesisService = kinesisService;
         this.eventBridgeService = eventBridgeService;
         this.stepFunctionsService = stepFunctionsService;
         this.redshiftSubmitter = redshiftSubmitter;
@@ -104,9 +109,11 @@ public class PipesTargetInvoker {
         if (targetArn.contains(":lambda:") || targetArn.contains(":function:")) {
             invokeLambda(targetArn, payload, region);
         } else if (targetArn.contains(":sqs:")) {
-            invokeSqs(targetArn, payload, region);
+            invokeSqs(targetArn, payload, region, tp, event);
         } else if (targetArn.contains(":sns:")) {
             invokeSns(targetArn, payload, region);
+        } else if (AwsArnUtils.isArnFor(targetArn, "kinesis")) {
+            invokeKinesis(targetArn, payload, region, tp, event);
         } else if (targetArn.contains(":events:")) {
             invokeEventBridge(targetArn, payload, region, tp, event);
         } else if (targetArn.contains(":states:")) {
@@ -198,9 +205,14 @@ public class PipesTargetInvoker {
         return fi >= 0 ? ref.substring(fi + ":function:".length()) : ref;
     }
 
-    private void invokeSqs(String arn, String payload, String region) {
+    private void invokeSqs(String arn, String payload, String region, JsonNode tp, String event) {
         String queueUrl = AwsArnUtils.arnToQueueUrl(arn, baseUrl);
-        sqsService.sendMessage(queueUrl, payload, 0, region);
+        JsonNode sqsParams = tp == null ? MissingNode.getInstance() : tp.path("SqsQueueParameters");
+        String groupId = resolveDynamicParameter(text(sqsParams, "MessageGroupId"), event,
+                "target parameter MessageGroupId");
+        String dedupId = resolveDynamicParameter(text(sqsParams, "MessageDeduplicationId"), event,
+                "target parameter MessageDeduplicationId");
+        sqsService.sendMessage(queueUrl, payload, 0, groupId, dedupId, region);
         LOG.debugv("Pipe delivered to SQS: {0}", arn);
     }
 
@@ -208,6 +220,32 @@ public class PipesTargetInvoker {
         String topicRegion = extractRegionFromArn(arn, region);
         snsService.publish(arn, null, payload, "Pipes", topicRegion);
         LOG.debugv("Pipe delivered to SNS: {0}", arn);
+    }
+
+    private void invokeKinesis(String arn, String payload, String region, JsonNode tp, String event) {
+        JsonNode kinesisParams = tp == null ? MissingNode.getInstance() : tp.path("KinesisStreamParameters");
+        String partitionKey = resolveDynamicParameter(text(kinesisParams, "PartitionKey"), event,
+                "target parameter PartitionKey");
+        validateKinesisPartitionKey(partitionKey);
+        AwsArnUtils.Arn stream = AwsArnUtils.parse(arn);
+        kinesisService.putRecordForAccount(stream.accountId(), PipesPoller.kinesisStreamName(arn),
+                payload.getBytes(StandardCharsets.UTF_8), partitionKey, extractRegionFromArn(arn, region));
+        LOG.debugv("Pipe delivered to Kinesis: {0}", arn);
+    }
+
+    private static void validateKinesisPartitionKey(String partitionKey) {
+        String key = partitionKey == null ? "" : partitionKey;
+        String constraint;
+        if (key.isEmpty()) {
+            constraint = "greater than or equal to 1";
+        } else if (key.codePointCount(0, key.length()) > MAX_PARTITION_KEY_LENGTH) {
+            constraint = "less than or equal to " + MAX_PARTITION_KEY_LENGTH;
+        } else {
+            return;
+        }
+        throw new AwsException("ValidationException", "1 validation error detected: Value '" + key
+                + "' at 'records.1.member.partitionKey' failed to satisfy constraint: Member must have length "
+                + constraint, 400);
     }
 
     private void invokeEventBridge(String arn, String payload, String region, JsonNode tp, String event) {
@@ -290,7 +328,7 @@ public class PipesTargetInvoker {
         LOG.debugv("Pipe delivered to Redshift Data API: {0}", targetArn);
     }
 
-    private static String text(JsonNode parent, String field) {
+    static String text(JsonNode parent, String field) {
         JsonNode node = parent.path(field);
         return node.isTextual() ? node.asText() : null;
     }

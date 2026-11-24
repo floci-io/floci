@@ -17,6 +17,8 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -34,8 +36,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesEmailIdentityConfigurationSetV2IntegrationTest {
 
-    private static final String SES_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String SNS_AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/sns/aws4_request";
     private static final String SQS_AUTH =
@@ -58,11 +58,11 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
     @Test
     @Order(1)
     void setup_identity_configSet_snsEventDestination() {
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"EmailIdentity\":\"" + IDENTITY + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + CS + "\"}")
         .when().post("/v2/email/configuration-sets").then().statusCode(200);
 
@@ -89,7 +89,7 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
                 .body("{\"TopicArn\":\"" + topicArn + "\",\"Protocol\":\"sqs\",\"Endpoint\":\"" + queueArn + "\"}")
         .when().post("/").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "EventDestinationName": "ed-sns",
@@ -107,12 +107,12 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
     @Test
     @Order(2)
     void putEmailIdentityConfigurationSet_associatesAndSurfacesInGet() {
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + CS + "\"}")
         .when().put("/v2/email/identities/" + IDENTITY + "/configuration-set")
         .then().statusCode(200);
 
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/identities/" + IDENTITY)
         .then().statusCode(200)
                 .body("ConfigurationSetName", equalTo(CS));
@@ -123,7 +123,7 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
     void sendWithoutConfigSet_routesThroughIdentityDefault_publishesEvent() throws Exception {
         drainQueue();
         // No ConfigurationSetName on the send — it must resolve to the identity's default.
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -145,12 +145,12 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
     @Test
     @Order(4)
     void clearConfigurationSet_removesAssociation() {
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{}")
         .when().put("/v2/email/identities/" + IDENTITY + "/configuration-set")
         .then().statusCode(200);
 
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/identities/" + IDENTITY)
         .then().statusCode(200)
                 .body("$", Matchers.not(Matchers.hasKey("ConfigurationSetName")));
@@ -160,7 +160,7 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
     @Order(5)
     void sendRawContentWithoutConfigSet_routesThroughIdentityDefault() throws Exception {
         // Re-associate (Order 4 cleared it) so this test is self-contained.
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + CS + "\"}")
         .when().put("/v2/email/identities/" + IDENTITY + "/configuration-set")
         .then().statusCode(200);
@@ -172,7 +172,7 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
         String rawB64 = Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
         // SendEmail with Raw content and no ConfigurationSetName must route through the
         // identity's default, just like the Simple-content path.
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -193,7 +193,7 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
     @Test
     @Order(6)
     void unknownIdentity_returns404() {
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + CS + "\"}")
         .when().put("/v2/email/identities/cs-attr-ghost@floci.test/configuration-set")
         .then().statusCode(404)
@@ -203,7 +203,7 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
     @Test
     @Order(7)
     void unknownConfigurationSet_returns404() {
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"cs-attr-missing\"}")
         .when().put("/v2/email/identities/" + IDENTITY + "/configuration-set")
         .then().statusCode(404)
@@ -214,7 +214,7 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
     @Order(8)
     void sendRawContentWithoutFromAddress_routesThroughIdentityDefault() throws Exception {
         // Re-associate so this test is self-contained.
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + CS + "\"}")
         .when().put("/v2/email/identities/" + IDENTITY + "/configuration-set")
         .then().statusCode(200);
@@ -226,7 +226,7 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
                 + "To: bounce@simulator.amazonses.com\r\n"
                 + "Subject: cs-attr-raw-nofrom\r\n\r\nbody";
         String rawB64 = Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "Destination": {"ToAddresses": ["bounce@simulator.amazonses.com"]},
@@ -248,18 +248,18 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
     @Order(9)
     void putConfigurationSet_whitespaceOnlyOrArrayBody_returnsSerializationExceptionAndKeepsAssociation() {
         // Re-associate so we can confirm a whitespace-only body does NOT clear.
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + CS + "\"}")
         .when().put("/v2/email/identities/" + IDENTITY + "/configuration-set")
         .then().statusCode(200);
 
         // A whitespace-only body is a serialization error on real AWS, not a silent clear.
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body(" \n")
         .when().put("/v2/email/identities/" + IDENTITY + "/configuration-set")
         .then().statusCode(400)
                 .body("__type", equalTo("SerializationException"));
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("[]")
         .when().put("/v2/email/identities/" + IDENTITY + "/configuration-set")
         .then().statusCode(400)
@@ -267,7 +267,7 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
                 .body("message", equalTo("Start of list found where not expected"));
 
         // The association is unchanged (the invalid bodies neither cleared nor updated it).
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/identities/" + IDENTITY)
         .then().statusCode(200)
                 .body("ConfigurationSetName", equalTo(CS));
@@ -280,22 +280,22 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
         // identity's default, then sending through that identity, fails with a bad-request error.
         String id = "cs-attr-stale@floci.test";
         String cs = "cs-attr-stale-cs";
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"EmailIdentity\":\"" + id + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + cs + "\"}")
         .when().post("/v2/email/configuration-sets").then().statusCode(200);
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + cs + "\"}")
         .when().put("/v2/email/identities/" + id + "/configuration-set").then().statusCode(200);
 
         // Delete the configuration set that is now the identity's default.
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().delete("/v2/email/configuration-sets/" + cs).then().statusCode(200);
 
         // A send with no explicit ConfigurationSetName must fail rather than silently drop it.
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -313,16 +313,16 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
     void createEmailIdentity_withConfigurationSet_surfacesInGet() {
         String cs = "cs-attr-oncreate-cs";
         String id = "cs-attr-oncreate@floci.test";
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + cs + "\"}")
         .when().post("/v2/email/configuration-sets").then().statusCode(200);
 
         // CreateEmailIdentity accepts a ConfigurationSetName and sets it as the identity default.
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"EmailIdentity\":\"" + id + "\",\"ConfigurationSetName\":\"" + cs + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
 
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/identities/" + id)
         .then().statusCode(200).body("ConfigurationSetName", equalTo(cs));
     }
@@ -331,14 +331,14 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
     @Order(12)
     void createEmailIdentity_withMissingConfigurationSet_returns404AndDoesNotCreate() {
         String id = "cs-attr-oncreate-missing@floci.test";
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"EmailIdentity\":\"" + id + "\",\"ConfigurationSetName\":\"cs-attr-ghost-oncreate\"}")
         .when().post("/v2/email/identities").then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"))
                 .body("message", equalTo("Configuration set <cs-attr-ghost-oncreate> does not exist."));
 
         // The identity must not have been created (AWS is atomic on the config-set validation).
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/identities/" + id).then().statusCode(404);
     }
 
@@ -346,14 +346,14 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
     @Order(17)
     void createEmailIdentity_withNonArrayTags_returns400AndDoesNotCreate() {
         String id = "cs-attr-oncreate-badtags@floci.test";
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"EmailIdentity\":\"" + id + "\",\"Tags\":\"oops\"}")
         .when().post("/v2/email/identities").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
                 .body("message", equalTo("Tags must be an array."));
 
         // Tags is validated before the identity is persisted, so nothing is created.
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/identities/" + id).then().statusCode(404);
     }
 
@@ -361,11 +361,11 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
     @Order(13)
     void createEmailIdentity_withNonStringConfigurationSet_returns400() {
         // ConfigurationSetName is a string; a non-string must be rejected, not coerced.
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"EmailIdentity\":\"cs-attr-badtype@floci.test\",\"ConfigurationSetName\":123}")
         .when().post("/v2/email/identities").then().statusCode(400)
                 .body("__type", equalTo("SerializationException"));
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/identities/cs-attr-badtype@floci.test").then().statusCode(404);
     }
 
@@ -377,10 +377,10 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
         // deviation from AWS, which stores "" verbatim and echoes it back; Floci keeps the two paths
         // aligned instead.
         String id = "cs-attr-emptycs@floci.test";
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"EmailIdentity\":\"" + id + "\",\"ConfigurationSetName\":\"\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/identities/" + id).then().statusCode(200)
                 .body("$", Matchers.not(Matchers.hasKey("ConfigurationSetName")));
     }
@@ -391,12 +391,12 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
         // A whitespace-only name is not "absent": it flows through name validation and is rejected
         // as invalid input (the same 400 the Put path yields), rather than being silently ignored.
         String id = "cs-attr-wscs@floci.test";
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"EmailIdentity\":\"" + id + "\",\"ConfigurationSetName\":\"   \"}")
         .when().post("/v2/email/identities").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
                 .body("message", equalTo("Invalid configuration set name <   >: only alphanumeric ASCII characters, '_', and '-' are allowed."));
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/identities/" + id).then().statusCode(404);
     }
 
@@ -405,11 +405,11 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
     void createEmailIdentity_withNonStringEmailIdentity_returns400() {
         // EmailIdentity is a string; a non-string must be rejected (not coerced into "123"), the same
         // as a non-string ConfigurationSetName.
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"EmailIdentity\":123}")
         .when().post("/v2/email/identities").then().statusCode(400)
                 .body("__type", equalTo("SerializationException"));
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/identities/123").then().statusCode(404);
     }
 

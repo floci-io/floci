@@ -16,9 +16,11 @@ import io.floci.aws.services.emrserverless.model.StartSessionRequest;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.URI;
 import java.time.Duration;
@@ -52,6 +54,7 @@ import static org.mockito.Mockito.when;
  * 30 days, its kept history's Spark History Server, which starts on a link and stops once no link to it is valid; any
  * other, Floci's page.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class EmrServerlessAppUisTest {
 
     private static final String REGION = "us-east-1";

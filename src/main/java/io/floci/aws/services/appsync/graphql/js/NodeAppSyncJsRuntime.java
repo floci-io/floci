@@ -372,7 +372,7 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime, ContainerTeardown
     private void attachLogStream() {
         try {
             String shortId = containerId.length() >= 8 ? containerId.substring(0, 8) : containerId;
-            this.logStream = logStreamer.attach(containerId, "/floci/appsync-js",
+            this.logStream = logStreamer.attachPolled(containerId, "/floci/appsync-js",
                     logStreamer.generateLogStreamName(shortId),
                     regionResolver.getDefaultRegion(), "appsync:js");
         } catch (RuntimeException e) {

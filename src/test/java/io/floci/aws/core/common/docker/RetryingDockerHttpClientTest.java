@@ -3,11 +3,13 @@ package io.floci.aws.core.common.docker;
 import com.github.dockerjava.transport.DockerHttpClient;
 import com.github.dockerjava.transport.DockerHttpClient.Request;
 import com.github.dockerjava.transport.DockerHttpClient.Response;
+import io.floci.aws.testing.ParallelLocks;
 import org.apache.hc.core5.http.ConnectionRequestTimeoutException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -54,6 +56,7 @@ import static org.mockito.Mockito.mock;
  * be replayable (no one-shot body stream, no hijacked stdin) and must not be an exec-start, which
  * would re-run a shell command whose first run may have executed.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class RetryingDockerHttpClientTest {
 
     private static final int MAX_ATTEMPTS = 3;

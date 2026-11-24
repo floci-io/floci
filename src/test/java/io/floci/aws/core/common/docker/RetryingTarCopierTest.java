@@ -9,10 +9,12 @@ import com.github.dockerjava.core.DockerClientImpl;
 import com.github.dockerjava.core.util.CompressArchiveUtil;
 import com.github.dockerjava.transport.DockerHttpClient;
 import io.floci.aws.testing.DockerArchiveUploadFixture;
+import io.floci.aws.testing.ParallelLocks;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -62,6 +64,7 @@ import static org.mockito.Mockito.withSettings;
  * site, shared by every service that copies content into containers; tar extract over the same
  * path is idempotent, so replay is safe.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class RetryingTarCopierTest {
 
     private static final int MAX_ATTEMPTS = 3;

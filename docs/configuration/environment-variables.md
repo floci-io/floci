@@ -151,6 +151,13 @@ This foundation release provides opt-in security-group filtering for EC2 Docker 
 | `FLOCI_DOCKER_POOL_GAUGE_INTERVAL_SECONDS` | `60` | Seconds between the log lines that report each Docker pool's leased, available and pending connections and its open streams, written only while a pool is in use; `0` turns them off. See [Docker Configuration](docker.md#connection-pool) |
 | `FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD` | `3` | Docker call attempts in a row (each retry counts) that fail before the daemon answers, after which a failed ping makes every Docker call fail at once until the daemon answers again; `0` turns this off. See [Docker Configuration](docker.md#unreachable-daemon) |
 | `FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS` | `5` | Seconds between the pings that check whether an unreachable Docker daemon is back |
+| `FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES` | `0` | Most container creates and starts sent to the Docker daemon at once; `0` means twice the CPUs Floci sees, at least 4. See [Docker Configuration](docker.md#concurrent-container-launches) |
+| `FLOCI_DOCKER_EVENTS_EXIT_DETECTION` | `false` | Watch Lambda containers' exits through one Docker events subscription instead of a wait stream per container. See [Docker Configuration](docker.md#container-exits-through-docker-events) |
+| `FLOCI_DOCKER_SERVICE_MAX_CONTAINERS_<SERVICE>` | _(none)_ | Most containers one service runs at once, named by its `io.floci.service` label in upper case (`FLOCI_DOCKER_SERVICE_MAX_CONTAINERS_LAMBDA=50`); a create past it fails with that service's own capacity error. A service not set is not limited. See [Docker Configuration](docker.md#per-service-container-budgets) |
+| `FLOCI_DOCKER_LOG_POLL_INTERVAL_MILLIS` | `1000` | Milliseconds between the reads of a long-lived service container's log, read on a timer instead of followed; at least 100. See [Docker Configuration](docker.md#container-log-settings) |
+| `FLOCI_DOCKER_LOG_DRIVER_MODE` | `false` | Opt-in: long-lived service containers push their logs to Floci through Docker's `gelf` driver; needs a daemon that can reach Floci. See [Docker Configuration](docker.md#log-driver-mode-opt-in) |
+| `FLOCI_DOCKER_LOG_DRIVER_HOST` | _(unset)_ | Host the daemon dials in the log-driver mode; `host.docker.internal` on Docker Desktop, `127.0.0.1` otherwise |
+| `FLOCI_DOCKER_LOG_DRIVER_PORT` | `12201` | Fixed port of Floci's log listener in the log-driver mode; Docker dials it on every start of a container created in the mode |
 | `FLOCI_DOCKER_IMAGE_REGISTRY_BASE` | _(none)_ | Optional registry/repository base for every Docker image Floci launches. When set, `postgres:16-alpine` resolves as `<base>/postgres:16-alpine` and `public.ecr.aws/docker/library/ubuntu:24.04` resolves as `<base>/public.ecr.aws/docker/library/ubuntu:24.04`. An image in a registry on `localhost` or a loopback address, Floci's own ECR among them, is launched as it is |
 | `FLOCI_DOCKER_LOG_MAX_SIZE` | `10m` | Log rotation max size for spawned containers (e.g. `10m`, `1g`) |
 | `FLOCI_DOCKER_LOG_MAX_FILE` | `3` | Number of rotated log files to keep for spawned containers |
@@ -296,6 +303,8 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_DYNAMODB_ENABLED` | `true` | Enable the DynamoDB service |
+| `FLOCI_SERVICES_DYNAMODB_TRANSACTION_CONFLICTS_ENABLED` | `false` | Reject requests that reach the items of a `TransactWriteItems` in flight with `TransactionConflictException` or a `TransactionConflict` cancellation, as AWS does, instead of making them wait. Native backend only. See [DynamoDB](../services/dynamodb.md#transaction-conflicts) |
+| `FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER` | `true` | Return attributes and map keys in a random order on the operations where AWS does. Native backend only. See [DynamoDB](../services/dynamodb.md#attribute-order) |
 | `FLOCI_SERVICES_DYNAMODB_BACKEND` | `native` | Engine behind the DynamoDB API: `native` or `local` (DynamoDB Local), case-insensitive. Any other value fails startup. See [DynamoDB Local backend](../services/dynamodb.md#dynamodb-local-backend) |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT` | _(none)_ | Base URL of DynamoDB Local, for example `http://dynamodb-local:8000`. Required when the backend is `local`. Must be `http` or `https` with a host. AWS endpoints (hosts under `amazonaws.com`, `amazonaws.com.cn` or `api.aws`) are rejected |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS` | `2` | Seconds to wait for a connection to DynamoDB Local |
@@ -321,7 +330,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_LAMBDA_INIT_TIMEOUT_SECONDS` | `10` | Seconds a newly started runtime has, counted from its container's start, to finish its init and request its first invocation; warm containers are not affected; a function whose `Timeout` plus 2 seconds is longer waits that long instead. The function's `Timeout` starts at dispatch. See [Slow cold starts](../services/lambda.md#slow-cold-starts) |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_DRAIN_TIMEOUT_SECONDS` | `15` | Shared shutdown drain budget for Lambda containers; 1 through 300 seconds, invalid values fail initialization |
 | `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_PER_FUNCTION` | `max(4, cpus)` | Maximum idle (warm) containers kept per function; a container released beyond this is stopped |
-| `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL` | `0` | Maximum idle (warm) containers kept across all functions. Beyond it, the least-recently-used idle container of any function is stopped to make room for the one just released. `0` leaves the total unbounded; a negative value is ignored with a warning. See [Bounding warm containers](../services/lambda.md#bounding-warm-containers) |
+| `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL` | `128` | Maximum idle (warm) containers kept across all functions. Beyond it, the least-recently-used idle container of any function is stopped to make room for the one just released. `0` leaves the total unbounded; a negative value is ignored with a warning. See [Bounding warm containers](../services/lambda.md#bounding-warm-containers) |
 | `FLOCI_SERVICES_LAMBDA_REGION_CONCURRENCY_LIMIT` | `1000` | Maximum concurrent Lambda invocations across all functions in a region |
 | `FLOCI_SERVICES_LAMBDA_UNRESERVED_CONCURRENCY_MIN` | `100` | Minimum unreserved concurrency pool |
 | `FLOCI_SERVICES_LAMBDA_CODE_VOLUME_POPULATE_CONCURRENCY` | `max(2, cpus/2)` | Maximum concurrent first-time code-volume populates (functions whose unpacked code is at least 32 MB). The default is derived from the CPU count the JVM sees, so a CPU-constrained Floci container collapses it to 2 and concurrent cold starts of distinct functions serialise into pairs; set this to decouple the cap from the CPU allocation |
@@ -497,8 +506,8 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ELASTICACHE_PROXY_BASE_PORT` | `6379` | First port in the ElastiCache proxy range |
 | `FLOCI_SERVICES_ELASTICACHE_PROXY_MAX_PORT` | `6399` | Last port in the ElastiCache proxy range |
 | `FLOCI_SERVICES_ELASTICACHE_DEFAULT_IMAGE` | `valkey/valkey:8` | Default Docker image for cache clusters |
-| `FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND` | `false` | Pass server flags as container arguments and take and restore snapshots without a shell or CLI in the image (`SAVE` over RESP, the Docker archive API, the snapshot file placed before the server starts). Never inferred from the image; see [ElastiCache](../services/elasticache.md#images-with-no-shell-or-cli) |
-| `FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND_DBFILENAME` | `dump.rdb` | Snapshot file name the server loads at startup; used only with `FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND` |
+| `FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND` | `false` | Pass server flags as container arguments and take snapshots without a shell or CLI in the image (`SAVE` over RESP, the Docker archive API). Never inferred from the image; see [ElastiCache](../services/elasticache.md#images-with-no-shell-or-cli) |
+| `FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND_DBFILENAME` | `dump.rdb` | Snapshot file name the server loads at startup; a restore places the snapshot under it, with or without `FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND` |
 | `FLOCI_SERVICES_ELASTICACHE_DOCKER_NETWORK` | _(none)_ | Docker network for ElastiCache containers (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
 | `FLOCI_SERVICES_ELASTICACHE_CLUSTER_ANNOUNCE_HOSTNAME` | _(none)_ | Hostname cluster-mode nodes announce in `MOVED`/`ASK` redirects and topology responses, and report as the `ConfigurationEndpoint`. Set to a name every client resolves (e.g. `localhost.floci.io`) when `FLOCI_HOSTNAME` only resolves inside Floci's Docker network. Defaults to `FLOCI_HOSTNAME` |
 
@@ -577,6 +586,8 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ECR_URI_STYLE` | `hostname` | Repository URI style: `hostname` (`<account>.dkr.ecr.<region>.localhost`) or `path` |
 | `FLOCI_SERVICES_ECR_PREFER_LOCAL_IMAGES` | `true` | Use an AWS-shaped ECR image URI as-is when the Docker daemon already has that image, instead of rewriting it to the loopback registry |
 | `FLOCI_SERVICES_ECR_DOCKER_NETWORK` | _(none)_ | Docker network for the ECR registry container |
+| `FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_ENABLED` | `true` | Apply repository lifecycle policies in the background, expiring the images their rules select |
+| `FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_INTERVAL_SECONDS` | `60` | How often the lifecycle sweep runs |
 
 ### EKS (Elastic Kubernetes Service)
 

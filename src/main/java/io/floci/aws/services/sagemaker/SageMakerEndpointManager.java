@@ -96,7 +96,9 @@ public class SageMakerEndpointManager implements ContainerTeardown, Resettable {
                     .withHostDockerInternalOnLinux()
                     .withEmbeddedDns()
                     .withPortBinding(PORT, 0)
-                    .withLogRotation();
+                    .withLogRotation()
+                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                            "sagemaker", endpoint.endpointName, endpoint.accountId, endpoint.region));
             applyEntrypoint(builder, c, "serve");
             ContainerSpec spec = builder.build();
             containerId = lifecycleManager.create(spec);

@@ -187,14 +187,6 @@ public final class DynamoDbConditionKeys {
                 "TransactGetItems", "TransactItems.*.Get.", body), table);
     }
 
-    /**
-     * The statement requests of a PartiQL batch or transaction ({@code BatchExecuteStatement},
-     * {@code ExecuteTransaction}), found through the request paths the condition-key table records.
-     */
-    public static List<JsonNode> partiQLStatementRequests(String operation, JsonNode body) {
-        return DynamoDbConditionKeyMembers.listElements(operation, "dynamodb:Attributes", "Statement", body);
-    }
-
     /** The statement text of one PartiQL request, or {@code null} when it has none. */
     public static String partiQLStatement(JsonNode request) {
         return DynamoDbConditionKeyMembers.values("ExecuteStatement", "dynamodb:Attributes", "Statement", request)

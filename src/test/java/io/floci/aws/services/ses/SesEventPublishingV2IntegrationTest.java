@@ -24,6 +24,8 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
@@ -48,8 +50,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesEventPublishingV2IntegrationTest {
 
-    private static final String SES_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String SNS_AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/sns/aws4_request";
     private static final String SQS_AUTH =
@@ -153,27 +153,21 @@ class SesEventPublishingV2IntegrationTest {
     @Test
     @Order(2)
     void setupSesIdentityConfigSetAndEventDestination() {
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"EmailIdentity\":\"" + SENDER + "\"}")
         .when()
                 .post("/v2/email/identities")
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + CS + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "EventDestinationName": "ed-sns",
@@ -255,7 +249,7 @@ class SesEventPublishingV2IntegrationTest {
                 raw.getBytes(StandardCharsets.UTF_8));
         given()
                 .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("Action=SendRawEmail"
                         + "&Source=" + URLEncoder.encode(SENDER, StandardCharsets.UTF_8)
                         + "&RawMessage.Data=" + URLEncoder.encode(rawB64, StandardCharsets.UTF_8)
@@ -283,18 +277,14 @@ class SesEventPublishingV2IntegrationTest {
     @Order(7)
     void disabledEventDestination_skipsPublish() throws Exception {
         String csDisabled = "v2-cs-ed-disabled";
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + csDisabled + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "EventDestinationName": "ed-sns-disabled",
@@ -312,9 +302,7 @@ class SesEventPublishingV2IntegrationTest {
 
         drainQueue();
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -341,9 +329,7 @@ class SesEventPublishingV2IntegrationTest {
     @Order(8)
     void mixedRecipients_filterBouncedRecipientsToSimulatorOnly() throws Exception {
         drainQueue();
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -381,9 +367,7 @@ class SesEventPublishingV2IntegrationTest {
     @Order(9)
     void sendEmail_emailTagsPropagateIntoMailTags() throws Exception {
         drainQueue();
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -423,7 +407,7 @@ class SesEventPublishingV2IntegrationTest {
         drainQueue();
         given()
                 .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("Action=SendEmail"
                         + "&Source=" + URLEncoder.encode(SENDER, StandardCharsets.UTF_8)
                         + "&Destination.ToAddresses.member.1="
@@ -453,9 +437,7 @@ class SesEventPublishingV2IntegrationTest {
     @Order(11)
     void sendEmail_simpleHeadersAppearInEventMailHeaders() throws Exception {
         drainQueue();
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -503,9 +485,7 @@ class SesEventPublishingV2IntegrationTest {
     void sendToSuppressedAddress_withBounceReason_publishesSyntheticBounceEvent() throws Exception {
         String suppressed = "bounce-suppressed-" + System.nanoTime() + "@example.com";
         // Pre-register the address in the account-level suppression list with reason BOUNCE.
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"EmailAddress\":\"" + suppressed + "\",\"Reason\":\"BOUNCE\"}")
         .when()
                 .put("/v2/email/suppression/addresses")
@@ -514,9 +494,7 @@ class SesEventPublishingV2IntegrationTest {
 
         try {
             drainQueue();
-            given()
-                    .contentType("application/json")
-                    .header("Authorization", SES_AUTH)
+            v2()
                     .body("""
                         {
                           "FromEmailAddress": "%s",
@@ -551,7 +529,7 @@ class SesEventPublishingV2IntegrationTest {
         } finally {
             // Always run cleanup so the suppression list doesn't leak into subsequent tests.
             given()
-                    .header("Authorization", SES_AUTH)
+                    .header("Authorization", AUTH)
             .when()
                     .delete("/v2/email/suppression/addresses/" + suppressed);
         }
@@ -577,18 +555,14 @@ class SesEventPublishingV2IntegrationTest {
                 .extract().jsonPath().getString("DeliveryStreamARN");
         assertNotNull(firehoseStreamArn);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + CS_FIREHOSE + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "EventDestinationName": "ed-firehose",
@@ -612,9 +586,7 @@ class SesEventPublishingV2IntegrationTest {
     @Order(13)
     void sendToSuppressedAddress_withComplaintReason_publishesSyntheticComplaintEvent() throws Exception {
         String suppressed = "complaint-suppressed-" + System.nanoTime() + "@example.com";
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"EmailAddress\":\"" + suppressed + "\",\"Reason\":\"COMPLAINT\"}")
         .when()
                 .put("/v2/email/suppression/addresses")
@@ -623,9 +595,7 @@ class SesEventPublishingV2IntegrationTest {
 
         try {
             drainQueue();
-            given()
-                    .contentType("application/json")
-                    .header("Authorization", SES_AUTH)
+            v2()
                     .body("""
                         {
                           "FromEmailAddress": "%s",
@@ -654,7 +624,7 @@ class SesEventPublishingV2IntegrationTest {
             assertEquals("OnAccountSuppressionList", complaint.path("complaint").path("complaintSubType").asText());
         } finally {
             given()
-                    .header("Authorization", SES_AUTH)
+                    .header("Authorization", AUTH)
             .when()
                     .delete("/v2/email/suppression/addresses/" + suppressed);
         }
@@ -711,18 +681,14 @@ class SesEventPublishingV2IntegrationTest {
                 .statusCode(200)
                 .extract().jsonPath().getString("DeliveryStreamARN");
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + csDisabled + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "EventDestinationName": "ed-firehose-disabled",
@@ -757,18 +723,14 @@ class SesEventPublishingV2IntegrationTest {
         String bogusStreamArn =
                 "arn:aws:firehose:us-east-1:000000000000:deliverystream/does-not-exist";
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + csUnknown + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "EventDestinationName": "ed-firehose-unknown",
@@ -847,18 +809,14 @@ class SesEventPublishingV2IntegrationTest {
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + CS_EB + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "EventDestinationName": "ed-eventbridge",
@@ -887,7 +845,7 @@ class SesEventPublishingV2IntegrationTest {
         JsonNode envelope = envelopes.get(0);
         assertEquals("aws.ses", envelope.path("source").asText());
         assertEquals("Email Sent", envelope.path("detail-type").asText());
-        assertEquals("default", envelope.path("event-bus-name").asText());
+        assertFalse(envelope.has("event-bus-name"), "EventBridge envelopes must not include event-bus-name");
         // AWS always emits a `resources` array on the envelope, and SesEventPublisher mirrors
         // that contract. SesService derives sourceArn from FromEmailAddress, so this case
         // produces a one-element array carrying the SES identity ARN; the sourceArn-null
@@ -923,18 +881,14 @@ class SesEventPublishingV2IntegrationTest {
     @Order(21)
     void eventBridge_disabledEventDestination_skipsPublish() throws Exception {
         String csDisabled = "ses-events-eb-cs-disabled";
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + csDisabled + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "EventDestinationName": "ed-eventbridge-disabled",
@@ -965,9 +919,7 @@ class SesEventPublishingV2IntegrationTest {
         String bogusBusArn =
                 "arn:aws:events:us-east-1:000000000000:event-bus/does-not-exist";
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + csUnknown + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
@@ -976,9 +928,7 @@ class SesEventPublishingV2IntegrationTest {
 
         // SES only supports the account default event bus, so a custom bus ARN is
         // rejected at create time and never stored.
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "EventDestinationName": "ed-eventbridge-unknown",
@@ -996,7 +946,7 @@ class SesEventPublishingV2IntegrationTest {
                 .body("__type", equalTo("BadRequestException"));
 
         given()
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .get("/v2/email/configuration-sets/" + csUnknown + "/event-destinations")
         .then()
@@ -1009,18 +959,14 @@ class SesEventPublishingV2IntegrationTest {
     @Test
     @Order(23)
     void cloudWatch_setupConfigSetAndEventDestination() {
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + CS_CW + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "EventDestinationName": "ed-cloudwatch",
@@ -1058,9 +1004,7 @@ class SesEventPublishingV2IntegrationTest {
     @Test
     @Order(24)
     void cloudWatch_sendWithTagsAndHeaders_registersSendMetricWithResolvedDimensions() {
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -1101,9 +1045,7 @@ class SesEventPublishingV2IntegrationTest {
     @Test
     @Order(25)
     void cloudWatch_sendWithoutTags_fallsBackToDefaultDimensionValue() {
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -1132,9 +1074,7 @@ class SesEventPublishingV2IntegrationTest {
     @Test
     @Order(26)
     void cloudWatch_successSimulator_registersBothSendAndDeliveryMetrics() {
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -1164,18 +1104,14 @@ class SesEventPublishingV2IntegrationTest {
     @Order(27)
     void cloudWatch_disabledEventDestination_doesNotPublishMetric() {
         String csDisabled = "ses-events-cw-cs-disabled";
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + csDisabled + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "EventDestinationName": "ed-cloudwatch-disabled",
@@ -1199,9 +1135,7 @@ class SesEventPublishingV2IntegrationTest {
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -1247,8 +1181,7 @@ class SesEventPublishingV2IntegrationTest {
                 "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + region + "/sqs/aws4_request";
         String eventsAuth =
                 "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + region + "/events/aws4_request";
-        String sesAuth =
-                "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + region + "/ses/aws4_request";
+        String sesAuth = SesV2Requests.authFor(region);
 
         String euQueueUrl = given()
                 .contentType(SQS_CONTENT_TYPE)
@@ -1297,27 +1230,21 @@ class SesEventPublishingV2IntegrationTest {
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", sesAuth)
+        v2(sesAuth)
                 .body("{\"ConfigurationSetName\":\"" + csName + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", sesAuth)
+        v2(sesAuth)
                 .body("{\"EmailIdentity\":\"" + SENDER + "\"}")
         .when()
                 .post("/v2/email/identities")
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", sesAuth)
+        v2(sesAuth)
                 .body("""
                     {
                       "EventDestinationName": "ed-eventbridge-eu-west-1",
@@ -1333,9 +1260,7 @@ class SesEventPublishingV2IntegrationTest {
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", sesAuth)
+        v2(sesAuth)
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -1445,18 +1370,14 @@ class SesEventPublishingV2IntegrationTest {
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"ConfigurationSetName\":\"" + csName + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "EventDestinationName": "ed-eventbridge-detail",
@@ -1514,9 +1435,7 @@ class SesEventPublishingV2IntegrationTest {
     }
 
     private void sendEmailToConfigSet(String configSet, String to, String subject) {
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -1632,12 +1551,12 @@ class SesEventPublishingV2IntegrationTest {
     @Order(33)
     void simulatorAndSuppressedBounces_arePublishedAsSeparateEvents() throws Exception {
         String suppressed = "split-suppressed-" + System.nanoTime() + "@example.com";
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("{\"EmailAddress\":\"" + suppressed + "\",\"Reason\":\"BOUNCE\"}")
         .when().put("/v2/email/suppression/addresses").then().statusCode(200);
         try {
             drainQueue();
-            given().contentType("application/json").header("Authorization", SES_AUTH)
+            v2()
                     .body("""
                         {
                           "FromEmailAddress": "%s",
@@ -1664,7 +1583,7 @@ class SesEventPublishingV2IntegrationTest {
                         "mail.destination carries the full envelope on every event");
             }
         } finally {
-            given().header("Authorization", SES_AUTH)
+            given().header("Authorization", AUTH)
             .when().delete("/v2/email/suppression/addresses/" + suppressed);
         }
     }
@@ -1684,7 +1603,7 @@ class SesEventPublishingV2IntegrationTest {
         String rawB64 = Base64.getEncoder().encodeToString(
                 mime.getBytes(StandardCharsets.UTF_8));
         drainQueue();
-        String messageId = given().contentType("application/json").header("Authorization", SES_AUTH)
+        String messageId = v2()
                 .body("""
                     {"FromEmailAddress": "%s",
                      "Destination": {"ToAddresses": ["success@simulator.amazonses.com"]},
@@ -1722,7 +1641,7 @@ class SesEventPublishingV2IntegrationTest {
 
         // The request's own tags, validated by the controller, stay on both events.
         drainQueue();
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {"FromEmailAddress": "%s",
                      "Destination": {"ToAddresses": ["success@simulator.amazonses.com"]},
@@ -1741,7 +1660,7 @@ class SesEventPublishingV2IntegrationTest {
 
         // The stored record keeps the marker and its envelope but no copy of the content, so it
         // is listed in neither the raw shape (no RawData) nor the Simple one (no Subject or Body).
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get("/_aws/ses?id=" + messageId).then().statusCode(200)
                 .body("messages[0].RejectReason", equalTo("Bad content"))
                 .body("messages[0]", hasKey("Destination"))
@@ -1754,7 +1673,7 @@ class SesEventPublishingV2IntegrationTest {
     @Order(35)
     void eicarInSimpleBody_isAcceptedThenRejectedAndStoredWithoutTheBody() throws Exception {
         drainQueue();
-        String messageId = given().contentType("application/json").header("Authorization", SES_AUTH)
+        String messageId = v2()
                 .body("""
                     {"FromEmailAddress": "%s",
                      "Destination": {"ToAddresses": ["success@simulator.amazonses.com"]},
@@ -1771,7 +1690,7 @@ class SesEventPublishingV2IntegrationTest {
         assertTrue(events.stream().anyMatch(e -> "Reject".equals(e.path("eventType").asText())));
         assertTrue(events.stream().noneMatch(e -> "Delivery".equals(e.path("eventType").asText())));
 
-        given().header("Authorization", SES_AUTH)
+        given().header("Authorization", AUTH)
         .when().get("/_aws/ses?id=" + messageId).then().statusCode(200)
                 .body("messages[0].RejectReason", equalTo("Bad content"))
                 .body("messages[0]", hasKey("Destination"))
@@ -1793,7 +1712,7 @@ class SesEventPublishingV2IntegrationTest {
                 "\"Subject\": {\"Data\": \"clean\"}, \"Body\": {\"Text\": {\"Data\": \"clean\"}}, "
                         + "\"Headers\": [{\"Name\": \"" + signature + "\", \"Value\": \"x\"}]"}) {
             drainQueue();
-            String messageId = given().contentType("application/json").header("Authorization", SES_AUTH)
+            String messageId = v2()
                     .body("""
                         {"FromEmailAddress": "%s",
                          "Destination": {"ToAddresses": ["success@simulator.amazonses.com"]},
@@ -1819,7 +1738,7 @@ class SesEventPublishingV2IntegrationTest {
                 }
             }
 
-            given().header("Authorization", SES_AUTH)
+            given().header("Authorization", AUTH)
             .when().get("/_aws/ses?id=" + messageId).then().statusCode(200)
                     .body("messages[0].RejectReason", equalTo("Bad content"))
                     .body("messages[0]", not(hasKey("Subject")))
@@ -1850,16 +1769,16 @@ class SesEventPublishingV2IntegrationTest {
             assertTrue(rejected.stream().anyMatch(e -> "Reject".equals(e.path("eventType").asText())));
             assertTrue(rejected.stream().allMatch(e -> messageId.equals(e.path("mail").path("messageId").asText())));
         } finally {
-            given().header("Authorization", SES_AUTH).when().delete("/v2/email/identities/" + recipient);
-            given().header("Authorization", SES_AUTH)
+            given().header("Authorization", AUTH).when().delete("/v2/email/identities/" + recipient);
+            given().header("Authorization", AUTH)
             .when().delete("/v2/email/custom-verification-email-templates/cvet-events-clean");
-            given().header("Authorization", SES_AUTH)
+            given().header("Authorization", AUTH)
             .when().delete("/v2/email/custom-verification-email-templates/cvet-events-scan");
         }
     }
 
     private void createCustomVerificationTemplate(String name, String content) {
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {"TemplateName": "%s", "FromEmailAddress": "%s", "TemplateSubject": "verify",
                      "TemplateContent": "%s",
@@ -1872,7 +1791,7 @@ class SesEventPublishingV2IntegrationTest {
     private String sendCustomVerificationEmail(String recipient, String templateName, String configurationSet) {
         String configurationSetField = configurationSet == null
                 ? "" : ", \"ConfigurationSetName\": \"" + configurationSet + "\"";
-        return given().contentType("application/json").header("Authorization", SES_AUTH)
+        return v2()
                 .body("""
                     {"EmailAddress": "%s", "TemplateName": "%s"%s}
                     """.formatted(recipient, templateName, configurationSetField))
@@ -1888,7 +1807,7 @@ class SesEventPublishingV2IntegrationTest {
         String recipient = "cvet-preamble@cvet-events.floci.test";
         createCustomVerificationTemplate("cvet-preamble", "<p>verify</p>");
         try {
-            given().contentType("application/json").header("Authorization", SES_AUTH)
+            v2()
                     .body("{\"ConfigurationSetName\":\"" + CS + "\"}")
             .when().put("/v2/email/identities/" + SENDER + "/configuration-set").then().statusCode(200);
             drainQueue();
@@ -1897,7 +1816,7 @@ class SesEventPublishingV2IntegrationTest {
                     receiveSesEvents(1).stream().map(e -> e.path("eventType").asText()).toList(),
                     "the identity default configuration set publishes without an explicit name");
 
-            given().contentType("application/json").header("Authorization", SES_AUTH)
+            v2()
                     .body("{\"EmailAddress\":\"" + recipient + "\",\"Reason\":\"BOUNCE\"}")
             .when().put("/v2/email/suppression/addresses").then().statusCode(200);
             drainQueue();
@@ -1906,35 +1825,33 @@ class SesEventPublishingV2IntegrationTest {
                     .filter(e -> "Bounce".equals(e.path("eventType").asText())).findFirst().orElseThrow();
             assertEquals("OnAccountSuppressionList", bounce.path("bounce").path("bounceSubType").asText());
 
-            given().contentType("application/json").header("Authorization", SES_AUTH)
+            v2()
                     .body("{\"ConfigurationSetName\":\"cvet-paused\"}")
             .when().post("/v2/email/configuration-sets").then().statusCode(200);
-            given().contentType("application/json").header("Authorization", SES_AUTH)
+            v2()
                     .body("{\"SendingEnabled\":false}")
             .when().put("/v2/email/configuration-sets/cvet-paused/sending").then().statusCode(200);
-            given().contentType("application/json").header("Authorization", SES_AUTH)
+            v2()
                     .body("""
                         {"EmailAddress": "%s", "TemplateName": "cvet-preamble", "ConfigurationSetName": "cvet-paused"}
                         """.formatted(recipient))
             .when().post("/v2/email/outbound-custom-verification-emails").then().statusCode(400)
                     .body("__type", equalTo("SendingPausedException"));
         } finally {
-            given().contentType("application/json").header("Authorization", SES_AUTH).body("{}")
+            v2().body("{}")
             .when().put("/v2/email/identities/" + SENDER + "/configuration-set");
-            given().header("Authorization", SES_AUTH)
+            given().header("Authorization", AUTH)
             .when().delete("/v2/email/suppression/addresses/" + recipient);
-            given().header("Authorization", SES_AUTH)
+            given().header("Authorization", AUTH)
             .when().delete("/v2/email/configuration-sets/cvet-paused");
-            given().header("Authorization", SES_AUTH)
+            given().header("Authorization", AUTH)
             .when().delete("/v2/email/custom-verification-email-templates/cvet-preamble");
-            given().header("Authorization", SES_AUTH).when().delete("/v2/email/identities/" + recipient);
+            given().header("Authorization", AUTH).when().delete("/v2/email/identities/" + recipient);
         }
     }
 
     private void sendEmail(String to) {
-        given()
-                .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+        v2()
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -2047,7 +1964,7 @@ class SesEventPublishingV2IntegrationTest {
                 raw.getBytes(StandardCharsets.UTF_8));
         given()
                 .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("Action=SendRawEmail"
                         + "&Source=" + URLEncoder.encode(SENDER, StandardCharsets.UTF_8)
                         + "&RawMessage.Data=" + URLEncoder.encode(rawB64, StandardCharsets.UTF_8)
@@ -2080,7 +1997,7 @@ class SesEventPublishingV2IntegrationTest {
                 raw.getBytes(StandardCharsets.UTF_8));
         given()
                 .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("Action=SendRawEmail"
                         + "&Source=" + URLEncoder.encode(SENDER, StandardCharsets.UTF_8)
                         + "&RawMessage.Data=" + URLEncoder.encode(rawB64, StandardCharsets.UTF_8)

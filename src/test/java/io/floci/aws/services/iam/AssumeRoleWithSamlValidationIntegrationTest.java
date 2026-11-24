@@ -58,13 +58,16 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -234,6 +237,64 @@ class AssumeRoleWithSamlValidationIntegrationTest {
         String roleArn = "arn:aws:iam::" + ACCOUNT + ":role/" + role;
         assume(roleArn, assertion(roleArn, PROVIDER, Instant.now().plusSeconds(300), AUDIENCE, ISSUER, true), PROVIDER)
                 .statusCode(403).body(containsString("AccessDenied"));
+    }
+
+    /**
+     * "You can use an Attribute element with the Name attribute set to
+     * https://aws.amazon.com/SAML/Attributes/RoleSessionName. This element contains one
+     * AttributeValue element that provides an identifier for the temporary credentials that are
+     * issued when the role is assumed." It names the session, and it is the {@code sts:RoleSessionName}
+     * a trust policy reads, which the Service Authorization Reference lists for
+     * {@code sts:AssumeRoleWithSAML}.
+     */
+    @Test
+    void trustPolicyRequiringTheSessionNameAllowsTheAssertionThatCarriesIt() {
+        String role = createRoleWithCondition("{\"StringEquals\":{\"sts:RoleSessionName\":\"alice@example.test\"}}");
+        assume(role, assertionNamingSession(role, "alice@example.test"), PROVIDER)
+                .statusCode(200)
+                .body("AssumeRoleWithSAMLResponse.AssumeRoleWithSAMLResult.AssumedRoleUser.Arn",
+                        equalTo("arn:aws:sts::" + ACCOUNT + ":assumed-role/" + role.substring(role.lastIndexOf('/') + 1)
+                                + "/alice@example.test"))
+                .body("AssumeRoleWithSAMLResponse.AssumeRoleWithSAMLResult.AssumedRoleUser.AssumedRoleId",
+                        endsWith(":alice@example.test"));
+    }
+
+    @Test
+    void trustPolicyRequiringTheSessionNameRefusesAnotherName() {
+        String role = createRoleWithCondition("{\"StringEquals\":{\"sts:RoleSessionName\":\"alice@example.test\"}}");
+        assume(role, assertionNamingSession(role, "mallory"), PROVIDER)
+                .statusCode(403).body(containsString("AccessDenied"));
+    }
+
+    @Test
+    void trustPolicyRequiringTheSessionNameRefusesAnAssertionWithoutOne() {
+        String role = createRoleWithCondition("{\"StringEquals\":{\"sts:RoleSessionName\":\"alice@example.test\"}}");
+        assume(role, assertion(role, PROVIDER, Instant.now().plusSeconds(300), AUDIENCE, ISSUER, true), PROVIDER)
+                .statusCode(403).body(containsString("AccessDenied"));
+    }
+
+    @Test
+    void theSessionNameAttributeNamesTheSessionWithoutACondition() {
+        String role = createRole(true);
+        assume(role, assertionNamingSession(role, "bob"), PROVIDER)
+                .statusCode(200)
+                .body("AssumeRoleWithSAMLResponse.AssumeRoleWithSAMLResult.AssumedRoleUser.Arn", endsWith("/bob"));
+    }
+
+    /**
+     * "Error: RoleSessionName in AuthnResponse must match [a-zA-Z_0-9+=,.@-]{2,64} (service:
+     * AWSSecurityTokenService; status code: 400; error code: InvalidIdentityToken)".
+     */
+    @Test
+    void aSessionNameAttributeOutsideItsPatternIsRejected() {
+        String role = createRole(true);
+        assume(role, assertionNamingSession(role, "has space"), PROVIDER)
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidIdentityToken"))
+                .body("ErrorResponse.Error.Message",
+                        equalTo("RoleSessionName in AuthnResponse must match [a-zA-Z_0-9+=,.@-]{2,64}"));
+        assume(role, assertionNamingSession(role, "a".repeat(65)), PROVIDER)
+                .statusCode(400).body("ErrorResponse.Error.Code", equalTo("InvalidIdentityToken"));
     }
 
     @Test
@@ -460,6 +521,157 @@ class AssumeRoleWithSamlValidationIntegrationTest {
         assertEquals(1024, token.length());
     }
 
+    /**
+     * And it publishes what that token cost, the three members its response declares: the size in
+     * bytes, the percentage of the 4,096-byte limit it consumes, and the deprecated member
+     * carrying the same percentage. A tag is not among the state counted here, this operation
+     * declaring none: a session tag reaches it inside the assertion.
+     */
+    @Test
+    void theSessionPublishesWhatItsTokenCost() {
+        String role = createRole(true);
+        String assertion = assertion(role, PROVIDER, Instant.now().plusSeconds(300), AUDIENCE, ISSUER, true);
+
+        String result = "AssumeRoleWithSAMLResponse.AssumeRoleWithSAMLResult.";
+        assumeRequest(role, assertion, PROVIDER)
+                .formParam("MinimumSessionTokenSize", "1024")
+                .formParam("Tags.member.1.Key", "team")
+                .formParam("Tags.member.1.Value", "payments")
+                .when().post("/").then().statusCode(200)
+                .body(result + "SessionTokenSize", equalTo("1024"))
+                .body(result + "SessionTokenUtilization", equalTo("25"))
+                .body(result + "PackedPolicySize", equalTo("25"));
+    }
+
+    /**
+     * The session tags the assertion passes are the session's principal tags: "to pass SAML
+     * attributes as session tags, include the Attribute element with the Name attribute set to
+     * https://aws.amazon.com/SAML/Attributes/PrincipalTag:{TagKey}", which is the only way this
+     * operation takes them, its request declaring no Tags member at all.
+     */
+    @Test
+    void theAssertionsSessionTagsBecomeTheSessionsPrincipalTags() {
+        String role = createRoleAllowingTags();
+        Map<String, List<String>> tags = Map.of("Project", List.of("Automation"),
+                "CostCenter", List.of("12345"));
+
+        String accessKeyId = assumeRequest(role, assertionCarryingTags(role, tags), PROVIDER)
+                .when().post("/").then().statusCode(200)
+                .extract().path("AssumeRoleWithSAMLResponse.AssumeRoleWithSAMLResult.Credentials.AccessKeyId");
+
+        assertEquals(Map.of("Project", "Automation", "CostCenter", "12345"),
+                iamService.resolveCallerArns(accessKeyId).orElseThrow().principalTags());
+    }
+
+    /**
+     * The keys the assertion asks to set as transitive pass down to a session assumed from this
+     * one: the attribute naming them "is an optional multivalued attribute that sets your session
+     * tags as transitive", so several values are read rather than refused as a tag attribute's
+     * would be. A tag the assertion carries but does not name there stays with this session, which
+     * is AWS's default.
+     */
+    @Test
+    void theAssertionsTransitiveKeysAreWhatPassesDownFromTheSession() {
+        String role = createRoleAllowingTags();
+        Map<String, List<String>> tags = new LinkedHashMap<>();
+        tags.put("Project", List.of("Automation"));
+        tags.put("CostCenter", List.of("12345"));
+
+        String accessKeyId = assumeRequest(role,
+                assertionCarryingTags(role, tags, List.of("Project", "Absent")), PROVIDER)
+                .when().post("/").then().statusCode(200)
+                .extract().path("AssumeRoleWithSAMLResponse.AssumeRoleWithSAMLResult.Credentials.AccessKeyId");
+
+        assertEquals(Map.of("Project", "Automation"),
+                iamService.callerTransitiveSessionTags(accessKeyId),
+                "only the tag named transitive passes down, and a key naming none selects nothing");
+
+        String noneNamed = assumeRequest(role, assertionCarryingTags(role, tags), PROVIDER)
+                .when().post("/").then().statusCode(200)
+                .extract().path("AssumeRoleWithSAMLResponse.AssumeRoleWithSAMLResult.Credentials.AccessKeyId");
+
+        assertTrue(iamService.callerTransitiveSessionTags(noneNamed).isEmpty(),
+                "an assertion naming no transitive key passes nothing down");
+    }
+
+    /**
+     * The value is the one the assertion signed, spaces and all: a tag value may carry them, and
+     * trimming it would hand a policy a value the provider never asserted.
+     */
+    @Test
+    void aSpacedTagValueIsStoredAsTheAssertionSignedIt() {
+        String role = createRoleAllowingTags();
+
+        String accessKeyId = assumeRequest(role, assertionCarryingTags(role, tag("Team", " admin ")), PROVIDER)
+                .when().post("/").then().statusCode(200)
+                .extract().path("AssumeRoleWithSAMLResponse.AssumeRoleWithSAMLResult.Credentials.AccessKeyId");
+
+        assertEquals(Map.of("Team", " admin "),
+                iamService.resolveCallerArns(accessKeyId).orElseThrow().principalTags());
+    }
+
+    /**
+     * A tag attribute carrying several values is a multi-valued session tag, which AWS STS does not
+     * support, and one carrying none names a tag with no value: both are refused rather than read
+     * as the first value or dropped, so a tag a policy would be evaluated with cannot go missing.
+     */
+    @Test
+    void aTagAttributeWithoutExactlyOneValueIsRefused() {
+        String role = createRoleAllowingTags();
+
+        assume(role, assertionCarryingTags(role, Map.of("Teams", List.of("one", "two"))), PROVIDER)
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidIdentityToken"))
+                .body("ErrorResponse.Error.Message",
+                        equalTo(SAMLAssertionVerifier.singleValueRequired("Teams")));
+        assume(role, assertionCarryingTags(role, Map.of("Teams", List.of())), PROVIDER)
+                .statusCode(400)
+                .body("ErrorResponse.Error.Message",
+                        equalTo(SAMLAssertionVerifier.singleValueRequired("Teams")));
+    }
+
+    /** And an attribute whose name ends at the colon names no tag key at all. */
+    @Test
+    void aTagAttributeNamingNoKeyIsRefused() {
+        String role = createRoleAllowingTags();
+
+        assume(role, assertionCarryingTags(role, tag("", "Automation")), PROVIDER)
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidIdentityToken"))
+                .body("ErrorResponse.Error.Message", equalTo(SAMLAssertionVerifier.TAG_KEY_MISSING));
+    }
+
+    /**
+     * The assertion's tags are state the session token carries, so they count against the one
+     * limit it is held to and a set that will not fit is refused before anything is minted. The
+     * request declares no Tags member, so this is measured once the assertion has been verified.
+     */
+    @Test
+    void anAssertionCarryingTooManyTagsIsRefused() {
+        String role = createRoleAllowingTags();
+        Map<String, List<String>> tags = new LinkedHashMap<>();
+        for (int i = 1; i <= 20; i++) {
+            tags.put("key-" + i, List.of("v".repeat(250)));
+        }
+
+        assume(role, assertionCarryingTags(role, tags), PROVIDER)
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("PackedPolicyTooLarge"));
+    }
+
+    /** A set that does fit is reported as what it cost, the tags counted with the token. */
+    @Test
+    void theAssertionsTagsCountTowardWhatTheSessionReports() {
+        String role = createRoleAllowingTags();
+        String value = "v".repeat(250);
+
+        String result = "AssumeRoleWithSAMLResponse.AssumeRoleWithSAMLResult.";
+        assumeRequest(role, assertionCarryingTags(role, tag("Project", value)), PROVIDER)
+                .when().post("/").then().statusCode(200)
+                .body(result + "SessionTokenSize",
+                        equalTo(Integer.toString(200 + "Project".length() + value.length())));
+    }
+
     private static void assertSignatureInvalid(Function<XMLSignatureFactory, List<Transform>> transforms) {
         String role = createRole(true);
         assume(role, assertion(role, PROVIDER, Instant.now().plusSeconds(300), AUDIENCE, ISSUER, true, false, transforms),
@@ -496,10 +708,31 @@ class AssumeRoleWithSamlValidationIntegrationTest {
     }
 
     private static String createRole(boolean allow) {
-        String role = "saml-role-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
-        String trust = allow
-                ? "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Federated\":\"" + PROVIDER + "\"},\"Action\":\"sts:AssumeRoleWithSAML\"}]}"
-                : "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Principal\":{\"Federated\":\"" + PROVIDER + "\"},\"Action\":\"sts:AssumeRoleWithSAML\"}]}";
+        return createRole("saml-role-", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\""
+                + (allow ? "Allow" : "Deny") + "\",\"Principal\":{\"Federated\":\"" + PROVIDER
+                + "\"},\"Action\":\"sts:AssumeRoleWithSAML\"}]}");
+    }
+
+    /**
+     * A role whose trust policy permits tagging the session as well as assuming it, which a tagged
+     * assertion needs: "trust policies for all roles connected to the identity provider passing
+     * tags must have the sts:TagSession permission."
+     */
+    private static String createRoleAllowingTags() {
+        return createRole("saml-tagged-", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Federated\":\"" + PROVIDER + "\"},"
+                + "\"Action\":[\"sts:AssumeRoleWithSAML\",\"sts:TagSession\"]}]}");
+    }
+
+    private static String createRoleWithCondition(String condition) {
+        return createRole("saml-session-", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Federated\":\"" + PROVIDER + "\"},"
+                + "\"Action\":\"sts:AssumeRoleWithSAML\",\"Condition\":" + condition + "}]}");
+    }
+
+    /** A role of this class's own, named for what its trust policy says, with the provider registered. */
+    private static String createRole(String namePrefix, String trust) {
+        String role = namePrefix + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         given().contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "CreateRole").formParam("RoleName", role)
                 .formParam("AssumeRolePolicyDocument", trust)
@@ -546,6 +779,70 @@ class AssumeRoleWithSamlValidationIntegrationTest {
     private static String assertion(String role, String provider, Instant expiry, String audience,
                                     String issuer, boolean sign, boolean unrelatedConfirmation,
                                     Function<XMLSignatureFactory, List<Transform>> transforms) {
+        return assertion(role, provider, expiry, audience, issuer, sign, unrelatedConfirmation, transforms, null);
+    }
+
+    /** A valid signed assertion for {@code role} that names its session {@code roleSessionName}. */
+    private static String assertionNamingSession(String role, String roleSessionName) {
+        return assertion(role, PROVIDER, Instant.now().plusSeconds(300), AUDIENCE, ISSUER, true, false,
+                factory -> List.of(enveloped(factory)), roleSessionName);
+    }
+
+    /**
+     * A valid signed assertion for {@code role} passing {@code tags} as its session tags, each key
+     * written as its own attribute and each value in its own AttributeValue element, so a case can
+     * pass a tag with no value or with several.
+     */
+    private static String assertionCarryingTags(String role, Map<String, List<String>> tags) {
+        return assertionCarryingTags(role, tags, List.of());
+    }
+
+    /** The same, asking for {@code transitiveTagKeys} to be set as transitive beside the tags. */
+    private static String assertionCarryingTags(String role, Map<String, List<String>> tags,
+                                                List<String> transitiveTagKeys) {
+        return assertion(role, PROVIDER, Instant.now().plusSeconds(300), AUDIENCE, ISSUER, true, false,
+                factory -> List.of(enveloped(factory)), null, tags, transitiveTagKeys);
+    }
+
+    /** One session tag, the shape every case that passes a well-formed one uses. */
+    private static Map<String, List<String>> tag(String key, String value) {
+        return Map.of(key, List.of(value));
+    }
+
+    private static String assertion(String role, String provider, Instant expiry, String audience,
+                                    String issuer, boolean sign, boolean unrelatedConfirmation,
+                                    Function<XMLSignatureFactory, List<Transform>> transforms,
+                                    String roleSessionName) {
+        return assertion(role, provider, expiry, audience, issuer, sign, unrelatedConfirmation, transforms,
+                roleSessionName, Map.of(), List.of());
+    }
+
+    private static String assertion(String role, String provider, Instant expiry, String audience,
+                                    String issuer, boolean sign, boolean unrelatedConfirmation,
+                                    Function<XMLSignatureFactory, List<Transform>> transforms,
+                                    String roleSessionName, Map<String, List<String>> principalTags,
+                                    List<String> transitiveTagKeys) {
+        String sessionNameAttribute = roleSessionName == null ? ""
+                : "<saml:Attribute Name=\"https://aws.amazon.com/SAML/Attributes/RoleSessionName\"><saml:AttributeValue>"
+                        + roleSessionName + "</saml:AttributeValue></saml:Attribute>";
+        StringBuilder tagAttributes = new StringBuilder();
+        principalTags.forEach((key, values) -> {
+            tagAttributes.append("<saml:Attribute Name=\"https://aws.amazon.com/SAML/Attributes/PrincipalTag:")
+                    .append(key).append("\">");
+            values.forEach(value -> tagAttributes.append("<saml:AttributeValue>").append(value)
+                    .append("</saml:AttributeValue>"));
+            tagAttributes.append("</saml:Attribute>");
+        });
+        if (!transitiveTagKeys.isEmpty()) {
+            // One multivalued attribute, which is how the guide writes this one: "include another
+            // Attribute element with the Name attribute set to
+            // https://aws.amazon.com/SAML/Attributes/TransitiveTagKeys".
+            tagAttributes.append("<saml:Attribute Name=\"https://aws.amazon.com/SAML/Attributes/")
+                    .append("TransitiveTagKeys\">");
+            transitiveTagKeys.forEach(key -> tagAttributes.append("<saml:AttributeValue>").append(key)
+                    .append("</saml:AttributeValue>"));
+            tagAttributes.append("</saml:Attribute>");
+        }
         String id = "_" + UUID.randomUUID();
         String extraConfirmation = unrelatedConfirmation
                 ? "<saml:SubjectConfirmation Method=\"urn:oasis:names:tc:SAML:2.0:cm:sender-vouches\"><saml:SubjectConfirmationData Recipient=\"https://unrelated.example.test\" NotOnOrAfter=\"" + Instant.now().minusSeconds(1) + "\"/></saml:SubjectConfirmation>"
@@ -554,7 +851,8 @@ class AssumeRoleWithSamlValidationIntegrationTest {
                 + Instant.now() + "\"><saml:Issuer>" + issuer + "</saml:Issuer><saml:Subject><saml:NameID Format=\"persistent\">saml-subject</saml:NameID>"
                 + extraConfirmation + "<saml:SubjectConfirmation Method=\"urn:oasis:names:tc:SAML:2.0:cm:bearer\"><saml:SubjectConfirmationData Recipient=\"https://signin.aws.amazon.com/saml\" NotOnOrAfter=\"" + expiry + "\"/></saml:SubjectConfirmation></saml:Subject>"
                 + "<saml:Conditions NotBefore=\"" + Instant.now().minusSeconds(30) + "\" NotOnOrAfter=\"" + expiry + "\"><saml:AudienceRestriction><saml:Audience>" + audience + "</saml:Audience></saml:AudienceRestriction></saml:Conditions>"
-                + "<saml:AttributeStatement><saml:Attribute Name=\"https://aws.amazon.com/SAML/Attributes/Role\"><saml:AttributeValue>" + role + "," + provider + "</saml:AttributeValue></saml:Attribute></saml:AttributeStatement></saml:Assertion>";
+                + "<saml:AttributeStatement><saml:Attribute Name=\"https://aws.amazon.com/SAML/Attributes/Role\"><saml:AttributeValue>" + role + "," + provider + "</saml:AttributeValue></saml:Attribute>" + sessionNameAttribute
+                + tagAttributes + "</saml:AttributeStatement></saml:Assertion>";
         try {
             Document document = XmlParser.parseDocument(xml);
             if (!sign) {

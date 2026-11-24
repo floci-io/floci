@@ -12,6 +12,7 @@ import io.floci.aws.services.elbv2.model.Listener;
 import io.floci.aws.services.elbv2.model.LoadBalancer;
 import io.floci.aws.services.elbv2.model.Rule;
 import io.floci.aws.testing.InlineMocks;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.Promise;
@@ -22,6 +23,8 @@ import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
 import io.vertx.core.net.SSLOptions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
@@ -54,6 +57,7 @@ import static org.mockito.Mockito.when;
  * A load balancer listener must not bind a port Floci needs for itself, or the two race and
  * whichever starts first wins - see {@link ElbV2DataPlane#isReservedByFloci(int)}.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class ElbV2ReservedPortTest {
 
     private static ElbV2DataPlane dataPlaneWith(int flociPort, boolean tlsEnabled, int awsHttpsPort) {

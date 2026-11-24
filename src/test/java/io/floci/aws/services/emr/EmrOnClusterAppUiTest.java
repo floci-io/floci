@@ -10,7 +10,9 @@ import io.floci.aws.services.emr.model.EmrPersistentAppUi;
 import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.URI;
 import java.time.Duration;
@@ -31,6 +33,7 @@ import static org.mockito.Mockito.mock;
  * primary node opens on a host of its own, which routes to the node's port, its pages' links to the node's other
  * interfaces made the browser's; until the node runs, the link starts it and is not ready.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class EmrOnClusterAppUiTest {
 
     private static final int RESOURCE_MANAGER = EmrClusterStorage.RESOURCE_MANAGER_WEB_PORT;

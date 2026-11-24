@@ -45,16 +45,26 @@ public final class EventRuleQueue implements AutoCloseable {
     public static EventRuleQueue route(String account, String region, String name, String pattern) {
         String url = call(account, region, "sqs", "AmazonSQS.CreateQueue", SQS_CONTENT_TYPE,
                 MAPPER.createObjectNode().put("QueueName", name)).jsonPath().getString("QueueUrl");
-        ObjectNode attributes = MAPPER.createObjectNode().put("QueueUrl", url);
-        attributes.putArray("AttributeNames").add("QueueArn");
-        String arn = call(account, region, "sqs", "AmazonSQS.GetQueueAttributes", SQS_CONTENT_TYPE, attributes)
-                .jsonPath().getString("Attributes.QueueArn");
-        call(account, region, "events", "AWSEvents.PutRule", EVENTS_CONTENT_TYPE,
-                MAPPER.createObjectNode().put("Name", name).put("EventPattern", pattern));
-        ObjectNode targets = MAPPER.createObjectNode().put("Rule", name);
-        targets.putArray("Targets").addObject().put("Id", TARGET_ID).put("Arn", arn);
-        call(account, region, "events", "AWSEvents.PutTargets", EVENTS_CONTENT_TYPE, targets);
-        return new EventRuleQueue(account, region, name, url);
+        EventRuleQueue queue = new EventRuleQueue(account, region, name, url);
+        try {
+            ObjectNode attributes = MAPPER.createObjectNode().put("QueueUrl", url);
+            attributes.putArray("AttributeNames").add("QueueArn");
+            String arn = call(account, region, "sqs", "AmazonSQS.GetQueueAttributes", SQS_CONTENT_TYPE, attributes)
+                    .jsonPath().getString("Attributes.QueueArn");
+            call(account, region, "events", "AWSEvents.PutRule", EVENTS_CONTENT_TYPE,
+                    MAPPER.createObjectNode().put("Name", name).put("EventPattern", pattern));
+            ObjectNode targets = MAPPER.createObjectNode().put("Rule", name);
+            targets.putArray("Targets").addObject().put("Id", TARGET_ID).put("Arn", arn);
+            call(account, region, "events", "AWSEvents.PutTargets", EVENTS_CONTENT_TYPE, targets);
+            return queue;
+        } catch (RuntimeException | AssertionError failure) {
+            try {
+                queue.close();
+            } catch (RuntimeException | AssertionError cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
+            throw failure;
+        }
     }
 
     /**
@@ -85,11 +95,17 @@ public final class EventRuleQueue implements AutoCloseable {
     public void close() {
         ObjectNode targets = MAPPER.createObjectNode().put("Rule", name);
         targets.putArray("Ids").add(TARGET_ID);
-        call(account, region, "events", "AWSEvents.RemoveTargets", EVENTS_CONTENT_TYPE, targets);
-        call(account, region, "events", "AWSEvents.DeleteRule", EVENTS_CONTENT_TYPE,
-                MAPPER.createObjectNode().put("Name", name));
-        call(account, region, "sqs", "AmazonSQS.DeleteQueue", SQS_CONTENT_TYPE,
-                MAPPER.createObjectNode().put("QueueUrl", url));
+        try {
+            call(account, region, "events", "AWSEvents.RemoveTargets", EVENTS_CONTENT_TYPE, targets);
+        } finally {
+            try {
+                call(account, region, "events", "AWSEvents.DeleteRule", EVENTS_CONTENT_TYPE,
+                        MAPPER.createObjectNode().put("Name", name));
+            } finally {
+                call(account, region, "sqs", "AmazonSQS.DeleteQueue", SQS_CONTENT_TYPE,
+                        MAPPER.createObjectNode().put("QueueUrl", url));
+            }
+        }
     }
 
     private static Response call(String account, String region, String service, String target,

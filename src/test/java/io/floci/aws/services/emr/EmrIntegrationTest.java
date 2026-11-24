@@ -15,9 +15,12 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static io.floci.aws.testing.EmrRequests.emr;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
@@ -236,6 +239,37 @@ class EmrIntegrationTest {
                 .body("Step.Status.State", equalTo("COMPLETED"));
     }
 
+    /** A step's own log destination and key, its StepMonitoringConfiguration, read back as DescribeStep's members. */
+    @Test
+    void aStepGivesBackItsOwnLogUriAndEncryptionKey() {
+        String cluster = emr("RunJobFlow", "{\"Name\":\"step-logs\",\"ReleaseLabel\":\"emr-7.11.0\","
+                + "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        try {
+            List<String> ids = emr("AddJobFlowSteps", "{\"JobFlowId\":\"" + cluster + "\",\"Steps\":["
+                    + "{\"Name\":\"logged\",\"ActionOnFailure\":\"CONTINUE\",\"HadoopJarStep\":{"
+                    + "\"Jar\":\"command-runner.jar\",\"Args\":[\"true\"]},\"StepMonitoringConfiguration\":{"
+                    + "\"S3MonitoringConfiguration\":{\"LogUri\":\"s3://step-logs/\","
+                    + "\"EncryptionKeyArn\":\"arn:aws:kms:us-east-1:000000000000:key/k\"}}},"
+                    + "{\"Name\":\"plain\",\"ActionOnFailure\":\"CONTINUE\",\"HadoopJarStep\":{"
+                    + "\"Jar\":\"command-runner.jar\",\"Args\":[\"true\"]}}]}")
+                    .then().statusCode(200).extract().jsonPath().getList("StepIds", String.class);
+
+            emr("DescribeStep", "{\"ClusterId\":\"" + cluster + "\",\"StepId\":\"" + ids.get(0) + "\"}")
+                    .then().statusCode(200)
+                    .body("Step.LogUri", equalTo("s3://step-logs/"))
+                    .body("Step.EncryptionKeyArn", equalTo("arn:aws:kms:us-east-1:000000000000:key/k"));
+            emr("DescribeStep", "{\"ClusterId\":\"" + cluster + "\",\"StepId\":\"" + ids.get(1) + "\"}")
+                    .then().statusCode(200)
+                    .body("Step", not(hasKey("LogUri")));
+            emr("ListSteps", "{\"ClusterId\":\"" + cluster + "\",\"StepIds\":[\"" + ids.get(0) + "\"]}")
+                    .then().statusCode(200)
+                    .body("Steps[0].LogUri", equalTo("s3://step-logs/"));
+        } finally {
+            emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + cluster + "\"]}").then().statusCode(200);
+        }
+    }
+
     @Test
     @Order(8)
     void listStepsNewestFirst() {
@@ -315,6 +349,14 @@ class EmrIntegrationTest {
         } finally {
             emr("DeleteSecurityConfiguration", "{\"Name\":\"floci-emr-sec\"}")
                     .then().statusCode(200);
+        }
+        // A configuration that is no JSON object could not be read when a cluster names it.
+        for (String notAnObject : List.of("not json", "[]")) {
+            emr("CreateSecurityConfiguration", objectMapper.createObjectNode().put("Name", "floci-emr-sec-bad")
+                    .put("SecurityConfiguration", notAnObject).toString())
+                    .then().statusCode(400)
+                    .body("__type", equalTo("InvalidRequestException"))
+                    .body("message", equalTo("SecurityConfiguration must be a JSON object."));
         }
     }
 
@@ -630,5 +672,185 @@ class EmrIntegrationTest {
             emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + uniform + "\",\"" + single + "\",\"" + grouped
                     + "\"]}").then().statusCode(200);
         }
+    }
+
+    @Test
+    @Order(22)
+    void describeClusterGivesBackTheSubnetsZonesProfileAndSecurityGroupsRunJobFlowAskedFor() {
+        List<String> launched = new ArrayList<>();
+        String fleet = """
+                {"InstanceFleetType": "MASTER", "TargetOnDemandCapacity": 1,
+                 "InstanceTypeConfigs": [{"InstanceType": "m5.xlarge"}]}""";
+        try {
+            String grouped = emr("RunJobFlow", """
+                    {"Name": "attributes-grouped", "JobFlowRole": "EMR_EC2_DefaultRole", "Instances": {
+                      "KeepJobFlowAliveWhenNoSteps": true, "Ec2SubnetId": "subnet-0aaa",
+                      "AdditionalMasterSecurityGroups": ["sg-0m1", "sg-0m2"],
+                      "AdditionalSlaveSecurityGroups": ["sg-0s1"]}}
+                    """).then().statusCode(200).extract().path("JobFlowId");
+            launched.add(grouped);
+            String inSubnets = emr("RunJobFlow", """
+                    {"Name": "attributes-subnets", "Instances": {"KeepJobFlowAliveWhenNoSteps": true,
+                      "Ec2SubnetIds": ["subnet-0bbb", "subnet-0ccc"], "InstanceFleets": [%s]}}
+                    """.formatted(fleet)).then().statusCode(200).extract().path("JobFlowId");
+            launched.add(inSubnets);
+            String inZones = emr("RunJobFlow", """
+                    {"Name": "attributes-zones", "Instances": {"KeepJobFlowAliveWhenNoSteps": true,
+                      "Placement": {"AvailabilityZones": ["us-east-1d", "us-east-1b"]}, "InstanceFleets": [%s]}}
+                    """.formatted(fleet)).then().statusCode(200).extract().path("JobFlowId");
+            launched.add(inZones);
+
+            String attributes = "Cluster.Ec2InstanceAttributes";
+            emr("DescribeCluster", "{\"ClusterId\":\"" + grouped + "\"}").then().statusCode(200)
+                    .body(attributes + ".Ec2SubnetId", equalTo("subnet-0aaa"))
+                    .body(attributes + ".IamInstanceProfile", equalTo("EMR_EC2_DefaultRole"))
+                    .body(attributes + ".AdditionalMasterSecurityGroups", equalTo(List.of("sg-0m1", "sg-0m2")))
+                    .body(attributes + ".AdditionalSlaveSecurityGroups", equalTo(List.of("sg-0s1")))
+                    .body(attributes + ".RequestedEc2SubnetIds", equalTo(List.of()))
+                    .body(attributes + ".RequestedEc2AvailabilityZones", equalTo(List.of()));
+            emr("DescribeCluster", "{\"ClusterId\":\"" + inSubnets + "\"}").then().statusCode(200)
+                    .body(attributes + ".Ec2SubnetId", equalTo("subnet-0bbb"))
+                    .body(attributes + ".RequestedEc2SubnetIds", equalTo(List.of("subnet-0bbb", "subnet-0ccc")))
+                    .body(attributes, not(hasKey("IamInstanceProfile")))
+                    .body(attributes, not(hasKey("AdditionalMasterSecurityGroups")));
+            emr("DescribeCluster", "{\"ClusterId\":\"" + inZones + "\"}").then().statusCode(200)
+                    .body(attributes + ".Ec2AvailabilityZone", equalTo("us-east-1d"))
+                    .body(attributes + ".RequestedEc2AvailabilityZones", equalTo(List.of("us-east-1d", "us-east-1b")));
+
+            emr("RunJobFlow", """
+                    {"Name": "attributes-both", "Instances": {"KeepJobFlowAliveWhenNoSteps": true,
+                      "Ec2SubnetIds": ["subnet-0bbb"], "Placement": {"AvailabilityZones": ["us-east-1d"]},
+                      "InstanceFleets": [%s]}}
+                    """.formatted(fleet)).then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message",
+                            equalTo("Ec2SubnetIds and Placement.AvailabilityZones cannot be specified together."));
+            emr("RunJobFlow", """
+                    {"Name": "attributes-malformed", "Instances": {"KeepJobFlowAliveWhenNoSteps": true,
+                      "AdditionalMasterSecurityGroups": "sg-0m1"}}
+                    """).then().statusCode(400)
+                    .body("__type", equalTo("SerializationException"));
+        } finally {
+            if (!launched.isEmpty()) {
+                emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + String.join("\",\"", launched) + "\"]}")
+                        .then().statusCode(200);
+            }
+        }
+    }
+
+    @Test
+    @Order(23)
+    void describeClusterGivesBackTheClustersOwnSettingsAndOnlyTheRealmOfItsKerberosAttributes() {
+        String osRelease = emr("DescribeReleaseLabel", "{\"ReleaseLabel\":\"emr-7.13.0\"}").then().statusCode(200)
+                .extract().path("AvailableOSReleases[0].Label");
+        String masterGroups = """
+                "InstanceGroups": [
+                  {"InstanceRole": "MASTER", "InstanceType": "m5.xlarge", "InstanceCount": 3},
+                  {"InstanceRole": "CORE", "InstanceType": "m5.xlarge", "InstanceCount": 1}]""";
+        List<String> launched = new ArrayList<>();
+        try {
+            String set = emr("RunJobFlow", """
+                    {"Name": "settings-set", "ReleaseLabel": "emr-7.13.0", "CustomAmiId": "ami-0abc",
+                     "EbsRootVolumeIops": 4000, "EbsRootVolumeThroughput": 250,
+                     "LogEncryptionKmsKeyId": "arn:aws:kms:us-east-1:000000000000:key/logs",
+                     "KerberosAttributes": {"Realm": "EC2.INTERNAL", "KdcAdminPassword": "kdc-secret",
+                       "CrossRealmTrustPrincipalPassword": "cross-secret"},
+                     "PlacementGroupConfigs": [{"InstanceRole": "MASTER"}],
+                     "MonitoringConfiguration": {
+                       "CloudWatchLogConfiguration": {"Enabled": true, "LogGroupName": "/emr/logs",
+                         "LogTypes": {"STEP_LOGS": ["STDOUT"]}},
+                       "S3LoggingConfiguration": {"LogTypeUploadPolicy": {"system-logs": "emr-managed"}}},
+                     "Instances": {"KeepJobFlowAliveWhenNoSteps": true, %s}}
+                    """.formatted(masterGroups)).then().statusCode(200).extract().path("JobFlowId");
+            launched.add(set);
+            String unset = emr("RunJobFlow", """
+                    {"Name": "settings-unset", "ReleaseLabel": "emr-7.13.0", "OSReleaseLabel": "2.0.20260727.0",
+                     "Instances": {"KeepJobFlowAliveWhenNoSteps": true}}
+                    """).then().statusCode(200).extract().path("JobFlowId");
+            launched.add(unset);
+
+            emr("DescribeCluster", "{\"ClusterId\":\"" + set + "\"}").then().statusCode(200)
+                    .body("Cluster.EbsRootVolumeIops", equalTo(4000))
+                    .body("Cluster.EbsRootVolumeThroughput", equalTo(250))
+                    .body("Cluster.LogEncryptionKmsKeyId", equalTo("arn:aws:kms:us-east-1:000000000000:key/logs"))
+                    .body("Cluster.OSReleaseLabel", equalTo(osRelease))
+                    .body("Cluster.RepoUpgradeOnBoot", equalTo("SECURITY"))
+                    .body("Cluster.KerberosAttributes", equalTo(Map.of("Realm", "EC2.INTERNAL")))
+                    .body("Cluster.PlacementGroups",
+                            equalTo(List.of(Map.of("InstanceRole", "MASTER", "PlacementStrategy", "SPREAD"))))
+                    .body("Cluster.MonitoringConfiguration.CloudWatchLogConfiguration.LogGroupName",
+                            equalTo("/emr/logs"))
+                    .body("Cluster.MonitoringConfiguration.S3LoggingConfiguration.LogTypeUploadPolicy",
+                            equalTo(Map.of("system-logs", "emr-managed")))
+                    .body(not(containsString("kdc-secret")))
+                    .body(not(containsString("cross-secret")));
+            emr("DescribeCluster", "{\"ClusterId\":\"" + unset + "\"}").then().statusCode(200)
+                    .body("Cluster.OSReleaseLabel", equalTo("2.0.20260727.0"))
+                    .body("Cluster.KerberosAttributes", equalTo(Map.of()))
+                    .body("Cluster", not(hasKey("RepoUpgradeOnBoot")))
+                    .body("Cluster", not(hasKey("PlacementGroups")))
+                    .body("Cluster", not(hasKey("EbsRootVolumeIops")));
+        } finally {
+            if (!launched.isEmpty()) {
+                emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + String.join("\",\"", launched) + "\"]}")
+                        .then().statusCode(200);
+            }
+        }
+
+        String refused = "{\"Name\": \"settings-refused\", \"Instances\": {\"KeepJobFlowAliveWhenNoSteps\": true%s}%s}";
+        emr("RunJobFlow", refused.formatted("", ", \"KerberosAttributes\": {\"Realm\": \"EC2.INTERNAL\"}"))
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("'kerberosAttributes.kdcAdminPassword'"))
+                .body("message", not(containsString("EC2.INTERNAL")));
+        emr("RunJobFlow", refused.formatted("", ", \"RepoUpgradeOnBoot\": \"ALL\""))
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("'repoUpgradeOnBoot'"));
+        emr("RunJobFlow", refused.formatted("", ", \"MonitoringConfiguration\": "
+                        + "{\"CloudWatchLogConfiguration\": {\"LogGroupName\": \"/emr/logs\"}}"))
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("'monitoringConfiguration.cloudWatchLogConfiguration.enabled'"));
+        emr("RunJobFlow", refused.formatted(", " + masterGroups, ", \"PlacementGroupConfigs\": ["
+                        + "{\"InstanceRole\": \"MASTER\", \"PlacementStrategy\": \"SPREAD\"},"
+                        + "{\"InstanceRole\": \"MASTER\", \"PlacementStrategy\": \"SPREAD\"}]"))
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Placement group supports single placement strategy for an instance role. "
+                        + "Found multiple strategy for the following instance role: MASTER"));
+        emr("RunJobFlow", refused.formatted(", " + masterGroups, ", \"PlacementGroupConfigs\": ["
+                        + "{\"InstanceRole\": \"CORE\", \"PlacementStrategy\": \"SPREAD\"}]"))
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message",
+                        equalTo("Placement groups are supported only for the MASTER instance role, not CORE."));
+        emr("RunJobFlow", refused.formatted(", " + masterGroups, ", \"PlacementGroupConfigs\": ["
+                        + "{\"InstanceRole\": \"MASTER\", \"PlacementStrategy\": \"PARTITION\"}]"))
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("The MASTER instance role supports only the SPREAD or NONE placement "
+                        + "strategy, not PARTITION."));
+        String primaryPlacement = ", \"PlacementGroupConfigs\": [{\"InstanceRole\": \"MASTER\"}]";
+        String singleMaster = "Placement group support for master node is available only for multi-master cluster "
+                + "and not for single-master cluster.";
+        emr("RunJobFlow", refused.formatted("", primaryPlacement))
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo(singleMaster));
+        emr("RunJobFlow", refused.formatted(", " + masterGroups.replace("\"InstanceCount\": 3", "\"InstanceCount\": 4"),
+                        primaryPlacement))
+                .then().statusCode(400)
+                .body("message", equalTo(singleMaster));
+        emr("RunJobFlow", refused.formatted(", \"InstanceFleets\": [{\"InstanceFleetType\": \"MASTER\", "
+                        + "\"TargetOnDemandCapacity\": 1, \"TargetSpotCapacity\": 2, "
+                        + "\"InstanceTypeConfigs\": [{\"InstanceType\": \"m5.xlarge\"}]}]", primaryPlacement))
+                .then().statusCode(400)
+                .body("message", equalTo(singleMaster));
+        emr("RunJobFlow", refused.formatted("", ", \"EbsRootVolumeIops\": \"fast\""))
+                .then().statusCode(400)
+                .body("__type", equalTo("SerializationException"));
+        emr("ListClusters", "{}").then().statusCode(200)
+                .body("Clusters.findAll { it.Name == 'settings-refused' }", hasSize(0));
     }
 }

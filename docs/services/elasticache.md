@@ -350,6 +350,18 @@ replication group is gone. The reference counts from the moment `CreateReplicati
 the name, not from when the group is stored, so a delete that lands while that create is still
 provisioning its container is refused too.
 
+### IAM enforcement
+
+With IAM enforcement on, each action is checked on the resources the AWS Service Authorization
+Reference lists for it, read from the request: a cache cluster by its `CacheClusterId`, a
+replication group by its `ReplicationGroupId`, a parameter group by its `CacheParameterGroupName`, a
+subnet group by its `CacheSubnetGroupName`, a snapshot by its `SnapshotName`, a user by its `UserId`,
+a user group by its `UserGroupId` (and, for `ModifyUserGroup`, each user its `UserIdsToAdd` and
+`UserIdsToRemove` name) and a serverless cache by its `ServerlessCacheName`, each as
+`arn:aws:elasticache:<region>:<account>:<type>:<name>`, the ARN ElastiCache mints. The tagging
+calls name their resource in `ResourceName`, which is not read, so they are checked on `*`, as is a
+Describe action naming no resource.
+
 ## Replicas and failover
 
 The members of a cluster-mode-disabled replication group share one backend, so a replica is a
@@ -380,11 +392,18 @@ snapshot's ARN. `DescribeSnapshots` returns snapshots in name order, `MaxRecords
 Snapshots outlive the group they were taken from, as on AWS. They are taken of
 cluster-mode-disabled replication groups only: a cluster-mode-enabled group, a standalone cache
 cluster or a group without a running backend is refused, as is seeding a cluster-mode-enabled
-group. Automatic snapshots, `CopySnapshot` and `FinalSnapshotIdentifier` are not modeled. To
-reload the dataset, the backend runs with `--enable-debug-command local`, which allows `DEBUG`
-only for connections from inside its own container; clients always connect through the proxy.
-With [`shell-less-backend`](#images-with-no-shell-or-cli) the snapshot file is placed before the
-server starts instead, and `DEBUG` is not enabled.
+group. Automatic snapshots, `CopySnapshot` and `FinalSnapshotIdentifier` are not modeled.
+
+A group created from a snapshot starts with the snapshot file already in its backend's data
+directory (the image's working directory, where a server started without `--dir` keeps its data),
+so the server loads it at startup. No backend runs with `--enable-debug-command`, which a Redis
+before 7.0 refuses to start with, and `DEBUG` is never used. The file is placed under the name set
+by `floci.services.elasticache.shell-less-backend-dbfilename`
+(`FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND_DBFILENAME`, default `dump.rdb`, the name Redis and
+Valkey load), and Floci checks the server's `dir`, and its `dbfilename` when it reports one, once
+it is up. If the file cannot be placed, or the server cannot start with it, the new group's
+container is removed and the create fails with `InvalidSnapshotState`; the group the snapshot came
+from and the snapshot are not touched.
 
 ## Engine version and backend image
 
@@ -415,9 +434,9 @@ Memcached uses the separate `floci.services.elasticache.default-memcached-image`
 
 ### Images with no shell or CLI
 
-By default Floci starts the backend through the image's `VALKEY_EXTRA_FLAGS` hook and takes and
-restores snapshots with the `valkey-cli` or `redis-cli` inside the container, which only images
-built like `valkey/valkey` provide. An image that has no shell and no CLI, such as a distroless
+By default Floci starts the backend through the image's `VALKEY_EXTRA_FLAGS` hook and takes
+snapshots with the `valkey-cli` or `redis-cli` inside the container, which only images built like
+`valkey/valkey` provide. An image that has no shell and no CLI, such as a distroless
 Redis-compatible image, needs the other path, which is selected by
 `floci.services.elasticache.shell-less-backend` (`FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND`).
 It is `false` by default and is never inferred from the image name, so which path runs is always the
@@ -432,17 +451,13 @@ With `shell-less-backend` set to `true`:
 - `CreateSnapshot` runs `SAVE`, reads `CONFIG GET dir` and `CONFIG GET dbfilename` over the RESP
   connection to the backend, and copies the file out of the container through the Docker archive
   API. No command is executed inside the container.
-- `CreateReplicationGroup` with `SnapshotName` places the snapshot file in the container's data
-  directory (the image's working directory, which is where a server started without `--dir` keeps
-  its data) before the server starts, so the server loads it itself. No `DEBUG` command is used and
-  `--enable-debug-command` is not passed. If the file cannot be placed, or the server cannot start
-  with it, the new group's container is removed and the create fails with `InvalidSnapshotState`;
-  the group the snapshot came from and the snapshot are not touched.
+- `CreateReplicationGroup` with `SnapshotName` places the snapshot file before the server starts,
+  as on the default path.
 - `floci.services.elasticache.shell-less-backend-dbfilename`
   (`FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND_DBFILENAME`, default `dump.rdb`) names the file
   the server loads from its data directory at startup. A restore places the snapshot under this
-  name, and a snapshot falls back to it when the server does not report `dbfilename`. Set it to the
-  name your image's server uses.
+  name on either path, and a snapshot falls back to it when the server does not report
+  `dbfilename`. Set it to the name your image's server uses.
 
 An image used this way has to:
 
@@ -480,7 +495,7 @@ do not restore a snapshot taken from one engine into another.
 | `FLOCI_SERVICES_ELASTICACHE_PROXY_MAX_PORT` | `6399` | Last host port in the ElastiCache proxy range |
 | `FLOCI_SERVICES_ELASTICACHE_DEFAULT_IMAGE` | `valkey/valkey:8` | Docker image for Redis/Valkey containers |
 | `FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND` | `false` | Start and snapshot the backend for an image with no shell or CLI: [see above](#images-with-no-shell-or-cli) |
-| `FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND_DBFILENAME` | `dump.rdb` | Snapshot file name the server loads at startup, used with the setting above |
+| `FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND_DBFILENAME` | `dump.rdb` | Snapshot file name the server loads at startup; a restore places the snapshot under it on either path |
 
 ### Docker Compose
 

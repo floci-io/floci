@@ -3,7 +3,7 @@
 **Protocol:** JSON 1.1 (`X-Amz-Target: com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.*`)
 **Endpoint:** `POST http://localhost:4566/`
 
-Floci emulates a CloudTrail trail's full life cycle and emits S3 data events
+Floci emulates a CloudTrail trail's full life cycle and emits S3 data events, IAM API calls
 and selected Secrets Manager management writes to the trail's destination bucket as gzipped JSON log files at the
 AWS-shaped key path:
 
@@ -25,7 +25,7 @@ ${prefix}AWSLogs/${accountId}/CloudTrail/${region}/yyyy/MM/dd/${accountId}_Cloud
 | `StartLogging` | Starts logging for a trail |
 | `StopLogging` | Stops logging for a trail |
 | `GetTrailStatus` | Returns the logging status of a trail |
-| `LookupEvents` | - |
+| `LookupEvents` | Returns the management events in the account's event history, newest first |
 | `ListTrails` | - |
 | `AddTags` | Adds or overwrites tags on a trail, identified by ARN |
 | `RemoveTags` | Removes the given tag keys from a trail, identified by ARN |
@@ -39,6 +39,28 @@ and `AWS::S3::Object` data resource ARNs in any of these forms:
 - `arn:aws:s3:::bucket/` — every key in the bucket
 - `arn:aws:s3:::bucket/prefix` — keys with the given prefix
 - `arn:aws:s3:::bucket/prefix/key` — exact key match
+
+## Source address
+
+`sourceIPAddress` is "the IP address that the request was made from"
+([CloudTrail record contents](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-record-contents.html)):
+the address of the connection Floci received the request on. An `X-Forwarded-For` header is not read on its own,
+since any client can send one. Behind a reverse proxy, Quarkus's own proxy settings make the address it forwards
+the source address, from the proxies they name only:
+
+```bash
+QUARKUS_HTTP_PROXY_PROXY_ADDRESS_FORWARDING=true
+QUARKUS_HTTP_PROXY_ALLOW_X_FORWARDED=true
+QUARKUS_HTTP_PROXY_TRUSTED_PROXIES=10.0.0.5   # the proxy's address or range
+```
+
+Quarkus takes the first address in `X-Forwarded-For`, so the proxy must set the header to the address its own
+connection came from, replacing any the client sent (nginx's `proxy_set_header X-Forwarded-For $remote_addr`). A
+proxy that appends to the client's header (nginx's `$proxy_add_x_forwarded_for`) leaves the client's choice first,
+and that is what gets recorded.
+
+With `floci.tls.enabled`, Floci's own TCP proxy relays every connection to Quarkus, so the source address is the
+loopback address.
 
 ## Encryption and CloudWatch Logs settings
 
@@ -68,15 +90,51 @@ refused for a permission it needs besides its own, such as
 operation. A browser `POST` upload, whose credential is in its form fields, is
 recorded as `PostObject` when IAM refuses it.
 
+## IAM Coverage
+
+Every IAM API call is recorded as a management event, as CloudTrail
+["logs all authenticated API requests to IAM"](https://docs.aws.amazon.com/IAM/latest/UserGuide/cloudtrail-integration.html):
+one IAM ran, one IAM answered with an error, and, with `floci.services.iam.enforcement-enabled`, one IAM enforcement
+refused.
+
+- `eventSource` is `iam.amazonaws.com` and `awsRegion` the Region IAM signs for in the request's partition
+  (`us-east-1` in `aws`). IAM is a global service, so only a trail with `IncludeGlobalServiceEvents` (the default)
+  records its calls, and only a multi-Region trail or one whose home Region is that Region.
+- `readOnly` is `true` for the actions AWS's service reference
+  ([`iam.json`](https://servicereference.us-east-1.amazonaws.com/v1/iam/iam.json)) gives the Read or List access
+  level, vendored as `readOnlyActions` in `iam-action-resources.json` by `make iam-action-resources-sync`.
+- `requestParameters` holds the request's members, named with a lower first letter (`userName`, `policyArn`,
+  `tags: [{"key": ..., "value": ...}]`), numbers and booleans typed as botocore's IAM model types them. A member the
+  model marks sensitive (a password, a private key) is left out, and a request whose only members are sensitive
+  (`ChangePassword`) has `"requestParameters": null`.
+- `responseElements` is `null` for a failed call and for a read-only one, as CloudTrail
+  "redacts the responseElements information" of a read-only event. Otherwise it holds the call's result
+  (`{"accessKey": {...}}` for `CreateAccessKey`), numbers, booleans and timestamps typed as the model types them,
+  timestamps written as CloudTrail writes them (`Oct 29, 2024 2:43:20 PM`), and without the members the model marks
+  sensitive (`secretAccessKey`, a service-specific credential's password or secret, a virtual MFA device's seed).
+- An error IAM models is recorded under its error shape's name: `NoSuchEntity` as `NoSuchEntityException`,
+  `DeleteConflict` as `DeleteConflictException`, with IAM's message. A call IAM enforcement refuses, on its
+  policies or because a `GetSessionToken` session without MFA cannot make it, is recorded as
+  `errorCode: "AccessDenied"` and `"requestParameters": null`, with the message and the request ID the refusal
+  answered with.
+- `sourceIPAddress` is the address the request came from and `userAgent` its `User-Agent`; `requestID` is the one
+  IAM answered with. `userIdentity` is the caller as it was before the call ran, so a key that deletes itself is
+  still recorded as its user's.
+- Like every management event, an IAM call also reaches the account's event history, which `LookupEvents` reads,
+  whether or not a trail records it.
+
+How each member is typed, which members are sensitive and each error's shape name are read from
+`iam-cloudtrail-shapes.json`, which `make aws-data-sync` generates from the pinned botocore.
+
 ## Management Write Coverage
 
 Successful Secrets Manager `PutSecretValue` and `UpdateSecret` API calls produce management
 records when a logging trail selects them. New trails include management events by default.
-Basic selectors honor `IncludeManagementEvents`, `ReadWriteType`, and source exclusions.
+Basic selectors honor `IncludeManagementEvents`, `ReadWriteType` (against each event's `readOnly`), and source exclusions.
 Advanced selectors evaluate `eventCategory`, `eventSource`, `eventName`, `readOnly`, `eventType`,
 and `userIdentity.arn`; unsupported fields do not match these records.
 
-Records have `eventCategory: Management`, `managementEvent: true`, and `readOnly: false`.
+Records have `eventCategory: Management` and `managementEvent: true`; the Secrets Manager writes have `readOnly: false`.
 Sensitive secret values are omitted. Buffers and background S3 delivery retain the originating
 account, including when different accounts use the same trail name. Multi-region trails cover
 regions within their own partition.
@@ -84,6 +142,20 @@ regions within their own partition.
 These writes also reach EventBridge's default bus in the request's account and region. See
 [Secrets Manager event delivery](secrets-manager.md#secret-write-events) for prerequisites,
 the secret-specific event pattern, and the limits of this coverage.
+
+## Event History
+
+`LookupEvents` reads the event history: every management event Floci records, in the caller's
+account and region, whether or not a trail is logging, as on AWS. Today those are the Secrets Manager
+`PutSecretValue` and `UpdateSecret` writes above. Events come back newest first, at most 50 a page
+with a `NextToken` for the rest (as on AWS, the token is accepted only with the same parameters), and can be narrowed by `StartTime`, `EndTime` and one
+`LookupAttributes` entry (`EventId`, `EventName`, `EventSource`, `ReadOnly`, `Username` or
+`AccessKeyId`). Each event carries `CloudTrailEvent`, the full record as a trail delivers it.
+
+The history keeps 90 days and at most 10,000 events per account and region, in memory: it does not
+survive a restart, and an emulator reset empties it. Records name no resources, so `Resources` is empty and a `ResourceType` or
+`ResourceName` attribute matches nothing. Floci records no Insights events, so `EventCategory: insight`
+returns an empty page; any other category is refused with `InvalidEventCategoryException`.
 
 ## Configuration
 

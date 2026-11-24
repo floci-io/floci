@@ -142,6 +142,31 @@ class EmrContainersIntegrationTest {
                 .body("__type", containsString("ValidationException"));
     }
 
+    /** A run takes a running slot only while it is RUNNING, so runs that complete at once never wait in the queue. */
+    @Test
+    void runsThatCompleteAtOnceNeverWaitBehindTheRunningLimit() {
+        String clusterId = emr().body("""
+                        {"name": "limited", "clientToken": "%s",
+                         "containerProvider": {"type": "EKS", "id": "%s", "info": {"eksInfo": {"namespace": "spark"}}},
+                         "schedulerConfiguration": {"maxConcurrentJobRuns": 1, "maxInQueueJobRuns": 100}}
+                        """.formatted(UUID.randomUUID(), eksCluster()))
+                .post("/virtualclusters")
+                .then().statusCode(200)
+                .extract().path("id");
+        String first = startJobRun(clusterId);
+        String second = startJobRun(clusterId);
+
+        for (String runId : new String[] {first, second}) {
+            emr().get("/virtualclusters/" + clusterId + "/jobruns/" + runId)
+                    .then().statusCode(200)
+                    .body("jobRun.state", equalTo("COMPLETED"));
+        }
+        emr().get("/virtualclusters/" + clusterId)
+                .then().statusCode(200)
+                .body("virtualCluster.schedulerStatus.currentConcurrentJobRuns", equalTo(0))
+                .body("virtualCluster.schedulerStatus.currentInQueueJobRuns", equalTo(0));
+    }
+
     @Test
     void jobRunOnAMissingVirtualClusterAnswersAwsDocumentedError() {
         emr().body("""

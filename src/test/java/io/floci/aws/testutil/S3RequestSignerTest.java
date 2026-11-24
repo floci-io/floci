@@ -1,6 +1,8 @@
 package io.floci.aws.testutil;
 
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.URI;
 import java.time.Instant;
@@ -10,6 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(ParallelLocks.PORTS)
 class S3RequestSignerTest {
 
     private static final S3RequestSigner SIGNER =

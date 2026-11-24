@@ -482,28 +482,11 @@ class DynamoDbConditionKeysTest {
         assertTrue(result.attributes().contains("inStock"), result.attributes().toString());
     }
 
-    @ParameterizedTest
-    @CsvSource({"BatchExecuteStatement, Statements", "ExecuteTransaction, TransactStatements"})
-    void partiQLStatementRequestsFollowTheRecordedMemberPaths(String operation, String member) {
-        JsonNode body = json("{\"" + member + "\":[{\"Statement\":\"SELECT * FROM a\"},"
-                + "{\"Statement\":\"DELETE FROM b WHERE PK = ?\",\"Parameters\":[{\"S\":\"k\"}]},"
-                + "\"not-an-object\"]}");
-
-        List<JsonNode> requests = DynamoDbConditionKeys.partiQLStatementRequests(operation, body);
-
-        assertEquals(3, requests.size());
-        assertEquals("SELECT * FROM a", DynamoDbConditionKeys.partiQLStatement(requests.get(0)));
-        assertEquals("DELETE FROM b WHERE PK = ?", DynamoDbConditionKeys.partiQLStatement(requests.get(1)));
-        assertEquals("k", requests.get(1).path("Parameters").path(0).path("S").asText());
-        assertNull(DynamoDbConditionKeys.partiQLStatement(requests.get(2)));
-    }
-
     @Test
-    void partiQLStatementRequestsIgnoreTheOtherOperationsMember() {
-        JsonNode body = json("{\"Statements\":[{\"Statement\":\"SELECT * FROM a\"}]}");
-
-        assertTrue(DynamoDbConditionKeys.partiQLStatementRequests("ExecuteTransaction", body).isEmpty());
-        assertTrue(DynamoDbConditionKeys.partiQLStatementRequests("BatchExecuteStatement", null).isEmpty());
+    void partiQLStatementReadsTheTextOfOneStatementRequest() {
+        assertEquals("DELETE FROM b WHERE PK = ?", DynamoDbConditionKeys.partiQLStatement(
+                json("{\"Statement\":\"DELETE FROM b WHERE PK = ?\",\"Parameters\":[{\"S\":\"k\"}]}")));
         assertNull(DynamoDbConditionKeys.partiQLStatement(json("{\"Statement\":1}")));
+        assertNull(DynamoDbConditionKeys.partiQLStatement(json("\"not-an-object\"")));
     }
 }

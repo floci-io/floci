@@ -2,7 +2,10 @@ package io.floci.aws.core.common.auth;
 
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.net.URI;
@@ -22,6 +25,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class LocalAwsSigningSessionTest {
 
     private static final String ACCOUNT = "111111111111";

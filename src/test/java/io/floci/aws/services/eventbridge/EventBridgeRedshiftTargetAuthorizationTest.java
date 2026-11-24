@@ -14,8 +14,10 @@ import io.floci.aws.services.redshiftdata.RedshiftDataService;
 import io.floci.aws.services.redshiftdata.RedshiftTargetAuthorizer;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.services.sqs.SqsService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
@@ -32,6 +34,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class EventBridgeRedshiftTargetAuthorizationTest {
     private static final String ACCOUNT = "123456789012";
     private static final String CLUSTER_ARN = "arn:aws:redshift:us-east-1:" + ACCOUNT + ":cluster:warehouse";

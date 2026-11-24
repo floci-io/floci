@@ -22,7 +22,9 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
+
+import static io.floci.aws.services.redshift.spectrum.StreamingViewSupport.schemaOrDefault;
+import static io.floci.aws.services.redshift.spectrum.StreamingViewSupport.table;
 
 /**
  * Streaming materialized views over Kinesis Data Streams. A view is a PostgreSQL table, and the stream's relation
@@ -35,14 +37,10 @@ import java.util.concurrent.ConcurrentHashMap;
 @ApplicationScoped
 public class KinesisStreamingViews {
 
-    /** The schema an unqualified view name is created in. */
-    static final String DEFAULT_VIEW_SCHEMA = "public";
-
     private static final String REDSHIFT_PRINCIPAL = ServicePrincipals.of("redshift");
     private static final List<String> READ_ACTIONS = List.of("kinesis:DescribeStreamSummary",
             "kinesis:GetShardIterator", "kinesis:GetRecords", "kinesis:ListShards", "kinesis:DescribeStream");
     private static final int PAGE_LIMIT = 1000;
-    private static final int BATCH_BYTES = 4 * 1024 * 1024;
     private static final DateTimeFormatter TIMESTAMP = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS");
 
     private final KinesisViewRegistry registry;
@@ -50,7 +48,7 @@ public class KinesisStreamingViews {
     private final ServiceRoleAuthorizer authorizer;
     private final RegionResolver regionResolver;
     private final Clock clock;
-    private final Map<String, Object> streamLocks = new ConcurrentHashMap<>();
+    private final StreamingViewSupport<KinesisViewBinding> support;
 
     @Inject
     public KinesisStreamingViews(KinesisViewRegistry registry, KinesisService kinesis,
@@ -60,6 +58,8 @@ public class KinesisStreamingViews {
         this.authorizer = authorizer;
         this.regionResolver = regionResolver;
         this.clock = clock;
+        this.support = new StreamingViewSupport<>(registry, KinesisViewBinding::viewSchema,
+                KinesisViewBinding::viewName, KinesisViewBinding::streamSchema, KinesisViewBinding::streamName);
     }
 
     public Optional<KinesisViewBinding> find(SpectrumSession session, String viewSchema, String viewName) {
@@ -78,65 +78,24 @@ public class KinesisStreamingViews {
     }
 
     public void unbind(KinesisViewBinding view) {
-        registry.unbind(view.accountId(), view.clusterKey(), view.databaseName(), view.bindingName());
+        support.unbind(view);
     }
 
     /** Unbinds a view captured earlier, unless a view of the same name over another stream has replaced it. */
     public void unbindIfCurrent(KinesisViewBinding captured) {
-        synchronized (streamLock(captured.accountId(), captured.clusterKey(), captured.databaseName(),
-                captured.streamSchema(), captured.streamName())) {
-            registry.find(captured.accountId(), captured.clusterKey(), captured.databaseName(),
-                    captured.bindingName()).filter(current -> readsSameStream(current, captured))
-                    .ifPresent(this::unbind);
-        }
+        support.unbindIfCurrent(captured);
     }
 
-    private static boolean readsSameStream(KinesisViewBinding first, KinesisViewBinding second) {
-        return first.streamSchema().equals(second.streamSchema()) && first.streamName().equals(second.streamName());
-    }
-
-    /** The SQL that drops a view's table, for the statement that drops a schema it reads from. */
-    static String dropSql(KinesisViewBinding view, boolean ifExists, boolean cascade) {
-        return "DROP TABLE " + (ifExists ? "IF EXISTS " : "") + table(view.viewSchema(), view.viewName())
-                + (cascade ? " CASCADE" : " RESTRICT");
-    }
-
-    /**
-     * Drops a view's table and its binding, and the stream's staging table once no other view reads the stream.
-     * Without that, a plain DROP SCHEMA of the stream's schema would keep failing on the leftover table.
-     */
+    /** Drops a view's table and its binding, and the stream's staging table once no other view reads the stream. */
     public void drop(KinesisViewBinding named, boolean ifExists, boolean cascade, BackendSql backend) {
-        synchronized (streamLock(named.accountId(), named.clusterKey(), named.databaseName(), named.streamSchema(),
-                named.streamName())) {
-            // the binding read before the lock may be gone or replaced by a view of the same name since
-            Optional<KinesisViewBinding> registered = registry.find(named.accountId(), named.clusterKey(),
-                    named.databaseName(), named.bindingName());
-            if (registered.isEmpty() || !readsSameStream(registered.get(), named)) {
-                if (ifExists) {
-                    return;
-                }
-                throw new SpectrumSqlException("42P01", "materialized view \"" + named.viewSchema() + "."
-                        + named.viewName() + "\" does not exist");
-            }
-            KinesisViewBinding view = registered.get();
-            boolean lastReader = registry.list(view.accountId(), view.clusterKey(), view.databaseName()).stream()
-                    .noneMatch(other -> !other.bindingName().equals(view.bindingName())
-                            && other.streamSchema().equals(view.streamSchema())
-                            && other.streamName().equals(view.streamName()));
-            String sql = dropSql(view, ifExists, cascade);
-            if (lastReader) {
-                sql += "; DROP TABLE IF EXISTS " + table(view.streamSchema(), view.streamName());
-            }
-            backend.execute(sql);
-            unbind(view);
-        }
+        support.drop(named, ifExists, cascade, backend);
     }
 
     public void create(ExternalStatement.CreateStreamingView statement, String streamName,
                        KinesisSchemaBinding schema, SpectrumSession session, String clusterRegion,
                        BackendSql backend) {
         String viewSchema = schemaOrDefault(statement.viewSchema());
-        synchronized (streamLock(session.accountId(), session.clusterKey(), session.databaseName(),
+        synchronized (support.lock(session.accountId(), session.clusterKey(), session.databaseName(),
                 schema.schemaName(), streamName)) {
             if (find(session, viewSchema, statement.viewName()).isPresent()) {
                 throw new SpectrumSqlException("42P07", "relation \"" + viewSchema + "." + statement.viewName()
@@ -158,20 +117,13 @@ public class KinesisStreamingViews {
     public long refresh(KinesisViewBinding view, KinesisSchemaBinding schema, String clusterRegion,
                         BackendSql backend) {
         // refreshes of the views over one stream share its staging table, so they run one at a time
-        synchronized (streamLock(view.accountId(), view.clusterKey(), view.databaseName(), view.streamSchema(),
-                view.streamName())) {
+        synchronized (support.lock(view)) {
             // the binding read before the lock may be stale: a refresh ahead of this one moved the checkpoints
             KinesisViewBinding latest = registry.find(view.accountId(), view.clusterKey(), view.databaseName(),
                     view.bindingName()).orElseThrow(() -> new SpectrumSqlException("42P01",
                             "relation \"" + view.viewSchema() + "." + view.viewName() + "\" does not exist"));
             return refreshLocked(latest, schema, clusterRegion, backend);
         }
-    }
-
-    private Object streamLock(String accountId, String clusterKey, String database, String streamSchema,
-                              String streamName) {
-        return streamLocks.computeIfAbsent(String.join("\u001f", accountId, clusterKey, database, streamSchema,
-                streamName), key -> new Object());
     }
 
     private long refreshLocked(KinesisViewBinding view, KinesisSchemaBinding schema, String clusterRegion,
@@ -198,7 +150,8 @@ public class KinesisStreamingViews {
                 if (records == null || records.isEmpty()) {
                     break;
                 }
-                for (List<KinesisRecord> batch : batches(records)) {
+                for (List<KinesisRecord> batch : StreamingViewSupport.batches(records,
+                        record -> record.getData() == null ? 0 : record.getData().length)) {
                     backend.execute(loadSql(view, shardId, batch, refreshTime));
                     current = current.withCheckpoint(shardId, batch.getLast().getSequenceNumber());
                     registry.replace(current);
@@ -231,25 +184,6 @@ public class KinesisStreamingViews {
         return clusterRegion != null ? clusterRegion : regionResolver.getDefaultRegion();
     }
 
-    /** Splits a page so no statement carries more than about {@value #BATCH_BYTES} bytes of record data. */
-    private static List<List<KinesisRecord>> batches(List<KinesisRecord> records) {
-        List<List<KinesisRecord>> batches = new ArrayList<>();
-        List<KinesisRecord> batch = new ArrayList<>();
-        long bytes = 0;
-        for (KinesisRecord record : records) {
-            long size = record.getData() == null ? 0 : record.getData().length;
-            if (!batch.isEmpty() && bytes + size > BATCH_BYTES) {
-                batches.add(batch);
-                batch = new ArrayList<>();
-                bytes = 0;
-            }
-            batch.add(record);
-            bytes += size;
-        }
-        batches.add(batch);
-        return batches;
-    }
-
     private static String loadSql(KinesisViewBinding view, String shardId, List<KinesisRecord> batch,
                                   Instant refreshTime) {
         String staging = table(view.streamSchema(), view.streamName());
@@ -273,13 +207,5 @@ public class KinesisStreamingViews {
     private static String timestamp(Instant instant) {
         return instant == null ? "NULL::timestamp"
                 : "TIMESTAMP '" + TIMESTAMP.format(instant.atOffset(ZoneOffset.UTC)) + "'";
-    }
-
-    private static String schemaOrDefault(String schema) {
-        return schema == null ? DEFAULT_VIEW_SCHEMA : schema;
-    }
-
-    private static String table(String schema, String name) {
-        return ExternalTableMaterializer.quote(schema) + "." + ExternalTableMaterializer.quote(name);
     }
 }

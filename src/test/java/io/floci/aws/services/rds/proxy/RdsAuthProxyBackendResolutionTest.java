@@ -2,9 +2,11 @@ package io.floci.aws.services.rds.proxy;
 
 import io.floci.aws.services.rds.container.RdsBackendGate;
 import io.floci.aws.services.rds.model.DatabaseEngine;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.FreePorts;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -27,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+@ResourceLock(ParallelLocks.PORTS)
 class RdsAuthProxyBackendResolutionTest {
 
     private final List<RdsAuthProxy> proxies = new ArrayList<>();

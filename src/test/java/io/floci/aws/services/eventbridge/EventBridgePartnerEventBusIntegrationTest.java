@@ -12,6 +12,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 
 /**
@@ -88,7 +89,9 @@ class EventBridgePartnerEventBusIntegrationTest {
                 .when().post(queuePath)
                 .then().statusCode(200)
                 .body("Messages", hasSize(1))
-                .body("Messages[0].Body", containsString("\"event-bus-name\":\"" + bus + "\""));
+                .body("Messages[0].Body", containsString("\"source\":\"example.com\""))
+                .body("Messages[0].Body", containsString("\"detail\":{\"orderId\":\"o-1\"}"))
+                .body("Messages[0].Body", not(containsString("event-bus-name")));
 
         given().contentType(EB_CT).header("X-Amz-Target", "AWSEvents.RemoveTargets")
                 .body("{\"Rule\":\"partner-rule\",\"EventBusName\":\"" + bus + "\",\"Ids\":[\"sink\"]}")

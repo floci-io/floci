@@ -110,24 +110,8 @@ final class DockerPoolGaugeLogger {
         return String.join("; ", parts);
     }
 
-    /** Counts the live docker-java stream threads by name, without capturing any thread's stack. */
+    /** The live docker-java stream callbacks, each on its own virtual thread. */
     static int countStreamThreads() {
-        ThreadGroup root = Thread.currentThread().getThreadGroup();
-        while (root.getParent() != null) {
-            root = root.getParent();
-        }
-        Thread[] threads = new Thread[root.activeCount() + 16];
-        int listed = root.enumerate(threads, true);
-        while (listed == threads.length) {
-            threads = new Thread[threads.length * 2];
-            listed = root.enumerate(threads, true);
-        }
-        int count = 0;
-        for (int i = 0; i < listed; i++) {
-            if (threads[i].getName().startsWith(STREAM_THREAD_PREFIX)) {
-                count++;
-            }
-        }
-        return count;
+        return FlociInvocationBuilder.activeStreams();
     }
 }

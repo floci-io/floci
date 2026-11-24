@@ -1,5 +1,6 @@
 package io.floci.aws.services.iam;
 
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.*;
 import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.RegionResolver;
@@ -106,6 +107,7 @@ public class IamQueryHandler {
     /** The caller this request signed as, which says whether a delegation bounds what it creates. */
     private final RequestContext requestContext;
     private final Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders;
+    private final IamCloudTrailEvents cloudTrailEvents;
     /** Signs each page's Marker, so only a marker this handler issued names an item. */
     private final SignedMarkers markers = new SignedMarkers(MARKER_MAX_LENGTH);
 
@@ -118,7 +120,8 @@ public class IamQueryHandler {
                            CentralRootAccess centralRootAccess,
                            RegionResolver regionResolver,
                            RequestContext requestContext,
-                           Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders) {
+                           Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders,
+                           IamCloudTrailEvents cloudTrailEvents) {
         this.iamService = iamService;
         this.policyEvaluator = policyEvaluator;
         this.accountResolver = accountResolver;
@@ -130,11 +133,19 @@ public class IamQueryHandler {
         this.centralRootAccess = centralRootAccess;
         this.regionResolver = regionResolver;
         this.serverCertificateReferenceProviders = serverCertificateReferenceProviders;
+        this.cloudTrailEvents = cloudTrailEvents;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String authorization) {
         LOG.debugv("IAM action: {0}", action);
+        // The caller is read before the call runs, which may delete the key it was signed with.
+        ObjectNode caller = cloudTrailEvents.caller(authorization);
+        Response response = dispatch(action, params, authorization);
+        cloudTrailEvents.record(action, params, authorization, caller, response);
+        return response;
+    }
 
+    private Response dispatch(String action, MultivaluedMap<String, String> params, String authorization) {
         try {
             IamArnShapes.checkPolicySourceArn(action, params);
             IamRequestShapes.check(action, params);
@@ -408,8 +419,7 @@ public class IamQueryHandler {
                     "No access key could be determined from the request.", 404);
         }
         return iamService.findUserNameByAccessKeyId(accessKeyId)
-                .orElseThrow(() -> new AwsException("NoSuchEntity",
-                        "The Access Key with id " + accessKeyId + " cannot be found.", 404));
+                .orElseThrow(() -> accessKeyNotFound(accessKeyId));
     }
 
     /**
@@ -640,7 +650,8 @@ public class IamQueryHandler {
      * the CLI reference adds that it "can be called by IAM users only. If this command is called
      * using AWS account (root) credentials, the command returns an InvalidUserType error". A
      * signing key that belongs to no stored user is Floci's stand-in for exactly that caller, so
-     * it answers the same way rather than reporting the key as missing.
+     * it answers the same way rather than reporting the key as missing; an assumed-role session
+     * answers {@code NoSuchEntity}, which {@link #callingIamUser} sets out.
      */
     private Response handleChangePassword(MultivaluedMap<String, String> params,
                                           String authorization) {
@@ -656,16 +667,52 @@ public class IamQueryHandler {
 
     /**
      * The IAM user whose access key signed the request, for the one operation that acts on the
-     * caller and gives no way to name anyone else. Unlike {@link #resolveUserName}, a key with no
-     * user behind it is not a missing entity here: the caller is not an IAM user, which is the
-     * case {@code InvalidUserType} is published for.
+     * caller and gives no way to name anyone else. A key with no user behind it is not one caller
+     * but several, and AWS does not answer them all the same way.
+     *
+     * <p>Credentials that belong to no stored user are Floci's stand-in for account root, and the
+     * CLI reference publishes that case: the operation "can be called by IAM users only. If this
+     * command is called using AWS account (root) credentials, the command returns an
+     * InvalidUserType error". That stays the answer for every caller but the one recorded below,
+     * a session minted for the account root included: the error is published for root, however
+     * root signs, and {@code AssumeRoot} mints a session that acts as the account root.
+     *
+     * <p>An assumed-role session is the recorded exception. Taken against a real account on
+     * 2026-10-29, {@code ChangePassword} under one answers {@code NoSuchEntity} 404, a code this
+     * operation's model declares alongside {@code InvalidUserType}, so the two are not one case
+     * and that session must not be given root's error. The recording names the code and not the
+     * sentence, so the sentence is {@link #accessKeyNotFound}'s, the one this package already
+     * answers wherever a signing key resolves to no user, which keeps one situation to one
+     * wording. What AWS answers the other session kinds is not recorded, so they keep the error
+     * they had.
      */
     private String callingIamUser(String authorization) {
         String accessKeyId = accountResolver.extractAccessKeyId(authorization);
         return iamService.findUserNameByAccessKeyId(accessKeyId)
-                .orElseThrow(() -> new AwsException("InvalidUserType",
-                        "The request was rejected because the type of user for the transaction "
-                                + "was incorrect.", 400));
+                .orElseThrow(() -> signedByAnAssumedRole(accessKeyId)
+                        ? accessKeyNotFound(accessKeyId)
+                        : new AwsException("InvalidUserType",
+                                "The request was rejected because the type of user for the "
+                                        + "transaction was incorrect.", 400));
+    }
+
+    /**
+     * Whether an assumed-role session signed the request, the one caller with no stored user
+     * behind it that is answered a missing key rather than root's error. The principal type is
+     * what separates them rather than the key's own prefix, which every session shares: a
+     * privileged session and a session the root credential minted each report the account,
+     * being the root they act as.
+     */
+    private boolean signedByAnAssumedRole(String accessKeyId) {
+        return iamService.resolveCallerArns(accessKeyId)
+                .filter(caller -> IamService.CallerArns.TYPE_ASSUMED_ROLE.equals(caller.principalType()))
+                .isPresent();
+    }
+
+    /** The error a signing key that resolves to no stored user answers, wherever one is read. */
+    private static AwsException accessKeyNotFound(String accessKeyId) {
+        return new AwsException("NoSuchEntity",
+                "The Access Key with id " + accessKeyId + " cannot be found.", 404);
     }
 
     private String loginProfileXml(LoginProfile profile) {
@@ -753,6 +800,14 @@ public class IamQueryHandler {
     }
 
     private Response handleCreateOpenIDConnectProvider(MultivaluedMap<String, String> params) {
+        // The reference gives IdentityCenterInstanceArn as "The Amazon Resource Name (ARN) of the IAM Identity Center
+        // instance to associate with the OpenID Connect (OIDC) provider": any other ARN is a value IAM does not take,
+        // so no provider is made on it, as none is under the name of a provider it might otherwise name.
+        String identityCenterInstance = getParam(params, "IdentityCenterInstanceArn");
+        if (identityCenterInstance != null && !isIdentityCenterInstance(identityCenterInstance)) {
+            throw new AwsException("InvalidInput",
+                    "IdentityCenterInstanceArn must be the ARN of an IAM Identity Center instance.", 400);
+        }
         OpenIDConnectProvider provider = iamService.createOpenIDConnectProvider(
                 getParam(params, "Url"),
                 getMemberList(params, "ClientIDList"),
@@ -763,6 +818,16 @@ public class IamQueryHandler {
             xml.start("Tags").raw(tagsXml(provider.getTags())).end("Tags");
         }
         return Response.ok(AwsQueryResponse.envelope("CreateOpenIDConnectProvider", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /** Whether {@code arn} is an IAM Identity Center instance's ARN, {@code arn:<partition>:sso:::instance/<id>}. */
+    private static boolean isIdentityCenterInstance(String arn) {
+        if (!AwsArnUtils.isArn(arn)) {
+            return false;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return "sso".equals(parsed.service()) && parsed.resource().startsWith("instance/")
+                && parsed.resource().length() > "instance/".length();
     }
 
     // The response carries no ARN: AWS echoes back the scheme-less Url, and the caller already

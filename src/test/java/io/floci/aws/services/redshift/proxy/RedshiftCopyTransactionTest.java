@@ -4,8 +4,11 @@ import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.ByteArrayOutputStream;
 import java.io.FilterInputStream;
@@ -34,6 +37,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 @Timeout(15)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class RedshiftCopyTransactionTest {
     @Test
     void readyForQueryClearsDiscardStateBeforeTheClientParsesRollback() throws Exception {

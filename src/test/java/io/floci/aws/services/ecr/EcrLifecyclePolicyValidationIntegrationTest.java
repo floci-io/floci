@@ -13,10 +13,12 @@ import org.junit.jupiter.params.provider.MethodSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.ecr.EcrClient;
+import software.amazon.awssdk.services.ecr.model.DeleteLifecyclePolicyResponse;
 import software.amazon.awssdk.services.ecr.model.InvalidParameterException;
 import software.amazon.awssdk.services.ecr.model.LifecyclePolicyNotFoundException;
 import software.amazon.awssdk.services.ecr.model.RepositoryNotFoundException;
 
+import java.time.Instant;
 import java.util.UUID;
 import java.util.stream.Stream;
 
@@ -98,7 +100,12 @@ class EcrLifecyclePolicyValidationIntegrationTest {
                 new Object[]{region, policyWithPriority("\"rulePriority\":0,")},
                 new Object[]{region, policyWithPriority("\"rulePriority\":-1,")},
                 new Object[]{region, policyWithPriority("\"rulePriority\":null,")},
-                new Object[]{region, policyWithPriority("\"rulePriority\":2147483648,")}));
+                new Object[]{region, policyWithPriority("\"rulePriority\":2147483648,")},
+                new Object[]{region, "{\"rules\":[" + RULE.replace("\"countNumber\":2", "\"countNumber\":0") + "]}"},
+                new Object[]{region, "{\"rules\":[" + RULE.replace("\"any\"", "\"tagged\"") + "]}"},
+                new Object[]{region, "{\"rules\":[" + RULE + ","
+                        + RULE.replace("\"rulePriority\":1", "\"rulePriority\":2")
+                        .replace("\"tagStatus\":\"any\"", "\"tagStatus\":\"untagged\"") + "]}"}));
     }
 
     private static String policyWithPriority(String property) {
@@ -120,6 +127,53 @@ class EcrLifecyclePolicyValidationIntegrationTest {
             assertThrows(RepositoryNotFoundException.class,
                     () -> client.putLifecyclePolicy(r -> r.repositoryName(repository)
                             .lifecyclePolicyText(VALID_POLICY)));
+        }
+    }
+
+    /** ECR answers with a time stamp before the sweep first applies the policy, and deleting it echoes it. */
+    @Test
+    void getAndDeleteSayWhenThePolicyWasLastApplied() {
+        String repository = "lifecycle-validation/" + UUID.randomUUID();
+        try (EcrClient client = AwsTestClients.create(EcrClient.builder(), "test", Region.US_EAST_1)) {
+            client.createRepository(r -> r.repositoryName(repository));
+            try {
+                client.putLifecyclePolicy(r -> r.repositoryName(repository).lifecyclePolicyText(VALID_POLICY));
+
+                assertEquals(Instant.EPOCH, client.getLifecyclePolicy(r -> r.repositoryName(repository))
+                        .lastEvaluatedAt());
+                DeleteLifecyclePolicyResponse deleted = client.deleteLifecyclePolicy(
+                        r -> r.repositoryName(repository));
+                assertEquals(VALID_POLICY, deleted.lifecyclePolicyText());
+                assertEquals(Instant.EPOCH, deleted.lastEvaluatedAt());
+            } finally {
+                client.deleteRepository(r -> r.repositoryName(repository));
+            }
+        }
+    }
+
+    /** ECR's validator ends its text with a newline, which the message keeps inside the closing quote. */
+    @Test
+    void aRefusedDocumentCarriesEcrsMessage() {
+        String repository = "lifecycle-validation/" + UUID.randomUUID();
+        try (EcrClient client = AwsTestClients.create(EcrClient.builder(), "test", Region.US_EAST_1)) {
+            InvalidParameterException zeroCount = assertThrows(InvalidParameterException.class,
+                    () -> client.putLifecyclePolicy(r -> r.repositoryName(repository).lifecyclePolicyText(
+                            "{\"rules\":[" + RULE.replace("\"countNumber\":2", "\"countNumber\":0") + "]}")));
+            InvalidParameterException malformed = assertThrows(InvalidParameterException.class,
+                    () -> client.putLifecyclePolicy(r -> r.repositoryName(repository)
+                            .lifecyclePolicyText("{1:2}" + " ".repeat(100))));
+            InvalidParameterException tooShort = assertThrows(InvalidParameterException.class,
+                    () -> client.putLifecyclePolicy(r -> r.repositoryName(repository)
+                            .lifecyclePolicyText("{\"rules\":[]}")));
+
+            assertEquals("Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: 'Lifecycle policy "
+                    + "validation failure: numeric instance is lower than the required minimum (minimum: 1, found: 0)"
+                    + "\n'", zeroCount.awsErrorDetails().errorMessage());
+            assertEquals("Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: 'Lifecycle policy "
+                    + "parsing failure: Could not map policyString into LifecyclePolicy.'",
+                    malformed.awsErrorDetails().errorMessage());
+            assertEquals("Invalid parameter at 'lifecyclePolicyText' failed to satisfy constraint: 'Member must have "
+                    + "length greater than or equal to 100'", tooShort.awsErrorDetails().errorMessage());
         }
     }
 

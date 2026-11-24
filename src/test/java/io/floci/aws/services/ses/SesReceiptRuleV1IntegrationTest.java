@@ -1,12 +1,12 @@
 package io.floci.aws.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV1Requests.query;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -22,27 +22,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesReceiptRuleV1IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-west-2/email/aws4_request";
+    private static final String AUTH = SesV1Requests.authFor("us-west-2");
     private static final String RS = "floci-v1-rules";
     private static final String BOUNCE_SENDER = "receipt-bounce@floci-rules.example.com";
 
     private static String snsTopicArn;
 
-    private static RequestSpecification req(String action) {
-        return given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", AUTH)
-                .formParam("Action", action);
-    }
-
     @Test
     @Order(1)
     void createRuleSet_andRichRule() {
-        req("CreateReceiptRuleSet").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRuleSet").formParam("RuleSetName", RS)
         .when().post("/").then().statusCode(200);
 
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "rich")
                 .formParam("Rule.Enabled", "true")
                 .formParam("Rule.TlsPolicy", "Require")
@@ -59,7 +51,7 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(2)
     void describeRule_roundTripsSortedRecipientsAndOrderedActions() {
-        String body = req("DescribeReceiptRule").formParam("RuleSetName", RS)
+        String body = query(AUTH, "DescribeReceiptRule").formParam("RuleSetName", RS)
                 .formParam("RuleName", "rich")
         .when().post("/").then().statusCode(200)
                 .body(containsString("<Name>rich</Name>"))
@@ -78,16 +70,16 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(3)
     void createWithoutAfter_insertsAtFront_andAfterInsertsBehind() {
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "first")
         .when().post("/").then().statusCode(200);
 
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "middle")
                 .formParam("After", "first")
         .when().post("/").then().statusCode(200);
 
-        String body = req("DescribeReceiptRuleSet").formParam("RuleSetName", RS)
+        String body = query(AUTH, "DescribeReceiptRuleSet").formParam("RuleSetName", RS)
         .when().post("/").then().statusCode(200).extract().asString();
         assertTrue(body.indexOf("<Name>first</Name>") < body.indexOf("<Name>middle</Name>"));
         assertTrue(body.indexOf("<Name>middle</Name>") < body.indexOf("<Name>rich</Name>"));
@@ -96,11 +88,11 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(4)
     void minimalRule_getsAwsDefaults() {
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "minimal")
         .when().post("/").then().statusCode(200);
 
-        req("DescribeReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "DescribeReceiptRule").formParam("RuleSetName", RS)
                 .formParam("RuleName", "minimal")
         .when().post("/").then().statusCode(200)
                 .body(containsString("<Enabled>false</Enabled>"))
@@ -112,7 +104,7 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(5)
     void duplicateCreate_returnsAlreadyExists() {
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "rich")
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>AlreadyExists</Code>"))
@@ -122,12 +114,12 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(6)
     void missingSetAndMissingRule_errors() {
-        req("CreateReceiptRule").formParam("RuleSetName", "floci-v1-nope")
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", "floci-v1-nope")
                 .formParam("Rule.Name", "r")
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>RuleSetDoesNotExist</Code>"));
 
-        req("DescribeReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "DescribeReceiptRule").formParam("RuleSetName", RS)
                 .formParam("RuleName", "ghost")
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>RuleDoesNotExist</Code>"))
@@ -137,21 +129,21 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(7)
     void invalidRuleShape_returnsSmithyValidationError() {
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "bad!name")
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>ValidationError</Code>"))
                 .body(containsString("&apos;rule.name&apos;"))
                 .body(containsString("^[a-zA-Z0-9_.-]+$"));
 
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "badtls")
                 .formParam("Rule.TlsPolicy", "Bogus")
         .when().post("/").then().statusCode(400)
                 .body(containsString("&apos;rule.tlsPolicy&apos;"))
                 .body(containsString("[Optional, Require]"));
 
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "badlambda")
                 .formParam("Rule.Actions.member.1.LambdaAction.InvocationType", "Event")
         .when().post("/").then().statusCode(400)
@@ -162,14 +154,14 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(8)
     void actionTargets_areValidatedAgainstLocalServices() {
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "s3neg")
                 .formParam("Rule.Actions.member.1.S3Action.BucketName", "floci-no-such-bucket")
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>InvalidS3Configuration</Code>"))
                 .body(containsString("No such bucket: floci-no-such-bucket"));
 
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "snsneg")
                 .formParam("Rule.Actions.member.1.SNSAction.TopicArn",
                         "arn:aws:sns:us-west-2:000000000000:floci-no-such-topic")
@@ -178,7 +170,7 @@ class SesReceiptRuleV1IntegrationTest {
                 .body(containsString("Could not publish to SNS topic: "
                         + "arn:aws:sns:us-west-2:000000000000:floci-no-such-topic"));
 
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "lamneg")
                 .formParam("Rule.Actions.member.1.LambdaAction.FunctionArn",
                         "arn:aws:lambda:us-west-2:000000000000:function:floci-no-such-fn")
@@ -187,7 +179,7 @@ class SesReceiptRuleV1IntegrationTest {
                 .body(containsString("Could not invoke Lambda function: "
                         + "arn:aws:lambda:us-west-2:000000000000:function:floci-no-such-fn"));
 
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "bounceneg")
                 .formParam("Rule.Actions.member.1.BounceAction.SmtpReplyCode", "550")
                 .formParam("Rule.Actions.member.1.BounceAction.Message", "unavailable")
@@ -200,7 +192,7 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(9)
     void verifiedBounceSender_andLocalSnsTopic_areAccepted() {
-        req("VerifyEmailIdentity").formParam("EmailAddress", BOUNCE_SENDER)
+        query(AUTH, "VerifyEmailIdentity").formParam("EmailAddress", BOUNCE_SENDER)
         .when().post("/").then().statusCode(200);
 
         snsTopicArn = given()
@@ -212,7 +204,7 @@ class SesReceiptRuleV1IntegrationTest {
         .when().post("/").then().statusCode(200)
                 .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
 
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "actions-ok")
                 .formParam("Rule.Actions.member.1.BounceAction.SmtpReplyCode", "550")
                 .formParam("Rule.Actions.member.1.BounceAction.Message", "unavailable")
@@ -221,7 +213,7 @@ class SesReceiptRuleV1IntegrationTest {
         .when().post("/").then().statusCode(200);
 
         // The stored SNS action picks up AWS's UTF-8 encoding default (probed).
-        req("DescribeReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "DescribeReceiptRule").formParam("RuleSetName", RS)
                 .formParam("RuleName", "actions-ok")
         .when().post("/").then().statusCode(200)
                 .body(containsString("<TopicArn>" + snsTopicArn + "</TopicArn>"))
@@ -235,7 +227,7 @@ class SesReceiptRuleV1IntegrationTest {
         // An action serialized as an empty structure contributes no keys, so a list can arrive
         // starting at member.2. AWS pads the gap into an empty action slot and rejects it
         // because the slot carries no action type (probed).
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "sparse")
                 .formParam("Rule.Actions.member.2.StopAction.Scope", "RuleSet")
         .when().post("/").then().statusCode(400)
@@ -247,19 +239,19 @@ class SesReceiptRuleV1IntegrationTest {
     @Order(9)
     void leadingZeroIndex_isParsedUnderItsOriginalSpelling() {
         // Probed: member.01 on its own is a valid slot 1 and the action must not be dropped.
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "leadzero")
                 .formParam("Rule.Actions.member.01.StopAction.Scope", "RuleSet")
         .when().post("/").then().statusCode(200);
 
-        req("DescribeReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "DescribeReceiptRule").formParam("RuleSetName", RS)
                 .formParam("RuleName", "leadzero")
         .when().post("/").then().statusCode(200)
                 .body(containsString("<Scope>RuleSet</Scope>"));
 
         // Probed: mixed spellings order by (length, lex), so 01 followed by 2 puts the
         // one-digit token first and slot 1 is an empty pad.
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "leadzero2")
                 .formParam("Rule.Actions.member.01.AddHeaderAction.HeaderName", "X-A")
                 .formParam("Rule.Actions.member.01.AddHeaderAction.HeaderValue", "v")
@@ -272,7 +264,7 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(9)
     void stopAction_mustBeLast() {
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "stopfirst")
                 .formParam("Rule.Actions.member.1.StopAction.Scope", "RuleSet")
                 .formParam("Rule.Actions.member.2.AddHeaderAction.HeaderName", "X-A")
@@ -285,12 +277,12 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(9)
     void nonAsciiDigitIndex_isIgnoredLikeAnUnmodeledParameter() {
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "fwidx")
                 .formParam("Rule.Actions.member.１.StopAction.Scope", "RuleSet")
         .when().post("/").then().statusCode(200);
 
-        req("DescribeReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "DescribeReceiptRule").formParam("RuleSetName", RS)
                 .formParam("RuleName", "fwidx")
         .when().post("/").then().statusCode(200)
                 .body(containsString("<Actions></Actions>"));
@@ -299,7 +291,7 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(9)
     void actionIndexZero_isRejectedAsMalformedInput() {
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "zeroidx")
                 .formParam("Rule.Actions.member.0.StopAction.Scope", "RuleSet")
         .when().post("/").then().statusCode(400)
@@ -310,7 +302,7 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(9)
     void malformedWireBoolean_isRejectedAsMalformedInput() {
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "badbool")
                 .formParam("Rule.Enabled", "bogus")
         .when().post("/").then().statusCode(400)
@@ -318,17 +310,17 @@ class SesReceiptRuleV1IntegrationTest {
                 .body(containsString("boolean must follow xsd1.1 definition"));
 
         // Uppercase TRUE is rejected too (probed); the numeric forms are accepted.
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "badbool")
                 .formParam("Rule.ScanEnabled", "TRUE")
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>MalformedInput</Code>"));
 
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "numbool")
                 .formParam("Rule.Enabled", "1")
         .when().post("/").then().statusCode(200);
-        req("DescribeReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "DescribeReceiptRule").formParam("RuleSetName", RS)
                 .formParam("RuleName", "numbool")
         .when().post("/").then().statusCode(200)
                 .body(containsString("<Enabled>true</Enabled>"));
@@ -337,7 +329,7 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(9)
     void twoActionTypesInOneMember_areRejected() {
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "multitype")
                 .formParam("Rule.Actions.member.1.StopAction.Scope", "RuleSet")
                 .formParam("Rule.Actions.member.1.AddHeaderAction.HeaderName", "X-A")
@@ -352,7 +344,7 @@ class SesReceiptRuleV1IntegrationTest {
     void overflowingActionIndex_isRejectedNotAServerError() {
         // A digit run that overflows int implies an index far beyond any contiguous list; the
         // gap padding turns it into the probed empty-slot rejection instead of a 500.
-        req("CreateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "hugeidx")
                 .formParam("Rule.Actions.member.999999999999999999999.StopAction.Scope", "RuleSet")
         .when().post("/").then().statusCode(400)
@@ -362,7 +354,7 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(9)
     void topLevelRuleNameParam_getsSmithyValidation() {
-        req("DescribeReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "DescribeReceiptRule").formParam("RuleSetName", RS)
                 .formParam("RuleName", "bad name")
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>ValidationError</Code>"))
@@ -372,18 +364,18 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(10)
     void updateRule_isFullReplace_andKeepsPosition() {
-        req("UpdateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "UpdateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "rich")
         .when().post("/").then().statusCode(200);
 
-        req("DescribeReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "DescribeReceiptRule").formParam("RuleSetName", RS)
                 .formParam("RuleName", "rich")
         .when().post("/").then().statusCode(200)
                 .body(containsString("<Enabled>false</Enabled>"))
                 .body(containsString("<TlsPolicy>Optional</TlsPolicy>"))
                 .body(containsString("<Actions></Actions>"));
 
-        req("UpdateReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "UpdateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "ghost")
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>RuleDoesNotExist</Code>"));
@@ -392,11 +384,11 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(11)
     void setRulePosition_movesToFrontWithoutAfter() {
-        req("SetReceiptRulePosition").formParam("RuleSetName", RS)
+        query(AUTH, "SetReceiptRulePosition").formParam("RuleSetName", RS)
                 .formParam("RuleName", "rich")
         .when().post("/").then().statusCode(200);
 
-        String body = req("DescribeReceiptRuleSet").formParam("RuleSetName", RS)
+        String body = query(AUTH, "DescribeReceiptRuleSet").formParam("RuleSetName", RS)
         .when().post("/").then().statusCode(200).extract().asString();
         assertTrue(body.indexOf("<Name>rich</Name>") < body.indexOf("<Name>first</Name>"));
     }
@@ -404,14 +396,14 @@ class SesReceiptRuleV1IntegrationTest {
     @Test
     @Order(12)
     void deleteRule_isIdempotent_andRuleSetDeleteCascades() {
-        req("DeleteReceiptRule").formParam("RuleSetName", RS)
+        query(AUTH, "DeleteReceiptRule").formParam("RuleSetName", RS)
                 .formParam("RuleName", "ghost")
         .when().post("/").then().statusCode(200);
 
-        req("DeleteReceiptRuleSet").formParam("RuleSetName", RS)
+        query(AUTH, "DeleteReceiptRuleSet").formParam("RuleSetName", RS)
         .when().post("/").then().statusCode(200);
 
-        req("DescribeReceiptRuleSet").formParam("RuleSetName", RS)
+        query(AUTH, "DescribeReceiptRuleSet").formParam("RuleSetName", RS)
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>RuleSetDoesNotExist</Code>"));
     }

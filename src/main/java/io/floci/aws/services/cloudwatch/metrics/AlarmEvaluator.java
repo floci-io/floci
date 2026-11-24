@@ -282,6 +282,7 @@ public class AlarmEvaluator {
                 && alarm.getMetrics().isEmpty()
                 && alarm.getNamespace() != null && !alarm.getNamespace().isBlank()
                 && alarm.getMetricName() != null && !alarm.getMetricName().isBlank()
+                && alarm.getStatistic() != null && !alarm.getStatistic().isBlank()
                 && alarm.getPeriod() != null && alarm.getPeriod() > 0
                 && alarm.getEvaluationPeriods() > 0
                 && alarm.getComparisonOperator() != null;

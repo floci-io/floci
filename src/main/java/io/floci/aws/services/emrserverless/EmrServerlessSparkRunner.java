@@ -2,6 +2,8 @@ package io.floci.aws.services.emrserverless;
 
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.exception.ConflictException;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
@@ -33,12 +35,14 @@ import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
+import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
@@ -52,6 +56,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
@@ -482,6 +487,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private final Map<String, SparkExecutors.Capacity> capacities = new ConcurrentHashMap<>();
     // Where Floci reaches the Spark UI of each EMR Serverless Spark run's driver, by run, while its container runs.
     private final Map<String, ContainerLifecycleManager.EndpointInfo> driverUis = new ConcurrentHashMap<>();
+    // The runs asked to interrupt their driver, which the thread watching each sends it SIGTERM for.
+    private final Set<String> interrupts = ConcurrentHashMap.newKeySet();
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -535,7 +542,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             if (progress.cancelled()) {
                 return Outcome.halted();
             }
-            credentials = roleCredentials.forRole(job.executionRole(), job.accountId(), job.runId());
+            credentials = roleCredentials.forRole(job.executionRole(), job.accountId(), job.runId(),
+                    progress.sessionPolicy());
             Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.resourceIdentityLabels(
                     job.service(), job.runId(), job.accountId(), job.region()));
             // The deployment that started the driver, which removeLeftoverDrivers() goes by.
@@ -556,6 +564,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             ContainerBuilder.Builder container = containerBuilder.newContainer(launchImage(job, progress))
                     .withName(ContainerStorageHelper.dockerName(config, job.service() + "-" + job.runId()))
                     .withEnv(environment(awsEnvironment, job.environment()));
+            if (job.interruptible()) {
+                container.withInit();
+            }
             // bash -c's script gets "floci" as its $0, and what runs after it as its arguments, "$@".
             if (job.engine() == Engine.HIVE) {
                 List<String> hive = hiveArguments(job, endpoint, executorEnvironment);
@@ -712,16 +723,19 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             return Outcome.couldNotStart(e.getMessage());
         } finally {
             driverUis.remove(job.runId());
+            interrupts.remove(job.runId());
             // The executors go with their driver, however the run ended, and their workers' share of the
             // application's capacity with them.
             if (executors != null) {
                 executors.removeAll();
+                progress.executorsRan(executors.lifetimes());
             }
             if (capacity != null) {
                 leaveCapacity(job.executors().application(), capacity);
             }
             String unclaimed = launches.end(job.runId(), launch);
             if (unclaimed != null) {
+                killInterruptible(job, unclaimed);
                 lifecycleManager.stopAndRemove(unclaimed, logHandle, STOP_TIMEOUT_SECONDS);
             } else if (logHandle != null) {
                 // Floci's teardown claimed the driver, but the log stream is still this run's to close.
@@ -760,6 +774,50 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             // run() reads it once the driver's container is up and at each look at the driver after, and
             // removes the driver itself: a stop makes no Docker call, so no Docker error can lose it.
             launch.requestStop();
+        }
+    }
+
+    /**
+     * Asks the thread watching the run's running driver to send its container SIGTERM, which the container's init
+     * process passes on to the driver ({@link Job#asInterruptible}), and to let the run end as the driver does. Like
+     * {@link #stop}, it makes no Docker call, so the caller is never held up by Docker. A run whose driver has not
+     * started yet is not interrupted here: its caller reports it cancelled until then.
+     */
+    @Override
+    public void interrupt(String runId) {
+        if (launches.get(runId) != null) {
+            interrupts.add(runId);
+        }
+    }
+
+    // Sends the driver's container SIGTERM; one Docker cannot send it to is stopped instead, so the run still ends.
+    private void sendSigterm(String containerId, Job job, ContainerLaunches.Launch launch) {
+        try {
+            lifecycleManager.getDockerClient().killContainerCmd(containerId).withSignal("SIGTERM").exec();
+        } catch (NotFoundException | ConflictException e) {
+            // Gone, or no longer running: the next look finds it ended.
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not send SIGTERM to the driver of Spark run {0}; stopping it", job.runId());
+            launch.requestStop();
+        }
+    }
+
+    /**
+     * Sends an interruptible job's driver container SIGKILL, where it still runs, before it is stopped: Docker's stop
+     * sends SIGTERM first, which the container's init process passes on to the driver, so a driver stopped at once
+     * would get a SIGTERM to handle ({@link Job#asInterruptible}).
+     */
+    private void killInterruptible(Job job, String containerId) {
+        if (!job.interruptible()) {
+            return;
+        }
+        try {
+            lifecycleManager.getDockerClient().killContainerCmd(containerId).exec();
+        } catch (NotFoundException | ConflictException e) {
+            // Gone, or no longer running: nothing to kill.
+        } catch (RuntimeException e) {
+            // Docker's stop that follows sends SIGKILL at its end anyway.
+            LOG.warnv(e, "Could not kill the driver of Spark run {0}", job.runId());
         }
     }
 
@@ -1479,7 +1537,12 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
 
     /** The JVM options that open to Hadoop's classes the packages it reaches into, which Java 8 ignores. */
     public static String yarnJavaOptions() {
-        return YARN_OPENED_PACKAGES.stream().map(name -> "--add-opens=java.base/" + name + "=ALL-UNNAMED")
+        return javaBaseOpens(YARN_OPENED_PACKAGES);
+    }
+
+    /** The JVM options that open these {@code java.base} packages to the classes on the class path. */
+    public static String javaBaseOpens(List<String> packages) {
+        return packages.stream().map(name -> "--add-opens=java.base/" + name + "=ALL-UNNAMED")
                 .collect(Collectors.joining(" "));
     }
 
@@ -1808,6 +1871,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                              SparkExecutors executors) throws InterruptedException {
         Instant deadline = job.timeout().isZero() ? null : clock.instant().plus(job.timeout());
         while (!launch.stopRequested() && !progress.cancelled()) {
+            if (interrupts.remove(job.runId())) {
+                sendSigterm(containerId, job, launch);
+            }
             if (executors != null) {
                 executors.follow();
             }
@@ -1843,8 +1909,12 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         if (job.logFolder() == null || containerId == null) {
             return;
         }
-        // Closed however the read ends, which ends Docker's stream and the compressors.
-        try (DriverOutput output = new DriverOutput()) {
+        // Closed however the read ends, which ends Docker's stream and the compressors, and its files deleted after:
+        // Docker closes the callback as its stream completes, before the files are read.
+        DriverOutput output = null;
+        try {
+            output = new DriverOutput();
+            killInterruptible(job, containerId);
             lifecycleManager.stop(containerId, STOP_TIMEOUT_SECONDS);
             lifecycleManager.getDockerClient().logContainerCmd(containerId)
                     .withStdOut(true)
@@ -1855,14 +1925,20 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             if (!output.awaitCompletion(LOG_READ_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)) {
                 throw new IOException("reading the driver's output took longer than " + LOG_READ_TIMEOUT);
             }
-            putLogs(s3Service, job.accountId(), job.region(), job.logFolder(), output.gzipped(StreamType.STDOUT),
-                    output.gzipped(StreamType.STDERR));
+            try (InputStream stdout = output.gzipped(StreamType.STDOUT);
+                 InputStream stderr = output.gzipped(StreamType.STDERR)) {
+                putLogs(s3Service, job.accountId(), job.region(), job.logFolder(), stdout, stderr);
+            }
         } catch (InterruptedException e) {
             // Floci is shutting down: the run ends as its driver did, without its logs.
             Thread.currentThread().interrupt();
         } catch (IOException | RuntimeException e) {
             LOG.warnv("Could not write the logs of Spark run {0} of {1} to {2}: {3}", job.runId(), job.service(),
                     job.logFolder(), e.getMessage());
+        } finally {
+            if (output != null) {
+                output.discard();
+            }
         }
     }
 
@@ -1873,16 +1949,35 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
      * the compressors, and a frame that still comes after is dropped.
      */
     private static final class DriverOutput extends ResultCallback.Adapter<Frame> {
-        private final ByteArrayOutputStream stdout = new ByteArrayOutputStream();
-        private final ByteArrayOutputStream stderr = new ByteArrayOutputStream();
+        // Each stream gzipped into a file of its own, which a long run's output never holds in memory.
+        private final Path stdout;
+        private final Path stderr;
         private final GZIPOutputStream stdoutGzip;
         private final GZIPOutputStream stderrGzip;
         // Guarded by this.
         private boolean compressorsClosed;
 
         DriverOutput() throws IOException {
-            stdoutGzip = new GZIPOutputStream(stdout);
-            stderrGzip = new GZIPOutputStream(stderr);
+            Path out = Files.createTempFile("floci-driver-", ".stdout.gz");
+            try {
+                stderr = Files.createTempFile("floci-driver-", ".stderr.gz");
+            } catch (IOException e) {
+                Files.deleteIfExists(out);
+                throw e;
+            }
+            stdout = out;
+            GZIPOutputStream stdoutCompressor = null;
+            try {
+                stdoutCompressor = new GZIPOutputStream(new BufferedOutputStream(Files.newOutputStream(stdout)));
+                stderrGzip = new GZIPOutputStream(new BufferedOutputStream(Files.newOutputStream(stderr)));
+            } catch (IOException e) {
+                if (stdoutCompressor != null) {
+                    stdoutCompressor.close();
+                }
+                deleteFiles();
+                throw e;
+            }
+            stdoutGzip = stdoutCompressor;
         }
 
         @Override
@@ -1897,10 +1992,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             }
         }
 
-        // A stream's whole gzipped output, once Docker has sent everything.
-        synchronized byte[] gzipped(StreamType stream) throws IOException {
+        // A stream's whole gzipped output, once Docker has sent everything, read from its file.
+        synchronized InputStream gzipped(StreamType stream) throws IOException {
             closeCompressors();
-            return (stream == StreamType.STDERR ? stderr : stdout).toByteArray();
+            return Files.newInputStream(stream == StreamType.STDERR ? stderr : stdout);
         }
 
         @Override
@@ -1910,6 +2005,27 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             } finally {
                 synchronized (this) {
                     closeCompressors();
+                }
+            }
+        }
+
+        // Closes it, if Docker has not, and deletes its files, once they have been read or the read has failed.
+        void discard() {
+            try {
+                close();
+            } catch (IOException e) {
+                LOG.debugv("Could not close the driver's output: {0}", e.getMessage());
+            } finally {
+                deleteFiles();
+            }
+        }
+
+        private void deleteFiles() {
+            for (Path file : List.of(stdout, stderr)) {
+                try {
+                    Files.deleteIfExists(file);
+                } catch (IOException e) {
+                    LOG.warnv("Could not delete the driver output file {0}: {1}", file, e.getMessage());
                 }
             }
         }

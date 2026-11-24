@@ -9,8 +9,10 @@ import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.PortAllocator;
 import io.floci.aws.services.amazonmq.model.Broker;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Mockito;
 
 import java.util.List;
@@ -27,6 +29,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class RabbitMqManagerTest {
 
     private ContainerLifecycleManager lifecycleManager;
@@ -187,7 +190,7 @@ class RabbitMqManagerTest {
         manager.startContainer(broker);
 
         assertEquals("/aws/amazonmq/broker/b-1/general", broker.generalLogGroup());
-        verify(logStreamer).attach(eq("container-id"), eq(broker.generalLogGroup()),
+        verify(logStreamer).attachPolled(eq("container-id"), eq(broker.generalLogGroup()),
                 any(), any(), eq("amazonmq:b-1"));
     }
 

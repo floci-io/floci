@@ -104,6 +104,11 @@ def test_an_optional_arn_member_of_a_type_without_variables_names_it_when_absent
         {"type": "catalog", "fill": {}, "when": {"CatalogArn": [None]}}]
     # A required member is always there.
     assert r.with_absent_arn(named, FORMATS, set()) == named
+    # A format ending in a wildcard (DMS's `cert:*`) names every resource of its type, so a request leaving the member
+    # out names none of them.
+    wildcard = {"cert": "arn:${Partition}:svc:${Region}:${Account}:cert:*"}
+    assert r.with_absent_arn([{"types": ["cert"], "arn": "CertificateArn"}], wildcard, {"CertificateArn"}) == [
+        {"types": ["cert"], "arn": "CertificateArn"}]
 
 
 def test_an_optional_arn_member_of_a_type_with_variables_names_its_services_default_when_absent():
@@ -222,7 +227,7 @@ def test_a_rest_xml_request_is_read_for_its_path_and_query_members_alone():
                           "shapes": shapes}}
         assert r.request_members(models, "GetThing") == read, protocol
         assert set(r.string_patterns(models, "GetThing")) == set(read), protocol
-        assert r.located_members(models, "GetThing") == {"Id": "{Id}", "Marker": "?Marker"}, protocol
+        assert r.located_members(models, "GetThing") == ({"Id": "{Id}", "Marker": "?Marker"}, {}), protocol
 
 
 def test_an_arn_inside_a_structure_or_a_lists_structures_is_read_by_its_path():
@@ -274,10 +279,13 @@ def test_a_type_made_in_another_takes_that_ones_id_from_the_arn_member_named_aft
     assert r.with_parent_ids([instance, made], formats, ["instance", "set"], members("InstanceArn", "Name")) == [
         instance, {"type": "set", "fill": {"InstanceId": "InstanceArn"}, "arnOf": {"InstanceArn": "instance"},
                    "made": True}]
-    # Not from a type the action does not act on, a member in a structure, or with two ARN members to pick from,
-    # and not over a variable a member fills already.
+    # Not from a type the action does not act on, a member in a structure or a list's elements (keyed by its path, as
+    # RAM's permissionTemplateParameters[].permissionArn is), or with two ARN members to pick from, and not over a
+    # variable a member fills already.
     assert r.with_parent_ids([made], formats, ["set"], members("InstanceArn")) == [made]
     assert r.with_parent_ids([made], formats, ["instance", "set"], {"InstanceArn": "Config.InstanceArn"}) == [made]
+    for path in ("Config.InstanceArn", "Configs[].InstanceArn"):
+        assert r.with_parent_ids([made], formats, ["instance", "set"], {path: path}) == [made]
     assert r.with_parent_ids([made], formats, ["instance", "set"],
                              members("InstanceArn", "SourceInstanceArn")) == [made]
     filled = {"type": "set", "fill": {"InstanceId": "InstanceId"}}
@@ -368,10 +376,11 @@ def model(operations: dict[str, dict[str, str]], protocol: str = "json") -> dict
 @pytest.fixture
 def isolated(monkeypatch):
     monkeypatch.setattr(r, "NAMESPACES", ("svc",))
-    monkeypatch.setattr(r, "HAND_BUILT", ("hand",))
     monkeypatch.setattr(r, "NOT_COVERED", {"later": "a later batch"})
     monkeypatch.setattr(r, "MEASURED", {})
     monkeypatch.setattr(r, "STATEMENT_SOURCES", {})
+    monkeypatch.setattr(r, "PATH_SOURCES", {})
+    monkeypatch.setattr(r, "PERMISSION_SOURCES", {})
     return monkeypatch
 
 
@@ -543,6 +552,57 @@ def test_a_member_holding_an_account_id_gives_the_account_of_the_types_named_by_
                           ["registryId"]) == [{"type": "catalog", "fill": {}}]
     # Two account members, either of which it could be, give none.
     assert r.with_account([{"type": "thing", "fill": {}}], FORMATS, ["a", "b"]) == [{"type": "thing", "fill": {}}]
+
+
+def test_an_account_and_a_region_a_format_names_beside_its_own_take_the_requests_members(tmp_path):
+    # Config's aggregation authorization: arn:...:<caller>:aggregation-authorization/<authorized account>/<Region>.
+    formats = {"grant": "arn:${Partition}:svc:${Region}:${Account}:grant/${GranteeAccount}/${GranteeRegion}"}
+    write_models(tmp_path, {"svc": model({"PutGrant": {"AuthorizedAccountId": "AccountId",
+                                                       "AuthorizedAwsRegion": "String"}})})
+    models = r.load_models(tmp_path, {"svc"})
+    assert r.region_members(models, "PutGrant") == ["AuthorizedAwsRegion"]
+    filled = r.with_account_variables([{"type": "grant", "fill": {}}], formats,
+                                      r.account_members(models, "PutGrant"), r.region_members(models, "PutGrant"))
+    assert filled == [{"type": "grant", "fill": {"GranteeAccount": "AuthorizedAccountId",
+                                                 "GranteeRegion": "AuthorizedAwsRegion"}}]
+    # The member that fills the format's own account variable is not also the ARN's account, which stays the caller's.
+    assert r.with_account(filled, formats, ["AuthorizedAccountId"]) == filled
+    # A format naming no other account or Region is left as it is.
+    assert r.with_account_variables([{"type": "thing", "fill": {}}], FORMATS, ["registryId"], ["Region"]) == [
+        {"type": "thing", "fill": {}}]
+
+
+def test_lists_a_request_adds_or_removes_name_a_type_no_resource_names_yet():
+    # ElastiCache's ModifyUserGroup changes the users of its UserIdsToAdd and UserIdsToRemove.
+    formats = {"group": "arn:${Partition}:svc:${Region}:${Account}:group:${GroupId}",
+               "user": "arn:${Partition}:svc:${Region}:${Account}:user:${UserId}"}
+    members = {"GroupId": "GroupId", "UserIdsToAdd": "UserIdsToAdd[]", "UserIdsToRemove": "UserIdsToRemove[]"}
+    resources = [{"type": "group", "fill": {"GroupId": "GroupId"}}]
+    assert r.with_change_lists(resources, ["group", "user"], formats, members) == resources + [
+        {"type": "user", "fill": {"UserId": "UserIdsToAdd[]"}}, {"type": "user", "fill": {"UserId": "UserIdsToRemove[]"}}]
+    # A type another resource names already, or a list named after something else, adds nothing.
+    named = resources + [{"type": "user", "fill": {"UserId": "UserIds[]"}}]
+    assert r.with_change_lists(named, ["group", "user"], formats, members) == named
+    assert r.with_change_lists(resources, ["group", "user"], formats, {"TagsToAdd": "TagsToAdd[]"}) == resources
+
+
+def test_a_structure_named_after_the_type_gives_its_name_to_a_type_named_by_nothing_else(tmp_path):
+    # Config's PutConfigurationRecorder names its recorder in ConfigurationRecorder.name.
+    service = model({"PutRecorder": {"Recorder": "Recorder"}})
+    service["shapes"]["Recorder"] = {"type": "structure", "members": {"name": {"shape": "String"},
+                                                                      "roleARN": {"shape": "String"}}}
+    write_models(tmp_path, {"svc": service})
+    models = r.load_models(tmp_path, {"svc"})
+    assert r.structure_name_fields(models, "PutRecorder", ["recorder"]) == {"recorder": "Recorder.name"}
+    formats = {"recorder": "arn:${Partition}:svc:${Region}:${Account}:recorder/${RecorderName}/${RecorderId}"}
+    assert r.with_structure_names([{"type": "recorder", "fill": {}}], formats, {"recorder": "Recorder.name"}) == [
+        {"type": "recorder", "fill": {"RecorderName": "Recorder.name"}}]
+    # A row another rule filled keeps its fill, and a format of two names says nothing about which one it is.
+    given = [{"type": "recorder", "fill": {"RecorderId": "Id"}}]
+    assert r.with_structure_names(given, formats, {"recorder": "Recorder.name"}) == given
+    two = {"recorder": "arn:${Partition}:svc:${Region}:${Account}:recorder/${GroupName}/${RecorderName}"}
+    assert r.with_structure_names([{"type": "recorder", "fill": {}}], two, {"recorder": "Recorder.name"}) == [
+        {"type": "recorder", "fill": {}}]
 
 
 def test_an_account_member_of_a_types_own_structure_gives_that_types_account_alone(tmp_path):
@@ -871,15 +931,112 @@ def test_a_field_of_each_of_a_lists_structures_taking_an_arn_before_a_name_is_re
 
 
 def good_document() -> dict:
-    return {"namespaces": {"svc": ["svc"]}, "handBuilt": ["hand"],
+    return {"namespaces": {"svc": ["svc"]},
             "notCovered": {"later": "a later batch"},
             "otherNamespaces": ["other"], "arnFormats": {"svc": {"thing": FORMATS["thing"], "group": FORMATS["group"]}},
+            "pathFormats": {},
             "unqualified": {"svc": ["thing"]}, "mintedIds": {"svc": ["thing"]}, "mintedSuffixes": {},
             "forwardedActions": {},
             "operations": {
                 "svc:A": {"action": "svc:A", "types": ["thing"], "resources": [{"types": ["thing"], "arn": "ThingArn"}]},
                 "svc:B": {"action": "svc:B", "types": ["group"], "resources": [{"type": "group", "fill": {"GroupName": "Names[]"}}]},
                 "svc:C": {"action": "svc:C", "types": [], "resources": []}}}
+
+
+GUIDE = {
+    "action": {"sentence": "The API-managing Action expression has the format svc:{action}, where {action} is one of "
+                           "the following actions: GET, POST, PUT, DELETE, PATCH, or *.",
+               "actions": ["GET", "POST", "PUT", "DELETE", "PATCH", "*"]},
+    "resource": {"sentence": "API Gateway resources have the following ARN format:",
+                 "format": "arn:aws:svc:{region}::{resource-path-specifier}"},
+    "tables": [
+        {"heading": "REST API resources",
+         "rows": [{"resource": "Stage", "arn": "arn:{partition}:svc:{region}::/restapis/{api-id}/stages/{stage-name}"},
+                  {"resource": "Associations", "arn": "arn:{partition}:svc:{region}:{account-id}:/associations"}]},
+        {"heading": "execute-api",
+         "rows": [{"resource": "endpoint",
+                   "arn": "arn:{partition}:execute-api:{region}:{account-id}:{api-id}/{stage}"}]}],
+}
+NO_ROUTE_ACTIONS = {"byMethod": {}, "byModel": {}}
+
+
+def routed_model(routes: dict[str, tuple[str, str, dict[str, str]]]) -> dict:
+    """A rest-json model: each operation its method, its path, and the member each label of its path carries."""
+    shapes = {"String": {"type": "string"}}
+    operations = {}
+    for name, (method, uri, labels) in routes.items():
+        shapes[name + "In"] = {"type": "structure", "members": {
+            member: {"shape": "String", "location": "uri", "locationName": label} for label, member in labels.items()}}
+        operations[name] = {"http": {"method": method, "requestUri": uri}, "input": {"shape": name + "In"}}
+    return {"metadata": {"protocol": "rest-json"}, "operations": operations, "shapes": shapes}
+
+
+def test_a_route_authorized_by_its_method_names_the_reference_type_of_its_own_path():
+    formats = {"Api": "arn:${Partition}:svc:${Region}::/apis/${ApiId}", "Apis": "arn:${Partition}:svc:${Region}::/apis"}
+    models = {"svc": routed_model({"GetApi": ("GET", "/apis/{api_id}", {"api_id": "restApiId"})}),
+              "svcv2": routed_model({"GetApi": ("GET", "/v2/apis/{apiId}", {"apiId": "ApiId"}),
+                                   "CreateApi": ("POST", "/v2/apis", {})})}
+    operations = {"svc:GetApi": {"action": "svc:GET", "types": ["Api"]},
+                  "svc:CreateApi": {"action": "svc:CreateApi", "types": []}}
+    # CreateApi is authorized as the method of its route, which the reference gives no single action.
+    resources, needed = r.routed_resources("svc", operations, formats, GUIDE, models,
+                                           {"byMethod": {"svc": {"CreateApi"}}, "byModel": {}})
+    assert resources == {
+        "svc:CreateApi": [{"type": "Apis", "fill": {}}],
+        "svc:GetApi": [{"type": "Api", "fill": {"ApiId": "restApiId"}}, {"type": "Api", "fill": {"ApiId": "ApiId"}}],
+    }
+    assert needed == {}
+
+
+def test_a_path_the_reference_does_not_give_takes_the_guides_row_and_else_the_guides_format():
+    models = {"svc": routed_model({
+        "GetStage": ("GET", "/restapis/{restapi_id}/stages/{stage_name}",
+                     {"restapi_id": "restApiId", "stage_name": "stageName"}),
+        "GetAssociations": ("GET", "/associations", {}),
+        "GetSdkType": ("GET", "/sdktypes/{sdktype_id}", {"sdktype_id": "id"})})}
+    operations = {f"svc:{name}": {"action": "svc:GET", "types": []}
+                  for name in ("GetStage", "GetAssociations", "GetSdkType")}
+    resources, needed = r.routed_resources("svc", operations, {}, GUIDE, models, NO_ROUTE_ACTIONS)
+    assert resources == {
+        "svc:GetAssociations": [{"type": "Associations (REST API resources)", "fill": {}}],
+        "svc:GetSdkType": [{"type": "/sdktypes/{sdktype_id} (resource-path-specifier)", "fill": {"SdktypeId": "id"}}],
+        "svc:GetStage": [{"type": "Stage (REST API resources)",
+                          "fill": {"ApiId": "restApiId", "StageName": "stageName"}}],
+    }
+    # The guide's row keeps the account it gives; its ARN format gives none.
+    assert needed == {
+        "/sdktypes/{sdktype_id} (resource-path-specifier)": "arn:${Partition}:svc:${Region}::/sdktypes/${SdktypeId}",
+        "Associations (REST API resources)": "arn:${Partition}:svc:${Region}:${Account}:/associations",
+        "Stage (REST API resources)": "arn:${Partition}:svc:${Region}::/restapis/${ApiId}/stages/${StageName}",
+    }
+
+
+def test_a_route_whose_label_holds_an_arn_or_checked_as_a_named_action_is_left_to_the_rules():
+    models = {"svc": routed_model({
+        "DeleteAssociation": ("DELETE", "/associations/{association_arn}", {"association_arn": "associationArn"}),
+        "DeletePortal": ("DELETE", "/portals/{portal_id}", {"portal_id": "PortalId"})})}
+    operations = {"svc:DeleteAssociation": {"action": "svc:DELETE", "types": []},
+                  "svc:DeletePortal": {"action": "svc:DeletePortal", "types": []}}
+    assert r.routed_resources("svc", operations, {}, GUIDE, models, NO_ROUTE_ACTIONS) == ({}, {})
+
+
+def test_published_paths_leaving_out_different_leading_segments_of_one_clients_routes_are_refused():
+    formats = {"Apis": "arn:${Partition}:svc:${Region}::/apis", "Things": "arn:${Partition}:svc:${Region}::/things"}
+    models = {"svcv2": routed_model({"GetApis": ("GET", "/v2/apis", {}), "GetThings": ("GET", "/v3/things", {})})}
+    operations = {f"svc:{name}": {"action": "svc:GET", "types": []} for name in ("GetApis", "GetThings")}
+    with pytest.raises(ValueError, match="different leading segments"):
+        r.routed_resources("svc", operations, formats, GUIDE, models, NO_ROUTE_ACTIONS)
+
+
+def test_route_types_are_read_only_for_a_namespace_with_a_path_source_and_never_named_as_a_reference_type(monkeypatch):
+    document = good_document()
+    document["pathFormats"] = {
+        "svc": {"/sdktypes (resource-path-specifier)": "arn:${Partition}:svc:${Region}::/sdktypes"}}
+    assert any("pathFormats" in problem for problem in r.validate(document))
+    monkeypatch.setattr(r, "PATH_SOURCES", {"svc": Path("svc.json")})
+    assert r.validate(document) == []
+    document["pathFormats"] = {"svc": {"thing": "arn:${Partition}:svc:${Region}::/things"}}
+    assert any("pathFormats" in problem for problem in r.validate(document))
 
 
 def test_a_well_formed_document_validates():
@@ -1096,7 +1253,7 @@ def test_the_vendored_file_is_well_formed():
     assert document["integerVariables"] == {"lambda": {"layerVersion": ["LayerVersion"]}}
     # Lambda is read whole: a partial ARN names a function, a provisioned concurrency config acts on the version or
     # alias its Qualifier names, the action the reference gives it, and AddPermission's SourceAccount is its source's.
-    assert "lambda" in document["namespaces"] and "lambda" not in document["handBuilt"]
+    assert "lambda" in document["namespaces"]
     assert operations["lambda:Invoke"]["resources"] == [
         {"type": "function", "fill": {"FunctionName": "FunctionName"}, "partialArn": True}]
     assert operations["lambda:PublishVersion"]["resources"] == [
@@ -1116,10 +1273,57 @@ def test_the_vendored_file_is_well_formed():
         for kind in ("app", "gwy", "net")]
     assert operations["elasticloadbalancing:CreateRule"]["creates"] == [
         {"type": f"listener-rule/{kind}", "parent": f"listener/{kind}", "arn": "ListenerArn"} for kind in ("app", "net")]
-    assert set(document["handBuilt"]) >= {"s3"}
+    # S3 is read from the table: an object by its bucket and key, a bucket per client, and DeleteObjects, whose keys
+    # its XML body names, left to S3.
+    assert "s3" in document["namespaces"]
+    assert operations["s3:PutObject"]["resources"] == [
+        {"type": "object", "fill": {"BucketName": "Bucket", "ObjectName": "Key"}}]
+    assert operations["s3:CreateBucket"]["locatedApart"] == {"s3": {"Bucket": "{Bucket}"}, "s3control": {"Bucket": "{name}"}}
+    assert operations["s3:DeleteObjects"]["unread"] == ["Delete.Objects[].Key"]
     # An SQS request names its queue by URL, which SQS finds as its handlers do; a create names it by name.
     assert operations["sqs:SendMessage"]["resources"] == [{"type": "queue", "fill": {}, "find": ["QueueUrl"]}]
     assert operations["sqs:CreateQueue"]["resources"] == [{"type": "queue", "fill": {"QueueName": "QueueName"}}]
+    # CloudWatch is read whole: each alarm a list names, and a dashboard by its name, its ARN with no Region.
+    assert "cloudwatch" in document["namespaces"] and "cloudwatch" not in document["notCovered"]
+    assert operations["cloudwatch:DeleteAlarms"]["resources"] == [
+        {"type": "alarm", "fill": {"AlarmName": "AlarmNames[]"}}]
+    assert operations["cloudwatch:DeleteDashboards"]["resources"] == [
+        {"type": "dashboard", "fill": {"DashboardName": "DashboardNames[]"}}]
+    assert document["arnFormats"]["cloudwatch"]["dashboard"] == (
+        "arn:${Partition}:cloudwatch::${Account}:dashboard/${DashboardName}")
+    # Comprehend is read whole; its detection actions act on no resource type, and a classifier's are read by ARN.
+    assert "comprehend" in document["namespaces"] and "comprehend" not in document["notCovered"]
+    assert operations["comprehend:DetectSentiment"] == {
+        "action": "comprehend:DetectSentiment", "types": [], "resources": []}
+    assert operations["comprehend:DescribeDocumentClassifier"]["resources"] == [
+        {"types": ["document-classifier"], "arn": "DocumentClassifierArn"}]
+    # Config is read whole: a rule is found by its name, its ARN ending in the id Config mints; a conformance pack is
+    # its name, the id it mints after it found the same way when Config holds the pack.
+    assert "config" in document["namespaces"] and "config" not in document["notCovered"]
+    assert operations["config:DeleteConfigRule"]["resources"] == [
+        {"type": "ConfigRule", "fill": {}, "find": ["ConfigRuleName"]}]
+    assert operations["config:DeleteConformancePack"]["resources"] == [
+        {"type": "ConformancePack", "fill": {"ConformancePackName": "ConformancePackName"}}]
+    # An aggregation authorization is the caller's, its path the account and Region it authorizes; a recorder put
+    # names its recorder in the ConfigurationRecorder structure.
+    assert operations["config:PutAggregationAuthorization"]["resources"] == [
+        {"type": "AggregationAuthorization",
+         "fill": {"AggregatorAccount": "AuthorizedAccountId", "AggregatorRegion": "AuthorizedAwsRegion"}}]
+    assert {"type": "ConfigurationRecorder", "fill": {"RecorderName": "ConfigurationRecorder.name"}} in operations[
+        "config:PutConfigurationRecorder"]["resources"]
+    # DMS is read whole: an existing resource by the ARN its request names it by, each format ending in a literal `*`.
+    assert document["arnFormats"]["dms"]["Endpoint"] == "arn:${Partition}:dms:${Region}:${Account}:endpoint:*"
+    assert "dms" in document["namespaces"] and "dms" not in document["notCovered"]
+    assert operations["dms:DeleteEndpoint"]["resources"] == [{"types": ["Endpoint"], "arn": "EndpointArn"}]
+    # An endpoint written with no CertificateArn names no certificate.
+    assert not any(resource.get("type") == "Certificate" for resource in operations["dms:CreateEndpoint"]["resources"])
+    # ElastiCache is read whole: a cluster, group or user by the identifier its request names.
+    assert "elasticache" in document["namespaces"] and "elasticache" not in document["notCovered"]
+    assert operations["elasticache:DeleteCacheCluster"]["resources"][0] == {
+        "type": "cluster", "fill": {"CacheClusterId": "CacheClusterId"}}
+    assert operations["elasticache:ModifyUserGroup"]["resources"] == [
+        {"type": "usergroup", "fill": {"UserGroupId": "UserGroupId"}},
+        {"type": "user", "fill": {"UserId": "UserIdsToAdd[]"}}, {"type": "user", "fill": {"UserId": "UserIdsToRemove[]"}}]
     # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
     assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]
@@ -1140,25 +1344,26 @@ def test_the_vendored_file_is_well_formed():
         "type": "loadbalancer/app/", "fill": {"LoadBalancerName": "Name"}, "when": {"Type": ["application", None]}}
 
 
-MEASURED_FORMATS = {"thing": "arn:${Partition}:hand:${Region}:${Account}:thing/${ThingName}"}
+MEASURED_FORMATS = {"thing": "arn:${Partition}:probed:${Region}:${Account}:thing/${ThingName}"}
 PROBED = "real AWS probes in https://example.com/probes accept an allow and enforce a deny on thing/*"
 
 
 def measured_documents(tmp_path, listed: list[str]) -> list[dict]:
-    hand = model({"ListThings": {"StartName": "String"}})
-    hand["metadata"]["endpointPrefix"] = "hand"
-    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}), "hand": hand})
-    return DOCUMENTS + [reference("hand", {"ListThings": listed}, MEASURED_FORMATS)]
+    probed = model({"ListThings": {"StartName": "String"}})
+    probed["metadata"]["endpointPrefix"] = "probed"
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}), "probed": probed})
+    return DOCUMENTS + [reference("probed", {"ListThings": listed}, MEASURED_FORMATS)]
 
 
 def test_a_measured_operation_takes_the_resources_aws_was_measured_to_check_where_the_reference_lists_none(
         isolated, tmp_path):
-    isolated.setattr(r, "MEASURED", {"hand:ListThings": ([{"type": "thing", "fill": {}}], PROBED)})
+    isolated.setattr(r, "NAMESPACES", ("svc", "probed"))
+    isolated.setattr(r, "MEASURED", {"probed:ListThings": ([{"type": "thing", "fill": {}}], PROBED)})
     document = r.build(measured_documents(tmp_path, []), "test", tmp_path, "botocore test")
-    # Read in a namespace otherwise built by hand, keeping the reference's empty types.
-    assert document["operations"]["hand:ListThings"] == {
-        "action": "hand:ListThings", "types": [], "resources": [{"type": "thing", "fill": {}}]}
-    assert r.reads("hand:ListThings")
+    # The measured resources replace what the rules read, keeping the reference's empty types.
+    assert document["operations"]["probed:ListThings"] == {
+        "action": "probed:ListThings", "types": [], "resources": [{"type": "thing", "fill": {}}]}
+    assert r.reads("probed:ListThings")
     assert r.validate(document) == []
     assert r.derive(document, tmp_path) == []
 
@@ -1175,14 +1380,16 @@ def test_a_measured_operation_takes_the_resources_aws_was_measured_to_check_wher
 ])
 def test_a_measured_entry_is_refused_unless_it_cites_aws_for_what_the_metadata_does_not_say(
         isolated, tmp_path, measured, listed, problem):
-    isolated.setattr(r, "MEASURED", {"hand:ListThings": measured})
+    isolated.setattr(r, "NAMESPACES", ("svc", "probed"))
+    isolated.setattr(r, "MEASURED", {"probed:ListThings": measured})
     with pytest.raises(ValueError, match=problem):
         r.build(measured_documents(tmp_path, listed), "test", tmp_path, "botocore test")
 
 
 def test_a_measured_entry_must_name_an_operation_the_file_reads(isolated, tmp_path):
-    isolated.setattr(r, "MEASURED", {"hand:Gone": ([{"type": "thing", "fill": {}}], PROBED)})
-    with pytest.raises(ValueError, match="MEASURED gives hand:Gone, which the file does not read"):
+    isolated.setattr(r, "NAMESPACES", ("svc", "probed"))
+    isolated.setattr(r, "MEASURED", {"probed:Gone": ([{"type": "thing", "fill": {}}], PROBED)})
+    with pytest.raises(ValueError, match="MEASURED gives probed:Gone, which the file does not read"):
         r.build(measured_documents(tmp_path, []), "test", tmp_path, "botocore test")
 
 
@@ -1362,11 +1569,86 @@ def test_a_rest_request_reads_its_path_and_query_members_and_records_where_the_o
     assert r.derive(document, tmp_path) == []
 
 
-def test_a_member_two_clients_locate_apart_is_an_error():
+def test_a_member_two_clients_locate_apart_is_read_under_each_client(monkeypatch):
+    # S3's CreateBucket carries its Bucket as {Bucket}, S3 Control's as {name}: a request's route tells which it is.
+    one = rest_model({"GetThing": {"ThingName": "String", "Marker": "String"}},
+                     {"GetThing": {"ThingName": "uri:ThingName", "Marker": "querystring:marker"}})
+    two = rest_model({"GetThing": {"ThingName": "String", "Marker": "String"}},
+                     {"GetThing": {"ThingName": "uri:name", "Marker": "querystring:marker"}})
+    monkeypatch.setattr(r, "REST_MODELS", {"one": "svc", "two": "svc"})
+    assert r.located_members({"one": one, "two": two}, "GetThing") == (
+        {"Marker": "?marker"}, {"one": {"ThingName": "{ThingName}"}, "two": {"ThingName": "{name}"}})
+
+
+def test_a_member_one_client_locates_and_another_carries_in_a_body_it_reads_is_located_for_the_first_alone(monkeypatch):
+    # A request of the client carrying it in its body is read from its body, not from a path it has no label in.
+    one = rest_model({"GetThing": {"ThingName": "String"}}, {"GetThing": {"ThingName": "uri:ThingName"}})
+    two = model({"GetThing": {"ThingName": "String"}})
+    monkeypatch.setattr(r, "REST_MODELS", {"one": "svc"})
+    assert r.located_members({"one": one, "two": two}, "GetThing") == ({}, {"one": {"ThingName": "{ThingName}"}})
+    # A REST-XML body is not read, so a client carrying the member there leaves it shared.
+    xml = {**two, "metadata": {**two.get("metadata", {}), "protocol": "rest-xml"}}
+    assert r.located_members({"one": one, "two": xml}, "GetThing") == ({"ThingName": "{ThingName}"}, {})
+    monkeypatch.setattr(r, "REST_MODELS", {})
+    with pytest.raises(ValueError, match="one has no vendored routes"):
+        r.located_members({"one": one, "two": two}, "GetThing")
+
+
+def test_a_member_located_apart_by_a_client_whose_routes_are_not_vendored_is_an_error(monkeypatch):
     one = rest_model({"GetThing": {"ThingName": "String"}}, {"GetThing": {"ThingName": "uri:ThingName"}})
     two = rest_model({"GetThing": {"ThingName": "String"}}, {"GetThing": {"ThingName": "querystring:thing"}})
-    with pytest.raises(ValueError, match="GetThing's ThingName is"):
+    monkeypatch.setattr(r, "REST_MODELS", {"one": "svc"})
+    with pytest.raises(ValueError, match="GetThing's ThingName is located apart by one, two, and two has no vendored"):
         r.located_members({"one": one, "two": two}, "GetThing")
+
+
+# S3's object types: an access point's object and a bucket's.
+OBJECTS = {"accesspointobject": "arn:${Partition}:s3:${Region}:${Account}:accesspoint/${AccessPointName}/object/"
+                                "${ObjectName}",
+           "object": "arn:${Partition}:s3:::${BucketName}/${ObjectName}"}
+OBJECT_MEMBERS = {"Bucket": "Bucket", "Key": "Key", "ContentType": "ContentType"}
+OBJECT_SHAPES = {"Bucket": "BucketName", "Key": "ObjectKey", "ContentType": "ContentType"}
+
+
+def test_a_member_whose_shape_is_named_as_the_type_and_key_fills_the_types_name():
+    assert r._filling("ObjectName", "object", 2, {"Key": "Key", "Bucket": "Bucket"}, bare=set(),
+                      shapes={"Key": "ObjectKey", "Bucket": "BucketName"}) == "Key"
+    assert r.resources_for("s3:GetObject", ["accesspointobject", "object"], OBJECTS, OBJECT_MEMBERS,
+                           shapes=OBJECT_SHAPES) == [
+        {"type": "object", "fill": {"BucketName": "Bucket", "ObjectName": "Key"}}]
+    # A shape named as another type and Key names that one.
+    assert r._filling("ObjectName", "object", 2, {"Key": "Key"}, bare=set(), shapes={"Key": "BucketKey"}) is None
+
+
+def test_a_type_named_exactly_as_what_the_operation_makes_rules_out_one_only_ending_with_it():
+    # PutObject makes an `object`, not an `accesspointobject`, whose access point the request does not name.
+    assert r.resources_for("s3:PutObject", ["accesspointobject", "object"], OBJECTS, OBJECT_MEMBERS,
+                           shapes=OBJECT_SHAPES) == [
+        {"type": "object", "fill": {"BucketName": "Bucket", "ObjectName": "Key"}}]
+    # With no type named exactly so, one ending with the name is still what it makes.
+    assert r.resources_for("s3:PutObject", ["accesspointobject"], OBJECTS, OBJECT_MEMBERS, shapes=OBJECT_SHAPES) == [
+        {"type": "accesspointobject", "fill": {}}]
+
+
+def test_a_type_a_body_the_reader_does_not_read_names_by_a_key_shape_is_left_unread():
+    # S3's DeleteObjects names each object it deletes in Delete.Objects[].Key, an ObjectKey, in a REST-XML body.
+    shapes = {"String": {"type": "string"}, "ObjectKey": {"type": "string"},
+              "Identifier": {"type": "structure", "members": {"Key": {"shape": "ObjectKey"}}},
+              "Identifiers": {"type": "list", "member": {"shape": "Identifier"}},
+              "Delete": {"type": "structure", "members": {"Objects": {"shape": "Identifiers"}}},
+              "In": {"type": "structure", "members": {
+                  "Bucket": {"shape": "String", "location": "uri", "locationName": "Bucket"},
+                  "Delete": {"shape": "Delete"}}}}
+    models = {"s3": {"metadata": {"protocol": "rest-xml"}, "operations": {"DeleteObjects": {"input": {"shape": "In"}}},
+                     "shapes": shapes}}
+    bucket_only = [{"type": "object", "fill": {"BucketName": "Bucket"}}]
+    assert r.body_only_identifiers(["object"], OBJECTS, bucket_only, models, "DeleteObjects") == ["Delete.Objects[].Key"]
+    # The type's own variable filled by what the reader reads, nothing is left.
+    assert r.body_only_identifiers(["object"], OBJECTS, [{"type": "object", "fill": {
+        "BucketName": "Bucket", "ObjectName": "Key"}}], models, "DeleteObjects") == []
+    # A body the reader reads leaves nothing unread.
+    rest_json = {"s3": {**models["s3"], "metadata": {"protocol": "rest-json"}}}
+    assert r.body_only_identifiers(["object"], OBJECTS, bucket_only, rest_json, "DeleteObjects") == []
 
 
 def test_a_located_member_must_be_a_path_label_or_a_query_parameter(isolated, tmp_path):
@@ -1375,6 +1657,24 @@ def test_a_located_member_must_be_a_path_label_or_a_query_parameter(isolated, tm
     document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
     document["operations"]["svc:GetThing"]["located"] = {"ThingName": "header:x"}
     assert any("does not give each member it locates" in problem for problem in r.validate(document))
+
+
+def test_a_member_located_apart_names_a_client_whose_routes_are_vendored_and_an_unread_one_a_body_path(
+        isolated, tmp_path, monkeypatch):
+    write_models(tmp_path, {"svc": rest_model({"GetThing": {"ThingName": "String"}, "ListThings": {}},
+                                              {"GetThing": {"ThingName": "uri:ThingName"}})})
+    document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
+    monkeypatch.setattr(r, "REST_MODELS", {"one": "svc"})
+    entry = document["operations"]["svc:GetThing"]
+    entry.update(locatedApart={"one": {"ThingName": "{name}"}}, unread=["Delete.Objects[].Key"])
+    assert r.validate(document) == []
+    for broken in ({"locatedApart": {"two": {"ThingName": "{name}"}}}, {"locatedApart": {"one": {"ThingName": "x"}}},
+                   {"locatedApart": {}}):
+        assert any("locates apart" in problem for problem in r.validate(
+            {**document, "operations": {**document["operations"], "svc:GetThing": {**entry, **broken}}}))
+    for broken in (["Delete..Key"], [], "Delete.Objects[].Key"):
+        assert any("leaves unread" in problem for problem in r.validate(
+            {**document, "operations": {**document["operations"], "svc:GetThing": {**entry, "unread": broken}}}))
 
 
 SPLIT = [reference("svc", {"GetThing": ["thing"], "ListThings": []}, {"thing": FORMATS["thing"]}),
@@ -2061,6 +2361,10 @@ def test_an_arn_patterns_type_words_and_a_clients_versioned_twin():
     assert r.pattern_words("arn:aws:svc:[a-z0-9-]+:([0-9]{12}):(bus-v2|subscriber|source-v2\\/(a|b))\\/[A-Za-z]+") == {
         "bus-v2", "subscriber", "source-v2"}
     assert r.pattern_words("(arn:aws[\\w-]*:svc:[a-z]+:[0-9]{12}:bus\\/)?[A-Za-z]+") == {"bus"}
+    # An optional account gives each type word in an alternative of its own (Bedrock's taggable ARNs).
+    assert r.pattern_words("(^arn:aws:svc:[a-z0-9-]{1,20}:[0-9]{12}:model/(imported)/[a-z0-9]{12}$)|"
+                           "(^arn:aws:svc:[a-z0-9-]{1,20}:([0-9]{12}|)((:(job|model)/[a-z0-9]+$)|(:guardrail/[a-z0-9]+$)|"
+                           "(:(profile|app-profile)/[a-z0-9]+$)))") == {"model", "job", "guardrail", "profile", "app-profile"}
     formats = {"bus": "arn:${Partition}:svc:${Region}:${Account}:bus/${BusName}",
                "busv2": "arn:${Partition}:svc:${Region}:${Account}:busv2/${BusName}/${OpaqueId}"}
     model_ = documented("CreateBus", {"Name": ("String", "The name of the bus.")})
@@ -2739,3 +3043,383 @@ def test_nested_record_id_finds_only_containing_and_adjacent_resource_types():
                                      members("AttachmentId", "OtherAttachmentId"), models) == []
     shapes["DescribeInterfaceResponse"] = shapes.pop("Interface")
     assert r.with_nested_record_find([], list(formats), formats, members("AttachmentId"), models) == []
+
+
+# --------------------------------------------------------------------------- #
+# PERMISSION_SOURCES: the vendored KMS permissions
+# --------------------------------------------------------------------------- #
+KEYS_FORMATS = {"alias": "arn:${Partition}:kms:${Region}:${Account}:alias/${Alias}",
+                "key": "arn:${Partition}:kms:${Region}:${Account}:key/${KeyId}"}
+KEYS_ACTIONS = {"kms:ReEncryptFrom": ["key"], "kms:ReEncryptTo": ["key"], "kms:UpdateAlias": ["alias", "key"],
+                "kms:DeleteAlias": ["alias", "key"], "kms:ReplicateKey": ["key"], "kms:CreateKey": []}
+
+
+def keys_model() -> dict:
+    """A model shaped as KMS's: ReEncrypt naming its keys by `SourceKeyId` and `DestinationKeyId`, documented as the
+    keys it decrypts and reencrypts with, the alias calls naming an alias whose record holds its `TargetKeyId`."""
+    def request(members: dict, required: list[str]) -> dict:
+        return {"type": "structure", "members": members, "required": required}
+    shapes = {
+        "KeyIdType": {"type": "string"}, "AliasNameType": {"type": "string"}, "CiphertextType": {"type": "blob"},
+        "RegionType": {"type": "string"},
+        "ReEncryptRequest": request({
+            "CiphertextBlob": {"shape": "CiphertextType"},
+            "SourceKeyId": {"shape": "KeyIdType", "documentation": "<p>Specifies the KMS key that KMS will use to "
+                                                                   "decrypt the ciphertext before it is re-encrypted."
+                                                                   "</p>"},
+            "DestinationKeyId": {"shape": "KeyIdType", "documentation": "<p>A unique identifier for the KMS key that "
+                                                                        "is used to reencrypt the data.</p>"}},
+            ["DestinationKeyId"]),
+        "UpdateAliasRequest": request({"AliasName": {"shape": "AliasNameType"},
+                                       "TargetKeyId": {"shape": "KeyIdType"}}, ["AliasName", "TargetKeyId"]),
+        "DeleteAliasRequest": request({"AliasName": {"shape": "AliasNameType"}}, ["AliasName"]),
+        "ReplicateKeyRequest": request({"KeyId": {"shape": "KeyIdType"}, "ReplicaRegion": {"shape": "RegionType"}},
+                                       ["KeyId", "ReplicaRegion"]),
+        "KeyMetadata": {"type": "structure", "members": {"KeyId": {"shape": "KeyIdType"}}},
+        "AliasListEntry": {"type": "structure", "members": {"AliasName": {"shape": "AliasNameType"},
+                                                            "TargetKeyId": {"shape": "KeyIdType"}}},
+    }
+    operations = {name: {"name": name, "input": {"shape": f"{name}Request"}}
+                  for name in ("ReEncrypt", "UpdateAlias", "DeleteAlias", "ReplicateKey")}
+    return {"metadata": {"protocol": "json", "endpointPrefix": "kms"}, "operations": operations, "shapes": shapes}
+
+
+def keys_row(operation: str, actions: list[str], items: list[str]) -> dict:
+    return {"operation": operation, "apiReference": f"https://example.com/API_{operation}.html", "actions": actions,
+            "description": [], "items": items, "policies": [{"policyType": "Key policy", "resources": "KMS key"}]}
+
+
+def test_vendored_permissions_check_each_resource_they_list_as_the_action_they_name():
+    models = {"kms": keys_model()}
+    row = keys_row("ReEncrypt", ["kms:ReEncryptFrom", "kms:ReEncryptTo"],
+                   ["kms:ReEncryptFrom on the KMS key used to decrypt",
+                    "kms:ReEncryptTo on the KMS key used to encrypt"])
+    resources, actions = r.permission_resources("kms:ReEncrypt", "kms:ReEncrypt", [], row, KEYS_ACTIONS,
+                                                KEYS_FORMATS, models)
+    assert actions == {"kms:ReEncryptFrom": ["key"], "kms:ReEncryptTo": ["key"]}
+    assert resources == [{"type": "key", "fill": {"KeyId": "SourceKeyId"}, "action": "kms:ReEncryptFrom"},
+                         {"type": "key", "fill": {"KeyId": "DestinationKeyId"}, "action": "kms:ReEncryptTo"}]
+    sentence = {"operation": "ReEncrypt", "parameter": "SourceKeyId",
+                "sentence": "If you used a symmetric encryption KMS key, AWS KMS can get the KMS key from metadata "
+                            "that it adds to the symmetric ciphertext blob."}
+    assert r.with_from_metadata(resources, "kms:ReEncrypt", [sentence], models)[2:] == [
+        {"types": ["key"], "through": "CiphertextBlob", "when": {"SourceKeyId": [None]}, "action": "kms:ReEncryptFrom"}]
+
+
+def test_a_listed_resource_no_member_names_is_reached_through_the_record_of_another_it_lists():
+    models = {"kms": keys_model()}
+    alias = {"type": "alias", "fill": {"Alias": "AliasName"}}
+    row = keys_row("UpdateAlias", ["kms:UpdateAlias"],
+                   ["The alias", "The currently associated KMS key", "The newly associated KMS key"])
+    assert r.permission_resources("kms:UpdateAlias", "kms:UpdateAlias", [alias], row, KEYS_ACTIONS, KEYS_FORMATS,
+                                  models) == (
+        [alias, {"type": "key", "fill": {"KeyId": "TargetKeyId"}}, {"types": ["key"], "through": "AliasName"}], None)
+    row = keys_row("DeleteAlias", ["kms:DeleteAlias"],
+                   ["The alias (in an IAM policy)", "The KMS key (in a key policy)"])
+    assert r.permission_resources("kms:DeleteAlias", "kms:DeleteAlias", [alias], row, KEYS_ACTIONS, KEYS_FORMATS,
+                                  models) == ([alias, {"types": ["key"], "through": "AliasName"}], None)
+
+
+def test_a_listed_action_on_no_resource_is_one_the_operation_is_checked_as():
+    row = keys_row("ReplicateKey", ["kms:ReplicateKey"],
+                   ["kms:ReplicateKey on the multi-Region primary key", "kms:CreateKey in an IAM policy in the replica "
+                                                                        "Region"])
+    assert r.permission_resources("kms:ReplicateKey", "kms:ReplicateKey", [], row, KEYS_ACTIONS, KEYS_FORMATS,
+                                  {"kms": keys_model()}) == (
+        [{"type": "key", "fill": {"KeyId": "KeyId"}, "action": "kms:ReplicateKey"}],
+        {"kms:ReplicateKey": ["key"], "kms:CreateKey": []})
+
+
+def test_vendored_permissions_the_metadata_does_not_bear_out_are_refused():
+    models = {"kms": keys_model()}
+    unknown = keys_row("ReEncrypt", [], ["kms:ReEncryptAll on the KMS key used to decrypt"])
+    with pytest.raises(ValueError, match="does not have"):
+        r.permission_resources("kms:ReEncrypt", "kms:ReEncrypt", [], unknown, KEYS_ACTIONS, KEYS_FORMATS, models)
+    undocumented = keys_row("ReEncrypt", ["kms:ReEncryptFrom"], ["kms:ReEncryptFrom on the KMS key used to sign"])
+    with pytest.raises(ValueError, match="documented as used for"):
+        r.permission_resources("kms:ReEncrypt", "kms:ReEncrypt", [], undocumented, KEYS_ACTIONS, KEYS_FORMATS, models)
+    sentence = {"operation": "ReEncrypt", "parameter": "SourceKeyId",
+                "sentence": "AWS KMS can get the KMS key from metadata that it adds to the envelope."}
+    with pytest.raises(ValueError, match="names no member"):
+        r.with_from_metadata([], "kms:ReEncrypt", [sentence], models)
+    assert r.permission_resources("kms:Encrypt", "kms:Encrypt", [{"type": "key", "fill": {"KeyId": "KeyId"}}],
+                                  keys_row("Encrypt", ["kms:Encrypt"], []), KEYS_ACTIONS, KEYS_FORMATS, models) == (
+        [{"type": "key", "fill": {"KeyId": "KeyId"}}], None)
+
+
+def test_an_identifier_given_as_another_arns_resource_names_its_type_by_that_resource():
+    identifiers = [{"identifier": "Key ARN", "sentence": "", "format": "arn:{partition}:kms:{region}:{account-id}:key/"
+                                                                        "{key-id}"},
+                   {"identifier": "Alias ARN", "sentence": "",
+                    "format": "arn:{partition}:kms:{region}:{account-id}:alias/{alias-name}"},
+                   {"identifier": "Alias name", "sentence": "", "format": "alias/{alias-name}"}]
+    assert r.named_resources(identifiers, KEYS_FORMATS) == {"alias"}
+    assert r.named_resources(identifiers[:2], KEYS_FORMATS) == set()
+
+
+def test_an_operation_checked_as_several_actions_checks_each_resource_as_one_of_them(isolated):
+    isolated.setattr(r, "PERMISSION_SOURCES", {"svc": Path("svc.json")})
+    document = good_document()
+    document["arnFormats"]["svc"]["key"] = "arn:${Partition}:svc:${Region}:${Account}:key/${KeyId}"
+    entry = {"action": "svc:ReEncrypt", "types": [],
+             "actions": {"svc:ReEncryptFrom": ["key"], "svc:ReEncryptTo": ["key"]},
+             "resources": [{"type": "key", "fill": {"KeyId": "SourceKeyId"}, "action": "svc:ReEncryptFrom"},
+                           {"type": "key", "fill": {"KeyId": "DestinationKeyId"}, "action": "svc:ReEncryptTo"}]}
+    document["operations"] = dict(sorted({**document["operations"], "svc:ReEncrypt": entry}.items()))
+    assert r.validate(document) == []
+    unchecked = dict(entry, resources=[{"type": "key", "fill": {"KeyId": "SourceKeyId"}}])
+    document["operations"]["svc:ReEncrypt"] = unchecked
+    assert any("none of the actions" in problem for problem in r.validate(document))
+    isolated.setattr(r, "PERMISSION_SOURCES", {})
+    document["operations"]["svc:ReEncrypt"] = entry
+    assert any("vendored permissions" in problem for problem in r.validate(document))
+
+
+def test_every_permission_source_is_written_by_its_own_fetcher():
+    assert set(r.PERMISSION_FETCHERS) == set(r.PERMISSION_SOURCES)
+    for namespace, path in r.PERMISSION_SOURCES.items():
+        assert r.PERMISSION_FETCHERS[namespace].OUTPUT == path, namespace
+
+
+def test_each_permission_source_is_verified_against_the_pages_its_own_fetcher_reads(isolated, tmp_path):
+    class Fetcher:
+        def __init__(self, page: str):
+            self.page = page
+
+        def fetch_all(self):
+            return (self.page,)
+
+        def stale(self, source, page):
+            return source["says"] != page
+
+    sources = {}
+    for namespace, says in (("first", "kept"), ("second", "kept")):
+        sources[namespace] = tmp_path / f"{namespace}.json"
+        sources[namespace].write_text(json.dumps({"_source": {"pages": [f"https://{namespace}"],
+                                                              "fetcher": f"fetch_{namespace}.py"}, "says": says}))
+    isolated.setattr(r, "PERMISSION_SOURCES", sources)
+    isolated.setattr(r, "PERMISSION_FETCHERS", {"first": Fetcher("kept"), "second": Fetcher("kept")})
+    assert r.verify_permission_sources() == []
+    isolated.setattr(r, "PERMISSION_FETCHERS", {"first": Fetcher("kept"), "second": Fetcher("changed")})
+    assert r.verify_permission_sources() == ["https://second and the pages they link to no longer give what "
+                                             "second.json holds for second: run fetch_second.py"]
+
+
+# --------------------------------------------------------------------------- #
+# PERMISSION_SOURCES: the vendored DynamoDB permissions
+# --------------------------------------------------------------------------- #
+TABLES_FORMATS = {"table": "arn:${Partition}:dynamodb:${Region}:${Account}:table/${TableName}",
+                  "index": "arn:${Partition}:dynamodb:${Region}:${Account}:table/${TableName}/index/${IndexName}"}
+TABLES_ACTIONS = {"dynamodb:PutItem": ["table"], "dynamodb:DeleteItem": ["table"], "dynamodb:GetItem": ["table"],
+                  "dynamodb:ConditionCheckItem": ["table"], "dynamodb:PartiQLSelect": ["index", "table"],
+                  "dynamodb:PartiQLInsert": ["table"]}
+TABLES_SOURCE = {
+    "partiql": {"items": [
+        {"text": "To read items using PartiQL for DynamoDB, you must have dynamodb:PartiQLSelect permission on the "
+                 "table or index.", "code": ["dynamodb:PartiQLSelect"]},
+        {"text": "To insert items using PartiQL for DynamoDB, you must have dynamodb:PartiQLInsert permission on the "
+                 "table or index.", "code": ["dynamodb:PartiQLInsert"]}]},
+    "transactions": {"sentences": [
+        {"text": "Permissions for Put, Delete, and Get actions are governed by the permissions used for the underlying "
+                 "PutItem, DeleteItem, and GetItem operations.",
+         "code": ["Put", "Delete", "Get", "PutItem", "DeleteItem", "GetItem"]},
+        {"text": "For the ConditionCheck action, you can use the dynamodb:ConditionCheckItem permission in IAM "
+                 "policies.", "code": ["ConditionCheck", "dynamodb:ConditionCheckItem"]}]},
+}
+
+
+def dynamodb_model() -> dict:
+    """A model shaped as DynamoDB's: a transaction's items, PartiQL statements alone and in a list, a batch keyed by
+    the shape a table's name has, and a map keyed by any string."""
+    shapes = {
+        "TableArn": {"type": "string"}, "PartiQLStatement": {"type": "string"}, "Name": {"type": "string"},
+        "Item": {"type": "structure", "members": {"TableName": {"shape": "TableArn"}}},
+        "TransactWriteItem": {"type": "structure", "members": {"ConditionCheck": {"shape": "Item"},
+                                                                "Put": {"shape": "Item"}, "Delete": {"shape": "Item"}}},
+        "TransactWriteItemList": {"type": "list", "member": {"shape": "TransactWriteItem"}},
+        "BatchStatementRequest": {"type": "structure", "members": {"Statement": {"shape": "PartiQLStatement"}}},
+        "PartiQLBatchRequest": {"type": "list", "member": {"shape": "BatchStatementRequest"}},
+        "BatchGetRequestMap": {"type": "map", "key": {"shape": "TableArn"}, "value": {"shape": "Item"}},
+        "VariablesMap": {"type": "map", "key": {"shape": "Name"}, "value": {"shape": "Name"}},
+        "TransactWriteItemsInput": {"type": "structure", "members": {"TransactItems": {"shape":
+                                                                                        "TransactWriteItemList"}}},
+        "ExecuteStatementInput": {"type": "structure", "members": {"Statement": {"shape": "PartiQLStatement"}}},
+        "BatchExecuteStatementInput": {"type": "structure",
+                                       "members": {"Statements": {"shape": "PartiQLBatchRequest"}}},
+        "BatchGetItemInput": {"type": "structure", "members": {"RequestItems": {"shape": "BatchGetRequestMap"},
+                                                               "Variables": {"shape": "VariablesMap"}}},
+    }
+    operations = {name: {"name": name, "input": {"shape": f"{name}Input"}}
+                  for name in ("TransactWriteItems", "ExecuteStatement", "BatchExecuteStatement", "BatchGetItem")}
+    return {"metadata": {"protocol": "json", "endpointPrefix": "dynamodb"}, "operations": operations, "shapes": shapes}
+
+
+def test_each_transaction_item_is_checked_as_the_action_the_vendored_page_gives_its_kind():
+    kinds = r.item_actions(TABLES_SOURCE, "dynamodb")
+    assert kinds == {"Put": "dynamodb:PutItem", "Delete": "dynamodb:DeleteItem", "Get": "dynamodb:GetItem",
+                     "ConditionCheck": "dynamodb:ConditionCheckItem"}
+    assert r.item_resources("dynamodb:TransactWriteItems", kinds, TABLES_ACTIONS, TABLES_FORMATS,
+                            {"dynamodb": dynamodb_model()}) == [
+        {"type": "table", "fill": {"TableName": "TransactItems[].ConditionCheck.TableName"},
+         "action": "dynamodb:ConditionCheckItem"},
+        {"type": "table", "fill": {"TableName": "TransactItems[].Put.TableName"}, "action": "dynamodb:PutItem"},
+        {"type": "table", "fill": {"TableName": "TransactItems[].Delete.TableName"}, "action": "dynamodb:DeleteItem"}]
+    assert r.item_resources("dynamodb:ExecuteStatement", kinds, TABLES_ACTIONS, TABLES_FORMATS,
+                            {"dynamodb": dynamodb_model()}) == []
+    with pytest.raises(ValueError, match="pairs no kinds"):
+        r.item_actions({"transactions": {"sentences": [{"text": "Put.", "code": ["Put"]}]}}, "dynamodb")
+
+
+def test_each_statement_is_checked_as_the_action_of_its_verb_on_its_table_or_index():
+    models = {"dynamodb": dynamodb_model()}
+    assert r.statement_resources("dynamodb:ExecuteStatement", TABLES_SOURCE, TABLES_ACTIONS, TABLES_FORMATS,
+                                 models) == [
+        {"types": ["index", "table"], "statement": "Statement", "verb": "SELECT",
+         "names": {"TableName": "table", "IndexName": "index"}, "action": "dynamodb:PartiQLSelect"},
+        {"types": ["table"], "statement": "Statement", "verb": "INSERT", "names": {"TableName": "table"},
+         "action": "dynamodb:PartiQLInsert"}]
+    assert [row["statement"] for row in r.statement_resources(
+        "dynamodb:BatchExecuteStatement", TABLES_SOURCE, TABLES_ACTIONS, TABLES_FORMATS, models)] == \
+        ["Statements[].Statement", "Statements[].Statement"]
+    assert r.statement_resources("dynamodb:TransactWriteItems", TABLES_SOURCE, TABLES_ACTIONS, TABLES_FORMATS,
+                                 models) == []
+    unknown = {"partiql": {"items": [{"text": "To scan items using PartiQL for DynamoDB, you must have "
+                                              "dynamodb:PartiQLScan permission on the table.",
+                                      "code": ["dynamodb:PartiQLScan"]}]}}
+    with pytest.raises(ValueError, match="names no action"):
+        r.statement_resources("dynamodb:ExecuteStatement", unknown, TABLES_ACTIONS, TABLES_FORMATS, models)
+
+
+def test_a_map_keyed_by_the_shape_a_types_name_has_names_that_type_by_its_keys():
+    models = {"dynamodb": dynamodb_model()}
+    assert r.with_map_keys([], ["table"], TABLES_FORMATS, models, "BatchGetItem") == [
+        {"type": "table", "fill": {"TableName": "RequestItems{}"}}]
+    # A type a rule already names, and a map keyed by any string, add nothing.
+    named = [{"type": "table", "fill": {"TableName": "TableName"}}]
+    assert r.with_map_keys(named, ["table"], TABLES_FORMATS, models, "BatchGetItem") == named
+    assert r.FILL_PATH_RE.match("RequestItems{}") and r.FILL_PATH_RE.match("TransactItems[].Put.TableName")
+
+
+def test_a_statement_resource_names_its_member_verb_and_every_variable_of_its_types():
+    good = {"types": ["index", "table"], "statement": "Statements[].Statement", "verb": "SELECT",
+            "names": {"TableName": "table", "IndexName": "index"}}
+    assert r._resource_problems("dynamodb:BatchExecuteStatement", good, {"index", "table"}, TABLES_FORMATS) == []
+    for bad in (dict(good, verb="select"), dict(good, names={"TableName": "table"}),
+                dict(good, statement="a.b.c.d"), dict(good, types=["stream"])):
+        assert r._resource_problems("dynamodb:BatchExecuteStatement", bad, {"index", "table"}, TABLES_FORMATS)
+
+
+# --------------------------------------------------------------------------- #
+# PERMISSION_SOURCES: the vendored IAM identifiers
+# --------------------------------------------------------------------------- #
+USERS_FORMATS = {"user": "arn:${Partition}:iam::${Account}:user/${UserNameWithPath}",
+                 "group": "arn:${Partition}:iam::${Account}:group/${GroupNameWithPath}",
+                 "saml-provider": "arn:${Partition}:iam::${Account}:saml-provider/${SamlProviderName}",
+                 "mfa": "arn:${Partition}:iam::${Account}:mfa/${MfaTokenIdWithPath}",
+                 "role": "arn:${Partition}:iam::${Account}:role/${RoleNameWithPath}"}
+USERS_ARNS = {"syntax": ["arn:aws:iam::{account}:root", "arn:aws:iam::{account}:user/{user-name-with-path}",
+                         "arn:aws:iam::{account}:group/{group-name-with-path}",
+                         "arn:aws:iam::{account}:mfa/{virtual-device-name-with-path}",
+                         "arn:aws:iam::{account}:saml-provider/{provider-name}"],
+              "paths": ["If you use the IAM API or AWS Command Line Interface (AWS CLI) to create IAM resources, you "
+                        "can add an optional path."]}
+
+
+def iam_model() -> dict:
+    """A model shaped as IAM's: creates taking a path, a rename, an operation acting on its signer, a device by its
+    serial number and a deletion task."""
+    shapes = {"name": {"type": "string"}}
+    members = {
+        "CreateUser": ["Path", "UserName"], "CreateVirtualMFADevice": ["Path", "VirtualMFADeviceName"],
+        "UpdateGroup": ["GroupName", "NewPath", "NewGroupName"], "UpdateUser": ["UserName", "NewUserName"],
+        "GetUser": ["UserName"], "ChangePassword": ["OldPassword", "NewPassword"], "TagMFADevice": ["SerialNumber"],
+        "GetServiceLinkedRoleDeletionStatus": ["DeletionTaskId"],
+    }
+    for operation, names in members.items():
+        shapes[f"{operation}Request"] = {"type": "structure", "members": {name: {"shape": "name"} for name in names}}
+    operations = {name: {"name": name, "input": {"shape": f"{name}Request"}} for name in members}
+    return {"metadata": {"protocol": "query", "endpointPrefix": "iam"}, "operations": operations, "shapes": shapes}
+
+
+def test_the_identifiers_give_the_types_whose_arn_holds_a_name_after_its_path():
+    assert r.path_types(USERS_ARNS, USERS_FORMATS) == {
+        "user": (["user", "name"], "path"), "group": (["group", "name"], "path"),
+        "mfa": (["virtual", "device", "name"], "path")}
+
+
+def test_a_create_names_what_it_makes_by_its_name_after_its_path():
+    models = {"iam": iam_model()}
+    assert r.with_paths([{"type": "user", "fill": {"UserNameWithPath": "Path"}}], "iam:CreateUser", USERS_ARNS,
+                        USERS_FORMATS, models) == [
+        {"type": "user", "fill": {"UserNameWithPath": "UserName"}, "path": "Path"}]
+    assert r.with_paths([{"type": "mfa", "fill": {"MfaTokenIdWithPath": "Path"}}], "iam:CreateVirtualMFADevice",
+                        USERS_ARNS, USERS_FORMATS, models) == [
+        {"type": "mfa", "fill": {"MfaTokenIdWithPath": "VirtualMFADeviceName"}, "path": "Path"}]
+    # A request giving no path, and identifiers saying nothing of paths a create gives, leave the resources as they are.
+    named = [{"type": "user", "fill": {"UserNameWithPath": "UserName"}}]
+    assert r.with_paths(named, "iam:GetUser", USERS_ARNS, USERS_FORMATS, models) == named
+    assert r.with_paths([{"type": "user", "fill": {"UserNameWithPath": "Path"}}], "iam:CreateUser",
+                        dict(USERS_ARNS, paths=[]), USERS_FORMATS, models) == [
+        {"type": "user", "fill": {"UserNameWithPath": "Path"}}]
+
+
+def test_a_rename_also_names_the_resource_under_its_new_name_and_path():
+    models = {"iam": iam_model()}
+    sentence = [{"operation": "UpdateGroup", "parameter": None,
+                 "sentence": "The person making the request (the principal), must have permission to change the role "
+                             "group with the old name and the new name."}]
+    old = [{"type": "group", "fill": {"GroupNameWithPath": "GroupName"}}]
+    assert r.with_renames(old, "iam:UpdateGroup", sentence, USERS_ARNS, USERS_FORMATS, models) == old + [
+        {"type": "group", "fill": {"GroupNameWithPath": "NewGroupName"}, "path": "NewPath", "renames": "GroupName"}]
+    assert r.with_renames(old, "iam:UpdateGroup", [], USERS_ARNS, USERS_FORMATS, models) == old
+    # A rename whose request gives no new path is refused rather than read half.
+    with pytest.raises(ValueError, match="no NewUserName and NewPath"):
+        r.with_renames([{"type": "user", "fill": {"UserNameWithPath": "UserName"}}], "iam:UpdateUser", sentence,
+                       USERS_ARNS, USERS_FORMATS, models)
+
+
+def test_an_operation_acting_on_its_signer_names_that_user_when_its_request_names_none():
+    models = {"iam": iam_model()}
+    get_user = [{"operation": "GetUser", "parameter": None,
+                 "sentence": "If you do not specify a user name, IAM determines the user name implicitly based on the "
+                             "AWS access key ID used to sign the request."},
+                {"operation": "GetUser", "parameter": "UserName",
+                 "sentence": "If it is not included, it defaults to the user making the request."}]
+    assert r.with_signing_user([], "iam:GetUser", ["user"], get_user, models) == [
+        {"types": ["user"], "signer": True, "when": {"UserName": [None]}}]
+    change = [{"operation": "ChangePassword", "parameter": None,
+               "sentence": "Changes the password of the IAM user who is calling this operation."}]
+    assert r.with_signing_user([], "iam:ChangePassword", ["user"], change, models) == [
+        {"types": ["user"], "signer": True}]
+    assert r.with_signing_user([], "iam:GetUser", ["user"], [], models) == []
+    with pytest.raises(ValueError, match="not one of each"):
+        r.with_signing_user([], "iam:GetUser", ["group"], get_user, models)
+
+
+def test_a_member_whose_value_is_the_resources_arn_names_it_and_a_formats_type_is_named_through_it():
+    models = {"iam": iam_model()}
+    serial = [{"operation": "TagMFADevice", "parameter": "SerialNumber",
+               "sentence": "For virtual MFA devices, the serial number is the same as the ARN."}]
+    assert r.with_same_as_arn([], "iam:TagMFADevice", ["mfa"], serial, USERS_FORMATS, models) == [
+        {"types": ["mfa"], "arn": "SerialNumber"}]
+    task = [{"operation": "GetServiceLinkedRoleDeletionStatus", "parameter": "DeletionTaskId",
+             "sentence": "This identifier is returned by the DeleteServiceLinkedRole operation in the format "
+                         "task/aws-service-role/<service-principal-name>/<role-name>/<task-uuid>."}]
+    assert r.with_formats([], "iam:GetServiceLinkedRoleDeletionStatus", ["role"], task, models) == [
+        {"types": ["role"], "through": "DeletionTaskId"}]
+    named = [{"type": "role", "fill": {"RoleNameWithPath": "RoleName"}}]
+    assert r.with_formats(named, "iam:GetServiceLinkedRoleDeletionStatus", ["role"], task, models) == named
+
+
+def test_a_resource_named_after_its_path_or_signed_for_is_checked():
+    types = {"user", "group"}
+    good = {"type": "user", "fill": {"UserNameWithPath": "UserName"}, "path": "Path"}
+    renamed = {"type": "group", "fill": {"GroupNameWithPath": "NewGroupName"}, "path": "NewPath",
+               "renames": "GroupName"}
+    signer = {"types": ["user"], "signer": True, "when": {"UserName": [None]}}
+    for resource in (good, renamed, signer, {"types": ["user"], "signer": True}):
+        assert r._resource_problems("iam:Op", resource, types, USERS_FORMATS) == [], resource
+    for bad in (dict(good, path="Paths[]"), dict(good, find=["UserName"]), dict(renamed, path=None),
+                {"type": "group", "fill": {"GroupNameWithPath": "NewGroupName"}, "renames": "GroupName"},
+                dict(signer, signer="yes"), dict(signer, types=["user", "group"]), dict(signer, fill={})):
+        assert r._resource_problems("iam:Op", bad, types, USERS_FORMATS), bad

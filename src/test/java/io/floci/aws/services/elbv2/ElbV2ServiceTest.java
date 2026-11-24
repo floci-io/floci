@@ -103,6 +103,22 @@ class ElbV2ServiceTest {
 
     private ElbV2Service service;
 
+    @Test
+    void intervalUpdateAndRollbackRescheduleMonitoring() {
+        String arn = createTargetGroup("interval-update");
+        TargetGroup group = service.describeTargetGroups(REGION, null, List.of(arn), null).getFirst();
+        Integer original = group.getHealthCheckIntervalSeconds();
+        clearInvocations(healthChecker);
+        service.modifyTargetGroup(REGION, arn, null, null, null, null, 7, null, null, null, null);
+        verify(healthChecker).startMonitoring(group);
+        clearInvocations(healthChecker);
+        service.modifyTargetGroup(REGION, arn, null, null, null, null, original, null, null, null, null);
+        verify(healthChecker).startMonitoring(group);
+        clearInvocations(healthChecker);
+        service.modifyTargetGroup(REGION, arn, null, null, null, "/changed", null, null, null, null, null);
+        verifyNoInteractions(healthChecker);
+    }
+
     @BeforeEach
     void setUp() {
         service = new ElbV2Service();

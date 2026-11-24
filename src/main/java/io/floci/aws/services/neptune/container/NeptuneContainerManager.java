@@ -115,6 +115,7 @@ public class NeptuneContainerManager {
                 .withEnv(backendEnv(dbType))
                 .withDockerNetwork(config.services().neptune().dockerNetwork())
                 .withLogRotation()
+                .withPushedLogs()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "neptune", clusterId, accountId, region));
 
@@ -140,7 +141,7 @@ public class NeptuneContainerManager {
         String logGroup = "/aws/neptune/cluster/" + identity + "/" + dbType.name().toLowerCase() + "-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
 
-        Closeable logHandle = logStreamer.attach(
+        Closeable logHandle = logStreamer.attachPolled(
                 info.containerId(), logGroup, logStream, region, "neptune:" + identity);
         handle.setLogStream(logHandle);
 

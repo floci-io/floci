@@ -44,6 +44,7 @@ AWS::CertificateManager::Certificate	update not yet on the engine's changes (#66
 AWS::CloudFormation::CustomResource	update not yet on the engine's changes (#6606)
 AWS::CloudFormation::StackSet	update not yet on the engine's changes (#6606)
 AWS::CloudFront::CachePolicy	update not yet on the engine's changes (#6606)
+AWS::CloudFront::ConnectionGroup	update not yet on the engine's changes (#6606)
 AWS::CloudFront::Distribution	update not yet on the engine's changes (#6606)
 AWS::CloudFront::Function	update not yet on the engine's changes (#6606)
 AWS::CloudFront::KeyGroup	update not yet on the engine's changes (#6606)
@@ -110,6 +111,7 @@ AWS::ElasticLoadBalancingV2::LoadBalancer	prior entity found by reusesPriorEntit
 AWS::ElasticLoadBalancingV2::TargetGroup	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
 AWS::Events::ApiDestination	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
 AWS::Events::Archive	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Events::Connection	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
 AWS::Events::EventBus	update not yet on the engine's changes (#6606)
 AWS::Events::EventBusPolicy	update not yet on the engine's changes (#6606)
 AWS::Events::Rule	update not yet on the engine's changes (#6606)

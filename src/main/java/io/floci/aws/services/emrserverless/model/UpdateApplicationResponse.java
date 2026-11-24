@@ -8,7 +8,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 public class UpdateApplicationResponse {
 
     // Without the clientToken storage keeps, as GetApplicationResponse leaves it out.
-    @JsonIgnoreProperties({"clientToken", "pinnedImages"})
+    @JsonIgnoreProperties({"clientToken", "pinnedImages", "schedulerOff"})
     private Application application;
 
     public Application getApplication() {

@@ -41,7 +41,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class IamAccountPropertiesTest {
 
-    private static final String NAMESPACE = "SdkTestNs";
+    /**
+     * The one namespace AWS publishes, which is the only one a property can be stored under: a
+     * namespace the service does not recognise is refused, so these keys keep what is theirs alone
+     * in the property name rather than in a namespace of their own.
+     */
+    private static final String NAMESPACE = "RoleManager";
 
     private static IamClient iam() {
         return TestFixtures.iamClient();
@@ -52,8 +57,8 @@ class IamAccountPropertiesTest {
     @DisplayName("PutAccountProperties and GetAccountProperties round-trip the map")
     void propertiesRoundTrip() {
         Map<String, String> properties = new LinkedHashMap<>();
-        properties.put(NAMESPACE + "/Enabled", "true");
-        properties.put(NAMESPACE + "/Mode", "strict");
+        properties.put(NAMESPACE + "/SdkRoundTrip", "true");
+        properties.put(NAMESPACE + "/SdkMode", "strict");
 
         iam().putAccountProperties(PutAccountPropertiesRequest.builder()
                 .properties(properties)
@@ -64,12 +69,26 @@ class IamAccountPropertiesTest {
 
         assertThat(response.hasProperties()).isTrue();
         assertThat(response.properties())
-                .containsEntry(NAMESPACE + "/Enabled", "true")
-                .containsEntry(NAMESPACE + "/Mode", "strict");
+                .containsEntry(NAMESPACE + "/SdkRoundTrip", "true")
+                .containsEntry(NAMESPACE + "/SdkMode", "strict");
+    }
+
+    /**
+     * A namespace the service does not recognise is refused rather than stored, and the SDK carries
+     * the message through its own model: this suite pins the error codes as well as the shapes.
+     */
+    @Test
+    @Order(2)
+    @DisplayName("A namespace the service does not recognise is refused")
+    void unrecognisedNamespaceIsRejected() {
+        assertThatThrownBy(() -> iam().putAccountProperties(PutAccountPropertiesRequest.builder()
+                .properties(Map.of("OtherSdkNs/Beta", "2"))
+                .build()))
+                .hasMessageContaining("Unsupported namespace: OtherSdkNs");
     }
 
     @Test
-    @Order(2)
+    @Order(3)
     @DisplayName("All keys in one request must share a namespace")
     void mixedNamespacesAreRejected() {
         Map<String, String> properties = new LinkedHashMap<>();
@@ -83,7 +102,7 @@ class IamAccountPropertiesTest {
     }
 
     @Test
-    @Order(3)
+    @Order(4)
     @DisplayName("SetSecurityTokenServicePreferences takes the version as a typed enum")
     void setTokenVersion() {
         iam().setSecurityTokenServicePreferences(
@@ -105,7 +124,7 @@ class IamAccountPropertiesTest {
      * twice is FeatureDisabled.
      */
     @Test
-    @Order(4)
+    @Order(5)
     @DisplayName("Outbound federation refuses both redundant directions, with typed errors")
     void federationSwitch() {
         IamClient client = iam();

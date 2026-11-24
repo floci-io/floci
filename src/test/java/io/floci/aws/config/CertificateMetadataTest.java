@@ -1,13 +1,16 @@
 package io.floci.aws.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class CertificateMetadataTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

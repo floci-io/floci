@@ -155,8 +155,14 @@ public class RedshiftInterceptingBridge {
      * budget the caller supplies.
      */
     RedshiftInterceptingBridge(Socket client, Socket backend, ReentrantLock backendLock, long ownershipWaitMillis) {
-        this(client, backend, null, null, null, List.of(), null, null, null, null, null, null, backendLock,
-                ownershipWaitMillis, null);
+        this(client, backend, null, backendLock, ownershipWaitMillis);
+    }
+
+    /** For tests: as above, with the Spectrum interceptor whose ownership-gated paths the test drives. */
+    RedshiftInterceptingBridge(Socket client, Socket backend, SpectrumInterceptor spectrumInterceptor,
+                               ReentrantLock backendLock, long ownershipWaitMillis) {
+        this(client, backend, null, null, null, List.of(), spectrumInterceptor, "000000000000:c", "dev", null, null,
+                null, backendLock, ownershipWaitMillis, null);
     }
 
     private RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
@@ -364,7 +370,23 @@ public class RedshiftInterceptingBridge {
         if (spectrumInterceptor != null && parse.parameterTypeOids().isEmpty()
                 && !coordinator.isDiscardingUntilSync()) {
             try {
-                SpectrumInterceptor.Plan plan = spectrumInterceptor.plan(parse.sql(), spectrumSession());
+                SpectrumInterceptor.Plan plan;
+                if (spectrumInterceptor.preparation() != null
+                        && spectrumInterceptor.preparation().needsBackendForDdl(parse.sql(), spectrumSession())) {
+                    write(backendOut, new byte[]{'H', 0, 0, 0, 4});
+                    SpectrumInterceptor.Plan[] resolved = new SpectrumInterceptor.Plan[1];
+                    boolean owned = runWithBackendOwned(() -> {
+                        resolved[0] = spectrumInterceptor.plan(parse.sql(), spectrumSession(), relationalBackend);
+                        return true;
+                    });
+                    if (!owned) {
+                        // Forwarding would let PostgreSQL drop the stub and leave its binding behind.
+                        throw new SpectrumReadException("58030", "Unable to prepare external function DDL");
+                    }
+                    plan = resolved[0];
+                } else {
+                    plan = spectrumInterceptor.plan(parse.sql(), spectrumSession());
+                }
                 if (plan instanceof SpectrumInterceptor.Plan.Ddl || plan instanceof SpectrumInterceptor.Plan.Query
                         || plan instanceof SpectrumInterceptor.Plan.ExternalDdl) {
                     awaitPriorBackendResponses();

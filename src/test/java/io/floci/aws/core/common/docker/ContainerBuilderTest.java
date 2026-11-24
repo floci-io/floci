@@ -8,7 +8,10 @@ import com.github.dockerjava.api.model.VersionComponent;
 import com.github.dockerjava.api.model.VersionPlatform;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -27,7 +30,20 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class ContainerBuilderTest {
+
+    @Test
+    void withoutEnvRemovesEveryEntryOfThatVariableAndNoOther() {
+        ContainerSpec spec = new TestFixture().builder.newContainer("alpine")
+                .withEnv("POD", "1")
+                .withEnv("POD_CIDR", "10.0.0.0/16")
+                .withEnv("POD", "2")
+                .withoutEnv("POD")
+                .build();
+
+        assertEquals(List.of("POD_CIDR=10.0.0.0/16"), spec.env());
+    }
 
     @Test
     void withHostDockerInternalOnLinux_omitsAutomaticAliasForPodmanDaemon() {

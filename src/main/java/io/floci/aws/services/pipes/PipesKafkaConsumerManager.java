@@ -3,6 +3,11 @@ package io.floci.aws.services.pipes;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.kafka.KafkaConsumerHandle;
+import io.floci.aws.core.common.kafka.KafkaOffsetDto;
+import io.floci.aws.core.common.kafka.KafkaRecordDto;
+import io.floci.aws.core.common.kafka.KafkaRestClient;
+import io.floci.aws.core.common.kafka.KarapaceManager;
 import io.floci.aws.services.msk.MskService;
 import io.floci.aws.services.pipes.model.Pipe;
 import jakarta.annotation.PreDestroy;
@@ -21,7 +26,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * (Karapace) instead of embedding {@code kafka-clients} directly: see #2916, where kafka-clients
  * and the zstd-jni/lz4-java it pulls in were reachable in every build regardless of whether a
  * Pipe ever used a Kafka source. {@link KarapaceManager} starts a Karapace sidecar per distinct
- * target on demand, and {@link PipesKafkaRestClient} speaks its REST API.
+ * target on demand, and {@link KafkaRestClient} speaks its REST API.
  */
 @ApplicationScoped
 public class PipesKafkaConsumerManager {
@@ -32,12 +37,12 @@ public class PipesKafkaConsumerManager {
 
     private final MskService mskService;
     private final KarapaceManager karapaceManager;
-    private final PipesKafkaRestClient restClient;
+    private final KafkaRestClient restClient;
     private final ConcurrentHashMap<String, KafkaConsumerHandle> consumers = new ConcurrentHashMap<>();
 
     @Inject
     public PipesKafkaConsumerManager(MskService mskService, KarapaceManager karapaceManager,
-                                      PipesKafkaRestClient restClient) {
+                                      KafkaRestClient restClient) {
         this.mskService = mskService;
         this.karapaceManager = karapaceManager;
         this.restClient = restClient;

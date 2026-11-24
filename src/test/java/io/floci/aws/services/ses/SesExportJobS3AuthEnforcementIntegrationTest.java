@@ -13,6 +13,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -27,18 +28,14 @@ class SesExportJobS3AuthEnforcementIntegrationTest {
 
     @Test
     void completedExportUrlCanBeFetchedWhenS3AuthIsEnforced() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2(AUTH)
             .body("{\"VdmAttributes\":{\"VdmEnabled\":\"ENABLED\"}}")
         .when()
             .put("/v2/email/account/vdm")
         .then()
             .statusCode(200);
 
-        String jobId = given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        String jobId = v2(AUTH)
             .body("""
                 {"ExportDataSource": {"MessageInsightsDataSource":
                     {"StartDate": %d, "EndDate": %d}},

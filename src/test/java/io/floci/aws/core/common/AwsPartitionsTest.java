@@ -1,8 +1,11 @@
 package io.floci.aws.core.common;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.PartitionMatrix;
 import io.floci.aws.testing.PartitionMatrix.PartitionCase;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -26,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * shape assertions pin what {@code tools/aws/regen_partitions.py} produces from botocore; the
  * lookup assertions pin the strict-then-fail-open resolution every ARN and hostname relies on.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class AwsPartitionsTest {
 
     private static final Set<String> PUBLISHED_PARTITIONS = Set.of(
@@ -77,8 +81,8 @@ class AwsPartitionsTest {
     }
 
     @Test
-    void theCommercialPartitionPublishesThirtyFourRegionsAndChinaTwo() {
-        assertEquals(34, AwsPartitions.commercial().regions().size());
+    void theCommercialPartitionPublishesThirtySixRegionsAndChinaTwo() {
+        assertEquals(36, AwsPartitions.commercial().regions().size());
         assertEquals(List.of("cn-north-1", "cn-northwest-1"), AwsPartitions.byId("aws-cn").regionIds());
         assertEquals(List.of("us-gov-east-1", "us-gov-west-1"), AwsPartitions.byId("aws-us-gov").regionIds());
     }
@@ -225,7 +229,7 @@ class AwsPartitionsTest {
         assertFalse(aws.region("ap-east-1").orElseThrow().s3WebsiteDashForm());
         assertTrue(AwsPartitions.byId("aws-us-gov").region("us-gov-west-1").orElseThrow().s3WebsiteDashForm());
         assertFalse(AwsPartitions.byId("aws-cn").region("cn-north-1").orElseThrow().optIn());
-        assertEquals(17, aws.regions().stream().filter(AwsPartition.Region::optIn).count());
+        assertEquals(19, aws.regions().stream().filter(AwsPartition.Region::optIn).count());
     }
 
     @ParameterizedTest

@@ -136,6 +136,11 @@ floci:
     pool-gauge-interval-seconds: 60          # Log Docker pool use every N seconds while a pool is busy; 0 = off
     breaker-failure-threshold: 3             # Consecutive Docker call attempts (each retry counts) failing at the transport before Floci pings the daemon and fails calls fast if it is gone; 0 = off
     breaker-probe-interval-seconds: 5        # Seconds between pings while the daemon is unreachable
+    max-concurrent-launches: 0               # Most container creates and starts at once; 0 = twice the CPUs, at least 4
+    events-exit-detection: false             # Watch Lambda exits through one Docker events stream instead of a wait per container
+    log-poll-interval-millis: 1000           # How often a long-lived service container's log is read (it is not followed)
+    log-driver-mode: false                   # Opt-in: service containers push their logs over GELF; needs a daemon that can reach Floci
+    log-driver-port: 12201                   # Fixed port of the log-driver listener; Docker dials it on every container start
     docker-config-path: ""                   # Path to dir containing Docker's config.json (e.g. /root/.docker)
     registry-credentials: []                 # Per-registry explicit credentials for private registries
 
@@ -161,6 +166,7 @@ floci:
 
     dynamodb:
       enabled: true
+      transaction-conflicts-enabled: false    # reject requests that reach a transaction's busy items, as AWS does (native only)
       backend: native                         # native | local (forward calls to DynamoDB Local)
       # local-endpoint: http://dynamodb-local:8000  # DynamoDB Local base URL, required when backend is local
       local-connect-timeout-seconds: 2        # Seconds to wait for a connection to DynamoDB Local
@@ -188,7 +194,7 @@ floci:
       container-idle-timeout-seconds: 300     # Remove idle containers after this
       init-timeout-seconds: 10                # Time a cold runtime has to request its first invocation; the function's Timeout wins when longer
       # warm-pool-max-per-function:           # Idle containers kept per function (default max(4, cpus))
-      warm-pool-max-total: 0                  # Idle containers kept across all functions; 0 = unbounded
+      warm-pool-max-total: 128                # Idle containers kept across all functions; 0 = unbounded
       region-concurrency-limit: 1000          # Concurrent executions ceiling per region
       unreserved-concurrency-min: 100         # Minimum unreserved capacity PutFunctionConcurrency must leave
       hot-reload:
@@ -227,7 +233,7 @@ floci:
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
       shell-less-backend: false               # true = image has no shell or CLI: flags as container arguments, snapshots via SAVE over RESP + Docker archive API
-      shell-less-backend-dbfilename: dump.rdb # snapshot file the server loads at startup (used with shell-less-backend)
+      shell-less-backend-dbfilename: dump.rdb # snapshot file the server loads at startup; a restore places the snapshot under it
 
     rds:
       enabled: true
@@ -346,6 +352,8 @@ floci:
       keep-running-on-shutdown: true
       uri-style: hostname                     # hostname | path
       prefer-local-images: true
+      lifecycle-sweep-enabled: true           # apply repository lifecycle policies in the background
+      lifecycle-sweep-interval-seconds: 60
 ```
 
 ### Initialization hooks

@@ -1,7 +1,9 @@
 package io.floci.aws.services.ecr.registry;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.ecr.EcrService;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.FreePorts;
 import io.vertx.core.Context;
 import io.vertx.core.Future;
@@ -23,9 +25,11 @@ import io.vertx.ext.web.Router;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.InOrder;
 import org.mockito.Mockito;
 
 import java.util.ArrayList;
@@ -50,6 +54,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 /** Unit tests for routing AWS-shaped ECR repository URIs through Floci's data plane. */
+@ResourceLock(ParallelLocks.PORTS)
 class EcrRegistryDataPlaneTest {
 
     private Vertx vertx;
@@ -112,6 +117,39 @@ class EcrRegistryDataPlaneTest {
         assertEquals("123456789012", requestNoPort.accountId());
         assertEquals("eu-west-1", requestNoPort.region());
         assertEquals("/v2/123456789012/eu-west-1/team/app/tags/list", requestNoPort.backendUri());
+    }
+
+    @Test
+    void aMirrorRequestForAnAccountsAwsRegistryHostIsServedFromThatAccountsRepository() {
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor("172.17.0.1:4566",
+                "/v2/team/app/manifests/v1", "ns=111122223333.dkr.ecr.eu-west-1.amazonaws.com", "hostname").orElseThrow();
+
+        assertEquals("111122223333", request.accountId());
+        assertEquals("eu-west-1", request.region());
+        assertEquals("team/app", request.repositoryName());
+        assertEquals("111122223333/eu-west-1/team/app", request.storageRepositoryName());
+        assertEquals("v1", request.tag());
+        assertEquals("/v2/111122223333/eu-west-1/team/app/manifests/v1", request.backendUri());
+
+        EcrRegistryDataPlane.RegistryRequest china = EcrRegistryDataPlane.requestFor("172.17.0.1:4566",
+                "/v2/app/blobs/sha256:abc", "ns=111122223333.dkr.ecr.cn-north-1.amazonaws.com.cn", "hostname").orElseThrow();
+        assertEquals("cn-north-1", china.region());
+        assertEquals("/v2/111122223333/cn-north-1/app/blobs/sha256:abc", china.backendUri());
+    }
+
+    @Test
+    void anAwsRegistryHostIsServedOnlyAsAMirrorRequestsNamespaceInItsRegionsPartition() {
+        // A region under another partition's suffix names no registry.
+        assertFalse(EcrRegistryDataPlane.requestFor("172.17.0.1:4566", "/v2/app/manifests/v1",
+                "ns=111122223333.dkr.ecr.cn-north-1.amazonaws.com", "hostname").isPresent());
+        assertFalse(EcrRegistryDataPlane.requestFor("172.17.0.1:4566", "/v2/app/manifests/v1",
+                "ns=111122223333.dkr.ecr.us-east-1.amazonaws.com.cn", "hostname").isPresent());
+        // Another registry's namespace, such as a public registry's, is not Floci's.
+        assertFalse(EcrRegistryDataPlane.requestFor("172.17.0.1:4566", "/v2/library/nginx/manifests/1",
+                "ns=docker.io", "hostname").isPresent());
+        // A request sent to the AWS host itself is not a mirror request.
+        assertFalse(EcrRegistryDataPlane.requestFor("111122223333.dkr.ecr.us-east-1.amazonaws.com",
+                "/v2/app/manifests/v1", null, "hostname").isPresent());
     }
 
     @Test
@@ -871,6 +909,171 @@ class EcrRegistryDataPlaneTest {
         assertTrue(response.body().isEmpty());
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "GET, /v2/never-created/manifests/1",
+            "HEAD, /v2/never-created/manifests/1",
+            "PUT, /v2/never-created/manifests/1",
+            "POST, /v2/never-created/blobs/uploads/"
+    })
+    void aRepositoryNobodyCreatedIsUnknownBeforeAnyByteReachesTheRegistry(String method, String path)
+            throws Exception {
+        EcrRegistryManager manager = Mockito.mock(EcrRegistryManager.class);
+        HttpServer dataPlane = dataPlane(manager, false, null);
+        when(ecrService.registryRepositoryName("never-created", "000000000000", "us-east-1"))
+                .thenThrow(new AwsException("RepositoryNotFoundException",
+                        "The repository with name 'never-created' does not exist in the registry with id '000000000000'",
+                        400));
+
+        RegistryResponse response = request(dataPlane.actualPort(), HttpMethod.valueOf(method), path);
+
+        // The name is refused only once the registry running now has had its catalog read.
+        InOrder order = Mockito.inOrder(manager);
+        order.verify(manager).ensureStarted();
+        order.verify(manager).ensureCatalogReconciled();
+        assertEquals(404, response.status());
+        assertEquals("application/json", response.contentType());
+        assertEquals("registry/2.0", response.apiVersion());
+        if (!"HEAD".equals(method)) {
+            JsonObject error = new JsonObject(response.body()).getJsonArray("errors").getJsonObject(0);
+            assertEquals("NAME_UNKNOWN", error.getString("code"));
+            assertEquals("The repository with name 'never-created' does not exist in the registry with id "
+                    + "'000000000000'", error.getString("message"));
+        }
+        Mockito.verify(manager, Mockito.never()).httpClient();
+        if ("PUT".equals(method) || "POST".equals(method)) {
+            Mockito.verify(manager).releaseWriteAdmission();
+        }
+    }
+
+    @Test
+    void aRequestBeforeTheCatalogIsReadStartsTheRegistryAndReadsItFirst() throws Exception {
+        HttpServer registry = vertx.createHttpServer().requestHandler(request -> request.response()
+                        .setStatusCode(200).putHeader("Content-Type", "application/json").end("{}"))
+                .listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        EcrRegistryManager manager = Mockito.mock(EcrRegistryManager.class);
+        when(manager.httpClient()).thenReturn(new RegistryHttpClient("http://127.0.0.1:" + registry.actualPort()));
+        HttpServer dataPlane = dataPlane(manager, false, null);
+        when(manager.isCatalogReconciled()).thenReturn(false);
+        try {
+            RegistryResponse response = request(dataPlane.actualPort(), HttpMethod.GET,
+                    "/v2/platform/api/manifests/latest");
+
+            assertEquals(200, response.status());
+            InOrder order = Mockito.inOrder(manager, ecrService);
+            order.verify(manager).ensureStarted();
+            order.verify(manager).ensureCatalogReconciled();
+            order.verify(ecrService).registryRepositoryName("platform/api", "000000000000", "us-east-1");
+        } finally {
+            dataPlane.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            registry.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"GET", "PUT"})
+    void aNameTheUnreadCatalogCannotPlaceIsUnavailableRatherThanUnknown(String method) throws Exception {
+        EcrRegistryManager manager = Mockito.mock(EcrRegistryManager.class);
+        HttpServer dataPlane = dataPlane(manager, false, null);
+        when(manager.isCatalogReconciled()).thenReturn(false);
+        when(ecrService.registryRepositoryName("held", "000000000000", "us-east-1"))
+                .thenThrow(new IllegalStateException("The ECR registry catalog has not been read yet"));
+
+        RegistryResponse response = request(dataPlane.actualPort(), HttpMethod.valueOf(method),
+                "/v2/held/manifests/1");
+
+        assertEquals(503, response.status());
+        assertEquals("registry/2.0", response.apiVersion());
+        assertEquals("UNAVAILABLE",
+                new JsonObject(response.body()).getJsonArray("errors").getJsonObject(0).getString("code"));
+        Mockito.verify(manager, Mockito.never()).httpClient();
+        if ("PUT".equals(method)) {
+            Mockito.verify(manager).releaseWriteAdmission();
+        }
+    }
+
+    @Test
+    void aNameTheEarlierCatalogMissedIsPlacedByTheRecoveredRegistrysCatalog() throws Exception {
+        HttpServer registry = vertx.createHttpServer().requestHandler(request -> request.response()
+                        .setStatusCode(200).putHeader("Content-Type", "application/json").end("{}"))
+                .listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        EcrRegistryManager manager = Mockito.mock(EcrRegistryManager.class);
+        when(manager.httpClient()).thenReturn(new RegistryHttpClient("http://127.0.0.1:" + registry.actualPort()));
+        HttpServer dataPlane = dataPlane(manager, false, null);
+        when(ecrService.registryRepositoryName("restored", "000000000000", "us-east-1"))
+                .thenThrow(new AwsException("RepositoryNotFoundException",
+                        "The repository with name 'restored' does not exist in the registry with id '000000000000'",
+                        400))
+                .thenReturn("restored");
+        try {
+            RegistryResponse response = request(dataPlane.actualPort(), HttpMethod.GET, "/v2/restored/manifests/1");
+
+            assertEquals(200, response.status());
+            InOrder order = Mockito.inOrder(manager, ecrService);
+            order.verify(ecrService).registryRepositoryName("restored", "000000000000", "us-east-1");
+            order.verify(manager).ensureStarted();
+            order.verify(manager).ensureCatalogReconciled();
+            order.verify(ecrService).registryRepositoryName("restored", "000000000000", "us-east-1");
+        } finally {
+            dataPlane.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            registry.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void aClientLeavingWhileTheCatalogIsReadGivesItsWriteAdmissionBackAtOnce() throws Exception {
+        EcrRegistryManager manager = Mockito.mock(EcrRegistryManager.class);
+        HttpServer dataPlane = dataPlane(manager, false, null);
+        when(manager.isCatalogReconciled()).thenReturn(false);
+        CountDownLatch readStarted = new CountDownLatch(1);
+        CountDownLatch finishRead = new CountDownLatch(1);
+        Mockito.doAnswer(call -> {
+            readStarted.countDown();
+            finishRead.await(5, TimeUnit.SECONDS);
+            return null;
+        }).when(manager).ensureCatalogReconciled();
+        CountDownLatch released = new CountDownLatch(1);
+        Mockito.doAnswer(call -> {
+            released.countDown();
+            return null;
+        }).when(manager).releaseWriteAdmission();
+        HttpClient client = vertx.createHttpClient();
+        try {
+            HttpClientRequest upload = client.request(new RequestOptions().setHost("127.0.0.1")
+                            .setPort(dataPlane.actualPort()).setMethod(HttpMethod.POST)
+                            .setURI("/v2/platform/api/blobs/uploads/"))
+                    .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            upload.putHeader("Host", "000000000000.dkr.ecr.us-east-1.localhost:4566");
+            upload.setChunked(true);
+            upload.write("partial");
+            assertTrue(readStarted.await(5, TimeUnit.SECONDS), "the upload waits for the catalog read");
+
+            upload.connection().close();
+
+            assertTrue(released.await(2, TimeUnit.SECONDS),
+                    "the admission comes back while the catalog read is still blocked");
+        } finally {
+            finishRead.countDown();
+            client.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            dataPlane.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void aLookupFailingAfterTheCatalogReadIsAnsweredRatherThanLeftWaiting() throws Exception {
+        EcrRegistryManager manager = Mockito.mock(EcrRegistryManager.class);
+        HttpServer dataPlane = dataPlane(manager, false, null);
+        when(manager.isCatalogReconciled()).thenReturn(false);
+        when(ecrService.isImageTagImmutable("platform/api", "000000000000", "us-east-1"))
+                .thenThrow(new IllegalStateException("metadata store unavailable"));
+
+        RegistryResponse response = request(dataPlane.actualPort(), HttpMethod.PUT, "/v2/platform/api/manifests/v1");
+
+        assertEquals(500, response.status());
+        Mockito.verify(manager).releaseWriteAdmission();
+        Mockito.verify(manager, Mockito.never()).httpClient();
+    }
+
     @Test
     void upstreamErrorResponsesPassThroughUnchanged() throws Exception {
         HttpServer registry = vertx.createHttpServer().requestHandler(request -> request.response()
@@ -1012,6 +1215,8 @@ class EcrRegistryDataPlaneTest {
         }).when(ecrService).unlockRepositoryWrites(anyString());
         when(ecrService.registryRepositoryName("platform/api", "000000000000", "us-east-1"))
                 .thenReturn("legacy/platform-api");
+        // The steady state: the registry's catalog has been read since it started.
+        when(registryManager.isCatalogReconciled()).thenReturn(true);
 
         Router router = Router.router(vertx);
         new EcrRegistryDataPlane(registryManager, ecrService, config, vertx).register(router);

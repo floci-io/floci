@@ -1,13 +1,12 @@
 package io.floci.aws.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
@@ -26,8 +25,6 @@ import static org.hamcrest.Matchers.startsWith;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesTenantAssociationV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String TENANT = "floci-assoc-tenant";
     private static final String TENANT_B = "floci-assoc-tenant-b";
     private static final String IDENTITY = "floci-assoc.example.com";
@@ -37,10 +34,6 @@ class SesTenantAssociationV2IntegrationTest {
     private static final String IDENTITY_ARN = ARN_PREFIX + "identity/" + IDENTITY;
     private static final String CONFIG_SET_ARN = ARN_PREFIX + "configuration-set/" + CONFIG_SET;
     private static final String TEMPLATE_ARN = ARN_PREFIX + "template/" + TEMPLATE;
-
-    private static RequestSpecification v2() {
-        return given().contentType("application/json").header("Authorization", AUTH);
-    }
 
     private static void associate(String tenant, String arn) {
         v2().body("{\"TenantName\":\"" + tenant + "\",\"ResourceArn\":\"" + arn + "\"}")

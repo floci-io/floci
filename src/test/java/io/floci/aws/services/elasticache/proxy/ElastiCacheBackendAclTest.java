@@ -2,9 +2,11 @@ package io.floci.aws.services.elasticache.proxy;
 
 import io.floci.aws.services.elasticache.model.AuthMode;
 import io.floci.aws.testing.FakeRespServer;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.InOrder;
 
 import java.io.IOException;
@@ -25,6 +27,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class ElastiCacheBackendAclTest {
 
     private FakeRespServer server;

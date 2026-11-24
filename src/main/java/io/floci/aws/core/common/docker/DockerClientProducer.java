@@ -428,20 +428,14 @@ public class DockerClientProducer {
 
     /** 0 turns the pool gauge lines off; a negative interval names no schedule. */
     static int validatePoolGaugeIntervalSeconds(int seconds) {
-        if (seconds < 0) {
-            throw new IllegalArgumentException("floci.docker.pool-gauge-interval-seconds "
-                    + "(FLOCI_DOCKER_POOL_GAUGE_INTERVAL_SECONDS) must be 0 or more, got: " + seconds);
-        }
-        return seconds;
+        return requireAtLeastZero(seconds, "floci.docker.pool-gauge-interval-seconds",
+                "FLOCI_DOCKER_POOL_GAUGE_INTERVAL_SECONDS");
     }
 
     /** 0 turns the Docker circuit breaker off; a negative threshold is a misconfiguration. */
     static int validateBreakerFailureThreshold(int threshold) {
-        if (threshold < 0) {
-            throw new IllegalArgumentException("floci.docker.breaker-failure-threshold "
-                    + "(FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD) must be 0 or more, got: " + threshold);
-        }
-        return threshold;
+        return requireAtLeastZero(threshold, "floci.docker.breaker-failure-threshold",
+                "FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD");
     }
 
     static int validateBreakerProbeIntervalSeconds(int seconds) {
@@ -449,9 +443,23 @@ public class DockerClientProducer {
                 "FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS");
     }
 
+    /** 0 means the default, twice the CPUs Floci sees and at least 4; a negative value is a misconfiguration. */
+    static int validateMaxConcurrentLaunches(int value) {
+        return requireAtLeastZero(value, "floci.docker.max-concurrent-launches", "FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES");
+    }
+
     private static int requireAtLeastOne(int value, String setting, String envVar) {
-        if (value < 1) {
-            throw new IllegalArgumentException(setting + " (" + envVar + ") must be at least 1, got: " + value);
+        return requireAtLeast(1, value, setting, envVar);
+    }
+
+    private static int requireAtLeastZero(int value, String setting, String envVar) {
+        return requireAtLeast(0, value, setting, envVar);
+    }
+
+    private static int requireAtLeast(int minimum, int value, String setting, String envVar) {
+        if (value < minimum) {
+            throw new IllegalArgumentException(setting + " (" + envVar + ") must be at least " + minimum
+                    + ", got: " + value);
         }
         return value;
     }
@@ -575,8 +583,29 @@ public class DockerClientProducer {
                 Duration.ofSeconds(validateConnectionRequestTimeoutSeconds(
                         config.docker().connectionRequestTimeoutSeconds())));
         gaugeLogger.register(role, transport::gauges);
+        int launchSlots = "control-plane".equals(role)
+                ? LaunchBulkheadDockerHttpClient.resolveSize(
+                        validateMaxConcurrentLaunches(config.docker().maxConcurrentLaunches()),
+                        Runtime.getRuntime().availableProcessors())
+                : 0;
+        if (launchSlots > 0) {
+            LOG.infov("At most {0} container creates and starts run at once", launchSlots);
+        }
+        Duration launchWait = Duration.ofSeconds(config.docker().connectionRequestTimeoutSeconds());
         usePingTransport(clientConfig);
-        return DockerClientImpl.getInstance(clientConfig, wrapForRole(transport, role, apiTimeout, breaker));
+        return newDockerClient(clientConfig,
+                wrapForRole(transport, role, apiTimeout, breaker, launchSlots, launchWait));
+    }
+
+    /**
+     * A DockerClient over {@code httpClient} whose stream callbacks run on virtual threads
+     * ({@link FlociDockerCmdExecFactory}). docker-java offers no other way to give its streams a thread of
+     * Floci's choosing than its deprecated exec-factory hook.
+     */
+    @SuppressWarnings("deprecation")
+    static DockerClient newDockerClient(DefaultDockerClientConfig clientConfig, DockerHttpClient httpClient) {
+        return DockerClientImpl.getInstance(clientConfig)
+                .withDockerCmdExecFactory(new FlociDockerCmdExecFactory(httpClient, clientConfig.getObjectMapper()));
     }
 
     static FlociDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections,
@@ -601,7 +630,7 @@ public class DockerClientProducer {
      * silent daemon, not the length of each of its attempts.
      */
     static DockerHttpClient wrapForRole(DockerHttpClient transport, String role, Duration callTimeout) {
-        return wrapForRole(transport, role, callTimeout, null);
+        return wrapForRole(transport, role, callTimeout, null, 0, Duration.ZERO);
     }
 
     /**
@@ -612,6 +641,29 @@ public class DockerClientProducer {
      */
     static DockerHttpClient wrapForRole(DockerHttpClient transport, String role, Duration callTimeout,
                                         DockerCircuitBreaker breaker) {
+        return wrapForRole(transport, role, callTimeout, breaker, 0, Duration.ZERO);
+    }
+
+    /**
+     * As {@link #wrapForRole(DockerHttpClient, String, Duration)}, with the control-plane transport's
+     * container creates and starts limited to {@code launchSlots} at once ({@link
+     * LaunchBulkheadDockerHttpClient}), each waiting up to {@code launchWait} for a slot. The bulkhead sits
+     * under the retry layer, so a backoff never holds a slot. 0 slots leaves launches unbounded.
+     */
+    static DockerHttpClient wrapForRole(DockerHttpClient transport, String role, Duration callTimeout,
+                                        int launchSlots, Duration launchWait) {
+        return wrapForRole(transport, role, callTimeout, null, launchSlots, launchWait);
+    }
+
+    /**
+     * Both of the above. The bulkhead sits under the breaker, so an open breaker fails a launch at once
+     * instead of after a wait for a slot.
+     */
+    static DockerHttpClient wrapForRole(DockerHttpClient transport, String role, Duration callTimeout,
+                                        DockerCircuitBreaker breaker, int launchSlots, Duration launchWait) {
+        if (launchSlots > 0 && "control-plane".equals(role)) {
+            transport = new LaunchBulkheadDockerHttpClient(transport, launchSlots, launchWait);
+        }
         if (breaker != null && breaker.isEnabled()) {
             transport = new CircuitBreakingDockerHttpClient(transport, breaker);
         }

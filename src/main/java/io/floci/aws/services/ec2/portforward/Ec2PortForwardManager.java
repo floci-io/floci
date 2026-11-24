@@ -2,10 +2,13 @@ package io.floci.aws.services.ec2.portforward;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.ListenBacklog;
 import io.floci.aws.core.common.docker.ContainerBuilder;
+import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
@@ -28,9 +31,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
@@ -74,6 +79,15 @@ public class Ec2PortForwardManager {
     private static final String IPV4_HOST_ADDRESSES = "0.0.0.0";
     private static final String IPV6_HOST_ADDRESSES = "::";
 
+    // A forked socat owns each accepted socket. Keep those children alive after closing the listener.
+    private static final List<String> DRAINABLE_ENTRYPOINT = List.of("sh", "-c", """
+            socat "$@" &
+            listener=$!
+            echo "$listener" > /tmp/floci-listener
+            wait "$listener"
+            while pidof socat >/dev/null; do sleep 1; done
+            """, "socat");
+
     private final DockerClient dockerClient;
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -89,6 +103,8 @@ public class Ec2PortForwardManager {
     // Persists an instance after its publishedPorts change, so the mapping survives a
     // hard restart (not just the periodic/shutdown flush). Set by the owning service.
     private volatile Consumer<Instance> persister;
+    private Function<Instance, DesiredPorts> currentEnforcedPorts;
+    private BiPredicate<Instance, PublishedPortFamily> unrestrictedEgress;
 
     @Inject
     public Ec2PortForwardManager(DockerClient dockerClient,
@@ -123,13 +139,42 @@ public class Ec2PortForwardManager {
     /**
      * Reconciles the instance's live forwards against the desired port set: publishes ports
      * that are newly opened and unpublishes ports that no longer have an ingress rule. Runs
-     * asynchronously so it does not block the calling API thread.
+     * listener closure synchronously under enforcement and queues new publications.
      */
     public void reconcile(Instance instance, DesiredPorts desiredPorts) {
         if (!enabled() || instance == null || instance.getDockerContainerId() == null) {
             return;
         }
+        if (enforced()) {
+            synchronized (instance) {
+                closeRevoked(instance, currentPorts(instance, desiredPorts));
+            }
+        }
         executor.submit(() -> reconcileNow(instance, desiredPorts));
+    }
+
+    private DesiredPorts currentPorts(Instance instance, DesiredPorts snapshot) {
+        return currentEnforcedPorts != null && enforced() ? currentEnforcedPorts.apply(instance) : snapshot;
+    }
+
+    private void closeRevoked(Instance instance, DesiredPorts desired) {
+        RuntimeException failure = null;
+        for (Integer port : new ArrayList<>(instance.getPublishedPorts().keySet())) {
+            if (desired.ports().get(port) != family(instance, port)) {
+                try {
+                    revoke(instance, port);
+                } catch (RuntimeException e) {
+                    if (failure == null) {
+                        failure = e;
+                    } else if (failure != e) {
+                        failure.addSuppressed(e);
+                    }
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
     }
 
     void reconcileNow(Instance instance, DesiredPorts desiredPorts) {
@@ -142,19 +187,12 @@ public class Ec2PortForwardManager {
             if (!"running".equals(state)) {
                 return;
             }
+            desiredPorts = currentPorts(instance, desiredPorts);
+            closeRevoked(instance, desiredPorts);
             for (Map.Entry<Integer, PublishedPortFamily> desired : desiredPorts.ports().entrySet()) {
                 int port = desired.getKey();
-                // The rules opening the port changed family: its sidecar binds or dials the wrong addresses.
-                if (instance.getPublishedPorts().containsKey(port) && desired.getValue() != family(instance, port)) {
-                    unpublish(instance, port);
-                }
                 if (!instance.getPublishedPorts().containsKey(port)) {
                     publish(instance, port, desired.getValue());
-                }
-            }
-            for (Integer port : new ArrayList<>(instance.getPublishedPorts().keySet())) {
-                if (!desiredPorts.ports().containsKey(port)) {
-                    unpublish(instance, port);
                 }
             }
         }
@@ -172,11 +210,35 @@ public class Ec2PortForwardManager {
             for (Integer port : new ArrayList<>(instance.getPublishedPorts().keySet())) {
                 unpublish(instance, port);
             }
+            if (enforced()) {
+                String prefix = ContainerStorageHelper.dockerName(config, "ec2-fwd-" + instance.getInstanceId() + "-");
+                try {
+                    for (Container relay : dockerClient.listContainersCmd().withShowAll(true)
+                            .withNameFilter(List.of("^/?" + Pattern.quote(prefix) + "[0-9]+-draining-[0-9a-f]+$"))
+                            .exec()) {
+                        lifecycleManager.removeIfExistsStrict(relay.getId());
+                    }
+                } catch (RuntimeException e) {
+                    LOG.warnv(e, "Could not clean up draining relays for instance {0}", instance.getInstanceId());
+                }
+            }
         }
     }
 
     boolean enabled() {
         return config.services().ec2().publishSecurityGroupPorts() && !config.services().ec2().mock();
+    }
+
+    private boolean enforced() {
+        return config.network() != null && config.network().securityGroupEnforcement() != null
+                && config.network().securityGroupEnforcement().enabled();
+    }
+
+    /** Resolves current rules under the instance lock, including when launch supplied an older snapshot. */
+    public void setCurrentEnforcedPorts(Function<Instance, DesiredPorts> resolver,
+                                        BiPredicate<Instance, PublishedPortFamily> egress) {
+        currentEnforcedPorts = resolver;
+        unrestrictedEgress = egress;
     }
 
     /** Sets the callback used to persist an instance after its forwards change. */
@@ -257,9 +319,10 @@ public class Ec2PortForwardManager {
             ContainerStorageHelper.removeStaleContainer(config, lifecycleManager, name);
 
             // An IPv6-only host binding can reach the sidecar on its own IPv6 address, so its listener takes both.
+            boolean drainable = enforced();
             ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(config.services().ec2().socatImage())
                     .withName(name)
-                    .withEntrypoint(List.of("socat"))
+                    .withEntrypoint(drainable ? DRAINABLE_ENTRYPOINT : List.of("socat"))
                     .withCmd(List.of(
                             (ipv6 ? "TCP6-LISTEN:" + appPort + ",ipv6only=0" : "TCP-LISTEN:" + appPort)
                                     + ",fork,reuseaddr,nodelay,backlog=" + ListenBacklog.ACCEPT,
@@ -270,12 +333,15 @@ public class Ec2PortForwardManager {
                         case ANY -> null;
                     })
                     .withLogRotation();
+            if (drainable) {
+                specBuilder.withInit();
+            }
             if (target.network() != null) {
                 specBuilder.withNetworkMode(target.network());
             }
             ContainerSpec spec = specBuilder.build();
 
-            String containerId = lifecycleManager.create(spec);
+            String containerId = drainable ? lifecycleManager.createAutoRemoving(spec) : lifecycleManager.create(spec);
             lifecycleManager.startCreated(containerId, spec);
 
             instance.getPublishedPorts().put(appPort, hostPort);
@@ -297,6 +363,50 @@ public class Ec2PortForwardManager {
     void unpublish(Instance instance, int appPort) {
         String name = forwardContainerName(config, instance.getInstanceId(), appPort);
         ContainerStorageHelper.removeStaleContainer(config, lifecycleManager, name);
+        forget(instance, appPort);
+    }
+
+    private void revoke(Instance instance, int appPort) {
+        if (!enforced()) {
+            unpublish(instance, appPort);
+            return;
+        }
+        String name = forwardContainerName(config, instance.getInstanceId(), appPort);
+        try {
+            InspectContainerResponse relay = dockerClient.inspectContainerCmd(name).exec();
+            String id = relay.getId();
+            if (Boolean.TRUE.equals(relay.getHostConfig().getAutoRemove())
+                    && (unrestrictedEgress == null || !unrestrictedEgress.test(instance, family(instance, appPort)))) {
+                try {
+                    ContainerExec.Result closed = ContainerExec.run(dockerClient, id, new String[]{"sh", "-ec", """
+                            listener=$(cat /tmp/floci-listener)
+                            if kill -0 "$listener" 2>/dev/null; then kill -KILL "$listener"; fi
+                            while kill -0 "$listener" 2>/dev/null; do sleep 0.01; done
+                            """}, 5);
+                    if (closed.exitCode() != 0) {
+                        throw new IllegalStateException(closed.summary());
+                    }
+                } catch (RuntimeException e) {
+                    // An idle auto-removing relay may exit before Docker reports the exec result.
+                    if (Boolean.TRUE.equals(dockerClient.inspectContainerCmd(id).exec().getState().getRunning())) {
+                        LOG.warnv(e, "Could not close EC2 relay {0}'s listener, removing the relay to revoke host access", id);
+                        lifecycleManager.removeIfExistsStrict(id);
+                    }
+                    forget(instance, appPort);
+                    return;
+                }
+                // An idle relay can already have exited. A draining one still holds its host binding.
+                dockerClient.renameContainerCmd(id).withName(name + "-draining-" + id.substring(0, 12)).exec();
+            } else {
+                lifecycleManager.removeIfExistsStrict(id);
+            }
+        } catch (NotFoundException e) {
+            lifecycleManager.removeIfExistsStrict(legacyForwardContainerName(config, instance.getInstanceId(), appPort));
+        }
+        forget(instance, appPort);
+    }
+
+    private void forget(Instance instance, int appPort) {
         Integer hostPort = instance.getPublishedPorts().remove(appPort);
         instance.getPublishedPortFamilies().remove(appPort);
         if (hostPort != null) {
@@ -450,6 +560,17 @@ public class Ec2PortForwardManager {
             ports.put(port, PublishedPortFamily.IPV6);
         }
         return new DesiredPorts(ports);
+    }
+
+    public static boolean hasUnrestrictedEgress(List<SecurityGroup> groups, PublishedPortFamily family) {
+        // A dual-stack publication uses IPv4 for its connection to the guest.
+        return groups.stream().flatMap(group -> group.getIpPermissionsEgress().stream())
+                .filter(permission -> "-1".equals(permission.getIpProtocol())
+                        || (isTcp(permission.getIpProtocol()) && Integer.valueOf(0).equals(permission.getFromPort())
+                        && Integer.valueOf(65535).equals(permission.getToPort())))
+                .anyMatch(permission -> family == PublishedPortFamily.IPV6
+                        ? opensToEveryAddress(permission.getIpv6Ranges().stream().map(range -> range.getCidrIpv6()))
+                        : opensToEveryAddress(permission.getIpRanges().stream().map(range -> range.getCidrIp())));
     }
 
     /** Whether any of the CIDRs is a valid one with a prefix length of 0, which every address of its family matches. */

@@ -152,6 +152,7 @@ public class MemoryDbContainerManager {
                 .withName(containerName)
                 .withDockerNetwork(config.services().memorydb().dockerNetwork())
                 .withLogRotation()
+                .withPushedLogs()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "memorydb", clusterName, accountId, region));
 
@@ -190,7 +191,7 @@ public class MemoryDbContainerManager {
         String logName = isDefaultScope(accountId, region) ? logicalName : clusterName;
         String logGroup = "/aws/memorydb/cluster/" + logName + "/engine-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
-        Closeable logHandle = logStreamer.attach(
+        Closeable logHandle = logStreamer.attachPolled(
                 info.containerId(), logGroup, logStream, region, "memorydb:" + clusterName);
         handle.setLogStream(logHandle);
 

@@ -40,6 +40,7 @@ import io.floci.aws.services.rds.model.DatabaseEngine;
 import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.services.rds.model.DbClusterAutomatedBackup;
 import io.floci.aws.services.rds.model.DbClusterEndpoint;
+import io.floci.aws.services.rds.model.DbClusterMonitoringSettings;
 import io.floci.aws.services.rds.model.DbClusterParameterGroup;
 import io.floci.aws.services.rds.model.DbClusterSnapshot;
 import io.floci.aws.services.rds.model.DbEndpoint;
@@ -4342,11 +4343,18 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * The default security group of {@code instance}'s VPC, which describe reports for an instance that
-     * keeps no groups: an Aurora member, whose groups are its cluster's, or one stored before RDS gave
-     * one. No group when its VPC is unknown or gone.
+     * The groups describe reports for an instance that keeps none: an Aurora member reports its
+     * cluster's groups, and otherwise, or for one stored before RDS gave one, the default security
+     * group of its VPC. No group when its VPC is unknown or gone.
      */
     public List<String> defaultVpcSecurityGroupIds(DbInstance instance) {
+        if (!isBlank(instance.getDbClusterIdentifier())) {
+            DbCluster cluster = findClusterForScope(accountIdFromArn(instance.getDbInstanceArn()),
+                    regionResolver.regionOf(instance.getDbInstanceArn()), instance.getDbClusterIdentifier());
+            if (cluster != null && !cluster.getVpcSecurityGroupIds().isEmpty()) {
+                return List.copyOf(cluster.getVpcSecurityGroupIds());
+            }
+        }
         try {
             return RdsSecurityGroups.vpcDefault(ec2Service, regionResolver.regionOf(instance.getDbInstanceArn()),
                     instance.getVpcId());
@@ -4386,6 +4394,13 @@ public class RdsService implements Resettable, ResourceProvider {
         return isBlank(dbSubnetGroupName)
                 ? getDbInstance(instanceId, effectiveRegion).getVpcId()
                 : getDbSubnetGroup(dbSubnetGroupName, effectiveRegion).getVpcId();
+    }
+
+    /** As {@link #defaultVpcSecurityGroupIds(String, String, String)} for a DB cluster. */
+    public List<String> defaultClusterVpcSecurityGroupIds(String region, String clusterId) {
+        String effectiveRegion = effectiveRegion(region);
+        return RdsSecurityGroups.vpcDefault(ec2Service, effectiveRegion,
+                getDbCluster(clusterId, effectiveRegion).getVpcId());
     }
 
     private static void validateInstanceSettings(DbInstanceSettings settings) {
@@ -4430,46 +4445,11 @@ public class RdsService implements Resettable, ResourceProvider {
      * the instance's.
      */
     private static DbInstanceSettings withEffectiveWindows(DbInstanceSettings settings, DbInstance current) {
-        String backup = settings.preferredBackupWindow();
-        String maintenance = settings.preferredMaintenanceWindow();
-        boolean backupGiven = backup != null;
-        boolean maintenanceGiven = maintenance != null;
-        if (current == null) {
-            if (!backupGiven) {
-                backup = maintenanceGiven && DbInstanceSettings.windowsOverlap(
-                        DbInstanceSettings.DEFAULT_BACKUP_WINDOW, maintenance)
-                        ? DbInstanceSettings.backupWindowAfter(maintenance)
-                        : DbInstanceSettings.DEFAULT_BACKUP_WINDOW;
-            }
-            if (!maintenanceGiven) {
-                maintenance = backupGiven && DbInstanceSettings.windowsOverlap(
-                        backup, DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW)
-                        ? DbInstanceSettings.maintenanceWindowAfter(backup)
-                        : DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW;
-            }
-            // a derived window is clear unless the given one leaves no 30-minute gap at all
-            if (DbInstanceSettings.windowsOverlap(backup, maintenance)) {
-                if (!maintenanceGiven) {
-                    throw DbInstanceSettings.noRoomForMaintenanceWindow();
-                }
-                if (!backupGiven) {
-                    throw DbInstanceSettings.noRoomForBackupWindow();
-                }
-            }
-        } else {
-            if (!backupGiven) {
-                backup = current.getPreferredBackupWindow() != null
-                        ? current.getPreferredBackupWindow() : DbInstanceSettings.DEFAULT_BACKUP_WINDOW;
-            }
-            if (!maintenanceGiven) {
-                maintenance = current.getPreferredMaintenanceWindow() != null
-                        ? current.getPreferredMaintenanceWindow() : DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW;
-            }
-        }
-        if (DbInstanceSettings.windowsOverlap(backup, maintenance)) {
-            throw DbInstanceSettings.overlappingWindows();
-        }
-        return settings.withWindows(backup, maintenance);
+        String[] windows = BackupWindows.effectiveWindows(current == null, settings.preferredBackupWindow(),
+                settings.preferredMaintenanceWindow(),
+                current == null ? null : current.getPreferredBackupWindow(),
+                current == null ? null : current.getPreferredMaintenanceWindow());
+        return settings.withWindows(windows[0], windows[1]);
     }
 
     /**
@@ -5909,6 +5889,8 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         cluster.setDbSubnetGroupName(placement.dbSubnetGroupName());
         cluster.setVpcId(placement.vpcId());
+        // none named yet: AWS puts the cluster in its VPC's default group; EC2 without one leaves none
+        cluster.setVpcSecurityGroupIds(RdsSecurityGroups.vpcDefault(ec2Service, effectiveRegion, placement.vpcId()));
         cluster.setAvailabilityZone(placement.availabilityZone());
         cluster.setMultiAz(placement.multiAz());
         cluster.setSubnetAvailabilityZones(placement.subnetAvailabilityZones());
@@ -12079,6 +12061,105 @@ public class RdsService implements Resettable, ResourceProvider {
         DbInstance member = findInstanceForScope(accountIdFromArn(cluster.getDbClusterArn()),
                 AwsArnUtils.regionOrDefault(cluster.getDbClusterArn(), regionResolver.getDefaultRegion()), memberId);
         return member == null ? 1 : member.getPromotionTier();
+    }
+
+    /**
+     * Refuses {@code vpcSecurityGroupIds} unless each names a security group of the cluster's Region in
+     * the cluster's VPC, as CreateDBCluster and ModifyDBCluster do. A null or empty list passes.
+     */
+    public void requireClusterSecurityGroups(String region, String clusterId, List<String> vpcSecurityGroupIds) {
+        if (vpcSecurityGroupIds == null || vpcSecurityGroupIds.isEmpty()) {
+            return;
+        }
+        String effectiveRegion = effectiveRegion(region);
+        RdsSecurityGroups.requireInVpc(ec2Service, effectiveRegion, vpcSecurityGroupIds,
+                getDbCluster(clusterId, effectiveRegion).getVpcId());
+    }
+
+    /**
+     * Applies the Enhanced Monitoring, Performance Insights and Database Insights members of a
+     * CreateDBCluster ({@code create} true) or ModifyDBCluster request. On create a member left out
+     * takes the AWS default (no monitoring, Database Insights {@code standard}); on modify it keeps
+     * the cluster's value. The monitoring pair and the Database Insights mode are judged on the
+     * values in effect after the request.
+     */
+    public synchronized DbCluster setClusterMonitoringSettings(String region, String clusterId,
+                                                               DbClusterMonitoringSettings settings, boolean create) {
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        applyClusterMonitoringSettings(cluster, settings, create);
+        putClusterForScope(currentAccountId(), effectiveRegion, cluster.getDbClusterIdentifier(), cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    /**
+     * Runs the checks of {@link #setClusterMonitoringSettings} against the cluster as it stands, storing
+     * nothing, so a ModifyDBCluster can refuse the request before any of its other changes is stored.
+     */
+    public synchronized void validateClusterMonitoringSettings(String region, String clusterId,
+                                                               DbClusterMonitoringSettings settings) {
+        DbCluster copy = RESPONSE_COPIER.convertValue(getDbCluster(clusterId, effectiveRegion(region)),
+                DbCluster.class);
+        applyClusterMonitoringSettings(copy, settings, false);
+    }
+
+    private static void applyClusterMonitoringSettings(DbCluster cluster, DbClusterMonitoringSettings settings,
+                                                       boolean create) {
+        settings.validate();
+        int interval = settings.monitoringInterval() != null
+                ? settings.monitoringInterval() : cluster.getMonitoringInterval();
+        String role = settings.monitoringRoleArn() != null
+                ? settings.monitoringRoleArn() : cluster.getMonitoringRoleArn();
+        if (create) {
+            DbInstanceSettings.validateMonitoringPairOnCreate(interval, role);
+        } else if (interval != 0 && (role == null || role.isBlank())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "A MonitoringRoleArn value is required if you specify a MonitoringInterval value "
+                            + "other than 0.", 400);
+        }
+        boolean insightsEnabled = settings.performanceInsightsEnabled() != null
+                ? settings.performanceInsightsEnabled() : cluster.isPerformanceInsightsEnabled();
+        Integer retention = settings.performanceInsightsRetentionPeriod() != null
+                ? settings.performanceInsightsRetentionPeriod() : cluster.getPerformanceInsightsRetentionPeriod();
+        if (insightsEnabled && retention == null) {
+            retention = 7;
+        }
+        String mode = settings.databaseInsightsMode() != null
+                ? settings.databaseInsightsMode() : cluster.getDatabaseInsightsMode();
+        if (create && mode == null) {
+            mode = DbClusterMonitoringSettings.DATABASE_INSIGHTS_STANDARD;
+        }
+        if (DbClusterMonitoringSettings.DATABASE_INSIGHTS_ADVANCED.equals(mode)
+                && (!insightsEnabled || retention < 465)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Database Insights advanced mode requires Performance Insights to be enabled "
+                            + "with a retention period of at least 465 days.", 400);
+        }
+        cluster.setMonitoringInterval(interval);
+        cluster.setMonitoringRoleArn(role);
+        cluster.setPerformanceInsightsEnabled(insightsEnabled);
+        cluster.setPerformanceInsightsRetentionPeriod(insightsEnabled ? retention : null);
+        cluster.setDatabaseInsightsMode(mode);
+    }
+
+    /** Stores what a Create/ModifyDBCluster request carries; a null argument leaves that field as it is. */
+    public synchronized DbCluster setDbClusterRequestSettings(String id, String region,
+            List<String> vpcSecurityGroupIds, String backupWindow, String maintenanceWindow) {
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(id, effectiveRegion);
+        BackupWindows.effectiveWindows(false, backupWindow, maintenanceWindow,
+                cluster.getPreferredBackupWindow(), cluster.getPreferredMaintenanceWindow());
+        if (vpcSecurityGroupIds != null) {
+            cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+        }
+        if (backupWindow != null) {
+            cluster.setPreferredBackupWindow(backupWindow);
+        }
+        if (maintenanceWindow != null) {
+            cluster.setPreferredMaintenanceWindow(BackupWindows.lowerCase(maintenanceWindow));
+        }
+        putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
 
     private static final Set<String> DATA_API_ENGINES = Set.of("aurora-postgresql", "aurora-mysql");

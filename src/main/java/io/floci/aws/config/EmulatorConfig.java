@@ -1205,13 +1205,59 @@ public interface EmulatorConfig {
         boolean enabled();
 
         /**
-         * How long a job run stays RUNNING before it completes; 0, the default, completes a job run as
-         * soon as it is submitted. Floci follows the job run states without running Spark on Kubernetes.
+         * How long a job run stays RUNNING before it completes in the {@code immediate} runner mode; 0, the default,
+         * completes a job run as soon as it is submitted.
          *
          * Env var: FLOCI_SERVICES_EMRCONTAINERS_JOB_RUN_DURATION_SECONDS
          */
         @WithDefault("0")
         int jobRunDurationSeconds();
+
+        /**
+         * {@code immediate} follows the job run states without running anything; {@code docker} runs each job run's
+         * Spark job, its {@code spark-submit} or {@code spark-sql}, in a container of its release's EMR on EKS image.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_RUNNER_MODE
+         */
+        @WithDefault("immediate")
+        String runnerMode();
+
+        /**
+         * The Docker network a {@code docker} job run's container joins; the global default when omitted.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_DOCKER_NETWORK
+         */
+        Optional<String> dockerNetwork();
+
+        /**
+         * The image a {@code docker} job run uses when it names no custom image, with {@code %s} standing for its
+         * release's container image tag, {@code emr-7.2.0:20240610} for {@code emr-7.2.0-20240610}, for example
+         * "registry.internal/emr-on-eks/spark/%s". If omitted, Floci uses the release's base image on Amazon ECR
+         * Public.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_IMAGE_TEMPLATE
+         */
+        Optional<String> imageTemplate();
+
+        /**
+         * The image a managed endpoint's Jupyter Enterprise Gateway and its kernels run in, in the {@code docker}
+         * runner mode, with {@code %s} standing for its release's container image tag, for example
+         * "registry.internal/emr-on-eks/notebook-spark/%s". If omitted, Floci uses the release's
+         * {@code notebook-spark} image on Amazon ECR Public.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_GATEWAY_IMAGE_TEMPLATE
+         */
+        Optional<String> gatewayImageTemplate();
+
+        /**
+         * When true, Floci removes, in the {@code docker} runner mode, every EMR on EKS driver a previous run of
+         * <em>this same</em> Floci left on the daemon before its first job run starts. Turn it off when two Floci
+         * instances share a daemon with the same port and no resource namespace.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_RECONCILE_CONTAINERS_ON_STARTUP
+         */
+        @WithDefault("true")
+        boolean reconcileContainersOnStartup();
     }
 
     interface EmrServerlessServiceConfig {
@@ -1724,6 +1770,34 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean streamRetentionEnabled();
 
+        /**
+         * The most records a DynamoDB stream of the native engine keeps across its shards; the oldest goes first.
+         * AWS limits a stream by age rather than by count, so raise this when a consumer can fall far behind.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_MAX_RECORDS
+         */
+        @WithDefault("1000")
+        int streamMaxRecords();
+
+        /**
+         * Emulates the transaction conflicts DynamoDB reports under contention: a TransactWriteItems keeps its
+         * items busy for a few milliseconds, so a PutItem, UpdateItem or DeleteItem on one fails with
+         * TransactionConflictException and another TransactWriteItems or a TransactGetItems is cancelled with
+         * TransactionConflict. Off, overlapping transactions serialize instead. The native backend only.
+         * Env: FLOCI_SERVICES_DYNAMODB_TRANSACTION_CONFLICTS_ENABLED.
+         */
+        @WithDefault("false")
+        boolean transactionConflictsEnabled();
+
+        /**
+         * Whether the operations that AWS answers in a new order on each call do the same: the
+         * ReturnValues of PutItem, UpdateItem and DeleteItem, the Item of a failed condition check,
+         * TransactGetItems and the Item of a TransactWriteItems cancellation reason. Map keys and
+         * top-level attributes come back shuffled. False keeps the stored order. The native backend only.
+         * Env: FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER
+         */
+        @WithDefault("true")
+        boolean randomizeAttributeOrder();
+
         /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
         @WithDefault("native")
         String backend();
@@ -1909,18 +1983,18 @@ public interface EmulatorConfig {
         /**
          * Start and snapshot the backend of a Redis or Valkey replication group the way an image
          * with no shell and no CLI needs: server flags go to the container as arguments instead of
-         * the {@code VALKEY_EXTRA_FLAGS} hook, a snapshot is taken with {@code SAVE} over the RESP
-         * connection and read out of the container through the Docker archive API, and a snapshot
-         * is restored by placing its file in the data directory before the server starts, so no
-         * {@code DEBUG} command is involved. Off by default and never inferred from the image name:
-         * the default image keeps the {@code VALKEY_EXTRA_FLAGS} and CLI path.
+         * the {@code VALKEY_EXTRA_FLAGS} hook, and a snapshot is taken with {@code SAVE} over the
+         * RESP connection and read out of the container through the Docker archive API. Off by
+         * default and never inferred from the image name: the default image keeps the
+         * {@code VALKEY_EXTRA_FLAGS} and CLI path. Either way a snapshot is restored by placing its
+         * file in the data directory before the server starts, so no {@code DEBUG} command is involved.
          */
         @WithDefault("false")
         boolean shellLessBackend();
 
         /**
-         * Name of the snapshot file the server loads from its data directory at startup. Only used
-         * with {@link #shellLessBackend()}: a restore places the snapshot under this name, and a
+         * Name of the snapshot file the server loads from its data directory at startup. A restore
+         * places the snapshot under this name on either path, and with {@link #shellLessBackend()} a
          * snapshot export falls back to it when the server does not report {@code dbfilename}.
          * Set it to the name the image's server uses ({@code dump.rdb} for Redis and Valkey).
          */
@@ -3444,6 +3518,22 @@ public interface EmulatorConfig {
         boolean preferLocalImages();
 
         Optional<String> dockerNetwork();
+
+        /**
+         * Run the background sweep that applies repository lifecycle policies, expiring the images their rules
+         * select. When off, policies are checked and stored but nothing expires.
+         * Env: FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_ENABLED
+         */
+        @WithDefault("true")
+        boolean lifecycleSweepEnabled();
+
+        /**
+         * How often the lifecycle sweep runs, in seconds. ECR expires an image within 24 hours of it meeting a
+         * rule, so the interval only bounds how late Floci is.
+         * Env: FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_INTERVAL_SECONDS
+         */
+        @WithDefault("60")
+        long lifecycleSweepIntervalSeconds();
     }
 
     interface LambdaServiceConfig {
@@ -3586,15 +3676,16 @@ public interface EmulatorConfig {
          * Maximum idle (warm) containers kept across all functions. When a release would push
          * the total past this, the least-recently-used idle container of any function is
          * stopped first, so the container that just ran (the most likely to run again) stays
-         * warm. {@code 0} disables the bound; a negative value is ignored with a warning and
-         * also leaves it unbounded. This bounds idle containers only, emulator-wide. Busy
+         * warm. The default, 128, keeps a stack of many functions from accumulating one warm
+         * container per function touched. {@code 0} disables the bound; a negative value is ignored
+         * with a warning and also leaves it unbounded. This bounds idle containers only, emulator-wide. Busy
          * containers are not counted: their ceiling is {@code region-concurrency-limit}, which
          * applies independently in each region, so peak container count is this cap plus the
          * in-flight invocations across every active region.
          *
          * Env var: FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL
          */
-        @WithDefault("0")
+        @WithDefault("128")
         int warmPoolMaxTotal();
 
         /** Docker network to attach Lambda containers to. Empty = default bridge. */
@@ -4195,8 +4286,9 @@ public interface EmulatorConfig {
         /**
          * When true (and ECR is enabled), each new k3s cluster gets a generated
          * {@code /etc/rancher/k3s/registries.yaml} that mirrors every ECR repository URI the
-         * emulator can mint to the registry container's in-network endpoint, so pods can pull
-         * images pushed to Floci ECR without any manual containerd configuration.
+         * emulator can mint, and the cluster's and default account's registry hosts as AWS names
+         * them, to the registry container's in-network endpoint, so pods can pull images pushed to
+         * Floci ECR without any manual containerd configuration.
          */
         @WithDefault("true")
         boolean ecrRegistryMirror();
@@ -4226,6 +4318,19 @@ public interface EmulatorConfig {
         boolean defaultStorageClass();
 
         /**
+         * The local-path provisioner image that serves EKS Auto Mode block storage: while a cluster's
+         * {@code storageConfig.blockStorage} is enabled, claims of a StorageClass whose provisioner is
+         * {@code ebs.csi.eks.amazonaws.com} are provisioned from the node's disk by it. The default is the version
+         * k3s v1.36.0+k3s1 bundles.
+         */
+        @WithDefault("rancher/local-path-provisioner:v0.0.35")
+        String blockStorageProvisionerImage();
+
+        /** The image of the helper pods that {@link #blockStorageProvisionerImage()} runs to create and remove volumes. */
+        @WithDefault("rancher/mirrored-library-busybox:1.37.0")
+        String blockStorageHelperImage();
+
+        /**
          * When true, exposes an IMDS link-local proxy (169.254.169.254:80) inside the cluster container's
          * network namespace that relays to Floci's EC2 metadata service.
          */
@@ -4238,6 +4343,22 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean imdsPodNetwork();
+
+        /**
+         * When true, pods get addresses from IPv4 /28 prefixes of their node's subnet, which the node holds on its network
+         * interface, as the Amazon VPC CNI plugin's prefix delegation assigns them, instead of k3s's own pod network. A
+         * node needs an address in a Docker-backed subnet for it.
+         */
+        @WithDefault("false")
+        boolean vpcPodNetwork();
+
+        /**
+         * How many /28 prefixes a node holds with {@link #vpcPodNetwork()}: two, as a node running pods holds under the
+         * VPC CNI's default {@code WARM_PREFIX_TARGET} of one. With {@link #vpcPodNetwork()} on, Floci refuses to start
+         * unless it is between 1 and 16.
+         */
+        @WithDefault("2")
+        int vpcPodPrefixes();
 
         /**
          * When true, configures k3s with the cluster's per-cluster OIDC signing keypair and
@@ -4509,6 +4630,62 @@ public interface EmulatorConfig {
         /** Seconds between the pings that check whether an unreachable Docker daemon is back. */
         @WithDefault("5")
         int breakerProbeIntervalSeconds();
+
+        /**
+         * Most container creates and starts sent to the Docker daemon at once; more wait, up to
+         * {@link #connectionRequestTimeoutSeconds}, for one to finish. 0 means twice the CPUs Floci
+         * sees, and at least 4. Image pulls, stops, removes and every other call are not limited here.
+         */
+        @WithDefault("0")
+        int maxConcurrentLaunches();
+
+        /**
+         * Whether Lambda containers' exits are seen through one Docker events subscription for the whole
+         * daemon rather than one {@code /wait} stream per container, which saves each running container a
+         * streaming connection and a thread. Off by default while it proves itself.
+         */
+        @WithDefault("false")
+        boolean eventsExitDetection();
+
+        /**
+         * Most containers a service may run at once, keyed by its {@code io.floci.service} label
+         * ({@code lambda}, {@code rds}, {@code elasticache}, ...). A create past it fails at once with the
+         * capacity or limit error that service's API declares (Lambda's {@code TooManyRequestsException},
+         * RDS's {@code InsufficientDBInstanceCapacity}). A service not listed is not limited; none is by default.
+         */
+        Map<String, Integer> serviceMaxContainers();
+
+        /**
+         * Milliseconds between the reads of a long-lived service container's log (a database, a broker, a
+         * registry), which Floci reads on a timer instead of holding a follow stream open for the
+         * container's life. A line reaches the console and CloudWatch Logs up to this long after the
+         * container writes it. At least 100.
+         */
+        @WithDefault("1000")
+        int logPollIntervalMillis();
+
+        /**
+         * Opt-in: long-lived service containers send their logs to Floci through Docker's {@code gelf}
+         * log driver instead of being read on a timer, so they hold no Docker connection at all. Needs a
+         * daemon that can reach Floci (Docker Desktop, or a daemon on Floci's host), not Docker-in-Docker
+         * or a remote daemon.
+         */
+        @WithDefault("false")
+        boolean logDriverMode();
+
+        /**
+         * The host the daemon dials to reach Floci's log listener in the log-driver mode. Unset, it is
+         * {@code host.docker.internal} on Docker Desktop and {@code 127.0.0.1} otherwise.
+         */
+        Optional<String> logDriverHost();
+
+        /**
+         * The port Floci's log listener takes in the log-driver mode. It is fixed because Docker keeps the
+         * address in each container's log configuration and dials it on every start, including a start of a
+         * container Floci adopts after a restart. The default is GELF's standard port.
+         */
+        @WithDefault("12201")
+        int logDriverPort();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.

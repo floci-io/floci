@@ -5,6 +5,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.model.AccessKey;
 import io.floci.aws.services.iam.model.IamUser;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.ExecuteApiRequestSigner;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
@@ -12,6 +13,8 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.URI;
 import java.net.URLDecoder;
@@ -34,6 +37,7 @@ import static org.mockito.Mockito.when;
  * presigned query-string form, a credential scoped to another service, a registered IAM user's
  * identity, and the virtual-host path rewrite that would otherwise make every signature mismatch.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class ExecuteApiSigV4AuthorizerTest {
 
     private static final String HOST = "localhost:4566";

@@ -8,8 +8,10 @@ import io.floci.aws.services.kinesis.KinesisService;
 import io.floci.aws.services.kinesis.model.KinesisRecord;
 import io.floci.aws.services.kinesis.model.KinesisShard;
 import io.floci.aws.services.kinesis.model.KinesisStream;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
@@ -43,6 +45,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class KinesisStreamingViewsTest {
     private static final String ACCOUNT = "000000000000";
     private static final String ROLE = "arn:aws:iam::000000000000:role/R";
@@ -290,7 +293,7 @@ class KinesisStreamingViewsTest {
 
         assertThat(views.overSchema(SESSION, "kds"), equalTo(List.of(view)));
         assertThat(views.overSchema(SESSION, "other"), equalTo(List.of()));
-        assertThat(KinesisStreamingViews.dropSql(view, true, false),
+        assertThat(StreamingViewSupport.dropSql(view.viewSchema(), view.viewName(), true, false),
                 equalTo("DROP TABLE IF EXISTS \"public\".\"events_mv\" RESTRICT"));
     }
 }

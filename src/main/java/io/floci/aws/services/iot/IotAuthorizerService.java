@@ -295,9 +295,9 @@ public class IotAuthorizerService {
         Map<String, String> keys = new LinkedHashMap<>();
         for (Map.Entry<String, JsonNode> entry : node.properties()) {
             if (!KEY_NAME_PATTERN.matcher(entry.getKey()).matches()) {
-                throw constraint("tokenSigningPublicKeys", "Map keys must satisfy constraint: [Member must have length "
-                        + "less than or equal to 128, Member must have length greater than or equal to 1, "
-                        + "Member must satisfy regular expression pattern: [a-zA-Z0-9:_-]+]");
+                throw invalid(SmithyValidationErrors.message(List.of(
+                        SmithyValidationErrors.Violations.WITHOUT_VALUES.mapKeys("tokenSigningPublicKeys", null,
+                                SmithyValidationErrors.constraintSet(1, 128, "[a-zA-Z0-9:_-]+", null)))));
             }
             keys.put(entry.getKey(), entry.getValue().asText(null));
         }

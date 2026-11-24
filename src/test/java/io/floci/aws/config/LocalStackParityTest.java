@@ -1,6 +1,8 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.HashMap;
 import java.util.List;
@@ -20,6 +22,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 
 /** The cases of the former docker/test-localstack-parity.sh, plus the TLS mappings it did not cover. */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class LocalStackParityTest {
 
     private static String value(String property, String... env) {

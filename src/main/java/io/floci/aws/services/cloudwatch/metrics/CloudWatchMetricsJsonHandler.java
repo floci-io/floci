@@ -335,6 +335,7 @@ public class CloudWatchMetricsJsonHandler {
         alarm.setMetricName(request.path("MetricName").asText(null));
         alarm.setNamespace(request.path("Namespace").asText(null));
         alarm.setStatistic(request.path("Statistic").asText(null));
+        alarm.setExtendedStatistic(request.path("ExtendedStatistic").asText(null));
         JsonNode metrics = request.path("Metrics");
         if (metrics.isArray()) {
             for (JsonNode query : metrics) {
@@ -448,6 +449,9 @@ public class CloudWatchMetricsJsonHandler {
                 }
                 if (a.getStatistic() != null) {
                     node.put("Statistic", a.getStatistic());
+                }
+                if (a.getExtendedStatistic() != null) {
+                    node.put("ExtendedStatistic", a.getExtendedStatistic());
                 }
                 ArrayNode dimensions = node.putArray("Dimensions");
                 a.getDimensions().forEach(d -> {

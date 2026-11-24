@@ -5,8 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.codeartifact.model.CodeArtifactRepository;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.InOrder;
 
 import java.io.ByteArrayInputStream;
@@ -36,6 +38,7 @@ import static org.mockito.Mockito.when;
  * resolves a merge or an asset from, and what it writes back. {@link VerdaccioSidecarClient} is
  * mocked, so no real Verdaccio call ever happens here; its own wire contract has its own tests.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class CodeArtifactNpmUpstreamRepositoryImporterTest {
 
     private static final String REGION = "us-east-1";

@@ -12,6 +12,7 @@ import io.floci.aws.services.lambda.model.LambdaFunction;
 import io.floci.aws.services.lambda.model.PendingInvocation;
 import io.floci.aws.services.lambda.runtime.RuntimeApiServer;
 import io.floci.aws.services.lambda.runtime.RuntimeApiServerFactory;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Vertx;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
@@ -20,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.File;
 import java.io.IOException;
@@ -51,6 +53,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @DisabledOnOs(OS.WINDOWS)
+@ResourceLock(ParallelLocks.PORTS)
 class ProcessLauncherTest {
 
     private static final String ACCOUNT = "123456789012";

@@ -64,7 +64,7 @@ class IamQueryHandlerTest {
         when(service.getServerCertificate(CERTIFICATE_NAME)).thenReturn(certificate);
         when(service.listServerCertificates(null)).thenReturn(List.of(certificate));
         IamQueryHandler handler = new IamQueryHandler(service, null, null, null, null, null, null, null, null,
-                new RequestContext(), null);
+                new RequestContext(), null, mock(IamCloudTrailEvents.class));
 
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ServerCertificateName", CERTIFICATE_NAME);
@@ -94,7 +94,7 @@ class IamQueryHandlerTest {
         when(service.createRole(ROLE_NAME, "/", EMPTY_POLICY_DOCUMENT, null, 3600, Map.of(), null)).thenReturn(role);
         when(service.getValidatedRole(ROLE_NAME)).thenReturn(role);
         IamQueryHandler handler = new IamQueryHandler(service, null, null, null, null, null, null, null, null,
-                new RequestContext(), null);
+                new RequestContext(), null, mock(IamCloudTrailEvents.class));
 
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleName", ROLE_NAME);

@@ -19,9 +19,10 @@ class Route53RecordNameTest {
     }
 
     @Test
-    void recordIdentityDecodesLettersAndKeepsWildcardsAndEscapedDots() {
+    void recordIdentityDecodesLettersAndEscapesWildcardsAndEscapedDots() {
         assertEquals("a.example.test.", Route53RecordName.recordName("\\101.Example.test"));
-        assertEquals("*.example.test.", Route53RecordName.recordName("\\052.Example.test"));
+        assertEquals("\\052.example.test.", Route53RecordName.recordName("*.Example.test"));
+        assertEquals("\\052.example.test.", Route53RecordName.recordName("\\052.Example.test"));
         assertEquals(Route53RecordName.recordName("*a.example.test"),
                 Route53RecordName.recordName("\\052a.example.test"));
         assertNotEquals(Route53RecordName.recordName("a\\056b.example.test"),

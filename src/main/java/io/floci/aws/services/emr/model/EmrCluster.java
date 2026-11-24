@@ -47,6 +47,18 @@ public class EmrCluster {
     private int normalizedInstanceHours;
     private int stepConcurrencyLevel = 1;
     private int ebsRootVolumeSize;
+    // RunJobFlow's root volume IOPS and throughput; null when not given.
+    private Integer ebsRootVolumeIops;
+    private Integer ebsRootVolumeThroughput;
+    // The Amazon Linux release asked for, else the release's latest; null when neither is known.
+    private String osReleaseLabel;
+    private String logEncryptionKmsKeyId;
+    private String repoUpgradeOnBoot;
+    // The realm of the cluster's KerberosAttributes, and nothing else of them: their passwords are never kept.
+    private String kerberosRealm;
+    // Its PlacementGroupConfigs and MonitoringConfiguration as given, raw JSON; null when none.
+    private String placementGroups;
+    private String monitoringConfiguration;
     private String ec2Attributes;
     private String applications;
     private String configurations;
@@ -175,6 +187,36 @@ public class EmrCluster {
 
     public int getEbsRootVolumeSize() { return ebsRootVolumeSize; }
     public void setEbsRootVolumeSize(int ebsRootVolumeSize) { this.ebsRootVolumeSize = ebsRootVolumeSize; }
+
+    public Integer getEbsRootVolumeIops() { return ebsRootVolumeIops; }
+    public void setEbsRootVolumeIops(Integer ebsRootVolumeIops) { this.ebsRootVolumeIops = ebsRootVolumeIops; }
+
+    public Integer getEbsRootVolumeThroughput() { return ebsRootVolumeThroughput; }
+    public void setEbsRootVolumeThroughput(Integer ebsRootVolumeThroughput) {
+        this.ebsRootVolumeThroughput = ebsRootVolumeThroughput;
+    }
+
+    public String getOsReleaseLabel() { return osReleaseLabel; }
+    public void setOsReleaseLabel(String osReleaseLabel) { this.osReleaseLabel = osReleaseLabel; }
+
+    public String getLogEncryptionKmsKeyId() { return logEncryptionKmsKeyId; }
+    public void setLogEncryptionKmsKeyId(String logEncryptionKmsKeyId) {
+        this.logEncryptionKmsKeyId = logEncryptionKmsKeyId;
+    }
+
+    public String getRepoUpgradeOnBoot() { return repoUpgradeOnBoot; }
+    public void setRepoUpgradeOnBoot(String repoUpgradeOnBoot) { this.repoUpgradeOnBoot = repoUpgradeOnBoot; }
+
+    public String getKerberosRealm() { return kerberosRealm; }
+    public void setKerberosRealm(String kerberosRealm) { this.kerberosRealm = kerberosRealm; }
+
+    public String getPlacementGroups() { return placementGroups; }
+    public void setPlacementGroups(String placementGroups) { this.placementGroups = placementGroups; }
+
+    public String getMonitoringConfiguration() { return monitoringConfiguration; }
+    public void setMonitoringConfiguration(String monitoringConfiguration) {
+        this.monitoringConfiguration = monitoringConfiguration;
+    }
 
     public String getEc2Attributes() { return ec2Attributes; }
     public void setEc2Attributes(String ec2Attributes) { this.ec2Attributes = ec2Attributes; }

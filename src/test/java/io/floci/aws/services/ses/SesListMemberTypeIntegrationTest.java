@@ -9,14 +9,14 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.util.List;
 import java.util.stream.Stream;
 
+import static io.floci.aws.services.ses.SesV2Requests.authFor;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.EXPECTED_MAP;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.LIST;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.NUMBER;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.STRING_FOR_INTEGER;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.assertError;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.assertSerializationException;
-import static io.floci.aws.services.ses.SesV2SerializationErrors.authFor;
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 
@@ -81,18 +81,14 @@ class SesListMemberTypeIntegrationTest {
     @Test
     void pageSize_isNarrowedBeforeTheRangeCheck() {
         for (String identity : List.of("a@narrow.example.com", "b@narrow.example.com")) {
-            given()
-                .contentType("application/json")
-                .header("Authorization", NARROW_REGION_AUTH)
+            v2(NARROW_REGION_AUTH)
                 .body("{\"EmailIdentity\": \"" + identity + "\"}")
             .when()
                 .post("/v2/email/identities")
             .then()
                 .statusCode(200);
         }
-        given()
-            .contentType("application/json")
-            .header("Authorization", NARROW_REGION_AUTH)
+        v2(NARROW_REGION_AUTH)
             .body("{\"PageSize\": 1.5}")
         .when()
             .post("/v2/email/list-identities")

@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
@@ -22,10 +23,8 @@ import static org.hamcrest.Matchers.nullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesDedicatedIpPagingIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/ap-northeast-3/ses/aws4_request";
-    private static final String OTHER_REGION_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-north-1/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("ap-northeast-3");
+    private static final String OTHER_REGION_AUTH = SesV2Requests.authFor("eu-north-1");
     private static final String POOLS = "/v2/email/dedicated-ip-pools";
     private static final String IPS = "/v2/email/dedicated-ips";
 
@@ -33,7 +32,7 @@ class SesDedicatedIpPagingIntegrationTest {
     @Order(1)
     void createPoolsOutOfNameOrder() {
         for (String name : new String[] {"page-b", "page-c", "page-a"}) {
-            given().contentType("application/json").header("Authorization", AUTH)
+            v2(AUTH)
                     .body("{\"PoolName\": \"" + name + "\"}")
             .when().post(POOLS).then().statusCode(200);
         }

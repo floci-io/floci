@@ -7,8 +7,11 @@ import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
+import io.floci.aws.testing.ParallelLocks;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -26,6 +29,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class ElastiCacheContainerManagerTest {
 
     private static final Logger LOG = Logger.getLogger(ElastiCacheContainerManagerTest.class);
@@ -94,7 +98,7 @@ class ElastiCacheContainerManagerTest {
                     "io.floci.resource-id", "my-group",
                     "io.floci.account", "000000000000",
                     "io.floci.region", "eu-west-1"));
-            verify(logStreamer).attach(eq("container-id"), anyString(), any(), eq("eu-west-1"), anyString());
+            verify(logStreamer).attachPolled(eq("container-id"), anyString(), any(), eq("eu-west-1"), anyString());
         }
     }
 
@@ -106,7 +110,7 @@ class ElastiCacheContainerManagerTest {
                         new ContainerLifecycleManager.EndpointInfo("127.0.0.1", 6379))));
         when(lifecycleManager.isDockerReachable()).thenReturn(false);
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
-        when(logStreamer.attach(any(), any(), any(), any(), any()))
+        when(logStreamer.attachPolled(any(), any(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("log attach failed after daemon went away"));
 
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);

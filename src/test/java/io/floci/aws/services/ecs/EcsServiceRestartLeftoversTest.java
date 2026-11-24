@@ -17,7 +17,10 @@ import io.floci.aws.services.ecs.model.EcsTaskAddress;
 import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.services.ecs.model.NetworkBinding;
 import io.floci.aws.services.ecs.model.NetworkMode;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -48,6 +51,7 @@ import static org.mockito.Mockito.when;
  * without a graceful shutdown left serving, and the load balancer targets and Cloud Map instances
  * that even a graceful one leaves registered.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EcsServiceRestartLeftoversTest {
 
     private static final String REGION = "us-east-1";

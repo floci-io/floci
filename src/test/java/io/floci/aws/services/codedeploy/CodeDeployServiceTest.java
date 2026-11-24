@@ -89,6 +89,52 @@ class CodeDeployServiceTest {
     }
 
     @Test
+    void deletingAnApplicationDropsItsTags() {
+        String arn = service.applicationArn(REGION, "tagged-app");
+        service.createApplication(REGION, "tagged-app", "Server", List.of(Map.of("Key", "team", "Value", "core")));
+
+        service.deleteApplication(REGION, "tagged-app");
+        service.createApplication(REGION, "tagged-app", "Server", null);
+
+        assertEquals(List.of(), service.listTagsForResource(arn));
+    }
+
+    @Test
+    void deletingAnApplicationDeletesItsDeploymentGroupsAndTheirTags() {
+        String groupArn = service.deploymentGroupArn(REGION, "grouped-app", "group");
+        service.createApplication(REGION, "grouped-app", "Server", null);
+        service.createDeploymentGroup(REGION, "grouped-app", "group", null, ROLE_ARN, Map.of(),
+                List.of(Map.of("Key", "team", "Value", "core")));
+
+        service.deleteApplication(REGION, "grouped-app");
+        service.createApplication(REGION, "grouped-app", "Server", null);
+
+        assertEquals(List.of(), service.listDeploymentGroups(REGION, "grouped-app"));
+        assertEquals(List.of(), service.listTagsForResource(groupArn));
+    }
+
+    @Test
+    void createApplicationValidatesTheNameAndComputePlatformAsCodeDeployDoes() {
+        assertEquals("ApplicationNameRequiredException", assertThrows(AwsException.class,
+                () -> service.createApplication(REGION, null, null, null)).getErrorCode());
+        assertEquals("ApplicationNameRequiredException", assertThrows(AwsException.class,
+                () -> service.createApplication(REGION, "", null, null)).getErrorCode());
+        assertEquals("InvalidApplicationNameException", assertThrows(AwsException.class,
+                () -> service.createApplication(REGION, "a".repeat(101), null, null)).getErrorCode());
+        assertEquals("InvalidApplicationNameException", assertThrows(AwsException.class,
+                () -> service.createApplication(REGION, "has space", null, null)).getErrorCode());
+        assertEquals("InvalidComputePlatformException", assertThrows(AwsException.class,
+                () -> service.createApplication(REGION, "bad-platform", "Windows", null)).getErrorCode());
+
+        for (String platform : List.of("Server", "Lambda", "ECS", "Kubernetes")) {
+            assertEquals(platform, service.createApplication(REGION, "app-" + platform, platform, null)
+                    .getComputePlatform());
+        }
+        assertEquals(100, service.createApplication(REGION, "a".repeat(100), null, null)
+                .getApplicationName().length());
+    }
+
+    @Test
     void onPremisesRegistrationAndDeregistrationUseTheDeploymentClock() {
         Clock clock = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
         CodeDeployService target = newService(Duration.ofHours(1), clock);

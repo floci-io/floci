@@ -2,9 +2,13 @@ package io.floci.aws.core.common.docker;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.LogContainerCmd;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.StreamType;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -16,6 +20,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -26,9 +31,11 @@ import java.util.Comparator;
 import java.util.Deque;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -47,17 +54,54 @@ public class ContainerLogStreamer {
     private static final Logger LOG = Logger.getLogger(ContainerLogStreamer.class);
     private static final DateTimeFormatter LOG_STREAM_DATE_FMT = DateTimeFormatter.ofPattern("yyyy/MM/dd");
 
+    private static final Duration DEFAULT_POLL_INTERVAL = Duration.ofMillis(1000);
+
     private final DockerClient dockerClient;
+    private final DockerClient pollingDockerClient;
     private final CloudWatchLogsService cloudWatchLogsService;
+    private final Duration pollInterval;
+
+    private final GelfLogListener gelfLogListener;
 
     // Log-follow attaches hold their connection open for the whole container lifetime, so
     // this class is the primary consumer of the streaming pool: sharing the control-plane
     // pool is what starved short create/start/stop calls during an LZA Logging fan-out
-    // (see DockerClientProducer / StreamingDocker).
+    // (see DockerClientProducer / StreamingDocker). A polled attach reads with short
+    // control-plane calls instead, and holds no connection between reads.
     @Inject
-    public ContainerLogStreamer(@StreamingDocker DockerClient dockerClient, CloudWatchLogsService cloudWatchLogsService) {
+    public ContainerLogStreamer(@StreamingDocker DockerClient dockerClient, DockerClient pollingDockerClient,
+                                CloudWatchLogsService cloudWatchLogsService, EmulatorConfig config,
+                                GelfLogListener gelfLogListener) {
+        this(dockerClient, pollingDockerClient, cloudWatchLogsService,
+                Duration.ofMillis(validateLogPollIntervalMillis(config.docker().logPollIntervalMillis())),
+                gelfLogListener);
+    }
+
+    public ContainerLogStreamer(DockerClient dockerClient, CloudWatchLogsService cloudWatchLogsService) {
+        this(dockerClient, dockerClient, cloudWatchLogsService, DEFAULT_POLL_INTERVAL);
+    }
+
+    ContainerLogStreamer(DockerClient dockerClient, DockerClient pollingDockerClient,
+                         CloudWatchLogsService cloudWatchLogsService, Duration pollInterval) {
+        this(dockerClient, pollingDockerClient, cloudWatchLogsService, pollInterval, GelfLogListener.disabled());
+    }
+
+    ContainerLogStreamer(DockerClient dockerClient, DockerClient pollingDockerClient,
+                         CloudWatchLogsService cloudWatchLogsService, Duration pollInterval,
+                         GelfLogListener gelfLogListener) {
+        this.gelfLogListener = gelfLogListener;
         this.dockerClient = dockerClient;
+        this.pollingDockerClient = pollingDockerClient;
         this.cloudWatchLogsService = cloudWatchLogsService;
+        this.pollInterval = pollInterval;
+    }
+
+    static int validateLogPollIntervalMillis(int millis) {
+        if (millis < 100) {
+            throw new IllegalArgumentException("floci.docker.log-poll-interval-millis "
+                    + "(FLOCI_DOCKER_LOG_POLL_INTERVAL_MILLIS) must be at least 100, got: " + millis);
+        }
+        return millis;
     }
 
     /**
@@ -121,6 +165,93 @@ public class ContainerLogStreamer {
     }
 
     /**
+     * Like {@link #attach}, but for a long-lived service container (a database, a broker, a registry):
+     * the log is read every {@code floci.docker.log-poll-interval-millis} with a short call, so the container
+     * holds no streaming connection and no stream thread for its life. Lines arrive up to one interval
+     * later. Hand the handle to {@code ContainerLifecycleManager.stopAndRemove}, which reads the last
+     * lines between the container's stop and its removal.
+     */
+    public Closeable attachPolled(String containerId, String logGroup, String logStream,
+                                  String region, String logPrefix) {
+        return attachPolledForAccount(null, containerId, logGroup, logStream, region, logPrefix);
+    }
+
+    /** Like {@link #attachFromNow}, read on a timer as {@link #attachPolled} is. */
+    public Closeable attachPolledFromNow(String containerId, String logGroup, String logStream,
+                                         String region, String logPrefix) {
+        return attachPolledFromNowForAccount(null, containerId, logGroup, logStream, region, logPrefix);
+    }
+
+    /** Like {@link #attachForAccount}, read on a timer as {@link #attachPolled} is. */
+    public Closeable attachPolledForAccount(String accountId, String containerId, String logGroup,
+                                            String logStream, String region, String logPrefix) {
+        return attachPolledForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, null);
+    }
+
+    /** Like {@link #attachFromNowForAccount}, read on a timer as {@link #attachPolled} is. */
+    public Closeable attachPolledFromNowForAccount(String accountId, String containerId, String logGroup,
+                                                   String logStream, String region, String logPrefix) {
+        return attachPolledForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, Instant.now());
+    }
+
+    Closeable attachPolledForAccount(String accountId, String containerId, String logGroup, String logStream,
+                                     String region, String logPrefix, Instant since) {
+        ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
+        BiConsumer<StreamType, String> sink = (stream, line) -> {
+            String logged = logToConsole(logPrefix, line);
+            if (logged != null) {
+                forwardToCloudWatchLogs(accountId, logGroup, logStream, region, logged);
+            }
+        };
+        Closeable pushed = attachPushed(containerId, sink);
+        if (pushed != null) {
+            return pushed;
+        }
+        return new PolledLogHandle(pollingDockerClient, containerId, since, sink).start(pollInterval);
+    }
+
+    /**
+     * In the log-driver mode, a container created with Floci's {@code gelf} log configuration pushes its
+     * log, so it is claimed by its tag instead of read; null when the mode is off or the container was not
+     * created for it (one started before the mode was turned on). A container that still sends to the
+     * address of a listener this Floci no longer has is read on a timer instead, from the daemon's local copy.
+     */
+    private Closeable attachPushed(String containerId, BiConsumer<StreamType, String> sink) {
+        if (!gelfLogListener.enabled()) {
+            return null;
+        }
+        GelfLogListener listener = gelfLogListener;
+        InspectContainerResponse inspect;
+        try {
+            inspect = pollingDockerClient.inspectContainerCmd(containerId).exec();
+        } catch (NotFoundException e) {
+            LOG.debugv("Container {0} is gone before its log was attached: {1}", containerId, e.getMessage());
+            return null;
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not read the log tag of container {0}; reading its log on a timer instead, which "
+                    + "needs the daemon's local copy of a pushed log: {1}", containerId, e.getMessage());
+            return null;
+        }
+        Map<String, String> labels = inspect.getConfig() == null ? null : inspect.getConfig().getLabels();
+        String token = labels == null ? null : labels.get(GelfLogListener.LOG_TOKEN_LABEL);
+        if (token == null) {
+            return null;
+        }
+        LogConfig logConfig = inspect.getHostConfig() == null ? null : inspect.getHostConfig().getLogConfig();
+        String gelfAddress = logConfig == null || logConfig.getConfig() == null
+                ? null : logConfig.getConfig().get("gelf-address");
+        if (!listener.listensAt(gelfAddress)) {
+            LOG.warnv("Container {0} sends its log to {1}, where this Floci does not listen; reading its log on a "
+                    + "timer instead, from the daemon's local copy", containerId, gelfAddress);
+            return null;
+        }
+        listener.register(token, sink);
+        // The daemon may still be sending the last lines when the container's owner closes the handle.
+        return () -> CompletableFuture.delayedExecutor(LogReassemblyCallback.DEFAULT_CLOSE_GRACE_MILLIS,
+                TimeUnit.MILLISECONDS).execute(() -> listener.unregister(token, sink));
+    }
+
+    /**
      * Like {@link #attachForAccount}, but forwards the container's standard output and standard error to
      * log streams of their own in {@code logGroup}, {@code stdoutStream} and {@code stderrStream}, either
      * of which may be null to forward that output nowhere. A container with a terminal has no standard
@@ -134,15 +265,28 @@ public class ContainerLogStreamer {
                 ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
             }
         }
+        // The lines of one emission, by stream, each sent as the container wrote it, but for a line ending and an empty
+        // line, which CloudWatch Logs refuses as an event. One emitter at a time touches it.
+        Map<String, List<Map<String, Object>>> batch = new LinkedHashMap<>();
         BiConsumer<StreamType, String> emitter = (stream, line) -> {
-            String logged = logToConsole(logPrefix, line);
+            logToConsole(logPrefix, line);
             String logStream = stream == StreamType.STDERR ? stderrStream : stdoutStream;
-            if (logged != null && logStream != null) {
-                forwardToCloudWatchLogs(accountId, logGroup, logStream, region, logged);
+            String message = line.endsWith("\r") ? line.substring(0, line.length() - 1) : line;
+            if (logStream != null && !message.isEmpty()) {
+                Map<String, Object> event = new HashMap<>();
+                event.put("timestamp", System.currentTimeMillis());
+                event.put("message", message);
+                batch.computeIfAbsent(logStream, ignored -> new ArrayList<>()).add(event);
             }
         };
+        // Each stream's lines of one emission in one PutLogEvents, not one call a line.
+        Runnable drained = () -> {
+            batch.forEach((logStream, events) -> forwardToCloudWatchLogs(accountId, logGroup, logStream, region,
+                    events));
+            batch.clear();
+        };
         return follow(containerId, null,
-                new LogReassemblyCallback(LogReassemblyCallback.DEFAULT_CLOSE_GRACE_MILLIS, emitter));
+                new LogReassemblyCallback(LogReassemblyCallback.DEFAULT_CLOSE_GRACE_MILLIS, emitter, drained));
     }
 
     /**
@@ -332,14 +476,18 @@ public class ContainerLogStreamer {
 
     private void forwardToCloudWatchLogs(
             String accountId, String logGroup, String logStream, String region, String line) {
+        Map<String, Object> event = new HashMap<>();
+        event.put("timestamp", System.currentTimeMillis());
+        event.put("message", line);
+        forwardToCloudWatchLogs(accountId, logGroup, logStream, region, List.of(event));
+    }
+
+    private void forwardToCloudWatchLogs(
+            String accountId, String logGroup, String logStream, String region, List<Map<String, Object>> events) {
         try {
-            Map<String, Object> event = new HashMap<>();
-            event.put("timestamp", System.currentTimeMillis());
-            event.put("message", line);
-            cloudWatchLogsService.putLogEventsForAccount(
-                    accountId, logGroup, logStream, List.of(event), region);
+            cloudWatchLogsService.putLogEventsForAccount(accountId, logGroup, logStream, events, region);
         } catch (Exception e) {
-            LOG.debugv("Could not forward log line to CloudWatch Logs: {0}", e.getMessage());
+            LOG.debugv("Could not forward log lines to CloudWatch Logs: {0}", e.getMessage());
         }
     }
 
@@ -376,6 +524,9 @@ public class ContainerLogStreamer {
         // any later callback until the transport has been closed and the final tail has been flushed.
         private final ReentrantReadWriteLock callbackGate = new ReentrantReadWriteLock(true);
         private final BiConsumer<StreamType, String> lineConsumer;
+        // Runs once the lines pending at a time have all gone to lineConsumer, on the thread that emitted them, which
+        // is still the only one emitting; a consumer that gathers lines sends them on from here.
+        private final Runnable drained;
         private final long closeGraceMillis;
         // Guarded by 'buffers'. Set only by the Docker transport terminal callback; afterwards onNext
         // refuses to append, so nothing is ever buffered past the final flush.
@@ -397,7 +548,12 @@ public class ContainerLogStreamer {
         }
 
         LogReassemblyCallback(long closeGraceMillis, BiConsumer<StreamType, String> lineConsumer) {
+            this(closeGraceMillis, lineConsumer, () -> { });
+        }
+
+        LogReassemblyCallback(long closeGraceMillis, BiConsumer<StreamType, String> lineConsumer, Runnable drained) {
             this.lineConsumer = lineConsumer;
+            this.drained = drained;
             this.closeGraceMillis = closeGraceMillis;
         }
 
@@ -535,13 +691,27 @@ public class ContainerLogStreamer {
                 synchronized (emissionLock) {
                     synchronized (buffers) {
                         pending = pendingLines.pollFirst();
-                        if (pending == null) {
+                    }
+                }
+                if (pending != null) {
+                    lineConsumer.accept(pending.stream(), pending.line());
+                    continue;
+                }
+                // Still the only emitter here, so drained never runs beside lineConsumer; lines that came while it
+                // ran are emitted before this emission ends.
+                try {
+                    drained.run();
+                } catch (RuntimeException e) {
+                    LOG.debugv("Could not send on a container's log lines: {0}", e.getMessage());
+                }
+                synchronized (emissionLock) {
+                    synchronized (buffers) {
+                        if (pendingLines.isEmpty()) {
                             emitting = false;
                             return;
                         }
                     }
                 }
-                lineConsumer.accept(pending.stream(), pending.line());
             }
         }
 

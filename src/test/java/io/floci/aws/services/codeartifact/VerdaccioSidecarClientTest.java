@@ -7,9 +7,12 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.PerKeyContainerPool;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -36,6 +39,7 @@ import static org.mockito.Mockito.mock;
  * for a running Verdaccio container. The container is registered in the manager's pool directly, so
  * readiness resolves to the fake server without any Docker daemon.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class VerdaccioSidecarClientTest {
 
     private final ContainerBuilder containerBuilder = mock(ContainerBuilder.class);

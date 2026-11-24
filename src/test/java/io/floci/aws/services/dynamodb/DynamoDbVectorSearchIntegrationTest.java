@@ -2,6 +2,7 @@ package io.floci.aws.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
@@ -14,10 +15,16 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
@@ -46,6 +53,7 @@ class DynamoDbVectorSearchIntegrationTest {
     private static final String PLAIN = "VectorPlainIndex";
     private static final String SCHEMA = "VectorSchemaIndex";
     private static final String REJECTED = "VectorRejectedTable";
+    private static final String FILTERS = "VectorFilterDocs";
 
     private static final String QUERY_VECTOR = """
             [{"N": "1"}, {"N": "0"}, {"N": "0"}]""";
@@ -66,7 +74,7 @@ class DynamoDbVectorSearchIntegrationTest {
 
     @AfterAll
     static void cleanup() {
-        for (String table : List.of(DOCS, PLAIN, SCHEMA)) {
+        for (String table : List.of(DOCS, PLAIN, SCHEMA, FILTERS)) {
             given()
                     .port(testPort)
                     .header("X-Amz-Target", TARGET + "DeleteTable")
@@ -213,6 +221,49 @@ class DynamoDbVectorSearchIntegrationTest {
                 ]
             }
             """.formatted(SCHEMA))
+                .statusCode(200);
+
+        call("CreateTable", """
+            {
+                "TableName": "%s",
+                "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                "AttributeDefinitions": [
+                    {"AttributeName": "pk", "AttributeType": "S"},
+                    {"AttributeName": "tenant", "AttributeType": "S"},
+                    {"AttributeName": "category", "AttributeType": "S"},
+                    {"AttributeName": "price", "AttributeType": "N"},
+                    {"AttributeName": "bin", "AttributeType": "B"}
+                ],
+                "BillingMode": "PAY_PER_REQUEST",
+                "VectorIndexes": [
+                    {"IndexName": "full",
+                     "VectorAttribute": {"AttributeName": "embedding"},
+                     "SearchSchema": [
+                         {"AttributeName": "tenant", "SearchSchemaElementType": "HASH"},
+                         {"AttributeName": "category", "SearchSchemaElementType": "INLINE_FILTER"},
+                         {"AttributeName": "price", "SearchSchemaElementType": "INLINE_FILTER"},
+                         {"AttributeName": "bin", "SearchSchemaElementType": "INLINE_FILTER"}
+                     ],
+                     "Projection": {"ProjectionType": "ALL"},
+                     "Dimensions": 3,
+                     "DistanceFunction": "COSINE"},
+                    {"IndexName": "filters",
+                     "VectorAttribute": {"AttributeName": "embedding"},
+                     "SearchSchema": [
+                         {"AttributeName": "category", "SearchSchemaElementType": "INLINE_FILTER"},
+                         {"AttributeName": "price", "SearchSchemaElementType": "INLINE_FILTER"}
+                     ],
+                     "Projection": {"ProjectionType": "ALL"},
+                     "Dimensions": 3,
+                     "DistanceFunction": "COSINE"},
+                    {"IndexName": "bare",
+                     "VectorAttribute": {"AttributeName": "embedding"},
+                     "Projection": {"ProjectionType": "ALL"},
+                     "Dimensions": 3,
+                     "DistanceFunction": "COSINE"}
+                ]
+            }
+            """.formatted(FILTERS))
                 .statusCode(200);
     }
 
@@ -504,14 +555,14 @@ class DynamoDbVectorSearchIntegrationTest {
 
     @Test
     @Order(19)
-    void searchVectorsRejectsANonEqualityComparator() {
+    void searchVectorsRejectsALessThanOnTheHashAttribute() {
         expectValidation("SearchVectors", search(SCHEMA, "schema", 4, """
             ,
             "SearchConditionExpression": "tenant < :t",
             "ExpressionAttributeValues": {":t": {"S": "acme"}}
             """),
-                "Invalid SearchConditionExpression: Invalid comparator used in "
-                + "SearchConditionExpression");
+                "SearchConditionExpression must use = on the HASH attribute, not inside OR or NOT; "
+                + "HASH attribute: tenant");
     }
 
     @Test
@@ -1037,6 +1088,380 @@ class DynamoDbVectorSearchIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo(type))
                 .body("message", equalTo(message));
+    }
+
+    // ── Search condition operators ──
+
+    private static final String FILTER_VALUES = """
+            {":t": {"S": "t1"}, ":u": {"S": "t2"}, ":z": {"S": "zz"}, ":a": {"S": "a"},
+             ":c": {"S": "c1"}, ":c1": {"S": "c1"}, ":c2": {"S": "c2"}, ":s": {"S": "s"},
+             ":p": {"N": "3"}, ":n2": {"N": "2"}, ":n3": {"N": "3"}, ":n4": {"N": "4"},
+             ":bb": {"B": "AAEC"}, ":bool": {"BOOL": true}}""";
+
+    // AWS refuses a value the expression does not use, so each request sends only its own.
+    private static String valuesFor(String expression) throws Exception {
+        ObjectNode values = MAPPER.createObjectNode();
+        Iterator<Map.Entry<String, JsonNode>> pool = MAPPER.readTree(FILTER_VALUES).fields();
+        while (pool.hasNext()) {
+            Map.Entry<String, JsonNode> value = pool.next();
+            if (Pattern.compile(Pattern.quote(value.getKey()) + "(?![A-Za-z0-9_])").matcher(expression).find()) {
+                values.set(value.getKey(), value.getValue());
+            }
+        }
+        return MAPPER.writeValueAsString(values);
+    }
+
+    private static final String HASH_EQUALS = "SearchConditionExpression must use = on the HASH "
+            + "attribute, not inside OR or NOT; HASH attribute: tenant";
+    private static final String HASH_ONCE = "SearchConditionExpression must contain only one "
+            + "condition on the HASH attribute; to search more than one HASH value, make one "
+            + "SearchVectors call for each value";
+    private static final String HASH_MISSING = "SearchConditionExpression must have all HASH "
+            + "attributes in configured SearchSchema";
+    private static final String NESTED = "Invalid SearchConditionExpression: "
+            + "SearchConditionExpression cannot have conditions on nested attributes";
+    private static final String NO_NAMES = "Invalid SearchConditionExpression: Invalid condition in "
+            + "SearchConditionExpression: No attribute names used in a condition";
+    private static final String MANY_NAMES = "Invalid SearchConditionExpression: Invalid condition "
+            + "in SearchConditionExpression: Multiple attribute names used in one condition";
+
+    private static String function(String name) {
+        return "Invalid SearchConditionExpression: The function is not allowed in a search "
+                + "condition; function: " + name;
+    }
+
+    private static final String EXISTS_NEEDS_PATH = "Invalid SearchConditionExpression: Operator or "
+            + "function requires a document path; operator or function: attribute_exists";
+
+    private static String operandCount(String function) {
+        return "Invalid SearchConditionExpression: Incorrect number of operands for operator or "
+                + "function; operator or function: " + function + ", number of operands: 2";
+    }
+
+    private static String invalidFunction(String name) {
+        return "Invalid SearchConditionExpression: Invalid function name; function: " + name;
+    }
+
+    private static final String RESERVED_NAME = "Invalid SearchConditionExpression: Attribute name is a "
+            + "reserved keyword; reserved keyword: name";
+
+    private static String operandType(String op, String type) {
+        return "Invalid SearchConditionExpression: Incorrect operand type for operator or function; "
+                + "operator or function: " + op + ", operand type: " + type;
+    }
+
+    private static String notInSchema(String attribute) {
+        return "SearchConditionExpression must not contain any attributes that is not in "
+                + "SearchSchema. Invalid attribute: " + attribute;
+    }
+
+    private static String operator(String op, String attribute, String type) {
+        return "SearchConditionExpression allows this operator only on Number (N) attributes; "
+                + "operator: " + op + ", attribute: " + attribute + ", attribute type: " + type;
+    }
+
+    private static String typeMismatch(String attribute, String valueType, String type) {
+        return "Type of '" + attribute + "' attribute in SearchConditionExpression (" + valueType
+                + ") does not match type in search schema (" + type + ")";
+    }
+
+    private static void putFilterItem(String key, String tenant, String category, String price) {
+        StringBuilder item = new StringBuilder("""
+            {"pk": {"S": "%s"}, "tenant": {"S": "%s"},
+             "embedding": {"L": [{"N": "1"}, {"N": "0"}, {"N": "0"}]}""".formatted(key, tenant));
+        if (category != null) {
+            item.append(", \"category\": {\"S\": \"").append(category).append("\"}");
+        }
+        if (price != null) {
+            item.append(", \"price\": {\"N\": \"").append(price).append("\"}");
+        }
+        item.append('}');
+        call("PutItem", """
+            {"TableName": "%s", "Item": %s}
+            """.formatted(FILTERS, item))
+                .statusCode(200);
+    }
+
+    @Test
+    @Order(46)
+    void seedFilterItems() {
+        putFilterItem("i1", "t1", "c1", "1");
+        putFilterItem("i2", "t1", "c2", "2");
+        putFilterItem("i3", "t1", "c3", "3");
+        putFilterItem("i4", "t1", "c1", "4");
+        putFilterItem("i5", "t1", "c2", "5");
+        putFilterItem("i6", "t1", null, null);
+        putFilterItem("other", "t2", "c1", "3");
+    }
+
+    @ParameterizedTest
+    @Order(47)
+    @CsvSource(delimiter = '|', textBlock = """
+            tenant = :t AND price < :p | i1,i2
+            tenant = :t AND price <= :p | i1,i2,i3
+            tenant = :t AND price <> :p | i1,i2,i4,i5,i6
+            tenant = :t AND price BETWEEN :n2 AND :n4 | i2,i3,i4
+            tenant = :t AND price IN (:n2, :n4) | i2,i4
+            tenant = :t AND (price < :n2 OR price > :n4) | i1,i5
+            tenant = :t AND NOT price < :p | i3,i4,i5,i6
+            tenant = :t AND category <> :c | i2,i3,i5,i6
+            tenant = :t AND category IN (:c1, :c2) | i1,i2,i4,i5
+            tenant = :t AND NOT (category = :c OR price < :p) | i3,i5,i6
+            tenant = :t AND attribute_not_exists(price) | i6
+            tenant = :t AND attribute_exists(price) | i1,i2,i3,i4,i5
+            price < :p AND tenant = :t | i1,i2
+            (tenant = :t AND price < :p) | i1,i2
+            :t = tenant AND price < :p | i1,i2
+            """)
+    void searchVectorsFiltersOnInlineFilterOperators(String expression, String expectedKeys) throws Exception {
+        JsonNode response = json("SearchVectors", search(FILTERS, "full", 10, """
+            ,
+            "SearchConditionExpression": "%s",
+            "ExpressionAttributeValues": %s
+            """.formatted(expression, valuesFor(expression))));
+        List<String> keys = keysOf(response);
+        keys.sort(null);
+        assertEquals(List.of(expectedKeys.split(",")), keys);
+    }
+
+    @Test
+    @Order(48)
+    void searchVectorsAcceptsOrderingOnANumberFilterWithoutAHash() throws Exception {
+        List<String> keys = keysOf(json("SearchVectors", search(FILTERS, "filters", 10, """
+            ,
+            "SearchConditionExpression": "price < :p",
+            "ExpressionAttributeValues": %s
+            """.formatted(valuesFor("price < :p")))));
+        keys.sort(null);
+        assertEquals(List.of("i1", "i2"), keys);
+    }
+
+    static Stream<Arguments> searchConditionRefusals() {
+        return Stream.of(
+                Arguments.of("full", "tenant < :t AND zz = :z", HASH_EQUALS),
+                Arguments.of("full", "zz = :z AND tenant < :t", HASH_EQUALS),
+                Arguments.of("full", "price = :s AND tenant < :t", HASH_EQUALS),
+                Arguments.of("full", "category < :c AND tenant < :t", HASH_EQUALS),
+                Arguments.of("full", "tenant <> :t", HASH_EQUALS),
+                Arguments.of("full", "tenant >= :t", HASH_EQUALS),
+                Arguments.of("full", "tenant BETWEEN :t AND :u", HASH_EQUALS),
+                Arguments.of("full", "tenant IN (:t, :u)", HASH_EQUALS),
+                Arguments.of("full", "tenant = :t OR category = :c", HASH_EQUALS),
+                Arguments.of("full", "NOT (tenant = :t)", HASH_EQUALS),
+                Arguments.of("full", "tenant = :t AND tenant < :u", HASH_EQUALS),
+                Arguments.of("full", "tenant = :t AND attribute_exists(tenant)", HASH_EQUALS),
+                Arguments.of("full", "tenant < :t AND category.x = :c", NESTED),
+                Arguments.of("full", "tenant < :t AND category = price", MANY_NAMES),
+                Arguments.of("full", "begins_with(category, :c) AND tenant < :t", function("begins_with")),
+                Arguments.of("full", "tenant = :t AND begins_with(category, :a) AND category.x = :c",
+                        function("begins_with")),
+                Arguments.of("full", "tenant = :t AND category.x = :c AND begins_with(category, :a)",
+                        NESTED),
+                Arguments.of("full", "tenant = :t AND :p = :p AND begins_with(category, :a)", NO_NAMES),
+                Arguments.of("full", "tenant = :t AND contains(category, :a)", function("contains")),
+                Arguments.of("full", "tenant = :t AND attribute_type(category, :a)",
+                        function("attribute_type")),
+                Arguments.of("full", "tenant = :t AND size(category) < :p", function("size")),
+                Arguments.of("full", "tenant = :t AND category[0] = :c", NESTED),
+                Arguments.of("full", "tenant < :bool", operandType("<", "BOOL")),
+                Arguments.of("full", "tenant = :t AND begins_with(category, :p)", operandType("begins_with", "N")),
+                Arguments.of("full", "tenant = :t AND attribute_exists(price, :p)", operandCount("attribute_exists")),
+                Arguments.of("full", "tenant = :t AND NOT attribute_not_exists(price, :p)",
+                        operandCount("attribute_not_exists")),
+                Arguments.of("full", "attribute_exists(price, :p)", operandCount("attribute_exists")),
+                Arguments.of("full", "tenant < :t AND attribute_exists(price, :p)", operandCount("attribute_exists")),
+                Arguments.of("full", "tenant = :t AND begins_with(category, :c) AND attribute_exists(price, :p)",
+                        operandCount("attribute_exists")),
+                Arguments.of("full", "tenant = :t AND attribute_exists(zz, :p)", operandCount("attribute_exists")),
+                Arguments.of("full", "tenant = :t AND category < :bool AND attribute_exists(price, :p)",
+                        operandType("<", "BOOL")),
+                Arguments.of("full", "tenant = :t AND attribute_exists(:p)", EXISTS_NEEDS_PATH),
+                Arguments.of("full", "tenant = :t AND attribute_exists(size(price))", EXISTS_NEEDS_PATH),
+                Arguments.of("full", "tenant = :t AND nope(category)", invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND ATTRIBUTE_EXISTS(price)", invalidFunction("ATTRIBUTE_EXISTS")),
+                Arguments.of("full", "tenant = :t AND SIZE(category) = :p", invalidFunction("SIZE")),
+                Arguments.of("full", "tenant = :t AND name(category)", invalidFunction("name")),
+                Arguments.of("full", "tenant = :t AND nope(:c)", invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND category = nope(price)", invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND nope(category) IN (:c)", invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND nope(price) BETWEEN :n2 AND :n4", invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND attribute_exists(nope(category))", invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND nope(category) = :missing", invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND size(nope(:missing)) = :p",
+                        "Invalid SearchConditionExpression: An expression attribute value used in "
+                        + "expression is not defined; attribute value: :missing"),
+                Arguments.of("full", "tenant = :t AND nope(name)", RESERVED_NAME),
+                Arguments.of("full", "tenant = :t AND begins_with(category, :a) AND nope(category)",
+                        invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND category < :bool AND nope(category)", operandType("<", "BOOL")),
+                Arguments.of("full", "tenant = :t AND nope(category) AND category < :bool", invalidFunction("nope")),
+                Arguments.of("full", "tenant = :t AND nope()",
+                        "Invalid SearchConditionExpression: Syntax error; token: \")\", near: \"()\""),
+                Arguments.of("full", "tenant = :t AND tenant = :u AND zz = :z", HASH_ONCE),
+                Arguments.of("full", "zz = :z AND tenant = :t AND tenant = :u", HASH_ONCE),
+                Arguments.of("full", "tenant = :t AND tenant = :p", HASH_ONCE),
+                Arguments.of("full", "tenant = :t AND (tenant = :u AND category = :c)", HASH_ONCE),
+                Arguments.of("full", "tenant = :t AND tenant = :u AND tenant < :t", HASH_EQUALS),
+                Arguments.of("full", "zz = :z", HASH_MISSING),
+                Arguments.of("full", "price = :s", HASH_MISSING),
+                Arguments.of("full", "category < :c", HASH_MISSING),
+                Arguments.of("full", "category = :c OR price = :p", HASH_MISSING),
+                Arguments.of("full", "category.x = :c", NESTED),
+                Arguments.of("full", "tenant = :t AND zz = :z AND category < :c", notInSchema("zz")),
+                Arguments.of("full", "tenant = :t AND category < :c AND zz = :z",
+                        operator("<", "category", "S")),
+                Arguments.of("full", "tenant = :t AND price = :s AND category < :c",
+                        typeMismatch("price", "S", "N")),
+                Arguments.of("full", "tenant = :p AND zz = :z", typeMismatch("tenant", "N", "S")),
+                Arguments.of("full", "zz = :z AND tenant = :p", notInSchema("zz")),
+                Arguments.of("full", "tenant = :t AND category < :p", operator("<", "category", "S")),
+                Arguments.of("full", "tenant = :t AND :c > category", operator(">", "category", "S")),
+                Arguments.of("full", "tenant = :t AND category <= :c", operator("<=", "category", "S")),
+                Arguments.of("full", "tenant = :t AND category >= :c", operator(">=", "category", "S")),
+                Arguments.of("full", "tenant = :t AND category BETWEEN :c1 AND :c2",
+                        operator("BETWEEN", "category", "S")),
+                Arguments.of("full", "tenant = :t AND price IN (:p, :s)", typeMismatch("price", "S", "N")),
+                Arguments.of("full", "tenant = :t AND category IN (:a, :p)",
+                        typeMismatch("category", "N", "S")),
+                Arguments.of("full", "tenant = :t AND price BETWEEN :s AND :z",
+                        typeMismatch("price", "S", "N")),
+                Arguments.of("full", "tenant = :t AND attribute_exists(zz)", notInSchema("zz")),
+                Arguments.of("full", "tenant = :t AND bin < :bb", operator("<", "bin", "B")),
+                Arguments.of("full", "tenant = :t AND bin BETWEEN :bb AND :bb",
+                        operator("BETWEEN", "bin", "B")),
+                Arguments.of("full", "tenant = :t AND bin = :a", typeMismatch("bin", "S", "B")),
+                Arguments.of("bare", "tenant < :t", notInSchema("tenant")),
+                Arguments.of("bare", "tenant = :t", notInSchema("tenant")),
+                Arguments.of("bare", "tenant = :t OR price = :p", notInSchema("tenant")),
+                Arguments.of("bare", "begins_with(tenant, :t)", function("begins_with")),
+                Arguments.of("filters", "category < :c", operator("<", "category", "S")),
+                Arguments.of("filters", "tenant = :t", notInSchema("tenant")),
+                Arguments.of("filters", "price = :s", typeMismatch("price", "S", "N")));
+    }
+
+    @ParameterizedTest
+    @Order(49)
+    @MethodSource("searchConditionRefusals")
+    void searchVectorsRefusesASearchConditionInTheAwsOrder(String index, String expression,
+                                                           String message) throws Exception {
+        expectValidation("SearchVectors", search(FILTERS, index, 10, """
+            ,
+            "SearchConditionExpression": "%s",
+            "ExpressionAttributeValues": %s
+            """.formatted(expression, valuesFor(expression))), message);
+    }
+
+    private static final String UNUSED_VALUE_X = "Value provided in ExpressionAttributeValues unused in "
+            + "expressions: keys: {:x}";
+    private static final String UNUSED_NAME_X = "Value provided in ExpressionAttributeNames unused in "
+            + "expressions: keys: {#x}";
+    private static final String EMPTY_NAMES = "ExpressionAttributeNames must not be empty";
+    private static final String EMPTY_VALUES = "ExpressionAttributeValues must not be empty";
+    private static final String VALUES_NEED_EXPRESSION = "ExpressionAttributeValues can only be "
+            + "specified when using expressions";
+    private static final String NAMES_NEED_EXPRESSION = "ExpressionAttributeNames can only be "
+            + "specified when using expressions";
+    private static final String UNDEFINED_ZZ = "Invalid ProjectionExpression: An expression attribute "
+            + "name used in the document path is not defined; attribute name: #zz";
+    private static final String MISSING_TABLE = "VectorNoSuchFilterTable";
+    private static final String TENANT_EQUALS = "\"tenant = :t\"";
+    private static final String T_VALUES = "{\":t\": {\"S\": \"t1\"}}";
+    private static final String TX_VALUES = "{\":t\": {\"S\": \"t1\"}, \":x\": {\"S\": \"x\"}}";
+    private static final String X_VALUES = "{\":x\": {\"S\": \"x\"}}";
+    private static final String X_NAMES = "{\"#x\": \"x\"}";
+    private static final String CX_NAMES = "{\"#c\": \"category\", \"#x\": \"x\"}";
+    private static final String C_NAMES = "{\"#c\": \"category\"}";
+    private static final String LONG_CONDITION = "\"tenant = :t" + " ".repeat(4086) + "\"";
+    private static final String DEEP_CONDITION = "\"" + "NOT ".repeat(25000) + "tenant = :t\"";
+    private static final String LONG_PROJECTION = "\"category" + " ".repeat(4089) + "\"";
+    private static final String CONDITION_TOO_LONG = "Invalid SearchConditionExpression: Expression size "
+            + "has exceeded the maximum allowed size;";
+    private static final String PROJECTION_TOO_LONG = "Invalid ProjectionExpression: Expression size has "
+            + "exceeded the maximum allowed size;";
+
+    private static String members(String condition, String values, String names, String projection) {
+        StringBuilder members = new StringBuilder();
+        if (condition != null) {
+            members.append(",\n\"SearchConditionExpression\": ").append(condition);
+        }
+        if (values != null) {
+            members.append(",\n\"ExpressionAttributeValues\": ").append(values);
+        }
+        if (names != null) {
+            members.append(",\n\"ExpressionAttributeNames\": ").append(names);
+        }
+        if (projection != null) {
+            members.append(",\n\"ProjectionExpression\": ").append(projection);
+        }
+        return members.toString();
+    }
+
+    static Stream<Arguments> searchChecksBeforeTheTableLookup() {
+        return Stream.of(
+                Arguments.of(FILTERS, members(TENANT_EQUALS, TX_VALUES, null, null), UNUSED_VALUE_X),
+                Arguments.of(FILTERS, members(TENANT_EQUALS, T_VALUES, X_NAMES, null), UNUSED_NAME_X),
+                Arguments.of(FILTERS, members(TENANT_EQUALS, TX_VALUES, X_NAMES, null), UNUSED_NAME_X),
+                Arguments.of(FILTERS, members("\"tenant = :t AND attribute_exists(category.x)\"", TX_VALUES,
+                        null, null), NESTED),
+                Arguments.of(FILTERS, members("\"attribute_exists(price)\"", X_VALUES, null, null),
+                        UNUSED_VALUE_X),
+                Arguments.of(FILTERS, members(TENANT_EQUALS, T_VALUES, CX_NAMES, "\"#c\""), UNUSED_NAME_X),
+                Arguments.of(FILTERS, members(TENANT_EQUALS, null, "{}", null), EMPTY_NAMES),
+                Arguments.of(FILTERS, members("\"tenant = :t AND\"", "{}", null, null), EMPTY_VALUES),
+                Arguments.of(FILTERS, members("\"attribute_exists(price)\"", "{}", "{}", null), EMPTY_NAMES),
+                Arguments.of(FILTERS, members("\"attribute_exists(price)\"", "{}", null, "\"#zz\""),
+                        EMPTY_VALUES),
+                Arguments.of(FILTERS, members("\"tenant = :t AND attribute_exists(category.x)\"", T_VALUES,
+                        null, "\"#zz\""), UNDEFINED_ZZ),
+                Arguments.of(FILTERS, members("\"tenant = :t AND\"", null, null, "\"a,,b\""),
+                        "Invalid ProjectionExpression: Syntax error; token: \",\", near: \",,b\""),
+                Arguments.of(FILTERS, members(null, T_VALUES, null, null), VALUES_NEED_EXPRESSION),
+                Arguments.of(FILTERS, members(null, null, X_NAMES, null), NAMES_NEED_EXPRESSION),
+                Arguments.of(FILTERS, members(null, T_VALUES, X_NAMES, null), NAMES_NEED_EXPRESSION),
+                Arguments.of(FILTERS, members(null, T_VALUES, C_NAMES, "\"#c\""), VALUES_NEED_EXPRESSION),
+                Arguments.of(FILTERS, members(null, T_VALUES, null, "\"#zz\""), VALUES_NEED_EXPRESSION),
+                Arguments.of(FILTERS, members(null, null, CX_NAMES, "\"#c\""), UNUSED_NAME_X),
+                Arguments.of(FILTERS, members(null, null, C_NAMES, "\"#c\""), "SearchConditionExpression "
+                        + "must be provided when SearchSchema has a HASH key"),
+                Arguments.of(MISSING_TABLE, members("\"tenant = :t AND nope(category)\"", T_VALUES, null, null),
+                        invalidFunction("nope")),
+                Arguments.of(MISSING_TABLE, members(TENANT_EQUALS, TX_VALUES, null, null), UNUSED_VALUE_X),
+                Arguments.of(MISSING_TABLE, members(TENANT_EQUALS, T_VALUES, null, "\"#zz\""), UNDEFINED_ZZ),
+                Arguments.of(MISSING_TABLE, members("\"attribute_exists(price)\"", "{}", null, null),
+                        EMPTY_VALUES),
+                Arguments.of(MISSING_TABLE, members(null, T_VALUES, null, null), VALUES_NEED_EXPRESSION),
+                Arguments.of(MISSING_TABLE, members(LONG_CONDITION, T_VALUES, null, null), CONDITION_TOO_LONG),
+                Arguments.of(MISSING_TABLE, members(DEEP_CONDITION, T_VALUES, null, null), CONDITION_TOO_LONG),
+                Arguments.of(MISSING_TABLE, members(TENANT_EQUALS, T_VALUES, null, LONG_PROJECTION),
+                        PROJECTION_TOO_LONG),
+                Arguments.of(MISSING_TABLE, members(LONG_CONDITION, T_VALUES, null, LONG_PROJECTION),
+                        PROJECTION_TOO_LONG),
+                Arguments.of(FILTERS, members(LONG_CONDITION, T_VALUES, null, "\"#zz\""), UNDEFINED_ZZ),
+                Arguments.of(FILTERS, members(LONG_CONDITION, "{}", null, null), EMPTY_VALUES));
+    }
+
+    @ParameterizedTest(name = "[{index}] {0}: {2}")
+    @Order(50)
+    @MethodSource("searchChecksBeforeTheTableLookup")
+    void searchVectorsChecksTheExpressionsBeforeItLooksUpTheTable(String table, String extraMembers,
+                                                                  String message) {
+        expectValidation("SearchVectors", search(table, "full", 10, extraMembers), message);
+    }
+
+    @Test
+    @Order(51)
+    void searchVectorsAcceptsAProjectionThatUsesANameAlias() throws Exception {
+        JsonNode response = json("SearchVectors", search(FILTERS, "full", 10,
+                members(TENANT_EQUALS, T_VALUES, C_NAMES, "\"#c\"")));
+        assertFalse(response.path("SearchResults").isEmpty());
+        boolean projected = false;
+        for (JsonNode result : response.path("SearchResults")) {
+            List<String> attributes = new ArrayList<>();
+            result.path("Item").fieldNames().forEachRemaining(attributes::add);
+            assertTrue(List.of("category").containsAll(attributes));
+            projected |= !attributes.isEmpty();
+        }
+        assertTrue(projected);
     }
 
 }

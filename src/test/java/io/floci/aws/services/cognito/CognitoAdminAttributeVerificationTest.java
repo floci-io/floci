@@ -9,8 +9,11 @@ import io.floci.aws.services.cognito.model.UserPool;
 import io.floci.aws.services.cognito.verification.CognitoMessageDispatcher;
 import io.floci.aws.services.cognito.verification.VerificationCode;
 import io.floci.aws.services.cognito.verification.VerificationCodeService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Duration;
 import java.util.List;
@@ -27,6 +30,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CognitoAdminAttributeVerificationTest {
 
     private CognitoService service;

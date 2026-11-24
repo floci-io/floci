@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.resource.ExplorerResource;
+import io.floci.aws.services.dynamodb.DynamoDbMapOrder;
 import io.floci.aws.services.dynamodb.DynamoDbService;
 import io.floci.aws.services.dynamodb.DynamoDbStreamService;
 import io.floci.aws.services.dynamodb.DynamoDbTtlService;
@@ -118,7 +119,8 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     @Override
     public void putItem(Scope scope, String tableName, JsonNode item, String conditionExpression,
                         JsonNode expressionAttributeNames, JsonNode expressionAttributeValues) {
-        RequestScopes.runAs(scope.accountId(), () -> dynamoDbService.putItem(tableName, item, conditionExpression,
+        RequestScopes.runAs(scope.accountId(), () -> dynamoDbService.putItem(tableName,
+                DynamoDbMapOrder.sortedItem(item), conditionExpression,
                 expressionAttributeNames, expressionAttributeValues, scope.region(), "NONE"));
     }
 
@@ -139,9 +141,10 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
                                String updateExpression, JsonNode expressionAttributeNames,
                                JsonNode expressionAttributeValues, String returnValues, String conditionExpression) {
         DynamoDbService.UpdateResult result = RequestScopes.callAs(scope.accountId(), () ->
-                dynamoDbService.updateItem(tableName, key, attributeUpdates, updateExpression,
-                        expressionAttributeNames, expressionAttributeValues, returnValues, conditionExpression,
-                        scope.region(), "NONE"));
+                dynamoDbService.updateItem(tableName, key,
+                        DynamoDbMapOrder.sortedAttributeUpdates(attributeUpdates), updateExpression,
+                        expressionAttributeNames, DynamoDbMapOrder.sortedItem(expressionAttributeValues),
+                        returnValues, conditionExpression, scope.region(), "NONE"));
         if ("ALL_NEW".equals(returnValues)) {
             return result.newItem();
         } else if ("ALL_OLD".equals(returnValues)) {
@@ -155,6 +158,7 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     public ScanPage scan(Scope scope, String tableName, String filterExpression, JsonNode expressionAttributeNames,
                          JsonNode expressionAttributeValues, JsonNode scanFilter, Integer limit,
                          JsonNode exclusiveStartKey) {
+        dynamoDbService.validateFilterExpression(filterExpression, expressionAttributeNames, expressionAttributeValues);
         DynamoDbService.ScanResult result = RequestScopes.callAs(scope.accountId(), () ->
                 dynamoDbService.scan(tableName, filterExpression, expressionAttributeNames,
                         expressionAttributeValues, scanFilter, limit, exclusiveStartKey, scope.region()));
@@ -169,6 +173,22 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
         return RequestScopes.callAs(scope.accountId(), () -> dynamoDbService.createTable(tableName, keySchema,
                 attributeDefinitions, readCapacity, writeCapacity, globalSecondaryIndexes, localSecondaryIndexes,
                 scope.region()));
+    }
+
+    @Override
+    public TableDefinition createTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
+                                       List<AttributeDefinition> attributeDefinitions, boolean onDemand,
+                                       ThroughputSpec throughput, List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                       List<LocalSecondaryIndex> localSecondaryIndexes) {
+        return RequestScopes.callAs(scope.accountId(), () -> tableService.createTable(tableName, keySchema,
+                attributeDefinitions, onDemand, throughput, globalSecondaryIndexes, localSecondaryIndexes,
+                scope.region()));
+    }
+
+    @Override
+    public TableDefinition updateThroughput(Scope scope, String tableName, ThroughputChange change) {
+        return RequestScopes.callAs(scope.accountId(),
+                () -> tableService.updateThroughput(tableName, change, scope.region()));
     }
 
     @Override

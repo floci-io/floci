@@ -19,7 +19,7 @@ Supported MVP 1 behavior:
 
 Current MVP 1 limitations:
 
-- The plaintext MQTT listener on 1883 stays permissive. The TLS listener on 8883 admits a device only when its certificate is registered and `ACTIVE` and an attached policy allows `iot:Connect` for the client id, see [Device verification on 8883](#device-verification-on-8883). `Publish`, `Subscribe` and `Receive` are not evaluated yet on either port.
+- The plaintext MQTT listener on 1883 stays permissive. The TLS listener on 8883 admits a device only when its certificate is registered and `ACTIVE` and an attached policy allows `iot:Connect` for the client id, see [Device verification on 8883](#device-verification-on-8883). A session admitted by its certificate or by a custom authorizer publishes, subscribes and receives only where its policies allow, see [Topic authorization](#topic-authorization); a plaintext session that names no authorizer, or a WebSocket session signed with SigV4, is not restricted.
 - Rules evaluate the SQL subset described under [Rule SQL](#rule-sql); substitution templates remain follow-up scope.
 
 ## MVP 2 Coverage
@@ -92,12 +92,12 @@ The function is invoked synchronously with the event AWS IoT sends (`protocolDat
 - An MQTT `CONNECT` on the plaintext listener or on [MQTT over WebSocket](#mqtt-over-websocket) that names an authorizer, in the username (`<clientId>?x-amz-customauthorizer-name=<name>`), the WebSocket URL query or the `x-amz-customauthorizer-name` upgrade header, is admitted only when the authorizer exists and is `ACTIVE`, the signature verifies for a signed authorizer, the answer is valid, `isAuthenticated` is `true`, and the returned policies allow `iot:Connect` on `arn:aws:iot:<region>:<account>:client/<clientId>`. The event carries the username with its query, the password in base64, and for WebSocket the lower-cased upgrade headers, the query string without `?` and, over TLS, the server name.
 - A refused MQTT 3.1.1 client is disconnected without a `CONNACK`; an MQTT 5 client gets `CONNACK` reason code `0x87` with the reason string AWS sends, then the connection closes.
 - A `CONNECT` over MQTT over WebSocket that names no authorizer and whose upgrade URL carries no SigV4 signature (`X-Amz-Signature` in the query) goes through the account's default authorizer (`SetDefaultAuthorizer`), as on AWS. Without a default authorizer it is refused the same way. On the plaintext listener a `CONNECT` that names no authorizer is admitted.
+- The returned policies also decide the session's `iot:Publish`, `iot:Subscribe` and `iot:Receive`, see [Topic authorization](#topic-authorization).
 
 Current limitations:
 
 - HTTPS publish does not invoke authorizers, and `enableCachingForHttp` has no effect.
 - `refreshAfterInSeconds` and `disconnectAfterInSeconds` are returned but do not schedule a re-invocation or a disconnect.
-- The returned policies decide `iot:Connect` only; publish, subscribe and receive are not checked against them.
 - The function's resource policy is not checked, so `AddPermission` for `iot.amazonaws.com` is not required.
 - A WebSocket upgrade without the `mqtt` subprotocol is not answered with AWS's 426.
 - A refused WebSocket client sees a close frame with status `1000`. AWS sends an empty close frame to an MQTT 3.1.1 client and closes the connection without a close frame after the MQTT 5 `CONNACK`.
@@ -221,7 +221,7 @@ Broker scope:
 - Accept PUBLISH payloads up to 128 KB on 1883, 8883 and `/mqtt`, the AWS IoT Core quota (packets up to 146 KB including the variable header). A larger publish disconnects the client without acknowledgement, delivery or rule evaluation, as on AWS.
 - Forward an MQTT 5 publish's user properties to each MQTT 5 subscriber unchanged and in the order sent, a repeated name included, as AWS does. An MQTT 3.1.1 subscriber gets the message without them. The publish's other MQTT 5 properties, and those of a retained message, are not forwarded.
 - Serve MQTT over TLS on 8883 next to plaintext 1883 when TLS is enabled, and verify the device certificate and its `iot:Connect` permission there.
-- Keep the plaintext listener permissive except for a `CONNECT` that names a [custom authorizer](#authorizers); topic-level authorization (`Publish`, `Subscribe`, `Receive`) is follow-up scope.
+- Keep the plaintext listener permissive except for a `CONNECT` that names a [custom authorizer](#authorizers), and authorize the topics of every session a certificate or a custom authorizer admitted, see [Topic authorization](#topic-authorization).
 - Keep MQTT broker logging minimal.
 - Validate the relevant IoT compatibility tests against the native binary before considering the phase complete.
 
@@ -237,7 +237,7 @@ curl http://localhost:4566/_floci/ca.pem -o ca.pem
 aws --endpoint-url http://localhost:4566 iot create-keys-and-certificate --set-as-active \
   --certificate-pem-outfile device.crt --private-key-outfile device.key --query certificateArn --output text
 aws --endpoint-url http://localhost:4566 iot create-policy --policy-name connect \
-  --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"iot:Connect","Resource":"arn:aws:iot:*:*:client/*"}]}'
+  --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["iot:Connect","iot:Subscribe","iot:Receive"],"Resource":"*"}]}'
 aws --endpoint-url http://localhost:4566 iot attach-policy --policy-name connect --target <certificateArn>
 mosquitto_sub -h localhost -p 8883 --cafile ca.pem --cert device.crt --key device.key -t 'devices/#'
 ```
@@ -252,7 +252,28 @@ The connection is admitted when all of these hold, otherwise the broker answers 
 
 The connection carries these condition keys: `iot:ClientId`, `aws:SourceIp`, `iot:DomainName` (the server name the client sent in the TLS handshake, absent when it dialled an IP address), `iot:Connection.Thing.IsAttached` and, only when the client id names a thing attached to the certificate with `AttachThingPrincipal`, `iot:Connection.Thing.ThingName`, `iot:Connection.Thing.ThingTypeName` and `iot:Connection.Thing.Attributes[name]`. They are also what the policy's own `${...}` resolves against, in the `Resource` and `Condition` elements and nowhere else, read by the same resolver as an IAM policy's variables: key names are case-insensitive, `${*}`, `${?}` and `${$}` stand for those three characters, and a variable with no value, the certificate variables `iot:Certificate.*` among them, leaves a `Resource` pattern matching no resource and a `Condition` value null. A document that does not declare `"Version": "2012-10-17"` has no variables at all, `${iot:ClientId}` there being the literal text it looks like.
 
-Differences from AWS: AWS rejects an unregistered, inactive or expired certificate during the TLS handshake and closes an MQTT 3.1.1 connection it does not authorize without a `CONNACK`; Floci completes the handshake and always answers with the return code, so the reason is visible to the client. Deactivating the certificate or detaching the policy takes effect on the next connect; established sessions are not dropped. Policies attached to thing groups are not consulted, and exclusive thing attachment (`thingPrincipalType`) is not modelled: the thing is always the one named by the client id.
+Differences from AWS: AWS rejects an unregistered, inactive or expired certificate during the TLS handshake and closes an MQTT 3.1.1 connection it does not authorize without a `CONNACK`; Floci completes the handshake and always answers with the return code, so the reason is visible to the client. Deactivating the certificate takes effect on the next connect, and so does a policy change for the `iot:Connect` decision; established sessions are not dropped for either. Attaching, detaching or changing a policy does apply to an established session's next publish, subscribe and delivery, see [Topic authorization](#topic-authorization). Policies attached to thing groups are not consulted, and exclusive thing attachment (`thingPrincipalType`) is not modelled: the thing is always the one named by the client id.
+
+#### Topic authorization
+
+A session admitted on 8883 by its certificate, or on 1883 or `/mqtt` by a custom authorizer (the
+default authorizer for unsigned MQTT over WebSocket), is authorized per packet against the policies attached to its certificate at that moment, or against
+the policies the authorizer returned at connect. The resources are
+`arn:aws:iot:<region>:<account>:topicfilter/<filter>` for `iot:Subscribe` and
+`arn:aws:iot:<region>:<account>:topic/<topic>` for `iot:Publish` and `iot:Receive`, reserved
+`$aws/` topics included, and the condition keys and policy variables are those of the connect, so
+`${iot:Connection.Thing.ThingName}` and `${iot:ClientId}` scope a device to its own topics.
+
+| Denied | MQTT 3.1.1 | MQTT 5 |
+|---|---|---|
+| `SUBSCRIBE` | Connection closed, no `SUBACK` | `SUBACK` reason code `0x87` for that filter, session kept |
+| `PUBLISH` QoS 1 | Connection closed, no `PUBACK` | `PUBACK` reason code `0x87`, session kept |
+| `PUBLISH` QoS 0 | Connection closed | `DISCONNECT` reason code `0x87` |
+| `Receive` | The message, retained ones and those stored for a resumed persistent session included, is not delivered to that subscriber | Same |
+
+A denied publish is neither recorded, nor evaluated by topic rules, nor delivered. A connection the
+broker closes for a denial ends with the lifecycle `disconnectReason` `AUTH_ERROR`. A plaintext session
+that names no authorizer, or a WebSocket session signed with SigV4, is not restricted. `iot:RetainPublish` is not evaluated.
 
 ### Endpoint address
 
@@ -382,7 +403,7 @@ Implementation notes:
 
 Current accepted limitation:
 
-- Certificate and `iot:Connect` checks are enforced on 8883 only; topic-level authorization is not enforced on either port yet.
+- Certificate checks are enforced on 8883 only; custom authorizers, the default one included, decide `iot:Connect` on 1883 and `/mqtt`. Topic-level authorization applies to sessions a certificate or an authorizer admitted, see [Topic authorization](#topic-authorization).
 - QoS 2 and advanced MQTT 5 property semantics remain follow-up scope.
 - At most 1,000 MQTT publishes are pending rule evaluation, running or waiting. While that many are pending, further publishes are still delivered to subscribers but their topic rules are skipped, with one warning logged until the backlog drains.
 - REST shadow errors are not published to `rejected`.

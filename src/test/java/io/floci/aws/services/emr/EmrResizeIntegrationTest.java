@@ -9,12 +9,18 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 
 import static io.floci.aws.testing.EmrRequests.emr;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * EMR instance group and fleet resizing and bootstrap action listing over the AWS JSON 1.1 wire
@@ -35,6 +41,11 @@ class EmrResizeIntegrationTest {
     @BeforeAll
     static void configure() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    /** ListInstances for one instance group of a cluster. */
+    private static Response groupInstances(String clusterId, String groupId) {
+        return emr("ListInstances", "{\"ClusterId\":\"" + clusterId + "\",\"InstanceGroupId\":\"" + groupId + "\"}");
     }
 
     private static String groupId(String type) {
@@ -448,5 +459,226 @@ class EmrResizeIntegrationTest {
         emr("ListInstanceFleets", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
                 .body("InstanceFleets", hasSize(1));
         emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
+    }
+
+    // A cluster on releaseLabel whose task group starts with these configurations: the cluster's id, then the group's.
+    private static List<String> clusterWithTaskConfigurations(String releaseLabel, String configurations) {
+        String id = emr("RunJobFlow", "{\"Name\":\"reconfigure\",\"ReleaseLabel\":\"" + releaseLabel + "\","
+                + "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,\"InstanceGroups\":["
+                + "{\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1},"
+                + "{\"InstanceRole\":\"TASK\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1,"
+                + "\"Configurations\":" + configurations + "}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        return List.of(id, emr("ListInstanceGroups", "{\"ClusterId\":\"" + id + "\"}").jsonPath()
+                .getString("InstanceGroups.find { it.InstanceGroupType == 'TASK' }.Id"));
+    }
+
+    /**
+     * MERGE "only adds or modifies the new configurations that you submit. It preserves existing configurations",
+     * where OVERWRITE, the default, replaces them.
+     */
+    @Test
+    void aMergeReconfigurationKeepsTheGroupsOtherConfigurationsAndOverwriteReplacesThem() {
+        List<String> ids = clusterWithTaskConfigurations("emr-7.5.0", "[{\"Classification\":\"yarn-site\","
+                + "\"Properties\":{\"a\":\"1\",\"b\":\"2\"}},{\"Classification\":\"core-site\","
+                + "\"Properties\":{\"x\":\"1\"}}]");
+        String listGroups = "{\"ClusterId\":\"" + ids.get(0) + "\"}";
+        String task = "InstanceGroups.find { it.Id == '" + ids.get(1) + "' }";
+
+        emr("ModifyInstanceGroups", "{\"InstanceGroups\":[{\"InstanceGroupId\":\"" + ids.get(1) + "\","
+                + "\"ReconfigurationType\":\"MERGE\",\"Configurations\":[{\"Classification\":\"yarn-site\","
+                + "\"Properties\":{\"b\":\"3\",\"c\":\"4\"}},{\"Classification\":\"hive-site\","
+                + "\"Properties\":{\"h\":\"1\"}}]}]}").then().statusCode(200);
+        emr("ListInstanceGroups", listGroups).then().statusCode(200)
+                .body(task + ".Configurations.Classification", equalTo(List.of("yarn-site", "core-site", "hive-site")))
+                // GPath answers null for a key named Properties read as ".Properties".
+                .body(task + ".Configurations[0].get('Properties')", equalTo(Map.of("a", "1", "b", "3", "c", "4")))
+                .body(task + ".Configurations[1].get('Properties').x", equalTo("1"))
+                .body(task + ".ConfigurationsVersion", equalTo(1));
+
+        emr("ModifyInstanceGroups", "{\"InstanceGroups\":[{\"InstanceGroupId\":\"" + ids.get(1) + "\","
+                + "\"Configurations\":[{\"Classification\":\"spark\",\"Properties\":{\"s\":\"1\"}}]}]}")
+                .then().statusCode(200);
+        emr("ListInstanceGroups", listGroups).then().statusCode(200)
+                .body(task + ".Configurations.Classification", equalTo(List.of("spark")))
+                .body(task + ".ConfigurationsVersion", equalTo(2));
+    }
+
+    @Test
+    void aMergeBeforeItsReleasesOrAnUnknownTypeIsRefused() {
+        String early = clusterWithTaskConfigurations("emr-6.5.0", "[]").get(1);
+        String current = clusterWithTaskConfigurations("emr-7.5.0", "[]").get(1);
+        String change = "\"Configurations\":[{\"Classification\":\"spark\",\"Properties\":{}}]";
+
+        emr("ModifyInstanceGroups", "{\"InstanceGroups\":[{\"InstanceGroupId\":\"" + early + "\","
+                + "\"ReconfigurationType\":\"MERGE\"," + change + "}]}").then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("5.35.0 and 6.6.0"));
+        emr("ModifyInstanceGroups", "{\"InstanceGroups\":[{\"InstanceGroupId\":\"" + current + "\","
+                + "\"ReconfigurationType\":\"REPLACE\"," + change + "}]}").then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("'instanceGroups.1.member.reconfigurationType'"));
+    }
+
+    /**
+     * EC2InstanceIdsToTerminate ends the named instance: the group's others, and the next group's, keep their ids and
+     * addresses, the group's counts go down, and an instance it gets later takes a new id.
+     */
+    @Test
+    void aGroupsVolumesAmiAndShrinkPolicyAreKeptAndEachInstanceListsItsVolumesAndPublicAddress() {
+        String id = emr("RunJobFlow", """
+                {"Name": "volumes", "Instances": {"KeepJobFlowAliveWhenNoSteps": true, "InstanceGroups": [
+                  {"InstanceRole": "MASTER", "InstanceType": "m5.xlarge", "InstanceCount": 1},
+                  {"InstanceRole": "CORE", "InstanceType": "m5.xlarge", "InstanceCount": 3,
+                   "CustomAmiId": "ami-0123456789abcdef0",
+                   "EbsConfiguration": {"EbsOptimized": true, "EbsBlockDeviceConfigs": [{"VolumesPerInstance": 2,
+                     "VolumeSpecification": {"VolumeType": "gp3", "SizeInGB": 100, "Iops": 3000,
+                       "Throughput": 125}}]}}]}}
+                """).then().statusCode(200).extract().path("JobFlowId");
+        try {
+            String cluster = "{\"ClusterId\":\"" + id + "\"}";
+            String core = "InstanceGroups.find { it.InstanceGroupType == 'CORE' }";
+            String coreId = emr("ListInstanceGroups", cluster).then().statusCode(200)
+                    .body(core + ".EbsOptimized", equalTo(true))
+                    .body(core + ".CustomAmiId", equalTo("ami-0123456789abcdef0"))
+                    .body(core + ".EbsBlockDevices.Device", equalTo(List.of("/dev/sdb", "/dev/sdc")))
+                    .body(core + ".EbsBlockDevices[0].VolumeSpecification.VolumeType", equalTo("gp3"))
+                    .body(core + ".EbsBlockDevices[1].VolumeSpecification.SizeInGB", equalTo(100))
+                    .extract().path(core + ".Id");
+            Response instances = groupInstances(id, coreId);
+            List<String> coreIds = instances.jsonPath().getList("Instances.Ec2InstanceId");
+            assertEquals(List.of("/dev/sdb", "/dev/sdc"),
+                    instances.jsonPath().getList("Instances[0].EbsVolumes.Device"));
+            List<String> volumeIds = instances.jsonPath().getList("Instances.EbsVolumes.flatten().VolumeId");
+            assertEquals(6, new HashSet<>(volumeIds).size(), "each of the 3 instances' 2 volumes has its own id");
+            String publicIp = instances.jsonPath().getString("Instances[0].PublicIpAddress");
+            assertTrue(instances.jsonPath().getString("Instances[0].PublicDnsName")
+                    .startsWith("ec2-" + publicIp.replace('.', '-')), publicIp);
+
+            // Shrinking to 2 ends the instance named to terminate, not the last one, which is protected.
+            emr("ModifyInstanceGroups", """
+                    {"ClusterId": "%s", "InstanceGroups": [{"InstanceGroupId": "%s", "InstanceCount": 2,
+                      "ShrinkPolicy": {"DecommissionTimeout": 60, "InstanceResizePolicy": {
+                        "InstancesToTerminate": ["%s"], "InstancesToProtect": ["%s"]}}}]}
+                    """.formatted(id, coreId, coreIds.get(0), coreIds.get(2))).then().statusCode(200);
+            assertEquals(List.of(coreIds.get(1), coreIds.get(2)),
+                    groupInstances(id, coreId).jsonPath().getList("Instances.Ec2InstanceId"));
+            emr("ListInstanceGroups", cluster).then().statusCode(200)
+                    .body(core + ".RequestedInstanceCount", equalTo(2))
+                    .body(core + ".ShrinkPolicy.DecommissionTimeout", equalTo(60))
+                    .body(core + ".ShrinkPolicy.InstanceResizePolicy.InstancesToProtect[0]", equalTo(coreIds.get(2)));
+
+            // Without the protection, the protected instance would have been the one to go: the group's last.
+            emr("ModifyInstanceGroups", """
+                    {"ClusterId": "%s", "InstanceGroups": [{"InstanceGroupId": "%s", "InstanceCount": 1,
+                      "ShrinkPolicy": {"InstanceResizePolicy": {"InstancesToProtect": ["%s"]}}}]}
+                    """.formatted(id, coreId, coreIds.get(2))).then().statusCode(200);
+            assertEquals(List.of(coreIds.get(2)),
+                    groupInstances(id, coreId).jsonPath().getList("Instances.Ec2InstanceId"));
+
+            emr("AddInstanceGroups", """
+                    {"JobFlowId": "%s", "InstanceGroups": [{"InstanceRole": "TASK", "InstanceType": "m5.xlarge",
+                      "InstanceCount": 1, "EbsConfiguration": {"EbsBlockDeviceConfigs": [{"VolumesPerInstance": 26,
+                        "VolumeSpecification": {"VolumeType": "gp3", "SizeInGB": 10}}]}}]}
+                    """.formatted(id)).then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", equalTo("There is a limit of 25 volumes per instance."));
+        } finally {
+            emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
+        }
+    }
+
+    @Test
+    void aShrinkThatNamesAnUnknownInstanceOrProtectsTooManyIsRefusedAndTwoEntriesShrinkAGroupOnce() {
+        String id = emr("RunJobFlow", """
+                {"Name": "shrinks", "Instances": {"KeepJobFlowAliveWhenNoSteps": true, "InstanceGroups": [
+                  {"InstanceRole": "MASTER", "InstanceType": "m5.xlarge", "InstanceCount": 1},
+                  {"InstanceRole": "CORE", "InstanceType": "m5.xlarge", "InstanceCount": 4}]}}
+                """).then().statusCode(200).extract().path("JobFlowId");
+        try {
+            String coreId = emr("ListInstanceGroups", "{\"ClusterId\":\"" + id + "\"}").jsonPath()
+                    .getString("InstanceGroups.find { it.InstanceGroupType == 'CORE' }.Id");
+            List<String> ids = groupInstances(id, coreId).jsonPath().getList("Instances.Ec2InstanceId");
+
+            emr("ModifyInstanceGroups", """
+                    {"ClusterId": "%s", "InstanceGroups": [{"InstanceGroupId": "%s", "InstanceCount": 3,
+                      "ShrinkPolicy": {"InstanceResizePolicy": {"InstancesToTerminate": ["i-99999999999999999"]}}}]}
+                    """.formatted(id, coreId)).then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", equalTo("Instance i-99999999999999999 is not a running instance of instance "
+                            + "group " + coreId + "."));
+            emr("ModifyInstanceGroups", """
+                    {"ClusterId": "%s", "InstanceGroups": [{"InstanceGroupId": "%s", "InstanceCount": 3,
+                      "ShrinkPolicy": {"InstanceResizePolicy": {"InstancesToProtect": ["%s", "%s", "%s", "%s"]}}}]}
+                    """.formatted(id, coreId, ids.get(0), ids.get(1), ids.get(2), ids.get(3))).then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", equalTo("Instance group " + coreId + " cannot shrink to 3 instances without "
+                            + "ending one its shrink policy protects."));
+            assertEquals(ids, groupInstances(id, coreId).jsonPath().getList("Instances.Ec2InstanceId"));
+
+            // The second entry counts from what the first leaves: the group is already down to 3.
+            emr("ModifyInstanceGroups", """
+                    {"ClusterId": "%s", "InstanceGroups": [
+                      {"InstanceGroupId": "%s", "InstanceCount": 3,
+                       "ShrinkPolicy": {"InstanceResizePolicy": {"InstancesToTerminate": ["%s"]}}},
+                      {"InstanceGroupId": "%s", "InstanceCount": 3,
+                       "ShrinkPolicy": {"InstanceResizePolicy": {"InstancesToTerminate": ["%s"]}}}]}
+                    """.formatted(id, coreId, ids.get(0), coreId, ids.get(1))).then().statusCode(200);
+            assertEquals(ids.subList(1, 4), groupInstances(id, coreId).jsonPath().getList("Instances.Ec2InstanceId"));
+            emr("ListInstanceGroups", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                    .body("InstanceGroups.find { it.Id == '" + coreId + "' }.RunningInstanceCount", equalTo(3));
+        } finally {
+            emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
+        }
+    }
+
+    @Test
+    void terminatingANamedInstanceLeavesTheOthersTheirIdsAndAddresses() {
+        String id = emr("RunJobFlow", "{\"Name\":\"named\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"InstanceGroups\":[{\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\","
+                + "\"InstanceCount\":1},{\"InstanceRole\":\"CORE\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":3},"
+                + "{\"InstanceRole\":\"TASK\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        try {
+            String cluster = "{\"ClusterId\":\"" + id + "\"}";
+            String core = emr("ListInstanceGroups", cluster).jsonPath()
+                    .getString("InstanceGroups.find { it.InstanceGroupType == 'CORE' }.Id");
+            Response before = emr("ListInstances", cluster);
+            List<String> ids = before.jsonPath().getList("Instances.Ec2InstanceId");
+            List<String> addresses = before.jsonPath().getList("Instances.PrivateIpAddress");
+            String ended = ids.get(2);
+
+            emr("ModifyInstanceGroups", "{\"ClusterId\":\"" + id + "\",\"InstanceGroups\":[{\"InstanceGroupId\":\""
+                    + core + "\",\"EC2InstanceIdsToTerminate\":[\"" + ended + "\"]}]}").then().statusCode(200);
+
+            Response after = emr("ListInstances", cluster);
+            assertEquals(List.of(ids.get(0), ids.get(1), ids.get(3), ids.get(4)),
+                    after.jsonPath().getList("Instances.Ec2InstanceId"));
+            assertEquals(List.of(addresses.get(0), addresses.get(1), addresses.get(3), addresses.get(4)),
+                    after.jsonPath().getList("Instances.PrivateIpAddress"));
+            emr("ListInstanceGroups", cluster).then().statusCode(200)
+                    .body("InstanceGroups.find { it.Id == '" + core + "' }.RequestedInstanceCount", equalTo(2))
+                    .body("InstanceGroups.find { it.Id == '" + core + "' }.RunningInstanceCount", equalTo(2));
+            emr("ModifyInstanceGroups", "{\"ClusterId\":\"" + id + "\",\"InstanceGroups\":[{\"InstanceGroupId\":\""
+                    + core + "\",\"EC2InstanceIdsToTerminate\":[\"" + ended + "\"]}]}").then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"));
+            emr("ModifyInstanceGroups", "{\"ClusterId\":\"" + id + "\",\"InstanceGroups\":[{\"InstanceGroupId\":\""
+                    + core + "\",\"EC2InstanceIdsToTerminate\":\"" + ids.get(3) + "\"}]}").then().statusCode(400)
+                    .body("__type", equalTo("SerializationException"));
+            // The group's last instance too: the task instance after it keeps its id.
+            emr("ModifyInstanceGroups", "{\"ClusterId\":\"" + id + "\",\"InstanceGroups\":[{\"InstanceGroupId\":\""
+                    + core + "\",\"EC2InstanceIdsToTerminate\":[\"" + ids.get(3) + "\"]}]}").then().statusCode(200);
+            assertEquals(List.of(ids.get(0), ids.get(1), ids.get(4)),
+                    emr("ListInstances", cluster).jsonPath().getList("Instances.Ec2InstanceId"));
+
+            emr("ModifyInstanceGroups", "{\"ClusterId\":\"" + id + "\",\"InstanceGroups\":[{\"InstanceGroupId\":\""
+                    + core + "\",\"InstanceCount\":3}]}").then().statusCode(200);
+            List<String> grown = emr("ListInstances", "{\"ClusterId\":\"" + id + "\",\"InstanceGroupId\":\"" + core
+                    + "\"}").jsonPath().getList("Instances.Ec2InstanceId");
+            assertEquals(3, grown.size());
+            assertFalse(grown.contains(ended), "an ended instance's id is not taken again");
+        } finally {
+            emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
+        }
     }
 }

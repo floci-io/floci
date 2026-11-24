@@ -19,6 +19,7 @@ import io.floci.aws.services.iam.model.IamUser;
 import io.floci.aws.services.lambdaweb.LambdaWebService;
 import io.floci.aws.services.lambdaweb.model.WebFunctionEndpoint;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -28,6 +29,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
@@ -65,6 +67,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class IamConditionContextResolverTest {
 
     private static final Instant LOCK_NOW = Instant.parse("2026-01-01T00:00:00Z");
@@ -952,8 +955,8 @@ class IamConditionContextResolverTest {
                     + "\"Key\":{\"PK\":{\"S\":\"USER_alice\"}}," + extra + "}}]}");
             JsonNode original = body.deepCopy();
             when(request.getProperty("floci.bufferedJsonBody")).thenReturn(body);
-            Map<String, List<String>> context = resolver.dynamoDbTransactionItems("dynamodb:TransactGetItems",
-                    request, "us-east-1", "000000000000").getFirst().context();
+            Map<String, List<String>> context = resolver.resolvePart("dynamodb", "dynamodb:GetItem",
+                    "dynamodb:TransactGetItems", request, body.path("TransactItems").path(0).path("Get"), "us-east-1");
             assertEquals(List.of("ALL_ATTRIBUTES"), context.get("dynamodb:Select"));
             assertEquals(List.of("PK"), context.get("dynamodb:Attributes"));
             assertEquals(List.of("USER_alice"), context.get("dynamodb:LeadingKeys"));

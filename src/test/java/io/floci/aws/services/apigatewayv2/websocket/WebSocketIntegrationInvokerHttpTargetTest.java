@@ -7,9 +7,12 @@ import io.floci.aws.services.apigateway.VtlTemplateEngine;
 import io.floci.aws.services.apigatewayv2.model.Integration;
 import io.floci.aws.services.apigatewayv2.websocket.WebSocketIntegrationInvoker.IntegrationResult;
 import io.floci.aws.services.lambda.LambdaService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -29,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class WebSocketIntegrationInvokerHttpTargetTest {
 
     private WebSocketIntegrationInvoker invoker;

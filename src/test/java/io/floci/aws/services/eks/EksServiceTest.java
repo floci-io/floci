@@ -53,10 +53,14 @@ import io.floci.aws.services.eks.model.ResourcesVpcConfig;
 import io.floci.aws.services.eks.model.StorageConfig;
 import io.floci.aws.services.eks.model.Update;
 import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
+import io.floci.aws.services.eks.model.UpdateParam;
+import io.floci.aws.services.eks.model.UpgradePolicy;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
@@ -87,6 +91,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -99,6 +104,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class EksServiceTest {
 
     private EksService eksService;
@@ -403,6 +409,45 @@ class EksServiceTest {
     }
 
     @Test
+    void turningAutoModeOnGivesTheRunningNodeBlockStorageAndAPoolChangeDoesNotReapplyIt() {
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Cluster> clusterStore = new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+        Cluster running = new Cluster();
+        running.setName("auto-running");
+        running.setArn("arn:aws:eks:us-east-1:000000000000:cluster/auto-running");
+        running.setStatus(ClusterStatus.ACTIVE);
+        running.setContainerId("k3s-auto-running");
+        running.setKubernetesNetworkConfig(new KubernetesNetworkConfig());
+        clusterStore.putForAccount("000000000000", EksService.clusterKey("us-east-1", "auto-running"), running);
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        EksAddonService addons = mock(EksAddonService.class);
+        when(addons.recordUpdate(any(), anyString(), any(), any(), any()))
+                .thenReturn(new Update("u", "Successful", "AutoModeUpdate", List.of(), 0, List.of()));
+        EksService service = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
+                new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
+                new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
+                        new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class), addons);
+        KubernetesNetworkConfig loadBalancing = new KubernetesNetworkConfig();
+        loadBalancing.setElasticLoadBalancing(new ElasticLoadBalancing(true));
+        String nodeRole = "arn:aws:iam::000000000000:role/eks-auto-node";
+
+        service.updateClusterConfig("auto-running", new UpdateClusterConfigRequest(null, null, null, null, null,
+                new ComputeConfig(true, List.of("general-purpose", "system"), nodeRole),
+                new StorageConfig(new BlockStorage(true)), loadBalancing));
+
+        ArgumentCaptor<Cluster> applied = ArgumentCaptor.forClass(Cluster.class);
+        verify(clusterManager).applyBlockStorage(eq("k3s-auto-running"), applied.capture());
+        assertEquals(Boolean.TRUE, applied.getValue().getStorageConfig().blockStorage().enabled());
+
+        service.updateClusterConfig("auto-running", new UpdateClusterConfigRequest(null, null, null, null, null,
+                new ComputeConfig(true, List.of("general-purpose"), nodeRole),
+                new StorageConfig(new BlockStorage(true)), loadBalancing));
+
+        verify(clusterManager, times(1)).applyBlockStorage(anyString(), any());
+    }
+
+    @Test
     void initRestoresPersistedClustersAfterARestart() {
         // A cluster restored from eks-clusters.json after a Floci/Docker restart (#2609) has no
         // container attached — init must re-latch it and hand it back to the readiness poller.
@@ -634,6 +679,33 @@ class EksServiceTest {
         assertThrows(IllegalStateException.class, () -> service.deleteCluster("running-cluster"));
 
         assertEquals(ClusterStatus.ACTIVE, service.describeCluster("running-cluster").getStatus());
+    }
+
+    @Test
+    void deletingAClusterEndsItsNodeInEc2BeforeDeletingItsSecurityGroup() {
+        Cluster cluster = activeCluster();
+        cluster.setArn("arn:aws:eks:us-east-1:000000000000:cluster/running-cluster");
+        ResourcesVpcConfig vpc = new ResourcesVpcConfig();
+        vpc.setVpcId("vpc-1");
+        vpc.setClusterSecurityGroupId("sg-cluster");
+        cluster.setResourcesVpcConfig(vpc);
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.deriveClusterNodeInstanceId(cluster, "us-east-1", "000000000000")).thenReturn("i-0de00node");
+        Ec2Service ec2 = mock(Ec2Service.class);
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
+        clusterStore.putForAccount("000000000000", EksService.clusterKey("us-east-1", cluster.getName()), cluster);
+        EksService service = new EksService(fixedStorageFactory(clusterStore), testConfig(false, false),
+                new RegionResolver("us-east-1", "000000000000"), clusterManager, ec2,
+                new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
+                        new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        service.deleteCluster(cluster.getName());
+
+        InOrder order = inOrder(clusterManager, ec2);
+        order.verify(clusterManager).stopCluster(cluster);
+        order.verify(ec2).endClusterNodeInstance("000000000000", "us-east-1", "i-0de00node");
+        order.verify(ec2).deleteSecurityGroup("us-east-1", "sg-cluster");
     }
 
     private static Cluster activeCluster() {
@@ -1045,13 +1117,109 @@ class EksServiceTest {
             vpc.setEndpointPublicAccess(false);
             vpc.setPublicAccessCidrs(List.of(cidr));
             AwsException e = assertThrows(AwsException.class, () -> service.updateClusterConfig(
-                    "cidr-cluster", new UpdateClusterConfigRequest(vpc, null, null, null)), cidr);
+                    "cidr-cluster", new UpdateClusterConfigRequest(vpc, null, null, null, null)), cidr);
             assertEquals("InvalidParameterException", e.getErrorCode(), cidr);
             ResourcesVpcConfig stored = service.describeCluster("cidr-cluster").getResourcesVpcConfig();
             assertEquals(Boolean.TRUE, stored.getEndpointPublicAccess(), cidr);
             assertEquals(List.of("0.0.0.0/0"), stored.getPublicAccessCidrs(), cidr);
         }
         verify(addons, never()).recordUpdate(any(), anyString(), any(), any(), any());
+    }
+
+    @Test
+    void createClusterGivesExtendedSupportUnlessTheRequestAsksForStandard() {
+        CreateClusterRequest noSupportType = new CreateClusterRequest();
+        noSupportType.setName("policy-default");
+        noSupportType.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        noSupportType.setUpgradePolicy(new UpgradePolicy(null));
+        assertEquals(new UpgradePolicy("EXTENDED"), eksService.createCluster(noSupportType).getUpgradePolicy());
+
+        CreateClusterRequest standard = new CreateClusterRequest();
+        standard.setName("policy-standard");
+        standard.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        standard.setUpgradePolicy(new UpgradePolicy("STANDARD"));
+        eksService.createCluster(standard);
+        assertEquals(new UpgradePolicy("STANDARD"), eksService.describeCluster("policy-standard").getUpgradePolicy());
+
+        CreateClusterRequest bogus = new CreateClusterRequest();
+        bogus.setName("policy-bogus");
+        bogus.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        bogus.setUpgradePolicy(new UpgradePolicy("standard"));
+        AwsException e = assertThrows(AwsException.class, () -> eksService.createCluster(bogus));
+        assertEquals("InvalidParameterException", e.getErrorCode());
+        assertEquals("Invalid supportType 'standard'. Valid values: STANDARD | EXTENDED", e.getMessage());
+        assertFalse(eksService.listClusters().contains("policy-bogus"));
+    }
+
+    @Test
+    void standardSupportIsRefusedForAVersionPastItsEndOfStandardSupport() {
+        CreateClusterRequest create = new CreateClusterRequest();
+        create.setName("policy-retired");
+        create.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        create.setVersion("1.30");
+        create.setUpgradePolicy(new UpgradePolicy("STANDARD"));
+        AwsException refused = assertThrows(AwsException.class, () -> eksService.createCluster(create));
+        assertEquals("InvalidParameterException", refused.getErrorCode());
+        assertEquals("The requested Kubernetes version \"1.30\" is only supported under extended support. "
+                + "Please change the supportType to extended support to create the cluster.", refused.getMessage());
+        assertFalse(eksService.listClusters().contains("policy-retired"));
+
+        create.setUpgradePolicy(null);
+        eksService.createCluster(create);
+        AwsException update = assertThrows(AwsException.class, () -> eksService.updateClusterConfig("policy-retired",
+                new UpdateClusterConfigRequest(null, null, null, new UpgradePolicy("STANDARD"), null)));
+        assertEquals("InvalidParameterException", update.getErrorCode());
+        assertEquals("The Kubernetes version \"1.30\" is not in standard support. Please update the cluster to a "
+                + "version in standard support to change the supportType", update.getMessage());
+        assertEquals(new UpgradePolicy("EXTENDED"), eksService.describeCluster("policy-retired").getUpgradePolicy());
+    }
+
+    @Test
+    void standardSupportIsAcceptedForAVersionTheCalendarDoesNotListYet() {
+        CreateClusterRequest create = new CreateClusterRequest();
+        create.setName("policy-newest");
+        create.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        create.setVersion("1.38");
+        create.setUpgradePolicy(new UpgradePolicy("STANDARD"));
+
+        assertEquals(new UpgradePolicy("STANDARD"), eksService.createCluster(create).getUpgradePolicy());
+    }
+
+    @Test
+    void aClusterStoredBeforeFlociKeptTheUpgradePolicyReportsExtendedSupport() throws Exception {
+        // AWS gave existing clusters extended support too.
+        ObjectMapper mapper = new ObjectMapper();
+        Cluster stored = mapper.readValue("{\"name\":\"old\"}", Cluster.class);
+
+        assertEquals("EXTENDED", mapper.valueToTree(stored).path("upgradePolicy").path("supportType").asText());
+    }
+
+    @Test
+    void updateClusterConfigRecordsTheUpgradePolicyAsJsonAndRefusesAnUnknownSupportType() {
+        EksAddonService addons = mock(EksAddonService.class);
+        Update recorded = new Update("u", "Successful", "UpgradePolicyUpdate", List.of(), 0, List.of());
+        when(addons.recordUpdate(any(), anyString(), any(), any(), any())).thenReturn(recorded);
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, ec2Service,
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class), addons);
+        CreateClusterRequest create = new CreateClusterRequest();
+        create.setName("policy-update");
+        create.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        service.createCluster(create);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.updateClusterConfig("policy-update",
+                new UpdateClusterConfigRequest(null, null, null, new UpgradePolicy("LONG"), null)));
+        assertEquals("InvalidParameterException", e.getErrorCode());
+        assertEquals(new UpgradePolicy("EXTENDED"), service.describeCluster("policy-update").getUpgradePolicy());
+        verify(addons, never()).recordUpdate(any(), anyString(), any(), any(), any());
+
+        UpdateClusterConfigRequest request =
+                new UpdateClusterConfigRequest(null, null, null, new UpgradePolicy("STANDARD"), null);
+        service.updateClusterConfig("policy-update", request);
+
+        verify(addons).recordUpdate(any(), eq("UpgradePolicyUpdate"),
+                eq(List.of(new UpdateParam("UpgradePolicy", "{\"supportType\":\"STANDARD\"}"))), any(), eq(request));
+        assertEquals(new UpgradePolicy("STANDARD"), service.describeCluster("policy-update").getUpgradePolicy());
     }
 
     @Test
@@ -1073,7 +1241,7 @@ class EksServiceTest {
                 create.setAccessConfig(new AccessConfig(modes.get(from), null));
                 service.createCluster(create);
                 UpdateClusterConfigRequest request = new UpdateClusterConfigRequest(
-                        null, null, new AccessConfig(modes.get(to), null), null);
+                        null, null, new AccessConfig(modes.get(to), null), null, null);
                 if (to == from + 1) {
                     service.updateClusterConfig(name, request);
                     assertEquals(modes.get(to), service.describeCluster(name).getAccessConfig()

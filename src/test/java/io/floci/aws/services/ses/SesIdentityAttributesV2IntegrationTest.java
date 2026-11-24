@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -15,15 +17,10 @@ import static org.hamcrest.Matchers.nullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesIdentityAttributesV2IntegrationTest {
 
-    private static final String AUTH_HEADER =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
-
     @Test
     @Order(1)
     void createEmailIdentity_setsUpDomain() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"EmailIdentity": "v2-attrs.floci.test"}
                 """)
@@ -37,7 +34,7 @@ class SesIdentityAttributesV2IntegrationTest {
         // block carrying only BehaviorOnMxFailure and omits the inner
         // MailFromDomain / MailFromDomainStatus fields.
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/identities/v2-attrs.floci.test")
         .then()
@@ -51,9 +48,7 @@ class SesIdentityAttributesV2IntegrationTest {
     @Test
     @Order(2)
     void putEmailIdentityMailFromAttributes_setsDomain() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                   "MailFromDomain": "mail.v2-attrs.floci.test",
@@ -70,7 +65,7 @@ class SesIdentityAttributesV2IntegrationTest {
     @Order(3)
     void getEmailIdentity_includesMailFromAttributes() {
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/identities/v2-attrs.floci.test")
         .then()
@@ -83,9 +78,7 @@ class SesIdentityAttributesV2IntegrationTest {
     @Test
     @Order(4)
     void putEmailIdentityMailFromAttributes_emptyDomain_clears() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"MailFromDomain": ""}
                 """)
@@ -98,7 +91,7 @@ class SesIdentityAttributesV2IntegrationTest {
         // the block stays, BehaviorOnMxFailure resets to USE_DEFAULT_VALUE,
         // and the inner domain / status fields drop out.
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/identities/v2-attrs.floci.test")
         .then()
@@ -111,9 +104,7 @@ class SesIdentityAttributesV2IntegrationTest {
     @Test
     @Order(5)
     void putEmailIdentityMailFromAttributes_unknownIdentity_returnsBadRequest() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"MailFromDomain": "mail.ghost.floci.test"}
                 """)
@@ -128,9 +119,7 @@ class SesIdentityAttributesV2IntegrationTest {
     @Test
     @Order(11)
     void putEmailIdentityFeedbackAttributes_unknownIdentity_returnsBadRequest() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"EmailForwardingEnabled": true}
                 """)
@@ -146,9 +135,7 @@ class SesIdentityAttributesV2IntegrationTest {
     @Test
     @Order(6)
     void putEmailIdentityMailFromAttributes_invalidJson_returns400() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("[1,2,3]")
         .when()
             .put("/v2/email/identities/v2-attrs.floci.test/mail-from")
@@ -161,9 +148,7 @@ class SesIdentityAttributesV2IntegrationTest {
     @Test
     @Order(7)
     void putEmailIdentityMailFromAttributes_missingBody_returns400() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .put("/v2/email/identities/v2-attrs.floci.test/mail-from")
         .then()
@@ -174,9 +159,7 @@ class SesIdentityAttributesV2IntegrationTest {
     @Test
     @Order(8)
     void putEmailIdentityMailFromAttributes_missingMailFromDomainField_returns400() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"BehaviorOnMxFailure": "USE_DEFAULT_VALUE"}
                 """)
@@ -190,9 +173,7 @@ class SesIdentityAttributesV2IntegrationTest {
     @Test
     @Order(9)
     void putEmailIdentityMailFromAttributes_mailFromDomainAsObject_returns400() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"MailFromDomain": {"foo": "bar"}}
                 """)
@@ -206,9 +187,7 @@ class SesIdentityAttributesV2IntegrationTest {
     @Test
     @Order(10)
     void putEmailIdentityMailFromAttributes_unknownBehavior_returns400() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {
                   "MailFromDomain": "mail.v2-attrs.floci.test",
@@ -227,9 +206,7 @@ class SesIdentityAttributesV2IntegrationTest {
     @Test
     @Order(20)
     void putEmailIdentityDkimAttributes_unknownIdentity_returnsBadRequest() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"SigningEnabled": true}
                 """)
@@ -247,9 +224,7 @@ class SesIdentityAttributesV2IntegrationTest {
     void putEmailIdentityDkimAttributes_emailFormatWithUnregisteredParent_returnsBadRequest() {
         // Real SES v2 reports the parent domain (not the full email identity)
         // in the error message even when the input is email-formatted.
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"SigningEnabled": true}
                 """)
@@ -269,18 +244,14 @@ class SesIdentityAttributesV2IntegrationTest {
         // whose parent domain is registered, but persists nothing — DKIM is a
         // domain-level concept. The parent domain's DkimAttributes must remain
         // untouched, and no email identity is auto-created.
-        Object parentDkimBefore = given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        Object parentDkimBefore = v2()
         .when()
             .get("/v2/email/identities/v2-attrs.floci.test")
         .then()
             .statusCode(200)
             .extract().path("DkimAttributes");
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"SigningEnabled": true}
                 """)
@@ -289,18 +260,14 @@ class SesIdentityAttributesV2IntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/identities/v2-attrs.floci.test")
         .then()
             .statusCode(200)
             .body("DkimAttributes", equalTo(parentDkimBefore));
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .get("/v2/email/identities/orphan@v2-attrs.floci.test")
         .then()
@@ -310,9 +277,7 @@ class SesIdentityAttributesV2IntegrationTest {
     @Test
     @Order(23)
     void createEmailIdentity_duplicate_returnsAlreadyExists() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
             .body("""
                 {"EmailIdentity": "v2-attrs.floci.test"}
                 """)
@@ -328,9 +293,7 @@ class SesIdentityAttributesV2IntegrationTest {
     @Test
     @Order(24)
     void deleteEmailIdentity_unknownIdentity_returnsNotFound() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+        v2()
         .when()
             .delete("/v2/email/identities/ghost-delete.floci.test")
         .then()

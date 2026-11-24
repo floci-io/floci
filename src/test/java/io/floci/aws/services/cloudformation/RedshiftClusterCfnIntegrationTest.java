@@ -23,6 +23,7 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static io.floci.aws.services.redshift.RedshiftConnections.waitForConnection;
 import static io.restassured.RestAssured.given;
@@ -46,6 +47,7 @@ class RedshiftClusterCfnIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260903/us-east-1/cloudformation/aws4_request";
     private static final String REDSHIFT_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260903/us-east-1/redshift/aws4_request";
+    private static final String REDSHIFT_ARN = "arn:aws:redshift:us-east-1:000000000000:";
 
     private final List<String> stacksToCleanup = new ArrayList<>();
 
@@ -177,7 +179,8 @@ class RedshiftClusterCfnIntegrationTest {
                     "MasterUsername": "admin",
                     "MasterUserPassword": "Secret12345",
                     "ClusterType": "single-node",
-                    "DBName": "dev"
+                    "DBName": "dev",
+                    "Tags": [{"Key": "team", "Value": "data"}]
                   }
                 }
               },
@@ -200,6 +203,7 @@ class RedshiftClusterCfnIntegrationTest {
         assertNotNull(portStr, "Endpoint.Port output must not be null");
         int port = Integer.parseInt(portStr);
         assertTrue(port > 0, "Endpoint.Port must be a positive integer: " + port);
+        assertEquals(Map.of("team", "data"), tagsOf(REDSHIFT_ARN + "cluster:" + clusterId));
         assertNotNull(ns, "ClusterNamespaceArn output must not be null");
         assertTrue(ns.startsWith("arn:aws:redshift:"),
                 "ClusterNamespaceArn output must start with arn:aws:redshift:, got: " + ns);
@@ -279,6 +283,62 @@ class RedshiftClusterCfnIntegrationTest {
 
         assertParameterGroupNotFound(pgName);
         assertSubnetGroupNotFound(sgName);
+    }
+
+    /** A parameter group's and a subnet group's Tags reach Redshift, which reports them by the group's ARN. */
+    @Test
+    void createStackTagsTheParameterAndSubnetGroups() throws Exception {
+        String stackName = "rs-tags-it-" + System.currentTimeMillis();
+        String pgName = stackName + "-pg";
+        String sgName = stackName + "-sg";
+        stacksToCleanup.add(stackName);
+
+        String template = """
+            {
+              "Resources": {
+                "ParamGroup": {
+                  "Type": "AWS::Redshift::ClusterParameterGroup",
+                  "Properties": {
+                    "ParameterGroupName": "%s",
+                    "ParameterGroupFamily": "redshift-1.0",
+                    "Description": "Tagged parameter group",
+                    "Tags": [{"Key": "env", "Value": "pg"}]
+                  }
+                },
+                "SubnetGroup": {
+                  "Type": "AWS::Redshift::ClusterSubnetGroup",
+                  "Properties": {
+                    "ClusterSubnetGroupName": "%s",
+                    "Description": "Tagged subnet group",
+                    "SubnetIds": ["subnet-12345678"],
+                    "Tags": [{"Key": "env", "Value": "sg"}]
+                  }
+                }
+              }
+            }""".formatted(pgName, sgName);
+
+        cloudFormation(stackName, "CreateStack", template);
+        describeStacks(stackName, "CREATE_COMPLETE");
+
+        assertEquals(Map.of("env", "pg"), tagsOf(REDSHIFT_ARN + "parametergroup:" + pgName));
+        assertEquals(Map.of("env", "sg"), tagsOf(REDSHIFT_ARN + "subnetgroup:" + sgName));
+
+        cloudFormation(stackName, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stackName);
+        stacksToCleanup.remove(stackName);
+    }
+
+    /** The tags Redshift's DescribeTags reports for a resource ARN. */
+    private static Map<String, String> tagsOf(String arn) {
+        String xml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", REDSHIFT_AUTH)
+            .formParam("Action", "DescribeTags")
+            .formParam("ResourceName", arn)
+        .when().post("/").then()
+            .statusCode(200)
+            .extract().asString();
+        return XmlParser.extractPairs(xml, "TaggedResources", "Key", "Value");
     }
 
     private static void cloudFormation(String stack, String action, String templateBody) {

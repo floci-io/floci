@@ -101,7 +101,9 @@ public class RedshiftContainerManager {
                 .withEnv(envVars)
                 .withCmd(List.of("postgres", "-c", "allow_system_table_mods=on", "-c", "max_connections=" + maxConnections))
                 .withDockerNetwork(config.services().redshift().dockerNetwork())
-                .withLogRotation();
+                .withLogRotation()
+                .withPushedLogs()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels("redshift", clusterIdentifier, accountId, null));
 
         int enginePort = 5432; // Default postgres port
         if (!containerDetector.isRunningInContainer()) {
@@ -220,7 +222,7 @@ public class RedshiftContainerManager {
                 info.containerId(), clusterIdentifier, endpoint.host(), endpoint.port());
 
         try {
-            Closeable stream = logStreamer.attach(
+            Closeable stream = logStreamer.attachPolled(
                     info.containerId(),
                     "/floci/redshift",
                     clusterIdentifier,
@@ -250,6 +252,9 @@ public class RedshiftContainerManager {
         String adoptedId = adoptedContainers.get(key);
         String containerId = handle == null
                 ? adoptedContainers.getOrDefault(key, containerName(accountId, clusterIdentifier)) : handle.getContainerId();
+        if (handle != null) {
+            lifecycleManager.readLogBeforeRemoval(handle.getLogStream());
+        }
         lifecycleManager.removeIfExistsStrict(containerId, true);
         releaseHandle(key, handle);
         if (containerId.equals(adoptedId)) {

@@ -231,7 +231,7 @@ class LambdaMicrovmsServicePersistenceTest {
                 "arn:aws:iam::000000000000:role/build", "s3://bucket/next.zip", null);
         LambdaMicrovmsService.RunSettings settings = new LambdaMicrovmsService.RunSettings(
                 "1.0", "arn:aws:iam::000000000000:role/runtime", List.of("ingress"), List.of("egress"),
-                3600, false, 60, 0);
+                3600, false, 60, 0, "arn:aws:kms:us-east-1:000000000000:key/run-key");
         LambdaMicrovmsService.Microvm created = first.runMicrovm(REGION, ACCOUNT_ID, "run-image", settings);
         assertEquals("PENDING", created.state);
         assertEquals(settings, created.runSettings);

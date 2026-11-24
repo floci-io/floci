@@ -3,7 +3,7 @@ package io.floci.aws.services.ses;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
@@ -14,13 +14,12 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 class SesEmailAddressInsightsV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/ca-west-1/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("ca-west-1");
     private static final String PATH = "/v2/email/email-address-insights/";
 
     @Test
     void answersEveryVerdictWithoutVdm() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"EmailAddress\":\"admin@example.com\"}")
         .when().post(PATH).then().statusCode(200)
                 .body("MailboxValidation.IsValid.ConfidenceVerdict", equalTo("LOW"))
@@ -34,7 +33,7 @@ class SesEmailAddressInsightsV2IntegrationTest {
 
     @Test
     void malformedAddressAnswersOkWithLowVerdicts() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"EmailAddress\":\"no-at-sign\"}")
         .when().post(PATH).then().statusCode(200)
                 .body("MailboxValidation.IsValid.ConfidenceVerdict", equalTo("LOW"))
@@ -43,7 +42,7 @@ class SesEmailAddressInsightsV2IntegrationTest {
 
     @Test
     void pathWithoutTrailingSlashIsServed() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"EmailAddress\":\"alice@gmail.com\"}")
         .when().post("/v2/email/email-address-insights").then().statusCode(200)
                 .body("MailboxValidation.IsValid.ConfidenceVerdict", equalTo("HIGH"));
@@ -51,7 +50,7 @@ class SesEmailAddressInsightsV2IntegrationTest {
 
     @Test
     void emptyAddressIsRejected() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"EmailAddress\":\"\"}")
         .when().post(PATH).then().statusCode(400)
                 .header("x-amzn-ErrorType", equalTo("BadRequestException"))
@@ -60,7 +59,7 @@ class SesEmailAddressInsightsV2IntegrationTest {
 
     @Test
     void missingAddressIsRejected() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{}")
         .when().post(PATH).then().statusCode(400)
                 .body("message", equalTo("Email address must not be null nor empty"));
@@ -68,7 +67,7 @@ class SesEmailAddressInsightsV2IntegrationTest {
 
     @Test
     void nonStringAddressIsASerializationError() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"EmailAddress\":1}")
         .when().post(PATH).then().statusCode(400)
                 .header("x-amzn-ErrorType", equalTo("SerializationException"));

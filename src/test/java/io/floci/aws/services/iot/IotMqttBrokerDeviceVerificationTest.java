@@ -9,6 +9,7 @@ import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.services.iot.IotService.RegisteredDevice;
 import io.floci.aws.services.iot.model.IotCertificate;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.FreePorts;
 import io.quarkus.tls.TlsConfiguration;
 import io.quarkus.tls.TlsConfigurationRegistry;
@@ -28,6 +29,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import javax.net.ssl.KeyManager;
@@ -65,6 +67,7 @@ import static org.mockito.Mockito.when;
  * and a mocked {@link IotService}: which connections are refused, with which code, what the
  * evaluation is given, and that a refusal touches nothing else.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class IotMqttBrokerDeviceVerificationTest {
 
     private static Vertx vertx;

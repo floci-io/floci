@@ -2,8 +2,10 @@ package io.floci.aws.config;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
+import io.floci.aws.testing.ParallelLocks;
 import io.smallrye.config.WithDefault;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -14,6 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class ApplicationDefaultsTest {
 
     private static JsonNode productionConfig() throws IOException {
@@ -232,6 +235,84 @@ class ApplicationDefaultsTest {
         assertEquals("3", EmulatorConfig.DockerConfig.class.getMethod("breakerFailureThreshold")
                 .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
         assertEquals("5", EmulatorConfig.DockerConfig.class.getMethod("breakerProbeIntervalSeconds")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+    }
+
+    // Catches: max-concurrent-launches missing from the shipped application.yml, or a yml value that
+    // silently disagrees with its @WithDefault fallback.
+    @Test
+    void productionConfigDeclaresTheContainerLaunchBoundAtItsDefault() throws IOException, NoSuchMethodException {
+        JsonNode launches = productionConfig().path("floci").path("docker").path("max-concurrent-launches");
+
+        assertFalse(launches.isMissingNode(), "max-concurrent-launches should be declared in application.yml");
+        assertEquals(0, launches.asInt(-1));
+        assertEquals("0", EmulatorConfig.DockerConfig.class.getMethod("maxConcurrentLaunches")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+    }
+
+    // Catches: events-based exit detection switched on by default before it has proven itself, or the
+    // yml and the @WithDefault disagreeing.
+    @Test
+    void productionConfigKeepsEventsBasedExitDetectionOff() throws IOException, NoSuchMethodException {
+        JsonNode flag = productionConfig().path("floci").path("docker").path("events-exit-detection");
+
+        assertFalse(flag.isMissingNode(), "events-exit-detection should be declared in application.yml");
+        assertFalse(flag.asBoolean(true));
+        assertEquals("false", EmulatorConfig.DockerConfig.class.getMethod("eventsExitDetection")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+    }
+
+    // Catches: log-poll-interval-millis missing from the shipped application.yml, or a yml value that
+    // silently disagrees with its @WithDefault fallback.
+    @Test
+    void productionConfigDeclaresTheContainerLogPollIntervalAtItsDefault() throws IOException, NoSuchMethodException {
+        JsonNode interval = productionConfig().path("floci").path("docker").path("log-poll-interval-millis");
+
+        assertFalse(interval.isMissingNode(), "log-poll-interval-millis should be declared in application.yml");
+        assertEquals(1000, interval.asInt());
+        assertEquals("1000", EmulatorConfig.DockerConfig.class.getMethod("logPollIntervalMillis")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+    }
+
+    // Catches: warm-pool-max-total shipped unbounded again, so a stack of many functions keeps one
+    // warm container per function touched, or a yml value that disagrees with the @WithDefault.
+    @Test
+    void productionConfigBoundsTheLambdaWarmPoolTotalByDefault() throws IOException, NoSuchMethodException {
+        JsonNode maxTotal = productionConfig()
+                .path("floci").path("services").path("lambda").path("warm-pool-max-total");
+
+        assertFalse(maxTotal.isMissingNode(), "warm-pool-max-total should be declared in application.yml");
+        assertEquals(128, maxTotal.asInt());
+
+        WithDefault fallback = EmulatorConfig.LambdaServiceConfig.class
+                .getMethod("warmPoolMaxTotal")
+                .getAnnotation(WithDefault.class);
+        assertNotNull(fallback, "warmPoolMaxTotal should declare a fallback default");
+        assertEquals("128", fallback.value(),
+                "the @WithDefault must match application.yml, which wins over it");
+    }
+
+    // Catches: the log-driver mode switched on by default, which breaks Docker-in-Docker and remote
+    // daemons, or the yml and the @WithDefault disagreeing.
+    @Test
+    void productionConfigKeepsTheLogDriverModeOff() throws IOException, NoSuchMethodException {
+        JsonNode mode = productionConfig().path("floci").path("docker").path("log-driver-mode");
+
+        assertFalse(mode.isMissingNode(), "log-driver-mode should be declared in application.yml");
+        assertFalse(mode.asBoolean(true));
+        assertEquals("false", EmulatorConfig.DockerConfig.class.getMethod("logDriverMode")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+    }
+
+    // Catches: the log listener's port made ephemeral again, so a container created in the log-driver
+    // mode can no longer start after Floci restarts, or the yml and the @WithDefault disagreeing.
+    @Test
+    void productionConfigFixesTheLogDriverPort() throws IOException, NoSuchMethodException {
+        JsonNode port = productionConfig().path("floci").path("docker").path("log-driver-port");
+
+        assertFalse(port.isMissingNode(), "log-driver-port should be declared in application.yml");
+        assertEquals(12201, port.asInt());
+        assertEquals("12201", EmulatorConfig.DockerConfig.class.getMethod("logDriverPort")
                 .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
     }
 }
