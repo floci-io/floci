@@ -8,6 +8,7 @@ import io.floci.aws.core.storage.PersistentPathValidator;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.lifecycle.inithook.InitializationHook;
 import io.floci.aws.lifecycle.inithook.InitializationHooksRunner;
+import io.floci.aws.services.amazonmq.AmazonMqService;
 import io.floci.aws.services.amazonmq.container.RabbitMqManager;
 import io.floci.aws.services.appsync.graphql.SchemaCreationWorker;
 import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
@@ -102,6 +103,7 @@ public class EmulatorLifecycle {
     private final NeptuneContainerManager neptuneContainerManager;
     private final NeptuneProxyManager neptuneProxyManager;
     private final RabbitMqManager rabbitMqManager;
+    private final AmazonMqService amazonMqService;
     private final FlinkContainerManager flinkContainerManager;
     private final SageMakerService sageMakerService;
     private final RdsService rdsService;
@@ -150,6 +152,7 @@ public class EmulatorLifecycle {
                              NeptuneContainerManager neptuneContainerManager,
                              NeptuneProxyManager neptuneProxyManager,
                              RabbitMqManager rabbitMqManager,
+                             AmazonMqService amazonMqService,
                              FlinkContainerManager flinkContainerManager,
                              SageMakerService sageMakerService,
                              RdsService rdsService,
@@ -195,6 +198,7 @@ public class EmulatorLifecycle {
         this.neptuneContainerManager = neptuneContainerManager;
         this.neptuneProxyManager = neptuneProxyManager;
         this.rabbitMqManager = rabbitMqManager;
+        this.amazonMqService = amazonMqService;
         this.flinkContainerManager = flinkContainerManager;
         this.sageMakerService = sageMakerService;
         this.rdsService = rdsService;
@@ -305,6 +309,13 @@ public class EmulatorLifecycle {
             } catch (RuntimeException e) {
                 LOG.error("Failed to restore persisted SageMaker endpoints at startup", e);
             }
+        }
+        if (config.services().amazonmq().enabled()) {
+            // Starts the brokers' containers in the background, failing the future with the ones it could not.
+            amazonMqService.restorePersistedRuntime().exceptionally(ex -> {
+                LOG.error("Failed to restore persisted Amazon MQ brokers at startup", ex);
+                return null;
+            });
         }
         if (config.services().elbv2().enabled()) {
             elbV2Service.restorePersistedRuntime();

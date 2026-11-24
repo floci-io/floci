@@ -30,8 +30,11 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -57,6 +60,12 @@ public class AmazonMqService implements ResourceProvider {
      */
     private final StripedLocks storedBrokerLocks = new StripedLocks(256);
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
+    /**
+     * The brokers a restore is bringing back, by {@code account:key}, which the readiness poller leaves alone: their
+     * stored endpoints are the old container's until the restore keeps that container or starts a new one. In memory
+     * only, so after a crash the record keeps the endpoints the next start probes a surviving container on.
+     */
+    private final Set<String> restoringBrokers = ConcurrentHashMap.newKeySet();
 
     @Inject
     public AmazonMqService(StorageFactory storageFactory, EmulatorConfig config,
@@ -265,6 +274,190 @@ public class AmazonMqService implements ResourceProvider {
         return broker;
     }
 
+    /**
+     * Brings the persisted brokers back after Floci restarts. Shutdown removes their containers
+     * ({@link RabbitMqManager#stopAll}), so a broker stored {@code RUNNING}, or still starting, has nothing behind
+     * it. Each goes back to {@code CREATION_IN_PROGRESS} at once, and the containers start in the background, so
+     * Floci does not wait for them to report itself ready.
+     *
+     * <p>The poller leaves a broker alone while its restore runs, so its stored endpoints stay the old container's
+     * meanwhile. A broker whose container outlived Floci, as when Floci is killed, keeps that container when it still
+     * answers. Otherwise it gets a new container on its volume, where its node keeps its users, vhosts and messages,
+     * published on the host ports it had when they are free, and the poller reports it {@code RUNNING} once the
+     * console answers. A broker whose container ran under Docker's own hostname, before brokers had a fixed node
+     * name, keeps its data under a node no new container can find, and its admin password was never stored, so with
+     * no surviving container it is reported {@code CREATION_FAILED}. One whose container cannot be started is
+     * reported {@code CREATION_FAILED} too, and tried again at the next start; one {@code CreateBroker} failed for
+     * stays as it is, and one a crash left {@code DELETION_IN_PROGRESS} is deleted with its container and volume.
+     * Every broker is tried, and the ones that could not be restored fail the returned future together. A shutdown
+     * during the restore leaves the brokers not started yet {@code CREATION_IN_PROGRESS}, for the next start.
+     */
+    public CompletableFuture<Void> restorePersistedRuntime() {
+        if (config.services().amazonmq().mock()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        List<RestoringBroker> pending = new ArrayList<>();
+        RuntimeException failure = null;
+        for (AccountEntry<Broker> entry : storage.scanAllAccountEntries(key -> true)) {
+            try {
+                RestoringBroker restoring = prepareRestore(entry.accountId(), entry.key());
+                if (restoring != null) {
+                    pending.add(restoring);
+                }
+            } catch (RuntimeException e) {
+                failure = addRestoreFailure(failure, entry.accountId(), entry.key(), e);
+            }
+        }
+        RuntimeException prepareFailure = failure;
+        return CompletableFuture.runAsync(() -> {
+            RuntimeException restoreFailure = prepareFailure;
+            for (RestoringBroker restoring : pending) {
+                if (rabbitMqManager.isShuttingDown()) {
+                    // Brokers not reached yet stay starting, which the next start restores.
+                    break;
+                }
+                try {
+                    finishRestore(restoring);
+                } catch (RabbitMqManager.ShuttingDownException e) {
+                    LOG.debugv("Amazon MQ broker {0} not restored: {1}", restoring.key(), e.getMessage());
+                } catch (RuntimeException e) {
+                    restoreFailure = addRestoreFailure(restoreFailure, restoring.accountId(), restoring.key(), e);
+                } finally {
+                    restoringBrokers.remove(restoring.accountId() + ":" + restoring.key());
+                }
+            }
+            if (restoreFailure != null) {
+                throw restoreFailure;
+            }
+        });
+    }
+
+    /** A broker the restore brings back, with the endpoints it had for keeping a container that outlived Floci. */
+    private record RestoringBroker(String accountId, String key, Broker broker, List<BrokerInstance> endpoints,
+                                   boolean deleting) {}
+
+    private static RuntimeException addRestoreFailure(RuntimeException failure, String accountId, String key,
+                                                      RuntimeException e) {
+        RuntimeException restoreFailure = new IllegalStateException("Could not restore Amazon MQ broker " + key
+                + " of account " + accountId, e);
+        if (failure == null) {
+            return restoreFailure;
+        }
+        failure.addSuppressed(restoreFailure);
+        return failure;
+    }
+
+    /** Marks a broker the restore brings back, under its lock; null for one it leaves as it is. */
+    private RestoringBroker prepareRestore(String accountId, String key) {
+        synchronized (storedBrokerLock(accountId, key)) {
+            Broker broker = storage.getForAccount(accountId, key).orElse(null);
+            if (broker == null) {
+                return null;
+            }
+            if (broker.getBrokerState() == BrokerState.DELETION_IN_PROGRESS) {
+                return new RestoringBroker(accountId, key, broker, List.of(), true);
+            }
+            // A failed broker with a node name ran before and failed to come back; one without never ran.
+            if (broker.getBrokerState() == BrokerState.CREATION_FAILED && broker.getNodeName() == null) {
+                return null;
+            }
+            List<BrokerInstance> endpoints = broker.getBrokerInstances() == null
+                    ? List.of() : List.copyOf(broker.getBrokerInstances());
+            restoringBrokers.add(accountId + ":" + key);
+            broker.setBrokerState(BrokerState.CREATION_IN_PROGRESS);
+            storage.putForAccount(accountId, key, broker);
+            return new RestoringBroker(accountId, key, broker, endpoints, false);
+        }
+    }
+
+    private void finishRestore(RestoringBroker restoring) {
+        String accountId = restoring.accountId();
+        String key = restoring.key();
+        Object lock = storedBrokerLock(accountId, key);
+        Broker broker = restoring.broker();
+        if (restoring.deleting()) {
+            rabbitMqManager.stopContainer(broker);
+            rabbitMqManager.removeBrokerStorage(broker);
+            synchronized (lock) {
+                storage.deleteForAccount(accountId, key);
+            }
+            return;
+        }
+        Broker candidate = copyForAdoption(broker, restoring.endpoints());
+        if (rabbitMqManager.adoptRunningContainer(candidate)) {
+            synchronized (lock) {
+                Broker current = storage.getForAccount(accountId, key).orElse(null);
+                if (current == null || current.getBrokerState() == BrokerState.DELETION_IN_PROGRESS) {
+                    rabbitMqManager.stopContainer(candidate);
+                    return;
+                }
+                current.setContainerId(candidate.getContainerId());
+                current.setBrokerState(BrokerState.RUNNING);
+                storage.putForAccount(accountId, key, current);
+            }
+            return;
+        }
+        if (broker.getNodeName() == null) {
+            synchronized (lock) {
+                Broker current = storage.getForAccount(accountId, key).orElse(null);
+                if (current != null && current.getBrokerState() == BrokerState.CREATION_IN_PROGRESS) {
+                    LOG.warnv("Amazon MQ broker {0} ({1}) predates fixed RabbitMQ node names, so its data cannot be "
+                            + "found again after a restart; reporting it CREATION_FAILED", current.getBrokerName(),
+                            current.getBrokerId());
+                    current.setBrokerState(BrokerState.CREATION_FAILED);
+                    current.setBrokerInstances(new ArrayList<>());
+                    storage.putForAccount(accountId, key, current);
+                }
+            }
+            return;
+        }
+        try {
+            rabbitMqManager.restoreContainer(broker);
+        } catch (RabbitMqManager.ShuttingDownException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            synchronized (lock) {
+                Broker current = storage.getForAccount(accountId, key).orElse(null);
+                if (current != null && current.getBrokerState() == BrokerState.CREATION_IN_PROGRESS) {
+                    current.setBrokerState(BrokerState.CREATION_FAILED);
+                    current.setBrokerInstances(new ArrayList<>());
+                    storage.putForAccount(accountId, key, current);
+                }
+            }
+            throw e;
+        }
+        synchronized (lock) {
+            Broker current = storage.getForAccount(accountId, key).orElse(null);
+            if (current == null || current.getBrokerState() == BrokerState.DELETION_IN_PROGRESS) {
+                // Deleted while its container started, which the delete could not stop yet.
+                rabbitMqManager.stopContainer(broker);
+                if (current == null) {
+                    rabbitMqManager.removeBrokerStorage(broker);
+                }
+                return;
+            }
+            current.setContainerId(broker.getContainerId());
+            current.setBrokerInstances(broker.getBrokerInstances());
+            current.setNodeName(broker.getNodeName());
+            current.setAmqpHostPort(broker.getAmqpHostPort());
+            current.setConsoleHostPort(broker.getConsoleHostPort());
+            storage.putForAccount(accountId, key, current);
+        }
+    }
+
+    /**
+     * The broker as its record named it before the restore cleared its endpoints, which the readiness check of a
+     * container that outlived Floci probes, kept apart from the stored broker until the container is kept.
+     */
+    private static Broker copyForAdoption(Broker broker, List<BrokerInstance> endpoints) {
+        Broker candidate = new Broker(broker.getBrokerId(), broker.getBrokerArn(), broker.getBrokerName(),
+                broker.getEngineType(), broker.getEngineVersion(), broker.getDeploymentMode(),
+                broker.getHostInstanceType());
+        candidate.setAccountId(broker.getAccountId());
+        candidate.setBrokerInstances(new ArrayList<>(endpoints));
+        return candidate;
+    }
+
     private void applyLocalEndpoints(Broker broker) {
         BrokerInstance instance = new BrokerInstance(
                 "http://localhost:15672",
@@ -288,9 +481,13 @@ public class AmazonMqService implements ResourceProvider {
             // account. Brokers stored under a bare id have moved to their Region's key at startup.
             for (AccountEntry<Broker> entry : storage.scanAllAccountEntries(key -> true)) {
                 Broker broker = entry.value();
-                if (broker.getBrokerState() == BrokerState.CREATION_IN_PROGRESS
-                        && rabbitMqManager.isReady(broker)) {
-                    markRunning(entry.accountId(), entry.key());
+                if (broker.getBrokerState() != BrokerState.CREATION_IN_PROGRESS
+                        || restoringBrokers.contains(entry.accountId() + ":" + entry.key())) {
+                    continue;
+                }
+                String console = consoleUrl(broker);
+                if (rabbitMqManager.isReady(broker)) {
+                    markRunning(entry.accountId(), entry.key(), console);
                 }
             }
         } catch (Exception e) {
@@ -301,18 +498,25 @@ public class AmazonMqService implements ResourceProvider {
     /**
      * Stores a broker that turned ready as RUNNING, read again under its lock first. The readiness check is a
      * blocking call to the broker's container, long enough for a DeleteBroker, which marks the broker under the same
-     * lock, to land in the meantime, and a broker deleted or being deleted is not written back.
+     * lock, to land in the meantime, and a broker deleted or being deleted is not written back. Nor is one whose
+     * console has changed since the check, as a restore changes it: the answer came from the console it had.
      */
-    private void markRunning(String accountId, String key) {
+    private void markRunning(String accountId, String key, String probedConsole) {
         synchronized (storedBrokerLock(accountId, key)) {
             Broker broker = storage.getForAccount(accountId, key).orElse(null);
-            if (broker == null || broker.getBrokerState() != BrokerState.CREATION_IN_PROGRESS) {
+            if (broker == null || broker.getBrokerState() != BrokerState.CREATION_IN_PROGRESS
+                    || !Objects.equals(probedConsole, consoleUrl(broker))) {
                 return;
             }
             LOG.infov("Amazon MQ broker {0} is now RUNNING", broker.getBrokerName());
             broker.setBrokerState(BrokerState.RUNNING);
             storage.putForAccount(accountId, key, broker);
         }
+    }
+
+    private static String consoleUrl(Broker broker) {
+        List<BrokerInstance> instances = broker.getBrokerInstances();
+        return instances == null || instances.isEmpty() ? null : instances.get(0).getConsoleURL();
     }
 
     /** The lock of the broker stored under {@code key} in {@code accountId}. */
