@@ -39,7 +39,7 @@ import java.util.Map;
  *   which span the two engines, rely on them.</li>
  *   <li>{@code floci.services.eks.mock=false} runs EKS clusters as real k3s containers, and
  *   {@code floci.services.eks.irsa-signing-key=true} has k3s sign projected service account tokens
- *   with the cluster's OIDC keypair. {@code EksIrsaDockerIntegrationTest} relies on them, and on IAM
+ *   with the cluster's OIDC keypair. {@code EksIrsaDockerNightlyIntegrationTest} relies on them, and on IAM
  *   enforcement to refuse a mismatched subject or an untrusted issuer.</li>
  * </ul>
  *

@@ -25,7 +25,7 @@ import java.util.Map;
  *   <li>{@link ExternalPostgresResource} starts a PostgreSQL server before Floci boots and makes it
  *   the DSQL backend, with {@code floci.services.dsql.mock=false}, so every cluster's database is
  *   on that one server instead of in a container of its own.
- *   {@code DsqlExternalBackendIntegrationTest} relies on it. A server that does not start fails
+ *   {@code DsqlExternalBackendDockerNightlyIntegrationTest} relies on it. A server that does not start fails
  *   only that class: the resource records why, and the application boots anyway.</li>
  * </ul>
  *

@@ -37,7 +37,7 @@ import static org.mockito.Mockito.when;
 /**
  * Covers the checks that never need a real Docker daemon. The parts that actually launch and
  * verify a container are proved end to end in
- * {@code EcsCredentialsProxyDockerIntegrationTest} instead: mocking the exec/callback plumbing
+ * {@code EcsCredentialsProxyDockerNightlyIntegrationTest} instead: mocking the exec/callback plumbing
  * that {@link EcsCredentialsProxy#ensureProxyOn} depends on would mostly test the mock, not the
  * behaviour a runtime that silently drops {@code LinkLocalIPs} is meant to be caught by.
  */

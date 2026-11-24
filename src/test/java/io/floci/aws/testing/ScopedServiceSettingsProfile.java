@@ -12,8 +12,8 @@ import java.util.Map;
  * <p>The overrides, and who relies on them:
  * <ul>
  *   <li>{@code floci.services.ecs.mock=false} runs ECS tasks as Docker containers.
- *   {@code EcsImagePullDockerIntegrationTest}, {@code EcsEssentialContainerExitDockerIntegrationTest}
- *   and {@code EcsLinuxParametersDockerIntegrationTest} rely on it.
+ *   {@code EcsImagePullDockerIntegrationTest}, {@code EcsEssentialContainerExitDockerNightlyIntegrationTest}
+ *   and {@code EcsLinuxParametersDockerNightlyIntegrationTest} rely on it.
  *   {@code floci.network.security-group-enforcement.enabled=false} puts security-group enforcement
  *   back to its shipped default of off, and {@code floci.services.ecs.image-pull-behavior=default}
  *   back to the shipped pull on every launch, which the shared test config swaps for
@@ -30,7 +30,7 @@ import java.util.Map;
  *   <li>{@code floci.services.ecs.host-volume-roots=/dev/null} makes {@code /dev/null} the one host
  *   path a device may take, since devices are refused by default, and
  *   {@code floci.services.ecs.allow-privileged-containers=true} lets a task definition ask for
- *   privilege. {@code EcsLinuxParametersDockerIntegrationTest} relies on them.</li>
+ *   privilege. {@code EcsLinuxParametersDockerNightlyIntegrationTest} relies on them.</li>
  *   <li>The extra CORS origins, allowed and exposed headers, and
  *   {@code floci.security.cors-allow-private-network=true} are what a browser's preflight is
  *   answered with. {@code GlobalCorsFilterIntegrationTest} relies on them.</li>

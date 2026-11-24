@@ -99,7 +99,7 @@ class RedshiftServerlessCfnIntegrationTest {
     /**
      * The metadata behaviour under test needs no PostgreSQL container, so the runtime is replaced:
      * these tests then run without Docker, and the real container and proxy are exercised by
-     * {@code RedshiftServerlessRuntimeIntegrationTest}.
+     * {@code RedshiftServerlessRuntimeDockerNightlyIntegrationTest}.
      */
     @InjectMock
     RedshiftServerlessRuntime runtime;
