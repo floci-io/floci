@@ -2092,6 +2092,30 @@ class ResourceArnBuilderTest {
                 builder.buildResources("memorydb", "memorydb:DeleteCluster", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
+    // ── Route 53 Resolver ───────────────────────────────────────────────────────
+
+    /**
+     * A Route 53 Resolver request is checked on the rule, endpoint or domain list its id names, as {@code <type>/<id>},
+     * the ARN Route 53 Resolver mints. A DNSSEC configuration's format takes a ResourceId, which the request gives as
+     * the VPC's id, so the generated table checks the configuration under the VPC's id.
+     */
+    @Test
+    void route53ResolverChecksTheResourceItsIdNames() {
+        setJsonBody("{\"ResolverRuleId\":\"rslvr-rr-abc123\"}");
+        assertEquals(List.of("arn:aws:route53resolver:us-east-1:000000000000:resolver-rule/rslvr-rr-abc123"),
+                builder.buildResources("route53resolver", "route53resolver:GetResolverRule", ctx, "us-east-1",
+                        ACCOUNT, "aws"));
+        setJsonBody("{\"ResourceId\":\"vpc-0abc\"}");
+        assertEquals(List.of("arn:aws:route53resolver:us-east-1:000000000000:resolver-dnssec-config/vpc-0abc"),
+                builder.buildResources("route53resolver", "route53resolver:GetResolverDnssecConfig", ctx,
+                        "us-east-1", ACCOUNT, "aws"));
+        // An outpost resolver's create names the Outpost it runs on, another service's ARN, and makes its own.
+        setJsonBody("{\"Name\":\"edge\",\"OutpostArn\":\"arn:aws:outposts:us-east-1:000000000000:outpost/op-1\"}");
+        assertEquals(List.of("arn:aws:route53resolver:us-east-1:000000000000:outpost-resolver/*"),
+                builder.buildResources("route53resolver", "route53resolver:CreateOutpostResolver", ctx, "us-east-1",
+                        ACCOUNT, "aws"));
+    }
+
     // ── S3 and S3 Control ───────────────────────────────────────────────────────
 
     /** The resources an S3 or S3 Control request names, read from the generated table on the route it matches. */

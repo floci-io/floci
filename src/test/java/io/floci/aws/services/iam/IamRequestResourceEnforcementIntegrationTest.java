@@ -3626,6 +3626,50 @@ class IamRequestResourceEnforcementIntegrationTest {
                 "{\"ACLName\":\"" + acl + "-other\"}"), "memorydb:DescribeAcls");
     }
 
+    /**
+     * A Route 53 Resolver firewall domain list is checked on the ARN its id gives, {@code firewall-domain-list/<id>},
+     * the one Route 53 Resolver mints, so a grant on one lets the caller read it and not another.
+     */
+    @Test
+    void aRoute53ResolverDomainListIsCheckedOnTheArnItsIdGives() {
+        String allowed = domainList("res-fdl-" + suffix());
+        String other = domainList("res-fdl-other-" + suffix());
+        User user = user("res-resolver");
+        user.policy(allowOn("route53resolver:GetFirewallDomainList",
+                "arn:aws:route53resolver:" + REGION + ":" + ACCOUNT + ":firewall-domain-list/" + allowed));
+        send(user, "route53resolver", "Route53Resolver.GetFirewallDomainList", "1.1",
+                "{\"FirewallDomainListId\":\"" + allowed + "\"}").statusCode(200);
+        refusedJson(send(user, "route53resolver", "Route53Resolver.GetFirewallDomainList", "1.1",
+                "{\"FirewallDomainListId\":\"" + other + "\"}"), "route53resolver:GetFirewallDomainList");
+    }
+
+    /**
+     * A managed firewall domain list, which AWS owns, is checked on the ARN Route 53 Resolver gives it, so a grant on
+     * the ARN ListFirewallDomainLists returns lets the caller read that list.
+     */
+    @Test
+    void aManagedRoute53ResolverDomainListIsCheckedOnTheArnTheServiceGivesIt() {
+        String id = adminJson("route53resolver", "Route53Resolver.ListFirewallDomainLists").body("{}").post("/")
+                .then().statusCode(200).extract().path("FirewallDomainLists.find { it.ManagedOwnerName != null }.Id");
+        String arn = adminJson("route53resolver", "Route53Resolver.ListFirewallDomainLists").body("{}").post("/")
+                .then().statusCode(200).extract()
+                .path("FirewallDomainLists.find { it.Id == '" + id + "' }.Arn");
+        User user = user("res-resolver-managed");
+        user.policy(allowOn("route53resolver:GetFirewallDomainList", arn));
+        send(user, "route53resolver", "Route53Resolver.GetFirewallDomainList", "1.1",
+                "{\"FirewallDomainListId\":\"" + id + "\"}").statusCode(200);
+    }
+
+    /** A firewall domain list of the name, created as the admin and deleted after the test; its id. */
+    private String domainList(String name) {
+        String id = adminJson("route53resolver", "Route53Resolver.CreateFirewallDomainList")
+                .body("{\"CreatorRequestId\":\"" + name + "\",\"Name\":\"" + name + "\"}")
+                .post("/").then().statusCode(200).extract().path("FirewallDomainList.Id");
+        cleanup.register(() -> adminJson("route53resolver", "Route53Resolver.DeleteFirewallDomainList")
+                .body("{\"FirewallDomainListId\":\"" + id + "\"}").post("/"));
+        return id;
+    }
+
     private static ValidatableResponse glue(String operation, String body) {
         return adminJson("glue", "AWSGlue." + operation).body(body).post("/").then();
     }

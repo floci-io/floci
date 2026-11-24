@@ -362,7 +362,7 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs", "cloudwatch",
-              "comprehend", "config", "dms", "elasticache", "identitystore", "memorydb",
+              "comprehend", "config", "dms", "elasticache", "identitystore", "memorydb", "route53resolver",
               "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms", "dynamodb", "iam")
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -633,7 +633,6 @@ NOT_COVERED: dict[str, str] = {
     "network-firewall": _LATER,
     "organizations": _LATER,
     "rds-data": _REST,
-    "route53resolver": _LATER,
     "rum": _REST,
     "sagemaker": _LATER,
     "servicecatalog": "not read yet: CreatePortfolioShare, UpdatePortfolioShare and DeletePortfolioShare give in "
@@ -2244,10 +2243,13 @@ def compatible(member: str, variable: str) -> bool:
 
 def resources_for(operation: str, types: list[str], formats: dict[str, str], members: dict[str, str],
                   arn_members: set[str] | None = None, labels: dict[str, str] | None = None,
-                  shapes: dict[str, str] | None = None, aliased: set[str] | None = None) -> list[dict]:
+                  shapes: dict[str, str] | None = None, aliased: set[str] | None = None,
+                  foreign: set[str] | None = None) -> list[dict]:
     """The resources the rule finds the operation's request naming, as vendored entries. `labels` gives the path
-    segment before each bare member a REST request carries as a path label, stemmed (`path_labels`), and `shapes` the
-    botocore shape each member holds (`member_shapes`)."""
+    segment before each bare member a REST request carries as a path label, stemmed (`path_labels`), `shapes` the
+    botocore shape each member holds (`member_shapes`), and `foreign` the members holding another service's ARN
+    (`foreign_arn_members`), which name nothing of the namespace."""
+    members = {member: path for member, path in members.items() if member not in (foreign or set())}
     name = operation.split(":", 1)[1]
     created = stem(CREATING_RE.sub("", name)) if CREATING_RE.match(name) else None
     subject = stem(SUBJECT_RE.sub("", name))
@@ -3761,6 +3763,17 @@ def with_formats(resources: list[dict], operation: str, types: list[str], senten
     return found
 
 
+def foreign_arn_members(models: dict[str, dict], operation: str, formats: dict[str, str]) -> set[str]:
+    """The top-level members of the operation's request whose botocore pattern is the ARN of a service other than the
+    namespace's (Route 53 Resolver's CreateOutpostResolver `OutpostArn`, `^arn:aws([a-z-]+)?:outposts:...`): they hold
+    no resource of the namespace, whatever their name shares with one of its types, so the rules read the request
+    without them."""
+    services = {fmt.split(":")[2] for fmt in formats.values()}
+    return {member for member, patterns in string_patterns(models, operation).items()
+            if any(pattern and (service := PATTERN_SERVICE_RE.match(pattern)) and service.group(1) not in services
+                   for pattern in patterns)}
+
+
 def read_resources(operation: str, types: list[str], formats: dict[str, str], models: dict[str, dict]) -> list[dict]:
     """The resources the rules read from the request of the clients given."""
     name = operation.split(":", 1)[1]
@@ -3775,7 +3788,8 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
         resources = with_through(with_found(with_parent_ids(resources_for(operation, types, formats, members,
                                                                           arn_members, labels,
                                                                           member_shapes(models, name),
-                                                                          alias_members(models, name)),
+                                                                          alias_members(models, name),
+                                                                          foreign_arn_members(models, name, formats)),
                                                             formats, types, members),
                                             types, formats, members, found_keys(models, formats),
                                             requested_members(models)),
