@@ -293,6 +293,39 @@ class EcsFargateTaskIntegrationTest {
     }
 
     @Test
+    void updateServiceKeepsUnspecifiedDeploymentConfigurationMembers() {
+        String family = seed("fargate-config-update");
+        String serviceName = "fargate-config-update-svc";
+        call("CreateService", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"" + serviceName + "\","
+                + "\"taskDefinition\":\"" + family + "\",\"desiredCount\":0,\"launchType\":\"FARGATE\","
+                + NETWORK + ",\"deploymentConfiguration\":{\"maximumPercent\":150,"
+                + "\"minimumHealthyPercent\":50,\"deploymentCircuitBreaker\":{\"enable\":true,"
+                + "\"rollback\":true},\"alarms\":{\"alarmNames\":[\"deployment-alarm\"],"
+                + "\"enable\":true,\"rollback\":false}}}", 200);
+
+        call("UpdateService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"" + serviceName + "\","
+                + "\"deploymentConfiguration\":{\"maximumPercent\":175,\"minimumHealthyPercent\":25}}", 200)
+                .then()
+                .body("service.deploymentConfiguration.maximumPercent", equalTo(175))
+                .body("service.deploymentConfiguration.minimumHealthyPercent", equalTo(25))
+                .body("service.deploymentConfiguration.deploymentCircuitBreaker.enable", equalTo(true))
+                .body("service.deploymentConfiguration.deploymentCircuitBreaker.rollback", equalTo(true))
+                .body("service.deploymentConfiguration.alarms.alarmNames[0]", equalTo("deployment-alarm"));
+
+        call("DescribeServices", "{\"cluster\":\"" + CLUSTER + "\",\"services\":[\"" + serviceName + "\"]}", 200)
+                .then()
+                .body("services[0].deploymentConfiguration.deploymentCircuitBreaker.enable", equalTo(true))
+                .body("services[0].deploymentConfiguration.alarms.enable", equalTo(true));
+
+        call("UpdateService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"" + serviceName + "\","
+                + "\"deploymentConfiguration\":{\"deploymentCircuitBreaker\":{}}}", 200)
+                .then()
+                .body("service.deploymentConfiguration.deploymentCircuitBreaker", nullValue())
+                .body("service.deploymentConfiguration.maximumPercent", equalTo(175))
+                .body("service.deploymentConfiguration.alarms.alarmNames[0]", equalTo("deployment-alarm"));
+    }
+
+    @Test
     void createServiceOnACapacityProviderStrategyStartsTasksAndReportsTheProvider() {
         String family = seed("fargate-service-strategy");
         call("CreateService", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"fargate-spot-svc\","

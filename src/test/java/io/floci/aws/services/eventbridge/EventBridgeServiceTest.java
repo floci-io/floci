@@ -1817,6 +1817,60 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void matchesPatternByExistsTreatsIntermediateObjectAsAbsent() {
+        Map<String, Object> event = Map.of(
+                "Source", "my.app",
+                "Detail", "{\"status\":{\"nested\":\"v\"}}"
+        );
+        assertFalse(service.matchesPattern(event, "{\"detail\":{\"status\":[{\"exists\":true}]}}"));
+        assertTrue(service.matchesPattern(event, "{\"detail\":{\"status\":[{\"exists\":false}]}}"));
+    }
+
+    @Test
+    void matchesPatternByExistsChecksEntireArrayForLeafValues() {
+        String presentPattern = "{\"detail\":{\"status\":[{\"exists\":true}]}}";
+        String absentPattern = "{\"detail\":{\"status\":[{\"exists\":false}]}}";
+        for (String value : List.of("{}", "[]", "[{}]", "[[]]", "[[{}]]")) {
+            Map<String, Object> event = Map.of("Detail", "{\"status\":" + value + "}");
+            assertFalse(service.matchesPattern(event, presentPattern), value);
+            assertTrue(service.matchesPattern(event, absentPattern), value);
+        }
+        for (String value : List.of("null", "\"ok\"", "[{},[1]]")) {
+            Map<String, Object> event = Map.of("Detail", "{\"status\":" + value + "}");
+            assertTrue(service.matchesPattern(event, presentPattern), value);
+            assertFalse(service.matchesPattern(event, absentPattern), value);
+        }
+    }
+
+    @Test
+    void matchesPatternByExistsTreatsMissingParentAsAbsent() {
+        String pattern = "{\"detail\":{\"parent\":{\"child\":[{\"exists\":false}]}}}";
+        for (String detail : List.of("{}", "{\"parent\":null}", "{\"parent\":\"plain\"}")) {
+            assertTrue(service.matchesPattern(Map.of("Detail", detail), pattern), detail);
+        }
+    }
+
+    @Test
+    void matchesPatternByEmptyNestedDetailRequiresObject() {
+        String pattern = "{\"detail\":{\"parent\":{}}}";
+        for (String detail : List.of("{}", "{\"parent\":null}", "{\"parent\":[]}",
+                "{\"parent\":\"plain\"}")) {
+            assertFalse(service.matchesPattern(Map.of("Detail", detail), pattern), detail);
+        }
+        for (String detail : List.of("{\"parent\":{}}", "{\"parent\":[{}]}")) {
+            assertTrue(service.matchesPattern(Map.of("Detail", detail), pattern), detail);
+        }
+    }
+
+    @Test
+    void matchesPatternByEmptyOrBranchDoesNotMatchMissingParent() {
+        Map<String, Object> event = Map.of("Detail", "{}");
+        assertFalse(service.matchesPattern(event, "{\"detail\":{\"parent\":{\"$or\":[{}]}}}"));
+        assertTrue(service.matchesPattern(event,
+                "{\"detail\":{\"parent\":{\"$or\":[{},{\"child\":[{\"exists\":false}]}]}}}"));
+    }
+
+    @Test
     void matchesPatternByAccount_matches() {
         Map<String, Object> event = Map.of("Source", "my.app", "DetailType", "Order");
         assertTrue(service.matchesPattern(event, "{\"account\":[\"000000000000\"]}"));

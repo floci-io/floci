@@ -141,7 +141,7 @@ final class CopyBackendSession {
         while (true) {
             PostgresWireDecoder.FrontendMessage response = read();
             if (response.type() == 'D') {
-                rows.add(S3CopySimulator.parseDataRow(response.body()));
+                rows.add(PostgresWire.dataRowValues(response.body()));
             } else if (response.type() == 'C' || response.type() == 'I') {
                 close(name);
                 return rows;

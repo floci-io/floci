@@ -294,6 +294,13 @@ def test_a_create_naming_others_marks_what_it_makes():
     made = {"type": "replicationgroup", "fill": {"ReplicationGroupId": "ReplicationGroupId"}}
     joined = {"type": "globalreplicationgroup", "fill": {"GlobalId": "GlobalReplicationGroupId"}}
     assert r.with_made([made, joined], "svc:CreateReplicationGroup", groups) == [dict(made, made=True), joined]
+    # A type's whole name counts before its stem, which drops a trailing word: SageMaker's CreateEndpoint makes an
+    # endpoint, not the endpoint-config whose stem is endpoint too.
+    endpoints = {"endpoint": "arn:${Partition}:svc:${Region}:${Account}:endpoint/${EndpointName}",
+                 "endpoint-config": "arn:${Partition}:svc:${Region}:${Account}:endpoint-config/${EndpointConfigName}"}
+    endpoint = {"type": "endpoint", "fill": {"EndpointName": "EndpointName"}}
+    config = {"type": "endpoint-config", "fill": {"EndpointConfigName": "EndpointConfigName"}}
+    assert r.with_made([endpoint, config], "svc:CreateEndpoint", endpoints) == [dict(endpoint, made=True), config]
 
 
 def test_a_type_made_in_another_takes_that_ones_id_from_the_arn_member_named_after_it():
@@ -737,6 +744,21 @@ def test_a_member_named_after_a_type_and_its_variable_fills_that_type():
     shared = {"instance": "arn:${Partition}:ec2:${Region}:${Account}:instance/${InstanceId}",
               "managed-instance": "arn:${Partition}:svc:${Region}:${Account}:managed-instance/${InstanceId}"}
     assert r.with_type_named_members([], ["instance", "managed-instance"], shared, {"InstanceId": "InstanceId"}) == []
+    # For the type an operation is about, a member the variable's name ends in names it: SageMaker's JobName, of an
+    # inference recommendations job, read where nothing names it and where a create leaves its id open.
+    jobs = {"inference-recommendations-job": "arn:${Partition}:svc:${Region}:${Account}:"
+            "inference-recommendations-job/${InferenceRecommendationsJobName}"}
+    named_job = {"type": "inference-recommendations-job", "fill": {"InferenceRecommendationsJobName": "JobName"}}
+    assert r.with_type_named_members([], ["inference-recommendations-job"], jobs, {"JobName": "JobName"},
+                                     "inferencerecommendationsjob") == [named_job]
+    assert r.with_type_named_members([{"type": "inference-recommendations-job", "fill": {}}],
+                                     ["inference-recommendations-job"], jobs, {"JobName": "JobName"},
+                                     "inferencerecommendationsjob") == [named_job]
+    # Not for an operation about something else, nor from a bare Name.
+    assert r.with_type_named_members([], ["inference-recommendations-job"], jobs, {"JobName": "JobName"},
+                                     "model") == []
+    assert r.with_type_named_members([], ["inference-recommendations-job"], jobs, {"Name": "Name"},
+                                     "inferencerecommendationsjob") == []
 
 
 def test_a_structure_named_after_the_type_gives_its_name_to_a_type_named_by_nothing_else(tmp_path):
@@ -1503,11 +1525,16 @@ def test_the_vendored_file_is_well_formed():
     assert operations["memorydb:DeleteACL"]["resources"] == [{"type": "acl", "fill": {"AclName": "ACLName"}}]
     # Route 53 Resolver is read whole: a rule, an endpoint or a domain list by the id its request names.
     assert "route53resolver" in document["namespaces"] and "route53resolver" not in document["notCovered"]
+    assert {"type": "inference-recommendations-job", "fill": {"InferenceRecommendationsJobName": "JobName"}} in \
+        operations["sagemaker:DescribeInferenceRecommendationsJob"]["resources"]
     assert operations["route53resolver:GetResolverRule"]["resources"] == [
         {"type": "resolver-rule", "fill": {"ResourceId": "ResolverRuleId"}}]
     # CreateOutpostResolver's OutpostArn is an Outpost's ARN, so it holds no resolver: it makes its own, id open.
     assert operations["route53resolver:CreateOutpostResolver"]["resources"] == [
         {"type": "outpost-resolver", "fill": {}}]
+    # SageMaker is read whole: a model, an endpoint or a training job by its name.
+    assert "sagemaker" in document["namespaces"] and "sagemaker" not in document["notCovered"]
+    assert operations["sagemaker:DescribeModel"]["resources"] == [{"type": "model", "fill": {"ModelName": "ModelName"}}]
     # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
     assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]

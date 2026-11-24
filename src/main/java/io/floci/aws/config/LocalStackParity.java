@@ -21,6 +21,9 @@ import java.util.regex.Pattern;
  * one exception: LocalStack's and Floci's hostname suffixes are appended to the configured ones,
  * wherever those are set ({@link #withDnsSuffixes}). The whole translation is off when
  * {@code LOCALSTACK_PARITY=false}.
+ *
+ * <p>The container probe in {@code docker/healthcheck.sh} mirrors the listener and TLS
+ * mappings. Keep it and {@code docker/test_healthcheck.py} aligned when those rules change.
  */
 public final class LocalStackParity {
 

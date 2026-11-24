@@ -5,6 +5,8 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.eks.model.Cluster;
+import io.floci.aws.services.eks.model.ElasticLoadBalancing;
+import io.floci.aws.services.eks.model.KubernetesNetworkConfig;
 import io.floci.aws.services.eks.model.ResourcesVpcConfig;
 import io.floci.aws.services.elbv2.ElbV2Service;
 import io.floci.aws.services.elbv2.model.LoadBalancer;
@@ -33,7 +35,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 /**
  * EKS Auto Mode load balancing on a real k3s node: a LoadBalancer Service of the {@code eks.amazonaws.com/nlb}
  * class gets a Network Load Balancer with a target group on its NodePort, its DNS name is written to the
- * Service's status, and the load balancer goes with the Service. The reconciler is called directly: EKS is mocked
+ * Service's status, and the load balancer goes with the Service; on a node started with load balancing on, a
+ * Service of no class gets one too, and k3s's ServiceLB doesn't take it. The reconciler is called directly: EKS is mocked
  * in {@link RdsMockProfile}, which the other classes that run a real cluster use, so its interval doesn't run.
  */
 @QuarkusTest
@@ -85,16 +88,7 @@ class EksAutoModeNlbDockerIntegrationTest {
 
     @Test
     void aServiceOfTheNlbClassGetsALoadBalancerOnItsNodePortWhichGoesWithIt() {
-        String suffix = UUID.randomUUID().toString().substring(0, 8);
-        cluster = EksTestNode.cluster(ACCOUNT, "nlb-" + suffix);
-        RequestScopes.runAs(ACCOUNT, REGION, () -> {
-            String vpc = ec2.createVpc(REGION, "10.61.0.0/16", false).getVpcId();
-            String subnet = ec2.createSubnet(REGION, vpc, "10.61.1.0/24", "us-east-1a").getSubnetId();
-            ResourcesVpcConfig network = new ResourcesVpcConfig();
-            network.setVpcId(vpc);
-            network.setSubnetIds(List.of(subnet));
-            cluster.setResourcesVpcConfig(network);
-        });
+        cluster = clusterInAVpc("nlb-", "10.61", false);
         EksTestNode node = EksTestNode.start(dockerClient, eksClusterManager, cluster, Duration.ofSeconds(90));
         node.apply("""
                 apiVersion: v1
@@ -139,6 +133,56 @@ class EksAutoModeNlbDockerIntegrationTest {
         AwsException gone = assertThrows(AwsException.class, () -> RequestScopes.callAs(ACCOUNT, REGION,
                 () -> elb.describeTargetGroups(REGION, null, List.of(groups.getFirst().getTargetGroupArn()), null)));
         assertEquals("TargetGroupNotFound", gone.getErrorCode());
+    }
+
+    @Test
+    void aServiceOfNoClassGetsALoadBalancerOnANodeStartedWithLoadBalancingOn() {
+        cluster = clusterInAVpc("nlbd-", "10.62", true);
+        EksTestNode node = EksTestNode.start(dockerClient, eksClusterManager, cluster, Duration.ofSeconds(90));
+        node.apply("""
+                apiVersion: v1
+                kind: Service
+                metadata:
+                  name: plain
+                  namespace: default
+                spec:
+                  type: LoadBalancer
+                  selector:
+                    app: plain
+                  ports:
+                  - port: 18081
+                    targetPort: 80
+                    protocol: TCP""");
+
+        RequestScopes.runAs(ACCOUNT, REGION, () -> loadBalancers.reconcile(cluster, REGION));
+
+        List<LoadBalancer> created = RequestScopes.callAs(ACCOUNT, REGION, () -> loadBalancersOf(cluster.getName()));
+        assertEquals(1, created.size());
+        assertEquals("internal", created.getFirst().getScheme());
+        assertEquals(created.getFirst().getDnsName(), node.kubectlOutput("get", "service", "plain", "-n", "default",
+                "-o", "jsonpath={.status.loadBalancer.ingress[0].hostname}"));
+        // k3s's ServiceLB, which would take the Service too, doesn't run on the node.
+        assertEquals("", node.kubectlOutput("get", "pods", "-A", "-l", "svccontroller.k3s.cattle.io/svcname=plain",
+                "-o", "name"));
+    }
+
+    /** A cluster with a VPC and subnet of its own, with EKS Auto Mode load balancing on or not. */
+    private Cluster clusterInAVpc(String prefix, String cidr, boolean loadBalancing) {
+        Cluster created = EksTestNode.cluster(ACCOUNT, prefix + UUID.randomUUID().toString().substring(0, 8));
+        RequestScopes.runAs(ACCOUNT, REGION, () -> {
+            String vpc = ec2.createVpc(REGION, cidr + ".0.0/16", false).getVpcId();
+            String subnet = ec2.createSubnet(REGION, vpc, cidr + ".1.0/24", "us-east-1a").getSubnetId();
+            ResourcesVpcConfig network = new ResourcesVpcConfig();
+            network.setVpcId(vpc);
+            network.setSubnetIds(List.of(subnet));
+            created.setResourcesVpcConfig(network);
+        });
+        if (loadBalancing) {
+            KubernetesNetworkConfig network = new KubernetesNetworkConfig();
+            network.setElasticLoadBalancing(new ElasticLoadBalancing(true));
+            created.setKubernetesNetworkConfig(network);
+        }
+        return created;
     }
 
     private List<LoadBalancer> loadBalancersOf(String clusterName) {

@@ -2,6 +2,7 @@ package io.floci.aws.core.common.dns;
 
 import io.floci.aws.services.route53.Route53DnsRecordSource;
 import io.floci.aws.services.route53.Route53Service;
+import io.floci.aws.services.route53.model.AliasTarget;
 import io.floci.aws.services.route53.model.ResourceRecord;
 import io.floci.aws.services.route53.model.ResourceRecordSet;
 import io.floci.aws.services.route53.model.VpcAssociation;
@@ -296,22 +297,40 @@ class Route53DnsPacketIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({"A,1,1", "AAAA,28,0"})
+    void anOwnNameAliasToATargetFlociDoesNotServeAnswersAsTheEmulator(String recordType, int type, int answers)
+            throws Exception {
+        String zone = uniqueName() + ".localhost.floci.io";
+        String id = createZone(zone);
+        String name = "api.auth." + zone;
+        AliasTarget cloudFront = new AliasTarget();
+        cloudFront.setHostedZoneId("Z2FDTNDATAQYW2");
+        cloudFront.setDnsName("d111111abcdef8.cloudfront.net.");
+        ResourceRecordSet alias = new ResourceRecordSet();
+        alias.setName(name);
+        alias.setType(recordType);
+        alias.setAliasTarget(cloudFront);
+        change(id, "CREATE", alias);
+
+        byte[] response = query(DnsTestQuery.query(name, type, 0x1234));
+        assertPrivateHeader(response, 0, answers);
+        if (type == 1) {
+            assertArrayEquals(new DnsRecord.Address(1, "127.0.0.1").data(),
+                    Arrays.copyOfRange(response, response.length - 4, response.length));
+        }
+        for (int field : List.of(2, 4, -1, -2)) {
+            assertHeader(query(malformed(DnsTestQuery.query(name, type, 0x1234), field)), 5, false, 0, 0);
+        }
+    }
+
     @Test
     void privateZonePrecedenceAndPublicQueryShapeRemainExplicit() throws Exception {
         String name = uniqueName() + ".example";
         String id = createZone(name);
         change(id, "CREATE", record("marker." + name, "TXT", 60, "\"public\""));
         for (int field : List.of(2, 4, -1, -2)) {
-            byte[] request = DnsTestQuery.query("marker." + name, 16, 0x1234);
-            ByteBuffer packet = ByteBuffer.wrap(request);
-            if (field == -2) {
-                packet.putShort(2, (short) 0x0140);
-            } else if (field == -1) {
-                packet.putShort(request.length - 2, (short) 3);
-            } else {
-                packet.putShort(field, (short) (field == 2 ? 0x0900 : 2));
-            }
-            assertHeader(query(request), 5, false, 0, 0);
+            assertHeader(query(malformed(DnsTestQuery.query("marker." + name, 16, 0x1234), field)), 5, false, 0, 0);
         }
         String privateId = route53.createHostedZone(name, UUID.randomUUID().toString(), null,
                 new VpcAssociation("vpc-dns-packet", "us-east-1")).zone().getId();
@@ -388,6 +407,19 @@ class Route53DnsPacketIntegrationTest {
 
     private static String uniqueName() {
         return "dns-" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    /** A shape a public zone refuses: opcode 1, two questions, class CH, or the reserved Z bit. */
+    private static byte[] malformed(byte[] request, int field) {
+        ByteBuffer packet = ByteBuffer.wrap(request);
+        if (field == -2) {
+            packet.putShort(2, (short) 0x0140);
+        } else if (field == -1) {
+            packet.putShort(request.length - 2, (short) 3);
+        } else {
+            packet.putShort(field, (short) (field == 2 ? 0x0900 : 2));
+        }
+        return request;
     }
 
 
