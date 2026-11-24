@@ -204,8 +204,10 @@ class ElbV2BackendTlsIntegrationTest {
         AtomicInteger clientHellos = new AtomicInteger();
         NetServer stalled = vertx.createNetServer().connectHandler(socket -> {
             long accepted = System.nanoTime();
+            // A ClientHello can arrive over several reads, so only a connection's first bytes decide it.
+            AtomicBoolean firstRead = new AtomicBoolean(true);
             socket.handler(buffer -> {
-                if (buffer.length() > 0 && buffer.getUnsignedByte(0) == 22) {
+                if (buffer.length() > 0 && firstRead.getAndSet(false) && buffer.getUnsignedByte(0) == 22) {
                     clientHellos.incrementAndGet();
                 }
             });
