@@ -2554,6 +2554,17 @@ public interface EmulatorConfig {
     interface CloudWatchMetricsServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Upper bound on the datapoints kept per account in each namespace a service publishes by
+         * itself, such as AWS/SQS. Every datapoint is its own entry in a store that is held in memory
+         * and written out whole, and those services add some for each resource every minute, so
+         * without a bound the store outgrows the heap long before the 15 days AWS keeps one-minute
+         * data. Oldest datapoints are dropped first once exceeded; 0 or less keeps them all. Other
+         * namespaces, where only a client's PutMetricData writes, are never cut back.
+         */
+        @WithDefault("100000")
+        int maxStoredDatapoints();
     }
 
     interface PaymentCryptographyServiceConfig {

@@ -28,12 +28,14 @@ public class RedshiftMetricsPublisher {
     @Inject
     public RedshiftMetricsPublisher(RedshiftService redshiftService, CloudWatchMetricsService metricsService,
                                     Instance<RedshiftMetricCollector> collectors, EmulatorConfig config) {
-        this(redshiftService, metricsService, collectors, isEnabled(config));
+        this(redshiftService, metricsService, collectors, isEnabled(config),
+                config.services().cloudwatchmetrics().maxStoredDatapoints());
     }
 
     RedshiftMetricsPublisher(RedshiftService redshiftService, CloudWatchMetricsService metricsService,
-                             Iterable<RedshiftMetricCollector> collectors, boolean enabled) {
-        this.publisher = new MinuteMetricsPublisher<>(metricsService, NAMESPACE, enabled) {
+                             Iterable<RedshiftMetricCollector> collectors, boolean enabled,
+                             int maxStoredDatapoints) {
+        this.publisher = new MinuteMetricsPublisher<>(metricsService, NAMESPACE, enabled, maxStoredDatapoints) {
             @Override
             protected List<RedshiftMetricTarget> collectTargets(Instant now) {
                 return redshiftService.availableMetricTargets();

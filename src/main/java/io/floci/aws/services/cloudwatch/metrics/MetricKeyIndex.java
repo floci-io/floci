@@ -1,9 +1,13 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListSet;
 
@@ -56,12 +60,55 @@ final class MetricKeyIndex {
         String cutoff = timestampSegment(cutoffSeconds);
         for (Map<String, NavigableSet<String>> endingsBySeries : endingsBySeriesByAccount.values()) {
             endingsBySeries.forEach((series, endings) -> {
-                if (series.startsWith(namespaceSegment, series.indexOf("::"))) {
+                if (isInNamespace(series, namespaceSegment)) {
                     endings.headSet(cutoff).clear();
                 }
             });
         }
     }
+
+    /**
+     * In every account holding more than {@code ceiling} keys of {@code namespace}, removes the oldest of
+     * them across its series until {@code keep} are left. Returns the removed keys by account.
+     */
+    Map<String, Set<String>> removeOldest(String namespace, int ceiling, int keep) {
+        String namespaceSegment = "::" + namespace + "::";
+        Map<String, Set<String>> removedByAccount = new HashMap<>();
+        endingsBySeriesByAccount.forEach((account, endingsBySeries) -> {
+            List<String> namespaceSeries = new ArrayList<>();
+            long held = 0;
+            for (Map.Entry<String, NavigableSet<String>> endings : endingsBySeries.entrySet()) {
+                if (isInNamespace(endings.getKey(), namespaceSegment)) {
+                    namespaceSeries.add(endings.getKey());
+                    held += endings.getValue().size();
+                }
+            }
+            if (held <= ceiling) {
+                return;
+            }
+            List<SeriesEnding> oldestFirst = new ArrayList<>();
+            for (String series : namespaceSeries) {
+                for (String ending : endingsBySeries.get(series)) {
+                    oldestFirst.add(new SeriesEnding(series, ending));
+                }
+            }
+            oldestFirst.sort(Comparator.comparing(SeriesEnding::ending).thenComparing(SeriesEnding::series));
+            Set<String> removed = new HashSet<>();
+            for (SeriesEnding oldest : oldestFirst.subList(0, Math.max(0, oldestFirst.size() - keep))) {
+                endingsBySeries.get(oldest.series()).remove(oldest.ending());
+                removed.add(oldest.series() + oldest.ending());
+            }
+            removedByAccount.put(account, removed);
+        });
+        return removedByAccount;
+    }
+
+    private static boolean isInNamespace(String series, String namespaceSegment) {
+        return series.startsWith(namespaceSegment, series.indexOf("::"));
+    }
+
+    /** One key split as the index holds it; an ending starts with its timestamp, so endings sort by time. */
+    private record SeriesEnding(String series, String ending) {}
 
     /** The account's keys of {@code series} stamped in {@code [fromSeconds, toSeconds)}, oldest first. */
     List<String> keysBetween(String account, String series, long fromSeconds, long toSeconds) {

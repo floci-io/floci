@@ -34,7 +34,8 @@ public class SqsMetricsPublisher {
     public SqsMetricsPublisher(SqsService sqsService, CloudWatchMetricsService metricsService, EmulatorConfig config) {
         boolean enabled = config.services().sqs().enabled() && config.services().sqs().cloudwatchMetricsEnabled()
                 && config.services().cloudwatchmetrics().enabled();
-        this.publisher = new MinuteMetricsPublisher<>(metricsService, NAMESPACE, enabled) {
+        this.publisher = new MinuteMetricsPublisher<>(metricsService, NAMESPACE, enabled,
+                config.services().cloudwatchmetrics().maxStoredDatapoints()) {
             @Override
             protected List<SqsService.QueueMetrics> collectTargets(Instant now) {
                 return sqsService.collectQueueMetrics(now);

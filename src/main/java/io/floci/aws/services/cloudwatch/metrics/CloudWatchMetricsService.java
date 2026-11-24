@@ -254,6 +254,32 @@ public class CloudWatchMetricsService implements Resettable {
         deleteInEveryAccount(metricStore, d -> namespace.equals(d.getNamespace()) && d.getTimestamp() < cutoffSeconds);
     }
 
+    /**
+     * Drops the oldest {@code namespace} datapoints of every account holding more than {@code ceiling} of
+     * them, down to nine tenths of it so that the next calls find nothing to sort. A service that writes
+     * its own metrics each minute calls it: that history grows without a request, and would outgrow the
+     * heap well inside the 15 days it is kept for. Counting reads the key index, so nothing is dropped
+     * before storage has loaded.
+     */
+    public void deleteOldestMetricData(String namespace, int ceiling) {
+        if (!metricKeys.isBuilt()) {
+            return;
+        }
+        // Index first, as in deleteMetricDataBefore.
+        Map<String, Set<String>> oldestByAccount = metricKeys.removeOldest(namespace, ceiling, ceiling - ceiling / 10);
+        if (oldestByAccount.isEmpty()) {
+            return;
+        }
+        if (metricStore instanceof AccountAwareStorageBackend<MetricDatum> aware) {
+            aware.deleteAllAtomicallyForAccounts(oldestByAccount);
+        } else {
+            oldestByAccount.values().forEach(metricStore::deleteAllAtomically);
+        }
+        oldestByAccount.forEach((account, oldest) -> LOG.debugv(
+                "Dropped the {0} oldest {1} datapoint(s) of account {2} to stay within the ceiling of {3}",
+                oldest.size(), namespace, account, ceiling));
+    }
+
     private static <V> void deleteInEveryAccount(StorageBackend<String, V> store, Predicate<V> expired) {
         if (store instanceof AccountAwareStorageBackend<V> aware) {
             aware.deleteAllAccountsMatching(expired);
