@@ -412,6 +412,9 @@ def test_build_constraints_output_is_stable():
     (regen_account_shapes, "account/2021-02-01", "account-request-shapes.json", {}),
     (regen_securityhub_shapes, "securityhub/2018-10-26", "securityhub-request-shapes.json",
      {"prepare": regen_securityhub_shapes.prepare}),
+    (regen_ecr_shapes, "ecr/2015-09-21", "ecr-request-shapes.json", {}),
+    (regen_resource_groups_shapes, "resource-groups/2017-11-27", "resource-groups-request-shapes.json", {}),
+    (regen_logs_delivery_shapes, "logs/2014-03-28", "logs-delivery-request-shapes.json", {}),
 ])
 def test_each_constraints_script_runs_the_shared_main_with_its_operations(script, model, output, extra,
                                                                          monkeypatch):
