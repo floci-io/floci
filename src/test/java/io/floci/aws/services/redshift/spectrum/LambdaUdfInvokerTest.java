@@ -5,10 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.services.iam.IamPolicyEvaluator;
-import io.floci.aws.services.iam.ResourcePolicyProvider.ResourcePolicy;
+import io.floci.aws.services.iam.RoleResourceAccessAuthorizer;
 import io.floci.aws.services.iam.ServiceRoleAuthorizer;
-import io.floci.aws.services.lambda.LambdaResourcePolicyProvider;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
@@ -54,10 +52,11 @@ class LambdaUdfInvokerTest {
     private static final SpectrumSession SESSION = new SpectrumSession(ACCOUNT, ACCOUNT + ":cluster-1", "dev",
             List.of(), false);
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final String REGION = "us-east-1";
 
     private LambdaService lambda;
     private ServiceRoleAuthorizer authorizer;
-    private LambdaResourcePolicyProvider lambdaResourcePolicies;
+    private RoleResourceAccessAuthorizer roleAccess;
     private EmulatorConfig config;
     private AtomicLong now;
     private List<Long> sleeps;
@@ -69,13 +68,13 @@ class LambdaUdfInvokerTest {
         authorizer = mock(ServiceRoleAuthorizer.class);
         when(authorizer.refusal(anyString(), anyString(), anyString(), any(), anyList()))
                 .thenReturn(Optional.empty());
-        lambdaResourcePolicies = mock(LambdaResourcePolicyProvider.class);
-        when(lambdaResourcePolicies.getResourcePolicies(anyString(), anyString())).thenReturn(List.of());
+        roleAccess = mock(RoleResourceAccessAuthorizer.class);
+        when(roleAccess.refusal(anyString(), anyString(), anyString(), any(), any())).thenReturn(Optional.empty());
         config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().iam().enforcementEnabled()).thenReturn(true);
         RegionResolver regions = mock(RegionResolver.class);
         when(regions.getDefaultRegion()).thenReturn("us-east-1");
-        when(regions.partitionForRegion("us-east-1")).thenReturn("aws");
+        when(regions.partitionForRegion(anyString())).thenReturn("aws");
         now = new AtomicLong(1_000);
         sleeps = new ArrayList<>();
         Clock clock = new Clock() {
@@ -94,7 +93,7 @@ class LambdaUdfInvokerTest {
                 return Instant.ofEpochMilli(now.get());
             }
         };
-        invoker = new LambdaUdfInvoker(lambda, authorizer, lambdaResourcePolicies, new IamPolicyEvaluator(JSON),
+        invoker = new LambdaUdfInvoker(lambda, authorizer, roleAccess,
                 config, regions, clock, millis -> {
             sleeps.add(millis);
             now.addAndGet(millis);
@@ -131,7 +130,7 @@ class LambdaUdfInvokerTest {
         when(lambda.invokeArn(eq(FUNCTION_ARN), any(), any())).thenReturn(
                 ok("{\"success\":true,\"num_records\":3,\"results\":[3,null,10]}"));
 
-        List<String> results = invoker.invoke(twoInts(), SESSION, "analyst", 5678234L,
+        List<String> results = invoker.invoke(twoInts(), SESSION, REGION, "analyst", 5678234L,
                 rows(new String[] {"1", "2"}, new String[] {"3", null}, new String[] {"4", "6"}));
 
         assertThat(results, equalTo(Arrays.asList("3", null, "10")));
@@ -148,12 +147,26 @@ class LambdaUdfInvokerTest {
     }
 
     @Test
+    void callsABareFunctionNameAndNamesTheClusterInTheClustersOwnRegion() throws Exception {
+        String euFunctionArn = "arn:aws:lambda:eu-west-1:000000000000:function:sum";
+        when(lambda.invokeArn(eq(euFunctionArn), any(), any())).thenReturn(
+                ok("{\"success\":true,\"num_records\":1,\"results\":[3]}"));
+
+        invoker.invoke(twoInts(), SESSION, "eu-west-1", "u", 1, rows(new String[] {"1", "2"}));
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(lambda).invokeArn(eq(euFunctionArn), payload.capture(), eq(InvocationType.RequestResponse));
+        assertThat(JSON.readTree(payload.getValue()).get("cluster").textValue(),
+                equalTo("arn:aws:redshift:eu-west-1:000000000000:cluster:cluster-1"));
+    }
+
+    @Test
     void aFunctionOfOneArgumentGetsOneElementArrays() throws Exception {
         when(lambda.invokeArn(eq(FUNCTION_ARN), any(), any())).thenReturn(
                 ok("{\"success\":true,\"num_records\":2,\"results\":[\"A\",null]}"));
 
         List<String> results = invoker.invoke(
-                function(List.of("character varying"), "varchar", 100, 1024, 0), SESSION, "u", 1,
+                function(List.of("character varying"), "varchar", 100, 1024, 0), SESSION, REGION, "u", 1,
                 rows(new String[] {"a"}, new String[] {null}));
 
         assertThat(results, equalTo(Arrays.asList("A", null)));
@@ -165,7 +178,7 @@ class LambdaUdfInvokerTest {
         String encoded = JSON.writeValueAsString("{\"success\":true,\"num_records\":2,\"results\":[3,10]}");
         when(lambda.invokeArn(eq(FUNCTION_ARN), any(), any())).thenReturn(ok(encoded));
 
-        List<String> results = invoker.invoke(twoInts(), SESSION, "u", 1,
+        List<String> results = invoker.invoke(twoInts(), SESSION, REGION, "u", 1,
                 rows(new String[] {"1", "2"}, new String[] {"4", "6"}));
 
         assertThat(results, equalTo(List.of("3", "10")));
@@ -178,7 +191,7 @@ class LambdaUdfInvokerTest {
                 ok("{\"success\":true,\"num_records\":1,\"results\":[3]}"));
 
         List<String> results = invoker.invoke(
-                function(List.of("integer"), "integer", 2, 5L * 1024 * 1024, 0), SESSION, "u", 1,
+                function(List.of("integer"), "integer", 2, 5L * 1024 * 1024, 0), SESSION, REGION, "u", 1,
                 rows(new String[] {"1"}, new String[] {"2"}, new String[] {"3"}));
 
         assertThat(results, equalTo(List.of("1", "2", "3")));
@@ -198,7 +211,7 @@ class LambdaUdfInvokerTest {
         });
 
         // the first row alone is over the size limit; the two small ones fit together in the next batch
-        invoker.invoke(function(List.of("varchar"), "integer", 100, 1024, 0), SESSION, "u", 1,
+        invoker.invoke(function(List.of("varchar"), "integer", 100, 1024, 0), SESSION, REGION, "u", 1,
                 rows(new String[] {"x".repeat(2000)}, new String[] {"y"}, new String[] {"z"}));
 
         ArgumentCaptor<byte[]> payloads = ArgumentCaptor.forClass(byte[].class);
@@ -220,7 +233,7 @@ class LambdaUdfInvokerTest {
 
         // each row is "[1]" (3 bytes); 4 rows serialize to "[[1],[1],[1],[1]]" (17 bytes <= 20), 5 rows would be 21
         List<List<String>> input = Collections.nCopies(10, List.of("1"));
-        invoker.invoke(function(List.of("integer"), "integer", 100, limit, 0), SESSION, "u", 1, input);
+        invoker.invoke(function(List.of("integer"), "integer", 100, limit, 0), SESSION, REGION, "u", 1, input);
 
         ArgumentCaptor<byte[]> payloads = ArgumentCaptor.forClass(byte[].class);
         verify(lambda, times(3)).invokeArn(eq(FUNCTION_ARN), payloads.capture(), any());
@@ -238,12 +251,12 @@ class LambdaUdfInvokerTest {
         when(lambda.invokeArn(eq(arn), any(), any())).thenReturn(
                 ok("{\"success\":true,\"num_records\":1,\"results\":[5]}"));
 
-        assertThat(invoker.invoke(function, SESSION, "u", 1, rows(new String[] {"1"})), equalTo(List.of("5")));
+        assertThat(invoker.invoke(function, SESSION, REGION, "u", 1, rows(new String[] {"1"})), equalTo(List.of("5")));
     }
 
     @Test
     void noRowsMeansNoCall() {
-        assertThat(invoker.invoke(twoInts(), SESSION, "u", 1, List.of()), hasSize(0));
+        assertThat(invoker.invoke(twoInts(), SESSION, REGION, "u", 1, List.of()), hasSize(0));
 
         verify(lambda, never()).invokeArn(anyString(), any(), any());
     }
@@ -254,7 +267,7 @@ class LambdaUdfInvokerTest {
                 .thenReturn(Optional.of("The role does not allow lambda:InvokeFunction."));
 
         SpectrumSqlException refused = assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"})));
+                () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"})));
 
         assertThat(refused.sqlState(), equalTo("42501"));
         verify(lambda, never()).invokeArn(anyString(), any(), any());
@@ -266,7 +279,7 @@ class LambdaUdfInvokerTest {
                 ok("{\"success\":false,\"error_msg\":\"my function is not working\"}"));
 
         SpectrumSqlException failed = assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"})));
+                () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"})));
 
         assertThat(failed.getMessage(), containsString("my function is not working"));
     }
@@ -277,7 +290,7 @@ class LambdaUdfInvokerTest {
                 "{\"errorMessage\":\"boom\",\"errorType\":\"Error\"}".getBytes(StandardCharsets.UTF_8), null, "r"));
 
         SpectrumSqlException failed = assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"})));
+                () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"})));
 
         assertThat(failed.getMessage(), containsString("boom"));
     }
@@ -289,7 +302,7 @@ class LambdaUdfInvokerTest {
         when(lambda.invokeArn(eq(FUNCTION_ARN), any(), any())).thenReturn(timedOut);
 
         SpectrumSqlException failed = assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"})));
+                () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"})));
 
         assertThat(failed.getMessage(), containsString("timed out"));
     }
@@ -300,7 +313,7 @@ class LambdaUdfInvokerTest {
                 ok("{\"success\":true,\"num_records\":1,\"results\":[1]}"));
 
         SpectrumSqlException failed = assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(twoInts(), SESSION, "u", 1,
+                () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1,
                         rows(new String[] {"1", "2"}, new String[] {"3", "4"})));
 
         assertThat(failed.getMessage(), containsString("returned 1 results"));
@@ -315,7 +328,7 @@ class LambdaUdfInvokerTest {
 
         for (int attempt = 0; attempt < 3; attempt++) {
             assertThrows(SpectrumSqlException.class,
-                    () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"})));
+                    () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"})));
         }
     }
 
@@ -327,7 +340,7 @@ class LambdaUdfInvokerTest {
 
         for (int attempt = 0; attempt < 2; attempt++) {
             assertThrows(SpectrumSqlException.class,
-                    () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"})));
+                    () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"})));
         }
     }
 
@@ -336,7 +349,7 @@ class LambdaUdfInvokerTest {
         when(lambda.invokeArn(eq(FUNCTION_ARN), any(), any())).thenReturn(ok("{\"success\":false}"));
 
         SpectrumSqlException failed = assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"})));
+                () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"})));
 
         assertThat(failed.getMessage(), containsString("no error_msg"));
     }
@@ -347,9 +360,9 @@ class LambdaUdfInvokerTest {
                 ok("{\"success\":true,\"num_records\":1}"));
 
         SpectrumSqlException notJson = assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"})));
+                () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"})));
         SpectrumSqlException noResults = assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"})));
+                () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"})));
 
         assertThat(notJson.getMessage(), containsString("not JSON"));
         assertThat(noResults.getMessage(), containsString("no results array"));
@@ -361,7 +374,7 @@ class LambdaUdfInvokerTest {
 
         for (int attempt = 0; attempt < 2; attempt++) {
             assertThrows(SpectrumSqlException.class,
-                    () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"})));
+                    () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"})));
         }
     }
 
@@ -371,7 +384,7 @@ class LambdaUdfInvokerTest {
                 .thenReturn(new InvokeResult(200, "Unhandled", new byte[0], null, "r"));
 
         SpectrumSqlException failed = assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"})));
+                () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"})));
 
         assertThat(failed.getMessage(), containsString("Unhandled"));
     }
@@ -382,7 +395,7 @@ class LambdaUdfInvokerTest {
         when(lambda.invokeArn(eq(FUNCTION_ARN), any(), any())).thenReturn(ok(
                 "{\"success\":true,\"num_records\":2,\"results\":[12345678901234567890.1234567890,3.10]}"));
 
-        List<String> results = invoker.invoke(function, SESSION, "u", 1,
+        List<String> results = invoker.invoke(function, SESSION, REGION, "u", 1,
                 rows(new String[] {"1"}, new String[] {"2"}));
 
         assertThat(results, equalTo(List.of("12345678901234567890.1234567890", "3.10")));
@@ -391,9 +404,9 @@ class LambdaUdfInvokerTest {
     @Test
     void aRowWithTheWrongNumberOfValuesFailsBeforeAnyCall() {
         assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1"})));
+                () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1"})));
         assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2", "3"})));
+                () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2", "3"})));
 
         verify(lambda, never()).invokeArn(anyString(), any(), any());
     }
@@ -401,7 +414,7 @@ class LambdaUdfInvokerTest {
     @Test
     void anArgumentThatIsNotAValueOfItsTypeFailsBeforeAnyCall() {
         SpectrumSqlException failed = assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"abc", "2"})));
+                () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"abc", "2"})));
 
         assertThat(failed.sqlState(), equalTo("22P02"));
         verify(lambda, never()).invokeArn(anyString(), any(), any());
@@ -413,71 +426,47 @@ class LambdaUdfInvokerTest {
         when(lambda.invokeArn(eq(FUNCTION_ARN), any(), any())).thenReturn(
                 ok("{\"success\":true,\"num_records\":2,\"results\":[1,1]}"));
 
-        invoker.invoke(function, SESSION, "u", 1, rows(new String[] {}, new String[] {}));
+        invoker.invoke(function, SESSION, REGION, "u", 1, rows(new String[] {}, new String[] {}));
 
         assertThat(lastRequest().get("arguments").toString(), equalTo("[[],[]]"));
     }
 
     @Test
-    void aFunctionGivenAsAccountFunctionNameIsInvokedInThatAccountWhenGranted() {
+    void aFunctionGivenAsAccountFunctionNameIsInvokedInThatAccount() {
         String arn = "arn:aws:lambda:us-east-1:111111111111:function:sum";
         ExternalFunctionBinding function = new ExternalFunctionBinding(ACCOUNT, SESSION.clusterKey(), "dev",
                 "public", "f", List.of("integer"), "integer", "STABLE", "111111111111:function:sum", ROLE, 0, 10,
                 1024);
-        String grantPolicy = """
-                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
-                "Principal":{"AWS":"%s"},"Action":"lambda:InvokeFunction","Resource":"%s"}]}
-                """.formatted(ROLE, arn);
-        when(lambdaResourcePolicies.getResourcePolicies("lambda", arn))
-                .thenReturn(List.of(new ResourcePolicy(grantPolicy, "111111111111")));
         when(lambda.invokeArn(eq(arn), any(), any())).thenReturn(
                 ok("{\"success\":true,\"num_records\":1,\"results\":[5]}"));
 
-        assertThat(invoker.invoke(function, SESSION, "u", 1, rows(new String[] {"1"})), equalTo(List.of("5")));
+        assertThat(invoker.invoke(function, SESSION, REGION, "u", 1, rows(new String[] {"1"})), equalTo(List.of("5")));
         verify(authorizer).refusal(eq(ROLE), eq(ACCOUNT), anyString(), isNull(), anyList());
+        verify(roleAccess).refusal(eq(ROLE), eq("lambda:InvokeFunction"), eq(arn), eq("us-east-1"), any());
     }
 
     @Test
-    void aCrossAccountFunctionWithoutResourcePolicyGrantIsRefusedWhenEnforcementIsOn() {
-        String arn = "arn:aws:lambda:us-east-1:111111111111:function:sum";
-        ExternalFunctionBinding function = new ExternalFunctionBinding(ACCOUNT, SESSION.clusterKey(), "dev",
-                "public", "f", List.of("integer"), "integer", "STABLE", arn, ROLE, 0, 10, 1024);
-        when(lambdaResourcePolicies.getResourcePolicies("lambda", arn))
-                .thenReturn(List.of(new ResourcePolicy(null, "111111111111")));
+    void aRoleTheFunctionsAccessPoliciesRefuseIsRefusedBeforeAnyCall() {
+        when(roleAccess.refusal(eq(ROLE), eq("lambda:InvokeFunction"), eq(FUNCTION_ARN), anyString(), any()))
+                .thenReturn(Optional.of("not authorized to perform: lambda:InvokeFunction"));
 
         SpectrumSqlException refused = assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(function, SESSION, "u", 1, rows(new String[] {"1"})));
+                () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"})));
 
         assertThat(refused.sqlState(), equalTo("42501"));
+        assertThat(refused.getMessage(), containsString("not authorized to perform: lambda:InvokeFunction"));
         verify(lambda, never()).invokeArn(anyString(), any(), any());
     }
 
     @Test
-    void aCrossAccountFunctionRunsWithoutResourcePolicyWhenEnforcementIsOff() {
+    void theFunctionsAccessPoliciesAreNotConsultedWhenEnforcementIsOff() {
         when(config.services().iam().enforcementEnabled()).thenReturn(false);
-        String arn = "arn:aws:lambda:us-east-1:111111111111:function:sum";
-        ExternalFunctionBinding function = new ExternalFunctionBinding(ACCOUNT, SESSION.clusterKey(), "dev",
-                "public", "f", List.of("integer"), "integer", "STABLE", arn, ROLE, 0, 10, 1024);
-        when(lambda.invokeArn(eq(arn), any(), any())).thenReturn(
+        when(lambda.invokeArn(eq(FUNCTION_ARN), any(), any())).thenReturn(
                 ok("{\"success\":true,\"num_records\":1,\"results\":[5]}"));
 
-        assertThat(invoker.invoke(function, SESSION, "u", 1, rows(new String[] {"1"})), equalTo(List.of("5")));
-    }
-
-    @Test
-    void aSameAccountFunctionWithExplicitDenyInResourcePolicyIsRefused() {
-        String denyPolicy = """
-                {"Version":"2012-10-17","Statement":[{"Effect":"Deny",
-                "Principal":{"AWS":"%s"},"Action":"lambda:InvokeFunction","Resource":"%s"}]}
-                """.formatted(ROLE, FUNCTION_ARN);
-        when(lambdaResourcePolicies.getResourcePolicies("lambda", FUNCTION_ARN))
-                .thenReturn(List.of(new ResourcePolicy(denyPolicy, ACCOUNT)));
-
-        SpectrumSqlException refused = assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"})));
-
-        assertThat(refused.sqlState(), equalTo("42501"));
-        verify(lambda, never()).invokeArn(anyString(), any(), any());
+        assertThat(invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"})),
+                equalTo(List.of("5")));
+        verify(roleAccess, never()).refusal(anyString(), anyString(), anyString(), any(), any());
     }
 
     @Test
@@ -488,7 +477,7 @@ class LambdaUdfInvokerTest {
         when(lambda.invokeArn(eq(arn), any(), any())).thenReturn(
                 ok("{\"success\":true,\"num_records\":1,\"results\":[5]}"));
 
-        assertThat(invoker.invoke(function, SESSION, "u", 1, rows(new String[] {"1"})), equalTo(List.of("5")));
+        assertThat(invoker.invoke(function, SESSION, REGION, "u", 1, rows(new String[] {"1"})), equalTo(List.of("5")));
     }
 
     @Test
@@ -498,7 +487,7 @@ class LambdaUdfInvokerTest {
                     "public", "f", List.of("integer"), "integer", "STABLE", reference, ROLE, 0, 10, 1024);
 
             assertThrows(SpectrumSqlException.class,
-                    () -> invoker.invoke(function, SESSION, "u", 1, rows(new String[] {"1"})));
+                    () -> invoker.invoke(function, SESSION, REGION, "u", 1, rows(new String[] {"1"})));
         }
         verify(lambda, never()).invokeArn(anyString(), any(), any());
     }
@@ -508,7 +497,7 @@ class LambdaUdfInvokerTest {
         when(lambda.invokeArn(eq(FUNCTION_ARN), any(), any())).thenThrow(new IllegalStateException("executor down"));
 
         SpectrumSqlException failed = assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"})));
+                () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"})));
 
         assertThat(failed.getMessage(), containsString("executor down"));
     }
@@ -520,7 +509,7 @@ class LambdaUdfInvokerTest {
                 ok("{\"success\":true,\"num_records\":1,\"results\":[3]}"));
 
         List<String> results = invoker.invoke(
-                function(List.of("integer"), "integer", 10, 1024, Long.MAX_VALUE), SESSION, "u", 1,
+                function(List.of("integer"), "integer", 10, 1024, Long.MAX_VALUE), SESSION, REGION, "u", 1,
                 rows(new String[] {"1"}));
 
         assertThat(results, equalTo(List.of("3")));
@@ -532,7 +521,7 @@ class LambdaUdfInvokerTest {
                 ok("{\"success\":true,\"num_records\":1,\"results\":[\"three\"]}"));
 
         SpectrumSqlException failed = assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"})));
+                () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"})));
 
         assertThat(failed.sqlState(), equalTo("22P02"));
     }
@@ -543,7 +532,7 @@ class LambdaUdfInvokerTest {
         when(lambda.invokeArn(eq(FUNCTION_ARN), any(), any())).thenThrow(throttled, throttled).thenReturn(
                 ok("{\"success\":true,\"num_records\":1,\"results\":[3]}"));
 
-        List<String> results = invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"}));
+        List<String> results = invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"}));
 
         assertThat(results, equalTo(List.of("3")));
         assertThat(sleeps, equalTo(List.of(50L, 100L)));
@@ -555,7 +544,7 @@ class LambdaUdfInvokerTest {
                 .thenThrow(new AwsException("TooManyRequestsException", "Rate Exceeded.", 429));
 
         SpectrumSqlException failed = assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(function(List.of("integer"), "integer", 10, 1024, 300), SESSION, "u", 1,
+                () -> invoker.invoke(function(List.of("integer"), "integer", 10, 1024, 300), SESSION, REGION, "u", 1,
                         rows(new String[] {"1"})));
 
         assertThat(failed.getMessage(), containsString("throttled"));
@@ -570,7 +559,7 @@ class LambdaUdfInvokerTest {
                 .thenThrow(new AwsException("TooManyRequestsException", "Rate Exceeded.", 429));
 
         assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(function(List.of("integer"), "integer", 10, 1024, 0), SESSION, "u", 1,
+                () -> invoker.invoke(function(List.of("integer"), "integer", 10, 1024, 0), SESSION, REGION, "u", 1,
                         rows(new String[] {"1"})));
 
         assertThat(sleeps, hasSize(0));
@@ -582,7 +571,7 @@ class LambdaUdfInvokerTest {
                 .thenThrow(new AwsException("ResourceNotFoundException", "Function not found", 404));
 
         SpectrumSqlException failed = assertThrows(SpectrumSqlException.class,
-                () -> invoker.invoke(twoInts(), SESSION, "u", 1, rows(new String[] {"1", "2"})));
+                () -> invoker.invoke(twoInts(), SESSION, REGION, "u", 1, rows(new String[] {"1", "2"})));
 
         assertThat(failed.getMessage(), containsString("Function not found"));
         assertThat(sleeps, hasSize(0));

@@ -11,16 +11,10 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.core.common.IamConditionContextResolver;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ServicePrincipals;
-import io.floci.aws.services.iam.IamPolicyEvaluator;
-import io.floci.aws.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
-import io.floci.aws.services.iam.RequestPrincipal;
-import io.floci.aws.services.iam.ResourcePolicyProvider.ResourcePolicy;
+import io.floci.aws.services.iam.RoleResourceAccessAuthorizer;
 import io.floci.aws.services.iam.ServiceRoleAuthorizer;
-import io.floci.aws.services.iam.ServiceRoleAuthorizer.Permission;
-import io.floci.aws.services.lambda.LambdaResourcePolicyProvider;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
@@ -71,8 +65,7 @@ public class LambdaUdfInvoker {
 
     private final LambdaService lambda;
     private final ServiceRoleAuthorizer authorizer;
-    private final LambdaResourcePolicyProvider lambdaResourcePolicies;
-    private final IamPolicyEvaluator policyEvaluator;
+    private final RoleResourceAccessAuthorizer roleAccess;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final Clock clock;
@@ -80,19 +73,17 @@ public class LambdaUdfInvoker {
 
     @Inject
     public LambdaUdfInvoker(LambdaService lambda, ServiceRoleAuthorizer authorizer,
-                            LambdaResourcePolicyProvider lambdaResourcePolicies, IamPolicyEvaluator policyEvaluator,
-                            EmulatorConfig config, RegionResolver regionResolver, Clock clock) {
-        this(lambda, authorizer, lambdaResourcePolicies, policyEvaluator, config, regionResolver, clock,
-                LambdaUdfInvoker::sleep);
+                            RoleResourceAccessAuthorizer roleAccess, EmulatorConfig config,
+                            RegionResolver regionResolver, Clock clock) {
+        this(lambda, authorizer, roleAccess, config, regionResolver, clock, LambdaUdfInvoker::sleep);
     }
 
     LambdaUdfInvoker(LambdaService lambda, ServiceRoleAuthorizer authorizer,
-                     LambdaResourcePolicyProvider lambdaResourcePolicies, IamPolicyEvaluator policyEvaluator,
-                     EmulatorConfig config, RegionResolver regionResolver, Clock clock, LongConsumer sleeper) {
+                     RoleResourceAccessAuthorizer roleAccess, EmulatorConfig config, RegionResolver regionResolver,
+                     Clock clock, LongConsumer sleeper) {
         this.lambda = lambda;
         this.authorizer = authorizer;
-        this.lambdaResourcePolicies = lambdaResourcePolicies;
-        this.policyEvaluator = policyEvaluator;
+        this.roleAccess = roleAccess;
         this.config = config;
         this.regionResolver = regionResolver;
         this.clock = clock;
@@ -103,13 +94,15 @@ public class LambdaUdfInvoker {
      * Calls the function for every row and returns one result per row, in order, each as the text of the value or
      * null for SQL NULL.
      *
+     * @param clusterRegion the Region of the cluster, which Redshift calls the function from; null where the cluster
+     *                      is not one Floci knows, which leaves the default Region
      * @param user the database user whose query makes the call
      * @param queryId the id of that query
      * @param rows the argument rows as PostgreSQL prints them, each with one text (or null) per argument
      */
-    public List<String> invoke(ExternalFunctionBinding function, SpectrumSession session, String user, long queryId,
-                               List<List<String>> rows) {
-        String region = regionResolver.getDefaultRegion();
+    public List<String> invoke(ExternalFunctionBinding function, SpectrumSession session, String clusterRegion,
+                               String user, long queryId, List<List<String>> rows) {
+        String region = clusterRegion != null ? clusterRegion : regionResolver.getDefaultRegion();
         String functionArn = functionArn(function, session.accountId(), region);
         requireAuthorized(function, session.accountId(), functionArn);
         String clusterArn = new AwsArnUtils.Arn(regionResolver.partitionForRegion(region), "redshift", region,
@@ -286,7 +279,7 @@ public class LambdaUdfInvoker {
         return result.getFunctionError();
     }
 
-    /** A bare function name is one of the cluster's account in the default region, as Lambda resolves it. */
+    /** A bare function name is one of the cluster's account in the cluster's Region, as Lambda resolves it. */
     private String functionArn(ExternalFunctionBinding function, String accountId, String region) {
         String reference = function.lambdaFunction();
         if (AwsArnUtils.looksLikeArn(reference)) {
@@ -317,46 +310,17 @@ public class LambdaUdfInvoker {
 
     private void requireAuthorized(ExternalFunctionBinding function, String accountId, String functionArn) {
         Optional<String> refusal = authorizer.refusal(function.iamRoleArn(), accountId, REDSHIFT_PRINCIPAL, null,
-                List.of(new Permission(INVOKE_ACTION, functionArn)));
+                List.of());
         if (refusal.isPresent()) {
             throw new SpectrumSqlException(NOT_AUTHORIZED, refusal.get());
         }
         if (!config.services().iam().enforcementEnabled()) {
             return;
         }
-        AwsArnUtils.Arn target = AwsArnUtils.parse(functionArn);
-        List<ResourcePolicy> policies = lambdaResourcePolicies.getResourcePolicies("lambda", functionArn);
-        String targetAccount = policies.isEmpty() ? target.accountId() : policies.getFirst().ownerAccountId();
-        List<String> documents = policies.stream()
-                .map(ResourcePolicy::policyDocument)
-                .filter(document -> document != null && !document.isBlank())
-                .toList();
-        Map<String, List<String>> context = IamConditionContextResolver.withGlobalContext(
-                Map.of("aws:PrincipalArn", List.of(function.iamRoleArn())),
-                functionArn, target.region(), accountId, targetAccount, INVOKE_ACTION);
-        RequestPrincipal session = RequestPrincipal.roleSession(sessionArn(function.iamRoleArn()),
-                function.iamRoleArn());
-        ResourcePolicyDecision decision = policyEvaluator.evaluateResourcePolicyFor(
-                documents.isEmpty() ? null : documents, session, INVOKE_ACTION, functionArn, context);
-        boolean crossAccount = targetAccount != null && !targetAccount.isBlank() && !accountId.equals(targetAccount);
-        boolean resourceAllowed = decision == ResourcePolicyDecision.ALLOW
-                || decision == ResourcePolicyDecision.ALLOW_ACCOUNT
-                || decision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER;
-        if (decision == ResourcePolicyDecision.EXPLICIT_DENY || (crossAccount && !resourceAllowed)) {
-            throw new SpectrumSqlException(NOT_AUTHORIZED, "The Lambda function " + function.lambdaFunction()
-                    + " does not allow " + function.iamRoleArn() + " to perform " + INVOKE_ACTION + ".");
-        }
-    }
-
-    private static String sessionArn(String roleArn) {
-        try {
-            AwsArnUtils.Arn role = AwsArnUtils.parse(roleArn);
-            String roleName = role.resource().substring(role.resource().lastIndexOf('/') + 1);
-            return AwsArnUtils.Arn.global(role.partition(), "sts", role.accountId(), "assumed-role/" + roleName)
-                    .toString();
-        } catch (IllegalArgumentException ignored) {
-            // A role ARN that does not parse names no session; authorizer.refusal already rejects it when enforced.
-            return roleArn;
+        refusal = roleAccess.refusal(function.iamRoleArn(), INVOKE_ACTION, functionArn,
+                AwsArnUtils.parse(functionArn).region(), Map.of());
+        if (refusal.isPresent()) {
+            throw new SpectrumSqlException(NOT_AUTHORIZED, refusal.get());
         }
     }
 
