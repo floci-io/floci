@@ -42,7 +42,7 @@ class CognitoClientMetadataTest {
 
     private static Stream<Arguments> metadataRequests() {
         String[] actions = {"AdminCreateUser", "InitiateAuth", "AdminInitiateAuth", "RespondToAuthChallenge",
-                "AdminRespondToAuthChallenge", "ConfirmSignUp", "AdminConfirmSignUp", "ConfirmForgotPassword"};
+                "AdminRespondToAuthChallenge", "GetTokensFromRefreshToken", "ConfirmSignUp", "AdminConfirmSignUp", "ConfirmForgotPassword"};
         return Arrays.stream(actions).flatMap(action -> Stream.of(
                 Arguments.of(action, "{}", Map.of()),
                 Arguments.of(action, "{\"ClientMetadata\":null}", Map.of()),

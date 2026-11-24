@@ -1635,6 +1635,35 @@ class CognitoLambdaTriggersTest {
         }
     }
 
+    /** GetTokensFromRefreshToken hands the request's ClientMetadata to PreTokenGeneration, as REFRESH_TOKEN_AUTH does. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void preTokenGenerationOnGetTokensFromRefreshTokenReceivesClientMetadata() throws Exception {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createOAuthClient(pool, List.of("openid", "email"));
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        ArgumentCaptor<byte[]> payloadCap = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(), any()))
+                .thenReturn(ok(Map.of()));
+        String refreshToken = (String) service.generateAuthResultForHostedAuth(user, pool, client, null,
+                List.of("openid", "email"), Instant.now()).get("RefreshToken");
+        Map<String, String> metadata = Map.of("refreshKey", "refreshValue", "foo", "bar");
+
+        service.getTokensFromRefreshToken(client.getClientId(), refreshToken, metadata);
+        service.getTokensFromRefreshToken(client.getClientId(), refreshToken);
+
+        List<byte[]> payloads = payloadCap.getAllValues();
+        Map<String, Object> withMetadata = MAPPER.readValue(payloads.get(payloads.size() - 2),
+                new TypeReference<>() {});
+        Map<String, Object> withoutMetadata = MAPPER.readValue(payloads.get(payloads.size() - 1),
+                new TypeReference<>() {});
+        assertEquals("TokenGeneration_RefreshTokens", withMetadata.get("triggerSource"));
+        assertEquals(metadata, ((Map<String, Object>) withMetadata.get("request")).get("clientMetadata"));
+        assertEquals(Map.of(), ((Map<String, Object>) withoutMetadata.get("request")).get("clientMetadata"),
+                "the OAuth refresh_token grant has no ClientMetadata");
+    }
+
     /**
      * The OIDC flow owns {@code nonce}, and AWS lists it among the claims this trigger cannot
      * override or suppress. A trigger that tries must not displace the request's value.
