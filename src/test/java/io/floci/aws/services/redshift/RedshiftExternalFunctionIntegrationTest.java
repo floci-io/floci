@@ -334,10 +334,14 @@ class RedshiftExternalFunctionIntegrationTest {
                     () -> statement.executeQuery("SELECT val FROM v_indirect_udf"));
             assertEquals("0A000", indirect.getSQLState());
 
-            // Multi-statement with transaction control is rejected before collect so no NULL rows are committed
-            SQLException multi = assertThrows(SQLException.class, () -> statement.execute(
-                    "BEGIN; INSERT INTO out_sums SELECT exfunc_sum(1, 2); COMMIT;"));
-            assertEquals("0A000", multi.getSQLState());
+            // Multi-statement Simple Query with transaction control is rejected before collect so no NULL rows commit
+            try (Connection simpleConn = waitForConnection(
+                    RedshiftConnections.jdbcUrl(cluster) + "?preferQueryMode=simple", "admin", "Secret123");
+                 Statement simpleStmt = simpleConn.createStatement()) {
+                SQLException multi = assertThrows(SQLException.class, () -> simpleStmt.execute(
+                        "BEGIN; INSERT INTO out_sums SELECT exfunc_sum(1, 2); COMMIT;"));
+                assertEquals("0A000", multi.getSQLState());
+            }
 
             // Volatile argument expression (nextval) is rejected without advancing the sequence
             statement.execute("CREATE SEQUENCE udf_seq START 1");

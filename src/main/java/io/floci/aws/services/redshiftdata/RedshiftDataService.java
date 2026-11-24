@@ -705,11 +705,15 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
                     context.iamRoleArns(), !connection.getAutoCommit());
             try {
                 RedshiftDataBackendSql backend = new RedshiftDataBackendSql(connection, execution);
-                boolean ddl = preparation.handlesDdl(sql, session, backend);
+                boolean ddl = preparation.needsBackendForDdl(sql, session)
+                        ? preparation.handlesDdl(sql, session, backend)
+                        : preparation.handlesDdl(sql, session);
                 boolean handled = ddl
                         ? preparation.prepare(sql, session, backend)
-                        : preparation.prepare(parsed.sql(), session, backend,
-                                positionalParameters(parsed.parameterOrder(), parameters));
+                        : parsed.parameterOrder().isEmpty()
+                                ? preparation.prepare(parsed.sql(), session, backend)
+                                : preparation.prepare(parsed.sql(), session, backend,
+                                        positionalParameters(parsed.parameterOrder(), parameters));
                 if (handled) {
                     stored.status = RedshiftDataStatementStore.Status.FINISHED;
                     return;
