@@ -444,6 +444,45 @@ Floci records the configuration and does nothing more with it yet. It does not c
 entry, install the built-in node pools, serve the EBS provisioner or create load balancers, and
 `UpdateClusterConfig` refuses these members. [#8914](https://github.com/floci-io/floci/issues/8914) plans each.
 
+### Auto Mode load balancing for Services
+
+While a cluster has the load balancing capability on (`kubernetesNetworkConfig.elasticLoadBalancing.enabled`), a
+Service of type `LoadBalancer` whose `loadBalancerClass` is `eks.amazonaws.com/nlb` gets a Network Load Balancer in
+the cluster's subnets, as [on AWS](https://docs.aws.amazon.com/eks/latest/userguide/auto-configure-nlb.html):
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing   # internal when left out
+spec:
+  type: LoadBalancer
+  loadBalancerClass: eks.amazonaws.com/nlb
+  selector:
+    app: web
+  ports:
+  - port: 80
+    targetPort: 8080
+```
+
+Each TCP port gets a target group on the Service's NodePort, with the cluster's node registered by instance ID and a
+TCP health check, and a listener on the Service port. Once the node is registered, the load balancer's DNS name is
+written to the Service's `status.loadBalancer.ingress[0].hostname`. The load balancer, its listeners and target
+groups are deleted with the Service, with the cluster, and when the cluster's load balancing is turned off. Floci
+checks the cluster's Services every 10 seconds, and each check makes whatever a Service's ports are missing, so a
+port added later gets its listener and a changed NodePort its target group. The load balancers and target groups carry
+the tags Auto Mode sets, `eks:eks-cluster-name` and `service.eks.amazonaws.com/stack` (the only keys
+`AmazonEKSLoadBalancingPolicy` lets it set), and Floci takes as its own only those it named for the Service.
+
+UDP and SCTP ports get no listener, as Floci's load balancers serve TCP and HTTP only, and a Service with no TCP
+NodePort, such as one with `allocateLoadBalancerNodePorts: false`, gets no load balancer.
+
+On AWS, `eks.amazonaws.com/nlb` is the cluster's default class, so a Service that names no class gets one too. In
+Floci such a Service stays with k3s's own ServiceLB, which answers it with the node's address; name the class to get
+a load balancer. Ingresses (`eks.amazonaws.com/alb`) don't get one yet.
+
 ## Node group inputs
 
 `CreateNodegroup` accepts the full documented input set and stores every member, so `CreateNodegroup` and `DescribeNodegroup` both return exactly what was supplied.

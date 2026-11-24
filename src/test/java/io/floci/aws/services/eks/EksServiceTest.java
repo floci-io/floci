@@ -633,6 +633,18 @@ class EksServiceTest {
     }
 
     @Test
+    void aDeletedClustersAutoModeLoadBalancersGoWithIt() {
+        Cluster cluster = activeCluster();
+        EksService service = serviceWithCluster(cluster, mock(EksClusterManager.class), false);
+        EksAutoModeLoadBalancers loadBalancers = mock(EksAutoModeLoadBalancers.class);
+        service.autoModeLoadBalancers = loadBalancers;
+
+        service.deleteCluster("running-cluster");
+
+        verify(loadBalancers).deleteLoadBalancers(cluster, service.clusterRegion(cluster));
+    }
+
+    @Test
     void aDeleteOverlappingOneStillInProgressIsRejectedAndCannotReviveTheCluster() {
         Cluster cluster = activeCluster();
         EksClusterManager clusterManager = mock(EksClusterManager.class);
