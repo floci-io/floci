@@ -9,6 +9,7 @@ import io.floci.aws.services.docdb.DocDbQueryHandler;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.neptune.NeptuneQueryHandler;
 import io.floci.aws.services.rds.export.RdsExportTaskService;
+import io.floci.aws.services.rds.integration.RdsIntegrationService;
 import io.floci.aws.services.rds.model.DatabaseEngine;
 import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.services.rds.model.DbClusterParameterGroup;
@@ -82,8 +83,8 @@ class RdsQueryHandlerTest {
         docDbHandler = mock(DocDbQueryHandler.class);
         neptuneHandler = mock(NeptuneQueryHandler.class);
         exportTaskService = mock(RdsExportTaskService.class);
-        handler = new RdsQueryHandler(service, exportTaskService, config, regionResolver, docDbHandler,
-                neptuneHandler);
+        handler = new RdsQueryHandler(service, exportTaskService, mock(RdsIntegrationService.class), config,
+                regionResolver, docDbHandler, neptuneHandler);
     }
 
     @ParameterizedTest

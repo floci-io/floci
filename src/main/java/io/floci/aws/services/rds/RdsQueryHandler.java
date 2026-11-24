@@ -16,6 +16,7 @@ import io.floci.aws.core.common.docker.ContainerRejectedException;
 import io.floci.aws.services.docdb.DocDbQueryHandler;
 import io.floci.aws.services.neptune.NeptuneQueryHandler;
 import io.floci.aws.services.rds.export.RdsExportTaskService;
+import io.floci.aws.services.rds.integration.RdsIntegrationService;
 import io.floci.aws.services.rds.model.BlueGreenDeployment;
 import io.floci.aws.services.rds.model.DatabaseEngine;
 import io.floci.aws.services.rds.model.DbCluster;
@@ -43,6 +44,7 @@ import io.floci.aws.services.rds.model.EventSubscription;
 import io.floci.aws.services.rds.model.ExportTask;
 import io.floci.aws.services.rds.model.GlobalCluster;
 import io.floci.aws.services.rds.model.GlobalClusterMember;
+import io.floci.aws.services.rds.model.Integration;
 import io.floci.aws.services.rds.model.LogExportChanges;
 import io.floci.aws.services.rds.model.OptionGroup;
 import io.floci.aws.services.rds.model.OptionGroupOption;
@@ -82,16 +84,19 @@ public class RdsQueryHandler {
 
     private final RdsService service;
     private final RdsExportTaskService exportTaskService;
+    private final RdsIntegrationService integrationService;
     private final DocDbQueryHandler docDbQueryHandler;
     private final NeptuneQueryHandler neptuneQueryHandler;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
 
     @Inject
-    public RdsQueryHandler(RdsService service, RdsExportTaskService exportTaskService, EmulatorConfig config,
+    public RdsQueryHandler(RdsService service, RdsExportTaskService exportTaskService,
+                           RdsIntegrationService integrationService, EmulatorConfig config,
                            RegionResolver regionResolver, DocDbQueryHandler docDbQueryHandler,
                            NeptuneQueryHandler neptuneQueryHandler) {
         this.exportTaskService = exportTaskService;
+        this.integrationService = integrationService;
         this.docDbQueryHandler = docDbQueryHandler;
         this.neptuneQueryHandler = neptuneQueryHandler;
         this.service = service;
@@ -219,6 +224,10 @@ public class RdsQueryHandler {
                 case "StartExportTask" -> handleStartExportTask(params, region);
                 case "DescribeExportTasks" -> handleDescribeExportTasks(params, region);
                 case "CancelExportTask" -> handleCancelExportTask(params, region);
+                case "CreateIntegration" -> handleCreateIntegration(params, region);
+                case "DescribeIntegrations" -> handleDescribeIntegrations(params, region);
+                case "ModifyIntegration" -> handleModifyIntegration(params, region);
+                case "DeleteIntegration" -> handleDeleteIntegration(params, region);
                 case "DescribeGlobalClusters" -> handleDescribeGlobalClusters(params);
                 case "CreateGlobalCluster" -> handleCreateGlobalCluster(params, region);
                 case "ModifyGlobalCluster" -> handleModifyGlobalCluster(params);
@@ -2386,6 +2395,119 @@ public class RdsQueryHandler {
                 .elem("TotalExtractedDataInGB", task.getTotalExtractedDataInGb())
                 .elem("FailureCause", task.getFailureCause())
                 .elem("WarningMessage", task.getWarningMessage());
+        return xml.build();
+    }
+
+    // ── Zero-ETL integrations ─────────────────────────────────────────────────
+
+    private Response handleCreateIntegration(MultivaluedMap<String, String> params, String region) {
+        String integrationName = params.getFirst("IntegrationName");
+        String sourceArn = params.getFirst("SourceArn");
+        String targetArn = params.getFirst("TargetArn");
+        Response missing = firstMissingParam(
+                "SourceArn", sourceArn,
+                "TargetArn", targetArn,
+                "IntegrationName", integrationName);
+        if (missing != null) {
+            return missing;
+        }
+        Integration integration = integrationService.createIntegration(new RdsIntegrationService.CreateRequest(
+                integrationName, sourceArn, targetArn, params.getFirst("KMSKeyId"),
+                encryptionContext(params), parseTags(params), params.getFirst("DataFilter"),
+                params.getFirst("Description")), region);
+        return Response.ok(AwsQueryResponse.envelope("CreateIntegration", AwsNamespaces.RDS,
+                integrationXml(integration))).build();
+    }
+
+    private Response handleDescribeIntegrations(MultivaluedMap<String, String> params, String region) {
+        int limit = recordPageLimit(params);
+        Map<String, List<String>> filters = new LinkedHashMap<>();
+        for (int i = 1; params.getFirst("Filters.Filter." + i + ".Name") != null; i++) {
+            String name = params.getFirst("Filters.Filter." + i + ".Name");
+            filters.put(name, extractRdsFilterValues(params, name));
+        }
+        List<Integration> all = integrationService.describeIntegrations(
+                params.getFirst("IntegrationIdentifier"), filters, region);
+        PaginatedResult<Integration> page = recordPage(all, parseMarker(params.getFirst("Marker")), limit);
+        XmlBuilder xml = new XmlBuilder().start("Integrations");
+        for (Integration integration : page.items()) {
+            xml.start("Integration").raw(integrationXml(integration)).end("Integration");
+        }
+        xml.end("Integrations");
+        if (page.nextToken() != null) {
+            xml.elem("Marker", page.nextToken());
+        }
+        return Response.ok(AwsQueryResponse.envelope("DescribeIntegrations", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleModifyIntegration(MultivaluedMap<String, String> params, String region) {
+        String identifier = params.getFirst("IntegrationIdentifier");
+        Response missing = firstMissingParam("IntegrationIdentifier", identifier);
+        if (missing != null) {
+            return missing;
+        }
+        Integration integration = integrationService.modifyIntegration(identifier,
+                params.getFirst("IntegrationName"), params.getFirst("DataFilter"),
+                params.getFirst("Description"), region);
+        return Response.ok(AwsQueryResponse.envelope("ModifyIntegration", AwsNamespaces.RDS,
+                integrationXml(integration))).build();
+    }
+
+    private Response handleDeleteIntegration(MultivaluedMap<String, String> params, String region) {
+        String identifier = params.getFirst("IntegrationIdentifier");
+        Response missing = firstMissingParam("IntegrationIdentifier", identifier);
+        if (missing != null) {
+            return missing;
+        }
+        Integration integration = integrationService.deleteIntegration(identifier, region);
+        return Response.ok(AwsQueryResponse.envelope("DeleteIntegration", AwsNamespaces.RDS,
+                integrationXml(integration))).build();
+    }
+
+    /** Reads an {@code AdditionalEncryptionContext.entry.N.key} / {@code .value} map. */
+    private static Map<String, String> encryptionContext(MultivaluedMap<String, String> params) {
+        Map<String, String> context = new LinkedHashMap<>();
+        for (int i = 1; ; i++) {
+            String key = params.getFirst("AdditionalEncryptionContext.entry." + i + ".key");
+            if (key == null) {
+                break;
+            }
+            String value = params.getFirst("AdditionalEncryptionContext.entry." + i + ".value");
+            context.put(key, value == null ? "" : value);
+        }
+        return context;
+    }
+
+    static String integrationXml(Integration integration) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("SourceArn", integration.getSourceArn())
+                .elem("TargetArn", integration.getTargetArn())
+                .elem("IntegrationName", integration.getIntegrationName())
+                .elem("IntegrationArn", integration.getIntegrationArn())
+                .elem("KMSKeyId", integration.getKmsKeyId());
+        if (!integration.getAdditionalEncryptionContext().isEmpty()) {
+            xml.start("AdditionalEncryptionContext");
+            integration.getAdditionalEncryptionContext().forEach((key, value) -> xml.start("entry")
+                    .elem("key", key)
+                    .elem("value", value)
+                    .end("entry"));
+            xml.end("AdditionalEncryptionContext");
+        }
+        xml.elem("Status", integration.getStatus()).start("Tags");
+        writeTags(xml, integration.getTags());
+        xml.end("Tags")
+                .elem("DataFilter", integration.getDataFilter())
+                .elem("Description", integration.getDescription())
+                .elem("CreateTime", integration.getCreateTime() != null
+                        ? integration.getCreateTime().toString() : null)
+                .start("Errors");
+        for (Integration.IntegrationError error : integration.getErrors()) {
+            xml.start("IntegrationError")
+                    .elem("ErrorCode", error.getErrorCode())
+                    .elem("ErrorMessage", error.getErrorMessage())
+                    .end("IntegrationError");
+        }
+        xml.end("Errors");
         return xml.build();
     }
 

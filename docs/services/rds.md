@@ -157,6 +157,10 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `StartExportTask` | Export a DB snapshot or DB cluster snapshot to S3 as Parquet; see [Exporting snapshots to Amazon S3](#exporting-snapshots-to-amazon-s3) |
 | `DescribeExportTasks` | List export tasks, by `ExportTaskIdentifier`, `SourceArn`, `SourceType` and the `export-task-identifier`, `s3-bucket`, `source-arn` and `status` filters |
 | `CancelExportTask` | Cancel a running export task; what it already wrote stays in the bucket |
+| `CreateIntegration` | Create a zero-ETL integration from an Aurora PostgreSQL cluster or a PostgreSQL instance into a Redshift Serverless namespace or a provisioned cluster; see [Zero-ETL integrations with Amazon Redshift](#zero-etl-integrations-with-amazon-redshift) |
+| `DescribeIntegrations` | List integrations, by `IntegrationIdentifier` (ARN, id or name) and the `integration-identifier`, `integration-name`, `source-arn`, `target-arn` and `status` filters |
+| `ModifyIntegration` | Change an active integration's name, `DataFilter` or description |
+| `DeleteIntegration` | Delete an integration |
 | `DescribeGlobalClusters` | List the account's global clusters with their primary and secondary members; see [Global clusters](#global-clusters) |
 | `CreateGlobalCluster` | Create an Aurora global database, empty or with an existing Aurora cluster as its primary |
 | `ModifyGlobalCluster` | Rename a global cluster, set deletion protection, or upgrade its engine version (members follow) |
@@ -1150,6 +1154,44 @@ What differs from RDS:
   supported.
 - `TotalExtractedDataInGB` is the size of the rows Floci read, in whole gigabytes, and is 0 for
   most local data sets.
+
+## Zero-ETL integrations with Amazon Redshift
+
+`CreateIntegration` records a zero-ETL integration from an RDS PostgreSQL source into Redshift.
+`IntegrationName`, `SourceArn` and `TargetArn` are required, and `DataFilter`, `Description`,
+`KMSKeyId`, `AdditionalEncryptionContext` and `Tags` are optional. The integration ARN is
+`arn:aws:rds:<region>:<account>:integration:<uuid>`, and `DescribeIntegrations`,
+`ModifyIntegration` and `DeleteIntegration` find an integration by that ARN, by the id at its end
+or by its name.
+
+- `SourceArn` names an `aurora-postgresql` DB cluster or a standalone `postgres` DB instance in the
+  request's account and Region. A cluster or instance that does not exist is refused with
+  `DBClusterNotFoundFault` or `DBInstanceNotFound`. An Aurora member instance is refused: use its
+  cluster's ARN.
+- `TargetArn` names a Redshift Serverless namespace (`arn:aws:redshift-serverless:...:namespace/<id>`)
+  or a provisioned cluster (`arn:aws:redshift:...:cluster:<name>`) in the same account and Region.
+- `DataFilter` is required and must include at least one database, as RDS requires of a PostgreSQL
+  source: `include: <database>.*.*`. Each entry is `include:` or `exclude:` followed by
+  `database.schema.table`, where the schema and table may be `*` or a `/regex/`, with at most 99
+  patterns of at most 256 characters each.
+- `AdditionalEncryptionContext` is only accepted with `KMSKeyId`. An `IntegrationName` already used
+  in the Region is refused with `IntegrationAlreadyExistsFault`.
+
+`CreateIntegration` reports `creating`, `ModifyIntegration` reports `modifying` and
+`DeleteIntegration` reports `deleting`, as on AWS. `ModifyIntegration` only accepts an `active`
+integration, otherwise it fails with `InvalidIntegrationStateFault`.
+
+What differs from RDS:
+
+- No data is copied into Redshift yet: an integration reads back as `active` straight after it is
+  created or modified, without passing through `syncing`.
+- Only PostgreSQL sources are accepted. An `aurora-mysql`, `mysql` or `mariadb` source, and a
+  Multi-AZ `postgres` DB cluster, are refused with `InvalidParameterValue`.
+- A target that does not exist is refused with `InvalidParameterValue`. The target's resource
+  policy, the source's parameter group settings and the KMS key are not checked, and cross-account
+  sources or targets are not supported.
+- The tagging actions do not take an integration ARN yet; `Tags` given on create are kept and
+  reported back.
 
 ## Global clusters
 
