@@ -17,6 +17,8 @@ import io.floci.aws.services.elbv2.model.LoadBalancer;
 import io.floci.aws.services.elbv2.model.TargetDescription;
 import io.floci.aws.services.elbv2.model.TargetGroup;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
@@ -76,7 +78,7 @@ class EksAutoModeLoadBalancersTest {
     @Test
     void onlyLoadBalancerServicesOfTheAutoModeClassWithATcpNodePortGetOne() throws Exception {
         List<EksAutoModeLoadBalancers.NlbService> services =
-                EksAutoModeLoadBalancers.nlbServices(new ObjectMapper().readTree(SERVICES));
+                EksAutoModeLoadBalancers.nlbServices(new ObjectMapper().readTree(SERVICES), false);
 
         // UDP gets no listener, as Floci's load balancers serve TCP and HTTP only; a Service with no TCP NodePort
         // (only UDP, or allocateLoadBalancerNodePorts false) gets no load balancer.
@@ -84,10 +86,33 @@ class EksAutoModeLoadBalancersTest {
                 List.of(new EksAutoModeLoadBalancers.ServicePort("TCP", 80, 31080)))), services);
     }
 
+    @ParameterizedTest
+    @CsvSource({"true,shop/web shop/plain", "false,shop/web"})
+    void aServiceOfNoClassGetsOneOnlyWhileTheNodeRunsWithoutServiceLb(boolean classless, String expected)
+            throws Exception {
+        String classes = """
+                {"items": [
+                  {"metadata": {"namespace": "shop", "name": "web"},
+                   "spec": {"type": "LoadBalancer", "loadBalancerClass": "eks.amazonaws.com/nlb",
+                            "ports": [{"protocol": "TCP", "port": 80, "nodePort": 31080}]}},
+                  {"metadata": {"namespace": "shop", "name": "plain"},
+                   "spec": {"type": "LoadBalancer", "ports": [{"protocol": "TCP", "port": 80, "nodePort": 32080}]}},
+                  {"metadata": {"namespace": "shop", "name": "controller"},
+                   "spec": {"type": "LoadBalancer", "loadBalancerClass": "service.k8s.aws/nlb",
+                            "ports": [{"protocol": "TCP", "port": 80, "nodePort": 33080}]}}
+                ]}""";
+
+        List<EksAutoModeLoadBalancers.NlbService> services =
+                EksAutoModeLoadBalancers.nlbServices(new ObjectMapper().readTree(classes), classless);
+
+        assertEquals(List.of(expected.split(" ")),
+                services.stream().map(EksAutoModeLoadBalancers.NlbService::stack).toList());
+    }
+
     @Test
     void aServiceWithoutASchemeAnnotationGetsAnInternalLoadBalancer() throws Exception {
         List<EksAutoModeLoadBalancers.NlbService> services = EksAutoModeLoadBalancers.nlbServices(new ObjectMapper()
-                .readTree(SERVICES.replace(EksAutoModeLoadBalancers.SCHEME_ANNOTATION, "example.com/other")));
+                .readTree(SERVICES.replace(EksAutoModeLoadBalancers.SCHEME_ANNOTATION, "example.com/other")), false);
 
         assertEquals("internal", services.getFirst().scheme());
     }
