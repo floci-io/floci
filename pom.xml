@@ -20,7 +20,7 @@
         <apicurio.version>2.6.13.Final</apicurio.version>
         <everit.json.schema.version>1.14.6</everit.json.schema.version>
         <wire.version>7.1.2</wire.version>
-        <aws.sdk.version>2.57.7</aws.sdk.version>
+        <aws.sdk.version>2.59.7</aws.sdk.version>
         <!-- Nightly checks skip unless -Dnightly.checks.enabled=true, but a skipped @QuarkusTest still
              costs its profile's application: Quarkus builds every profile's application while JUnit
              discovers the tests, before any class is skipped, and keeps it for the rest of the JVM.
