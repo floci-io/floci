@@ -58,7 +58,7 @@ class EcsContainerInsightsIntegrationTest {
                 "Cluster": {"Ref": "Cluster"}, "TaskDefinition": {"Ref": "TaskDef"},
                 "DesiredCount": 1, "LaunchType": "FARGATE", "NetworkConfiguration": {"AwsvpcConfiguration":
                   {"Subnets": ["%2$s"]}}}}}}
-            """.formatted(cluster, Ec2Service.defaultSubnetId("us-east-1", "a"));
+            """.formatted(cluster, Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"));
 
         given().contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "CreateStack")

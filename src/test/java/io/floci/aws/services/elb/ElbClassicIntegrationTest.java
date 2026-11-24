@@ -43,7 +43,7 @@ class ElbClassicIntegrationTest {
 
     private static final String LB = "classic-elb-1";
 
-    private static String subnetA() { return Ec2Service.defaultSubnetId("us-east-1", "a"); }
+    private static String subnetA() { return Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"); }
 
     @Test
     @Order(1)
@@ -440,7 +440,7 @@ class ElbClassicIntegrationTest {
                 .formParam("Action", "AttachLoadBalancerToSubnets")
                 .formParam("Version", V1)
                 .formParam("LoadBalancerName", LB)
-                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "b"))
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000"))
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
@@ -448,13 +448,13 @@ class ElbClassicIntegrationTest {
                 .statusCode(200)
                 .body("AttachLoadBalancerToSubnetsResponse.AttachLoadBalancerToSubnetsResult"
                         + ".Subnets.member", hasItems(subnetA(),
-                        Ec2Service.defaultSubnetId("us-east-1", "b")));
+                        Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000")));
 
         given()
                 .formParam("Action", "DetachLoadBalancerFromSubnets")
                 .formParam("Version", V1)
                 .formParam("LoadBalancerName", LB)
-                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "b"))
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000"))
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
@@ -520,8 +520,8 @@ class ElbClassicIntegrationTest {
                 .formParam("Version", V2)
                 .formParam("Name", "v2-still-works")
                 .formParam("Type", "application")
-                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
-                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b"))
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"))
+                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000"))
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
@@ -594,7 +594,7 @@ class ElbClassicIntegrationTest {
                 .formParam("Action", "CreateLoadBalancer")
                 .formParam("Version", V1)
                 .formParam("LoadBalancerName", loadBalancerName)
-                .formParam("Subnets.member.1", subnetA())
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a", SOURCE_GROUP_ACCOUNT))
                 .formParam("SecurityGroups.member.1", groupId)
                 .formParam("Listeners.member.1.Protocol", "TCP")
                 .formParam("Listeners.member.1.LoadBalancerPort", "443")

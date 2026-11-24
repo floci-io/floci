@@ -207,7 +207,7 @@ class EcsServicePersistenceTest {
     /** An awsvpc service needs the subnets its tasks get an ENI in, as it does on AWS. */
     private static NetworkConfiguration awsvpcConfiguration() {
         AwsVpcConfiguration awsvpc = new AwsVpcConfiguration();
-        awsvpc.setSubnets(List.of(Ec2Service.defaultSubnetId(REGION, "a")));
+        awsvpc.setSubnets(List.of(Ec2Service.defaultSubnetId(REGION, "a", "000000000000")));
         NetworkConfiguration networkConfiguration = new NetworkConfiguration();
         networkConfiguration.setAwsvpcConfiguration(awsvpc);
         return networkConfiguration;

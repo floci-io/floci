@@ -42,8 +42,8 @@ class RdsProxyEndpointIntegrationTest {
     }
 
     private static RequestSpecification withSubnets(RequestSpecification request) {
-        return request.formParam("VpcSubnetIds.member.1", Ec2Service.defaultSubnetId(REGION, "a"))
-                .formParam("VpcSubnetIds.member.2", Ec2Service.defaultSubnetId(REGION, "b"));
+        return request.formParam("VpcSubnetIds.member.1", Ec2Service.defaultSubnetId(REGION, "a", "000000000000"))
+                .formParam("VpcSubnetIds.member.2", Ec2Service.defaultSubnetId(REGION, "b", "000000000000"));
     }
 
     private static RequestSpecification describe() {
@@ -144,7 +144,7 @@ class RdsProxyEndpointIntegrationTest {
                 .body(containsString("<Code>InvalidParameterValue</Code>"));
         query("CreateDBProxyEndpoint")
                 .formParam("DBProxyName", PROXY).formParam("DBProxyEndpointName", "lonely")
-                .formParam("VpcSubnetIds.member.1", Ec2Service.defaultSubnetId(REGION, "a"))
+                .formParam("VpcSubnetIds.member.1", Ec2Service.defaultSubnetId(REGION, "a", "000000000000"))
                 .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>InvalidSubnet</Code>"));
         withSubnets(query("CreateDBProxyEndpoint")).formParam("DBProxyEndpointName", "orphan")

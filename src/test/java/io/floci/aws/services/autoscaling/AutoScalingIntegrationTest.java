@@ -39,7 +39,7 @@ class AutoScalingIntegrationTest {
                 .formParam("LaunchConfigurationName", "my-lc")
                 .formParam("ImageId", "ami-12345678")
                 .formParam("InstanceType", "t3.micro")
-                .formParam("SecurityGroups.member.1", Ec2Service.defaultSecurityGroupId("us-east-1"))
+                .formParam("SecurityGroups.member.1", Ec2Service.defaultSecurityGroupId("us-east-1", "000000000000"))
                 .header("Authorization", AUTH)
             .when()
                 .post("/")

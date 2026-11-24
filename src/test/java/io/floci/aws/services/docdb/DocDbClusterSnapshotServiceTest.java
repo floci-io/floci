@@ -84,7 +84,7 @@ class DocDbClusterSnapshotServiceTest {
         key.setKeyState("Enabled");
         doReturn(key).when(kmsService).describeKey(KEY_ARN, "us-east-1");
         Ec2Service ec2Service = mock(Ec2Service.class);
-        when(ec2Service.resolveDefaultSecurityGroupId(anyString())).thenAnswer(inv -> Ec2Service.defaultSecurityGroupId(inv.getArgument(0)));
+        when(ec2Service.resolveDefaultSecurityGroupId(anyString())).thenAnswer(inv -> Ec2Service.defaultSecurityGroupId(inv.getArgument(0), "000000000000"));
         docDbService = new DocDbService(config, new RegionResolver("us-east-1", "000000000000"), containerManager,
                 storageFactory, mock(RdsService.class), ec2Service, kmsService);
     }

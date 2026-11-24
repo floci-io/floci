@@ -119,7 +119,7 @@ class EcsDescribeServicesIntegrationTest {
                  "taskDefinition":"blue-running-task","desiredCount":1,"launchType":"FARGATE",
                  "networkConfiguration":{"awsvpcConfiguration":{"subnets":["%s"]}},
                  "deploymentController":{"type":"CODE_DEPLOY"}}
-                """.formatted(Ec2Service.defaultSubnetId("us-east-1", "a")));
+                """.formatted(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000")));
         String primaryId = created.path("service.taskSets[0].id");
         await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
                 describe("blue-running-cluster", "blue-running-service").then()

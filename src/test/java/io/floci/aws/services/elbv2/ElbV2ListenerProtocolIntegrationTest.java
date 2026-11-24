@@ -161,12 +161,12 @@ class ElbV2ListenerProtocolIntegrationTest {
 
     private void createLoadBalancer(String type) {
         loadBalancer = elb.createLoadBalancer(request -> request.name(uniqueName("protocol-lb")).type(type)
-                .subnets(Ec2Service.defaultSubnetId(REGION.id(), "a"),
-                        Ec2Service.defaultSubnetId(REGION.id(), "b")))
+                .subnets(Ec2Service.defaultSubnetId(REGION.id(), "a", "000000000000"),
+                        Ec2Service.defaultSubnetId(REGION.id(), "b", "000000000000")))
                 .loadBalancers().getFirst().loadBalancerArn();
         targetGroup = elb.createTargetGroup(request -> request.name(uniqueName("protocol-tg"))
                 .targetType("ip").protocol(type.equals("network") ? "TCP" : "HTTP").port(80)
-                .vpcId(Ec2Service.defaultVpcId(REGION.id()))).targetGroups().getFirst().targetGroupArn();
+                .vpcId(Ec2Service.defaultVpcId(REGION.id(), "000000000000"))).targetGroups().getFirst().targetGroupArn();
     }
 
     private Listener createListener(String protocol, String sslPolicy, String certificateArn) {

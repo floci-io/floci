@@ -155,8 +155,8 @@ class CloudFormationElbV2ReplacementIntegrationTest {
     void aReplacementOnOneSubnetFailsTheUpdateAndKeepsTheBalancer() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "elb-replace-one-" + suffix;
-        String subnetA = Ec2Service.defaultSubnetId(REGION, "a");
-        String subnetB = Ec2Service.defaultSubnetId(REGION, "b");
+        String subnetA = Ec2Service.defaultSubnetId(REGION, "a", "000000000000");
+        String subnetB = Ec2Service.defaultSubnetId(REGION, "b", "000000000000");
         String template = """
             {
               "Resources": {
@@ -219,7 +219,7 @@ class CloudFormationElbV2ReplacementIntegrationTest {
                 "ListenerRef": {"Value": {"Ref": "Listener"}}
               }
             }
-            """.formatted(suffix, Ec2Service.defaultSubnetId(REGION, "a"), Ec2Service.defaultSubnetId(REGION, "b"));
+            """.formatted(suffix, Ec2Service.defaultSubnetId(REGION, "a", "000000000000"), Ec2Service.defaultSubnetId(REGION, "b", "000000000000"));
     }
 
     private static String template(String suffix, String listenerLb, String tgName, String extraResources) {
@@ -255,8 +255,8 @@ class CloudFormationElbV2ReplacementIntegrationTest {
                 "ListenerRef": {"Value": {"Ref": "Listener"}}
               }
             }
-            """.formatted(suffix, Ec2Service.defaultSubnetId(REGION, "a"), Ec2Service.defaultSubnetId(REGION, "b"),
-                tgName, Ec2Service.defaultVpcId(REGION), listenerLb, extraResources);
+            """.formatted(suffix, Ec2Service.defaultSubnetId(REGION, "a", "000000000000"), Ec2Service.defaultSubnetId(REGION, "b", "000000000000"),
+                tgName, Ec2Service.defaultVpcId(REGION, "000000000000"), listenerLb, extraResources);
     }
 
     private static void createStack(String stackName, String body) {

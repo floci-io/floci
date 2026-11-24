@@ -1104,7 +1104,7 @@ class IamPassRoleEnforcementIntegrationTest {
         return """
                 {"cluster":"%s","taskDefinition":"%s","launchType":"FARGATE","count":1,
                  "networkConfiguration":{"awsvpcConfiguration":{"subnets":["%s"]}}%s}"""
-                .formatted(cluster, family, Ec2Service.defaultSubnetId("us-east-1", "a"),
+                .formatted(cluster, family, Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"),
                         taskRoleOverride == null ? ""
                         : ",\"overrides\":{\"taskRoleArn\":\"" + taskRoleOverride + "\"}");
     }
@@ -1113,7 +1113,7 @@ class IamPassRoleEnforcementIntegrationTest {
         return """
                 {"cluster":"%s","serviceName":"%s","taskDefinition":"%s","desiredCount":0,"launchType":"FARGATE",
                  "networkConfiguration":{"awsvpcConfiguration":{"subnets":["%s"]}}}"""
-                .formatted(cluster, name, family, Ec2Service.defaultSubnetId("us-east-1", "a"));
+                .formatted(cluster, name, family, Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"));
     }
 
     private static RequestSpecification createStack(User user, String stack) {

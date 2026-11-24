@@ -48,7 +48,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class EcsSharedTaskNetworkDockerIntegrationTest {
 
     private static final String REGION = "us-east-1";
-    private static final String SUBNET = Ec2Service.defaultSubnetId("us-east-1", "a");
+    private static final String SUBNET = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
     private static final int FRONT_PORT = 8080;
     private static final int BACKEND_PORT = 8081;
 
