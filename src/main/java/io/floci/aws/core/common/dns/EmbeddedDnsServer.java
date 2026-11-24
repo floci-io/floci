@@ -436,7 +436,9 @@ public class EmbeddedDnsServer {
      *
      * <p>A forwarding rule associated with the querying VPC is then applied before Floci resolves
      * the name from a record source, because a Resolver rule takes precedence over a private
-     * hosted zone that matches the same name.
+     * hosted zone that matches the same name. An address query under an emulator suffix that the
+     * stored zone refuses, such as an alias to a target Floci does not serve, is then answered as
+     * the emulator's own name.
      */
     QueryPlan planQuery(String name, String clientAddress, String myIp, int type) {
         Optional<DnsAnswer> stored = resolveFromRecordSources(name, type, true, myIp);
@@ -449,6 +451,10 @@ public class EmbeddedDnsServer {
         Optional<DnsForwardingRule> rule = matchingRule(name, clientAddress);
         if (rule.isPresent() && rule.orElseThrow().forwards()) {
             return QueryPlan.forwardingTo(rule.orElseThrow().targets());
+        }
+        if (matchesSuffix(name) && (type == 1 || type == 28)
+                && stored.filter(answer -> answer.responseCode() == 5).isPresent()) {
+            return QueryPlan.answering(emulatorName.orElseThrow());
         }
         return stored.or(() -> resolveFromRecordSources(name, type))
                 .map(QueryPlan::answering).orElse(QueryPlan.UPSTREAM);

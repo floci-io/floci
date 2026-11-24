@@ -2,6 +2,7 @@ package io.floci.aws.core.common.dns;
 
 import io.floci.aws.services.route53.Route53DnsRecordSource;
 import io.floci.aws.services.route53.Route53Service;
+import io.floci.aws.services.route53.model.AliasTarget;
 import io.floci.aws.services.route53.model.ResourceRecord;
 import io.floci.aws.services.route53.model.ResourceRecordSet;
 import io.floci.aws.services.route53.model.VpcAssociation;
@@ -293,6 +294,30 @@ class Route53DnsPacketIntegrationTest {
         assertNegative(address, awsName, 0, 900);
         for (String label : List.of("weighted", "alias", "leaf.delegated")) {
             assertHeader(query(DnsTestQuery.query(label + "." + name, 16, 0x1234)), 5, false, 0, 0);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"A,1,1", "AAAA,28,0"})
+    void anOwnNameAliasToATargetFlociDoesNotServeAnswersAsTheEmulator(String recordType, int type, int answers)
+            throws Exception {
+        String zone = uniqueName() + ".localhost.floci.io";
+        String id = createZone(zone);
+        String name = "api.auth." + zone;
+        AliasTarget cloudFront = new AliasTarget();
+        cloudFront.setHostedZoneId("Z2FDTNDATAQYW2");
+        cloudFront.setDnsName("d111111abcdef8.cloudfront.net.");
+        ResourceRecordSet alias = new ResourceRecordSet();
+        alias.setName(name);
+        alias.setType(recordType);
+        alias.setAliasTarget(cloudFront);
+        change(id, "CREATE", alias);
+
+        byte[] response = query(DnsTestQuery.query(name, type, 0x1234));
+        assertPrivateHeader(response, 0, answers);
+        if (type == 1) {
+            assertArrayEquals(new DnsRecord.Address(1, "127.0.0.1").data(),
+                    Arrays.copyOfRange(response, response.length - 4, response.length));
         }
     }
 
