@@ -60,7 +60,7 @@ class ElbClassicCertificateDeleteRaceTest {
                 .formParam("Action", "CreateLoadBalancer")
                 .formParam("Version", CLASSIC_VERSION)
                 .formParam("LoadBalancerName", lbName)
-                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"))
                 .formParam("Listeners.member.1.Protocol", "HTTPS")
                 .formParam("Listeners.member.1.LoadBalancerPort", "443")
                 .formParam("Listeners.member.1.InstanceProtocol", "HTTP")

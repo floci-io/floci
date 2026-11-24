@@ -1207,6 +1207,11 @@ public class RedshiftService implements ManagedSecretRotator {
 
     /** The caller's cluster an ARN names, when the ARN is exactly that cluster's in this Region. */
     public Optional<Cluster> findClusterByArn(String clusterArn) {
+        return findClusterByArn(clusterArn, regionResolver.getRegion());
+    }
+
+    /** The caller's cluster an ARN names, when the ARN is exactly that cluster's in {@code region}. */
+    public Optional<Cluster> findClusterByArn(String clusterArn, String region) {
         if (!AwsArnUtils.looksLikeArn(clusterArn)) {
             return Optional.empty();
         }
@@ -1214,8 +1219,12 @@ public class RedshiftService implements ManagedSecretRotator {
         if (!"redshift".equals(arn.service()) || !arn.resource().startsWith("cluster:")) {
             return Optional.empty();
         }
+        String effectiveRegion = region != null && !region.isBlank() ? region : regionResolver.getRegion();
         String identifier = arn.resource().substring("cluster:".length());
-        return regionalCluster(identifier).filter(cluster -> clusterArn.equals(clusterArn(identifier)));
+        String expectedArn = regionResolver.buildArn("redshift", effectiveRegion, "cluster:" + identifier);
+        return clusters.get(identifier)
+                .filter(cluster -> clusterRegion(cluster).equals(effectiveRegion))
+                .filter(cluster -> clusterArn.equals(expectedArn));
     }
 
     /** Sets, or with {@code null} removes, the resource policy of the caller's cluster an ARN names. */

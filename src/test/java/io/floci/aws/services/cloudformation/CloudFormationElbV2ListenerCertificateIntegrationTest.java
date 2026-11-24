@@ -155,7 +155,7 @@ class CloudFormationElbV2ListenerCertificateIntegrationTest {
                   "Https": %s,
                   "Other": %s%s
                 }, "Outputs": {"Https": {"Value": {"Ref": "Https"}}, "Other": {"Value": {"Ref": "Other"}}%s}}
-                """.formatted(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b"),
+                """.formatted(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"), Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000"),
                 listener(443, main), listener(8443, main), extra, extraOutput);
     }
 

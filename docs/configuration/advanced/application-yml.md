@@ -266,7 +266,7 @@ floci:
 
     cloudwatchmetrics:
       enabled: true
-      max-stored-datapoints: 100000   # per account; oldest datapoints are dropped once the store exceeds this
+      max-stored-datapoints: 100000   # per account, in each namespace Floci publishes itself (AWS/SQS, AWS/Redshift); oldest dropped first, 0 keeps all
 
     secretsmanager:
       enabled: true

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.ClosedAccountLookup;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -62,7 +63,7 @@ import java.util.regex.Pattern;
  */
 @ApplicationScoped
 public class OrganizationsService implements ScpProvider, RootAccessOrganization,
-        PrincipalOrganization {
+        PrincipalOrganization, ClosedAccountLookup {
 
     private static final Logger LOG = Logger.getLogger(OrganizationsService.class);
 
@@ -129,7 +130,8 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
     private static final String FEATURE_SET_CONSOLIDATED_BILLING = "CONSOLIDATED_BILLING";
 
     private static final String STATUS_ACTIVE = "ACTIVE";
-    private static final String STATUS_PENDING_CLOSURE = "PENDING_CLOSURE";
+    private static final String STATUS_SUSPENDED = "SUSPENDED";
+    private static final String STATE_CLOSED = "CLOSED";
 
     /** CreateAccount's RoleName default, the role AWS preconfigures in every account it creates. */
     private static final String DEFAULT_ACCOUNT_ACCESS_ROLE_NAME = "OrganizationAccountAccessRole";
@@ -764,9 +766,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
             throw new AwsException("MasterCannotLeaveOrganizationException",
                     "The management account can't be removed from the organization.", 400);
         }
-        detachAllPoliciesFrom(organization, account.getId());
-        accounts.deleteForAccount(organization.getMasterAccountId(), account.getId());
-        placementChanged(organization, account.getId());
+        removeMember(organization, account);
     }
 
     public void leaveOrganization(String callerAccountId) {
@@ -775,7 +775,16 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
             throw new AwsException("MasterCannotLeaveOrganizationException",
                     "The management account can't leave the organization.", 400);
         }
-        OrganizationAccount account = requireAccount(organization, callerAccountId);
+        removeMember(organization, requireAccount(organization, callerAccountId));
+    }
+
+    /** As on AWS, a closed account stays in its organization until its post-closure period ends. */
+    private void removeMember(Organization organization, OrganizationAccount account) {
+        if (isClosed(account)) {
+            throw new AwsException("ConstraintViolationException",
+                    "You can't remove a closed account from the organization until its post-closure period ends.",
+                    400);
+        }
         detachAllPoliciesFrom(organization, account.getId());
         accounts.deleteForAccount(organization.getMasterAccountId(), account.getId());
         placementChanged(organization, account.getId());
@@ -788,9 +797,31 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
             throw new AwsException("ConstraintViolationException",
                     "The management account can't be closed.", 400);
         }
-        account.setStatus(STATUS_PENDING_CLOSURE);
+        if (isClosed(account)) {
+            throw new AwsException("AccountAlreadyClosedException",
+                    "You attempted to close an account that is already closed.", 400);
+        }
+        // AWS holds the account in PENDING_CLOSURE for the few minutes closing takes, which Floci does not wait out.
+        account.setStatus(STATUS_SUSPENDED);
         accounts.putForAccount(organization.getMasterAccountId(), accountId, account);
         return account;
+    }
+
+    /**
+     * The State of an account, the field that supersedes Status. The two differ only for a closed account: its
+     * State is CLOSED while its Status is SUSPENDED, because State keeps SUSPENDED for an account AWS suspended.
+     */
+    public static String accountState(OrganizationAccount account) {
+        return isClosed(account) ? STATE_CLOSED : account.getStatus();
+    }
+
+    @Override
+    public boolean isClosed(String accountId) {
+        return findAccount(accountId).filter(OrganizationsService::isClosed).isPresent();
+    }
+
+    private static boolean isClosed(OrganizationAccount account) {
+        return STATUS_SUSPENDED.equals(account.getStatus());
     }
 
     // ──────────────────────────── Policies ────────────────────────────
@@ -1261,6 +1292,10 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         if (accountId.equals(organization.getMasterAccountId())) {
             throw new AwsException("ConstraintViolationException",
                     "The management account can't be registered as a delegated administrator.", 400);
+        }
+        if (isClosed(account)) {
+            throw new AwsException("ConstraintViolationException",
+                    "You cannot register a suspended account as a delegated administrator.", 400);
         }
         if (account.getDelegatedServices().containsKey(servicePrincipal)) {
             throw new AwsException("AccountAlreadyRegisteredException",

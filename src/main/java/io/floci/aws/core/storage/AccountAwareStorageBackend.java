@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
@@ -243,6 +244,16 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
             delegate.get(rawKey).ifPresent(value -> result.put(rawKey, value));
         }
         return result;
+    }
+
+    /**
+     * Passes every account-relative key with the account that owns it, as {@link #scanAllAccountEntries}
+     * resolves them, without reading any value.
+     */
+    public void forEachKeyInAllAccounts(BiConsumer<String, String> accountAndKey) {
+        for (String rawKey : delegate.keys()) {
+            accountAndKey.accept(ownerOf(rawKey), hasAccountPrefix(rawKey) ? rawKey.substring(13) : rawKey);
+        }
     }
 
     /**

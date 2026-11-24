@@ -200,7 +200,7 @@ class CloudFormationEcsServiceStableIntegrationTest {
     @Test
     void updateStack_ecsServiceThatCannotStabilize_putsThePriorConfigurationBackOnRollback() {
         String name = "cfn-stable-rb-" + Long.toString(System.nanoTime(), 36);
-        String subnet = Ec2Service.defaultSubnetId("us-east-1", "a");
+        String subnet = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
         stackCall("CreateStack", name, AWSVPC_TEMPLATE.formatted(name, 1, subnet));
         CfnStackWaits.awaitStatus(name, "CREATE_COMPLETE");
         assertThat(stackStatus(name), equalTo("CREATE_COMPLETE"));
@@ -219,7 +219,7 @@ class CloudFormationEcsServiceStableIntegrationTest {
     @Test
     void updateStack_ecsServiceThatCannotStabilize_isReadBackWithoutTheDeploymentConfigurationItNeverHad() {
         String name = "cfn-stable-dc-" + Long.toString(System.nanoTime(), 36);
-        String subnet = Ec2Service.defaultSubnetId("us-east-1", "a");
+        String subnet = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
         stackCall("CreateStack", name, AWSVPC_TEMPLATE.formatted(name, 1, subnet));
         CfnStackWaits.awaitStatus(name, "CREATE_COMPLETE");
 
@@ -235,8 +235,8 @@ class CloudFormationEcsServiceStableIntegrationTest {
     @Test
     void createStack_awsvpcServiceWithSubnetListParameterUnderFnIf_usesEverySubnet() {
         String name = "cfn-stable-list-" + Long.toString(System.nanoTime(), 36);
-        String subnetA = Ec2Service.defaultSubnetId("us-east-1", "a");
-        String subnetB = Ec2Service.defaultSubnetId("us-east-1", "b");
+        String subnetA = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
+        String subnetB = Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000");
 
         given()
             .contentType("application/x-www-form-urlencoded")

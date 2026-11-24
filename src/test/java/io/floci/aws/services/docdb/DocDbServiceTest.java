@@ -68,7 +68,7 @@ class DocDbServiceTest {
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         rdsService = Mockito.mock(RdsService.class);
         ec2Service = Mockito.mock(Ec2Service.class);
-        when(ec2Service.resolveDefaultSecurityGroupId(anyString())).thenAnswer(inv -> Ec2Service.defaultSecurityGroupId(inv.getArgument(0)));
+        when(ec2Service.resolveDefaultSecurityGroupId(anyString())).thenAnswer(inv -> Ec2Service.defaultSecurityGroupId(inv.getArgument(0), "000000000000"));
         kmsService = Mockito.mock(KmsService.class);
         when(kmsService.describeKey(any(), any())).thenThrow(new AwsException("NotFoundException", "Key not found", 404));
         when(rdsService.isManagedClusterParameterGroup(any())).thenAnswer(inv ->
@@ -333,7 +333,7 @@ class DocDbServiceTest {
         DocDbCluster stored = docDbService.getDbCluster("c1");
         assertEquals("default", stored.getDbSubnetGroupName());
         assertEquals("default.docdb5.0", stored.getDbClusterParameterGroupName());
-        assertEquals(List.of(Ec2Service.defaultSecurityGroupId("us-east-1")), stored.getVpcSecurityGroupIds());
+        assertEquals(List.of(Ec2Service.defaultSecurityGroupId("us-east-1", "000000000000")), stored.getVpcSecurityGroupIds());
         assertFalse(stored.isStorageEncrypted());
         assertNull(stored.getKmsKeyId());
         assertEquals(1, stored.getBackupRetentionPeriod());
@@ -374,7 +374,7 @@ class DocDbServiceTest {
                 service.listDbClusters("arn:aws:rds:us-east-1:000000000000:cluster:old").iterator().next())) {
             assertEquals("default", read.getDbSubnetGroupName());
             assertEquals("default.docdb4.0", read.getDbClusterParameterGroupName());
-            assertEquals(List.of(Ec2Service.defaultSecurityGroupId("us-east-1")), read.getVpcSecurityGroupIds());
+            assertEquals(List.of(Ec2Service.defaultSecurityGroupId("us-east-1", "000000000000")), read.getVpcSecurityGroupIds());
             assertEquals(1, read.getBackupRetentionPeriod());
             assertEquals("04:00-06:00", read.getPreferredBackupWindow());
             assertEquals("mon:00:00-mon:03:00", read.getPreferredMaintenanceWindow());

@@ -10,13 +10,13 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
-import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
@@ -53,14 +53,13 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @ApplicationScoped
-public class CloudWatchMetricsService {
+public class CloudWatchMetricsService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(CloudWatchMetricsService.class);
 
@@ -81,34 +80,26 @@ public class CloudWatchMetricsService {
     /** The most StateReasonData can hold, in Unicode code points as SetAlarmState's length check counts them. */
     private static final int MAX_STATE_REASON_DATA = 4000;
     private static final int LIST_METRICS_PAGE_SIZE = 500;
-    private static final int UNBOUNDED_DATAPOINTS = Integer.MAX_VALUE;
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .setSerializationInclusion(JsonInclude.Include.NON_NULL)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
     private final StorageBackend<String, MetricDatum> metricStore;
+    private final MetricKeyIndex metricKeys = new MetricKeyIndex();
     private final StorageBackend<String, Alarm> alarmStore;
     private final StorageBackend<String, AlarmHistoryItem> historyStore;
     private final RegionResolver regionResolver;
     private final AlarmSnsNotifier alarmSnsNotifier;
-    private final int maxStoredDatapoints;
-    private final Map<String, DatapointCount> datapointCounts = new ConcurrentHashMap<>();
     private long lastHistorySequence;
     private Instant nextHistoryPrune = Instant.MIN;
 
     public CloudWatchMetricsService(StorageFactory storageFactory, RegionResolver regionResolver) {
-        this(storageFactory, regionResolver, null, UNBOUNDED_DATAPOINTS);
+        this(storageFactory, regionResolver, null);
     }
 
     @Inject
     public CloudWatchMetricsService(StorageFactory storageFactory, RegionResolver regionResolver,
-                                    AlarmSnsNotifier alarmSnsNotifier, EmulatorConfig config) {
-        this(storageFactory, regionResolver, alarmSnsNotifier,
-                config.services().cloudwatchmetrics().maxStoredDatapoints());
-    }
-
-    CloudWatchMetricsService(StorageFactory storageFactory, RegionResolver regionResolver,
-                             AlarmSnsNotifier alarmSnsNotifier, int maxStoredDatapoints) {
+                                    AlarmSnsNotifier alarmSnsNotifier) {
         // Services publish into this store every minute, SQS for every active queue, so under
         // persistent mode it is journaled rather than rewritten in full on every datum.
         this.metricStore = storageFactory.create("cloudwatchmetrics", "cwmetrics.json",
@@ -119,7 +110,6 @@ public class CloudWatchMetricsService {
                 new TypeReference<Map<String, AlarmHistoryItem>>() {}, WriteProfile.APPEND_HEAVY);
         this.regionResolver = regionResolver;
         this.alarmSnsNotifier = alarmSnsNotifier;
-        this.maxStoredDatapoints = maxStoredDatapoints;
     }
 
     CloudWatchMetricsService(StorageBackend<String, MetricDatum> metricStore,
@@ -138,20 +128,50 @@ public class CloudWatchMetricsService {
                              StorageBackend<String, Alarm> alarmStore,
                              StorageBackend<String, AlarmHistoryItem> historyStore,
                              RegionResolver regionResolver, AlarmSnsNotifier alarmSnsNotifier) {
-        this(metricStore, alarmStore, historyStore, regionResolver, alarmSnsNotifier, UNBOUNDED_DATAPOINTS);
-    }
-
-    CloudWatchMetricsService(StorageBackend<String, MetricDatum> metricStore,
-                             StorageBackend<String, Alarm> alarmStore,
-                             StorageBackend<String, AlarmHistoryItem> historyStore,
-                             RegionResolver regionResolver, AlarmSnsNotifier alarmSnsNotifier,
-                             int maxStoredDatapoints) {
         this.metricStore = metricStore;
         this.alarmStore = alarmStore;
         this.historyStore = historyStore;
         this.regionResolver = regionResolver;
         this.alarmSnsNotifier = alarmSnsNotifier;
-        this.maxStoredDatapoints = maxStoredDatapoints;
+        // A store handed in directly has nothing left to load.
+        buildMetricKeyIndex();
+    }
+
+    /**
+     * Adds the store's keys to the metric key index and starts reading through it.
+     * {@code EmulatorLifecycle} calls it once storage has loaded; reads scan the store until then.
+     */
+    public void buildMetricKeyIndex() {
+        if (metricStore instanceof AccountAwareStorageBackend<MetricDatum> aware) {
+            aware.forEachKeyInAllAccounts(metricKeys::add);
+        } else {
+            String account = metricKeyAccount(null);
+            metricStore.keys().forEach(key -> metricKeys.add(account, key));
+        }
+        metricKeys.markBuilt();
+    }
+
+    /** Empties the metric key index before storage is wiped, so a datum written after the wipe keeps its key. */
+    @Override
+    public void beforeReset() {
+        metricKeys.clear();
+    }
+
+    @Override
+    public void clear() {
+    }
+
+    @Override
+    public void afterReset() {
+        buildMetricKeyIndex();
+    }
+
+    /** The account whose index partition holds {@code accountId}'s keys; the request's when null. */
+    private String metricKeyAccount(String accountId) {
+        if (metricStore instanceof AccountAwareStorageBackend<?> aware) {
+            return accountId != null ? accountId : aware.accountId();
+        }
+        return "";
     }
 
     public void putMetricData(String namespace, List<MetricDatum> datums, String region) {
@@ -212,89 +232,15 @@ public class CloudWatchMetricsService {
     private void storeDatum(String accountId, String namespace, MetricDatum datum, String region, String id) {
         String key = region + "::" + namespace + "::" + datum.getMetricName()
                 + "::" + buildDimKey(datum.getDimensions()) + "::"
-                + String.format("%013d", datum.getTimestamp()) + "::" + id;
-        String account = datapointAccount(accountId);
-        DatapointCount count = datapointCounts.computeIfAbsent(account, ignored -> new DatapointCount());
-        synchronized (count) {
-            boolean replaces = storedDatapoint(account, key).isPresent();
-            try {
-                if (accountId != null && metricStore instanceof AccountAwareStorageBackend<?> rawAware) {
-                    @SuppressWarnings("unchecked")
-                    AccountAwareStorageBackend<MetricDatum> aware = (AccountAwareStorageBackend<MetricDatum>) rawAware;
-                    aware.putForAccount(accountId, key, datum);
-                } else {
-                    metricStore.put(key, datum);
-                }
-            } catch (RuntimeException e) {
-                // The write may or may not have reached the store, so the next one counts again.
-                count.stored = DatapointCount.UNKNOWN;
-                throw e;
-            }
-            if (count.stored == DatapointCount.UNKNOWN) {
-                count.stored = storedDatapointKeys(account).size();
-            } else if (!replaces) {
-                count.stored++;
-            }
-            if (count.stored > maxStoredDatapoints) {
-                count.stored = dropOldestDatapoints(account);
-            }
-        }
-    }
-
-    /**
-     * Brings an account's datapoints back under {@link #maxStoredDatapoints} by dropping the oldest,
-     * and returns how many are left. The ceiling bounds the memory footprint and the file the store
-     * is written out to, whichever services and clients publish into it.
-     * <p>
-     * A tenth of the ceiling goes at a time, so that a store at its ceiling is listed and sorted
-     * once in that many writes rather than on every one, with no index held beside the datapoints.
-     * The caller holds the account's {@link DatapointCount} monitor.
-     */
-    private int dropOldestDatapoints(String account) {
-        List<StoredDatapoint> stored = new ArrayList<>();
-        for (String key : storedDatapointKeys(account)) {
-            storedDatapoint(account, key)
-                    .ifPresent(datum -> stored.add(new StoredDatapoint(key, datum.getTimestamp())));
-        }
-        if (stored.size() <= maxStoredDatapoints) {
-            return stored.size();
-        }
-        int excess = stored.size() - (maxStoredDatapoints - maxStoredDatapoints / 10);
-        stored.sort(Comparator.comparingLong(StoredDatapoint::timestamp).thenComparing(StoredDatapoint::key));
-        Set<String> oldest = new LinkedHashSet<>();
-        for (StoredDatapoint datapoint : stored.subList(0, excess)) {
-            oldest.add(datapoint.key());
-        }
-        if (metricStore instanceof AccountAwareStorageBackend<MetricDatum> aware) {
-            aware.deleteAllAtomicallyForAccounts(Map.of(account, oldest));
+                + MetricKeyIndex.timestampSegment(datum.getTimestamp()) + "::" + id;
+        if (accountId != null && metricStore instanceof AccountAwareStorageBackend<?> rawAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<MetricDatum> aware = (AccountAwareStorageBackend<MetricDatum>) rawAware;
+            aware.putForAccount(accountId, key, datum);
         } else {
-            metricStore.deleteAllAtomically(oldest);
+            metricStore.put(key, datum);
         }
-        LOG.debugv("Dropped the {0} oldest metric datapoint(s) of account {1} to stay within the {2}-datapoint ceiling",
-                excess, account, maxStoredDatapoints);
-        return stored.size() - excess;
-    }
-
-    /** The partition {@code accountId} writes to, or the request's when null; "" for a plain store. */
-    private String datapointAccount(String accountId) {
-        if (metricStore instanceof AccountAwareStorageBackend<MetricDatum> aware) {
-            return accountId != null ? accountId : aware.accountId();
-        }
-        return "";
-    }
-
-    private Optional<MetricDatum> storedDatapoint(String account, String key) {
-        if (metricStore instanceof AccountAwareStorageBackend<MetricDatum> aware) {
-            return aware.getForAccount(account, key);
-        }
-        return metricStore.get(key);
-    }
-
-    private Set<String> storedDatapointKeys(String account) {
-        if (metricStore instanceof AccountAwareStorageBackend<MetricDatum> aware) {
-            return aware.keysForAccount(account);
-        }
-        return metricStore.keys();
+        metricKeys.add(metricKeyAccount(accountId), key);
     }
 
     /**
@@ -303,25 +249,36 @@ public class CloudWatchMetricsService {
      */
     public void deleteMetricDataBefore(String namespace, Instant cutoff) {
         long cutoffSeconds = cutoff.getEpochSecond();
+        // Index first: a read skips a key whose datum is gone, but cannot find a datum without a key.
+        metricKeys.removeBefore(namespace, cutoffSeconds);
         deleteInEveryAccount(metricStore, d -> namespace.equals(d.getNamespace()) && d.getTimestamp() < cutoffSeconds);
-        for (DatapointCount count : datapointCounts.values()) {
-            synchronized (count) {
-                count.stored = DatapointCount.UNKNOWN;
-            }
-        }
     }
 
     /**
-     * How many datapoints one account holds, counted from the store on the first write and again
-     * after a deletion that did not go through it. Its monitor is the one lock for that account's
-     * datapoint writes.
+     * Drops the oldest {@code namespace} datapoints of every account holding more than {@code ceiling} of
+     * them, down to nine tenths of it so that the next calls find nothing to sort. A service that writes
+     * its own metrics each minute calls it: that history grows without a request, and would outgrow the
+     * heap well inside the 15 days it is kept for. Counting reads the key index, so nothing is dropped
+     * before storage has loaded.
      */
-    private static final class DatapointCount {
-        private static final int UNKNOWN = -1;
-        private int stored = UNKNOWN;
+    public void deleteOldestMetricData(String namespace, int ceiling) {
+        if (!metricKeys.isBuilt()) {
+            return;
+        }
+        // Index first, as in deleteMetricDataBefore.
+        Map<String, Set<String>> oldestByAccount = metricKeys.removeOldest(namespace, ceiling, ceiling - ceiling / 10);
+        if (oldestByAccount.isEmpty()) {
+            return;
+        }
+        if (metricStore instanceof AccountAwareStorageBackend<MetricDatum> aware) {
+            aware.deleteAllAtomicallyForAccounts(oldestByAccount);
+        } else {
+            oldestByAccount.values().forEach(metricStore::deleteAllAtomically);
+        }
+        oldestByAccount.forEach((account, oldest) -> LOG.debugv(
+                "Dropped the {0} oldest {1} datapoint(s) of account {2} to stay within the ceiling of {3}",
+                oldest.size(), namespace, account, ceiling));
     }
-
-    private record StoredDatapoint(String key, long timestamp) {}
 
     private static <V> void deleteInEveryAccount(StorageBackend<String, V> store, Predicate<V> expired) {
         if (store instanceof AccountAwareStorageBackend<V> aware) {
@@ -427,22 +384,13 @@ public class CloudWatchMetricsService {
         String prefix = region + "::" + namespace + "::" + metricName + "::" + dimKey + "::";
 
         long startEpoch = startTime != null ? startTime.getEpochSecond() : 0;
-        long endEpoch = endTime != null ? endTime.getEpochSecond() : Long.MAX_VALUE;
+        // An end time with a fractional second includes datapoints stamped in that second.
+        long endExclusive = endTime == null ? Long.MAX_VALUE
+                : endTime.getEpochSecond() + (endTime.getNano() > 0 ? 1 : 0);
 
-        List<MetricDatum> matching = metricStore.scan(k -> {
-            if (!k.startsWith(prefix)) return false;
-            // Extract timestamp from key segment
-            String[] parts = k.split("::");
-            if (parts.length < 6) return false;
-            try {
-                long ts = Long.parseLong(parts[parts.length - 2]);
-                boolean beforeEnd = endTime == null || ts < endEpoch
-                        || (ts == endEpoch && endTime.getNano() > 0);
-                return ts >= startEpoch && beforeEnd;
-            } catch (NumberFormatException e) {
-                return false;
-            }
-        });
+        List<MetricDatum> matching = metricKeys.isBuilt()
+                ? indexedDatapoints(prefix, startEpoch, endExclusive)
+                : scannedDatapoints(prefix, startEpoch, endExclusive);
 
         if (unit != null && !unit.isBlank() && !"None".equals(unit)) {
             matching = matching.stream()
@@ -476,6 +424,33 @@ public class CloudWatchMetricsService {
         }
         result.sort(Comparator.comparing(Datapoint::timestamp));
         return result;
+    }
+
+    private List<MetricDatum> indexedDatapoints(String prefix, long startEpoch, long endExclusive) {
+        List<MetricDatum> matching = new ArrayList<>();
+        for (String key : metricKeys.keysBetween(metricKeyAccount(null), prefix, startEpoch, endExclusive)) {
+            // A key deleted since the index listed it is skipped.
+            metricStore.get(key).ifPresent(matching::add);
+        }
+        return matching;
+    }
+
+    private List<MetricDatum> scannedDatapoints(String prefix, long startEpoch, long endExclusive) {
+        return metricStore.scan(k -> {
+            if (!k.startsWith(prefix)) {
+                return false;
+            }
+            String[] parts = k.split("::");
+            if (parts.length < 6) {
+                return false;
+            }
+            try {
+                long ts = Long.parseLong(parts[parts.length - 2]);
+                return ts >= startEpoch && ts < endExclusive;
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        });
     }
 
     public List<MetricDataResult> getMetricData(

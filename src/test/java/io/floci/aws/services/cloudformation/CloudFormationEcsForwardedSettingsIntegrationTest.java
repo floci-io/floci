@@ -423,7 +423,7 @@ class CloudFormationEcsForwardedSettingsIntegrationTest {
 
     private static String serviceTemplate(String stackName, int desiredCount, String... settings) {
         String declared = List.of(settings).stream().map(setting -> ", " + setting).collect(Collectors.joining());
-        return SERVICE_TEMPLATE.formatted(stackName, Ec2Service.defaultSubnetId("us-east-1", "a"), desiredCount, declared);
+        return SERVICE_TEMPLATE.formatted(stackName, Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"), desiredCount, declared);
     }
 
     private static void submitTemplate(String action, String stackName, String template) {
@@ -462,7 +462,7 @@ class CloudFormationEcsForwardedSettingsIntegrationTest {
     /** Submits the template for {@code stackName}, with {@code maxPercent} as its MaxPercent when not null. */
     private static void submit(String action, String stackName, String maxPercent) {
         RequestSpecification request = cfn(action, stackName)
-            .formParam("TemplateBody", TEMPLATE.formatted(stackName, Ec2Service.defaultSubnetId("us-east-1", "a")));
+            .formParam("TemplateBody", TEMPLATE.formatted(stackName, Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000")));
         if (maxPercent != null) {
             request.formParam("Parameters.member.1.ParameterKey", "MaxPercent")
                 .formParam("Parameters.member.1.ParameterValue", maxPercent);

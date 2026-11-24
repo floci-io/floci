@@ -569,17 +569,20 @@ rejected with `ValidationError`.
 ### Metric storage {#metric-storage}
 
 Every datapoint is one entry in the metric store, which is held in memory and written out as a
-whole: about 500 bytes of JSON each in `cwmetrics.json`. The store keeps at most 100,000
-datapoints per account (`FLOCI_SERVICES_CLOUDWATCHMETRICS_MAX_STORED_DATAPOINTS`), which bounds
-both the memory footprint and the size of that file. A write past the ceiling drops the oldest
-tenth of it, by datapoint timestamp and whichever metrics they belong to, so the store is listed
-once in that many writes instead of on every one. The count is taken per account, and a store
-loaded from disk above the ceiling is cut back by the account's next write.
+whole: about 500 bytes of JSON each in `cwmetrics.json`. Services that publish their own metrics
+fill it without a `PutMetricData` call: an active SQS queue adds 8 to 11 datapoints a minute.
 
-Services that publish their own metrics fill the store without a `PutMetricData` call: an active
-SQS queue adds 8 to 11 datapoints a minute, so 50 active queues reach the default ceiling in about
-four hours. Raise the ceiling to keep a longer history, up to the 15 days those datapoints are
-kept for.
+Floci therefore keeps at most 100,000 datapoints per account in each namespace it publishes
+itself, `AWS/SQS` and `AWS/Redshift` (`FLOCI_SERVICES_CLOUDWATCHMETRICS_MAX_STORED_DATAPOINTS`).
+Once a minute, an account holding more than that in one of those namespaces loses its oldest
+datapoints there, by datapoint timestamp and whichever metrics they belong to, until nine tenths
+of the ceiling are left. A store loaded from disk above the ceiling is cut back the same way a
+minute after startup. With the default, 50 active queues keep about four hours of history; raise
+the ceiling to keep more, up to the 15 days those datapoints are kept for, or set it to `0` to
+keep them all.
+
+Datapoints in any other namespace are never dropped for the ceiling, so what a client writes with
+`PutMetricData` under its own namespace stays.
 
 ### Metric alarm updates
 

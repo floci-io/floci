@@ -5,6 +5,7 @@ import io.floci.aws.core.common.auth.SigV4aSignature;
 import io.floci.aws.services.s3.PreSignedUrlFilter;
 import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Priorities;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -29,6 +30,8 @@ import java.util.Set;
  * the account; otherwise IAM and temporary credentials (e.g. assumed-role {@code ASIA...}
  * keys) are looked up via {@link SessionAccountLookup}; if
  * neither matches, the configured default account applies.
+ *
+ * <p>A request whose credentials resolve to a closed account (see {@link ClosedAccountLookup}) is refused.
  */
 @Provider
 @ApplicationScoped
@@ -60,6 +63,8 @@ public class AccountContextFilter implements ContainerRequestFilter {
     private final RegionResolver regionResolver;
     private final RequestContext requestContext;
     private final SessionAccountLookup sessionAccountLookup;
+    // Read lazily, as IamService reads the organization ports: absent when Organizations is not deployed.
+    private final Instance<ClosedAccountLookup> closedAccountLookup;
     // Lazily resolved: JAX-RS providers are instantiated before runtime config mappings exist
     // (the AwsProtocolClaimFilter pattern). jakarta.inject.Provider is qualified inline because
     // this class also carries the JAX-RS @Provider annotation.
@@ -71,12 +76,14 @@ public class AccountContextFilter implements ContainerRequestFilter {
                                 RegionResolver regionResolver,
                                 RequestContext requestContext,
                                 SessionAccountLookup sessionAccountLookup,
+                                Instance<ClosedAccountLookup> closedAccountLookup,
                                 jakarta.inject.Provider<EmulatorConfig> configProvider,
                                 jakarta.inject.Provider<ResolvedServiceCatalog> catalogProvider) {
         this.accountResolver = accountResolver;
         this.regionResolver = regionResolver;
         this.requestContext = requestContext;
         this.sessionAccountLookup = sessionAccountLookup;
+        this.closedAccountLookup = closedAccountLookup;
         this.config = new MemoizedSupplier<>(configProvider::get);
         this.catalog = new MemoizedSupplier<>(catalogProvider::get);
     }
@@ -106,9 +113,11 @@ public class AccountContextFilter implements ContainerRequestFilter {
         if (rejectAmbiguousRegion(ctx, auth, query)) {
             return;
         }
-        String akid = resourceInfo != null && catalog().byResourceClass(resourceInfo.getResourceClass())
-                .map(ServiceDescriptor::acceptsLegacyAuthorization).orElse(false)
-                && !config().services().iam().enforcementEnabled()
+        boolean legacyS3Authorization = resourceInfo != null
+                && catalog().byResourceClass(resourceInfo.getResourceClass())
+                        .map(ServiceDescriptor::acceptsLegacyAuthorization).orElse(false)
+                && !config().services().iam().enforcementEnabled();
+        String akid = legacyS3Authorization
                 ? accountResolver.extractS3AccessKeyId(auth) : accountResolver.extractAccessKeyId(auth);
         if (akid != null) {
             requestContext.setAccountId(resolveAccount(akid, accountResolver.resolve(auth)));
@@ -123,6 +132,12 @@ public class AccountContextFilter implements ContainerRequestFilter {
             // Only a refusal or strict mode needs the signing name, so it is parsed only then.
             if (!servesRegion(region)) {
                 rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(auth));
+                return;
+            }
+            if (accountClosed()) {
+                // A SigV2 header names no service, and only S3 accepts one.
+                rejectClosedAccount(ctx, SigV4CredentialScope.serviceName(auth)
+                        .orElse(legacyS3Authorization ? "s3" : null));
                 return;
             }
             if (config().partitions().strict()) {
@@ -150,6 +165,10 @@ public class AccountContextFilter implements ContainerRequestFilter {
                 applyRegion(region);
                 if (!servesRegion(region)) {
                     rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceNameFromCredential(credential));
+                    return;
+                }
+                if (accountClosed()) {
+                    rejectClosedAccount(ctx, SigV4CredentialScope.serviceNameFromCredential(credential).orElse(null));
                     return;
                 }
                 if (config().partitions().strict()) {
@@ -256,6 +275,22 @@ public class AccountContextFilter implements ContainerRequestFilter {
             return;
         }
         ctx.abortWith(AwsProtocolClaimFilter.errorResponse(400, "InvalidSignatureException", message));
+    }
+
+    private boolean accountClosed() {
+        return closedAccountLookup.isResolvable() && closedAccountLookup.get().isClosed(requestContext.getAccountId());
+    }
+
+    /**
+     * A closed account's credentials and sessions stop working on AWS, so its requests are refused here, before
+     * signature checks and whether or not IAM enforcement is on. AWS documents only that the calls fail, not an
+     * error code, so the refusal is the one IAM enforcement gives a credential it does not recognize.
+     */
+    private void rejectClosedAccount(ContainerRequestContext ctx, String signingName) {
+        LOG.debugv("Refusing request from closed account {0}: {1} {2}",
+                requestContext.getAccountId(), ctx.getMethod(), ctx.getUriInfo().getPath());
+        String credentialScope = signingName == null ? null : catalog().canonicalCredentialScope(signingName);
+        ctx.abortWith(IamEnforcementFilter.unrecognizedClientResponse(credentialScope, ctx));
     }
 
     private static boolean isFormEncoded(MediaType mediaType) {
