@@ -1851,6 +1851,26 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void matchesPatternByEmptyNestedDetailRequiresObject() {
+        String pattern = "{\"detail\":{\"parent\":{}}}";
+        for (String detail : List.of("{}", "{\"parent\":null}", "{\"parent\":[]}",
+                "{\"parent\":\"plain\"}")) {
+            assertFalse(service.matchesPattern(Map.of("Detail", detail), pattern), detail);
+        }
+        for (String detail : List.of("{\"parent\":{}}", "{\"parent\":[{}]}")) {
+            assertTrue(service.matchesPattern(Map.of("Detail", detail), pattern), detail);
+        }
+    }
+
+    @Test
+    void matchesPatternByEmptyOrBranchDoesNotMatchMissingParent() {
+        Map<String, Object> event = Map.of("Detail", "{}");
+        assertFalse(service.matchesPattern(event, "{\"detail\":{\"parent\":{\"$or\":[{}]}}}"));
+        assertTrue(service.matchesPattern(event,
+                "{\"detail\":{\"parent\":{\"$or\":[{},{\"child\":[{\"exists\":false}]}]}}}"));
+    }
+
+    @Test
     void matchesPatternByAccount_matches() {
         Map<String, Object> event = Map.of("Source", "my.app", "DetailType", "Order");
         assertTrue(service.matchesPattern(event, "{\"account\":[\"000000000000\"]}"));

@@ -1433,6 +1433,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     }
 
     private boolean matchesDetailNode(JsonNode actual, JsonNode pattern) {
+        if (pattern.isEmpty()) {
+            return actual != null && actual.isObject();
+        }
         JsonNode orClauses = pattern.get("$or");
         if (orClauses != null && orClauses.isArray()) {
             boolean anyMatches = false;
