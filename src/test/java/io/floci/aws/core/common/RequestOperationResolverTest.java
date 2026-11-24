@@ -6,6 +6,7 @@ import io.floci.aws.core.common.RequestOperationResolver.ResolvedOperation;
 import io.floci.aws.services.iam.IamActionRegistry;
 import io.floci.aws.services.iam.ResourceArnBuilder;
 import io.floci.aws.services.s3.S3Controller;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ResourceInfo;
 import jakarta.ws.rs.core.MediaType;
@@ -13,6 +14,8 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.URI;
 import java.util.Map;
@@ -28,6 +31,7 @@ import static org.mockito.Mockito.when;
  * {@link RequestOperationResolver} on its own, outside {@link IamEnforcementFilter}, with the real service catalog
  * and action rules: each protocol resolves to the service that serves the request and the operation it calls there.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class RequestOperationResolverTest {
 
     private static final String SIGNED_FOR = "AWS4-HMAC-SHA256 "

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.Pem;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
+import io.floci.aws.testing.ParallelLocks;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.AfterEach;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -31,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@link TlsConfigSource}: a reused certificate, a regeneration after a configuration change,
  * a reissue of an expired leaf, and a certificate whose metadata write did not complete.
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class TlsConfigSourceLearnedHostnamesTest {
 
     private static final String LEARNED = "api.example.localhost.floci.io";

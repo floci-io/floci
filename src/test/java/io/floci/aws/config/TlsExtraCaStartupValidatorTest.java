@@ -1,9 +1,11 @@
 package io.floci.aws.config;
 
 import io.floci.aws.testing.ExtraCaConfigs;
+import io.floci.aws.testing.ParallelLocks;
 import io.quarkus.runtime.StartupEvent;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -18,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * The floci.tls.extra-ca-path file is checked at startup, from whichever source sets it, with TLS on or off.
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class TlsExtraCaStartupValidatorTest {
 
     @TempDir

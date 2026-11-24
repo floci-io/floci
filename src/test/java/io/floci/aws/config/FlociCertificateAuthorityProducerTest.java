@@ -1,8 +1,10 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.nio.file.Path;
 
@@ -14,6 +16,7 @@ import static org.mockito.Mockito.when;
  * The producer must hand beans the directory the config bootstrap used, and only fall back to the
  * configured persistent path when the bootstrap laid nothing down.
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class FlociCertificateAuthorityProducerTest {
 
     @TempDir

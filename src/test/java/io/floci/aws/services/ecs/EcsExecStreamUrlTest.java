@@ -2,7 +2,10 @@ package io.floci.aws.services.ecs;
 
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.ecs.exec.ExecSession;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -15,6 +18,7 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EcsExecStreamUrlTest {
 
     private static final ExecSession SESSION = new ExecSession("exec-session", "token", "task", "cluster",

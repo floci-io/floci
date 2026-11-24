@@ -8,7 +8,10 @@ import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudfront.model.ConnectionGroup;
 import io.floci.aws.services.cloudfront.model.Distribution;
 import io.floci.aws.services.cloudfront.model.DistributionConfig;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Instant;
 import java.util.HashMap;
@@ -32,6 +35,7 @@ import static org.mockito.Mockito.when;
  * distributions are served through a connection group, so the account's default group is minted
  * with the first {@code tenant-only} distribution and can never be deleted, as AWS documents.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CloudFrontConnectionGroupServiceTest {
 
     private static final String ACCOUNT = "000000000000";

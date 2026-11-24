@@ -8,7 +8,9 @@ import io.floci.aws.services.emr.EmrStudioService;
 import io.floci.aws.services.emr.EmrStudioService.Identity;
 import io.floci.aws.services.emr.model.EmrStudio;
 import io.floci.aws.services.emr.model.EmrStudioSessionMapping;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.util.HashMap;
@@ -32,6 +34,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /** {@code AWS::EMR::Studio} and {@code AWS::EMR::StudioSessionMapping} in isolation, with the Studio service mocked. */
+@ResourceLock(ParallelLocks.PORTS)
 class EmrStudioCfnProvisionerTest {
 
     private static final String STUDIO_ID = "es-0123456789ABCDEFGHIJKLMNO";

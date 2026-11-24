@@ -28,9 +28,12 @@ import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.services.sqs.SqsService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
@@ -81,6 +84,7 @@ import static org.mockito.Mockito.when;
  * DeleteThing treat the attributes, the thing type and the expected version, including racing merges
  * and racing versioned updates and deletes.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class IotServiceTest {
 
     private static final String REGION = "us-east-1";

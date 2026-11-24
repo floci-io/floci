@@ -2,6 +2,7 @@ package io.floci.aws.services.mwaa.proxy;
 
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerExec;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.FreePorts;
 import io.quarkus.tls.CertificateUpdatedEvent;
 import io.quarkus.tls.TlsConfiguration;
@@ -19,6 +20,7 @@ import io.vertx.core.net.SelfSignedCertificate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -33,6 +35,7 @@ import static org.mockito.Mockito.when;
  * {@code WebserverUrl} says {@code https} when {@code floci.tls.enabled} is on, so the proxy has to
  * serve TLS then, and stay plain HTTP otherwise.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class MwaaProxyManagerTlsTest {
 
     private Vertx vertx;

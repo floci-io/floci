@@ -11,9 +11,11 @@ import io.floci.aws.services.appsync.model.DomainName;
 import io.floci.aws.services.appsync.model.FunctionConfiguration;
 import io.floci.aws.services.appsync.model.GraphqlApi;
 import io.floci.aws.services.appsync.model.SchemaCreationStatusType;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -42,6 +44,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class AppSyncServiceTest {
 
     private static final Instant NOW = Instant.parse("2026-01-01T00:00:00Z");

@@ -7,7 +7,10 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.iot.IotService;
 import io.floci.aws.services.iot.model.IotTopicRule;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
@@ -36,6 +39,7 @@ import static org.mockito.Mockito.when;
  * Every case asserts the exact physical id and the exact {@code Fn::GetAtt} attribute key, because
  * an unmapped type still reports CREATE_COMPLETE through the dispatcher's stub arm.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class IotTopicRuleCfnProvisionerTest {
 
     private static final String TYPE = "AWS::IoT::TopicRule";

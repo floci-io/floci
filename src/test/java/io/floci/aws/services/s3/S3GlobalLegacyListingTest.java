@@ -21,6 +21,7 @@ import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.s3.model.LambdaNotification;
 import io.floci.aws.services.s3.model.NotificationConfiguration;
 import io.floci.aws.services.s3.model.S3Object;
+import io.floci.aws.testing.ParallelLocks;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.core.HttpHeaders;
@@ -30,6 +31,8 @@ import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.MockMakers;
@@ -59,6 +62,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class S3GlobalLegacyListingTest {
     private static final String OWNER = "000000000001";
     private static final String CALLER = "000000000002";

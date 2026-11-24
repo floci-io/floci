@@ -2,9 +2,12 @@ package io.floci.aws.services.apigateway;
 
 import io.floci.aws.services.apigateway.model.BasePathMapping;
 import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -21,6 +24,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class ApiGatewayCustomDomainFilterTest {
 
     private static final String DOMAIN = "api.example.com";

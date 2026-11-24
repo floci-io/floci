@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.NotAuthorizedException;
 import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.core.HttpHeaders;
@@ -12,6 +13,7 @@ import jakarta.ws.rs.core.StreamingOutput;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -65,6 +67,7 @@ import static org.mockito.Mockito.when;
  * {@code CodeArtifactServiceTest} and {@code PypiserverSidecarManagerTest}, what matters here is how
  * this controller uses their results.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class CodeArtifactPypiControllerTest {
 
     private static final String DOMAIN = "dom";

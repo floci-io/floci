@@ -5,7 +5,9 @@ import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.services.dsql.model.DsqlCluster;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import javax.crypto.Mac;
 import javax.crypto.SecretKeyFactory;
@@ -47,6 +49,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class ExternalDsqlBackendTest {
 
     private static final String SECRET = Base64.getEncoder().encodeToString(new byte[32]);

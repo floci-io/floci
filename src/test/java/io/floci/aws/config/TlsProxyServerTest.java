@@ -1,5 +1,6 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.FreePorts;
 import io.vertx.core.Vertx;
 import io.vertx.core.net.NetServer;
@@ -7,6 +8,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.net.Inet4Address;
@@ -38,6 +40,8 @@ import static org.mockito.Mockito.when;
  * Floci. The stub backends simply emit a marker on connect; the proxy pipes it back, letting
  * the test assert which backend a given first byte was routed to.
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
+@ResourceLock(ParallelLocks.PORTS)
 class TlsProxyServerTest {
 
     /** TLS ClientHello content type — the first byte the proxy keys protocol detection on. */

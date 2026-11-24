@@ -3,6 +3,7 @@ package io.floci.aws.services.ses;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.ses.model.MessageAttachment;
 import io.floci.aws.services.ses.model.MessageHeader;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Vertx;
 import io.vertx.ext.mail.MailClient;
 import io.vertx.ext.mail.MailConfig;
@@ -11,6 +12,8 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Mockito;
 
 import java.io.BufferedReader;
@@ -39,6 +42,7 @@ import static org.mockito.Mockito.when;
  * the assertions cover what a mocked client cannot: the SMTP envelope actually negotiated, and the
  * bytes the encoder puts on the wire.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SmtpRelayServerTest {
 
     private static StubSmtpServer server;

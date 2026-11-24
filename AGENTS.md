@@ -258,6 +258,12 @@ Guidelines:
   `.github/workflows/nightly-checks.yml` sets once a day and on a pull request that adds or changes one.
   Its images go in `.github/ci/prefetch-images.sh` keyed on its own class name, which only that
   workflow's list carries
+- Plain test classes (no `@QuarkusTest`) run four at a time in CI, in a Surefire pass before the
+  Quarkus classes. A plain class that opens a socket declares `@ResourceLock(ParallelLocks.PORTS)`:
+  the default mode when it releases a port and binds or dials it later (`FreePorts`, a port expected
+  to refuse), `mode = ResourceAccessMode.READ` otherwise. `ParallelLocksInventoryTest` enforces it. A
+  class that shares other process-wide state takes a lock named in `ParallelLocks` (`TLS_CONFIG` for
+  `TlsConfigSource`)
 - Prefer package-private constructors for testability
 - Integration tests may use ordered execution when stateful behavior requires it
 

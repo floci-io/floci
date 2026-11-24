@@ -10,8 +10,11 @@ import io.floci.aws.services.ecs.model.CreateServiceRequest;
 import io.floci.aws.services.ecs.model.EcsServiceModel;
 import io.floci.aws.services.ecs.model.UpdateServiceRequest;
 import io.floci.aws.testing.InMemoryStorageFactory;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.Map;
@@ -27,6 +30,7 @@ import static org.mockito.Mockito.when;
  * {@code replaceServiceDeploymentConfiguration} writes the stored deployment configuration exactly
  * as given, null included, which {@code updateService} cannot do: there a null means unchanged.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EcsServiceReplaceDeploymentConfigurationTest {
 
     private static final String REGION = "us-east-1";

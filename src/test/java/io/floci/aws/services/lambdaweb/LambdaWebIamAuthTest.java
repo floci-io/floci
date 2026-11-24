@@ -12,11 +12,13 @@ import io.floci.aws.services.lambdaweb.LambdaWebIamAuth.Inbound;
 import io.floci.aws.services.lambdaweb.LambdaWebService.WebFunctionTarget;
 import io.floci.aws.services.lambdaweb.model.WebFunction;
 import io.floci.aws.services.lambdaweb.model.WebFunctionEndpoint;
+import io.floci.aws.testing.ParallelLocks;
 import io.netty.handler.codec.http.QueryStringDecoder;
 import io.vertx.core.MultiMap;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -37,6 +39,7 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class LambdaWebIamAuthTest {
 
     private static final String ACCOUNT = "111111111111";

@@ -8,7 +8,9 @@ import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.model.Queue;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
@@ -37,6 +39,7 @@ import static org.mockito.Mockito.when;
  * The SQS CFN provisioner in isolation — the payoff of item 15's decomposition: one mocked
  * service instead of the ~30 the monolithic provisioner needed.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class SqsCfnProvisionerTest {
 
     private final SqsService sqs = mock(SqsService.class);

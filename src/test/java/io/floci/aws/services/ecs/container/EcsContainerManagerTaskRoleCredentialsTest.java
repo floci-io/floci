@@ -18,8 +18,10 @@ import io.floci.aws.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.ssm.SsmService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.time.Instant;
@@ -51,6 +53,7 @@ import static org.mockito.Mockito.when;
  * URI, giving each its own address so it can reach that endpoint, and letting all of it go when
  * the task does.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class EcsContainerManagerTaskRoleCredentialsTest {
 
     private static final String TASK_ARN = "arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123";

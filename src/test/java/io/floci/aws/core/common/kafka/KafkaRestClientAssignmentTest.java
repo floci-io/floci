@@ -4,9 +4,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -27,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Exercises the partition discovery, manual assignment and offset seeking calls of
  * {@link KafkaRestClient} against a fake server speaking Karapace's REST Proxy API.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class KafkaRestClientAssignmentTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

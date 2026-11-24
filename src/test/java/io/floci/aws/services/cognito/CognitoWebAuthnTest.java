@@ -13,9 +13,11 @@ import io.floci.aws.services.cognito.model.UserPool;
 import io.floci.aws.services.cognito.model.UserPoolClient;
 import io.floci.aws.services.cognito.model.WebAuthnConfiguration;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -31,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+@ResourceLock(ParallelLocks.PORTS)
 class CognitoWebAuthnTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String USERNAME = "alice";

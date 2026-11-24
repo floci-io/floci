@@ -37,6 +37,7 @@ import io.floci.aws.services.s3.S3RequestPathLabels;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.SqsServiceFactory;
 import io.floci.aws.services.sqs.SqsStoredResourceArns;
+import io.floci.aws.testing.ParallelLocks;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.ext.web.RoutingContext;
@@ -49,6 +50,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -81,6 +83,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class ResourceArnBuilderTest {
 
     private static final String ACCOUNT = "000000000000";

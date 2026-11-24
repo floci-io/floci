@@ -1,8 +1,10 @@
 package io.floci.aws.config;
 
 import io.floci.aws.services.acm.CertificateGenerator;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class ServerCertificateRenewalTest {
     @TempDir
     Path directory;

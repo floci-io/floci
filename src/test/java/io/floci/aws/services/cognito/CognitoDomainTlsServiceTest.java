@@ -8,8 +8,10 @@ import io.floci.aws.services.acm.AcmService;
 import io.floci.aws.services.acm.model.Certificate;
 import io.floci.aws.services.acm.model.CertificateStatus;
 import io.floci.aws.services.cognito.model.UserPoolDomain;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -35,6 +37,7 @@ import static org.mockito.Mockito.when;
  * request and every later operation register nothing. The test-only constructor without a manager keeps working. A
  * certificate ACM does not know, or has not issued, is refused before the hook, as on AWS.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class CognitoDomainTlsServiceTest {
 
     private static final String REGION = "us-east-1";

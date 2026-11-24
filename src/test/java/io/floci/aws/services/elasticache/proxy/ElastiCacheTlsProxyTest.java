@@ -5,9 +5,11 @@ import io.floci.aws.config.FlociCertificateAuthority;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.elasticache.model.AuthMode;
 import io.floci.aws.services.elasticache.model.TransitEncryption;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.TlsTrust;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -39,6 +41,7 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class ElastiCacheTlsProxyTest {
     private static final byte[] AUTH = "*2\r\n$4\r\nAUTH\r\n$18\r\nsynthetic-password\r\n"
             .getBytes(StandardCharsets.UTF_8);

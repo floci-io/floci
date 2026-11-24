@@ -7,10 +7,13 @@ import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.services.lambda.launcher.BootstrapProcess;
 import io.floci.aws.testing.ExtraCaConfigs;
 import io.floci.aws.testing.LocalHttpsServer;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLHandshakeException;
@@ -53,6 +56,8 @@ import static org.mockito.Mockito.when;
  * The CA bundle handed to every container Floci launches: the JVM's public roots followed by
  * Floci's trust anchor, and the environment entries that make each runtime read it.
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class ContainerCaBundleTest {
 
     @TempDir

@@ -2,8 +2,10 @@ package io.floci.aws.config;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
+import io.floci.aws.testing.ParallelLocks;
 import io.smallrye.config.WithDefault;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -14,6 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class ApplicationDefaultsTest {
 
     private static JsonNode productionConfig() throws IOException {

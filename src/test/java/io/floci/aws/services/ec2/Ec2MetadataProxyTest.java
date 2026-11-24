@@ -5,8 +5,10 @@ import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import io.floci.aws.testing.HelperShellFixture;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -27,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+@ResourceLock(ParallelLocks.PORTS)
 class Ec2MetadataProxyTest {
 
     /** Where the relay {@link Ec2MetadataProxy#startEc2Command} starts keeps its PID. */

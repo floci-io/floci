@@ -18,9 +18,12 @@ import io.floci.aws.services.ecs.model.NetworkConfiguration;
 import io.floci.aws.services.ecs.model.NetworkMode;
 import io.floci.aws.services.ecs.model.RunTaskRequest;
 import io.floci.aws.testing.InMemoryStorageFactory;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -53,6 +56,7 @@ import static org.mockito.Mockito.when;
  * RunTask answers before the task's images are pulled, as AWS does: the task comes back
  * PROVISIONING (awsvpc) or PENDING and moves on in the background.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EcsRunTaskAsyncLaunchServiceTest {
 
     private static final String REGION = "us-east-1";

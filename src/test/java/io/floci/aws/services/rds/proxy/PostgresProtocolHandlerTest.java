@@ -5,11 +5,13 @@ import io.floci.aws.core.common.BackendAuthenticator;
 import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.IamServiceTestHelper;
 import io.floci.aws.testutil.LogCapture;
 import io.floci.aws.testutil.SigV4TokenTestHelper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -59,6 +61,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(ParallelLocks.PORTS)
 class PostgresProtocolHandlerTest {
 
     private static final int SSL_REQUEST_CODE = 80877103;

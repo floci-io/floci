@@ -11,12 +11,14 @@ import io.floci.aws.core.common.Pem;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.services.appsync.model.DataSource;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.TlsTrust;
 import org.apache.hc.client5.http.DnsResolver;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -41,6 +43,7 @@ import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class HttpDataSourceTransportTest {
 
     private final ObjectMapper mapper = new ObjectMapper();

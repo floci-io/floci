@@ -1,6 +1,7 @@
 package io.floci.aws.services.mwaa.proxy;
 
 import io.floci.aws.core.common.docker.ContainerExec;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.FreePorts;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -14,6 +15,7 @@ import io.vertx.core.net.SelfSignedCertificate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -37,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * credentials get what Flask-AppBuilder answers them with, a {@code 302} back to the login form with
  * a session cookie holding the flashed message, and a form that fails validation gets the form again.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class MwaaWebProxyLoginTest {
 
     private static final String CSRF = "IjJiOWM0MDA2YWFmMzJhMTBhMzlkNGM2NDkzZDFiM2QzYjVlYTQ1NDYi.avj96w.5B4Sc88q";
