@@ -121,28 +121,28 @@ final class WebhookEventsConfigurations {
             throw invalidInput(AUTH + " must set exactly one of StaticTokenAuthConfiguration, "
                     + "BasicHttpAuthConfiguration or HmacAuthConfiguration");
         }
-        String authHeader;
-        String authHeaderMember;
-        switch (present.getFirst()) {
+        String authHeaderMember = switch (present.getFirst()) {
             case BASIC -> {
                 validateBasic(auth.get(BASIC));
-                authHeader = null;
-                authHeaderMember = null;
+                yield null;
             }
             case STATIC_TOKEN -> {
-                JsonNode staticToken = auth.get(STATIC_TOKEN);
-                refuseAuthHeader(STATIC_TOKEN, "TokenHttpHeader", staticToken.path("TokenHttpHeader").asText());
-                authHeader = staticToken.path("TokenHttpHeader").asText();
-                authHeaderMember = "StaticTokenAuthConfiguration.TokenHttpHeader";
+                refuseAuthHeader(STATIC_TOKEN, "TokenHttpHeader",
+                        auth.get(STATIC_TOKEN).path("TokenHttpHeader").asText());
+                yield "TokenHttpHeader";
             }
             default -> {
-                JsonNode hmac = auth.get(HMAC);
-                validateHmac(hmac);
-                authHeader = hmac.path("SignatureHttpHeader").asText();
-                authHeaderMember = "HmacAuthConfiguration.SignatureHttpHeader";
+                validateHmac(auth.get(HMAC));
+                yield "SignatureHttpHeader";
             }
+        };
+        if (authHeaderMember == null) {
+            validateMetadataHeaders(webhook.get("MetadataHttpHeaders"), null, null);
+            return;
         }
-        validateMetadataHeaders(webhook.get("MetadataHttpHeaders"), authHeader, authHeaderMember);
+        validateMetadataHeaders(webhook.get("MetadataHttpHeaders"),
+                auth.get(present.getFirst()).path(authHeaderMember).asText(),
+                present.getFirst() + "." + authHeaderMember);
     }
 
     private static void validateBasic(JsonNode basic) {

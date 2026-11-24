@@ -601,6 +601,22 @@ class EventBridgeV2EventSourcesTest {
     }
 
     @Test
+    void updateStoresANewSourceAndLeavesTheOneAReaderHeldUnchanged() {
+        EventSourceV2 held = service.createEventSource(create("hook", bus, STATIC_AUTH,
+                "\"Description\":\"first\""), REGION);
+        clock.advance(Duration.ofMinutes(5));
+
+        EventSourceV2 updated = service.updateEventSource(json("{\"EventSourceArn\":\"" + held.getArn()
+                + "\",\"Description\":\"second\"}"), REGION);
+
+        assertEquals("first", held.getDescription());
+        assertEquals(NOW, held.getLastModifiedTime());
+        assertEquals("second", updated.getDescription());
+        assertEquals(held.getSecretArn(), updated.getSecretArn());
+        assertEquals(service.webhookUrl(held), service.webhookUrl(updated));
+    }
+
+    @Test
     void updateReplacesTheDescriptionAndKeepsItWhenLeftOut() {
         EventSourceV2 source = service.createEventSource(create("hook", bus, STATIC_AUTH,
                 "\"Description\":\"first\""), REGION);

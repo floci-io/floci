@@ -155,15 +155,25 @@ public class EventBridgeV2EventSources implements Resettable {
                 configuration, WebhookEventsConfigurations.authType(
                         source.getConfiguration().get(WebhookEventsConfigurations.WEBHOOK)));
 
-        if (webhook != null) {
-            source.setConfiguration(WebhookEventsConfigurations.echo(webhook));
-        }
-        if (request.hasNonNull("Description")) {
-            source.setDescription(request.get("Description").textValue());
-        }
-        source.setLastModifiedTime(clock.instant());
-        sources.put(EventBridgeV2Service.storageKey(region, source.getName()), source);
-        return source;
+        EventSourceV2 changed = new EventSourceV2();
+        changed.setName(source.getName());
+        changed.setArn(source.getArn());
+        changed.setEventBusArn(source.getEventBusArn());
+        changed.setDescription(request.hasNonNull("Description") ? request.get("Description").textValue()
+                : source.getDescription());
+        changed.setConfiguration(webhook == null ? source.getConfiguration()
+                : WebhookEventsConfigurations.echo(webhook));
+        changed.setState(source.getState());
+        changed.setCreationTime(source.getCreationTime());
+        changed.setLastModifiedTime(clock.instant());
+        changed.setTags(source.getTags());
+        changed.setClientToken(source.getClientToken());
+        changed.setCreateRequestHash(source.getCreateRequestHash());
+        changed.setWebhookHostId(source.getWebhookHostId());
+        changed.setWebhookToken(source.getWebhookToken());
+        changed.setSecretArn(source.getSecretArn());
+        sources.put(EventBridgeV2Service.storageKey(region, source.getName()), changed);
+        return changed;
     }
 
     EventSourceV2 describe(JsonNode request, String region) {
