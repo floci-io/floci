@@ -6098,10 +6098,11 @@ public class AslExecutor {
         }
         if (arg.startsWith("'") && arg.endsWith("'")) {
             return objectMapper.getNodeFactory().textNode(
-                    unescapeIntrinsicLiteral(arg.substring(1, arg.length() - 1)));
+                    unescapeIntrinsicLiteral(arg.substring(1, arg.length() - 1), '\''));
         }
         if (arg.startsWith("\"") && arg.endsWith("\"")) {
-            return objectMapper.getNodeFactory().textNode(arg.substring(1, arg.length() - 1));
+            return objectMapper.getNodeFactory().textNode(
+                    unescapeIntrinsicLiteral(arg.substring(1, arg.length() - 1), '"'));
         }
         if ("true".equals(arg) || "false".equals(arg)) {
             return objectMapper.getNodeFactory().booleanNode(Boolean.parseBoolean(arg));
@@ -6121,12 +6122,13 @@ public class AslExecutor {
         }
     }
 
-    private static String unescapeIntrinsicLiteral(String literal) {
+    private static String unescapeIntrinsicLiteral(String literal, char quote) {
         StringBuilder value = new StringBuilder(literal.length());
         for (int i = 0; i < literal.length(); i++) {
             char c = literal.charAt(i);
             if (c == '\\' && i + 1 < literal.length()
-                    && isIntrinsicEscapedCharacter(literal.charAt(i + 1))) {
+                    && ((quote == '\'' && isIntrinsicEscapedCharacter(literal.charAt(i + 1)))
+                    || (quote == '"' && (literal.charAt(i + 1) == '"' || literal.charAt(i + 1) == '\\')))) {
                 value.append(literal.charAt(++i));
             } else {
                 value.append(c);
