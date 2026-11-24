@@ -4,6 +4,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ServicePrincipals;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.iam.ServiceRoleAuthorizer;
 import io.floci.aws.services.iam.ServiceRoleAuthorizer.Permission;
 import io.floci.aws.services.kinesis.KinesisService;
@@ -60,6 +61,16 @@ public class KinesisStreamingViews {
         this.clock = clock;
         this.support = new StreamingViewSupport<>(registry, KinesisViewBinding::viewSchema,
                 KinesisViewBinding::viewName, KinesisViewBinding::streamSchema, KinesisViewBinding::streamName);
+    }
+
+    /**
+     * Views kept in memory and bound to no Kinesis, role or Region service, for the statements a test prepares that
+     * never read a stream: anything that would reach one fails on its null collaborator.
+     */
+    static KinesisStreamingViews inMemory() {
+        return new KinesisStreamingViews(new KinesisViewRegistry(
+                AccountAwareStorageBackend.<KinesisViewBinding>inMemory("000000000000")),
+                null, null, null, Clock.systemUTC());
     }
 
     public Optional<KinesisViewBinding> find(SpectrumSession session, String viewSchema, String viewName) {
