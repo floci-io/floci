@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 class BrokerTest {
 
     /**
-     * containerId / accountId / volumeId are internal bookkeeping but must survive a
+     * containerId / accountId / volumeId / nodeName / host ports are internal bookkeeping but must survive a
      * serialize -> deserialize round-trip so the broker stays manageable after an
      * emulator restart (volume cleanup, container teardown, account-aware routing).
      * They are kept out of the API by the controller's explicit DescribeBroker
@@ -26,12 +26,18 @@ class BrokerTest {
         broker.setContainerId("container-xyz");
         broker.setAccountId("000000000000");
         broker.setVolumeId("a1b2c3");
+        broker.setNodeName("rabbit@localhost");
+        broker.setAmqpHostPort(5680);
+        broker.setConsoleHostPort(15680);
 
         Broker roundTripped = mapper.readValue(mapper.writeValueAsString(broker), Broker.class);
 
         assertEquals("container-xyz", roundTripped.getContainerId());
         assertEquals("000000000000", roundTripped.getAccountId());
         assertEquals("a1b2c3", roundTripped.getVolumeId());
+        assertEquals("rabbit@localhost", roundTripped.getNodeName());
+        assertEquals(5680, roundTripped.getAmqpHostPort());
+        assertEquals(15680, roundTripped.getConsoleHostPort());
     }
 
     @Test

@@ -231,6 +231,10 @@ INFLUX_IMAGE="$(grep -oE 'default-image: *"influxdb:[^"]+"' src/main/resources/a
 grep -q '/timestreaminfluxdb/' "$SHARD_FILE" && [ -n "$INFLUX_IMAGE" ] && pull "$INFLUX_IMAGE"
 K3S_IMAGE="$(grep -oE 'default-image: *"rancher/k3s:[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
 grep -q '/eks/' "$SHARD_FILE" && [ -n "$K3S_IMAGE" ] && pull "$K3S_IMAGE"
+# The nightly AmazonMqBrokerRestartNightlyIntegrationTest runs a broker in the RabbitMQ image Amazon MQ defaults to,
+# pinned in application.yml too.
+RABBITMQ_IMAGE="$(grep -oE 'default-image: *"rabbitmq:[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
+starts AmazonMqBrokerRestartNightlyIntegrationTest && [ -n "$RABBITMQ_IMAGE" ] && pull "$RABBITMQ_IMAGE"
 if [ -n "$ECR_PUBLIC_IMAGES" ]; then
     { for image in $ECR_PUBLIC_IMAGES; do pull_and_log "$image"; sleep 1; done; } &
 fi
