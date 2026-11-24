@@ -128,4 +128,14 @@ class CloudFormationDynamoDbSseSpecificationIntegrationTest {
         assertTrue(reason.contains("Value 'DES' at 'sSESpecification.sSEType' failed to satisfy constraint"), reason);
         assertThrows(ResourceNotFoundException.class, () -> dynamoDb.describeTable(r -> r.tableName(tableName)));
     }
+
+    @Test
+    void emptyKmsMasterKeyIdFailsTheStackAndLeavesNoTable() {
+        CfnStackWaits.createStack(cfn, stackName, TEMPLATE.formatted(tableName,
+                "{\"SSEEnabled\": true, \"KMSMasterKeyId\": \"\"}"), "ROLLBACK_COMPLETE");
+
+        String reason = CfnStackWaits.failedResourceReason(stackName);
+        assertTrue(reason.contains("Value '' at 'sSESpecification.kMSMasterKeyId' failed to satisfy constraint"), reason);
+        assertThrows(ResourceNotFoundException.class, () -> dynamoDb.describeTable(r -> r.tableName(tableName)));
+    }
 }

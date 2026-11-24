@@ -322,6 +322,33 @@ class DynamoDbLocalBackendIntegrationTest {
     }
 
     @Test
+    void aStackDeclaringAnUnknownSseTypeRollsBackOnLocal() {
+        String table = tableName("sse-des");
+        String stack = "local-it-sse-des-" + UUID.randomUUID();
+        String template = """
+            {
+                "Resources": {
+                    "Orders": {
+                        "Type": "AWS::DynamoDB::Table",
+                        "Properties": {
+                            "TableName": "%s",
+                            "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                            "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                            "BillingMode": "PAY_PER_REQUEST",
+                            "SSESpecification": {"SSEEnabled": true, "SSEType": "DES"}
+                        }
+                    }
+                }
+            }
+            """.formatted(table);
+
+        cloudFormation(A_EAST, "CreateStack", stack, template);
+        CfnStackWaits.awaitStatus(stack, "ROLLBACK_COMPLETE", A_EAST.authorization("cloudformation"));
+
+        dynamoDb(A_EAST, "DescribeTable", "{\"TableName\": \"" + table + "\"}").statusCode(400);
+    }
+
+    @Test
     void resetIsRefused() {
         given().when().post("/_floci/state/reset").then().statusCode(409);
     }

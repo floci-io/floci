@@ -19,6 +19,7 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.dynamodb.DynamoDbTableNames;
 import io.floci.aws.services.dynamodb.DynamoDbTtlIdentity;
+import io.floci.aws.services.dynamodb.NativeDynamoDbTableService;
 import io.floci.aws.services.dynamodb.model.AttributeDefinition;
 import io.floci.aws.services.dynamodb.model.GlobalSecondaryIndex;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
@@ -462,10 +463,11 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
     }
 
     // ponytail: Local keeps no encryption setting and answers an UpdateTable that only sets one with
-    // "Nothing to update", so the setting is accepted and the table is left as it is.
+    // "Nothing to update", so the setting gets CreateTable's checks and the table is left as it is.
     @Override
     public TableDefinition enableServerSideEncryption(Scope scope, String tableName, String sseType,
                                                       String kmsMasterKeyId) {
+        NativeDynamoDbTableService.requireValidSseSpecification(sseType, kmsMasterKeyId);
         return describeTable(scope, tableName);
     }
 

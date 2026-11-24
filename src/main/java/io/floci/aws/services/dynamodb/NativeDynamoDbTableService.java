@@ -438,6 +438,7 @@ public class NativeDynamoDbTableService {
     /** The UpdateTable that turns server-side encryption on, with the checks of the API. */
     public TableDefinition enableServerSideEncryption(String tableName, String sseType, String kmsMasterKeyId,
                                                       String region) {
+        requireValidSseSpecification(sseType, kmsMasterKeyId);
         TableSettings settings = new TableSettings(null, null, null, null, null, null, true, sseType,
                 kmsMasterKeyId);
         return updateTable(new UpdateTableRequest(tableName, null, List.of(), List.of(), List.of(), List.of(),
@@ -856,6 +857,30 @@ public class NativeDynamoDbTableService {
 
     private static String kmsMasterKeyArn(String kmsMasterKeyId, String region) {
         return kmsMasterKeyId != null ? kmsMasterKeyId : defaultKmsMasterKeyArn(region);
+    }
+
+    /** CreateTable's checks on the members of {@code SSESpecification}, in the order DynamoDB reports them. */
+    static List<String> sseSpecificationViolations(String sseType, String kmsMasterKeyId) {
+        List<String> violations = new ArrayList<>();
+        if (kmsMasterKeyId != null) {
+            String keyViolation = SmithyValidationErrors.lengthOutOfRange("sSESpecification.kMSMasterKeyId",
+                    kmsMasterKeyId, 1, 2048);
+            if (keyViolation != null) {
+                violations.add(keyViolation);
+            }
+        }
+        if (sseType != null && !SSE_TYPES.contains(sseType)) {
+            violations.add(SmithyValidationErrors.notInEnum(sseType, "sSESpecification.sSEType", SSE_TYPES));
+        }
+        return violations;
+    }
+
+    /** Refuses an {@code SSESpecification} that CreateTable would refuse, whichever engine keeps the table. */
+    public static void requireValidSseSpecification(String sseType, String kmsMasterKeyId) {
+        List<String> violations = sseSpecificationViolations(sseType, kmsMasterKeyId);
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
     }
 
     private static void validateSseType(String sseType) {
