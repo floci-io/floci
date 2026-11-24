@@ -1997,6 +1997,32 @@ class ResourceArnBuilderTest {
     }
 
     /**
+     * An identity store is checked in the account whose instance holds it, which the service answers for the store an
+     * {@code IdentityStoreId} names, not in the caller's.
+     */
+    @Test
+    void identityStoreChecksTheStoreInTheAccountItsServiceGives() {
+        ResourceArnBuilder reading = reading(new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "identitystore";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return "Identitystore".equals(type)
+                        ? Optional.of("arn:aws:identitystore::111122223333:identitystore/" + names.getFirst())
+                        : Optional.empty();
+            }
+        });
+        setJsonBody("{\"IdentityStoreId\":\"d-1234567890\",\"UserId\":\"1234567890-u1\"}");
+        assertEquals(List.of("arn:aws:identitystore::111122223333:identitystore/d-1234567890",
+                        "arn:aws:identitystore:::user/1234567890-u1"),
+                reading.buildResources("identitystore", "identitystore:DescribeUser", ctx, "us-east-1", ACCOUNT,
+                        "aws"));
+    }
+
+    /**
      * A required type an Identity Store request does not name is asked of the service: a membership's group and user
      * through its id, and a lookup's user by the members of the one way its alternate identifier is given, with their
      * paths, as the table writes them.
@@ -2041,6 +2067,53 @@ class ResourceArnBuilderTest {
                 reading.buildResources("identitystore", "identitystore:GetUserId", ctx, "us-east-1", ACCOUNT, "aws"));
         assertEquals(List.of(List.of("IdentityStoreId", "AlternateIdentifier.UniqueAttribute.AttributePath",
                 "AlternateIdentifier.UniqueAttribute.AttributeValue")), asked);
+    }
+
+    // ── MemoryDB ────────────────────────────────────────────────────────────────
+
+    /**
+     * A MemoryDB request is checked on the cluster, ACL or user its name names, as {@code <type>/<name>}, the ARN
+     * MemoryDB mints. The Service Reference lists no {@code cluster} for CreateCluster but the multi-Region cluster it
+     * may join, named by its MultiRegionClusterName, not by the new cluster's ClusterName, though both formats call
+     * their variable {@code ${ClusterName}}; DeleteCluster is checked on the cluster its ClusterName names.
+     */
+    @Test
+    void memoryDbChecksTheResourceItsNameNamesAsTheGeneratedTableReadsIt() {
+        setJsonBody("{\"ClusterName\":\"cache\"}");
+        assertEquals(List.of("arn:aws:memorydb:us-east-1:000000000000:cluster/cache"),
+                builder.buildResources("memorydb", "memorydb:DescribeClusters", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ClusterName\":\"cache\",\"NodeType\":\"db.t4g.small\",\"ACLName\":\"open-access\","
+                + "\"MultiRegionClusterName\":\"global\"}");
+        assertEquals(List.of("arn:aws:memorydb:us-east-1:000000000000:acl/open-access",
+                        "arn:aws:memorydb::000000000000:multiregioncluster/global"),
+                builder.buildResources("memorydb", "memorydb:CreateCluster", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ClusterName\":\"cache\"}");
+        assertEquals(List.of("arn:aws:memorydb:us-east-1:000000000000:cluster/cache"),
+                builder.buildResources("memorydb", "memorydb:DeleteCluster", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    // ── Route 53 Resolver ───────────────────────────────────────────────────────
+
+    /**
+     * A Route 53 Resolver request is checked on the rule, endpoint or domain list its id names, as {@code <type>/<id>},
+     * the ARN Route 53 Resolver mints. A DNSSEC configuration's format takes a ResourceId, which the request gives as
+     * the VPC's id, so the generated table checks the configuration under the VPC's id.
+     */
+    @Test
+    void route53ResolverChecksTheResourceItsIdNames() {
+        setJsonBody("{\"ResolverRuleId\":\"rslvr-rr-abc123\"}");
+        assertEquals(List.of("arn:aws:route53resolver:us-east-1:000000000000:resolver-rule/rslvr-rr-abc123"),
+                builder.buildResources("route53resolver", "route53resolver:GetResolverRule", ctx, "us-east-1",
+                        ACCOUNT, "aws"));
+        setJsonBody("{\"ResourceId\":\"vpc-0abc\"}");
+        assertEquals(List.of("arn:aws:route53resolver:us-east-1:000000000000:resolver-dnssec-config/vpc-0abc"),
+                builder.buildResources("route53resolver", "route53resolver:GetResolverDnssecConfig", ctx,
+                        "us-east-1", ACCOUNT, "aws"));
+        // An outpost resolver's create names the Outpost it runs on, another service's ARN, and makes its own.
+        setJsonBody("{\"Name\":\"edge\",\"OutpostArn\":\"arn:aws:outposts:us-east-1:000000000000:outpost/op-1\"}");
+        assertEquals(List.of("arn:aws:route53resolver:us-east-1:000000000000:outpost-resolver/*"),
+                builder.buildResources("route53resolver", "route53resolver:CreateOutpostResolver", ctx, "us-east-1",
+                        ACCOUNT, "aws"));
     }
 
     // ── S3 and S3 Control ───────────────────────────────────────────────────────

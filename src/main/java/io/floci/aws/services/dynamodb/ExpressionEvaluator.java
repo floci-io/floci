@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /**
@@ -572,30 +573,42 @@ final class ExpressionEvaluator {
         return invalidExpression(exprType, DynamoDbPartiQLParser.incorrectOperandType(operator, type));
     }
 
-    // AWS rejects a BETWEEN whose bounds are the wrong way round when it parses the
-    // expression, rather than letting the condition fail at evaluation time.
+    // AWS rejects a BETWEEN with bounds of different types or the wrong way round when it parses
+    // the expression, rather than letting the condition fail at evaluation time.
     private static void validateBetween(BetweenExpr between, String exprType, JsonNode values) {
-        JsonNode low = placeholderValue(between.low(), values);
-        JsonNode high = placeholderValue(between.high(), values);
+        String message = betweenBoundsError(placeholderValue(between.low(), values),
+                placeholderValue(between.high(), values), ExpressionEvaluator::displayAttributeValue);
+        if (message != null) {
+            throw invalidExpression(exprType, message);
+        }
+    }
+
+    static String betweenBoundsError(JsonNode low, JsonNode high, Function<JsonNode, String> display) {
         if (low == null || high == null) {
-            return;
+            return null;
         }
-        String lowType = low.fieldNames().next();
-        if (!lowType.equals(high.fieldNames().next()) || compareBoundValues(low, high) <= 0) {
-            return;
+        try {
+            if (!low.fieldNames().next().equals(high.fieldNames().next())) {
+                return DynamoDbPartiQLParser.betweenTypeMismatch(displayWrapped(low, display),
+                        displayWrapped(high, display));
+            }
+            if (compareBoundValues(low, high) > 0) {
+                return DynamoDbPartiQLParser.betweenReversed(displayWrapped(low, display),
+                        displayWrapped(high, display));
+            }
+        } catch (NumberFormatException ignored) {
+            // Another check refuses a number that does not parse.
         }
-        // AWS wraps the ConditionExpression form in its validation-error envelope, but reports
-        // the FilterExpression and KeyConditionExpression forms on their own.
-        String envelope = "ConditionExpression".equals(exprType) ? "1 validation error detected: " : "";
-        throw new AwsException("ValidationException", envelope
-                + "Invalid " + exprType + ": The BETWEEN operator requires upper bound to be greater than "
-                + "or equal to lower bound; lower bound operand: " + displayAttributeValue(low)
-                + ", upper bound operand: " + displayAttributeValue(high), 400);
+        return null;
+    }
+
+    private static String displayWrapped(JsonNode value, Function<JsonNode, String> display) {
+        return "AttributeValue: {" + value.fieldNames().next() + ":" + display.apply(value) + "}";
     }
 
     // DynamoDB orders strings by their UTF-8 bytes, which differs from Java's UTF-16
     // ordering above the basic plane: U+E000 sorts before U+10000 on AWS but after it here.
-    private static int compareBoundValues(JsonNode low, JsonNode high) {
+    static int compareBoundValues(JsonNode low, JsonNode high) {
         if (low.has("S") && high.has("S")) {
             return Arrays.compareUnsigned(
                     low.get("S").asText().getBytes(StandardCharsets.UTF_8),
@@ -629,8 +642,7 @@ final class ExpressionEvaluator {
     }
 
     private static String displayAttributeValue(JsonNode value) {
-        String type = value.fieldNames().next();
-        return "AttributeValue: {" + type + ":" + value.get(type).asText() + "}";
+        return value.get(value.fieldNames().next()).asText();
     }
 
     private static void validateFunction(FunctionCallExpr f, String exprType,

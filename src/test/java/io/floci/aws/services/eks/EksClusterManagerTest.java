@@ -6203,6 +6203,7 @@ class EksClusterManagerTest {
         void clusterCopyPreservesNodePrivateIpAndEksControllerStripsItFromWireResponses() throws Exception {
             Cluster cluster = vpcCluster("wire-cluster", "vpc-1", List.of("subnet-1"));
             cluster.setNodePrivateIp("10.0.1.25");
+            cluster.setClientRequestToken("internal-retry-token");
 
             Cluster copy = cluster.copy();
             assertEquals("10.0.1.25", copy.getNodePrivateIp());
@@ -6214,7 +6215,7 @@ class EksClusterManagerTest {
             assertEquals("10.0.1.25", deserialized.getNodePrivateIp());
 
             EksService eksService = Mockito.mock(EksService.class);
-            when(eksService.createCluster(any())).thenReturn(cluster);
+            when(eksService.createCluster(any(), any())).thenReturn(cluster);
             when(eksService.requireClusterInRequestRegion("wire-cluster")).thenReturn(cluster);
             when(eksService.deleteClusterInRequestRegion("wire-cluster")).thenReturn(cluster);
 
@@ -6234,10 +6235,36 @@ class EksClusterManagerTest {
                 Map<String, Object> body = (Map<String, Object>) response.getEntity();
                 Cluster wireCluster = (Cluster) body.get("cluster");
                 assertNull(wireCluster.getNodePrivateIp());
+                assertNull(wireCluster.getClientRequestToken());
                 String wireJson = mapper.writeValueAsString(wireCluster);
                 assertFalse(wireJson.contains("nodePrivateIp"));
+                assertFalse(wireJson.contains("clientRequestToken"));
             }
             assertEquals("10.0.1.25", cluster.getNodePrivateIp());
+            assertEquals("internal-retry-token", cluster.getClientRequestToken());
+        }
+
+        @Test
+        void eksControllerStripsTokenFromAnOtherwiseBareCluster() throws Exception {
+            Cluster cluster = new Cluster();
+            cluster.setName("token-only");
+            cluster.setClientRequestToken("internal-retry-token");
+
+            EksService eksService = Mockito.mock(EksService.class);
+            when(eksService.requireClusterInRequestRegion("token-only")).thenReturn(cluster);
+            EksController controller = new EksController(
+                    eksService,
+                    Mockito.mock(EksAccessEntryService.class),
+                    Mockito.mock(EksPodIdentityAssociationService.class),
+                    Mockito.mock(EksAddonService.class),
+                    new ObjectMapper().findAndRegisterModules(),
+                    Mockito.mock(EksClusterManager.class));
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> body = (Map<String, Object>) controller.describeCluster("token-only").getEntity();
+            Cluster response = (Cluster) body.get("cluster");
+            assertNull(response.getClientRequestToken());
+            assertEquals("internal-retry-token", cluster.getClientRequestToken());
         }
 
         @Test

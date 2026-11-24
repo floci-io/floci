@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.Gzip;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.ec2.model.FlowLog;
@@ -20,7 +21,6 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -37,7 +37,6 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.zip.GZIPOutputStream;
 
 import static io.floci.aws.services.ec2.Ec2Ids.randomHex;
 
@@ -328,7 +327,7 @@ public class FlowLogService {
             }
         }
 
-        byte[] gz = gzip(sb.toString());
+        byte[] gz = Gzip.compress(sb.toString().getBytes(StandardCharsets.UTF_8));
         String key = s3Key(fl, now);
         try {
             s3Service.putObject(fl.getBucketName(), key, gz, "application/octet-stream",
@@ -568,18 +567,6 @@ public class FlowLogService {
                 + "_" + ts + "_" + randomHex(8) + ".log.gz";
         return String.format("AWSLogs/%s/vpcflowlogs/%s/%s/%s",
                 fl.getAccountId(), fl.getRegion(), datePath, file);
-    }
-
-    private static byte[] gzip(String content) {
-        try {
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            try (GZIPOutputStream gz = new GZIPOutputStream(bos)) {
-                gz.write(content.getBytes(StandardCharsets.UTF_8));
-            }
-            return bos.toByteArray();
-        } catch (Exception e) {
-            throw new RuntimeException("gzip failed", e);
-        }
     }
 
     /**

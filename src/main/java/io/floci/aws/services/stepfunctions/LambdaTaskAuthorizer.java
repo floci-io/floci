@@ -16,7 +16,6 @@ import io.floci.aws.services.iam.ResourcePolicyProvider;
 import io.floci.aws.services.iam.ResourcePolicyProviders;
 import io.floci.aws.services.iam.RoleResourceAccessAuthorizer;
 import io.floci.aws.services.iam.RoleResourceAccessAuthorizer.ResourceGrant;
-import io.floci.aws.services.iam.ScpProvider;
 import io.floci.aws.services.iam.model.CallerContext;
 import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.stepfunctions.model.StateMachine;
@@ -60,12 +59,12 @@ public class LambdaTaskAuthorizer {
     public LambdaTaskAuthorizer(IamService iamService, IamPolicyEvaluator evaluator,
                                 AssumeRolePolicyEvaluator trustEvaluator,
                                 Instance<ResourcePolicyProvider> resourcePolicies,
-                                Instance<ScpProvider> scpProvider) {
+                                RoleResourceAccessAuthorizer access) {
         this.iamService = iamService;
         this.evaluator = evaluator;
         this.trustEvaluator = trustEvaluator;
         this.resourcePolicies = resourcePolicies;
-        this.access = new RoleResourceAccessAuthorizer(iamService, evaluator, resourcePolicies, scpProvider);
+        this.access = access;
     }
 
     /**

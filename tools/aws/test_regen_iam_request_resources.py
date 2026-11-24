@@ -143,6 +143,25 @@ def test_a_create_whose_action_acts_on_no_type_makes_the_one_named_as_it_is():
     assert r.makes_for("svc:CreatePool", [], VIEWS, {}) == []
 
 
+def test_a_create_joining_a_related_type_by_a_member_of_its_own_makes_the_type_named_as_it_is(tmp_path):
+    # MemoryDB's CreateCluster names the multi-Region cluster it may join and makes a cluster, whose tags it carries.
+    write_models(tmp_path, {"svc": model({
+        "CreateCluster": {"ClusterName": "String", "MultiRegionClusterName": "String", "Tags": "Strings"},
+        "CreatePermission": {"name": "String", "Tags": "Strings"}})})
+    models = r.load_models(tmp_path, {"svc"})
+    clusters = {"cluster": "arn:${Partition}:svc:${Region}:${Account}:cluster/${ClusterName}",
+                "multiregioncluster": "arn:${Partition}:svc::${Account}:multiregioncluster/${ClusterName}"}
+    assert r.makes_for("svc:CreateCluster", ["multiregioncluster"], clusters,
+                       members("ClusterName", "MultiRegionClusterName"), models=models) == [
+        {"type": "cluster", "fill": {"ClusterName": "ClusterName"}}]
+    # RAM's CreatePermission names no customer managed permission: that is the one it makes, not the AWS managed one.
+    permissions = {"permission": "arn:${Partition}:svc::${Account}:permission/${ResourcePath}",
+                   "customer-managed-permission":
+                       "arn:${Partition}:svc:${Region}:${Account}:permission/${ResourcePath}"}
+    assert r.makes_for("svc:CreatePermission", ["customer-managed-permission"], permissions, members("name"),
+                       models=models) == []
+
+
 def test_a_built_document_with_what_a_create_makes_a_default_and_a_maps_ids_validates(isolated, tmp_path):
     service = model({"CreateThing": {"ThingName": "String"}, "ListThings": {"ThingArn": "String"}, "ApplySteps": {}})
     service["shapes"]["Step"] = {"type": "structure", "members": {"poolId": {"shape": "String"},
@@ -268,6 +287,13 @@ def test_a_create_naming_others_marks_what_it_makes():
     # A member that may hold the ARN of the parent too names no resource the create makes.
     parent = {"types": ["pipeline", "webhook"], "arn": "PipelineArn"}
     assert r.with_made([parent, webhook], "svc:PutWebhook", formats) == [parent, dict(webhook, made=True)]
+    # Where a type is named as the create is, a type whose name merely ends in that word is one it joins, not makes:
+    # ElastiCache's CreateReplicationGroup makes a replication group, not the global one it may join.
+    groups = {"replicationgroup": "arn:${Partition}:svc:${Region}:${Account}:replicationgroup:${ReplicationGroupId}",
+              "globalreplicationgroup": "arn:${Partition}:svc::${Account}:globalreplicationgroup:${GlobalId}"}
+    made = {"type": "replicationgroup", "fill": {"ReplicationGroupId": "ReplicationGroupId"}}
+    joined = {"type": "globalreplicationgroup", "fill": {"GlobalId": "GlobalReplicationGroupId"}}
+    assert r.with_made([made, joined], "svc:CreateReplicationGroup", groups) == [dict(made, made=True), joined]
 
 
 def test_a_type_made_in_another_takes_that_ones_id_from_the_arn_member_named_after_it():
@@ -667,6 +693,50 @@ def test_the_vendored_reference_gives_the_types_an_action_requires():
     # A required type the Service Reference does not give the action is refused.
     with pytest.raises(ValueError, match="does not give it"):
         r.required_types("identitystore:DeleteGroupMembership", ["Group", "GroupMembership", "Identitystore"])
+
+
+def test_a_member_holding_another_services_arn_names_nothing_of_the_namespace(tmp_path):
+    # Route 53 Resolver's CreateOutpostResolver names the Outpost it runs on in its OutpostArn, an outposts ARN, whose
+    # name begins its own outpost resolver's.
+    service = model({"CreateOutpostResolver": {"Name": "String", "OutpostArn": "OutpostArn",
+                                               "ResolverArn": "ResolverArn"}})
+    service["shapes"]["OutpostArn"] = {"type": "string",
+                                       "pattern": "^arn:aws([a-z-]+)?:outposts:[a-z\\d-]+:\\d{12}:outpost/.+"}
+    service["shapes"]["ResolverArn"] = {"type": "string", "pattern": "^arn:aws([a-z-]+)?:svc:[a-z\\d-]+:\\d{12}:.+"}
+    write_models(tmp_path, {"svc": service})
+    models = r.load_models(tmp_path, {"svc"})
+    formats = {"outpost-resolver": "arn:${Partition}:svc:${Region}:${Account}:outpost-resolver/${ResourceId}"}
+    assert r.foreign_arn_members(models, "CreateOutpostResolver", formats) == {"OutpostArn"}
+    members = {"Name": "Name", "OutpostArn": "OutpostArn"}
+    assert r.resources_for("svc:CreateOutpostResolver", ["outpost-resolver"], formats, members) == [
+        {"types": ["outpost-resolver"], "arn": "OutpostArn"}]
+    assert r.resources_for("svc:CreateOutpostResolver", ["outpost-resolver"], formats, members,
+                           foreign={"OutpostArn"}) == [{"type": "outpost-resolver", "fill": {}}]
+
+
+def test_a_member_named_after_a_type_and_its_variable_fills_that_type():
+    # MemoryDB's cluster and multi-Region cluster both name their variable ClusterName.
+    formats = {"cluster": "arn:${Partition}:svc:${Region}:${Account}:cluster/${ClusterName}",
+               "multiregioncluster": "arn:${Partition}:svc::${Account}:multiregioncluster/${ClusterName}",
+               "snapshot": "arn:${Partition}:svc:${Region}:${Account}:snapshot/${SnapshotName}"}
+    members = {"ClusterName": "ClusterName", "MultiRegionClusterName": "MultiRegionClusterName",
+               "FinalSnapshotName": "FinalSnapshotName"}
+    # DeleteCluster: nothing read its cluster, which ClusterName names.
+    read = [{"type": "multiregioncluster", "fill": {"ClusterName": "MultiRegionClusterName"}}]
+    assert r.with_type_named_members(read, ["cluster", "multiregioncluster", "snapshot"], formats, members) == read + [
+        {"type": "cluster", "fill": {"ClusterName": "ClusterName"}}]
+    # CreateCluster: the multi-Region cluster took the new regional cluster's ClusterName.
+    created = [{"type": "multiregioncluster", "fill": {"ClusterName": "ClusterName"}, "made": True}]
+    assert r.with_type_named_members(created, ["multiregioncluster"], formats, members) == [
+        {"type": "multiregioncluster", "fill": {"ClusterName": "MultiRegionClusterName"}, "made": True}]
+    # A member that does not end in the variable's name names nothing: RDS's DBName is a database, not
+    # `${DbInstanceName}`.
+    db = {"db": "arn:${Partition}:svc:${Region}:${Account}:db:${DbInstanceName}"}
+    assert r.with_type_named_members([], ["db"], db, {"DBName": "DBName"}) == []
+    # A member two types may take names neither alone: SSM's InstanceId, an instance or a managed instance.
+    shared = {"instance": "arn:${Partition}:ec2:${Region}:${Account}:instance/${InstanceId}",
+              "managed-instance": "arn:${Partition}:svc:${Region}:${Account}:managed-instance/${InstanceId}"}
+    assert r.with_type_named_members([], ["instance", "managed-instance"], shared, {"InstanceId": "InstanceId"}) == []
 
 
 def test_a_structure_named_after_the_type_gives_its_name_to_a_type_named_by_nothing_else(tmp_path):
@@ -1404,6 +1474,15 @@ def test_the_vendored_file_is_well_formed():
     assert "elasticache" in document["namespaces"] and "elasticache" not in document["notCovered"]
     assert operations["elasticache:DeleteCacheCluster"]["resources"][0] == {
         "type": "cluster", "fill": {"CacheClusterId": "CacheClusterId"}}
+    # MemoryDB's DeleteCluster is checked on the cluster its ClusterName names, CreateCluster on the multi-Region
+    # cluster its MultiRegionClusterName names.
+    assert {"type": "cluster", "fill": {"ClusterName": "ClusterName"}} in \
+        operations["memorydb:DeleteCluster"]["resources"]
+    assert {"type": "multiregioncluster", "fill": {"ClusterName": "MultiRegionClusterName"}} in \
+        operations["memorydb:CreateCluster"]["resources"]
+    # CreateCluster makes a cluster, whose tags are checked on it, not on the multi-Region cluster it may join.
+    assert operations["memorydb:CreateCluster"]["makes"] == [
+        {"type": "cluster", "fill": {"ClusterName": "ClusterName"}}]
     assert operations["elasticache:ModifyUserGroup"]["resources"] == [
         {"type": "usergroup", "fill": {"UserGroupId": "UserGroupId"}},
         {"type": "user", "fill": {"UserId": "UserIdsToAdd[]"}}, {"type": "user", "fill": {"UserId": "UserIdsToRemove[]"}}]
@@ -1419,6 +1498,16 @@ def test_the_vendored_file_is_well_formed():
     assert {"type": "User", "fill": {}, "find": ["IdentityStoreId", "AlternateIdentifier.ExternalId.Issuer",
                                                  "AlternateIdentifier.ExternalId.Id"]} in \
         operations["identitystore:GetUserId"]["resources"]
+    # MemoryDB is read whole: a cluster, ACL or user by its name.
+    assert "memorydb" in document["namespaces"] and "memorydb" not in document["notCovered"]
+    assert operations["memorydb:DeleteACL"]["resources"] == [{"type": "acl", "fill": {"AclName": "ACLName"}}]
+    # Route 53 Resolver is read whole: a rule, an endpoint or a domain list by the id its request names.
+    assert "route53resolver" in document["namespaces"] and "route53resolver" not in document["notCovered"]
+    assert operations["route53resolver:GetResolverRule"]["resources"] == [
+        {"type": "resolver-rule", "fill": {"ResourceId": "ResolverRuleId"}}]
+    # CreateOutpostResolver's OutpostArn is an Outpost's ARN, so it holds no resolver: it makes its own, id open.
+    assert operations["route53resolver:CreateOutpostResolver"]["resources"] == [
+        {"type": "outpost-resolver", "fill": {}}]
     # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
     assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]

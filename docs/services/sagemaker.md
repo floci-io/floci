@@ -86,6 +86,8 @@ Only the accelerator is substituted. An instance type also implies vCPU and memo
 
 Endpoint containers are CPU-only for now; the `gpu` settings above apply to training jobs.
 
+Floci stops endpoint containers when it shuts down. With persistent storage, each endpoint that was `InService` or still `Creating` goes back to `Creating` when Floci starts again. Its container is started afresh from its endpoint config and model, `ModelDataUrl` included, and the endpoint reports `InService` once `/ping` answers. If the container can't be started, the endpoint reports `Failed` with the reason, for instance when its model was deleted. A container a crash left running is replaced, a `Failed` endpoint stays as it is, and one a crash left `Deleting` is deleted with its container. Endpoint containers are named after the endpoint's account, Region and name, so endpoints of the same name in two accounts or Regions don't share one.
+
 ## Examples
 
 ```python

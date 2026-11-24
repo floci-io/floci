@@ -2554,6 +2554,17 @@ public interface EmulatorConfig {
     interface CloudWatchMetricsServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Upper bound on the datapoints kept per account in each namespace a service publishes by
+         * itself, such as AWS/SQS. Every datapoint is its own entry in a store that is held in memory
+         * and written out whole, and those services add some for each resource every minute, so
+         * without a bound the store outgrows the heap long before the 15 days AWS keeps one-minute
+         * data. Oldest datapoints are dropped first once exceeded; 0 or less keeps them all. Other
+         * namespaces, where only a client's PutMetricData writes, are never cut back.
+         */
+        @WithDefault("100000")
+        int maxStoredDatapoints();
     }
 
     interface PaymentCryptographyServiceConfig {
@@ -3849,6 +3860,20 @@ public interface EmulatorConfig {
              */
             @WithDefault("busybox:1.36")
             String initImage();
+
+            /**
+             * Seconds a Lambda pod the scheduler marks Unschedulable may stay that way before
+             * its cold start is failed, so a cluster autoscaler has time to add a node. The
+             * grace is measured from when this launcher first observes the Unschedulable
+             * reason (the PodScheduled condition's lastTransitionTime records status
+             * transitions only, so a SchedulingGated to Unschedulable flip keeps the older
+             * timestamp), and {@code 0}, the default, keeps failing the cold start the
+             * moment the pod is reported Unschedulable.
+             *
+             * Env var: FLOCI_SERVICES_LAMBDA_KUBERNETES_UNSCHEDULABLE_GRACE_SECONDS
+             */
+            @WithDefault("0")
+            int unschedulableGraceSeconds();
         }
 
         HotReload hotReload();

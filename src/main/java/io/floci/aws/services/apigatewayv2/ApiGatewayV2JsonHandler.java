@@ -664,6 +664,12 @@ public class ApiGatewayV2JsonHandler {
         }
         if (i.getConnectionType() != null) node.put("ConnectionType", i.getConnectionType());
         if (i.getConnectionId() != null) node.put("ConnectionId", i.getConnectionId());
+        if (i.getTlsConfig() != null) {
+            ObjectNode tlsConfig = node.putObject("TlsConfig");
+            if (i.getTlsConfig().getServerNameToVerify() != null) {
+                tlsConfig.put("ServerNameToVerify", i.getTlsConfig().getServerNameToVerify());
+            }
+        }
         node.put("PayloadFormatVersion", i.getPayloadFormatVersion());
         if (i.getCredentialsArn() != null) {
             node.put("CredentialsArn", i.getCredentialsArn());

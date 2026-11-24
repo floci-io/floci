@@ -6,6 +6,8 @@ import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.UUID;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -148,10 +150,59 @@ class IdentityStoreIntegrationTest {
                 .body("UserName", equalTo("immutable@example.com"));
     }
 
+    /**
+     * The default account's IAM Identity Center instance holds its identity store, which an account outside that
+     * account's organization cannot see, and a store no instance holds stays usable by any account. The refused
+     * requests leave that account with no instance of its own.
+     */
+    @Test
+    void anotherAccountCannotSeeTheDefaultAccountsIdentityStore() {
+        String outsiderAccount = "210987654321";
+        String outsider = "AWS4-HMAC-SHA256 Credential=" + outsiderAccount
+                + "/20260904/us-east-1/identitystore/aws4_request";
+        String owned = "d-9067f2a3c1";
+        String userId = json("AWSIdentityStore.CreateUser",
+                "{\"IdentityStoreId\":\"" + owned + "\",\"UserName\":\"owner-only-" + UUID.randomUUID()
+                        + "@example.com\",\"DisplayName\":\"Owner Only\"}")
+                .statusCode(200).extract().path("UserId");
+        try {
+            json(outsider, "AWSIdentityStore.DescribeUser",
+                    "{\"IdentityStoreId\":\"" + owned + "\",\"UserId\":\"" + userId + "\"}")
+                    .statusCode(400)
+                    .body("__type", equalTo("ResourceNotFoundException"))
+                    .body("ResourceType", equalTo("IDENTITY_STORE"));
+            json(outsider, "AWSIdentityStore.ListUsers", "{\"IdentityStoreId\":\"" + owned + "\"}")
+                    .statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+            json(outsider, "AWSIdentityStore.CreateUser",
+                    "{\"IdentityStoreId\":\"" + owned + "\",\"UserName\":\"intruder-" + UUID.randomUUID()
+                            + "@example.com\",\"DisplayName\":\"Intruder\"}")
+                    .statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+            json(outsider, "AWSIdentityStore.ListUsers", "{\"IdentityStoreId\":\"" + STORE + "\"}")
+                    .statusCode(200);
+            given()
+                    .contentType(TYPE)
+                    .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + outsiderAccount
+                            + "/20260904/us-east-1/sso/aws4_request")
+                    .header("X-Amz-Target", "SWBExternalService.ListInstances")
+                    .body("{}")
+                    .post("/")
+                    .then()
+                    .statusCode(200)
+                    .body("Instances", hasSize(0));
+        } finally {
+            json("AWSIdentityStore.DeleteUser",
+                    "{\"IdentityStoreId\":\"" + owned + "\",\"UserId\":\"" + userId + "\"}");
+        }
+    }
+
     private static ValidatableResponse json(String target, String body) {
+        return json(AUTH, target, body);
+    }
+
+    private static ValidatableResponse json(String auth, String target, String body) {
         return given()
                 .contentType(TYPE)
-                .header("Authorization", AUTH)
+                .header("Authorization", auth)
                 .header("X-Amz-Target", target)
                 .body(body)
                 .post("/")

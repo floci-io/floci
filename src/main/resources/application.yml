@@ -559,6 +559,7 @@ floci:
       #     - workload-type=lambda:NoSchedule
       #   floci-address:                      # Host/IP pods use to reach Floci; auto-detected in-cluster
       #   init-image: busybox:1.36            # Init container image (needs sh, wget, unzip)
+      #   unschedulable-grace-seconds: 0      # Seconds an Unschedulable pod may wait while a cluster autoscaler adds a node (0 = fail the cold start immediately)
       hot-reload:
         enabled: false
       reactive-s3-sync:
@@ -741,6 +742,7 @@ floci:
       max-stored-events: 20000
     cloudwatchmetrics:
       enabled: true
+      max-stored-datapoints: 100000
     paymentcryptography:
       enabled: true
     secretsmanager:

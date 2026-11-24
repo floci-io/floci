@@ -7,8 +7,10 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.identitystore.model.Group;
 import io.floci.aws.services.identitystore.model.Membership;
 import io.floci.aws.services.identitystore.model.User;
+import io.floci.aws.services.ssoadmin.SsoAdminService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Optional;
@@ -27,6 +29,7 @@ class IdentityStoreStoredResourceArnsTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private IdentityStoreService service;
+    private SsoAdminService ssoAdmin;
     private IdentityStoreStoredResourceArns stored;
     private Group group;
     private User user;
@@ -37,7 +40,8 @@ class IdentityStoreStoredResourceArnsTest {
         service = new IdentityStoreService(AccountAwareStorageBackend.inMemory(GLOBAL_PARTITION),
                 AccountAwareStorageBackend.inMemory(GLOBAL_PARTITION),
                 AccountAwareStorageBackend.inMemory(GLOBAL_PARTITION), mapper);
-        stored = new IdentityStoreStoredResourceArns(service, new RegionResolver(REGION, GLOBAL_PARTITION));
+        ssoAdmin = Mockito.mock(SsoAdminService.class);
+        stored = new IdentityStoreStoredResourceArns(service, ssoAdmin, new RegionResolver(REGION, GLOBAL_PARTITION));
         group = service.createGroup(mapper.createObjectNode().put("IdentityStoreId", STORE)
                 .put("DisplayName", "Admins"));
         user = service.createUser(mapper.createObjectNode().put("IdentityStoreId", STORE).put("UserName", "alice")
@@ -71,6 +75,16 @@ class IdentityStoreStoredResourceArnsTest {
                                 "AlternateIdentifier.UniqueAttribute.AttributePath",
                                 "AlternateIdentifier.UniqueAttribute.AttributeValue"),
                         List.of(STORE, "displayName", "Admins"), REGION));
+    }
+
+    @Test
+    void anIdentityStoreIsTheOneInTheAccountWhoseInstanceHoldsIt() {
+        Mockito.when(ssoAdmin.identityStoreOwner(STORE)).thenReturn(Optional.of("111122223333"));
+        assertEquals(Optional.of("arn:aws:identitystore::111122223333:identitystore/" + STORE),
+                stored.find("Identitystore", List.of(STORE), REGION));
+        // A store no instance holds is not answered, so it stays in the caller's account.
+        Mockito.when(ssoAdmin.identityStoreOwner("d-0000000000")).thenReturn(Optional.empty());
+        assertEquals(Optional.empty(), stored.find("Identitystore", List.of("d-0000000000"), REGION));
     }
 
     @Test

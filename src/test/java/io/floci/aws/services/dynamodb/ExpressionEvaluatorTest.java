@@ -706,9 +706,41 @@ class ExpressionEvaluatorTest {
                     ExpressionEvaluator.validateExpression("n BETWEEN :hi AND :lo",
                             "ConditionExpression", null, values));
             assertEquals("ValidationException", e.getErrorCode());
-            assertEquals("1 validation error detected: Invalid ConditionExpression: The BETWEEN operator "
+            assertEquals("Invalid ConditionExpression: The BETWEEN operator "
                     + "requires upper bound to be greater than or equal to lower bound; lower bound operand: "
                     + "AttributeValue: {N:10}, upper bound operand: AttributeValue: {N:1}", e.getMessage());
+        }
+
+        @ParameterizedTest
+        @CsvSource(delimiter = '|', textBlock = """
+                ConditionExpression    | {"N":"3"} | {"S":"3"}    | {N:3}  | {S:3}
+                FilterExpression       | {"S":"a"} | {"B":"AQI="} | {S:a}  | {B:AQI=}
+                KeyConditionExpression | {"B":"AQI="} | {"N":"1"} | {B:AQI=} | {N:1}
+                """)
+        void betweenBoundsOfDifferentTypesAreRejected(String exprType, String low, String high,
+                String lowShown, String highShown) throws Exception {
+            ObjectMapper mapper = new ObjectMapper();
+            ObjectNode values = mapper.createObjectNode();
+            values.set(":lo", mapper.readTree(low));
+            values.set(":hi", mapper.readTree(high));
+
+            AwsException e = assertThrows(AwsException.class, () ->
+                    ExpressionEvaluator.validateExpression("n BETWEEN :lo AND :hi", exprType, null, values));
+
+            assertEquals("ValidationException", e.getErrorCode());
+            assertEquals("Invalid " + exprType + ": The BETWEEN operator requires same data type for lower and "
+                    + "upper bounds; lower bound operand: AttributeValue: " + lowShown
+                    + ", upper bound operand: AttributeValue: " + highShown, e.getMessage());
+        }
+
+        @Test
+        void betweenWithAPathBoundIsNotCheckedForTypes() {
+            ObjectMapper mapper = new ObjectMapper();
+            ObjectNode values = mapper.createObjectNode();
+            values.set(":lo", mapper.createObjectNode().put("N", "3"));
+
+            assertDoesNotThrow(() -> ExpressionEvaluator.validateExpression("n BETWEEN :lo AND other",
+                    "ConditionExpression", null, values));
         }
 
         // Checked against real DynamoDB (us-east-1, 2026-09-07): U+E000 as the lower bound

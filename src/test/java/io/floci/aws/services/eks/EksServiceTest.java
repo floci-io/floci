@@ -2,6 +2,7 @@ package io.floci.aws.services.eks;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
@@ -78,6 +79,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -635,9 +637,13 @@ class EksServiceTest {
     @Test
     void aDeletedClustersAutoModeLoadBalancersGoWithIt() {
         Cluster cluster = activeCluster();
-        EksService service = serviceWithCluster(cluster, mock(EksClusterManager.class), false);
         EksAutoModeLoadBalancers loadBalancers = mock(EksAutoModeLoadBalancers.class);
-        service.autoModeLoadBalancers = loadBalancers;
+        @SuppressWarnings("unchecked")
+        jakarta.enterprise.inject.Instance<EksAutoModeLoadBalancers> lookup =
+                mock(jakarta.enterprise.inject.Instance.class);
+        when(lookup.isResolvable()).thenReturn(true);
+        when(lookup.get()).thenReturn(loadBalancers);
+        EksService service = serviceWithCluster(cluster, mock(EksClusterManager.class), false, lookup);
 
         service.deleteCluster("running-cluster");
 
@@ -727,6 +733,12 @@ class EksServiceTest {
 
     private EksService serviceWithCluster(Cluster cluster, EksClusterManager clusterManager,
             boolean keepRunningOnShutdown) {
+        return serviceWithCluster(cluster, clusterManager, keepRunningOnShutdown, null);
+    }
+
+    private EksService serviceWithCluster(Cluster cluster, EksClusterManager clusterManager,
+            boolean keepRunningOnShutdown,
+            jakarta.enterprise.inject.Instance<EksAutoModeLoadBalancers> autoModeLoadBalancers) {
         AccountAwareStorageBackend<Cluster> clusterStore =
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
         clusterStore.putForAccount("000000000000", EksService.clusterKey(
@@ -734,7 +746,8 @@ class EksServiceTest {
         return new EksService(fixedStorageFactory(clusterStore), testConfig(false, keepRunningOnShutdown),
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
-                        new ObjectMapper()), mock(EksAccessEntryService.class));
+                        new ObjectMapper()), mock(EksAccessEntryService.class), null, null, null,
+                autoModeLoadBalancers);
     }
 
     private StorageFactory fixedStorageFactory(StorageBackend<String, ?> backend) {
@@ -760,6 +773,111 @@ class EksServiceTest {
         eksService.createCluster(req);
 
         assertThrows(AwsException.class, () -> eksService.createCluster(req));
+    }
+
+    @Test
+    void createClusterRetryWithSameClientRequestTokenReturnsExistingCluster() {
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName("retry-cluster");
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        req.setClientRequestToken("retry-token");
+
+        Cluster created = eksService.createCluster(req);
+        Cluster retried = eksService.createCluster(req);
+
+        assertEquals(created.getArn(), retried.getArn());
+        assertEquals(created.getCreatedAt(), retried.getCreatedAt());
+        assertEquals(List.of("retry-cluster"), eksService.listClusters());
+    }
+
+    @Test
+    void createClusterRejectsReusedTokenWithDifferentParameters() {
+        CreateClusterRequest original = clusterRequest("token-conflict");
+        original.setClientRequestToken("shared-token");
+        eksService.createCluster(original);
+
+        CreateClusterRequest changedRole = clusterRequest("token-conflict");
+        changedRole.setRoleArn("arn:aws:iam::000000000000:role/another-role");
+        changedRole.setClientRequestToken("shared-token");
+        AwsException changed = assertThrows(AwsException.class, () -> eksService.createCluster(changedRole));
+        assertEquals("InvalidParameterException", changed.getErrorCode());
+        assertEquals(400, changed.getHttpStatus());
+
+        CreateClusterRequest changedName = clusterRequest("another-cluster");
+        changedName.setClientRequestToken("shared-token");
+        AwsException renamed = assertThrows(AwsException.class, () -> eksService.createCluster(changedName));
+        assertEquals("InvalidParameterException", renamed.getErrorCode());
+        assertEquals(List.of("token-conflict"), eksService.listClusters());
+    }
+
+    @Test
+    void createClusterRetryUsesTheOriginalRequestAfterTagsChange() {
+        CreateClusterRequest original = clusterRequest("retagged-cluster");
+        original.setClientRequestToken("retag-token");
+        original.setTags(Map.of("env", "initial"));
+        Cluster created = eksService.createCluster(original);
+        eksService.tagResource(created.getArn(), Map.of("env", "updated"));
+
+        CreateClusterRequest retry = clusterRequest("retagged-cluster");
+        retry.setClientRequestToken("retag-token");
+        retry.setTags(Map.of("env", "initial"));
+        Cluster retried = eksService.createCluster(retry);
+
+        assertEquals(created.getArn(), retried.getArn());
+        assertEquals(created.getCreatedAt(), retried.getCreatedAt());
+        assertEquals(Map.of("env", "updated"), retried.getTags());
+    }
+
+    @Test
+    void createClusterRetrySurvivesPersistentStorageRestart(@TempDir Path directory) {
+        EksService before = persistentEksService(directory, null);
+        CreateClusterRequest original = clusterRequest("persisted-token-cluster");
+        original.setClientRequestToken("persisted-token");
+        ObjectNode rawRequest = new ObjectMapper().createObjectNode().put("deletionProtection", true);
+        Cluster created = before.createCluster(original, rawRequest);
+
+        EksService after = persistentEksService(directory, null);
+        CreateClusterRequest retry = clusterRequest("persisted-token-cluster");
+        retry.setClientRequestToken("persisted-token");
+        ObjectNode rawRetry = new ObjectMapper().createObjectNode().put("deletionProtection", true);
+        Cluster retried = after.createCluster(retry, rawRetry);
+
+        assertEquals(created.getArn(), retried.getArn());
+        assertEquals(created.getCreatedAt(), retried.getCreatedAt());
+        assertEquals(List.of("persisted-token-cluster"), after.listClusters());
+
+        rawRetry.put("deletionProtection", false);
+        AwsException changed = assertThrows(AwsException.class, () -> after.createCluster(retry, rawRetry));
+        assertEquals("InvalidParameterException", changed.getErrorCode());
+    }
+
+    @Test
+    void createClusterFailedRequestReleasesItsToken() {
+        CreateClusterRequest invalid = clusterRequest("retry-after-failure");
+        invalid.setVersion("1.0");
+        invalid.setClientRequestToken("failure-token");
+        AwsException failure = assertThrows(AwsException.class, () -> eksService.createCluster(invalid));
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+
+        CreateClusterRequest corrected = clusterRequest("retry-after-failure");
+        corrected.setClientRequestToken("failure-token");
+        Cluster created = eksService.createCluster(corrected);
+        assertEquals("retry-after-failure", created.getName());
+        assertEquals(List.of("retry-after-failure"), eksService.listClusters());
+    }
+
+    @Test
+    void createClusterRetryWithWhitespaceTokenStillReplays() {
+        CreateClusterRequest original = clusterRequest("blank-token-cluster");
+        original.setClientRequestToken(" ");
+        Cluster created = eksService.createCluster(original);
+
+        CreateClusterRequest retry = clusterRequest("blank-token-cluster");
+        retry.setClientRequestToken(" ");
+        Cluster retried = eksService.createCluster(retry);
+
+        assertEquals(created.getArn(), retried.getArn());
+        assertEquals(created.getCreatedAt(), retried.getCreatedAt());
     }
 
     @Test
@@ -3697,5 +3815,78 @@ class EksServiceTest {
         assertEquals("racing", first.get(5, TimeUnit.SECONDS).getName());
         AwsException after = assertThrows(AwsException.class, () -> service.createCluster(clusterRequest("racing")));
         assertEquals("ResourceInUseException", after.getErrorCode());
+    }
+
+    @Test
+    void aConcurrentRetryWithTheSameTokenWaitsForTheFirstCreate() throws Exception {
+        EksOidcService oidc = mock(EksOidcService.class);
+        CountDownLatch building = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(oidc.newIssuerUrl(anyString())).thenAnswer(invocation -> {
+            building.countDown();
+            release.await();
+            return "https://oidc.eks.us-east-1.amazonaws.com/id/0123456789ABCDEF0123456789ABCDEF";
+        });
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, null, oidc,
+                mock(EksAccessEntryService.class), mock(EksPodIdentityAssociationService.class));
+
+        CreateClusterRequest firstRequest = clusterRequest("retry-while-creating");
+        firstRequest.setClientRequestToken("in-flight-token");
+        CreateClusterRequest retryRequest = clusterRequest("retry-while-creating");
+        retryRequest.setClientRequestToken("in-flight-token");
+        CompletableFuture<Cluster> first = CompletableFuture.supplyAsync(() -> service.createCluster(firstRequest));
+        assertTrue(building.await(5, TimeUnit.SECONDS));
+        AtomicReference<Thread> retryThread = new AtomicReference<>();
+        CompletableFuture<Cluster> retry = CompletableFuture.supplyAsync(() -> {
+            retryThread.set(Thread.currentThread());
+            return service.createCluster(retryRequest);
+        });
+        try {
+            ThreadStates.awaitBlockedOrDone(retryThread, retry);
+        } finally {
+            release.countDown();
+        }
+
+        Cluster created = first.get(5, TimeUnit.SECONDS);
+        Cluster retried = retry.get(5, TimeUnit.SECONDS);
+        assertEquals(created.getArn(), retried.getArn());
+        assertEquals(created.getCreatedAt(), retried.getCreatedAt());
+        verify(oidc, times(1)).newIssuerUrl("us-east-1");
+        assertEquals(List.of("retry-while-creating"), service.listClusters());
+    }
+
+    @Test
+    void aConcurrentRetryEndsWhenTheFirstCreateThrowsAnError() throws Exception {
+        EksOidcService oidc = mock(EksOidcService.class);
+        CountDownLatch building = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(oidc.newIssuerUrl(anyString())).thenAnswer(invocation -> {
+            building.countDown();
+            release.await();
+            throw new AssertionError("failed during cluster creation");
+        });
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, null, oidc,
+                mock(EksAccessEntryService.class), mock(EksPodIdentityAssociationService.class));
+
+        CreateClusterRequest request = clusterRequest("failed-in-flight-create");
+        request.setClientRequestToken("failed-in-flight-token");
+        CompletableFuture<Cluster> first = CompletableFuture.supplyAsync(() -> service.createCluster(request));
+        assertTrue(building.await(5, TimeUnit.SECONDS));
+        AtomicReference<Thread> retryThread = new AtomicReference<>();
+        CompletableFuture<Cluster> retry = CompletableFuture.supplyAsync(() -> {
+            retryThread.set(Thread.currentThread());
+            return service.createCluster(request);
+        });
+        try {
+            ThreadStates.awaitBlockedOrDone(retryThread, retry);
+        } finally {
+            release.countDown();
+        }
+
+        ExecutionException firstFailure = assertThrows(ExecutionException.class, () -> first.get(5, TimeUnit.SECONDS));
+        assertEquals(AssertionError.class, firstFailure.getCause().getClass());
+        ExecutionException retryFailure = assertThrows(ExecutionException.class,
+                () -> retry.get(2, TimeUnit.SECONDS));
+        assertEquals(AssertionError.class, retryFailure.getCause().getClass());
     }
 }

@@ -893,16 +893,8 @@ public class NativeDynamoDbJsonHandler {
             checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression));
             checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression));
         } catch (AwsException e) {
-            throw inValidationEnvelope(e);
+            throw SmithyValidationErrors.inEnvelope(e);
         }
-    }
-
-    // A size check and a BETWEEN error add the envelope themselves.
-    private static AwsException inValidationEnvelope(AwsException e) {
-        if (!"ValidationException".equals(e.getErrorCode()) || e.getMessage().startsWith(VALIDATION_ENVELOPE)) {
-            return e;
-        }
-        return SmithyValidationErrors.validationException(e.getMessage());
     }
 
     private static void requireNonEmptyMap(JsonNode map, String member) {
@@ -1090,7 +1082,7 @@ public class NativeDynamoDbJsonHandler {
                 checkUnusedEav(exprAttrValues, colonTokensAll);
             }
         } catch (AwsException e) {
-            throw inValidationEnvelope(e);
+            throw SmithyValidationErrors.inEnvelope(e);
         }
 
         if (exprAttrValues != null) {

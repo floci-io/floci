@@ -823,6 +823,7 @@ public class ApiGatewayV2Service {
         integration.setResponseParameters(responseParameters);
 
         integration.setConnectionId((String) request.get("connectionId"));
+        integration.setTlsConfig(integrationTlsConfig(request.get("tlsConfig")));
 
         integrationStore.put(integrationKey(region, apiId, integration.getIntegrationId()), integration);
         return integration;
@@ -854,6 +855,7 @@ public class ApiGatewayV2Service {
     public Integration updateIntegration(String region, String apiId, String integrationId,
                                          Map<String, Object> request) {
         Integration integration = getIntegration(region, apiId, integrationId);
+        Integration.TlsConfig tlsConfig = integrationTlsConfig(request.get("tlsConfig"));
         Map<String, String> requestParameters = mergedParameters(integration.getRequestParameters(),
                 stringParameters(request.get("requestParameters"), "RequestParameters"));
         Map<String, Map<String, String>> responseParameters = mergedResponseParameters(
@@ -914,6 +916,9 @@ public class ApiGatewayV2Service {
         if (request.containsKey("connectionId") && request.get("connectionId") != null) {
             integration.setConnectionId((String) request.get("connectionId"));
         }
+        if (request.get("tlsConfig") != null) {
+            integration.setTlsConfig(tlsConfig);
+        }
 
         integrationStore.put(integrationKey(region, apiId, integrationId), integration);
         return integration;
@@ -925,6 +930,20 @@ public class ApiGatewayV2Service {
             throw new AwsException("BadRequestException", "Description must be a string.", 400);
         }
         return (String) description;
+    }
+
+    private static Integration.TlsConfig integrationTlsConfig(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof Map<?, ?> tlsConfig)) {
+            throw new AwsException("BadRequestException", "TlsConfig must be an object.", 400);
+        }
+        Object serverName = tlsConfig.get("serverNameToVerify");
+        if (serverName != null && !(serverName instanceof String)) {
+            throw new AwsException("BadRequestException", "ServerNameToVerify must be a string.", 400);
+        }
+        return new Integration.TlsConfig((String) serverName);
     }
 
     @SuppressWarnings("unchecked")

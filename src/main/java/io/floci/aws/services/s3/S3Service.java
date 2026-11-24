@@ -851,10 +851,11 @@ public class S3Service implements Resettable, ResourceProvider {
                 .orElseThrow(() -> noSuchBucket());
         rejectUploadAclWhenOwnershipEnforced(checkedBucket.value(), checkedBucket.account(), effectiveOptions, ownerId());
         rejectObjectLockWithoutLockEnabled(checkedBucket.value(), effectiveOptions);
-        rejectConflictingServerSideEncryption(
-                normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption()),
+        String normalizedServerSideEncryption = normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption());
+        rejectConflictingServerSideEncryption(normalizedServerSideEncryption,
                 validateSseCustomerKey(effectiveOptions.getSseCustomerAlgorithm(),
                         effectiveOptions.getSseCustomerKey(), effectiveOptions.getSseCustomerKeyMd5()));
+        rejectKmsKeyIdWithoutKmsEncryption(normalizedServerSideEncryption, effectiveOptions.getSseKmsKeyId());
         ChecksumAlgorithm declared = ChecksumAlgorithm.fromWireValue(effectiveOptions.getChecksumAlgorithm());
         // Checked again under the bucket lock when the object is stored; this only spares a transfer.
         checkWritePreconditions(bucketName, key, effectiveOptions.getIfMatch(), effectiveOptions.getIfNoneMatch());
@@ -1018,6 +1019,7 @@ public class S3Service implements Resettable, ResourceProvider {
         String normalizedServerSideEncryption = normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption());
         SseCustomerKey sseCustomerKey = validateSseCustomerKey(effectiveOptions.getSseCustomerAlgorithm(), effectiveOptions.getSseCustomerKey(), effectiveOptions.getSseCustomerKeyMd5());
         rejectConflictingServerSideEncryption(normalizedServerSideEncryption, sseCustomerKey);
+        rejectKmsKeyIdWithoutKmsEncryption(normalizedServerSideEncryption, effectiveOptions.getSseKmsKeyId());
         checkWritePreconditions(bucketName, key, effectiveOptions.getIfMatch(), effectiveOptions.getIfNoneMatch());
 
         byte[] data = body instanceof BytesBody bytes ? bytes.data() : null;
@@ -7266,6 +7268,25 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
+    /**
+     * Whether a request or a stored object carries a KMS key id without {@code aws:kms} or
+     * {@code aws:kms:dsse} encryption: the id only means something with one of those algorithms,
+     * and AWS refuses a write that carries it with any other algorithm or with none, an empty
+     * value included.
+     */
+    static boolean kmsKeyIdWithoutKmsEncryption(String serverSideEncryption, String sseKmsKeyId) {
+        return sseKmsKeyId != null
+                && !"aws:kms".equals(serverSideEncryption)
+                && !"aws:kms:dsse".equals(serverSideEncryption);
+    }
+
+    private static void rejectKmsKeyIdWithoutKmsEncryption(String serverSideEncryption, String sseKmsKeyId) {
+        if (kmsKeyIdWithoutKmsEncryption(serverSideEncryption, sseKmsKeyId)) {
+            throw new AwsException("InvalidArgument",
+                    "Server Side Encryption with AWS KMS managed key requires HTTP header x-amz-server-side-encryption : aws:kms", 400);
+        }
+    }
+
     private static String computeSseCustomerKeyMd5(String key) {
         try {
             byte[] decodedKey = Base64.getDecoder().decode(key.trim());
@@ -8716,7 +8737,8 @@ public class S3Service implements Resettable, ResourceProvider {
         String effectiveCacheControl = replaceMetadata && effectiveOptions.getCacheControl() != null
                 ? effectiveOptions.getCacheControl()
                 : source.getCacheControl();
-        String effectiveSseKmsKeyId = effectiveOptions.getSseKmsKeyId();
+        String effectiveSseKmsKeyId = new ObjectEncryption(normalizedServerSideEncryption,
+                effectiveOptions.getSseKmsKeyId()).keptKmsKeyId();
         boolean replaceTags = "REPLACE".equalsIgnoreCase(effectiveOptions.getTaggingDirective());
         Map<String, String> effectiveTags = replaceTags
                 ? effectiveOptions.getReplacementTagging()

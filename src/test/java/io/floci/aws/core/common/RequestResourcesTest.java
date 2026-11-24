@@ -439,6 +439,18 @@ class RequestResourcesTest {
                 created("servicediscovery:CreateHttpNamespace", namespace));
     }
 
+    /**
+     * A create whose action acts on other types tags the resource it makes when its request names it: MemoryDB's
+     * {@code CreateCluster} tags its new cluster, not the multi-Region cluster it may join.
+     */
+    @Test
+    void aCreateActingOnOtherTypesTagsTheResourceItMakes() {
+        ContainerRequestContext cluster = json("{\"ClusterName\":\"cache\",\"MultiRegionClusterName\":\"global\","
+                + "\"ACLName\":\"open-access\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"a\"}]}");
+        assertEquals(List.of("arn:aws:memorydb:us-east-1:000000000000:cluster/cache"),
+                created("memorydb:CreateCluster", cluster));
+    }
+
     /** A namespace's stored ARNs that find nothing, and act on the resource {@code arn} names in its own account. */
     private static StoredResourceArns reaching(String namespace, String arn) {
         return new StoredResourceArns() {

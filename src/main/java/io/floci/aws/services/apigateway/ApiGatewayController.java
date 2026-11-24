@@ -2879,6 +2879,12 @@ public class ApiGatewayController {
         }
         if (i.getConnectionType() != null) node.put("connectionType", i.getConnectionType());
         if (i.getConnectionId() != null) node.put("connectionId", i.getConnectionId());
+        if (i.getTlsConfig() != null) {
+            ObjectNode tlsConfig = node.putObject("tlsConfig");
+            if (i.getTlsConfig().getServerNameToVerify() != null) {
+                tlsConfig.put("serverNameToVerify", i.getTlsConfig().getServerNameToVerify());
+            }
+        }
         node.put("payloadFormatVersion", i.getPayloadFormatVersion());
         if (i.getCredentialsArn() != null) {
             node.put("credentialsArn", i.getCredentialsArn());

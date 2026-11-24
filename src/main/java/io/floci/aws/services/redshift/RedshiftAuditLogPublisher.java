@@ -3,6 +3,7 @@ package io.floci.aws.services.redshift;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
+import io.floci.aws.core.common.Gzip;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ServiceCallAuthorizer;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
@@ -16,7 +17,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -31,7 +31,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
-import java.util.zip.GZIPOutputStream;
 
 @ApplicationScoped
 public class RedshiftAuditLogPublisher {
@@ -361,7 +360,7 @@ public class RedshiftAuditLogPublisher {
             }
 
             String line = formatS3Line(logType, record);
-            byte[] newMember = compressGzipMember(line);
+            byte[] newMember = Gzip.compress((line + "\n").getBytes(StandardCharsets.UTF_8));
             int stripeIndex = Math.floorMod((bucket + "/" + key).hashCode(), STRIPE_COUNT);
             Object lock = deliveryStripes[stripeIndex];
             synchronized (lock) {
@@ -395,15 +394,6 @@ public class RedshiftAuditLogPublisher {
                 LOG.warnv(ex, "Delivery status listener threw an exception for cluster {0}", clusterIdentifier);
             }
         }
-    }
-
-    private static byte[] compressGzipMember(String newLine) throws IOException {
-        ByteArrayOutputStream lineGz = new ByteArrayOutputStream();
-        try (GZIPOutputStream gos = new GZIPOutputStream(lineGz)) {
-            gos.write(newLine.getBytes(StandardCharsets.UTF_8));
-            gos.write('\n');
-        }
-        return lineGz.toByteArray();
     }
 
     private byte[] appendGzipMember(String bucket, String key, byte[] newMember) throws IOException {

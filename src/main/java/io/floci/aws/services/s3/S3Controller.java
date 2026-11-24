@@ -4160,7 +4160,7 @@ public class S3Controller {
         String encryption = S3Service.normalizeServerSideEncryption(
             lcFields.get("x-amz-server-side-encryption"));
         String kmsKeyId = lcFields.get("x-amz-server-side-encryption-aws-kms-key-id");
-        if (kmsKeyId != null && !"aws:kms".equals(encryption) && !"aws:kms:dsse".equals(encryption)) {
+        if (S3Service.kmsKeyIdWithoutKmsEncryption(encryption, kmsKeyId)) {
             throw new AwsException("InvalidArgument",
                 "KMS key ID requires aws:kms or aws:kms:dsse server-side encryption.", 400);
         }
