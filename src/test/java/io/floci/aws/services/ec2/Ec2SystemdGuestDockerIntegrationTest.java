@@ -1,7 +1,10 @@
 package io.floci.aws.services.ec2;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.exception.ConflictException;
+import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.core.command.BuildImageResultCallback;
 import com.github.dockerjava.core.command.ExecStartResultCallback;
 import io.floci.aws.config.EmulatorConfig;
@@ -107,8 +110,16 @@ class Ec2SystemdGuestDockerIntegrationTest {
                     new ResolvedAmiImage(imageId, ResolvedAmiImage.SYSTEMD_RUNTIME, false, null), null, REGION);
             await().atMost(Duration.ofSeconds(60)).untilAsserted(() -> {
                 assertNotNull(instance.getDockerContainerId(), "EC2 must create the guarded guest");
-                ContainerExec.Result guard = ContainerExec.runMerged(docker, instance.getDockerContainerId(),
-                        new String[]{"test", "-f", "/run/floci-console-guard-passed"}, 10);
+                String containerId = instance.getDockerContainerId();
+                ContainerExec.Result guard;
+                try {
+                    guard = ContainerExec.runMerged(docker, containerId,
+                            new String[]{"test", "-f", "/run/floci-console-guard-passed"}, 10);
+                } catch (ConflictException e) {
+                    InspectContainerResponse.ContainerState state = docker.inspectContainerCmd(containerId).exec().getState();
+                    throw new IllegalStateException("console guard container exited with code " + state.getExitCodeLong()
+                            + ": " + containerLogs(containerId), e);
+                }
                 assertEquals(0, guard.exitCode(), "console guard did not admit the launch: " + guard.summary());
             });
 
@@ -176,6 +187,20 @@ class Ec2SystemdGuestDockerIntegrationTest {
             assertNotNull(imageId, "Docker must build the console guard fixture");
             return imageId;
         }
+    }
+
+    private String containerLogs(String containerId) throws Exception {
+        StringBuilder output = new StringBuilder();
+        try (ResultCallback.Adapter<Frame> callback = new ResultCallback.Adapter<>() {
+            @Override
+            public void onNext(Frame frame) {
+                output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
+            }
+        }) {
+            assertTrue(docker.logContainerCmd(containerId).withStdOut(true).withStdErr(true)
+                    .exec(callback).awaitCompletion(10, TimeUnit.SECONDS), "guard log retrieval timed out");
+        }
+        return output.toString();
     }
 
     @Test
