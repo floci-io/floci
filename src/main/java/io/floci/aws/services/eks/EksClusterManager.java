@@ -1664,6 +1664,18 @@ public class EksClusterManager
                 .orElse(false);
     }
 
+    /**
+     * Replaces the cluster's node on its data volume when it runs ServiceLB and load balancing is on, or runs
+     * without it and load balancing is off, so it starts as {@link #serviceLb} says; a node that already agrees is
+     * kept. Answers false when the replacement failed and the old node was restored.
+     */
+    boolean replaceNodeForServiceLb(Cluster cluster) {
+        if (cluster.getContainerId() == null || runsWithoutServiceLb(cluster) != serviceLb(cluster)) {
+            return true;
+        }
+        return replaceClusterContainer(cluster, null);
+    }
+
     /** Recreate the shared node with its named data volume intact, restoring its old type on failure. */
     boolean restartForNodeCapacity(Cluster cluster, String previousType) {
         if (cluster.getContainerId() == null) {

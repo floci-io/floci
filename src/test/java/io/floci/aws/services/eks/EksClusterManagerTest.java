@@ -1249,6 +1249,43 @@ class EksClusterManagerTest {
             verify(portAllocator, never()).allocate(6440, 6499);
         }
 
+        /** UpdateClusterConfig's load balancing change: a node whose ServiceLB disagrees is replaced in place. */
+        @ParameterizedTest
+        @CsvSource({"true,true", "false,false"})
+        void aNodeWhoseServiceLbDisagreesWithLoadBalancingIsReplacedKeepingItsEndpoint(boolean loadBalancing,
+                                                                                      String serviceLb) {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivorWithServiceLb("cid-old", serviceLb)));
+            when(lifecycleManager.create(any())).thenReturn("cid-new");
+            when(lifecycleManager.startCreated(any(), any())).thenReturn(new ContainerInfo("cid-new", Map.of()));
+            Cluster cluster = loadBalancingCluster(loadBalancing);
+            cluster.setDockerName("floci-eks-demo");
+            cluster.setContainerId("cid-old");
+            cluster.setHostPort(6441);
+
+            assertTrue(manager.replaceNodeForServiceLb(cluster));
+
+            assertEquals("cid-new", cluster.getContainerId());
+            assertEquals("https://localhost:6441", cluster.getEndpoint());
+            verify(dockerClient).stopContainerCmd("cid-old");
+            verify(lifecycleManager, never()).removeVolume(anyString());
+        }
+
+        @ParameterizedTest
+        @CsvSource({"true,false", "false,true"})
+        void aNodeWhoseServiceLbAgreesWithLoadBalancingIsKept(boolean loadBalancing, String serviceLb) {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivorWithServiceLb("cid-1", serviceLb)));
+            Cluster cluster = loadBalancingCluster(loadBalancing);
+            cluster.setDockerName("floci-eks-demo");
+            cluster.setContainerId("cid-1");
+
+            assertTrue(manager.replaceNodeForServiceLb(cluster));
+
+            assertEquals("cid-1", cluster.getContainerId());
+            verify(lifecycleManager, never()).create(any());
+        }
+
         @Test
         void firstNodeGroupReplacementKeepsTheClusterEndpoint() {
             when(lifecycleManager.create(any())).thenReturn("cid-new");

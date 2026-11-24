@@ -407,7 +407,7 @@ class EksServiceTest {
     }
 
     @Test
-    void turningAutoModeOnGivesTheRunningNodeBlockStorageAndAPoolChangeDoesNotReapplyIt() {
+    void turningAutoModeOnGivesTheRunningNodeBlockStorageAndReplacesItForLoadBalancingAndAPoolChangeDoesNeither() {
         StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
         AccountAwareStorageBackend<Cluster> clusterStore = new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
         Cluster running = new Cluster();
@@ -418,6 +418,7 @@ class EksServiceTest {
         running.setKubernetesNetworkConfig(new KubernetesNetworkConfig());
         clusterStore.putForAccount("000000000000", EksService.clusterKey("us-east-1", "auto-running"), running);
         EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.replaceNodeForServiceLb(any())).thenReturn(true);
         EksAddonService addons = mock(EksAddonService.class);
         when(addons.recordUpdate(any(), anyString(), any(), any(), any()))
                 .thenReturn(new Update("u", "Successful", "AutoModeUpdate", List.of(), 0, List.of()));
@@ -437,12 +438,23 @@ class EksServiceTest {
         ArgumentCaptor<Cluster> applied = ArgumentCaptor.forClass(Cluster.class);
         verify(clusterManager).applyBlockStorage(eq("k3s-auto-running"), applied.capture());
         assertEquals(Boolean.TRUE, applied.getValue().getStorageConfig().blockStorage().enabled());
+        // ServiceLB is a k3s server flag, so turning load balancing on replaces the node, which the poller verifies.
+        verify(clusterManager).replaceNodeForServiceLb(running);
+        assertTrue(running.isFinalizePending());
 
         service.updateClusterConfig("auto-running", new UpdateClusterConfigRequest(null, null, null, null, null,
                 new ComputeConfig(true, List.of("general-purpose"), nodeRole),
                 new StorageConfig(new BlockStorage(true)), loadBalancing));
 
         verify(clusterManager, times(1)).applyBlockStorage(anyString(), any());
+        verify(clusterManager, times(1)).replaceNodeForServiceLb(any());
+
+        KubernetesNetworkConfig off = new KubernetesNetworkConfig();
+        off.setElasticLoadBalancing(new ElasticLoadBalancing(false));
+        service.updateClusterConfig("auto-running", new UpdateClusterConfigRequest(null, null, null, null, null,
+                new ComputeConfig(false, List.of(), null), new StorageConfig(new BlockStorage(false)), off));
+
+        verify(clusterManager, times(2)).replaceNodeForServiceLb(running);
     }
 
     @Test
