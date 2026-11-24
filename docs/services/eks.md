@@ -484,7 +484,10 @@ Floci it does once the cluster's node runs without k3s's own ServiceLB, which wo
 node's address: a node started while load balancing is on, as one of a cluster created with it, runs without
 ServiceLB. ServiceLB is a k3s server flag, so a cluster whose load balancing is turned on by `UpdateClusterConfig`
 keeps it, and its Services of no class stay with it, until the node is next replaced: Floci replaces it on the same
-data volume when it restores the cluster. Name the class to get a load balancer at once. A Service of another class,
+data volume when it restores the cluster, and one whose load balancing is turned off keeps running without it, its
+Services of no class without a load balancer, until then. On a node without ServiceLB, a Service of no class with
+only UDP ports gets no load balancer, as Floci's load balancers don't forward UDP. Name the class to get a load
+balancer at once. A Service of another class,
 such as the AWS Load Balancer Controller's `service.k8s.aws/nlb`, is left to its controller. Ingresses
 (`eks.amazonaws.com/alb`) don't get one yet.
 
