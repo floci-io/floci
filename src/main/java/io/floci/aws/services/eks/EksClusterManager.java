@@ -3589,6 +3589,58 @@ public class EksClusterManager
         }
     }
 
+    /**
+     * What a read of a service account found: the service account as {@code kubectl get --output json} prints it,
+     * null for one that does not exist; or that the read failed, which says nothing about the service account.
+     */
+    record ServiceAccountRead(boolean succeeded, String json) {
+
+        static ServiceAccountRead found(String json) {
+            return new ServiceAccountRead(true, json);
+        }
+
+        static ServiceAccountRead absent() {
+            return new ServiceAccountRead(true, null);
+        }
+
+        static ServiceAccountRead failed() {
+            return new ServiceAccountRead(false, null);
+        }
+    }
+
+    /**
+     * Reads the service account {@code name} in {@code namespace} with kubectl in the cluster's server container,
+     * for the pod identity webhook, which is handed only the pod. A cluster with no container has none to read. A
+     * failed read is logged as a warning, and a service account that does not exist at debug level.
+     */
+    ServiceAccountRead serviceAccount(Cluster cluster, String namespace, String name, int timeoutSeconds) {
+        String containerId = cluster.getContainerId();
+        if (containerId == null) {
+            return ServiceAccountRead.absent();
+        }
+        try {
+            ContainerExec.Result result = execInContainerSeparatingStderr(containerId,
+                    new String[]{"kubectl", "--request-timeout=" + timeoutSeconds + "s", "get", "serviceaccount", name,
+                            "--namespace", namespace, "--output", "json"}, timeoutSeconds);
+            if (!result.timedOut() && result.exitCode() == 0) {
+                return ServiceAccountRead.found(result.stdout());
+            }
+            if (!result.timedOut() && result.stderr() != null && result.stderr().contains("(NotFound)")) {
+                LOG.debugv("Service account {0}/{1} does not exist in cluster {2}", namespace, name,
+                        cluster.getName());
+                return ServiceAccountRead.absent();
+            }
+            LOG.warnv("Could not read service account {0}/{1} in cluster {2}, so its pods get no IAM role "
+                    + "injected: {3}", namespace, name, cluster.getName(),
+                    result.timedOut() ? "kubectl did not answer in " + timeoutSeconds + "s" : result.summary());
+            return ServiceAccountRead.failed();
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not read service account {0}/{1} in cluster {2}, so its pods get no IAM role "
+                    + "injected", namespace, name, cluster.getName());
+            return ServiceAccountRead.failed();
+        }
+    }
+
     String clusterRegion(Cluster cluster) {
         String region = cluster == null ? null : AwsArnUtils.regionOrDefault(cluster.getArn(), null);
         if (region != null && !region.isBlank()) {
@@ -4255,6 +4307,11 @@ public class EksClusterManager
 
     ContainerExec.Result execInContainerForResult(String containerId, String[] cmd, int timeoutSeconds) {
         return ContainerExec.runMerged(lifecycleManager.getDockerClient(), containerId, cmd, timeoutSeconds);
+    }
+
+    /** {@link #execInContainerForResult} keeping stderr out of stdout, for output that is parsed. */
+    ContainerExec.Result execInContainerSeparatingStderr(String containerId, String[] cmd, int timeoutSeconds) {
+        return ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, timeoutSeconds);
     }
 
     /**
