@@ -2,8 +2,11 @@ package io.floci.aws.core.common.docker;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.LogContainerCmd;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.StreamType;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
@@ -32,6 +35,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -57,6 +61,8 @@ public class ContainerLogStreamer {
     private final CloudWatchLogsService cloudWatchLogsService;
     private final Duration pollInterval;
 
+    private final GelfLogListener gelfLogListener;
+
     // Log-follow attaches hold their connection open for the whole container lifetime, so
     // this class is the primary consumer of the streaming pool: sharing the control-plane
     // pool is what starved short create/start/stop calls during an LZA Logging fan-out
@@ -64,9 +70,11 @@ public class ContainerLogStreamer {
     // control-plane calls instead, and holds no connection between reads.
     @Inject
     public ContainerLogStreamer(@StreamingDocker DockerClient dockerClient, DockerClient pollingDockerClient,
-                                CloudWatchLogsService cloudWatchLogsService, EmulatorConfig config) {
+                                CloudWatchLogsService cloudWatchLogsService, EmulatorConfig config,
+                                GelfLogListener gelfLogListener) {
         this(dockerClient, pollingDockerClient, cloudWatchLogsService,
-                Duration.ofMillis(validateLogPollIntervalMillis(config.docker().logPollIntervalMillis())));
+                Duration.ofMillis(validateLogPollIntervalMillis(config.docker().logPollIntervalMillis())),
+                gelfLogListener);
     }
 
     public ContainerLogStreamer(DockerClient dockerClient, CloudWatchLogsService cloudWatchLogsService) {
@@ -75,6 +83,13 @@ public class ContainerLogStreamer {
 
     ContainerLogStreamer(DockerClient dockerClient, DockerClient pollingDockerClient,
                          CloudWatchLogsService cloudWatchLogsService, Duration pollInterval) {
+        this(dockerClient, pollingDockerClient, cloudWatchLogsService, pollInterval, GelfLogListener.disabled());
+    }
+
+    ContainerLogStreamer(DockerClient dockerClient, DockerClient pollingDockerClient,
+                         CloudWatchLogsService cloudWatchLogsService, Duration pollInterval,
+                         GelfLogListener gelfLogListener) {
+        this.gelfLogListener = gelfLogListener;
         this.dockerClient = dockerClient;
         this.pollingDockerClient = pollingDockerClient;
         this.cloudWatchLogsService = cloudWatchLogsService;
@@ -182,12 +197,58 @@ public class ContainerLogStreamer {
     Closeable attachPolledForAccount(String accountId, String containerId, String logGroup, String logStream,
                                      String region, String logPrefix, Instant since) {
         ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
-        return new PolledLogHandle(pollingDockerClient, containerId, since, (stream, line) -> {
+        BiConsumer<StreamType, String> sink = (stream, line) -> {
             String logged = logToConsole(logPrefix, line);
             if (logged != null) {
                 forwardToCloudWatchLogs(accountId, logGroup, logStream, region, logged);
             }
-        }).start(pollInterval);
+        };
+        Closeable pushed = attachPushed(containerId, sink);
+        if (pushed != null) {
+            return pushed;
+        }
+        return new PolledLogHandle(pollingDockerClient, containerId, since, sink).start(pollInterval);
+    }
+
+    /**
+     * In the log-driver mode, a container created with Floci's {@code gelf} log configuration pushes its
+     * log, so it is claimed by its tag instead of read; null when the mode is off or the container was not
+     * created for it (one started before the mode was turned on). A container that still sends to the
+     * address of a listener this Floci no longer has is read on a timer instead, from the daemon's local copy.
+     */
+    private Closeable attachPushed(String containerId, BiConsumer<StreamType, String> sink) {
+        if (!gelfLogListener.enabled()) {
+            return null;
+        }
+        GelfLogListener listener = gelfLogListener;
+        InspectContainerResponse inspect;
+        try {
+            inspect = pollingDockerClient.inspectContainerCmd(containerId).exec();
+        } catch (NotFoundException e) {
+            LOG.debugv("Container {0} is gone before its log was attached: {1}", containerId, e.getMessage());
+            return null;
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not read the log tag of container {0}; reading its log on a timer instead, which "
+                    + "needs the daemon's local copy of a pushed log: {1}", containerId, e.getMessage());
+            return null;
+        }
+        Map<String, String> labels = inspect.getConfig() == null ? null : inspect.getConfig().getLabels();
+        String token = labels == null ? null : labels.get(GelfLogListener.LOG_TOKEN_LABEL);
+        if (token == null) {
+            return null;
+        }
+        LogConfig logConfig = inspect.getHostConfig() == null ? null : inspect.getHostConfig().getLogConfig();
+        String gelfAddress = logConfig == null || logConfig.getConfig() == null
+                ? null : logConfig.getConfig().get("gelf-address");
+        if (!listener.listensAt(gelfAddress)) {
+            LOG.warnv("Container {0} sends its log to {1}, where this Floci does not listen; reading its log on a "
+                    + "timer instead, from the daemon's local copy", containerId, gelfAddress);
+            return null;
+        }
+        listener.register(token, sink);
+        // The daemon may still be sending the last lines when the container's owner closes the handle.
+        return () -> CompletableFuture.delayedExecutor(LogReassemblyCallback.DEFAULT_CLOSE_GRACE_MILLIS,
+                TimeUnit.MILLISECONDS).execute(() -> listener.unregister(token, sink));
     }
 
     /**

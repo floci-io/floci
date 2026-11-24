@@ -53,17 +53,28 @@ public class ContainerBuilder {
     private final EmbeddedDnsServer embeddedDnsServer;
     private final CurrentContainerNetworkResolver currentContainerNetworkResolver;
     private final ContainerEngineDetector containerEngineDetector;
+    private final GelfLogListener gelfLogListener;
 
     @Inject
     public ContainerBuilder(EmulatorConfig config, DockerHostResolver dockerHostResolver,
                             EmbeddedDnsServer embeddedDnsServer,
                             CurrentContainerNetworkResolver currentContainerNetworkResolver,
-                            ContainerEngineDetector containerEngineDetector) {
+                            ContainerEngineDetector containerEngineDetector,
+                            GelfLogListener gelfLogListener) {
         this.config = config;
         this.dockerHostResolver = dockerHostResolver;
         this.embeddedDnsServer = embeddedDnsServer;
         this.currentContainerNetworkResolver = currentContainerNetworkResolver;
         this.containerEngineDetector = containerEngineDetector;
+        this.gelfLogListener = gelfLogListener;
+    }
+
+    public ContainerBuilder(EmulatorConfig config, DockerHostResolver dockerHostResolver,
+                            EmbeddedDnsServer embeddedDnsServer,
+                            CurrentContainerNetworkResolver currentContainerNetworkResolver,
+                            ContainerEngineDetector containerEngineDetector) {
+        this(config, dockerHostResolver, embeddedDnsServer, currentContainerNetworkResolver,
+                containerEngineDetector, GelfLogListener.disabled());
     }
 
     public ContainerBuilder(EmulatorConfig config, DockerHostResolver dockerHostResolver,
@@ -84,8 +95,12 @@ public class ContainerBuilder {
      * @return a new Builder instance
      */
     public Builder newContainer(String image) {
-        return new Builder(resolveImage(image), config, dockerHostResolver, embeddedDnsServer,
+        Builder builder = new Builder(resolveImage(image), config, dockerHostResolver, embeddedDnsServer,
                 currentContainerNetworkResolver, containerEngineDetector);
+        if (gelfLogListener.enabled()) {
+            builder.logDriver = gelfLogListener;
+        }
+        return builder;
     }
 
     /**
@@ -251,6 +266,8 @@ public class ContainerBuilder {
         private boolean javaTrustStore;
         private String dnsName;
         private final List<String> joinedNetworks = new ArrayList<>();
+        private GelfLogListener logDriver;
+        private boolean pushedLogs;
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
                 EmbeddedDnsServer embeddedDnsServer,
@@ -613,6 +630,16 @@ public class ContainerBuilder {
         }
 
         /**
+         * Marks a container whose owner attaches its log with one of the {@code attachPolled} methods of
+         * {@link ContainerLogStreamer}. In the opt-in log-driver mode the daemon then pushes that log to Floci
+         * instead of Floci reading it on a timer; a container nobody attaches keeps its json-file log.
+         */
+        public Builder withPushedLogs() {
+            this.pushedLogs = true;
+            return this;
+        }
+
+        /**
          * Sets a custom log configuration.
          */
         public Builder withLogConfig(LogConfig logConfig) {
@@ -869,6 +896,16 @@ public class ContainerBuilder {
          * Builds the immutable ContainerSpec.
          */
         public ContainerSpec build() {
+            LogConfig effectiveLogConfig = logConfig;
+            Map<String, String> effectiveLabels = labels;
+            if (pushedLogs && logDriver != null && logConfig != null
+                    && logConfig.getType() == LogConfig.LoggingType.JSON_FILE) {
+                // The opt-in log-driver mode: the daemon pushes this container's log to Floci.
+                String token = GelfLogListener.newToken();
+                effectiveLabels = new HashMap<>(labels);
+                effectiveLabels.put(GelfLogListener.LOG_TOKEN_LABEL, token);
+                effectiveLogConfig = logDriver.logConfigFor(token, logConfig.getConfig());
+            }
             return new ContainerSpec(
                     image,
                     name,
@@ -884,8 +921,8 @@ public class ContainerBuilder {
                     List.copyOf(binds),
                     List.copyOf(volumesFrom),
                     List.copyOf(extraHosts),
-                    Map.copyOf(labels),
-                    logConfig,
+                    Map.copyOf(effectiveLabels),
+                    effectiveLogConfig,
                     privileged,
                     cgroupnsMode,
                     List.copyOf(dnsServers),

@@ -102,6 +102,7 @@ public class RedshiftContainerManager {
                 .withCmd(List.of("postgres", "-c", "allow_system_table_mods=on", "-c", "max_connections=" + maxConnections))
                 .withDockerNetwork(config.services().redshift().dockerNetwork())
                 .withLogRotation()
+                .withPushedLogs()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels("redshift", clusterIdentifier, accountId, null));
 
         int enginePort = 5432; // Default postgres port

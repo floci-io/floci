@@ -4649,6 +4649,29 @@ public interface EmulatorConfig {
         int logPollIntervalMillis();
 
         /**
+         * Opt-in: long-lived service containers send their logs to Floci through Docker's {@code gelf}
+         * log driver instead of being read on a timer, so they hold no Docker connection at all. Needs a
+         * daemon that can reach Floci (Docker Desktop, or a daemon on Floci's host), not Docker-in-Docker
+         * or a remote daemon.
+         */
+        @WithDefault("false")
+        boolean logDriverMode();
+
+        /**
+         * The host the daemon dials to reach Floci's log listener in the log-driver mode. Unset, it is
+         * {@code host.docker.internal} on Docker Desktop and {@code 127.0.0.1} otherwise.
+         */
+        Optional<String> logDriverHost();
+
+        /**
+         * The port Floci's log listener takes in the log-driver mode. It is fixed because Docker keeps the
+         * address in each container's log configuration and dials it on every start, including a start of a
+         * container Floci adopts after a restart. The default is GELF's standard port.
+         */
+        @WithDefault("12201")
+        int logDriverPort();
+
+        /**
          * Optional namespace inserted into Floci-managed child container and volume names.
          * Useful when multiple Floci processes share one Docker daemon.
          */

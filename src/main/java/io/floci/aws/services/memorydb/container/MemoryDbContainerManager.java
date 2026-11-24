@@ -152,6 +152,7 @@ public class MemoryDbContainerManager {
                 .withName(containerName)
                 .withDockerNetwork(config.services().memorydb().dockerNetwork())
                 .withLogRotation()
+                .withPushedLogs()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "memorydb", clusterName, accountId, region));
 

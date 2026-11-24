@@ -99,6 +99,7 @@ public class RabbitMqManager {
                 .withName(containerName)
                 .withDockerNetwork(config.services().dockerNetwork())
                 .withLogRotation()
+                .withPushedLogs()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "amazonmq", broker.getBrokerId(), regionResolver.getAccountId(),
                         brokerRegion(broker)));
