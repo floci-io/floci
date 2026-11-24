@@ -390,6 +390,52 @@ class CloudFrontDistributionTenantServiceTest {
                 100, "a", "b")));
     }
 
+    @Test
+    void aTenantDomainCannotBeClaimedThroughAssociateAlias() {
+        CloudFrontService service = service();
+        String distributionId = tenantOnly(service);
+        create(service, distributionId, "acme", "acme.example.com");
+        Distribution direct = service.createDistribution(distribution("direct"), Map.of());
+
+        assertEquals("CNAMEAlreadyExists",
+                errorCode(() -> service.associateAlias(direct.getId(), "ACME.example.com")));
+
+        List<String> aliases = service.getDistribution(direct.getId()).getConfig().getAliases();
+        assertTrue(aliases == null || aliases.isEmpty(), "a refused alias must leave the target untouched");
+    }
+
+    @Test
+    void aParameterWithoutNameOrValueIsInvalidArgumentOnCreateAndUpdate() {
+        CloudFrontService service = service();
+        String distributionId = tenantOnly(service);
+        DistributionTenant tenant = create(service, distributionId, "acme", "acme.example.com");
+        Map<String, String> noName = new LinkedHashMap<>();
+        noName.put(null, "x");
+        Map<String, String> noValue = new LinkedHashMap<>();
+        noValue.put("origin_path", null);
+
+        for (Map<String, String> parameters : List.of(noName, noValue)) {
+            assertEquals("InvalidArgument", errorCode(() -> service.createDistributionTenant(distributionId,
+                    "bad", List.of("bad.example.com"), Map.of(), null, parameters, null, null)));
+            assertEquals("InvalidArgument", errorCode(() -> service.updateDistributionTenant(tenant.getId(),
+                    tenant.getEtag(), null, null, null, parameters, null, null)));
+        }
+    }
+
+    @Test
+    void aWebAclWithoutAnActionIsInvalidArgumentOnCreateAndUpdate() {
+        CloudFrontService service = service();
+        String distributionId = tenantOnly(service);
+        DistributionTenant tenant = create(service, distributionId, "acme", "acme.example.com");
+        TenantCustomizations arnOnly = new TenantCustomizations();
+        arnOnly.setWebAclArn("arn:aws:wafv2:us-east-1:000000000000:global/webacl/x/y");
+
+        assertEquals("InvalidArgument", errorCode(() -> service.createDistributionTenant(distributionId,
+                "bad", List.of("bad.example.com"), Map.of(), arnOnly, null, null, null)));
+        assertEquals("InvalidArgument", errorCode(() -> service.updateDistributionTenant(tenant.getId(),
+                tenant.getEtag(), null, null, arnOnly, null, null, null)));
+    }
+
     private static List<String> names(List<DistributionTenant> tenants) {
         return tenants.stream().map(DistributionTenant::getName).toList();
     }

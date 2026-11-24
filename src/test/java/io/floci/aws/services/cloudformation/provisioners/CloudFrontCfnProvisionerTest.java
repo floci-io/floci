@@ -1481,9 +1481,12 @@ class CloudFrontCfnProvisionerTest {
     void updatesATenantInPlaceDeclarativelyWithThePriorEtag() throws Exception {
         DistributionTenant prior = tenant("dt_prior", ETAG, "acme");
         when(cloudFront.getDistributionTenant("dt_prior")).thenReturn(prior);
+        ConnectionGroup defaultGroup = new ConnectionGroup();
+        defaultGroup.setId("cg_default");
+        when(cloudFront.ensureDefaultConnectionGroup()).thenReturn(defaultGroup);
         when(cloudFront.listTagsForResource(prior.getArn())).thenReturn(Map.of("stale", "1"));
         when(cloudFront.updateDistributionTenant(eq("dt_prior"), eq(ETAG), eq("EDIST"),
-                eq(List.of("b.example.com")), any(), eq(Map.of()), ArgumentMatchers.isNull(),
+                eq(List.of("b.example.com")), any(), eq(Map.of()), eq("cg_default"),
                 eq(Boolean.TRUE))).thenReturn(tenant("dt_prior", NEW_ETAG, "acme"));
         StackResource r = resource(TENANT_TYPE, "dt_prior", Map.of("Id", "dt_prior"));
 
@@ -1502,6 +1505,25 @@ class CloudFrontCfnProvisionerTest {
         assertTrue(cleared.getValue().isEmpty(), "a template that drops Customizations clears them");
         verify(cloudFront).untagResource(prior.getArn(), List.of("stale"));
         verify(cloudFront).tagResource(prior.getArn(), Map.of("env", "test"));
+    }
+
+    @Test
+    void anUpdateThatDropsTheConnectionGroupMovesTheTenantBackToTheDefaultGroup() throws Exception {
+        DistributionTenant prior = tenant("dt_prior", ETAG, "acme");
+        when(cloudFront.getDistributionTenant("dt_prior")).thenReturn(prior);
+        ConnectionGroup defaultGroup = new ConnectionGroup();
+        defaultGroup.setId("cg_default");
+        when(cloudFront.ensureDefaultConnectionGroup()).thenReturn(defaultGroup);
+        when(cloudFront.updateDistributionTenant(any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(tenant("dt_prior", NEW_ETAG, "acme"));
+        StackResource r = resource(TENANT_TYPE, "dt_prior", Map.of("Id", "dt_prior"));
+
+        provisioner.provision(r, json("""
+                {"DistributionId": "EDIST", "Name": "acme", "Domains": ["b.example.com"]}
+                """), connectionCtx("dt_prior"));
+
+        verify(cloudFront).updateDistributionTenant(eq("dt_prior"), eq(ETAG), eq("EDIST"), any(), any(), any(),
+                eq("cg_default"), any());
     }
 
     @Test

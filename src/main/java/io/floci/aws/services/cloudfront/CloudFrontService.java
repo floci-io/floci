@@ -797,6 +797,9 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         if (dist.getConfig() == null) {
             throw new AwsException("InvalidArgument", "The target distribution has no configuration.", 400);
         }
+        if (tenantHoldsDomain(alias)) {
+            throw domainTaken();
+        }
         for (Distribution candidate : distStore.scan(k -> true)) {
             if (targetDistributionId.equals(candidate.getId()) || candidate.getConfig() == null
                     || candidate.getConfig().getAliases() == null) {
@@ -927,11 +930,8 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             if (requested == null || requested.isBlank()) {
                 continue;
             }
-            for (DistributionTenant tenant : tenantStore.scan(k -> true)) {
-                if (containsIgnoreCase(tenant.getDomains(), requested)) {
-                    throw new AwsException("CNAMEAlreadyExists",
-                            "The CNAME you provided is already associated with a different resource.", 409);
-                }
+            if (tenantHoldsDomain(requested)) {
+                throw domainTaken();
             }
             for (Distribution existing : distStore.scan(k -> true)) {
                 if (existing.getId().equals(currentDistributionId) || existing.getConfig() == null
@@ -1274,7 +1274,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         DistributionTenant tenant = new DistributionTenant();
         String id = "dt_" + randomIdSuffix(24);
         tenant.setId(id);
-        tenant.setArn(regionResolver.buildGlobalArn("cloudfront", accountId, "distribution-tenant/" + id));
+        tenant.setArn(regionResolver.buildGlobalArn("cloudfront", "distribution-tenant/" + id));
         tenant.setName(name);
         tenant.setDistributionId(distributionId);
         tenant.setConnectionGroupId(groupId);
@@ -1495,14 +1495,9 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     /** A domain belongs to one tenant or one distribution alias; the check is case-insensitive. */
     private void ensureTenantDomainsAvailable(List<String> domains, String currentTenantId) {
-        for (DistributionTenant other : tenantStore.scan(k -> true)) {
-            if (other.getId().equals(currentTenantId)) {
-                continue;
-            }
-            for (String domain : domains) {
-                if (containsIgnoreCase(other.getDomains(), domain)) {
-                    throw domainTaken();
-                }
+        for (String domain : domains) {
+            if (tenantHoldsDomain(domain, currentTenantId)) {
+                throw domainTaken();
             }
         }
         for (Distribution dist : distStore.scan(k -> true)) {
@@ -1515,6 +1510,19 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                 }
             }
         }
+    }
+
+    private boolean tenantHoldsDomain(String domain) {
+        return tenantHoldsDomain(domain, null);
+    }
+
+    private boolean tenantHoldsDomain(String domain, String exceptTenantId) {
+        for (DistributionTenant tenant : tenantStore.scan(k -> true)) {
+            if (!tenant.getId().equals(exceptTenantId) && containsIgnoreCase(tenant.getDomains(), domain)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static AwsException domainTaken() {
@@ -1538,6 +1546,9 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         if (customizations == null) {
             return;
         }
+        if (customizations.getWebAclArn() != null && customizations.getWebAclAction() == null) {
+            throw new AwsException("InvalidArgument", "The WebAcl Action must be specified.", 400);
+        }
         if (customizations.getWebAclAction() != null
                 && !TENANT_WEB_ACL_ACTIONS.contains(customizations.getWebAclAction())) {
             throw new AwsException("InvalidArgument", "The WebAcl Action specified is not valid.", 400);
@@ -1554,7 +1565,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         }
         for (Map.Entry<String, String> parameter : parameters.entrySet()) {
             String value = parameter.getValue();
-            if (!TENANT_PARAMETER_NAME.matcher(parameter.getKey()).matches()
+            if (parameter.getKey() == null || !TENANT_PARAMETER_NAME.matcher(parameter.getKey()).matches()
                     || value == null || value.isEmpty() || value.length() > TENANT_PARAMETER_VALUE_MAX_LENGTH) {
                 throw new AwsException("InvalidArgument",
                         "The Parameter " + parameter.getKey() + " is not valid.", 400);

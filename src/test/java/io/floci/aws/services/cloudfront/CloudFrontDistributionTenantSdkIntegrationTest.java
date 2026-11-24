@@ -40,6 +40,8 @@ import java.net.URI;
 import java.util.List;
 
 import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -52,6 +54,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @QuarkusTest
 class CloudFrontDistributionTenantSdkIntegrationTest {
+
+    private static final String CLOUDFRONT_NS = "http://cloudfront.amazonaws.com/doc/2020-05-31/";
 
     @TestHTTPResource("/")
     URI endpoint;
@@ -279,6 +283,59 @@ class CloudFrontDistributionTenantSdkIntegrationTest {
                 client.deleteConnectionGroup(request -> request.id(groupId).ifMatch(group.eTag()));
             } finally {
                 disableAndDelete(client, tenantId);
+                disableAndDeleteDistribution(client, distributionId);
+            }
+        }
+    }
+
+    @Test
+    void aTenantArnNamesTheAccountOfTheRequest() {
+        try (CloudFrontClient client = AwsTestClients.create(CloudFrontClient.builder(), "111122223333",
+                Region.US_EAST_1, endpoint)) {
+            String distributionId = createDistribution(client, "tenant-only");
+            String stamp = stamp();
+            DistributionTenant tenant = client.createDistributionTenant(request -> request
+                    .distributionId(distributionId).name("acct-" + stamp)
+                    .domains(DomainItem.builder().domain("acct-" + stamp + ".example.com").build()))
+                    .distributionTenant();
+            try {
+                assertTrue(tenant.arn().contains("::111122223333:distribution-tenant/" + tenant.id()),
+                        tenant.arn());
+            } finally {
+                disableAndDelete(client, tenant.id());
+                disableAndDeleteDistribution(client, distributionId);
+            }
+        }
+    }
+
+    @Test
+    void aParameterWithoutANameIsRefusedOnTheWire() {
+        try (CloudFrontClient client = client()) {
+            String distributionId = createDistribution(client, "tenant-only");
+            String stamp = stamp();
+            DistributionTenant tenant = client.createDistributionTenant(request -> request
+                    .distributionId(distributionId).name("noname-" + stamp)
+                    .domains(DomainItem.builder().domain("noname-" + stamp + ".example.com").build()))
+                    .distributionTenant();
+            try {
+                String create = "<CreateDistributionTenantRequest xmlns=\"" + CLOUDFRONT_NS + "\">"
+                        + "<DistributionId>" + distributionId + "</DistributionId><Name>raw-" + stamp + "</Name>"
+                        + "<Domains><DomainItem><Domain>raw-" + stamp + ".example.com</Domain></DomainItem></Domains>"
+                        + "<Parameters><Parameter><Value>x</Value></Parameter></Parameters>"
+                        + "</CreateDistributionTenantRequest>";
+                given().contentType("application/xml").body(create)
+                        .when().post(endpoint + "2020-05-31/distribution-tenant")
+                        .then().statusCode(400).body(containsString("InvalidArgument"));
+
+                String update = "<UpdateDistributionTenantRequest xmlns=\"" + CLOUDFRONT_NS + "\">"
+                        + "<Parameters><Parameter><Name></Name><Value>x</Value></Parameter></Parameters>"
+                        + "</UpdateDistributionTenantRequest>";
+                String etag = client.getDistributionTenant(request -> request.identifier(tenant.id())).eTag();
+                given().contentType("application/xml").header("If-Match", etag).body(update)
+                        .when().put(endpoint + "2020-05-31/distribution-tenant/" + tenant.id())
+                        .then().statusCode(400).body(containsString("InvalidArgument"));
+            } finally {
+                disableAndDelete(client, tenant.id());
                 disableAndDeleteDistribution(client, distributionId);
             }
         }

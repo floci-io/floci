@@ -309,7 +309,8 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
      *
      * <p>An update is declarative: it drives the tags, {@code Customizations} and {@code Parameters}
      * to the template's set, so a template that drops one clears it, and it reads an absent
-     * {@code Enabled} as the default, true. {@code ManagedCertificateRequest},
+     * {@code Enabled} as the default, true, and a dropped {@code ConnectionGroupId} as the account's
+     * default connection group, which is what a create picks. {@code ManagedCertificateRequest},
      * {@code DomainMappings} and {@code OnDomainTakeover} are accepted and ignored: Floci issues no
      * managed certificates and serves every domain the same way.
      */
@@ -330,9 +331,11 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
             provisioned = cloudFrontService.createDistributionTenant(distributionId, name, domains, tags,
                     customizations, parameters, connectionGroupId, enabled);
         } else {
+            String groupId = connectionGroupId == null || connectionGroupId.isBlank()
+                    ? cloudFrontService.ensureDefaultConnectionGroup().getId() : connectionGroupId;
             provisioned = cloudFrontService.updateDistributionTenant(prior.getId(), prior.getEtag(),
                     distributionId, domains, customizations == null ? new TenantCustomizations() : customizations,
-                    parameters == null ? Map.of() : parameters, connectionGroupId,
+                    parameters == null ? Map.of() : parameters, groupId,
                     enabled == null ? Boolean.TRUE : enabled);
             reconcileTags(provisioned.getArn(), tags);
         }

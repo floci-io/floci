@@ -12,6 +12,7 @@ import software.amazon.awssdk.services.cloudfront.model.EntityNotFoundException;
 import software.amazon.awssdk.services.cloudfront.model.GetDistributionTenantByDomainResponse;
 import software.amazon.awssdk.services.cloudfront.model.GetDistributionTenantResponse;
 import software.amazon.awssdk.services.cloudfront.model.InvalidIfMatchVersionException;
+import software.amazon.awssdk.services.cloudfront.model.NoSuchDistributionException;
 import software.amazon.awssdk.services.cloudfront.model.Origin;
 import software.amazon.awssdk.services.cloudfront.model.Origins;
 import software.amazon.awssdk.services.cloudfront.model.Parameter;
@@ -51,7 +52,7 @@ class CloudFrontDistributionTenantTest {
                 assertTrue(created.distributionTenant().arn().endsWith(":distribution-tenant/" + id));
                 assertTrue(created.distributionTenant().enabled());
                 assertNotNull(created.distributionTenant().connectionGroupId());
-                assertEquals("active", created.distributionTenant().domains().getFirst().statusAsString());
+                assertEquals("active", created.distributionTenant().domains().get(0).statusAsString());
 
                 GetDistributionTenantResponse byId =
                         cloudFront.getDistributionTenant(request -> request.identifier(id));
@@ -67,7 +68,7 @@ class CloudFrontDistributionTenantTest {
 
                 DistributionTenantSummary listed = cloudFront.listDistributionTenants(request -> request
                                 .associationFilter(filter -> filter.distributionId(distributionId)))
-                        .distributionTenantList().getFirst();
+                        .distributionTenantList().get(0);
                 assertEquals(id, listed.id());
                 assertEquals(created.eTag(), listed.eTag());
 
@@ -141,8 +142,8 @@ class CloudFrontDistributionTenantTest {
                             .distributionConfig().toBuilder().enabled(false).build()));
             String freshEtag = cloudFront.getDistribution(request -> request.id(distributionId)).eTag();
             cloudFront.deleteDistribution(request -> request.id(distributionId).ifMatch(freshEtag));
-        } catch (RuntimeException ignored) {
-            // teardown only: a distribution that is already gone or not yet disabled cannot leak into another test
+        } catch (NoSuchDistributionException ignored) {
+            // teardown only: a distribution that is already gone has nothing left to clean up
         }
     }
 }
