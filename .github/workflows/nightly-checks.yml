@@ -6,8 +6,9 @@ name: Nightly checks
 # outside floci.*, whose names Floci's configuration validates: a Quarkus test given -Dfloci.nightly refuses to
 # start. It runs once a day on main, on demand, and on a pull request that adds or changes a nightly check, so the
 # check is seen to pass before it merges. A *DockerNightlyIntegrationTest is a container end-to-end check moved out of
-# the shards to keep them short: a pull request that changes its service's src/main package runs it too, and one that
-# changes core/common/docker runs every one of them. GitHub-hosted runners only, which a public repository runs at no
+# the shards to keep them short: a pull request runs the ones its change can reach (its service's package, a service
+# the check imports, an image pin, a test helper the check names; .github/ci/select-nightly-checks.sh lists the rules),
+# and the daily run catches what those rules miss. GitHub-hosted runners only, which a public repository runs at no
 # charge.
 on:
   schedule:
@@ -19,7 +20,11 @@ on:
     paths:
       - '.github/workflows/nightly-checks.yml'
       - '.github/ci/select-nightly-checks.sh'
-      - 'src/test/java/**/*NightlyIntegrationTest.java'
+      - '.github/ci/test_select_nightly_checks.py'
+      - 'src/test/java/**'
+      - 'src/test/resources/application.yml'
+      - 'src/main/resources/application.yml'
+      - 'src/main/java/io/floci/aws/config/**'
       - 'src/main/java/io/floci/aws/services/**'
       - 'src/main/java/io/floci/aws/core/common/docker/**'
 
@@ -47,9 +52,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Test the selection
+        run: python3 -m unittest discover -s .github/ci -p test_select_nightly_checks.py
+
       # Every test is a top-level class in src/test/java, so the file name is the class name, as ci.yml relies on.
-      # On a pull request, only the checks it adds or changes run, or all of them when it changes this workflow, plus
-      # the Docker end-to-end checks of the services whose src/main package it changes.
+      # On a pull request, only the checks its change can reach run, or all of them when it changes this workflow or
+      # the selection; the script's header lists the rules.
       - name: List the nightly checks
         id: list
         env:

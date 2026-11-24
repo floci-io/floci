@@ -268,10 +268,11 @@ Guidelines:
   `TlsConfigSource`)
 - Docker end-to-end checks: `*DockerNightlyIntegrationTest.java`, for an integration test that starts
   real containers (a k3s node, a database engine, a sidecar, a task) and takes more than a few seconds.
-  It runs in the nightly workflow, and also on a pull request that changes its service's `src/main`
-  package (`services/<svc>/` selects the tests under `services/<svc>/`) or `core/common/docker`;
-  `.github/ci/select-nightly-checks.sh` picks them. Keep a fast container smoke test of the same path in
-  the shards when one exists
+  It runs in the nightly workflow, and also on a pull request whose change it can reach: its service's
+  `src/main` package, a service it imports, `core/common/docker`, an image pin, or a test helper it names.
+  `.github/ci/select-nightly-checks.sh` picks them and its header lists the rules; a check that exercises
+  another service without importing it goes in that script's `CONSUMERS`. Keep a fast container smoke test
+  of the same path in the shards when one exists
 - Prefer package-private constructors for testability
 - Integration tests may use ordered execution when stateful behavior requires it
 
