@@ -143,7 +143,7 @@ public class EksController {
                 && cluster.getNodePrivateIp() == null && cluster.getNodePodPrefixes() == null
                 && cluster.getClusterArgs() == null && cluster.getDefaultStorageClass() == null
                 && cluster.getJoinedInstanceIds() == null && cluster.getDockerNameRegion() == null
-                && cluster.getCreateRequest() == null)) {
+                && cluster.getCreateRequest() == null && cluster.getClientRequestToken() == null)) {
             return cluster;
         }
         Cluster response = cluster.copy();
@@ -156,6 +156,7 @@ public class EksController {
         response.setDefaultStorageClass(null);
         response.setJoinedInstanceIds(null);
         response.setCreateRequest(null);
+        response.setClientRequestToken(null);
         return response;
     }
 

@@ -38,14 +38,16 @@ class EksRegionScopingIntegrationTest {
             Response created = eks(ACCOUNT, "eu-west-1").body(request).post("/clusters");
             Response retried = eks(ACCOUNT, "eu-west-1").body(request).post("/clusters");
 
-            created.then().statusCode(200).body("cluster.clientRequestToken", equalTo(token))
+            created.then().statusCode(200).body("cluster", not(hasKey("clientRequestToken")))
                     .body("cluster", not(hasKey("createRequest")));
-            retried.then().statusCode(200).body("cluster.clientRequestToken", equalTo(token))
+            retried.then().statusCode(200).body("cluster", not(hasKey("clientRequestToken")))
                     .body("cluster", not(hasKey("createRequest")));
             assertEquals(created.jsonPath().getString("cluster.arn"),
                     retried.jsonPath().getString("cluster.arn"));
             assertEquals(created.jsonPath().getString("cluster.createdAt"),
                     retried.jsonPath().getString("cluster.createdAt"));
+            eks(ACCOUNT, "eu-west-1").get("/clusters/" + name).then().statusCode(200)
+                    .body("cluster", not(hasKey("clientRequestToken")));
 
             eks(ACCOUNT, "eu-west-1")
                     .body(clusterBody(name, ACCOUNT, "other", token))
