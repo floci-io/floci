@@ -204,8 +204,22 @@ class DynamoDbNativeBackendTest {
         });
 
         assertEquals("ValidationException", refused.getErrorCode());
-        assertEquals("Invalid ConditionExpression: Invalid function name; function: " + function,
-                refused.getMessage());
+        assertEquals("1 validation error detected: Invalid ConditionExpression: Invalid function name; function: "
+                + function, refused.getMessage());
+    }
+
+    @Test
+    void typedPutRefusesBetweenBoundsOfDifferentTypes() throws Exception {
+        createTable("");
+        JsonNode key = json("{\"id\":{\"S\":\"k\"}}");
+
+        AwsException refused = assertThrows(AwsException.class, () -> backend.putItem(SCOPE, TABLE, key,
+                "n BETWEEN :a AND :b", null, json("{\":a\":{\"N\":\"3\"},\":b\":{\"S\":\"3\"}}")));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals("1 validation error detected: Invalid ConditionExpression: The BETWEEN operator requires "
+                + "same data type for lower and upper bounds; lower bound operand: AttributeValue: {N:3}, "
+                + "upper bound operand: AttributeValue: {S:3}", refused.getMessage());
     }
 
     @Test
