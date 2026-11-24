@@ -41,6 +41,12 @@ public class WebIdentityTokenVerifier {
     /** The namespace AWS publishes a token's session tags under, whichever format they take. */
     private static final String TAGS_CLAIM = "https://aws.amazon.com/tags";
     private static final String FLATTENED_TAG_CLAIM = TAGS_CLAIM + "/principal_tags/";
+    /** The nested member, and the flattened claim, naming the keys to set as transitive. */
+    private static final String TRANSITIVE_KEYS = "transitive_tag_keys";
+    private static final String FLATTENED_TRANSITIVE_CLAIM = TAGS_CLAIM + "/" + TRANSITIVE_KEYS;
+    /** What a transitive tag key claim of any other shape is refused with, Floci's own wording. */
+    static final String TRANSITIVE_KEYS_MALFORMED =
+            "The web identity token's transitive tag keys do not read as an array of strings";
 
     private final ObjectMapper objectMapper;
 
@@ -126,7 +132,8 @@ public class WebIdentityTokenVerifier {
             throw new InvalidTokenException("The web identity token has no subject claim");
         }
 
-        return new WebIdentityToken(issuer, subject, audiences, readPrincipalTags(claims));
+        return new WebIdentityToken(issuer, subject, audiences, readPrincipalTags(claims),
+                readTransitiveTagKeys(claims));
     }
 
     private void verifyValidityWindow(JsonNode claims) throws InvalidTokenException {
@@ -172,9 +179,7 @@ public class WebIdentityTokenVerifier {
      * published nested example writes each as an array holding that one value, so a single-element
      * array is read as the value it holds. Anything else is a multi-valued session tag, which "AWS
      * STS does not support", and the token is refused rather than verified with that tag dropped:
-     * a tag a policy would have been evaluated with cannot go missing quietly. The transitive tag
-     * keys the same namespace carries are not read: nothing here passes a tag into a later session
-     * yet, and a key stored unread would say otherwise.
+     * a tag a policy would have been evaluated with cannot go missing quietly.
      */
     private Map<String, String> readPrincipalTags(JsonNode claims) throws InvalidTokenException {
         Map<String, String> tags = new LinkedHashMap<>();
@@ -192,6 +197,46 @@ public class WebIdentityTokenVerifier {
             tags.put(key, singleValue(key, claim.getValue()));
         }
         return tags;
+    }
+
+    /**
+     * The keys the token asks to set as transitive, in the order the claim lists them, read in
+     * both formats as the tags are: nested, where "transitive tag keys are represented in an array
+     * under the transitive_tag_keys key" of the same namespace, and flattened, "in a single claim
+     * as an array of strings with the prefix https://aws.amazon.com/tags/transitive_tag_keys".
+     *
+     * <p>Both published examples write an array, and a lone string is read as the one key it names
+     * rather than refused, which is the same reading {@link #singleValue} gives a tag written
+     * without its array. A claim of any other shape, or one holding something that is not a
+     * string, is refused rather than read past: a key dropped quietly would leave a chained
+     * session short of a tag whose absence a policy can turn on. Which keys select a tag is the
+     * session's business, not this one's.
+     */
+    private static List<String> readTransitiveTagKeys(JsonNode claims) throws InvalidTokenException {
+        List<String> keys = new ArrayList<>();
+        readTransitiveKeysInto(claims.path(TAGS_CLAIM).path(TRANSITIVE_KEYS), keys);
+        readTransitiveKeysInto(claims.path(FLATTENED_TRANSITIVE_CLAIM), keys);
+        return keys;
+    }
+
+    private static void readTransitiveKeysInto(JsonNode claim, List<String> keys)
+            throws InvalidTokenException {
+        if (claim.isMissingNode() || claim.isNull()) {
+            return;
+        }
+        if (claim.isTextual()) {
+            keys.add(claim.asText());
+            return;
+        }
+        if (!claim.isArray()) {
+            throw new InvalidTokenException(TRANSITIVE_KEYS_MALFORMED);
+        }
+        for (JsonNode key : claim) {
+            if (!key.isTextual()) {
+                throw new InvalidTokenException(TRANSITIVE_KEYS_MALFORMED);
+            }
+            keys.add(key.asText());
+        }
     }
 
     /** The one value a tag claim carries, written as a string or as an array holding it alone. */
