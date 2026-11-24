@@ -3,6 +3,7 @@ package io.floci.aws.services.apigatewayv2;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -189,25 +190,26 @@ class ApiGatewayV2VpcLinkRestTest {
     void createIntegrationWithVpcLinkEchoesConnectionFields() {
         // VPC_LINK + connectionId pointing at our VpcLink + listener-ARN integrationUri:
         // CreateIntegration must persist + echo connectionType, connectionId, integrationUri.
-        integrationId = given()
+        Response response = given()
                 .contentType(ContentType.JSON)
                 .body("""
                         {"integrationType":"HTTP_PROXY",
                          "integrationUri":"arn:aws:elasticloadbalancing:us-east-1:000000000000:listener/app/my-lb/abcdef0123456789/0011223344556677",
                          "connectionType":"VPC_LINK",
                          "connectionId":"%s",
+                         "tlsConfig":{"serverNameToVerify":"backend.example.com"},
                          "payloadFormatVersion":"1.0",
                          "integrationMethod":"ANY"}
                         """.formatted(vpcLinkId))
-                .when().post("/v2/apis/" + apiId + "/integrations")
-                .then()
-                .statusCode(201)
+                .when().post("/v2/apis/" + apiId + "/integrations");
+        integrationId = response.then().statusCode(201).extract().path("integrationId");
+        response.then()
                 .body("integrationId", notNullValue())
                 .body("integrationType", equalTo("HTTP_PROXY"))
                 .body("connectionType", equalTo("VPC_LINK"))
                 .body("connectionId", equalTo(vpcLinkId))
-                .body("integrationUri", containsString("listener/app/my-lb"))
-                .extract().path("integrationId");
+                .body("tlsConfig.serverNameToVerify", equalTo("backend.example.com"))
+                .body("integrationUri", containsString("listener/app/my-lb"));
     }
 
     @Test
@@ -218,7 +220,15 @@ class ApiGatewayV2VpcLinkRestTest {
                 .then()
                 .statusCode(200)
                 .body("connectionType", equalTo("VPC_LINK"))
-                .body("connectionId", equalTo(vpcLinkId));
+                .body("connectionId", equalTo(vpcLinkId))
+                .body("tlsConfig.serverNameToVerify", equalTo("backend.example.com"));
+
+        given()
+                .when().get("/v2/apis/" + apiId + "/integrations")
+                .then()
+                .statusCode(200)
+                .body("items.find { it.integrationId == '" + integrationId + "' }.tlsConfig.serverNameToVerify",
+                        equalTo("backend.example.com"));
     }
 
     @Test
@@ -235,7 +245,40 @@ class ApiGatewayV2VpcLinkRestTest {
                 .statusCode(200)
                 .body("integrationMethod", equalTo("GET"))
                 .body("connectionType", equalTo("VPC_LINK"))
-                .body("connectionId", equalTo(vpcLinkId));
+                .body("connectionId", equalTo(vpcLinkId))
+                .body("tlsConfig.serverNameToVerify", equalTo("backend.example.com"));
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"tlsConfig":{"serverNameToVerify":"updated.example.com"}}
+                        """)
+                .when().patch("/v2/apis/" + apiId + "/integrations/" + integrationId)
+                .then()
+                .statusCode(200)
+                .body("tlsConfig.serverNameToVerify", equalTo("updated.example.com"));
+
+        given()
+                .when().get("/v2/apis/" + apiId + "/integrations/" + integrationId)
+                .then()
+                .statusCode(200)
+                .body("tlsConfig.serverNameToVerify", equalTo("updated.example.com"));
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"integrationMethod":"POST","tlsConfig":{"serverNameToVerify":123}}
+                        """)
+                .when().patch("/v2/apis/" + apiId + "/integrations/" + integrationId)
+                .then()
+                .statusCode(400);
+
+        given()
+                .when().get("/v2/apis/" + apiId + "/integrations/" + integrationId)
+                .then()
+                .statusCode(200)
+                .body("integrationMethod", equalTo("GET"))
+                .body("tlsConfig.serverNameToVerify", equalTo("updated.example.com"));
     }
 
     @Test
@@ -258,18 +301,19 @@ class ApiGatewayV2VpcLinkRestTest {
                 .then().statusCode(201)
                 .extract().path("ApiId");
 
-        String localIntegrationId = given()
+        Response response = given()
                 .contentType(amzJson)
                 .header("X-Amz-Target", targetPrefix + "CreateIntegration")
                 .header("Authorization", authHeader)
                 .body("""
-                        {"ApiId":"%s","IntegrationType":"HTTP_PROXY","IntegrationUri":"https://example.com","IntegrationMethod":"GET","ConnectionType":"VPC_LINK","ConnectionId":"%s","PayloadFormatVersion":"1.0"}
+                        {"ApiId":"%s","IntegrationType":"HTTP_PROXY","IntegrationUri":"https://example.com","IntegrationMethod":"GET","ConnectionType":"VPC_LINK","ConnectionId":"%s","PayloadFormatVersion":"1.0","TlsConfig":{"ServerNameToVerify":"json.example.com"}}
                         """.formatted(localApiId, vpcLinkId))
-                .when().post("/")
-                .then().statusCode(201)
+                .when().post("/");
+        String localIntegrationId = response.then().statusCode(201).extract().path("IntegrationId");
+        response.then()
                 .body("ConnectionType", equalTo("VPC_LINK"))
                 .body("ConnectionId", equalTo(vpcLinkId))
-                .extract().path("IntegrationId");
+                .body("TlsConfig.ServerNameToVerify", equalTo("json.example.com"));
 
         given()
                 .contentType(amzJson)
@@ -280,7 +324,8 @@ class ApiGatewayV2VpcLinkRestTest {
                         """.formatted(localApiId, localIntegrationId))
                 .when().post("/")
                 .then().statusCode(200)
-                .body("ConnectionId", equalTo(vpcLinkId));
+                .body("ConnectionId", equalTo(vpcLinkId))
+                .body("TlsConfig.ServerNameToVerify", equalTo("json.example.com"));
 
         // cleanup the locally-scoped api so it doesn't leak into the next test
         given().when().delete("/v2/apis/" + localApiId).then().statusCode(anyOf(equalTo(204), equalTo(404)));
