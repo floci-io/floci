@@ -1838,7 +1838,7 @@ that has never set one.
 
 ### What a bad account property key answers
 
-A property key is read in three layers and two of them are settled by recordings.
+A property key is read in three layers.
 
 A key breaking the published shape, `accountPropertyKeyType` at 1 to 50 characters matching
 `^[A-Za-z][A-Za-z0-9/_-]*$`, is the declared constraint violation, a `ValidationError` naming the
@@ -1851,13 +1851,28 @@ sentence of its own describing the rule; the rule itself is unchanged, and the t
 it refuses, a trailing slash and several slashes, carry the same sentence without a recording of
 their own.
 
-The third layer is not implemented and is tracked rather than guessed. AWS also refuses a key whose
-namespace it does not recognise, `InvalidInput` 400 with `Unsupported namespace: <namespace>`,
-recorded 2026-10-25, where this emulator stores the property under whatever namespace the key
-names. Doing it needs the set of namespaces AWS recognises, and the recordings name exactly one
-real namespace and one invented one, so a check built from them would refuse namespaces AWS
-accepts. That is the wrong direction to be wrong in, so the set has to come from a source that
-publishes it.
+The third layer is the namespace itself. A key whose namespace AWS does not recognise is
+`InvalidInput` 400 with `Unsupported namespace: <namespace>`, recorded 2026-10-25, carrying the
+namespace half of the key rather than the whole key, and the refused write leaves every stored
+property as it was. Storing it instead was the worse of the two ways to be wrong here: one accepted
+bad write left this account answering every later read with a key AWS would never have stored, and
+the caller was never told.
+
+What that refusal is held to is the set of namespaces AWS recognises, and no page publishes the
+set. Only `RoleManager` is named anywhere: the API Reference's example for `PutAccountProperties`
+sets `RoleManager/Enabled`, the user guide has role manager "controlled by the account-level
+property RoleManager/Enabled", and the guide's policy example for `iam:AccountPropertyNamespaces`
+matches on `RoleManager`. All three introduce it as an example, and the operation's model carries no
+enum for the key, so what this package holds is those three pages read together rather than a list
+AWS published. The cost is the direction this refusal can be wrong in: a namespace AWS recognises
+and has not written down anywhere is refused here until the set in `IamService` names it, which is
+one set to extend when AWS publishes another.
+
+Two readings inside it are this package's own. The namespace is matched as AWS spells it, since
+nothing published says how AWS reads its case. And a request mixing two namespaces is answered for
+mixing them even when neither is recognised, because a request names one namespace before there is
+a namespace to look up; that order is also the one that leaves every request already being refused
+with the answer it already had.
 
 ### Organizations Root Access
 
