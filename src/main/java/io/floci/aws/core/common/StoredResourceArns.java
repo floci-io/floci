@@ -227,4 +227,13 @@ public interface StoredResourceArns {
     default Optional<String> findByMembers(String type, List<String> names, String region) {
         return find(type, names, region);
     }
+
+    /**
+     * As {@link #findByMembers(String, List, String)}, with the paths of the members the values come from, as the
+     * table writes them ({@code AlternateIdentifier.ExternalId.Id}), for a service whose request may name the resource
+     * in more than one way, each the same number of values.
+     */
+    default Optional<String> findByMembers(String type, List<String> members, List<String> names, String region) {
+        return findByMembers(type, names, region);
+    }
 }

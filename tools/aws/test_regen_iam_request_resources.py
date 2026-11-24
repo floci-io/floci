@@ -586,6 +586,89 @@ def test_lists_a_request_adds_or_removes_name_a_type_no_resource_names_yet():
     assert r.with_change_lists(resources, ["group", "user"], formats, {"TagsToAdd": "TagsToAdd[]"}) == resources
 
 
+def membership_model() -> dict:
+    """A model of Identity Store's memberships: a record of the membership's group and member, a call naming it by its
+    id, and lookups returning the id of a membership, a group or a user its request names otherwise."""
+    service = model({"DeleteMembership": {"StoreId": "String", "MembershipId": "String"},
+                     "GetMembershipId": {"StoreId": "String", "GroupId": "String", "MemberId": "MemberId"},
+                     "GetGroupId": {"StoreId": "String", "AlternateIdentifier": "AlternateIdentifier"},
+                     "ListMembers": {"StoreId": "String", "GroupIds": "Strings"}})
+    service["shapes"].update({
+        "GroupMembership": {"type": "structure", "members": {"StoreId": {"shape": "String"},
+                                                             "MembershipId": {"shape": "String"},
+                                                             "GroupId": {"shape": "String"},
+                                                             "MemberId": {"shape": "MemberId"}}},
+        "MemberId": {"type": "structure", "union": True, "members": {"UserId": {"shape": "String"}}},
+        "AlternateIdentifier": {"type": "structure", "union": True,
+                                "members": {"ExternalId": {"shape": "ExternalId"},
+                                            "UniqueAttribute": {"shape": "UniqueAttribute"}}},
+        "ExternalId": {"type": "structure", "members": {"Issuer": {"shape": "String"}, "Id": {"shape": "String"}}},
+        "UniqueAttribute": {"type": "structure", "members": {"AttributePath": {"shape": "String"},
+                                                             "AttributeValue": {"shape": "Document"}}},
+        "Document": {"type": "structure", "members": {}, "document": True},
+        "GetMembershipIdOut": {"type": "structure", "members": {"StoreId": {"shape": "String"},
+                                                                "MembershipId": {"shape": "String"}}},
+        "GetGroupIdOut": {"type": "structure", "members": {"StoreId": {"shape": "String"},
+                                                           "GroupId": {"shape": "String"}}},
+        "ListMembersOut": {"type": "structure", "members": {"MembershipId": {"shape": "String"}}}})
+    for name in ("GetMembershipId", "GetGroupId", "ListMembers"):
+        service["operations"][name]["output"] = {"shape": name + "Out"}
+    return service
+
+
+MEMBERSHIP_FORMATS = {"Group": "arn:${Partition}:svc:::group/${GroupId}",
+                      "GroupMembership": "arn:${Partition}:svc:::membership/${MembershipId}",
+                      "User": "arn:${Partition}:svc:::user/${UserId}"}
+
+
+def test_a_record_names_the_types_it_links_beside_the_id_a_request_names_it_by(tmp_path):
+    # Identity Store's DeleteGroupMembership names the membership, whose record holds its group and its member.
+    write_models(tmp_path, {"svc": membership_model()})
+    models = r.load_models(tmp_path, {"svc"})
+    types = ["Group", "GroupMembership", "User"]
+    reached = r.record_reached(models, "DeleteMembership", types)
+    assert reached == {"MembershipId": {"GroupMembership": ["Group", "User"]}}
+    named = [{"type": "GroupMembership", "fill": {"MembershipId": "MembershipId"}}]
+    assert r.with_record_through(named, MEMBERSHIP_FORMATS, reached, {"Group", "GroupMembership", "User"}) == named + [
+        {"types": ["Group", "User"], "through": "MembershipId"}]
+    # Only a type the action requires is named so, and only through the member that names the record's own type.
+    assert r.with_record_through(named, MEMBERSHIP_FORMATS, reached, {"GroupMembership", "User"}) == named + [
+        {"types": ["User"], "through": "MembershipId"}]
+    assert r.with_record_through(named, MEMBERSHIP_FORMATS, reached, set()) == named
+    assert r.with_record_through([], MEMBERSHIP_FORMATS, reached, {"Group", "User"}) == []
+
+
+def test_a_lookup_finds_the_type_whose_id_it_returns_by_what_its_request_names(tmp_path):
+    # GetGroupMembershipId returns the id of the membership of its GroupId and MemberId.UserId.
+    write_models(tmp_path, {"svc": membership_model()})
+    models = r.load_models(tmp_path, {"svc"})
+    keys = r.lookup_keys(models, "GetMembershipId")
+    assert keys == {"MembershipId": [["StoreId", "GroupId", "MemberId.UserId"]]}
+    named = [{"type": "Group", "fill": {"GroupId": "GroupId"}}]
+    types = ["Group", "GroupMembership", "User"]
+    assert r.with_lookup_find(named, types, MEMBERSHIP_FORMATS, keys, {"Group", "GroupMembership"}) == named + [
+        {"type": "GroupMembership", "fill": {}, "find": ["StoreId", "GroupId", "MemberId.UserId"]}]
+    # A union is given one way at a time, so each way finds the type apart; a document is one value.
+    assert r.lookup_keys(models, "GetGroupId") == {"GroupId": [
+        ["StoreId", "AlternateIdentifier.ExternalId.Issuer", "AlternateIdentifier.ExternalId.Id"],
+        ["StoreId", "AlternateIdentifier.UniqueAttribute.AttributePath",
+         "AlternateIdentifier.UniqueAttribute.AttributeValue"]]}
+    # A request holding a list looks nothing up, and a type the action does not require is not found.
+    assert r.lookup_keys(models, "ListMembers") == {}
+    assert r.with_lookup_find(named, types, MEMBERSHIP_FORMATS, keys, {"Group"}) == named
+
+
+def test_the_vendored_reference_gives_the_types_an_action_requires():
+    assert r.required_types("identitystore:DeleteGroupMembership", ["Group", "GroupMembership", "Identitystore",
+                                                                    "User"]) == {"Group", "GroupMembership",
+                                                                                 "Identitystore", "User"}
+    # A namespace the source is not granted for requires nothing it says.
+    assert r.required_types("elasticache:CreateCacheCluster", ["cluster", "parametergroup"]) == set()
+    # A required type the Service Reference does not give the action is refused.
+    with pytest.raises(ValueError, match="does not give it"):
+        r.required_types("identitystore:DeleteGroupMembership", ["Group", "GroupMembership", "Identitystore"])
+
+
 def test_a_structure_named_after_the_type_gives_its_name_to_a_type_named_by_nothing_else(tmp_path):
     # Config's PutConfigurationRecorder names its recorder in ConfigurationRecorder.name.
     service = model({"PutRecorder": {"Recorder": "Recorder"}})
@@ -1324,6 +1407,18 @@ def test_the_vendored_file_is_well_formed():
     assert operations["elasticache:ModifyUserGroup"]["resources"] == [
         {"type": "usergroup", "fill": {"UserGroupId": "UserGroupId"}},
         {"type": "user", "fill": {"UserId": "UserIdsToAdd[]"}}, {"type": "user", "fill": {"UserId": "UserIdsToRemove[]"}}]
+    # Identity Store is read whole: the identity store and the user or group a request names by id.
+    assert "identitystore" in document["namespaces"] and "identitystore" not in document["notCovered"]
+    assert {"type": "User", "fill": {"UserId": "UserId"}} in operations["identitystore:DescribeUser"]["resources"]
+    # A membership's group and user are read through its id, and a lookup's group, user or membership found by what
+    # its request names, as the vendored reference requires those types.
+    assert {"types": ["Group", "User"], "through": "MembershipId"} in operations[
+        "identitystore:DeleteGroupMembership"]["resources"]
+    assert {"type": "GroupMembership", "fill": {}, "find": ["IdentityStoreId", "GroupId", "MemberId.UserId"]} in \
+        operations["identitystore:GetGroupMembershipId"]["resources"]
+    assert {"type": "User", "fill": {}, "find": ["IdentityStoreId", "AlternateIdentifier.ExternalId.Issuer",
+                                                 "AlternateIdentifier.ExternalId.Id"]} in \
+        operations["identitystore:GetUserId"]["resources"]
     # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
     assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]

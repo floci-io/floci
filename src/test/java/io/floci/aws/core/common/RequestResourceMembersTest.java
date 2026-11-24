@@ -795,7 +795,11 @@ class RequestResourceMembersTest {
                 .noneMatch(unless -> unless.getValue().contains(values.getOrDefault(unless.getKey(), "")));
     }
 
-    /** The value at the member's path in a body: in its list's first element, and in its field's structure. */
+    /**
+     * The value at the member's path in a body: in its list's first element, and in its field's structure, which the
+     * other fields the request gives of it share ({@code AlternateIdentifier.ExternalId}'s {@code Issuer} and
+     * {@code Id}).
+     */
     private static void put(ObjectNode body, Member member, String value) {
         if (member.field() == null) {
             if (member.map()) {
@@ -807,8 +811,11 @@ class RequestResourceMembersTest {
             }
         } else if (member.map()) {
             put(body.putObject(member.name()).putObject("table"), member.field(), value);
+        } else if (member.list()) {
+            put(body.putArray(member.name()).addObject(), member.field(), value);
         } else {
-            put(member.list() ? body.putArray(member.name()).addObject() : body.putObject(member.name()), member.field(), value);
+            put(body.get(member.name()) instanceof ObjectNode shared ? shared : body.putObject(member.name()),
+                    member.field(), value);
         }
     }
 

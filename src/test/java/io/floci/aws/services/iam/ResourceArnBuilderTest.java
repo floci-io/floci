@@ -1977,6 +1977,72 @@ class ResourceArnBuilderTest {
                 builder.buildResources("elasticache", "elasticache:ModifyUserGroup", ctx, "us-west-2", ACCOUNT, "aws"));
     }
 
+    // ── Identity Store ──────────────────────────────────────────────────────────
+
+    /**
+     * An Identity Store request is checked on the identity store its IdentityStoreId names and on the user or group its
+     * id names, whose ARN has no Region and no account; a list is checked on every user, as the Service Reference gives
+     * it.
+     */
+    @Test
+    void identityStoreChecksTheStoreAndTheUserARequestNames() {
+        setJsonBody("{\"IdentityStoreId\":\"d-1234567890\",\"UserId\":\"1234567890-u1\"}");
+        assertEquals(List.of("arn:aws:identitystore::000000000000:identitystore/d-1234567890",
+                        "arn:aws:identitystore:::user/1234567890-u1"),
+                builder.buildResources("identitystore", "identitystore:DescribeUser", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"IdentityStoreId\":\"d-1234567890\"}");
+        assertEquals(List.of("arn:aws:identitystore:::user/*",
+                        "arn:aws:identitystore::000000000000:identitystore/d-1234567890"),
+                builder.buildResources("identitystore", "identitystore:ListUsers", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /**
+     * A required type an Identity Store request does not name is asked of the service: a membership's group and user
+     * through its id, and a lookup's user by the members of the one way its alternate identifier is given, with their
+     * paths, as the table writes them.
+     */
+    @Test
+    void identityStoreAsksTheServiceForTheRequiredTypesARequestDoesNotName() {
+        List<List<String>> asked = new ArrayList<>();
+        ResourceArnBuilder reading = reading(new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "identitystore";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<String> findByMembers(String type, List<String> members, List<String> names,
+                                                  String region) {
+                asked.add(members);
+                return Optional.of("arn:aws:identitystore:::user/" + names.getLast());
+            }
+
+            @Override
+            public List<String> through(String member, String value, String region) {
+                return List.of("arn:aws:identitystore:::group/g-of-" + value,
+                        "arn:aws:identitystore:::user/u-of-" + value);
+            }
+        });
+        setJsonBody("{\"IdentityStoreId\":\"d-1234567890\",\"MembershipId\":\"m1\"}");
+        assertEquals(List.of("arn:aws:identitystore:::membership/m1",
+                        "arn:aws:identitystore::000000000000:identitystore/d-1234567890",
+                        "arn:aws:identitystore:::group/g-of-m1", "arn:aws:identitystore:::user/u-of-m1"),
+                reading.buildResources("identitystore", "identitystore:DeleteGroupMembership", ctx, "us-east-1",
+                        ACCOUNT, "aws"));
+        setJsonBody("{\"IdentityStoreId\":\"d-1234567890\",\"AlternateIdentifier\":{\"UniqueAttribute\":"
+                + "{\"AttributePath\":\"userName\",\"AttributeValue\":\"alice\"}}}");
+        assertEquals(List.of("arn:aws:identitystore::000000000000:identitystore/d-1234567890",
+                        "arn:aws:identitystore:::user/alice"),
+                reading.buildResources("identitystore", "identitystore:GetUserId", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of(List.of("IdentityStoreId", "AlternateIdentifier.UniqueAttribute.AttributePath",
+                "AlternateIdentifier.UniqueAttribute.AttributeValue")), asked);
+    }
+
     // ── S3 and S3 Control ───────────────────────────────────────────────────────
 
     /** The resources an S3 or S3 Control request names, read from the generated table on the route it matches. */
