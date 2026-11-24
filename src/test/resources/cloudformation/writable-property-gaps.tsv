@@ -290,7 +290,6 @@ AWS::EFS::FileSystem	ReplicationConfiguration	not modeled: Floci has no EFS repl
 AWS::EKS::Cluster	ActiveCertificateAuthorityId	accepted and ignored
 AWS::EKS::Cluster	BootstrapSelfManagedAddons	accepted and ignored
 AWS::EKS::Cluster	CertificateAuthority	accepted and ignored
-AWS::EKS::Cluster	ComputeConfig	accepted and ignored
 AWS::EKS::Cluster	ControlPlaneScalingConfig	accepted and ignored
 AWS::EKS::Cluster	DeletionProtection	accepted and ignored
 AWS::EKS::Cluster	Force	accepted and ignored
@@ -300,7 +299,6 @@ AWS::EKS::Cluster	KubeSchedulerConfig	accepted and ignored
 AWS::EKS::Cluster	OutpostConfig	accepted and ignored
 AWS::EKS::Cluster	RemoteNetworkConfig	accepted and ignored
 AWS::EKS::Cluster	RollbackConfig	accepted and ignored
-AWS::EKS::Cluster	StorageConfig	accepted and ignored
 AWS::EKS::Cluster	ZonalShiftConfig	accepted and ignored
 AWS::EKS::Nodegroup	AmiType	accepted and ignored
 AWS::EKS::Nodegroup	CapacityType	accepted and ignored

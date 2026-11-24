@@ -251,29 +251,42 @@ class CloudFormationEksIntegrationTest {
         }
     }
 
-    /** EKS Auto Mode stays out of AWS::EKS::Cluster for now, so a template enabling it still creates its cluster. */
     @Test
-    void aClusterEnablingAutoModeIsCreatedWithoutIt() {
+    void aClusterIsCreatedWithAutoModeAndAnUpdateDroppingItTurnsItOffInPlace() {
         String stack = "cfn-eks-auto-" + Long.toString(System.nanoTime(), 36);
         String autoMode = "\"ComputeConfig\": {\"Enabled\": true, \"NodePools\": [\"general-purpose\", \"system\"],"
                 + " \"NodeRoleArn\": \"arn:aws:iam::000000000000:role/eks-auto-node\"},"
                 + " \"StorageConfig\": {\"BlockStorage\": {\"Enabled\": true}},"
                 + " \"KubernetesNetworkConfig\": {\"ElasticLoadBalancing\": {\"Enabled\": true}}";
-        // The Gateway API settings, which Floci doesn't model, don't fail the conversion either.
+        // The Gateway API settings, which Floci doesn't model, don't fail the conversion.
         String gatewayApi = "\"KubernetesNetworkConfig\": {\"ElasticLoadBalancing\": {\"Enabled\": false,"
                 + " \"GatewayApi\": {\"Crds\": {\"Managed\": true}}}}";
-        String template = "{\"Resources\": {"
-                + "\"Subject\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE + autoMode + "}},"
-                + "\"Gateway\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE + gatewayApi + "}}}}";
+        String gateway = "\"Gateway\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE + gatewayApi + "}}";
         try (CloudFormationClient client = AwsTestClients.create(
                 CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
-            CfnStackWaits.createStack(client, stack, template, "CREATE_COMPLETE");
-            for (String resource : List.of("Subject", "Gateway")) {
-                JsonPath cluster = given().get("/clusters/" + physicalId(client, stack, resource)).jsonPath();
-                assertNull(cluster.get("cluster.computeConfig"), resource);
-                assertNull(cluster.get("cluster.storageConfig"), resource);
-                assertNull(cluster.get("cluster.kubernetesNetworkConfig.elasticLoadBalancing"), resource);
-            }
+            CfnStackWaits.createStack(client, stack, "{\"Resources\": {"
+                    + "\"Subject\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE + autoMode + "}},"
+                    + gateway + "}}", "CREATE_COMPLETE");
+            String subject = physicalId(client, stack, "Subject");
+            JsonPath cluster = given().get("/clusters/" + subject).jsonPath();
+            assertEquals(true, cluster.getBoolean("cluster.computeConfig.enabled"));
+            assertEquals(List.of("general-purpose", "system"), cluster.getList("cluster.computeConfig.nodePools"));
+            assertEquals("arn:aws:iam::000000000000:role/eks-auto-node",
+                    cluster.getString("cluster.computeConfig.nodeRoleArn"));
+            assertEquals(true, cluster.getBoolean("cluster.storageConfig.blockStorage.enabled"));
+            assertEquals(true, cluster.getBoolean("cluster.kubernetesNetworkConfig.elasticLoadBalancing.enabled"));
+            assertEquals(false, given().get("/clusters/" + physicalId(client, stack, "Gateway")).jsonPath()
+                    .getBoolean("cluster.kubernetesNetworkConfig.elasticLoadBalancing.enabled"));
+
+            CfnStackWaits.updateStack(client, stack, "{\"Resources\": {"
+                    + "\"Subject\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {"
+                    + ROLE.substring(0, ROLE.length() - 2) + "}}," + gateway + "}}", "UPDATE_COMPLETE");
+
+            assertEquals(subject, physicalId(client, stack, "Subject"));
+            JsonPath updated = given().get("/clusters/" + subject).jsonPath();
+            assertEquals(false, updated.getBoolean("cluster.computeConfig.enabled"));
+            assertEquals(false, updated.getBoolean("cluster.storageConfig.blockStorage.enabled"));
+            assertEquals(false, updated.getBoolean("cluster.kubernetesNetworkConfig.elasticLoadBalancing.enabled"));
         } finally {
             CfnStackWaits.deleteStack(stack);
         }
