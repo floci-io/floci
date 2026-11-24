@@ -17,6 +17,8 @@ import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
 import com.github.dockerjava.api.command.StopContainerCmd;
 import com.github.dockerjava.api.exception.DockerException;
+import com.github.dockerjava.api.model.AccessMode;
+import com.github.dockerjava.api.model.Bind;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerConfig;
 import com.github.dockerjava.api.model.ContainerNetwork;
@@ -64,6 +66,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -96,6 +99,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.atLeastOnce;
@@ -1888,7 +1892,7 @@ class Ec2ContainerManagerTest {
                 "us-west-2");
 
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
-        verify(harness.builder).withCmd(List.of("/sbin/init"));
+        verify(harness.builder).withCmd(argThat((List<String> command) -> "/sbin/init".equals(command.getFirst())));
         verify(harness.builder).withCgroupnsMode("private");
         verify(harness.builder, never()).withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
         verify(harness.builder).withReadOnlyBind("/lib/modules/6.8.0-test", "/lib/modules/6.8.0-test");
@@ -1898,6 +1902,72 @@ class Ec2ContainerManagerTest {
         assertEquals(-1, commandIndex(harness.executedCommands, "/usr/sbin/sshd"),
                 "a systemd guest's init starts sshd; Floci must not start a second one");
         verify(harness.lifecycleManager).create(any(ContainerSpec.class), eq("linux/arm64"));
+    }
+
+    @Test
+    void systemdGuestMasksHostConsolesAndKeepsPseudoTerminals() throws Exception {
+        ContainerSpec spec = launchSpecForImage(new ResolvedAmiImage(
+                "floci/ami-ubuntu:24.04", ResolvedAmiImage.SYSTEMD_RUNTIME, false, null));
+
+        Set<String> consolePaths = new HashSet<>();
+        consolePaths.add("/dev/console");
+        for (int tty = 0; tty < 64; tty++) {
+            consolePaths.add("/dev/tty" + tty);
+        }
+        Set<String> maskedPaths = new HashSet<>();
+        for (Bind bind : spec.binds()) {
+            String path = bind.getVolume().getPath();
+            if (path.startsWith("/dev/")) {
+                assertEquals("/dev/null", bind.getPath(), path);
+                assertEquals(AccessMode.ro, bind.getAccessMode(), path);
+                maskedPaths.add(path);
+            }
+        }
+        assertEquals(consolePaths, maskedPaths);
+        assertTrue(spec.env().contains("container=docker"));
+        assertEquals(List.of("/sbin/init", "systemd.mask=getty@.service", "systemd.mask=autovt@.service",
+                "systemd.mask=console-getty.service", "systemd.mask=container-getty@.service",
+                "systemd.mask=serial-getty@.service", "systemd.mask=getty-static.service"), spec.cmd());
+    }
+
+    @Test
+    void nonSystemdGuestKeepsTheTailCommandWithoutConsoleMasks() throws Exception {
+        ContainerSpec spec = launchSpecForImage(ResolvedAmiImage.minimal("ubuntu:24.04"));
+
+        assertEquals(List.of("tail", "-f", "/dev/null"), spec.cmd());
+        assertTrue(spec.binds().isEmpty());
+        assertFalse(spec.env().contains("container=docker"));
+    }
+
+    private ContainerSpec launchSpecForImage(ResolvedAmiImage image) throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+        when(harness.config.docker()).thenReturn(docker);
+        when(docker.logMaxSize()).thenReturn("10m");
+        when(docker.logMaxFile()).thenReturn("3");
+        ContainerBuilder actualBuilder = new ContainerBuilder(harness.config, mock(DockerHostResolver.class),
+                mock(EmbeddedDnsServer.class));
+        ContainerBuilder.Builder builder = actualBuilder.newContainer(image.dockerImage());
+        when(harness.containerBuilder.newContainer(image.dockerImage())).thenReturn(builder);
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        InspectContainerResponse response = inspectResponse("172.18.0.11");
+        when(inspect.exec()).thenReturn(response);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        Instance instance = instance("i-console-settings");
+
+        try {
+            harness.manager.launch(instance, image, null, "us-west-2");
+
+            awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+            ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
+            verify(harness.lifecycleManager).create(spec.capture());
+            return spec.getValue();
+        } finally {
+            harness.manager.stop();
+        }
     }
 
     @Test
@@ -2648,7 +2718,7 @@ class Ec2ContainerManagerTest {
                         executor,
                         userDataTimeout);
         return new LaunchHarness(manager, lifecycleManager, dockerClient, streamingDockerClient, metadataServer,
-                logStreamer, builder, portAllocator, portForwardManager, config, vpcNetworkManager,
+                logStreamer, containerBuilder, builder, portAllocator, portForwardManager, config, vpcNetworkManager,
                 new CopyOnWriteArrayList<>());
     }
 
@@ -3192,6 +3262,7 @@ class Ec2ContainerManagerTest {
                                  DockerClient streamingDockerClient,
                                  Ec2MetadataServer metadataServer,
                                  ContainerLogStreamer logStreamer,
+                                 ContainerBuilder containerBuilder,
                                  ContainerBuilder.Builder builder,
                                  PortAllocator portAllocator,
                                  Ec2PortForwardManager portForwardManager,

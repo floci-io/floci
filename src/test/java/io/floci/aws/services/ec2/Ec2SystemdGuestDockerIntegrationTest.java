@@ -2,6 +2,8 @@ package io.floci.aws.services.ec2;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.core.command.BuildImageResultCallback;
+import com.github.dockerjava.core.command.ExecStartResultCallback;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
@@ -22,8 +24,15 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -71,12 +80,102 @@ class Ec2SystemdGuestDockerIntegrationTest {
     @Inject
     RegionResolver regionResolver;
 
+    @TempDir
+    Path imageContext;
+
     @Inject
     ContainerReachableEndpoint reachableEndpoint;
 
     @BeforeEach
     void requireDocker() {
         assumeTrue(DockerAvailability.answers(docker), "Docker must be available for EC2 systemd guest tests");
+    }
+
+    @Test
+    void systemdLaunchMasksConsoleDevicesWithoutBreakingPseudoTerminals() throws Exception {
+        String imageId = buildConsoleGuardImage();
+        Ec2ContainerManager manager = new Ec2ContainerManager(containerBuilder, lifecycleManager,
+                mock(ContainerLogStreamer.class), mock(ContainerDetector.class), dockerHostResolver, docker,
+                portAllocator, config, mock(Ec2MetadataServer.class), mock(Ec2PortForwardManager.class),
+                regionResolver, mock(ContainerNetworkReachability.class), mock(VpcNetworkManager.class),
+                reachableEndpoint);
+        Instance instance = new Instance();
+        instance.setInstanceId("i-console" + UUID.randomUUID().toString().replace("-", "").substring(0, 8));
+        instance.setRegion(REGION);
+        try {
+            manager.launch(instance,
+                    new ResolvedAmiImage(imageId, ResolvedAmiImage.SYSTEMD_RUNTIME, false, null), null, REGION);
+            await().atMost(Duration.ofSeconds(60)).untilAsserted(() -> {
+                assertNotNull(instance.getDockerContainerId(), "EC2 must create the guarded guest");
+                ContainerExec.Result guard = ContainerExec.runMerged(docker, instance.getDockerContainerId(),
+                        new String[]{"test", "-f", "/run/floci-console-guard-passed"}, 10);
+                assertEquals(0, guard.exitCode(), "console guard did not admit the launch: " + guard.summary());
+            });
+
+            String execId = docker.execCreateCmd(instance.getDockerContainerId()).withTty(true)
+                    .withAttachStdout(true).withAttachStderr(true)
+                    .withCmd("sh", "-c", "test -t 0 && test -t 1 && tty").exec().getId();
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            try (ExecStartResultCallback callback = new ExecStartResultCallback(output, output)) {
+                assertTrue(docker.execStartCmd(execId).withTty(true).exec(callback)
+                        .awaitCompletion(10, TimeUnit.SECONDS), "PTY probe timed out");
+            }
+            assertEquals(0L, docker.inspectExecCmd(execId).exec().getExitCodeLong());
+            assertTrue(output.toString(StandardCharsets.UTF_8).contains("/dev/pts/"),
+                    "guest must retain working pseudo-terminals: " + output.toString(StandardCharsets.UTF_8));
+        } finally {
+            CountDownLatch tornDown = new CountDownLatch(1);
+            manager.terminate(instance, tornDown::countDown);
+            try {
+                assertTrue(tornDown.await(60, TimeUnit.SECONDS), "guarded guest cleanup timed out");
+            } finally {
+                manager.stop();
+                docker.removeImageCmd(imageId).exec();
+            }
+        }
+    }
+
+    @Test
+    void consoleGuardRejectsAnUnprotectedLaunch() throws Exception {
+        String imageId = buildConsoleGuardImage();
+        String containerId = null;
+        try {
+            containerId = docker.createContainerCmd(imageId).withCmd("/sbin/init").exec().getId();
+            docker.startContainerCmd(containerId).exec();
+            String rejectedId = containerId;
+            await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+                InspectContainerResponse.ContainerState state = docker.inspectContainerCmd(rejectedId).exec().getState();
+                assertFalse(state.getRunning(), "unprotected fixture must exit rather than boot an init");
+                assertEquals(78L, state.getExitCodeLong());
+            });
+        } finally {
+            if (containerId != null) {
+                docker.removeContainerCmd(containerId).withForce(true).exec();
+            }
+            docker.removeImageCmd(imageId).exec();
+        }
+    }
+
+    private String buildConsoleGuardImage() throws Exception {
+        // The guard checks the production launch settings but never runs systemd or a getty.
+        String dockerfile = """
+                FROM %s
+                RUN rm /sbin/init
+                COPY systemd-console-guard.sh /sbin/init
+                RUN chmod 0755 /sbin/init
+                """.formatted(TestImages.PYTHON_ALPINE);
+        Files.writeString(imageContext.resolve("Dockerfile"), dockerfile);
+        try (InputStream guard = getClass().getResourceAsStream("/ec2/systemd-console-guard.sh")) {
+            assertNotNull(guard);
+            Files.copy(guard, imageContext.resolve("systemd-console-guard.sh"));
+        }
+        try (BuildImageResultCallback callback = new BuildImageResultCallback()) {
+            String imageId = docker.buildImageCmd(imageContext.toFile())
+                    .withTags(Set.of("floci-console-guard-test:" + UUID.randomUUID()))
+                    .withRemove(true).exec(callback).awaitImageId(180, TimeUnit.SECONDS);
+            assertNotNull(imageId, "Docker must build the console guard fixture");
+            return imageId;
+        }
     }
 
     @Test
