@@ -25,6 +25,7 @@ import static io.floci.aws.testing.AlbFixtures.deleteListener;
 import static io.floci.aws.testing.AlbFixtures.deleteLoadBalancer;
 import static io.floci.aws.testing.AlbFixtures.deleteTargetGroup;
 import static io.floci.aws.testing.AlbFixtures.registerTarget;
+import static io.floci.aws.testing.AlbFixtures.withHealthCheck;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -51,7 +52,7 @@ class ElbV2TraceHeaderIntegrationTest {
     @BeforeEach
     void startBackend() throws Exception {
         backend = vertx.createHttpServer()
-                .requestHandler(request -> {
+                .requestHandler(withHealthCheck(request -> {
                     String trace = String.valueOf(request.getHeader(ElbV2TraceHeader.NAME));
                     if ("websocket".equalsIgnoreCase(request.getHeader("Upgrade"))) {
                         handshake.complete(trace);
@@ -59,7 +60,7 @@ class ElbV2TraceHeaderIntegrationTest {
                         return;
                     }
                     request.response().end(trace);
-                })
+                }))
                 .listen(0, "127.0.0.1")
                 .toCompletionStage()
                 .toCompletableFuture()

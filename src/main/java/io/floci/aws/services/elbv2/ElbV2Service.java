@@ -590,6 +590,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                 : defaultHealthCheckProtocol(groupProtocol, groupTargetType);
         validateLayer7Members(checkProtocol, healthCheckPath, matcher);
         boolean layer7Check = isHttpProtocol(checkProtocol);
+        validateHealthCheckEnabled(targetType, healthCheckEnabled);
         Map<String, TargetGroup> regionTgs = targetGroups.computeIfAbsent(region, k -> new ConcurrentHashMap<>());
         boolean duplicate = regionTgs.values().stream()
                 .anyMatch(tg -> tg.getTargetGroupName().equals(name));
@@ -613,7 +614,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         tg.setRegion(region);
 
         // health check defaults
-        tg.setHealthCheckEnabled(healthCheckEnabled != null ? healthCheckEnabled : true);
+        tg.setHealthCheckEnabled(healthCheckEnabled != null ? healthCheckEnabled : !"lambda".equals(groupTargetType));
         tg.setHealthCheckProtocol(checkProtocol);
         tg.setHealthCheckPort(healthCheckPort != null ? healthCheckPort : "traffic-port");
         tg.setHealthCheckPath(layer7Check ? (healthCheckPath != null ? healthCheckPath : "/") : null);
@@ -685,6 +686,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         validateHealthCheckTimeout(healthCheckTimeout);
         TargetGroup tg = requireTargetGroup(region, arn);
         validateHealthCheckPort(healthCheckPort);
+        validateHealthCheckEnabled(tg.getTargetType(), healthCheckEnabled);
         validateHealthCheckProtocol(healthCheckProtocol, tg.getProtocol(), tg.getTargetType());
         String checkProtocol = healthCheckProtocol != null ? healthCheckProtocol : tg.getHealthCheckProtocol();
         validateLayer7Members(checkProtocol, healthCheckPath, matcher);
@@ -776,6 +778,12 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     /** Whether {@code protocol} is HTTP or HTTPS, the protocols whose health checks have a path and a matcher. */
     static boolean isHttpProtocol(String protocol) {
         return "HTTP".equals(protocol) || "HTTPS".equals(protocol);
+    }
+
+    private static void validateHealthCheckEnabled(String targetType, Boolean enabled) {
+        if (Boolean.FALSE.equals(enabled) && !"lambda".equals(targetType)) {
+            throw new AwsException("ValidationError", "Health checks cannot be disabled for non-Lambda targets", 400);
+        }
     }
 
     private static void validateHealthCheckTimeout(Integer timeout) {
@@ -1330,7 +1338,13 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             th.setTarget(t);
             if (isLambdaTg) {
                 th.setHealthCheckPort("N/A");
-                th.setState("healthy");
+                if (Boolean.FALSE.equals(tg.getHealthCheckEnabled())) {
+                    th.setState("unavailable");
+                    th.setReason("Target.HealthCheckDisabled");
+                    th.setDescription("Health checks are disabled for the target group");
+                } else {
+                    th.setState("healthy");
+                }
                 return th;
             }
             int port = ElbV2HealthChecker.effectivePort(t, tg);

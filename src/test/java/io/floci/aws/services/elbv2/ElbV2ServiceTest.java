@@ -1548,6 +1548,64 @@ class ElbV2ServiceTest {
         assertTrue(service.describeTargetHealth(REGION, arn, null).isEmpty());
     }
 
+    @Test
+    void lambdaHealthChecksDefaultDisabledAndDescribeUnavailable() {
+        TargetGroup group = service.createTargetGroup(REGION, "lambda-disabled", null, null, null,
+                null, "lambda", null, null, null, null, null, null, null, null, null, null, Map.of());
+        assertFalse(group.getHealthCheckEnabled());
+        service.registerTargets(REGION, group.getTargetGroupArn(), List.of(target("function", null)));
+        TargetHealth health = service.describeTargetHealth(REGION, group.getTargetGroupArn(), null).getFirst();
+        assertEquals("unavailable", health.getState());
+        assertEquals("Target.HealthCheckDisabled", health.getReason());
+        assertEquals("N/A", health.getHealthCheckPort());
+    }
+
+    @Test
+    void lambdaHealthChecksCanBeDisabledAfterExplicitEnablement() {
+        TargetGroup group = service.createTargetGroup(REGION, "lambda-toggle", null, null, null,
+                null, "lambda", null, null, true, null, null, null, null, null, null, null, Map.of());
+        assertTrue(group.getHealthCheckEnabled());
+        service.registerTargets(REGION, group.getTargetGroupArn(), List.of(target("function", null)));
+        service.modifyTargetGroup(REGION, group.getTargetGroupArn(), null, null, false,
+                null, null, null, null, null, null);
+        TargetHealth health = service.describeTargetHealth(REGION, group.getTargetGroupArn(), null).getFirst();
+        assertEquals("unavailable", health.getState());
+        assertEquals("Target.HealthCheckDisabled", health.getReason());
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"instance", "ip", "alb"})
+    void nonLambdaHealthChecksCannotBeDisabledAtCreate(String targetType) {
+        AwsException error = assertThrows(AwsException.class, () -> service.createTargetGroup(
+                REGION, "network-disabled", "HTTP", "HTTP1", 80, "vpc-a", targetType,
+                "HTTP", "traffic-port", false, "/", 30, 5, 5, 2, "200", "ipv4", Map.of()));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertTrue(service.describeTargetGroups(REGION, null, null, null).isEmpty());
+        verifyNoInteractions(healthChecker);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"instance", "ip", "alb"})
+    void nonLambdaDisableRejectsAllChangesBeforeMutation(String targetType) {
+        TargetGroup group = service.createTargetGroup(REGION, "network-enabled", "HTTP", "HTTP1", 80,
+                "vpc-a", targetType, "HTTP", "traffic-port", null, "/", 30, 5, 5, 2,
+                "200", "ipv4", Map.of());
+        assertTrue(group.getHealthCheckEnabled());
+        clearInvocations(healthChecker);
+        AwsException error = assertThrows(AwsException.class, () -> service.modifyTargetGroup(
+                REGION, group.getTargetGroupArn(), "HTTPS", "443", false, "/changed", 60, 10, 3, 4, "204"));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertTrue(group.getHealthCheckEnabled());
+        assertEquals("HTTP", group.getHealthCheckProtocol());
+        assertEquals("traffic-port", group.getHealthCheckPort());
+        assertEquals("/", group.getHealthCheckPath());
+        assertEquals(30, group.getHealthCheckIntervalSeconds());
+        assertEquals(5, group.getHealthCheckTimeoutSeconds());
+        assertEquals("200", group.getMatcher());
+        verifyNoInteractions(healthChecker);
+    }
+
     private void targetOperation(String operation, String arn, List<TargetDescription> targets) {
         Runnable request = switch (operation) {
             case "register" -> () -> service.registerTargets(REGION, arn, targets);
