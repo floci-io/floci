@@ -109,6 +109,68 @@ class AccountPropertiesIntegrationTest {
     }
 
     /**
+     * The one property AWS publishes a type for takes the two values it publishes and nothing else:
+     * role manager is "controlled by the account-level property RoleManager/Enabled", where "a
+     * value of true enables role manager; false disables it", and the member says "the service
+     * validates each value based on the property key's expected type".
+     *
+     * <p>The spellings are the ones every page writes, so a capitalised or numeric flag is refused
+     * rather than stored under a switch nothing could read. What AWS answers for such a value is
+     * published nowhere, so the sentence is this package's own and it is pinned here.
+     */
+    @Test
+    void theOnePropertyWithAPublishedTypeTakesOnlyTheValuesItPublishes() {
+        for (String value : List.of("true", "false")) {
+            iam("PutAccountProperties")
+                .formParam("Properties.entry.1.key", "RoleManager/Enabled")
+                .formParam("Properties.entry.1.value", value)
+            .when().post("/").then().statusCode(200);
+        }
+
+        for (String value : List.of("yes", "True", "1", "TRUE")) {
+            iam("PutAccountProperties")
+                .formParam("Properties.entry.1.key", "RoleManager/Enabled")
+                .formParam("Properties.entry.1.value", value)
+            .when().post("/").then().statusCode(400)
+                .body(containsString("InvalidInput"))
+                .body(not(containsString("ValidationError")))
+                .body(containsString("Property RoleManager/Enabled expects true or false: " + value));
+        }
+
+        iam("GetAccountProperties").when().post("/").then().statusCode(200)
+            .body(containsString("RoleManager/Enabled"));
+    }
+
+    /**
+     * A property whose type no page gives takes any value its declared length admits, which is the
+     * looser answer where nothing says what the property is for, and a request refused for the
+     * typed property stores neither of its entries.
+     */
+    @Test
+    void aPropertyWithNoPublishedTypeTakesAnyValueAndARefusedRequestStoresNothing() {
+        String freeform = key("Freeform");
+
+        iam("PutAccountProperties")
+            .formParam("Properties.entry.1.key", freeform)
+            .formParam("Properties.entry.1.value", "whatever it likes")
+        .when().post("/").then().statusCode(200);
+
+        String alongside = key("Alongside");
+
+        iam("PutAccountProperties")
+            .formParam("Properties.entry.1.key", alongside)
+            .formParam("Properties.entry.1.value", "stored only if the request is")
+            .formParam("Properties.entry.2.key", "RoleManager/Enabled")
+            .formParam("Properties.entry.2.value", "maybe")
+        .when().post("/").then().statusCode(400)
+            .body(containsString("Property RoleManager/Enabled expects true or false: maybe"));
+
+        iam("GetAccountProperties").when().post("/").then().statusCode(200)
+            .body(containsString(freeform))
+            .body(not(containsString(alongside)));
+    }
+
+    /**
      * "All keys must belong to the same namespace."
      *
      * <p>The second namespace here is also one AWS does not recognise, and the answer is still
