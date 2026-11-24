@@ -294,6 +294,34 @@ class DynamoDbLocalBackendIntegrationTest {
     }
 
     @Test
+    void aStackDeclaringEncryptionCreatesItsTableOnLocal() {
+        String table = tableName("sse");
+        String stack = "local-it-sse-" + UUID.randomUUID();
+        String template = """
+            {
+                "Resources": {
+                    "Orders": {
+                        "Type": "AWS::DynamoDB::Table",
+                        "Properties": {
+                            "TableName": "%s",
+                            "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                            "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                            "BillingMode": "PAY_PER_REQUEST",
+                            "SSESpecification": {"SSEEnabled": true}
+                        }
+                    }
+                }
+            }
+            """.formatted(table);
+
+        cloudFormation(A_EAST, "CreateStack", stack, template);
+        created.add(new CreatedTable(A_EAST, table));
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", A_EAST.authorization("cloudformation"));
+
+        dynamoDb(A_EAST, "DescribeTable", "{\"TableName\": \"" + table + "\"}").statusCode(200);
+    }
+
+    @Test
     void resetIsRefused() {
         given().when().post("/_floci/state/reset").then().statusCode(409);
     }

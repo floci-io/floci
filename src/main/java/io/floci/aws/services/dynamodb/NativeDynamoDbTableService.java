@@ -435,6 +435,15 @@ public class NativeDynamoDbTableService {
                 warm(change.table().warm())), region);
     }
 
+    /** The UpdateTable that turns server-side encryption on, with the checks of the API. */
+    public TableDefinition enableServerSideEncryption(String tableName, String sseType, String kmsMasterKeyId,
+                                                      String region) {
+        TableSettings settings = new TableSettings(null, null, null, null, null, null, true, sseType,
+                kmsMasterKeyId);
+        return updateTable(new UpdateTableRequest(tableName, null, List.of(), List.of(), List.of(), List.of(),
+                List.of(), List.of(), List.of(), List.of(), List.of(), settings, null), region);
+    }
+
     private static Throughput throughput(CapacityUnits capacity) {
         return capacity == null ? null : new Throughput(capacity.readCapacityUnits(), capacity.writeCapacityUnits());
     }

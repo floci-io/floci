@@ -461,6 +461,14 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         return table(call(scope, "UpdateTable", body).path("TableDescription"));
     }
 
+    // ponytail: Local keeps no encryption setting and answers an UpdateTable that only sets one with
+    // "Nothing to update", so the setting is accepted and the table is left as it is.
+    @Override
+    public TableDefinition enableServerSideEncryption(Scope scope, String tableName, String sseType,
+                                                      String kmsMasterKeyId) {
+        return describeTable(scope, tableName);
+    }
+
     private ObjectNode capacity(CapacityUnits capacity) {
         return aws.createObjectNode()
                 .put("ReadCapacityUnits", capacity.readCapacityUnits())

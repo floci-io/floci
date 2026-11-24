@@ -198,6 +198,13 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     }
 
     @Override
+    public TableDefinition enableServerSideEncryption(Scope scope, String tableName, String sseType,
+                                                      String kmsMasterKeyId) {
+        return RequestScopes.callAs(scope.accountId(),
+                () -> tableService.enableServerSideEncryption(tableName, sseType, kmsMasterKeyId, scope.region()));
+    }
+
+    @Override
     public TableDefinition createOnDemandTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
                                                List<AttributeDefinition> attributeDefinitions,
                                                List<GlobalSecondaryIndex> globalSecondaryIndexes,
