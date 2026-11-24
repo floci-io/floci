@@ -119,6 +119,8 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     @Override
     public void putItem(Scope scope, String tableName, JsonNode item, String conditionExpression,
                         JsonNode expressionAttributeNames, JsonNode expressionAttributeValues) {
+        dynamoDbService.validateConditionExpression(conditionExpression, expressionAttributeNames,
+                expressionAttributeValues);
         RequestScopes.runAs(scope.accountId(), () -> dynamoDbService.putItem(tableName,
                 DynamoDbMapOrder.sortedItem(item), conditionExpression,
                 expressionAttributeNames, expressionAttributeValues, scope.region(), "NONE"));
@@ -132,6 +134,8 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     @Override
     public void deleteItem(Scope scope, String tableName, JsonNode key, String conditionExpression,
                            JsonNode expressionAttributeNames, JsonNode expressionAttributeValues) {
+        dynamoDbService.validateConditionExpression(conditionExpression, expressionAttributeNames,
+                expressionAttributeValues);
         RequestScopes.runAs(scope.accountId(), () -> dynamoDbService.deleteItem(tableName, key, conditionExpression,
                 expressionAttributeNames, expressionAttributeValues, scope.region(), "NONE"));
     }
@@ -140,6 +144,8 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     public JsonNode updateItem(Scope scope, String tableName, JsonNode key, JsonNode attributeUpdates,
                                String updateExpression, JsonNode expressionAttributeNames,
                                JsonNode expressionAttributeValues, String returnValues, String conditionExpression) {
+        dynamoDbService.validateConditionExpression(conditionExpression, expressionAttributeNames,
+                expressionAttributeValues);
         DynamoDbService.UpdateResult result = RequestScopes.callAs(scope.accountId(), () ->
                 dynamoDbService.updateItem(tableName, key,
                         DynamoDbMapOrder.sortedAttributeUpdates(attributeUpdates), updateExpression,

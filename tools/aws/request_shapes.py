@@ -120,11 +120,13 @@ def build(model: dict, provenance: str, generator: str, outputs: bool = False, r
     return document
 
 
-def build_constraints(model: dict, operations: tuple[str, ...], provenance: str, generator: str) -> dict:
+def build_constraints(model: dict, operations: tuple[str, ...], provenance: str, generator: str,
+                      sensitive: bool = False) -> dict:
     """The input shapes of `operations` with the constraints `RequestConstraintCheck` reads: for every
     shape reachable from one, its type, required members, min, max, pattern, the pattern a violation
     quotes where that is not the one matched on, and enum, and the shapes of its members, list
-    elements or map keys and values. Unlike `build`, it keeps members bound to
+    elements or map keys and values. `sensitive` marks the shapes the model marks `sensitive`.
+    Unlike `build`, it keeps members bound to
     the URI, query string or headers, so it suits the JSON protocols, whose members all travel in
     the body."""
     kept: dict[str, dict] = {}
@@ -135,6 +137,8 @@ def build_constraints(model: dict, operations: tuple[str, ...], provenance: str,
         shape = model["shapes"][name]
         entry = {k: shape[k] for k in ("type", "required", "min", "max", "pattern", "quotedPattern", "enum")
                  if k in shape}
+        if sensitive and shape.get("sensitive"):
+            entry["sensitive"] = True
         kept[name] = entry
         if shape["type"] == "structure":
             entry["members"] = {k: v["shape"] for k, v in shape.get("members", {}).items()}
@@ -229,8 +233,8 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path,
     it vendors in part: IAM reduces a paged request to its paging members, the rest of it keeping
     the reading it has today.
 
-    `results`, `sensitive`, `errors` and `check` are `build`'s, for a generator that keeps every
-    operation's member types."""
+    `results`, `errors` and `check` are `build`'s, for a generator that keeps every
+    operation's member types. `sensitive` is `build`'s and `build_constraints`'s."""
     parser = argparse.ArgumentParser(description=description, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="exit 1 when the vendored file differs from a fresh generation")
     parser.add_argument("--botocore-data", type=Path, help="botocore data directory")
@@ -244,7 +248,8 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path,
     if constraints and operations is None:
         operations = tuple(name for name, operation in sorted(loaded["operations"].items()) if "input" in operation)
     generator = generator_name(script)
-    fresh = render(build_constraints(loaded, operations, provenance, generator) if operations is not None
+    fresh = render(build_constraints(loaded, operations, provenance, generator, sensitive=sensitive)
+                   if operations is not None
                    else build(loaded, provenance, generator, outputs, required,
                               results=results, sensitive=sensitive, errors=errors, check=check))
 

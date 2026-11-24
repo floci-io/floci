@@ -8,14 +8,25 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static io.floci.aws.testing.InlineMocks.inlineMock;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -36,13 +47,51 @@ class EksPodIdentityWebhookTest {
     private EksAddonService addons;
     private EksPodIdentityAssociationService associations;
     private EksPodIdentityWebhook webhook;
+    private final Map<String, EksClusterManager.ServiceAccountRead> serviceAccounts = new ConcurrentHashMap<>();
+    private final List<String> serviceAccountReads = new CopyOnWriteArrayList<>();
+    private final AtomicReference<Instant> now = new AtomicReference<>(Instant.parse("2026-11-24T00:00:00Z"));
+    private volatile CountDownLatch readGate;
+
+    private EksPodIdentityWebhook webhook(String endpoint) {
+        Clock clock = new Clock() {
+            @Override
+            public ZoneId getZone() {
+                return ZoneOffset.UTC;
+            }
+
+            @Override
+            public Clock withZone(ZoneId zone) {
+                return this;
+            }
+
+            @Override
+            public Instant instant() {
+                return now.get();
+            }
+        };
+        return new EksPodIdentityWebhook(eks, addons, associations, () -> endpoint,
+                (cluster, namespace, name) -> {
+                    serviceAccountReads.add(namespace + "/" + name);
+                    CountDownLatch gate = readGate;
+                    if (gate != null) {
+                        try {
+                            gate.await(10, TimeUnit.SECONDS);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                    return serviceAccounts.getOrDefault(namespace + "/" + name,
+                            EksClusterManager.ServiceAccountRead.absent());
+                },
+                cluster -> "eu-west-1", clock, Duration.ofMillis(500));
+    }
 
     @BeforeEach
     void setUp() {
         eks = Mockito.mock(EksService.class);
         addons = Mockito.mock(EksAddonService.class);
         associations = Mockito.mock(EksPodIdentityAssociationService.class);
-        webhook = new EksPodIdentityWebhook(eks, addons, associations, () -> FLOCI_ENDPOINT);
+        webhook = webhook(FLOCI_ENDPOINT);
 
         Cluster cluster = new Cluster();
         cluster.setName(CLUSTER_NAME);
@@ -291,7 +340,7 @@ class EksPodIdentityWebhookTest {
         assertNull(EksPodIdentityWebhook.podReachableEndpoint("http://localhost.floci.io:4566"));
         assertNull(EksPodIdentityWebhook.podReachableEndpoint("http://host.docker.internal:4566"));
 
-        webhook = new EksPodIdentityWebhook(eks, addons, associations, () -> null);
+        webhook = webhook(null);
         JsonNode patch = patchOf(webhook.review(CLUSTER_NAME, ACCOUNT_ID,
                 admissionReview(pod("checkout", List.of(Map.of("name", "app"))))));
 
@@ -306,5 +355,303 @@ class EksPodIdentityWebhookTest {
 
         assertEquals("admission.k8s.io/v1beta1", review.get("apiVersion"));
         assertTrue(response(review).containsKey("uid"));
+    }
+
+    // ------------------------------------------------------------
+    // IAM roles for service accounts
+    // ------------------------------------------------------------
+
+    private static final String ROLE_ARN = "arn:aws:iam::123456789012:role/payments";
+
+    private void noPodIdentity() {
+        when(associations.list(any(), anyString(), anyString(), any(), any()))
+                .thenReturn(new EksPodIdentityAssociationService.Page(List.of(), null));
+    }
+
+    private void serviceAccount(String name, Map<String, String> annotations) throws Exception {
+        serviceAccounts.put("payments/" + name, EksClusterManager.ServiceAccountRead.found(
+                MAPPER.writeValueAsString(Map.of("apiVersion", "v1", "kind", "ServiceAccount",
+                        "metadata", Map.of("name", name, "namespace", "payments", "annotations", annotations)))));
+    }
+
+    private Map<String, Object> reviewOf(String serviceAccount) {
+        return webhook.review(CLUSTER_NAME, ACCOUNT_ID,
+                admissionReview(pod(serviceAccount, List.of(Map.of("name", "app")))));
+    }
+
+    private Map<String, Object> annotatedPod(String serviceAccount, Map<String, String> annotations,
+                                             Map<String, Object> spec) {
+        Map<String, Object> withAccount = new LinkedHashMap<>(spec);
+        withAccount.put("serviceAccountName", serviceAccount);
+        return Map.of("kind", "Pod", "metadata", Map.of("name", "api", "annotations", annotations),
+                "spec", withAccount);
+    }
+
+    /**
+     * The upstream webhook's mutation, value for value: the projected token for STS, its read-only mount, the role
+     * and token file, regional STS endpoints, and the cluster's Region, on init containers and containers alike.
+     */
+    @Test
+    void aServiceAccountWithARoleArnGetsTheWebIdentityMutation() throws Exception {
+        noPodIdentity();
+        serviceAccount("checkout", Map.of("eks.amazonaws.com/role-arn", ROLE_ARN));
+        Map<String, Object> spec = new LinkedHashMap<>();
+        spec.put("initContainers", List.of(Map.of("name", "migrate")));
+        spec.put("containers", List.of(Map.of("name", "app")));
+
+        JsonNode patch = patchOf(webhook.review(CLUSTER_NAME, ACCOUNT_ID,
+                admissionReview(annotatedPod("checkout", Map.of(), spec))));
+
+        String env = """
+                [{"name":"AWS_ROLE_ARN","value":"arn:aws:iam::123456789012:role/payments"},
+                 {"name":"AWS_WEB_IDENTITY_TOKEN_FILE",
+                  "value":"/var/run/secrets/eks.amazonaws.com/serviceaccount/token"},
+                 {"name":"AWS_STS_REGIONAL_ENDPOINTS","value":"regional"},
+                 {"name":"AWS_DEFAULT_REGION","value":"eu-west-1"},
+                 {"name":"AWS_REGION","value":"eu-west-1"},
+                 {"name":"AWS_ENDPOINT_URL","value":"http://floci.local:4566"},
+                 {"name":"AWS_ENDPOINT_URL_STS","value":"http://floci.local:4566"}]""";
+        String mount = """
+                [{"name":"aws-iam-token","mountPath":"/var/run/secrets/eks.amazonaws.com/serviceaccount",
+                  "readOnly":true}]""";
+        assertEquals(MAPPER.readTree("""
+                [
+                  {"op":"add","path":"/spec/volumes","value":[
+                    {"name":"aws-iam-token","projected":{"sources":[{"serviceAccountToken":
+                      {"audience":"sts.amazonaws.com","expirationSeconds":86400,"path":"token"}}]}}]},
+                  {"op":"add","path":"/spec/initContainers/0/volumeMounts","value":%1$s},
+                  {"op":"add","path":"/spec/initContainers/0/env","value":%2$s},
+                  {"op":"add","path":"/spec/containers/0/volumeMounts","value":%1$s},
+                  {"op":"add","path":"/spec/containers/0/env","value":%2$s}
+                ]""".formatted(mount, env)), patch);
+        assertEquals(List.of("payments/checkout"), serviceAccountReads);
+    }
+
+    /** Pod Identity takes precedence, as the upstream webhook's container credentials do; one mutation, never both. */
+    @Test
+    void podIdentityTakesPrecedenceOverARoleArn() throws Exception {
+        serviceAccount("checkout", Map.of("eks.amazonaws.com/role-arn", ROLE_ARN));
+
+        JsonNode patch = patchOf(webhook.review(CLUSTER_NAME, ACCOUNT_ID,
+                admissionReview(pod("checkout", List.of(Map.of("name", "app"))))));
+
+        assertEquals("eks-pod-identity-token", patch.get(0).get("value").get(0).get("name").asText());
+        assertFalse(patch.toString().contains("AWS_ROLE_ARN"), patch.toString());
+        assertEquals(List.of(), serviceAccountReads);
+    }
+
+    /** Without the agent there is no Pod Identity mutation, so the role ARN applies. */
+    @Test
+    void aRoleArnAppliesWhenThePodIdentityAgentIsNotInstalled() throws Exception {
+        when(addons.isInstalled(any(), eq(EksPodIdentityWebhook.POD_IDENTITY_ADDON))).thenReturn(false);
+        serviceAccount("checkout", Map.of("eks.amazonaws.com/role-arn", ROLE_ARN));
+
+        JsonNode patch = patchOf(webhook.review(CLUSTER_NAME, ACCOUNT_ID,
+                admissionReview(pod("checkout", List.of(Map.of("name", "app"))))));
+
+        assertEquals("aws-iam-token", patch.get(0).get("value").get(0).get("name").asText());
+    }
+
+    @Test
+    void aServiceAccountWithoutARoleArnOrThatCannotBeReadLeavesThePodUnchanged() throws Exception {
+        noPodIdentity();
+        serviceAccount("plain", Map.of("team", "payments"));
+        serviceAccounts.put("payments/broken", EksClusterManager.ServiceAccountRead.found("not json"));
+        serviceAccounts.put("payments/unreadable", EksClusterManager.ServiceAccountRead.failed());
+
+        for (String account : List.of("plain", "broken", "missing", "unreadable")) {
+            Map<String, Object> review = webhook.review(CLUSTER_NAME, ACCOUNT_ID,
+                    admissionReview(pod(account, List.of(Map.of("name", "app")))));
+
+            assertEquals(Boolean.TRUE, response(review).get("allowed"));
+            assertNull(response(review).get("patch"), account);
+        }
+    }
+
+    @Test
+    void theServiceAccountAndThePodAnnotationsShapeTheToken() throws Exception {
+        assertEquals(Optional.of(new EksPodIdentityWebhook.WebIdentity(ROLE_ARN, "custom", 3600, false)),
+                EksPodIdentityWebhook.webIdentity(Map.of("eks.amazonaws.com/role-arn", ROLE_ARN,
+                        "eks.amazonaws.com/audience", "custom", "eks.amazonaws.com/token-expiration", "7200",
+                        "eks.amazonaws.com/sts-regional-endpoints", "false"),
+                        Map.of("eks.amazonaws.com/token-expiration", "3600")));
+        assertEquals(Optional.of(new EksPodIdentityWebhook.WebIdentity(ROLE_ARN, "sts.amazonaws.com", 600, true)),
+                EksPodIdentityWebhook.webIdentity(Map.of("eks.amazonaws.com/role-arn", ROLE_ARN,
+                        "eks.amazonaws.com/token-expiration", "60", "eks.amazonaws.com/sts-regional-endpoints",
+                        "maybe"), Map.of()));
+        assertEquals(Optional.of(new EksPodIdentityWebhook.WebIdentity(ROLE_ARN, "sts.amazonaws.com", 7200, true)),
+                EksPodIdentityWebhook.webIdentity(Map.of("eks.amazonaws.com/role-arn", ROLE_ARN,
+                        "eks.amazonaws.com/token-expiration", "7200"),
+                        Map.of("eks.amazonaws.com/token-expiration", "soon")));
+        assertEquals(Optional.of(new EksPodIdentityWebhook.WebIdentity(ROLE_ARN, "sts.amazonaws.com", 86400, true)),
+                EksPodIdentityWebhook.webIdentity(Map.of("eks.amazonaws.com/role-arn", ROLE_ARN,
+                        "eks.amazonaws.com/token-expiration", "a day"), Map.of()));
+        assertEquals(Optional.empty(), EksPodIdentityWebhook.webIdentity(
+                Map.of("eks.amazonaws.com/role-arn", " "), Map.of()));
+    }
+
+    @Test
+    void theTokenTakesTheAnnotatedLifetime() throws Exception {
+        noPodIdentity();
+        serviceAccount("checkout", Map.of("eks.amazonaws.com/role-arn", ROLE_ARN,
+                "eks.amazonaws.com/audience", "sts.amazonaws.com", "eks.amazonaws.com/sts-regional-endpoints", "false"));
+
+        JsonNode patch = patchOf(webhook.review(CLUSTER_NAME, ACCOUNT_ID, admissionReview(annotatedPod("checkout",
+                Map.of("eks.amazonaws.com/token-expiration", "3600"), Map.of("containers",
+                        List.of(Map.of("name", "app")))))));
+
+        assertEquals(MAPPER.readTree("""
+                {"audience":"sts.amazonaws.com","expirationSeconds":3600,"path":"token"}"""),
+                patch.get(0).get("value").get(0).get("projected").get("sources").get(0).get("serviceAccountToken"));
+        assertFalse(patch.toString().contains("AWS_STS_REGIONAL_ENDPOINTS"), patch.toString());
+    }
+
+    /** Floci's STS exchanges a cluster's tokens for sts.amazonaws.com alone, so another audience could never work. */
+    @Test
+    void anAudienceFlociCannotExchangeLeavesThePodUnchanged() throws Exception {
+        noPodIdentity();
+        serviceAccount("checkout", Map.of("eks.amazonaws.com/role-arn", ROLE_ARN,
+                "eks.amazonaws.com/audience", "custom"));
+
+        assertNull(response(reviewOf("checkout")).get("patch"));
+    }
+
+    /** A token volume or mount of the same name the pod brings, which would not hold the token, gets no role pair. */
+    @Test
+    void aTokenVolumeOrMountThatWouldNotHoldTheTokenGetsNoRolePair() throws Exception {
+        noPodIdentity();
+        serviceAccount("checkout", Map.of("eks.amazonaws.com/role-arn", ROLE_ARN));
+        Map<String, Object> elsewhere = Map.of("name", "app",
+                "volumeMounts", List.of(Map.of("name", "aws-iam-token", "mountPath", "/elsewhere")));
+        Map<String, Object> inPlace = Map.of("name", "sidecar",
+                "volumeMounts", List.of(Map.of("name", "aws-iam-token",
+                        "mountPath", "/var/run/secrets/eks.amazonaws.com/serviceaccount")));
+        Map<String, Object> spec = new LinkedHashMap<>();
+        spec.put("containers", List.of(elsewhere, inPlace));
+
+        JsonNode mounted = patchOf(webhook.review(CLUSTER_NAME, ACCOUNT_ID,
+                admissionReview(annotatedPod("checkout", Map.of(), spec))));
+        assertFalse(envOf(mounted, 0).contains("AWS_ROLE_ARN"), mounted.toString());
+        assertTrue(envOf(mounted, 1).contains("AWS_ROLE_ARN"), mounted.toString());
+
+        spec.put("volumes", List.of(Map.of("name", "aws-iam-token", "emptyDir", Map.of())));
+        spec.put("containers", List.of(Map.of("name", "app")));
+        JsonNode other = patchOf(webhook.review(CLUSTER_NAME, ACCOUNT_ID,
+                admissionReview(annotatedPod("checkout", Map.of(), spec))));
+        assertFalse(envOf(other, 0).contains("AWS_ROLE_ARN"), other.toString());
+        assertTrue(envOf(other, 0).contains("AWS_REGION"), other.toString());
+    }
+
+    private static String envOf(JsonNode patch, int container) {
+        StringBuilder env = new StringBuilder();
+        patch.forEach(operation -> {
+            if (operation.get("path").asText().startsWith("/spec/containers/" + container + "/env")) {
+                env.append(operation.get("value"));
+            }
+        });
+        return env.toString();
+    }
+
+    /** A burst of pods, and the cluster's own pods of service accounts with no role, cost one read each. */
+    @Test
+    void aServiceAccountIsReadOnceWhileItsReadIsFresh() throws Exception {
+        noPodIdentity();
+        serviceAccount("checkout", Map.of("eks.amazonaws.com/role-arn", ROLE_ARN));
+
+        reviewOf("checkout");
+        reviewOf("checkout");
+        reviewOf("missing");
+        reviewOf("missing");
+        assertEquals(List.of("payments/checkout", "payments/missing"), serviceAccountReads);
+
+        now.set(now.get().plus(EksPodIdentityWebhook.SERVICE_ACCOUNT_CACHE_TTL));
+        assertTrue(response(reviewOf("checkout")).containsKey("patch"));
+        assertEquals(List.of("payments/checkout", "payments/missing", "payments/checkout"), serviceAccountReads);
+    }
+
+    @Test
+    void aFailedReadIsNotReused() throws Exception {
+        noPodIdentity();
+        serviceAccounts.put("payments/checkout", EksClusterManager.ServiceAccountRead.failed());
+        reviewOf("checkout");
+        await().atMost(Duration.ofSeconds(5)).until(() -> {
+            serviceAccount("checkout", Map.of("eks.amazonaws.com/role-arn", ROLE_ARN));
+            return response(reviewOf("checkout")).containsKey("patch");
+        });
+
+        assertEquals("payments/checkout", serviceAccountReads.get(1));
+    }
+
+    /** A read that hangs, in Docker before kubectl even starts, still leaves the webhook answering in time. */
+    @Test
+    void aReadThatOutlastsTheLookupTimeoutLeavesThePodUnchangedAndServesLaterPods() throws Exception {
+        noPodIdentity();
+        serviceAccount("checkout", Map.of("eks.amazonaws.com/role-arn", ROLE_ARN));
+        readGate = new CountDownLatch(1);
+
+        Map<String, Object> review = reviewOf("checkout");
+        assertEquals(Boolean.TRUE, response(review).get("allowed"));
+        assertNull(response(review).get("patch"));
+
+        readGate.countDown();
+        await().atMost(Duration.ofSeconds(5)).until(() -> response(reviewOf("checkout")).containsKey("patch"));
+        assertEquals(List.of("payments/checkout"), serviceAccountReads);
+    }
+
+
+    @Test
+    void aSkippedContainerIsLeftAsItIs() throws Exception {
+        noPodIdentity();
+        serviceAccount("checkout", Map.of("eks.amazonaws.com/role-arn", ROLE_ARN));
+        Map<String, Object> spec = new LinkedHashMap<>();
+        spec.put("initContainers", List.of(Map.of("name", "migrate")));
+        spec.put("containers", List.of(Map.of("name", "app"), Map.of("name", "proxy")));
+
+        JsonNode patch = patchOf(webhook.review(CLUSTER_NAME, ACCOUNT_ID, admissionReview(annotatedPod("checkout",
+                Map.of("eks.amazonaws.com/skip-containers", "migrate, proxy"), spec))));
+
+        List<String> paths = new ArrayList<>();
+        patch.forEach(operation -> paths.add(operation.get("path").asText()));
+        assertEquals(List.of("/spec/volumes", "/spec/containers/0/volumeMounts", "/spec/containers/0/env"), paths);
+    }
+
+    /** As upstream, a container setting either variable of a pair gets neither, and nothing it set is overwritten. */
+    @Test
+    void variablesTheContainerSetsAreLeftAlone() throws Exception {
+        noPodIdentity();
+        serviceAccount("checkout", Map.of("eks.amazonaws.com/role-arn", ROLE_ARN));
+        Map<String, Object> container = Map.of("name", "app",
+                "env", List.of(Map.of("name", "AWS_WEB_IDENTITY_TOKEN_FILE", "value", "/mine"),
+                        Map.of("name", "AWS_DEFAULT_REGION", "value", "us-west-2"),
+                        Map.of("name", "AWS_STS_REGIONAL_ENDPOINTS", "value", "legacy"),
+                        Map.of("name", "AWS_ENDPOINT_URL", "value", "http://mine")),
+                "volumeMounts", List.of(Map.of("name", "aws-iam-token",
+                        "mountPath", "/var/run/secrets/eks.amazonaws.com/serviceaccount")));
+
+        JsonNode patch = patchOf(webhook.review(CLUSTER_NAME, ACCOUNT_ID,
+                admissionReview(pod("checkout", List.of(container)))));
+
+        assertEquals(1, patch.size(), patch.toString());
+        assertEquals("/spec/volumes", patch.get(0).get("path").asText());
+    }
+
+    @Test
+    void anExistingEnvListIsAppendedTo() throws Exception {
+        noPodIdentity();
+        serviceAccount("checkout", Map.of("eks.amazonaws.com/role-arn", ROLE_ARN));
+        Map<String, Object> container = Map.of("name", "app",
+                "env", List.of(Map.of("name", "AWS_REGION", "value", "us-west-2")));
+
+        JsonNode patch = patchOf(webhook.review(CLUSTER_NAME, ACCOUNT_ID,
+                admissionReview(pod("checkout", List.of(container)))));
+
+        List<String> appended = new ArrayList<>();
+        patch.forEach(operation -> {
+            if (operation.get("path").asText().equals("/spec/containers/0/env/-")) {
+                appended.add(operation.get("value").get("name").asText());
+            }
+        });
+        assertEquals(List.of("AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_STS_REGIONAL_ENDPOINTS",
+                "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_STS"), appended);
     }
 }
