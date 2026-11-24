@@ -11,6 +11,7 @@ import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalanci
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.Matcher;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetGroup;
 
+import static io.floci.aws.services.cloudformation.CfnStackTestSupport.physicalId;
 import static io.floci.aws.testing.CfnStackWaits.output;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -32,7 +33,7 @@ class CloudFormationTargetGroupHealthIntegrationTest {
 
         assertEquals(before, elb.describeTargetGroups(request -> request.targetGroupArns(arn))
                 .targetGroups().getFirst());
-        assertEquals(arn, physicalId());
+        assertEquals(arn, physicalId(stack.client(CloudFormationClient.builder()), stack.name(), "Group"));
     }
 
     @ParameterizedTest
@@ -58,7 +59,7 @@ class CloudFormationTargetGroupHealthIntegrationTest {
         TargetGroup after = elb.describeTargetGroups(request -> request.targetGroupArns(arn))
                 .targetGroups().getFirst();
         assertAll(
-                () -> assertEquals(arn, physicalId()),
+                () -> assertEquals(arn, physicalId(stack.client(CloudFormationClient.builder()), stack.name(), "Group")),
                 () -> assertEquals("HTTP", after.healthCheckProtocolAsString()),
                 () -> assertEquals("8888", after.healthCheckPort()),
                 () -> assertEquals("/ready", after.healthCheckPath()),
@@ -67,11 +68,6 @@ class CloudFormationTargetGroupHealthIntegrationTest {
                 () -> assertEquals(4, after.healthyThresholdCount()),
                 () -> assertEquals(5, after.unhealthyThresholdCount()),
                 () -> assertEquals("200-299", after.matcher().httpCode()));
-    }
-
-    private String physicalId() {
-        return stack.client(CloudFormationClient.builder()).describeStackResource(request ->
-                request.stackName(stack.name()).logicalResourceId("Group")).stackResourceDetail().physicalResourceId();
     }
 
     private static String template(boolean updated) {
