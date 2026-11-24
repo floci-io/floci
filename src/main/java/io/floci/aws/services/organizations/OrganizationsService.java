@@ -766,9 +766,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
             throw new AwsException("MasterCannotLeaveOrganizationException",
                     "The management account can't be removed from the organization.", 400);
         }
-        detachAllPoliciesFrom(organization, account.getId());
-        accounts.deleteForAccount(organization.getMasterAccountId(), account.getId());
-        placementChanged(organization, account.getId());
+        removeMember(organization, account);
     }
 
     public void leaveOrganization(String callerAccountId) {
@@ -777,7 +775,16 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
             throw new AwsException("MasterCannotLeaveOrganizationException",
                     "The management account can't leave the organization.", 400);
         }
-        OrganizationAccount account = requireAccount(organization, callerAccountId);
+        removeMember(organization, requireAccount(organization, callerAccountId));
+    }
+
+    /** As on AWS, a closed account stays in its organization until its post-closure period ends. */
+    private void removeMember(Organization organization, OrganizationAccount account) {
+        if (isClosed(account)) {
+            throw new AwsException("ConstraintViolationException",
+                    "You can't remove a closed account from the organization until its post-closure period ends.",
+                    400);
+        }
         detachAllPoliciesFrom(organization, account.getId());
         accounts.deleteForAccount(organization.getMasterAccountId(), account.getId());
         placementChanged(organization, account.getId());

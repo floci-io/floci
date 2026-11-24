@@ -9,6 +9,7 @@ import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -28,6 +29,8 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.sts.StsClient;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 import java.util.function.Function;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
@@ -41,7 +44,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * {@code CloseAccount} end to end with IAM enforcement off, Floci's default: the account reads as closed in its
  * organization, and every credential that resolves to it is refused across the wire protocols.
  *
- * <p>Runs as its own management account, so it never contends for one with the other Organizations suites.
+ * <p>Runs as its own management account, so it never contends for one with the other Organizations suites. As on
+ * AWS, a closed account stays in its organization and nothing in it can be deleted, so each test ends with
+ * {@code /_floci/state/reset}. Test classes run one at a time, so the reset clears only what this class and the
+ * ones before it created.
  */
 @QuarkusTest
 class OrganizationsCloseAccountIntegrationTest {
@@ -72,10 +78,10 @@ class OrganizationsCloseAccountIntegrationTest {
         open = organizations.createAccount(MANAGEMENT_ACCOUNT, "open@example.com", "Open");
     }
 
-    /** Runs before the cleanup extension, so the closed account has left the organization when its user is deleted. */
+    /** Runs before the cleanup extension, which then finds no user left to delete. */
     @AfterEach
-    void removeOrganization() {
-        organizations.cleanup();
+    void resetState() {
+        given().post("/_floci/state/reset").then().statusCode(200);
     }
 
     @Test
@@ -117,6 +123,29 @@ class OrganizationsCloseAccountIntegrationTest {
                 .formParam("Action", "DescribeVpcs").formParam("Version", "2016-11-15")
                 .post("/").then().statusCode(401)
                 .body("Response.Errors.Error.Code", equalTo("AuthFailure"));
+    }
+
+    /** A presigned POST carries its credential in the form body, not in a header or the query string. */
+    @Test
+    void theClosedAccountsPresignedPostIsRefused() {
+        String bucket = "closed-account-post-" + UUID.randomUUID();
+        // Unsigned, like the POST below, so both reach the default account.
+        given().put("/" + bucket).then().statusCode(200);
+        closeAccount(closed);
+
+        presignedPost(bucket, open).statusCode(204);
+        presignedPost(bucket, closed).statusCode(403).body("Error.Code", equalTo("InvalidAccessKeyId"));
+    }
+
+    @Test
+    void theClosedAccountCannotBeRemovedFromTheOrganization() {
+        closeAccount(closed);
+
+        organizations.request(MANAGEMENT_ACCOUNT, "RemoveAccountFromOrganization", "{\"AccountId\":\"" + closed + "\"}")
+                .post("/").then().statusCode(400)
+                .body("__type", equalTo("ConstraintViolationException"));
+        assertRefused(AwsBasicCredentials.create(closed, SECRET), StsClient.builder(), StsClient::getCallerIdentity,
+                403, "InvalidClientTokenId");
     }
 
     @Test
@@ -163,6 +192,13 @@ class OrganizationsCloseAccountIntegrationTest {
             assertEquals(status, refused.statusCode());
             assertEquals(errorCode, refused.awsErrorDetails().errorCode());
         }
+    }
+
+    private ValidatableResponse presignedPost(String bucket, String accountId) {
+        return given().multiPart("key", accountId)
+                .multiPart("x-amz-credential", accountId + "/20261124/us-east-1/s3/aws4_request")
+                .multiPart("file", accountId, "body".getBytes(StandardCharsets.UTF_8), "text/plain")
+                .when().post("/" + bucket).then();
     }
 
     private void closeAccount(String accountId) {

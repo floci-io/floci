@@ -149,6 +149,22 @@ class OrganizationsServiceTest {
     }
 
     @Test
+    void aClosedAccountStaysInItsOrganization() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
+                .getAccountId();
+        service.closeAccount(MANAGEMENT_ACCOUNT, member);
+
+        AwsException removed = assertThrows(AwsException.class,
+                () -> service.removeAccountFromOrganization(MANAGEMENT_ACCOUNT, member));
+        AwsException left = assertThrows(AwsException.class, () -> service.leaveOrganization(member));
+
+        assertEquals("ConstraintViolationException", removed.getErrorCode());
+        assertEquals("ConstraintViolationException", left.getErrorCode());
+        assertTrue(service.isClosed(member));
+    }
+
+    @Test
     void renameAccountRenamesAMemberAccountAndTheManagementAccount() {
         service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
         String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)

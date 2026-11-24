@@ -72,14 +72,16 @@ call `LeaveOrganization`. An account in no organization gets
   `PENDING_CLOSURE`. As on AWS during the 90-day post-closure period, the account stays in the
   organization: `DescribeAccount`, `ListAccounts` and `ListAccountsForParent` report its `State` as
   `CLOSED` and its legacy `Status` as `SUSPENDED`, and Account Management's `GetAccountInformation`
-  reports `CLOSED`. Closing it again fails with `AccountAlreadyClosedException`, and it cannot be
-  registered as a delegated administrator. The post-closure period does not end in Floci: the
-  account keeps its resources, and stays closed until `RemoveAccountFromOrganization` removes it.
-- A request whose `Authorization` header or SigV4 presigned URL carries a credential of a closed
-  account (its 12-digit access key id, an IAM user's key, or a session in the account) is refused,
-  whether or not IAM enforcement is on. AWS documents that these calls fail but not the error, so
-  Floci answers as it does for a credential it does not recognize: `InvalidClientTokenId` or
-  `UnrecognizedClientException`, `InvalidAccessKeyId` on S3 and `AuthFailure` on EC2.
+  reports `CLOSED`. Closing it again fails with `AccountAlreadyClosedException`; registering it as a
+  delegated administrator, `RemoveAccountFromOrganization` and `LeaveOrganization` fail with
+  `ConstraintViolationException`. The post-closure period does not end in Floci, so the account
+  stays closed and keeps its resources.
+- A request whose `Authorization` header, SigV4 presigned URL or S3 presigned POST form carries a
+  credential of a closed account (its 12-digit access key id, an IAM user's key, or a session in the
+  account) is refused, whether or not IAM enforcement is on. AWS documents that these calls fail but
+  not the error, so Floci answers as it does for a credential it does not recognize:
+  `InvalidClientTokenId` or `UnrecognizedClientException`, `InvalidAccessKeyId` on S3 and
+  `AuthFailure` on EC2.
 - `DescribeEffectivePolicy` merges every policy of the requested type down the
   root → OU → target chain, with the closest ancestor winning on conflicting keys. As on AWS,
   the access-control types (`SERVICE_CONTROL_POLICY`, `RESOURCE_CONTROL_POLICY`) are rejected.

@@ -22,6 +22,7 @@ import software.amazon.awssdk.services.sts.model.StsException;
 
 import java.net.URI;
 
+import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -30,7 +31,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * opened in it both work until the account is closed, and are refused before any policy is read once it is.
  *
  * <p>Runs as its own management account and enables no service control policies, so the SCP enforcement this
- * profile turns on never reaches it.
+ * profile turns on never reaches it. As on AWS, a closed account stays in its organization, so the test ends with
+ * {@code /_floci/state/reset}. Test classes run one at a time, so the reset clears only what this class and the
+ * ones before it created.
  */
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -58,8 +61,8 @@ class OrganizationsCloseAccountIamIntegrationTest {
     }
 
     @AfterEach
-    void removeOrganization() {
-        organizations.cleanup();
+    void resetState() {
+        given().post("/_floci/state/reset").then().statusCode(200);
     }
 
     @Test
