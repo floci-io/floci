@@ -10,7 +10,6 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
-import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.eventbridgev2.model.EventBusV2;
@@ -75,8 +74,8 @@ public class EventBridgeV2EventSources implements Resettable {
      * its credential. A retry with the {@code ClientToken} of an earlier create returns that source when it repeats
      * the request, and fails when it changes it.
      */
-    EventSourceV2 create(JsonNode request, String region, Function<String, Optional<EventBusV2>> findBus) {
-        throwIfInvalid(WebhookEventsConfigurations.createViolations(request));
+    EventSourceV2 create(JsonNode request, String region, Function<String, Optional<EventBusV2>> findBusByName) {
+        EventBridgeV2RequestShapes.check("CreateEventSource", request);
         String name = request.get("Name").textValue();
         String eventBusArn = request.get("EventBusArn").textValue();
         JsonNode configuration = request.get("Configuration");
@@ -99,8 +98,12 @@ public class EventBridgeV2EventSources implements Resettable {
         if (retried.isPresent()) {
             return retried.get();
         }
-        findBus.apply(eventBusArn).orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                "Event bus not found: " + AwsArnUtils.parse(eventBusArn).resource().split("/")[1], 404));
+        String busName = AwsArnUtils.parse(eventBusArn).resource().split("/")[1];
+        EventBusV2 bus = findBusByName.apply(busName).orElseThrow(() -> new AwsException(
+                "ResourceNotFoundException", "Resource does not exist", 404));
+        if (!eventBusArn.equals(bus.getArn())) {
+            throw new AwsException("ResourceNotFoundException", "Event bus not found: " + busName, 404);
+        }
         String key = storageKey(region, name);
         if (sources.get(key).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsException", "Resource already exists", 409);
@@ -138,7 +141,7 @@ public class EventBridgeV2EventSources implements Resettable {
      * the secret stay as they are. A refused update changes nothing.
      */
     EventSourceV2 update(JsonNode request, String region) {
-        throwIfInvalid(WebhookEventsConfigurations.updateViolations(request));
+        EventBridgeV2RequestShapes.check("UpdateEventSource", request);
         String arn = request.get("EventSourceArn").textValue();
         checkArn(arn, region);
         JsonNode configuration = request.hasNonNull("Configuration") ? request.get("Configuration") : null;
@@ -164,7 +167,11 @@ public class EventBridgeV2EventSources implements Resettable {
     }
 
     EventSourceV2 describe(JsonNode request, String region) {
-        throwIfInvalid(WebhookEventsConfigurations.eventSourceArnViolations(request));
+        return find("DescribeEventSource", request, region);
+    }
+
+    private EventSourceV2 find(String operation, JsonNode request, String region) {
+        EventBridgeV2RequestShapes.check(operation, request);
         String arn = request.get("EventSourceArn").textValue();
         checkArn(arn, region);
         return require(arn, region);
@@ -172,7 +179,7 @@ public class EventBridgeV2EventSources implements Resettable {
 
     /** Deletes the source and schedules its secret for deletion, unless the secret is already scheduled. */
     void delete(JsonNode request, String region) {
-        EventSourceV2 source = describe(request, region);
+        EventSourceV2 source = find("DeleteEventSource", request, region);
         try {
             if (secrets.describeSecret(source.getSecretArn(), region).getDeletedDate() == null) {
                 secrets.deleteSecret(source.getSecretArn(), null, false, region);
@@ -288,12 +295,6 @@ public class EventBridgeV2EventSources implements Resettable {
             }
         }
         return tags;
-    }
-
-    private static void throwIfInvalid(List<String> violations) {
-        if (!violations.isEmpty()) {
-            throw SmithyValidationErrors.exception("InvalidInputException", violations);
-        }
     }
 
     static String id(EventSourceV2 source) {

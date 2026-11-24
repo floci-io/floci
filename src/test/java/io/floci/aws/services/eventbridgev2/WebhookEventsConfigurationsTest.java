@@ -27,11 +27,11 @@ class WebhookEventsConfigurationsTest {
     private static final String SIGNED_MESSAGE_ID_ERROR = "WebhookEventsConfiguration.AuthConfiguration"
             + ".HmacAuthConfiguration is invalid: ";
 
-    // ──────────────────────────── Constraints ────────────────────────────
+    // ──────────────────────────── Constraints, through the generated shapes ────────────────────────────
 
     @Test
     void validRequestHasNoViolations() {
-        assertEquals(List.of(), WebhookEventsConfigurations.createViolations(create("{\"Name\":\"hook\","
+        assertEquals(List.of(), violations("CreateEventSource", create("{\"Name\":\"hook\","
                 + "\"EventBusArn\":\"" + BUS + "\",\"Description\":\"d\",\"ClientToken\":\"t\","
                 + "\"Tags\":{\"a\":\"b\"},\"Configuration\":{\"WebhookEventsConfiguration\":{"
                 + "\"AuthConfiguration\":" + STATIC_AUTH + ",\"RoleArn\":\"" + ROLE + "\"}}}")));
@@ -43,7 +43,7 @@ class WebhookEventsConfigurationsTest {
                 "Value null at 'name' failed to satisfy constraint: Member must not be null",
                 "Value null at 'eventBusArn' failed to satisfy constraint: Member must not be null",
                 "Value null at 'configuration' failed to satisfy constraint: Member must not be null"),
-                WebhookEventsConfigurations.createViolations(MAPPER.createObjectNode()));
+                violations("CreateEventSource", MAPPER.createObjectNode()));
         assertEquals(List.of(
                 "Value null at '" + PATH + ".authConfiguration' failed to satisfy constraint: Member must not be null",
                 "Value null at '" + PATH + ".roleArn' failed to satisfy constraint: Member must not be null"),
@@ -52,7 +52,7 @@ class WebhookEventsConfigurationsTest {
 
     @Test
     void nameBreakingItsPatternIsReportedWithTheModelsPattern() {
-        List<String> violations = WebhookEventsConfigurations.createViolations(create("{\"Name\":\"-x\","
+        List<String> violations = violations("CreateEventSource", create("{\"Name\":\"-x\","
                 + "\"EventBusArn\":\"" + BUS + "\",\"Configuration\":{}}"));
         assertEquals(List.of("Value '-x' at 'name' failed to satisfy constraint: Member must satisfy regular "
                 + "expression pattern: (?!aws\\.)[A-Za-z0-9][\\.\\-_A-Za-z0-9]*"), violations);
@@ -60,7 +60,7 @@ class WebhookEventsConfigurationsTest {
 
     @Test
     void reservedAwsNamePrefixIsRefused() {
-        List<String> violations = WebhookEventsConfigurations.createViolations(create("{\"Name\":\"aws.x\","
+        List<String> violations = violations("CreateEventSource", create("{\"Name\":\"aws.x\","
                 + "\"EventBusArn\":\"" + BUS + "\",\"Configuration\":{}}"));
         assertEquals(1, violations.size());
         assertTrue(violations.getFirst().startsWith("Value 'aws.x' at 'name'"), violations.toString());
@@ -68,7 +68,7 @@ class WebhookEventsConfigurationsTest {
 
     @Test
     void severalViolationsAreCountedInOneMessageInMemberOrder() {
-        List<String> violations = WebhookEventsConfigurations.createViolations(create("{\"Name\":\"-x\","
+        List<String> violations = violations("CreateEventSource", create("{\"Name\":\"-x\","
                 + "\"EventBusArn\":\"nope\",\"ClientToken\":\"\",\"Configuration\":{}}"));
         assertEquals(4, violations.size());
         assertTrue(violations.get(0).contains("at 'name'"));
@@ -153,22 +153,32 @@ class WebhookEventsConfigurationsTest {
 
     @Test
     void tagsAreHeldToTheirShape() {
-        assertEquals(List.of("Value at 'tags' failed to satisfy constraint: Member must have length less than or "
-                        + "equal to 200"),
-                WebhookEventsConfigurations.createViolations(create(withTags(201))));
-        List<String> violations = WebhookEventsConfigurations.createViolations(create("{\"Name\":\"hook\","
+        StringBuilder rendered = new StringBuilder();
+        for (int i = 0; i < 201; i++) {
+            rendered.append(i == 0 ? "" : ", ").append('k').append(i).append("=v");
+        }
+        assertEquals(List.of("Value '{" + rendered + "}' at 'tags' failed to satisfy constraint: Member must have "
+                        + "length less than or equal to 200"),
+                violations("CreateEventSource", create(withTags(201))));
+        List<String> violations = violations("CreateEventSource", create("{\"Name\":\"hook\","
                 + "\"EventBusArn\":\"" + BUS + "\",\"Configuration\":{\"WebhookEventsConfiguration\":{"
                 + "\"AuthConfiguration\":" + STATIC_AUTH + ",\"RoleArn\":\"" + ROLE + "\"}},\"Tags\":{\" a\":\"b \"}}"));
-        assertEquals(2, violations.size());
-        assertTrue(violations.get(0).startsWith("Value '{ a=b }' at 'tags' failed to satisfy constraint: Map keys "
-                + "must satisfy constraint: ["), violations.get(0));
-        assertTrue(violations.get(1).contains("Map value must satisfy constraint: ["), violations.get(1));
+        assertEquals(List.of(
+                "Value '{ a=b }' at 'tags' failed to satisfy constraint: Map keys must satisfy constraint: "
+                        + "[Member must have length less than or equal to 128, "
+                        + "Member must have length greater than or equal to 1, "
+                        + "Member must satisfy regular expression pattern: \\S([\\s\\S]*\\S)?(?![\\s\\S]).*]",
+                "Value '{ a=b }' at 'tags' failed to satisfy constraint: Map value must satisfy constraint: "
+                        + "[Member must have length less than or equal to 256, "
+                        + "Member must have length greater than or equal to 0, "
+                        + "Member must satisfy regular expression pattern: (\\S([\\s\\S]*\\S)?)?(?![\\s\\S]).*, "
+                        + "Member must not be null]"), violations);
     }
 
     @Test
     void aValueOfTheWrongTypeIsAPlainInvalidInput() {
-        AwsException e = assertThrows(AwsException.class, () -> WebhookEventsConfigurations.createViolations(
-                create("{\"Name\":5}")));
+        AwsException e = assertThrows(AwsException.class, () -> EventBridgeV2RequestShapes.check(
+                "CreateEventSource", create("{\"Name\":5}")));
         assertEquals("InvalidInputException", e.getErrorCode());
         assertEquals(400, e.getHttpStatus());
     }
@@ -178,11 +188,17 @@ class WebhookEventsConfigurationsTest {
         assertEquals(List.of(), hmacViolations("\"SecretEncoding\":\"BASE64\",\"SecretValue\":\"whsec_abcdef\""));
         assertEquals(1, hmacViolations("\"SecretEncoding\":\"BASE64\",\"SecretValue\":\"whsec_abc\"").size());
         assertEquals(List.of(), hmacViolations("\"SecretValue\":\"whsec_abc\""));
+        JsonNode request = json("{\"Name\":\"hook\",\"EventBusArn\":\"" + BUS + "\",\"Configuration\":"
+                + "{\"WebhookEventsConfiguration\":{\"AuthConfiguration\":{\"HmacAuthConfiguration\":{" + HMAC_BASE
+                + ",\"SecretEncoding\":\"BASE64\",\"SecretValue\":\"whsec_abcdef\"}},\"RoleArn\":\"" + ROLE + "\"}}}");
+        EventBridgeV2RequestShapes.check("CreateEventSource", request);
+        assertEquals("whsec_abcdef", request.at("/Configuration/WebhookEventsConfiguration/AuthConfiguration"
+                + "/HmacAuthConfiguration/SecretValue").asText());
     }
 
     @Test
     void updateViolationsCoverTheArnConfigurationAndDescription() {
-        List<String> violations = WebhookEventsConfigurations.updateViolations(MAPPER.createObjectNode()
+        List<String> violations = violations("UpdateEventSource", MAPPER.createObjectNode()
                 .put("EventSourceArn", "x").put("Description", "a\nb"));
         assertEquals(2, violations.size());
         assertTrue(violations.get(0).startsWith("Value 'x' at 'eventSourceArn'"), violations.get(0));
@@ -394,6 +410,15 @@ class WebhookEventsConfigurationsTest {
         return base + "," + extra;
     }
 
+    private static List<String> violations(String operation, JsonNode request) {
+        try {
+            EventBridgeV2RequestShapes.check(operation, request);
+            return List.of();
+        } catch (AwsException e) {
+            return List.of(e.getMessage().replaceFirst("^\\d+ validation errors? detected: ", "").split("; "));
+        }
+    }
+
     private static JsonNode create(String json) {
         return json(json);
     }
@@ -424,7 +449,7 @@ class WebhookEventsConfigurationsTest {
     }
 
     private static List<String> webhookViolations(String webhookJson) {
-        return WebhookEventsConfigurations.createViolations(json("{\"Name\":\"hook\",\"EventBusArn\":\"" + BUS
+        return violations("CreateEventSource", json("{\"Name\":\"hook\",\"EventBusArn\":\"" + BUS
                 + "\",\"Configuration\":{\"WebhookEventsConfiguration\":" + webhookJson + "}}"));
     }
 

@@ -218,7 +218,17 @@ class EventBridgeV2EventSourcesTest {
                 () -> service.createEventSource(create("hook", missing, STATIC_AUTH), REGION));
         assertEquals("ResourceNotFoundException", notFound.getErrorCode());
         assertEquals(404, notFound.getHttpStatus());
-        assertEquals("Event bus not found: missing", notFound.getMessage());
+        assertEquals("Resource does not exist", notFound.getMessage());
+    }
+
+    @Test
+    void createNamesTheBusWhenOnlyTheIdInItsArnDiffers() {
+        String otherId = bus.substring(0, bus.lastIndexOf('/') + 1) + "zzzzzzzzzzzzzzzzzzzzzzzzz";
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createEventSource(create("hook", otherId, STATIC_AUTH), REGION));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        assertEquals(404, e.getHttpStatus());
+        assertEquals("Event bus not found: orders", e.getMessage());
     }
 
     @Test
@@ -278,8 +288,10 @@ class EventBridgeV2EventSourcesTest {
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(failing, secrets,
                 new RegionResolver(REGION, ACCOUNT), clock, "http://floci.test:4566");
 
+        EventBusV2 existing = new EventBusV2();
+        existing.setArn(bus);
         IllegalStateException e = assertThrows(IllegalStateException.class, () -> eventSources.create(
-                create("hook", bus, STATIC_AUTH), REGION, arn -> Optional.of(new EventBusV2())));
+                create("hook", bus, STATIC_AUTH), REGION, name -> Optional.of(existing)));
 
         assertSame(failure, e);
         ArgumentCaptor<String> secretName = ArgumentCaptor.forClass(String.class);
