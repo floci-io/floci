@@ -146,6 +146,12 @@ public class StepFunctionsService implements Resettable, ResourceProvider, Store
     // expression there and the deny list above stops applying once the walk enters one.
     private static final Set<String> JSONATA_PAYLOAD_FIELDS = Set.of(
             "Output", "Assign", "Arguments", "ItemSelector", "BatchInput");
+    // The payload templates AslExecutor.resolveParameters evaluates on a JSONPath state. Every
+    // field of one whose name ends with '.$' must begin with '$' or be a single Intrinsic Function
+    // call, so the validator walks each of these from the state, nested objects and arrays included.
+    private static final List<String> JSONPATH_PAYLOAD_TEMPLATES = List.of(
+            "Parameters", "ResultSelector", "ItemSelector", "Assign", "Credentials",
+            "ItemBatcher/BatchInput", "ItemReader/Parameters", "ResultWriter/Parameters");
     private static final Set<String> ITEM_READER_INPUT_TYPES = Set.of(
             "MANIFEST", "JSON", "CSV", "JSONL", "PARQUET");
     private static final Set<String> RESULT_WRITER_TRANSFORMATIONS = Set.of("NONE", "COMPACT", "FLATTEN");
@@ -2681,6 +2687,8 @@ public class StepFunctionsService implements Resettable, ResourceProvider, Store
         validateQueryLanguageValue(stateDef, statePath + "/QueryLanguage", errors);
         if (stateIsJsonata) {
             collectTopLevelReferences(statePath, stateDef, errors);
+        } else {
+            validatePayloadTemplateFields(statePath, stateDef, errors);
         }
 
         // Structurally validate JSONPath Choice rules (comparator allowlist, exactly-one operator,
@@ -2840,6 +2848,90 @@ public class StepFunctionsService implements Resettable, ResourceProvider, Store
         }
         errors.add(UNSUPPORTED_JSONATA_MARKER + " Reference to '" + reference
                 + "' at the top level is not supported. at " + path);
+    }
+
+    /**
+     * Flags every {@code .$} field of the JSONPath payload templates
+     * {@link AslExecutor#resolveParameters} evaluates whose value is neither a JSONPath (it does
+     * not begin with {@code $}) nor a single Intrinsic Function call: a name, its argument list in
+     * parentheses, and nothing but whitespace after the {@code )} that closes that list. AWS
+     * reports such a value as a definition error, while the executor drops what follows and
+     * succeeds. Reported at the field itself, nested objects and arrays included, matching the
+     * depth the executor resolves them at.
+     */
+    private static void validatePayloadTemplateFields(String statePath, JsonNode stateDef,
+                                                      List<String> errors) {
+        for (String templatePath : JSONPATH_PAYLOAD_TEMPLATES) {
+            JsonNode template = stateDef;
+            for (String segment : templatePath.split("/")) {
+                template = template.path(segment);
+            }
+            validatePayloadTemplate(statePath, templatePath, template, errors);
+        }
+    }
+
+    private static void validatePayloadTemplate(String statePath, String templatePath, JsonNode template,
+                                                List<String> errors) {
+        if (template.isObject()) {
+            Iterator<Map.Entry<String, JsonNode>> fields = template.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+                String key = entry.getKey();
+                JsonNode value = entry.getValue();
+                if (key.endsWith(".$") && value.isTextual()
+                        && !isValidPayloadTemplateValue(value.asText())) {
+                    errors.add(EXPLICIT_LOCATION_MARKER + "The value for the field '" + key
+                            + "' must be a valid JSONPath or a valid intrinsic function call"
+                            + MARKER_PAYLOAD_SEPARATOR + statePath + "/" + templatePath + "/" + key);
+                } else if (value.isObject() || value.isArray()) {
+                    validatePayloadTemplate(statePath, templatePath + "/" + key, value, errors);
+                }
+            }
+            return;
+        }
+        for (int index = 0; index < template.size(); index++) {
+            validatePayloadTemplate(statePath, templatePath + "[" + index + "]",
+                    template.get(index), errors);
+        }
+    }
+
+    /**
+     * Whether one {@code .$} field value is a JSONPath reference ({@code $} or {@code $$} first)
+     * or a single Intrinsic Function call. The {@code )} closing the argument list is found with
+     * string literals skipped, a literal running from one {@code '} to its matching {@code '} with
+     * a backslash escaping the next character, so a quoted {@code \'} does not end it; anything
+     * after that {@code )}, including an index suffix, is not part of a call.
+     */
+    private static boolean isValidPayloadTemplateValue(String value) {
+        if (value.startsWith("$")) {
+            return true;
+        }
+        int open = value.indexOf('(');
+        if (open < 0) {
+            return false;
+        }
+        int depth = 0;
+        boolean inLiteral = false;
+        for (int i = open; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (inLiteral) {
+                if (c == '\\') {
+                    i++;
+                } else if (c == '\'') {
+                    inLiteral = false;
+                }
+            } else if (c == '\'') {
+                inLiteral = true;
+            } else if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+                if (depth == 0) {
+                    return value.substring(i + 1).isBlank();
+                }
+            }
+        }
+        return false;
     }
 
     /**

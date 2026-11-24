@@ -1983,6 +1983,54 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                 """.replace("__MAP_QUERY_LANGUAGE__", mapQueryLanguage);
     }
 
+    // The three values the issue reports as wrongly accepted: a bare name, a call with a suffix
+    // after its argument list, and a call with an index after it. All three must be FAIL.
+    private static Stream<String> valuesNeitherJsonPathNorIntrinsicCall() {
+        return Stream.of("foo", "States.StringToJson($.payload).status", "States.Array($.a, $.b)[0]");
+    }
+
+    @ParameterizedTest
+    @MethodSource("valuesNeitherJsonPathNorIntrinsicCall")
+    void payloadTemplateValueNeitherJsonPathNorIntrinsicCall_returnsFailWithSchemaError(String value) {
+        validateDefinition(passWithParameter(value))
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].severity", equalTo("ERROR"))
+                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
+                .body("diagnostics[0].message", equalTo(
+                        "The value for the field 'x.$' must be a valid JSONPath"
+                                + " or a valid intrinsic function call"))
+                .body("diagnostics[0].location", equalTo("/States/S/Parameters/x.$"));
+    }
+
+    @Test
+    void payloadTemplateValueNeitherJsonPathNorIntrinsicCall_rejectedAtCreateStateMachine() {
+        createStateMachine("intrinsic-field-" + System.nanoTime(), passWithParameter("foo"))
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidDefinition"))
+                .body("message", containsString(
+                        "The value for the field 'x.$' must be a valid JSONPath"
+                                + " or a valid intrinsic function call"));
+    }
+
+    @Test
+    void payloadTemplateValueThatIsOneIntrinsicCall_returnsOK() {
+        validateDefinition(passWithParameter("States.Array($.a)"))
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    private static String passWithParameter(String value) {
+        ObjectNode root = OBJECT_MAPPER.createObjectNode();
+        root.put("StartAt", "S");
+        root.putObject("States").putObject("S")
+                .put("Type", "Pass").put("End", true)
+                .putObject("Parameters").put("x.$", value);
+        return root.toString();
+    }
+
     private static List<Map<String, Object>> diagnosticsOf(String definition) {
         return validateDefinition(definition).jsonPath().getList("diagnostics");
     }
