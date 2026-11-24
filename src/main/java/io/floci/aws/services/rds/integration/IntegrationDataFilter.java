@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 /**
  * The {@code DataFilter} of a zero-ETL integration from a PostgreSQL source: a comma-separated list
@@ -109,7 +110,37 @@ public record IntegrationDataFilter(List<Rule> rules) {
             throw invalid("The data filter pattern " + pattern + " is not valid: the database name of a "
                     + "PostgreSQL pattern can't be a regular expression.");
         }
+        for (String part : parts) {
+            if (Rule.isRegex(part)) {
+                String regex = part.substring(1, part.length() - 1);
+                if (regex.isEmpty() || hasUnescapedSlash(regex)) {
+                    throw invalid("The data filter pattern " + pattern + " is not valid: " + part
+                            + " is not a valid regular expression.");
+                }
+                try {
+                    Pattern.compile(regex);
+                } catch (PatternSyntaxException e) {
+                    throw invalid("The data filter pattern " + pattern + " is not valid: " + part
+                            + " is not a valid regular expression.");
+                }
+            } else if (part.indexOf('/') >= 0) {
+                throw invalid("The data filter pattern " + pattern + " is not valid: " + part
+                        + " has an unexpected '/'.");
+            }
+        }
         return new Rule(include, parts);
+    }
+
+    private static boolean hasUnescapedSlash(String regex) {
+        for (int i = 0; i < regex.length(); i++) {
+            char c = regex.charAt(i);
+            if (c == '\\' && i + 1 < regex.length()) {
+                i++;
+            } else if (c == '/') {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Splits on {@code separator}, leaving alone what a {@code /regex/} part encloses. */

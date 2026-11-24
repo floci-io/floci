@@ -125,6 +125,11 @@ public class RdsIntegrationService implements Resettable {
             if (findByName(effectiveRegion, request.integrationName()).isPresent()) {
                 throw alreadyExists(request.integrationName());
             }
+            if (findBySourceAndTarget(effectiveRegion, request.sourceArn(), request.targetArn()).isPresent()) {
+                throw new AwsException("IntegrationAlreadyExistsFault",
+                        "An integration between source " + request.sourceArn() + " and target "
+                                + request.targetArn() + " already exists.", 400);
+            }
             integrations.put(key(effectiveRegion, integration.integrationId()), integration);
         }
         LOG.infov("Created RDS integration {0} from {1} to {2}", integration.getIntegrationArn(),
@@ -142,7 +147,8 @@ public class RdsIntegrationService implements Resettable {
             }
         }
         if (integrationIdentifier != null && !integrationIdentifier.isBlank()) {
-            return List.of(new Integration(requireIntegration(effectiveRegion, integrationIdentifier)));
+            Integration found = requireIntegration(effectiveRegion, integrationIdentifier);
+            return matchesFilters(found, filters) ? List.of(new Integration(found)) : List.of();
         }
         return regionIntegrations(effectiveRegion).stream()
                 .filter(integration -> matchesFilters(integration, filters))
@@ -167,21 +173,22 @@ public class RdsIntegrationService implements Resettable {
                         + integration.getIntegrationName() + " can't be modified because its status is "
                         + integration.getStatus() + ".", 400);
             }
-            if (integrationName != null && !integrationName.equals(integration.getIntegrationName())) {
+            Integration updated = new Integration(integration);
+            if (integrationName != null && !integrationName.equals(updated.getIntegrationName())) {
                 if (findByName(effectiveRegion, integrationName).isPresent()) {
                     throw alreadyExists(integrationName);
                 }
-                integration.setIntegrationName(integrationName);
+                updated.setIntegrationName(integrationName);
             }
             if (dataFilter != null) {
-                integration.setDataFilter(dataFilter);
+                updated.setDataFilter(dataFilter);
             }
             if (description != null) {
-                integration.setDescription(description);
+                updated.setDescription(description);
             }
-            integrations.put(key(effectiveRegion, integration.integrationId()), integration);
-            LOG.infov("Modified RDS integration {0}", integration.getIntegrationArn());
-            return withStatus(integration, Integration.STATUS_MODIFYING);
+            integrations.put(key(effectiveRegion, updated.integrationId()), updated);
+            LOG.infov("Modified RDS integration {0}", updated.getIntegrationArn());
+            return withStatus(updated, Integration.STATUS_MODIFYING);
         }
     }
 
@@ -206,6 +213,10 @@ public class RdsIntegrationService implements Resettable {
         requireInScope(arn, region, accountId, "SourceArn");
         String type = resource.substring(0, separator);
         String identifier = resource.substring(separator + 1);
+        if (identifier.isBlank()) {
+            throw new AwsException("InvalidParameterValue",
+                    "SourceArn must identify an RDS DB instance or an Aurora DB cluster.", 400);
+        }
         switch (type) {
             case "cluster" -> requireClusterSource(rdsService.getDbCluster(identifier, region));
             case "db" -> requireInstanceSource(rdsService.getDbInstance(identifier, region));
@@ -264,7 +275,7 @@ public class RdsIntegrationService implements Resettable {
         requireInScope(arn, region, accountId, "TargetArn");
         boolean found = namespace
                 ? redshiftServerlessService.findNamespaceByArn(targetArn, region).isPresent()
-                : redshiftService.findClusterByArn(targetArn).isPresent();
+                : redshiftService.findClusterByArn(targetArn, region).isPresent();
         if (!found) {
             throw new AwsException("InvalidParameterValue",
                     "The integration target " + targetArn + " can't be found.", 400);
@@ -325,6 +336,13 @@ public class RdsIntegrationService implements Resettable {
     private Optional<Integration> findByName(String region, String integrationName) {
         return regionIntegrations(region).stream()
                 .filter(integration -> integrationName.equals(integration.getIntegrationName()))
+                .findFirst();
+    }
+
+    private Optional<Integration> findBySourceAndTarget(String region, String sourceArn, String targetArn) {
+        return regionIntegrations(region).stream()
+                .filter(integration -> sourceArn.equals(integration.getSourceArn())
+                        && targetArn.equals(integration.getTargetArn()))
                 .findFirst();
     }
 

@@ -365,6 +365,8 @@ class RedshiftServiceTest {
         String arn = "arn:aws:redshift:us-east-1:111111111111:cluster:warehouse";
 
         assertTrue(service.findClusterByArn(arn).isPresent());
+        assertTrue(service.findClusterByArn(arn, "us-east-1").isPresent());
+        assertTrue(service.findClusterByArn(arn, "eu-west-1").isEmpty());
         for (String other : List.of("arn:aws:redshift:us-east-1:222222222222:cluster:warehouse",
                 "arn:aws:redshift:eu-west-1:111111111111:cluster:warehouse",
                 "arn:aws:redshift:us-east-1:111111111111:snapshot:warehouse/nightly")) {

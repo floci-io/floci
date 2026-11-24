@@ -51,6 +51,7 @@ class RdsIntegrationServiceTest {
     private static final String FILTER = "include: orders.*.*";
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-11-24T09:00:00Z"), ZoneOffset.UTC);
 
+    private InMemoryStorage<String, Integration> storage;
     private RdsService rdsService;
     private RedshiftService redshiftService;
     private RedshiftServerlessService serverless;
@@ -58,6 +59,7 @@ class RdsIntegrationServiceTest {
 
     @BeforeEach
     void setUp() {
+        storage = new InMemoryStorage<>();
         rdsService = mock(RdsService.class);
         redshiftService = mock(RedshiftService.class);
         serverless = mock(RedshiftServerlessService.class);
@@ -66,9 +68,9 @@ class RdsIntegrationServiceTest {
                 new AwsException("DBClusterNotFoundFault", "DB cluster missing not found.", 404));
         when(serverless.findNamespaceByArn(anyString(), anyString())).thenReturn(Optional.empty());
         when(serverless.findNamespaceByArn(NAMESPACE_ARN, REGION)).thenReturn(Optional.of(new Namespace()));
-        when(redshiftService.findClusterByArn(anyString())).thenReturn(Optional.empty());
-        when(redshiftService.findClusterByArn(REDSHIFT_CLUSTER_ARN)).thenReturn(Optional.of(new Cluster()));
-        service = new RdsIntegrationService(new InMemoryStorage<>(), rdsService, redshiftService, serverless,
+        when(redshiftService.findClusterByArn(anyString(), anyString())).thenReturn(Optional.empty());
+        when(redshiftService.findClusterByArn(REDSHIFT_CLUSTER_ARN, REGION)).thenReturn(Optional.of(new Cluster()));
+        service = new RdsIntegrationService(storage, rdsService, redshiftService, serverless,
                 new RegionResolver(REGION, ACCOUNT), CLOCK);
     }
 
@@ -159,6 +161,10 @@ class RdsIntegrationServiceTest {
         assertError("InvalidParameterValue", 400, () -> service.createIntegration(request("orders",
                 "arn:aws:rds:us-east-1:000000000000:snapshot:orders", NAMESPACE_ARN), REGION));
         assertError("InvalidParameterValue", 400, () -> service.createIntegration(request("orders",
+                "arn:aws:rds:us-east-1:000000000000:cluster:", NAMESPACE_ARN), REGION));
+        assertError("InvalidParameterValue", 400, () -> service.createIntegration(request("orders",
+                "arn:aws:rds:us-east-1:000000000000:db:", NAMESPACE_ARN), REGION));
+        assertError("InvalidParameterValue", 400, () -> service.createIntegration(request("orders",
                 CLUSTER_ARN, "arn:aws:s3:::orders"), REGION));
         assertError("InvalidParameterValue", 400, () -> service.createIntegration(request("orders",
                 "not-an-arn", NAMESPACE_ARN), REGION));
@@ -212,6 +218,14 @@ class RdsIntegrationServiceTest {
     }
 
     @Test
+    void createIntegration_refusesADuplicateSourceAndTargetPair() {
+        create("orders-zero-etl");
+
+        assertError("IntegrationAlreadyExistsFault", 400, () -> service.createIntegration(
+                request("orders-second-name", CLUSTER_ARN, NAMESPACE_ARN), REGION));
+    }
+
+    @Test
     void createIntegration_requiresADataFilterNamingADatabase() {
         assertError("InvalidParameterValue", 400, () -> service.createIntegration(
                 new RdsIntegrationService.CreateRequest("orders", CLUSTER_ARN, NAMESPACE_ARN, null, Map.of(),
@@ -234,13 +248,18 @@ class RdsIntegrationServiceTest {
     @Test
     void describeIntegrations_findsAnIntegrationByArnIdOrName() {
         Integration created = create("orders-zero-etl");
-        create("other-zero-etl");
+        service.createIntegration(request("other-zero-etl", CLUSTER_ARN, REDSHIFT_CLUSTER_ARN), REGION);
 
         for (String identifier : List.of(created.getIntegrationArn(), created.integrationId(), "orders-zero-etl")) {
             List<Integration> found = service.describeIntegrations(identifier, Map.of(), REGION);
             assertThat(found.stream().map(Integration::getIntegrationArn).toList(),
                     contains(created.getIntegrationArn()));
         }
+        assertThat(service.describeIntegrations(created.getIntegrationArn(),
+                Map.of("status", List.of("active")), REGION).stream().map(Integration::getIntegrationArn).toList(),
+                contains(created.getIntegrationArn()));
+        assertThat(service.describeIntegrations(created.getIntegrationArn(),
+                Map.of("status", List.of("failed")), REGION), empty());
         assertError("IntegrationNotFoundFault", 404,
                 () -> service.describeIntegrations("missing", Map.of(), REGION));
     }
@@ -248,7 +267,7 @@ class RdsIntegrationServiceTest {
     @Test
     void describeIntegrations_isScopedToTheRegionAndFiltered() {
         Integration orders = create("orders-zero-etl");
-        create("other-zero-etl");
+        service.createIntegration(request("other-zero-etl", CLUSTER_ARN, REDSHIFT_CLUSTER_ARN), REGION);
 
         assertThat(service.describeIntegrations(null, Map.of(), "us-west-2"), empty());
         assertThat(service.describeIntegrations(null, Map.of("integration-name", List.of("orders-zero-etl")),
@@ -277,7 +296,7 @@ class RdsIntegrationServiceTest {
     @Test
     void modifyIntegration_refusesATakenNameAnInvalidFilterAndAnUnknownIntegration() {
         Integration created = create("orders-zero-etl");
-        create("other-zero-etl");
+        service.createIntegration(request("other-zero-etl", CLUSTER_ARN, REDSHIFT_CLUSTER_ARN), REGION);
 
         assertError("IntegrationAlreadyExistsFault", 400, () -> service.modifyIntegration(
                 created.getIntegrationArn(), "other-zero-etl", null, null, REGION));
@@ -285,6 +304,18 @@ class RdsIntegrationServiceTest {
                 created.getIntegrationArn(), null, "include: orders.items", null, REGION));
         assertError("IntegrationNotFoundFault", 404, () -> service.modifyIntegration(
                 "missing", null, null, "changed", REGION));
+    }
+
+    @Test
+    void modifyIntegration_refusesAnIntegrationThatIsNotActive() {
+        Integration created = create("orders-zero-etl");
+        String key = "integration::" + REGION + "::" + created.integrationId();
+        Integration stored = new Integration(storage.get(key).orElseThrow());
+        stored.setStatus(Integration.STATUS_CREATING);
+        storage.put(key, stored);
+
+        assertError("InvalidIntegrationStateFault", 400, () -> service.modifyIntegration(
+                created.getIntegrationArn(), null, null, "changed", REGION));
     }
 
     @Test

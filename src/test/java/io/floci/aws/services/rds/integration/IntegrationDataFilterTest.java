@@ -62,6 +62,11 @@ class IntegrationDataFilterTest {
         assertInvalid("include: /bo.*/.*.*");
         assertInvalid("include: books.*./unclosed");
         assertInvalid("include: books.*.{x}");
+        assertInvalid("include: books.*./*/");
+        assertInvalid("include: books.*./+/");
+        assertInvalid("include: books.*.//");
+        assertInvalid("include: books.public.a/b/c");
+        assertInvalid("include: books.*./a/b/c/");
     }
 
     @Test

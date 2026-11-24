@@ -10,7 +10,9 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.CreateIntegrationResponse;
 import software.amazon.awssdk.services.rds.model.DbClusterNotFoundException;
+import software.amazon.awssdk.services.rds.model.DbInstanceNotFoundException;
 import software.amazon.awssdk.services.rds.model.DeleteIntegrationResponse;
+import software.amazon.awssdk.services.rds.model.DescribeIntegrationsResponse;
 import software.amazon.awssdk.services.rds.model.Integration;
 import software.amazon.awssdk.services.rds.model.IntegrationAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.IntegrationNotFoundException;
@@ -18,6 +20,7 @@ import software.amazon.awssdk.services.rds.model.IntegrationStatus;
 import software.amazon.awssdk.services.rds.model.ModifyIntegrationResponse;
 import software.amazon.awssdk.services.rds.model.Tag;
 import software.amazon.awssdk.services.redshiftserverless.RedshiftServerlessClient;
+import software.amazon.awssdk.services.redshiftserverless.model.Namespace;
 import software.amazon.awssdk.services.redshiftserverless.model.ResourceNotFoundException;
 
 import java.util.List;
@@ -29,8 +32,10 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
@@ -44,6 +49,7 @@ class RdsIntegrationIntegrationTest {
 
     private static final String ACCOUNT = "246813579024";
     private static final String CLUSTER = "zetl-orders-src";
+    private static final String INSTANCE = "zetl-orders-db";
     private static final String NAMESPACE = "zetl-orders-dest";
     private static final String FILTER = "include: orders.*.*";
 
@@ -60,9 +66,16 @@ class RdsIntegrationIntegrationTest {
                 // the test failed before it created the cluster
             }
             try {
-                serverless.deleteNamespace(request -> request.namespaceName(NAMESPACE));
-            } catch (ResourceNotFoundException ignored) {
-                // the test failed before it created the namespace
+                rds.deleteDBInstance(request -> request.dbInstanceIdentifier(INSTANCE).skipFinalSnapshot(true));
+            } catch (DbInstanceNotFoundException ignored) {
+                // the test did not create the standalone instance
+            }
+            for (Namespace namespace : serverless.listNamespaces(request -> {}).namespaces()) {
+                try {
+                    serverless.deleteNamespace(request -> request.namespaceName(namespace.namespaceName()));
+                } catch (ResourceNotFoundException ignored) {
+                    // already removed
+                }
             }
         }
     }
@@ -153,6 +166,53 @@ class RdsIntegrationIntegrationTest {
             assertAwsError("InvalidParameterValue", 400, () -> rds.createIntegration(request -> request
                     .integrationName("orders-zero-etl").sourceArn(sourceArn).targetArn(targetArn)));
             assertThat(rds.describeIntegrations(request -> {}).integrations(), empty());
+        }
+    }
+
+    @Test
+    void standalonePostgresInstanceIntegrationThroughTheSdk() {
+        try (RdsClient rds = rdsClient("us-east-1", ACCOUNT);
+             RedshiftServerlessClient serverless = serverlessClient()) {
+            String sourceArn = rds.createDBInstance(request -> request.dbInstanceIdentifier(INSTANCE)
+                    .dbInstanceClass("db.t3.micro").engine("postgres")
+                    .masterUsername("postgres").masterUserPassword("Secret123")).dbInstance().dbInstanceArn();
+            String targetArn = createTarget(serverless);
+
+            CreateIntegrationResponse created = rds.createIntegration(request -> request
+                    .integrationName("orders-from-instance").sourceArn(sourceArn).targetArn(targetArn)
+                    .dataFilter(FILTER));
+            assertThat(created.status(), equalTo(IntegrationStatus.CREATING));
+            assertThat(created.sourceArn(), equalTo(sourceArn));
+            assertThat(created.targetArn(), equalTo(targetArn));
+
+            Integration described = rds.describeIntegrations(request -> request
+                    .integrationIdentifier(created.integrationArn())).integrations().getFirst();
+            assertThat(described.status(), equalTo(IntegrationStatus.ACTIVE));
+        }
+    }
+
+    @Test
+    void describeIntegrationsPaginatesWithMaxRecordsAndMarker() {
+        try (RdsClient rds = rdsClient("us-east-1", ACCOUNT);
+             RedshiftServerlessClient serverless = serverlessClient()) {
+            String sourceArn = createSource(rds);
+            for (int i = 0; i < 21; i++) {
+                String nsName = "zetl-page-" + i;
+                String targetArn = serverless.createNamespace(request -> request.namespaceName(nsName))
+                        .namespace().namespaceArn();
+                String integrationName = "orders-page-" + i;
+                rds.createIntegration(request -> request.integrationName(integrationName)
+                        .sourceArn(sourceArn).targetArn(targetArn).dataFilter(FILTER));
+            }
+
+            DescribeIntegrationsResponse firstPage = rds.describeIntegrations(request -> request.maxRecords(20));
+            assertThat(firstPage.integrations(), hasSize(20));
+            assertThat(firstPage.marker(), notNullValue());
+
+            DescribeIntegrationsResponse secondPage = rds.describeIntegrations(request -> request
+                    .maxRecords(20).marker(firstPage.marker()));
+            assertThat(secondPage.integrations(), hasSize(1));
+            assertThat(secondPage.marker(), nullValue());
         }
     }
 }
