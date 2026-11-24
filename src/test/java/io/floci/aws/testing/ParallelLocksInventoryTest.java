@@ -20,8 +20,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * ci.yml runs the test classes that start no Quarkus application four at a time. A plain class that opens a socket
  * declares {@link ParallelLocks#PORTS}, so a class that releases a port and binds or dials it later never runs beside one
- * the kernel could hand that port to. The list of socket APIs is the one {@code .github/ci/split-concurrent.py}'s
- * rollout was annotated from; a class it misses fails here instead of flaking in a shard.
+ * the kernel could hand that port to. A class opens a socket when its source names one of the socket APIs below, or
+ * names, or extends, another src/test/java class that does (a helper such as {@link LocalHttpsServer}); a class
+ * this misses fails here instead of flaking in a shard.
  */
 class ParallelLocksInventoryTest {
 
@@ -30,29 +31,57 @@ class ParallelLocksInventoryTest {
     private static final Pattern EXTENDS = Pattern.compile(
             "^\\s*(?:public\\s+)?(?:abstract\\s+)?(?:final\\s+)?class\\s+\\w+(?:<[^>]*>)?\\s+extends\\s+(\\w+)",
             Pattern.MULTILINE);
+    private static final String SOCKET_APIS = "FreePorts|new ServerSocket|ServerSocketChannel|DatagramSocket"
+            + "|Https?Server\\.create|new Socket\\(|createHttpServer|createNetServer|\\.listen\\(|\\.bind\\(";
+    private static final Pattern CALLS_A_SOCKET_API = Pattern.compile(SOCKET_APIS);
     private static final Pattern OPENS_A_SOCKET = Pattern.compile(
-            "FreePorts|new ServerSocket|ServerSocketChannel|DatagramSocket|HttpServer\\.create|new Socket\\("
-                    + "|\\.bind\\(|localhost:[0-9]{4}|127\\.0\\.0\\.1:[0-9]{4}|getLocalPort");
+            SOCKET_APIS + "|localhost:[0-9]{4}|127\\.0\\.0\\.1:[0-9]{4}|getLocalPort");
     private static final Pattern PORTS_LOCK = Pattern.compile(
             "@ResourceLock\\(\\s*(?:value\\s*=\\s*)?ParallelLocks\\.PORTS\\b");
 
     @Test
     void everyPlainClassThatOpensASocketDeclaresThePortsLock() {
         Map<String, String> sources = sources();
+        Set<String> openers = openers(sources);
         Set<String> missing = new TreeSet<>();
-        for (Map.Entry<String, String> entry : sources.entrySet()) {
-            String name = entry.getKey();
-            String source = entry.getValue();
-            // This class names the socket APIs it looks for without opening any.
-            if (isTestClass(name) && !name.equals(ParallelLocksInventoryTest.class.getSimpleName())
-                    && !isQuarkus(name, sources, new TreeSet<>())
-                    && OPENS_A_SOCKET.matcher(source).find() && !PORTS_LOCK.matcher(source).find()) {
+        for (String name : openers) {
+            if (isTestClass(name) && !isQuarkus(name, sources, new TreeSet<>())
+                    && !PORTS_LOCK.matcher(sources.get(name)).find()) {
                 missing.add(name);
             }
         }
         assertTrue(missing.isEmpty(), "Plain test classes that open a socket without @ResourceLock(ParallelLocks.PORTS): "
                 + missing + ". Use the default mode when the class releases a port and binds or dials it later, "
                 + "ResourceAccessMode.READ otherwise.");
+    }
+
+    /**
+     * The classes whose source names a socket API, and the test classes that name, or extend, a helper whose source
+     * calls one: one hop, because a fixture that only names an address (a {@code localhost:4566} endpoint) would
+     * otherwise pull in every class that uses it. ParallelLocks and this class name the APIs without opening any.
+     */
+    private static Set<String> openers(Map<String, String> sources) {
+        Set<String> skipped = Set.of(ParallelLocks.class.getSimpleName(),
+                ParallelLocksInventoryTest.class.getSimpleName());
+        Set<String> openers = new TreeSet<>();
+        Set<String> helpers = new TreeSet<>();
+        sources.forEach((name, source) -> {
+            if (!skipped.contains(name) && OPENS_A_SOCKET.matcher(source).find()) {
+                openers.add(name);
+                if (!isTestClass(name) && CALLS_A_SOCKET_API.matcher(source).find()) {
+                    helpers.add(name);
+                }
+            }
+        });
+        if (!helpers.isEmpty()) {
+            Pattern names = Pattern.compile("\\b(?:" + String.join("|", helpers) + ")\\b");
+            sources.forEach((name, source) -> {
+                if (!skipped.contains(name) && names.matcher(source).find()) {
+                    openers.add(name);
+                }
+            });
+        }
+        return openers;
     }
 
     private static boolean isTestClass(String name) {

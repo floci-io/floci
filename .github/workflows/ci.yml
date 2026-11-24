@@ -146,9 +146,10 @@ jobs:
       # after them. split-concurrent.py says which is which. A pass with no classes is skipped: an
       # empty includesFile makes surefire run the whole suite.
       # surefire.timeout bounds each pass's reused test fork from its first test set, including
-      # deadlocks or blocking I/O that ignore JUnit's interrupt: 10 minutes for the plain pass,
-      # 25 for the Quarkus one. The 35-minute job ceiling also covers compilation, test startup,
-      # and report upload.
+      # deadlocks or blocking I/O that ignore JUnit's interrupt: 5 minutes for the plain pass, which
+      # took at most two on 2026-11-23, and 25 for the Quarkus one. Their sum stays under the
+      # 35-minute job ceiling with room for compilation and report upload, so a hung pass ends with
+      # surefire's thread dump instead of the job being cancelled.
       - name: Run tests
         run: |
           python3 .github/ci/split-concurrent.py shard.txt quarkus.txt plain.txt
@@ -157,7 +158,7 @@ jobs:
             ./mvnw surefire:test -B \
               -Dsurefire.includesFile="$GITHUB_WORKSPACE/plain.txt" \
               -Dsurefire.failIfNoTests=true \
-              -Dsurefire.timeout=600 \
+              -Dsurefire.timeout=300 \
               -Dtest.classes.mode=concurrent || status=$?
           fi
           if [ -s quarkus.txt ]; then

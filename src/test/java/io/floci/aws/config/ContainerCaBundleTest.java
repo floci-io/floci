@@ -12,6 +12,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
 import org.junit.jupiter.api.parallel.ResourceLock;
 
 import javax.net.ssl.SSLContext;
@@ -56,6 +57,7 @@ import static org.mockito.Mockito.when;
  * Floci's trust anchor, and the environment entries that make each runtime read it.
  */
 @ResourceLock(ParallelLocks.TLS_CONFIG)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class ContainerCaBundleTest {
 
     @TempDir

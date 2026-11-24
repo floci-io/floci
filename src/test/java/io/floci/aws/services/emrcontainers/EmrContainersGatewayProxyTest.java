@@ -4,6 +4,7 @@ import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.ServiceConfigAccess;
 import io.floci.aws.core.common.SparkConnectTargets;
 import io.floci.aws.core.common.WebSocketUpgrades;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -19,6 +20,8 @@ import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Duration;
 import java.util.Optional;
@@ -41,6 +44,7 @@ import static org.mockito.Mockito.when;
  * Requests to an endpoint's {@code serverUrl} through {@link EmrContainersGatewayProxy}: a server that echoes what it
  * gets stands in for the endpoint's gateway, and the service's routes for its tokens.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EmrContainersGatewayProxyTest {
 
     private static final String ENDPOINT = "ep0123456789a";

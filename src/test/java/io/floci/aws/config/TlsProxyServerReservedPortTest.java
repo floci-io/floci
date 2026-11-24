@@ -7,6 +7,7 @@ import io.vertx.core.Vertx;
 import io.vertx.core.net.NetClient;
 import io.vertx.core.net.NetServer;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
 import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.ArrayList;
@@ -26,6 +27,7 @@ import static org.mockito.Mockito.when;
  * available: anything that yields to the proxy on configuration alone would leave it unserved.
  */
 @ResourceLock(ParallelLocks.TLS_CONFIG)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class TlsProxyServerReservedPortTest {
 
     private static TlsProxyServer proxyWith(int flociPort, boolean tlsEnabled, int awsHttpsPort) {
