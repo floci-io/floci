@@ -16,6 +16,7 @@ public class RuleCondition {
     // typed configs
     private List<String> hostHeaderValues = new ArrayList<>();
     private List<String> pathPatternValues = new ArrayList<>();
+    private List<String> pathPatternRegexValues = new ArrayList<>();
     private String httpHeaderName;
     private List<String> httpHeaderValues = new ArrayList<>();
     private List<String> httpMethodValues = new ArrayList<>();
@@ -35,6 +36,12 @@ public class RuleCondition {
 
     public List<String> getPathPatternValues() { return pathPatternValues; }
     public void setPathPatternValues(List<String> pathPatternValues) { this.pathPatternValues = pathPatternValues; }
+
+    /** {@code PathPatternConfig.RegexValues}: regular expressions matched against the whole request path. */
+    public List<String> getPathPatternRegexValues() { return pathPatternRegexValues; }
+    public void setPathPatternRegexValues(List<String> pathPatternRegexValues) {
+        this.pathPatternRegexValues = pathPatternRegexValues != null ? pathPatternRegexValues : new ArrayList<>();
+    }
 
     public String getHttpHeaderName() { return httpHeaderName; }
     public void setHttpHeaderName(String httpHeaderName) { this.httpHeaderName = httpHeaderName; }

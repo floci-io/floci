@@ -11,6 +11,7 @@ import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.elbv2.ElbV2HealthChecker;
 import io.floci.aws.services.elbv2.ElbV2Service;
 import io.floci.aws.services.elbv2.ElbV2Service.ListenerCertificate;
+import io.floci.aws.services.elbv2.PathPatternRegexValues;
 import io.floci.aws.services.elbv2.model.Action;
 import io.floci.aws.services.elbv2.model.AvailabilityZone;
 import io.floci.aws.services.elbv2.model.Listener;
@@ -1013,6 +1014,14 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
             JsonNode pathCfg = item.path("PathPatternConfig");
             if (pathCfg.path("Values").isArray()) {
                 condition.setPathPatternValues(toStringList(pathCfg.path("Values")));
+            }
+            if (pathCfg.path("RegexValues").isArray()) {
+                List<String> regexValues = toStringList(pathCfg.path("RegexValues"));
+                if ("path-pattern".equals(condition.getField()) && !regexValues.isEmpty()) {
+                    PathPatternRegexValues.validate(regexValues,
+                            !condition.getValues().isEmpty() || !condition.getPathPatternValues().isEmpty());
+                }
+                condition.setPathPatternRegexValues(regexValues);
             }
             JsonNode hostCfg = item.path("HostHeaderConfig");
             if (hostCfg.path("Values").isArray()) {
