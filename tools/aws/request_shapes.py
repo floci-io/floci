@@ -2,8 +2,7 @@
 
 `regen_dynamodb_shapes.py`, `regen_sesv2_shapes.py`, `regen_apigateway_shapes.py`,
 `regen_ecs_shapes.py`, `regen_eks_shapes.py` and `regen_organizations_shapes.py` each name a botocore model
-and an output file and hand the rest to `main()`. `regen_resource_groups_shapes.py`, `regen_logs_delivery_shapes.py` and
-`regen_ecr_shapes.py` vendor constraints as well, through `build_constraints()`. The output keeps only what `RequestShapeModel` reads: the input
+and an output file and hand the rest to `main()`. The output keeps only what `RequestShapeModel` reads: the input
 shape of every operation, reduced to the members carried in the JSON body, and for every shape
 reachable from one, its type and the shapes of its members, list elements or map values.
 `regen_emr_serverless_shapes.py` keeps every operation's output shape too, with `outputs=True`.
@@ -12,8 +11,9 @@ reachable from one, its type and the shapes of its members, list elements or map
 result shape and the element it is wrapped in with `results=True`, the shapes the model marks
 `sensitive` with `sensitive=True`, and the shape each modeled error code is answered by with
 `errors=True`, holding every shape it keeps to what the record can read through `check`.
-`regen_iam_shapes.py` and `regen_sts_shapes.py` name their operations instead, which switches
-`main()` to `build_constraints()`.
+A generator that names its operations instead switches `main()` to `build_constraints()`, as
+`regen_iam_shapes.py`, `regen_sts_shapes.py`, `regen_ecr_shapes.py`, `regen_resource_groups_shapes.py` and
+`regen_logs_delivery_shapes.py` do, and so does one passing `constraints=True` for every operation with an input.
 
 Members bound to the URI, the query string or a header are left out: they never reach the body.
 A model without such members, as DynamoDB's, comes out whole.
