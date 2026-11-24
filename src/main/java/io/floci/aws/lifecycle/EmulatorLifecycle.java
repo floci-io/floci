@@ -10,6 +10,7 @@ import io.floci.aws.lifecycle.inithook.InitializationHook;
 import io.floci.aws.lifecycle.inithook.InitializationHooksRunner;
 import io.floci.aws.services.amazonmq.container.RabbitMqManager;
 import io.floci.aws.services.appsync.graphql.SchemaCreationWorker;
+import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.floci.aws.services.codeartifact.CodeArtifactService;
 import io.floci.aws.services.docdb.container.DocDbContainerManager;
 import io.floci.aws.services.dynamodb.DynamoDbRuntime;
@@ -123,6 +124,7 @@ public class EmulatorLifecycle {
     private final PersistentPathValidator persistentPathValidator;
     private final EksService eksService;
     private final CodeArtifactService codeArtifactService;
+    private final CloudWatchMetricsService cloudWatchMetricsService;
     private final DynamoDbRuntime dynamoDbRuntime;
     private final RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer;
     // Set on the boot thread, read by the async HttpServerStart observer.
@@ -170,7 +172,8 @@ public class EmulatorLifecycle {
                              DynamoDbRuntime dynamoDbRuntime,
                              RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer,
                              EksService eksService,
-                             CodeArtifactService codeArtifactService) {
+                             CodeArtifactService codeArtifactService,
+                             CloudWatchMetricsService cloudWatchMetricsService) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -212,6 +215,7 @@ public class EmulatorLifecycle {
         this.persistentPathValidator = persistentPathValidator;
         this.eksService = eksService;
         this.codeArtifactService = codeArtifactService;
+        this.cloudWatchMetricsService = cloudWatchMetricsService;
         this.dynamoDbRuntime = dynamoDbRuntime;
         this.redshiftZeroEtlConsumer = redshiftZeroEtlConsumer;
     }
@@ -243,6 +247,7 @@ public class EmulatorLifecycle {
 
         serviceRegistry.logEnabledServices();
         storageFactory.loadAll();
+        cloudWatchMetricsService.buildMetricKeyIndex();
         int sweptSessions = iamService.sweepOrphanedLambdaExecutionRoleSessions();
         if (sweptSessions > 0) {
             LOG.infov("Removed {0} orphaned Lambda execution-role session(s)", sweptSessions);
