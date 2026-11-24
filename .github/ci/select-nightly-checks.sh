@@ -27,7 +27,8 @@ trap 'rm -rf "$work"' EXIT
     > "$work/all.txt"
 
 if [ -n "${PR:-}" ]; then
-    gh pr diff "$PR" --repo "$GITHUB_REPOSITORY" --name-only > "$work/changed.txt"
+    # The files API pages up to 3000 files; gh pr diff refuses a diff of more than 300.
+    gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename' > "$work/changed.txt"
     if grep -qxE '\.github/(workflows/nightly-checks\.yml|ci/select-nightly-checks\.sh)' "$work/changed.txt"; then
         cp "$work/all.txt" "$work/selected.txt"
     else
