@@ -179,6 +179,35 @@ class DynamoDbNativeBackendTest {
         assertEquals("Invalid FilterExpression: Invalid function name; function: " + function, refused.getMessage());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            putItem    | nope(id)             | nope
+            putItem    | ATTRIBUTE_EXISTS(id) | ATTRIBUTE_EXISTS
+            updateItem | nope(id)             | nope
+            updateItem | ATTRIBUTE_EXISTS(id) | ATTRIBUTE_EXISTS
+            deleteItem | nope(id)             | nope
+            deleteItem | ATTRIBUTE_EXISTS(id) | ATTRIBUTE_EXISTS
+            """)
+    void typedWritesRefuseAnUnknownConditionFunction(String call, String condition, String function)
+            throws Exception {
+        createTable("");
+        JsonNode key = json("{\"id\":{\"S\":\"k\"}}");
+        backend.putItem(SCOPE, TABLE, key, null, null, null);
+
+        AwsException refused = assertThrows(AwsException.class, () -> {
+            switch (call) {
+                case "putItem" -> backend.putItem(SCOPE, TABLE, key, condition, null, null);
+                case "updateItem" -> backend.updateItem(SCOPE, TABLE, key, null, "SET n = :v", null,
+                        json("{\":v\":{\"N\":\"1\"}}"), "NONE", condition);
+                default -> backend.deleteItem(SCOPE, TABLE, key, condition, null, null);
+            }
+        });
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals("Invalid ConditionExpression: Invalid function name; function: " + function,
+                refused.getMessage());
+    }
+
     @Test
     void typedUpdateItemReturnsOnlyTheRequestedImage() throws Exception {
         backend.createTable(SCOPE, TABLE, List.of(new KeySchemaElement("id", "HASH")),

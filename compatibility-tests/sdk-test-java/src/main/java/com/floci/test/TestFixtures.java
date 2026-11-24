@@ -996,6 +996,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static StsClient stsClient(String accountId) {
+        return StsClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
+                .build();
+    }
+
     public static KafkaClient kafkaClient() {
         return KafkaClient.builder()
                 .endpointOverride(ENDPOINT)

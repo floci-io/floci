@@ -22,7 +22,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * declares {@link ParallelLocks#PORTS}, so a class that releases a port and binds or dials it later never runs beside one
  * the kernel could hand that port to. A class opens a socket when its source names one of the socket APIs below, or
  * names, or extends, another src/test/java class that does (a helper such as {@link LocalHttpsServer}); a class
- * this misses fails here instead of flaking in a shard.
+ * this misses fails here instead of flaking in a shard. A plain class that builds the {@code EmulatorConfig}
+ * mapping with a {@code SmallRyeConfigBuilder} declares {@link ParallelLocks#CONFIG_MAPPING} the same way.
  */
 class ParallelLocksInventoryTest {
 
@@ -38,6 +39,9 @@ class ParallelLocksInventoryTest {
             SOCKET_APIS + "|localhost:[0-9]{4}|127\\.0\\.0\\.1:[0-9]{4}|getLocalPort");
     private static final Pattern PORTS_LOCK = Pattern.compile(
             "@ResourceLock\\(\\s*(?:value\\s*=\\s*)?ParallelLocks\\.PORTS\\b");
+    private static final Pattern BUILDS_THE_CONFIG_MAPPING = Pattern.compile("withMapping\\(\\s*EmulatorConfig\\.class");
+    private static final Pattern CONFIG_MAPPING_LOCK = Pattern.compile(
+            "@ResourceLock\\(\\s*(?:value\\s*=\\s*)?ParallelLocks\\.CONFIG_MAPPING\\b");
 
     @Test
     void everyPlainClassThatOpensASocketDeclaresThePortsLock() {
@@ -53,6 +57,20 @@ class ParallelLocksInventoryTest {
         assertTrue(missing.isEmpty(), "Plain test classes that open a socket without @ResourceLock(ParallelLocks.PORTS): "
                 + missing + ". Use the default mode when the class releases a port and binds or dials it later, "
                 + "ResourceAccessMode.READ otherwise.");
+    }
+
+    @Test
+    void everyPlainClassThatBuildsTheConfigMappingDeclaresItsLock() {
+        Map<String, String> sources = sources();
+        Set<String> missing = new TreeSet<>();
+        sources.forEach((name, source) -> {
+            if (isTestClass(name) && BUILDS_THE_CONFIG_MAPPING.matcher(source).find()
+                    && !isQuarkus(name, sources, new TreeSet<>()) && !CONFIG_MAPPING_LOCK.matcher(source).find()) {
+                missing.add(name);
+            }
+        });
+        assertTrue(missing.isEmpty(), "Plain test classes that build the EmulatorConfig mapping without "
+                + "@ResourceLock(ParallelLocks.CONFIG_MAPPING): " + missing);
     }
 
     /**

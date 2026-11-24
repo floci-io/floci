@@ -5172,6 +5172,82 @@ class EksClusterManagerTest {
         }
     }
 
+    /** The service account lookup the pod identity webhook makes, through kubectl in the server container. */
+    @Nested
+    class ServiceAccountLookupTest {
+
+        private EksClusterManager manager;
+        private final Cluster cluster = new Cluster();
+
+        @BeforeEach
+        void setUp() {
+            EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
+            manager = Mockito.spy(new EksClusterManager(Mockito.mock(ContainerBuilder.class),
+                    Mockito.mock(ContainerLifecycleManager.class), Mockito.mock(ContainerDetector.class),
+                    Mockito.mock(PortAllocator.class), Mockito.mock(DockerHostResolver.class),
+                    Mockito.mock(EcrRegistryManager.class), config, new RegionResolver("us-east-1", "000000000000"),
+                    Mockito.mock(Ec2MetadataServer.class), Mockito.mock(EksOidcService.class),
+                    inlineMock(FlociCertificateAuthority.class), Mockito.mock(ContainerLogStreamer.class),
+                    new InMemoryStorage<>(), 0, Mockito.mock(Ec2ImageCatalog.class),
+                    EksTestEndpoints.dockerHostEndpoint()));
+            cluster.setName("demo");
+            cluster.setContainerId("server-1");
+        }
+
+        @Test
+        void theServiceAccountIsReadAsKubectlPrintsIt() {
+            doReturn(new ContainerExec.Result(0L, "{\"kind\":\"ServiceAccount\"}", "a warning", false)).when(manager)
+                    .execInContainerSeparatingStderr(anyString(), any(), anyInt());
+
+            assertEquals(EksClusterManager.ServiceAccountRead.found("{\"kind\":\"ServiceAccount\"}"),
+                    manager.serviceAccount(cluster, "payments", "checkout", 2));
+            verify(manager).execInContainerSeparatingStderr("server-1", new String[]{"kubectl",
+                    "--request-timeout=2s", "get", "serviceaccount", "checkout", "--namespace", "payments",
+                    "--output", "json"}, 2);
+        }
+
+        @Test
+        void aServiceAccountThatDoesNotExistIsAbsent() {
+            doReturn(new ContainerExec.Result(1L, "",
+                    "Error from server (NotFound): serviceaccounts \"checkout\" not found", false)).when(manager)
+                    .execInContainerSeparatingStderr(anyString(), any(), anyInt());
+
+            assertEquals(EksClusterManager.ServiceAccountRead.absent(),
+                    manager.serviceAccount(cluster, "payments", "checkout", 2));
+        }
+
+        /** A failed read says nothing about the service account, so it is not taken for an absent one. */
+        @Test
+        void aReadThatFailsOrTimesOutFails() {
+            doReturn(new ContainerExec.Result(1L, "", "Unable to connect to the server", false),
+                    new ContainerExec.Result(-1L, "{", "", true)).when(manager)
+                    .execInContainerSeparatingStderr(anyString(), any(), anyInt());
+
+            assertEquals(EksClusterManager.ServiceAccountRead.failed(),
+                    manager.serviceAccount(cluster, "payments", "checkout", 2));
+            assertEquals(EksClusterManager.ServiceAccountRead.failed(),
+                    manager.serviceAccount(cluster, "payments", "checkout", 2));
+        }
+
+        @Test
+        void aFailedExecFails() {
+            doThrow(new IllegalStateException("container gone")).when(manager)
+                    .execInContainerSeparatingStderr(anyString(), any(), anyInt());
+
+            assertEquals(EksClusterManager.ServiceAccountRead.failed(),
+                    manager.serviceAccount(cluster, "payments", "checkout", 2));
+        }
+
+        @Test
+        void aClusterWithNoContainerIsNotAsked() {
+            cluster.setContainerId(null);
+
+            assertEquals(EksClusterManager.ServiceAccountRead.absent(),
+                    manager.serviceAccount(cluster, "payments", "checkout", 2));
+            verify(manager, never()).execInContainerSeparatingStderr(any(), any(), anyInt());
+        }
+    }
+
     @Nested
     class JoinedInstancesTest {
 

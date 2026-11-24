@@ -411,6 +411,53 @@ class CloudWatchMetricsServiceTest {
         assertEquals(1.0, points.getFirst().sampleCount());
     }
 
+    @Test
+    void getMetricStatistics_readsDatapointsTheStoreHeldBeforeTheIndexWasBuilt() {
+        InMemoryStorage<String, MetricDatum> store = new InMemoryStorage<>();
+        CloudWatchMetricsService loaded = new CloudWatchMetricsService(
+                store, new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"));
+        long minute = (Instant.now().getEpochSecond() / 60) * 60 - 120;
+        MetricDatum persisted = datum("Requests", 7);
+        persisted.setNamespace(NAMESPACE);
+        persisted.setTimestamp(minute);
+        persisted.setSampleCount(1.0);
+        persisted.setSum(7.0);
+        persisted.setMinimum(7.0);
+        persisted.setMaximum(7.0);
+        store.put(REGION + "::" + NAMESPACE + "::Requests::::"
+                + MetricKeyIndex.timestampSegment(minute) + "::persisted", persisted);
+
+        loaded.buildMetricKeyIndex();
+
+        List<CloudWatchMetricsService.Datapoint> points = loaded.getMetricStatistics(
+                NAMESPACE, "Requests", null, Instant.ofEpochSecond(minute), Instant.ofEpochSecond(minute + 60),
+                60, List.of("Sum"), null, REGION);
+        assertEquals(1, points.size());
+        assertEquals(7.0, points.getFirst().sum());
+    }
+
+    @Test
+    void deleteMetricDataBefore_dropsOnlyTheNamespacesOlderDatapoints() {
+        long minute = (Instant.now().getEpochSecond() / 60) * 60 - 600;
+        MetricDatum old = datum("Requests", 1);
+        old.setTimestamp(minute);
+        MetricDatum recent = datum("Requests", 2);
+        recent.setTimestamp(minute + 120);
+        MetricDatum otherNamespace = datum("Requests", 4);
+        otherNamespace.setTimestamp(minute);
+        service.putMetricData(NAMESPACE, List.of(old, recent), REGION);
+        service.putMetricData("Other/Metrics", List.of(otherNamespace), REGION);
+
+        service.deleteMetricDataBefore(NAMESPACE, Instant.ofEpochSecond(minute + 60));
+
+        Instant start = Instant.ofEpochSecond(minute);
+        Instant end = Instant.ofEpochSecond(minute + 180);
+        assertEquals(List.of(2.0), service.getMetricStatistics(NAMESPACE, "Requests", null, start, end,
+                60, List.of("Sum"), null, REGION).stream().map(CloudWatchMetricsService.Datapoint::sum).toList());
+        assertEquals(List.of(4.0), service.getMetricStatistics("Other/Metrics", "Requests", null, start, end,
+                60, List.of("Sum"), null, REGION).stream().map(CloudWatchMetricsService.Datapoint::sum).toList());
+    }
+
     // ──────────────────────────── GetMetricStatistics ────────────────────────────
 
     @Test

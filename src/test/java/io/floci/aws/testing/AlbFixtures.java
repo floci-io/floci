@@ -17,7 +17,7 @@ import static org.hamcrest.Matchers.equalTo;
  */
 public final class AlbFixtures {
 
-    private static final String DEFAULT_ACCOUNT = "test";
+    private static final String DEFAULT_ACCOUNT = "000000000000";
 
     private AlbFixtures() {
     }
@@ -31,8 +31,8 @@ public final class AlbFixtures {
                 .formParam("Action", "CreateLoadBalancer")
                 .formParam("Name", name)
                 .formParam("Type", "application")
-                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
-                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b"))
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a", account))
+                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b", account))
                 .header("Authorization", auth(account))
             .when()
                 .post("/")

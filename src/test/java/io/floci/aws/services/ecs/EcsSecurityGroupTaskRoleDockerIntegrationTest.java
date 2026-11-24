@@ -61,7 +61,7 @@ class EcsSecurityGroupTaskRoleDockerIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(EcsSecurityGroupTaskRoleDockerIntegrationTest.class);
     private static final String REGION = "us-east-1";
-    private static final String SUBNET = Ec2Service.defaultSubnetId("us-east-1", "a");
+    private static final String SUBNET = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
     private static final String NETWORK = "floci-ecs-sg-task-role-it";
     private static final int CREDENTIALS_PORT = freePort();
 

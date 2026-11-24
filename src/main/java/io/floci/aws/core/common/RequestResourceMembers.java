@@ -49,6 +49,12 @@ final class RequestResourceMembers {
      */
     private static final Pattern FILL_MEMBER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\[]|\\[]\\.[A-Za-z][A-Za-z0-9_]*"
             + "(\\.[A-Za-z][A-Za-z0-9_]*)?|\\{}|\\{}\\.[A-Za-z][A-Za-z0-9_]*|\\.[A-Za-z][A-Za-z0-9_]*)?");
+    /**
+     * A member a service finds a resource by: one list, or a value at any depth of structures, as a lookup's request
+     * gives it ({@code AlternateIdentifier.ExternalId.Id}).
+     */
+    private static final Pattern FOUND_MEMBER =
+            Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\[]|(\\.[A-Za-z][A-Za-z0-9_]*)*)");
     /** An ARN format's leading resource type word, and the rest of its resource. */
     private static final Pattern RESOURCE_PART = Pattern.compile(
             "^arn:\\$\\{Partition}:[^:]*:[^:]*:[^:]*:([A-Za-z][A-Za-z0-9-]*)(.*)$");
@@ -852,7 +858,7 @@ final class RequestResourceMembers {
         });
         List<Member> find = new ArrayList<>();
         for (JsonNode member : resource.path("find")) {
-            find.add(member(operation, member.asText("")));
+            find.add(foundMember(operation, member.asText("")));
         }
         if (resource.has("find") && (!resource.path("find").isArray() || find.isEmpty() || !fill.isEmpty()
                 || (find.size() > 1 && find.stream().anyMatch(Member::list))
@@ -1054,6 +1060,17 @@ final class RequestResourceMembers {
             return new Member(path.substring(0, path.length() - 2), false, null, true);
         }
         return path.endsWith("[]") ? new Member(path.substring(0, path.length() - 2), true) : new Member(path, false);
+    }
+
+    /** A member a service finds a resource by: {@code Name[]}, {@code Name}, or a field of its structures, any deep. */
+    private static Member foundMember(String operation, String path) {
+        if (!FOUND_MEMBER.matcher(path).matches()) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads " + operation + " at " + path
+                    + ", which is no member");
+        }
+        int dot = path.indexOf('.');
+        return dot < 0 ? member(operation, path)
+                : new Member(path.substring(0, dot), false, foundMember(operation, path.substring(dot + 1)));
     }
 
     /**

@@ -25,20 +25,20 @@ class ElbV2RegionalZoneIntegrationTest {
             String name = "regional-" + UUID.randomUUID().toString().substring(0, 12);
             ElasticLoadBalancingV2Exception rejected = assertThrows(ElasticLoadBalancingV2Exception.class,
                     () -> virginia.createLoadBalancer(r -> r.name(name).scheme("internal")
-                            .type("application").subnets(Ec2Service.defaultSubnetId("us-east-1", "a"))));
+                            .type("application").subnets(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"))));
             assertEquals("ValidationError", rejected.awsErrorDetails().errorCode());
             ElasticLoadBalancingV2Exception osakaRejected = assertThrows(ElasticLoadBalancingV2Exception.class,
                     () -> osaka.createLoadBalancer(r -> r.name(name).scheme("internal").type("application")
-                            .subnets(Ec2Service.defaultSubnetId("ap-northeast-3", "a"))));
+                            .subnets(Ec2Service.defaultSubnetId("ap-northeast-3", "a", "000000000000"))));
             assertEquals("ValidationError", osakaRejected.awsErrorDetails().errorCode());
             String arn = osaka.createLoadBalancer(r -> r.name(name).scheme("internal").type("application")
-                    .subnets(Ec2Service.defaultSubnetId("ap-northeast-3", "a"),
-                            Ec2Service.defaultSubnetId("ap-northeast-3", "b")))
+                    .subnets(Ec2Service.defaultSubnetId("ap-northeast-3", "a", "000000000000"),
+                            Ec2Service.defaultSubnetId("ap-northeast-3", "b", "000000000000")))
                     .loadBalancers().getFirst().loadBalancerArn();
             try {
                 ElasticLoadBalancingV2Exception updateRejected = assertThrows(
                         ElasticLoadBalancingV2Exception.class, () -> osaka.setSubnets(r -> r.loadBalancerArn(arn)
-                                .subnets(Ec2Service.defaultSubnetId("ap-northeast-3", "b"))));
+                                .subnets(Ec2Service.defaultSubnetId("ap-northeast-3", "b", "000000000000"))));
                 assertEquals("ValidationError", updateRejected.awsErrorDetails().errorCode());
                 assertEquals(2, osaka.describeLoadBalancers(r -> r.loadBalancerArns(arn))
                         .loadBalancers().getFirst().availabilityZones().size());

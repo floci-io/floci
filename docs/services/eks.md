@@ -148,6 +148,23 @@ The volume is a projected service account token with audience `pods.eks.amazonaw
 
 Real EKS sets neither endpoint variable. Floci adds them so the credentials it hands out are used against Floci, as every container Floci launches already is, instead of being sent to AWS, which rejects them. `AWS_ENDPOINT_URL_STS` is set beside the global variable because the AWS SDK for Go v2 builds the STS client of its web identity provider before it reads `AWS_ENDPOINT_URL`. A pod cannot resolve the Docker host name (`host.docker.internal` lives only in the cluster container's `/etc/hosts`) or, unless the cluster's pods resolve through Floci's embedded DNS (see [DNS resolution](#dns-resolution-and-route-53-private-hosted-zones)), Floci's hostname (k3s replaces a custom Docker network's loopback resolver `127.0.0.11` with a public one, so `localhost.floci.io` answers `127.0.0.1`), so the endpoint is the Docker host address and is injected only when that is an IP address, as it is when Floci runs in a container. A container that sets `AWS_ENDPOINT_URL` itself gets no `AWS_ENDPOINT_URL_STS`, which would override its choice for STS. A container with any `envFrom` source gets no endpoint variable, because its values are unknown at admission and an injected `env` entry would take precedence over them; it still gets the credentials variables.
 
+#### IAM roles for service accounts
+
+The same webhook also makes the IAM roles for service accounts (IRSA) mutation, as the Amazon EKS pod identity webhook does. A pod that gets no Pod Identity mutation, because no association matches it or the agent addon is not installed, is checked for a service account annotated with `eks.amazonaws.com/role-arn`. The webhook is handed only the pod, so Floci reads the service account with `kubectl` in the cluster container, within two seconds of the webhook's three, even when Docker is slow. A read is reused for 10 seconds, so a burst of pods, and the cluster's own pods of service accounts with no role, cost one read each. So a change to a service account reaches pods created up to 10 seconds later. A failed read is not reused. A service account that is missing, unannotated or unreadable leaves the pod unchanged, and a failed read is logged as a warning. Pod Identity takes precedence, as the upstream webhook's container credentials do, and the two mutations are never made together.
+
+Every init container and container gets:
+
+| What | Value |
+|---|---|
+| `AWS_ROLE_ARN` | The service account's `eks.amazonaws.com/role-arn` |
+| `AWS_WEB_IDENTITY_TOKEN_FILE` | `/var/run/secrets/eks.amazonaws.com/serviceaccount/token` |
+| `AWS_STS_REGIONAL_ENDPOINTS` | `regional`, unless the service account sets `eks.amazonaws.com/sts-regional-endpoints: "false"` |
+| `AWS_DEFAULT_REGION`, `AWS_REGION` | The cluster's Region |
+| Volume mount | `/var/run/secrets/eks.amazonaws.com/serviceaccount`, read-only, from volume `aws-iam-token` |
+| `AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_STS` | Floci's endpoint, under the rules above (Floci only) |
+
+The volume is a projected service account token with path `token`, audience `sts.amazonaws.com`, and `expirationSeconds` 86400. Floci's STS exchanges a cluster's tokens for `sts.amazonaws.com` alone, so a service account whose `eks.amazonaws.com/audience` names another gets no mutation, with a warning, rather than a token it could not exchange. The service account's `eks.amazonaws.com/token-expiration` overrides the expiry and the pod's overrides that. A value that is not a whole number is ignored, and a shorter one than 600 seconds is raised to 600, the shortest the API server issues. Containers the pod names in its `eks.amazonaws.com/skip-containers` annotation, comma-separated, are left as they are. As upstream, a container that sets either `AWS_ROLE_ARN` or `AWS_WEB_IDENTITY_TOKEN_FILE` gets neither, one that sets either Region variable gets neither, and a volume or mount the pod already has under the name is kept. When that volume is not a projected service account token at path `token`, or a container mounts it elsewhere, the container gets no `AWS_ROLE_ARN` or `AWS_WEB_IDENTITY_TOKEN_FILE`, which would name a token it does not have. Like upstream, the webhook reads only `env` for values the container sets, so its entries take precedence over the same names an `envFrom` source holds. The region variables are what the SDK needs to call STS; the token is exchanged at Floci's STS as described under [IRSA](#irsa-iam-roles-for-service-accounts).
+
 ### Credential endpoint
 
 On EKS the Pod Identity Agent answers on `169.254.170.23:80` on every node while the `eks-pod-identity-agent` add-on is installed. Floci makes that address answer in the cluster container while the add-on is stored, with NAT rules that send requests for it straight to Floci's credentials endpoint (`GET /v1/credentials`), so nothing is installed or run in the node. A `PREROUTING` rule takes the pod network's requests (the cluster's pod CIDR) and an `OUTPUT` rule the node's own, which is where `hostNetwork` pods' come from. The node's masquerade rule (flannel's) carries the answers back. Workloads reach this endpoint using the injected `AWS_CONTAINER_CREDENTIALS_FULL_URI` environment variable, passing their projected token in the `Authorization` header (`Authorization: <token>` or `Authorization: Bearer <token>`).
@@ -426,6 +443,45 @@ With IAM enforcement on, `CreateCluster` checks `iam:PassRole` on the cluster ro
 Floci records the configuration and does nothing more with it yet. It does not create the node role's access
 entry, install the built-in node pools, serve the EBS provisioner or create load balancers, and
 `UpdateClusterConfig` refuses these members. [#8914](https://github.com/floci-io/floci/issues/8914) plans each.
+
+### Auto Mode load balancing for Services
+
+While a cluster has the load balancing capability on (`kubernetesNetworkConfig.elasticLoadBalancing.enabled`), a
+Service of type `LoadBalancer` whose `loadBalancerClass` is `eks.amazonaws.com/nlb` gets a Network Load Balancer in
+the cluster's subnets, as [on AWS](https://docs.aws.amazon.com/eks/latest/userguide/auto-configure-nlb.html):
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing   # internal when left out
+spec:
+  type: LoadBalancer
+  loadBalancerClass: eks.amazonaws.com/nlb
+  selector:
+    app: web
+  ports:
+  - port: 80
+    targetPort: 8080
+```
+
+Each TCP port gets a target group on the Service's NodePort, with the cluster's node registered by instance ID and a
+TCP health check, and a listener on the Service port. Once the node is registered, the load balancer's DNS name is
+written to the Service's `status.loadBalancer.ingress[0].hostname`. The load balancer, its listeners and target
+groups are deleted with the Service, with the cluster, and when the cluster's load balancing is turned off. Floci
+checks the cluster's Services every 10 seconds, and each check makes whatever a Service's ports are missing, so a
+port added later gets its listener and a changed NodePort its target group. The load balancers and target groups carry
+the tags Auto Mode sets, `eks:eks-cluster-name` and `service.eks.amazonaws.com/stack` (the only keys
+`AmazonEKSLoadBalancingPolicy` lets it set), and Floci takes as its own only those it named for the Service.
+
+UDP and SCTP ports get no listener, as Floci's load balancers serve TCP and HTTP only, and a Service with no TCP
+NodePort, such as one with `allocateLoadBalancerNodePorts: false`, gets no load balancer.
+
+On AWS, `eks.amazonaws.com/nlb` is the cluster's default class, so a Service that names no class gets one too. In
+Floci such a Service stays with k3s's own ServiceLB, which answers it with the node's address; name the class to get
+a load balancer. Ingresses (`eks.amazonaws.com/alb`) don't get one yet.
 
 ## Node group inputs
 
@@ -1070,7 +1126,7 @@ The k3s API server is configured with:
 - `--kube-apiserver-arg=service-account-issuer=https://kubernetes.default.svc.cluster.local`
 - `--kube-apiserver-arg=api-audiences=https://kubernetes.default.svc.cluster.local,sts.amazonaws.com`
 
-This enables in-cluster pods to project service account tokens directly using Kubernetes standard projected volumes:
+With `floci.services.eks.pod-identity-webhook` and TLS on, annotating the service account with `eks.amazonaws.com/role-arn` is enough: the admission webhook injects the token and the variables, as described under [IAM roles for service accounts](#iam-roles-for-service-accounts). A pod can also project the token itself, using Kubernetes standard projected volumes:
 
 ```yaml
 apiVersion: v1

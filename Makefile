@@ -310,6 +310,7 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_securityhub_shapes.py
 	$(PYTHON) tools/aws/regen_rekognition_shapes.py
 	$(PYTHON) tools/aws/regen_kinesis_shapes.py
+	$(PYTHON) tools/aws/regen_eventbridgev2_shapes.py
 	$(PYTHON) tools/aws/regen_config_shapes.py
 	$(PYTHON) tools/aws/regen_iam_shapes.py
 	$(PYTHON) tools/aws/regen_sts_shapes.py
@@ -452,6 +453,10 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 	}
 	@$(PYTHON) tools/aws/regen_kinesis_shapes.py --check || { \
 		echo "error: Kinesis request shapes are out of date; run 'make aws-data-sync'."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_eventbridgev2_shapes.py --check || { \
+		echo "error: EventBridge V2 request shapes are out of date; run 'make aws-data-sync'."; \
 		exit 1; \
 	}
 	@$(PYTHON) tools/aws/regen_config_shapes.py --check || { \
@@ -641,7 +646,9 @@ IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json
 	tools/aws/sources/kms-api-permissions.json tools/aws/fetch_kms_api_permissions.py \
 	tools/aws/test_fetch_kms_api_permissions.py tools/aws/sources/dynamodb-permissions.json \
 	tools/aws/fetch_dynamodb_permissions.py tools/aws/test_fetch_dynamodb_permissions.py \
-	tools/aws/sources/iam-identifiers.json tools/aws/fetch_iam_identifiers.py tools/aws/test_fetch_iam_identifiers.py
+	tools/aws/sources/iam-identifiers.json tools/aws/fetch_iam_identifiers.py tools/aws/test_fetch_iam_identifiers.py \
+	tools/aws/sources/required-resource-types.json tools/aws/fetch_required_resource_types.py \
+	tools/aws/test_fetch_required_resource_types.py
 
 iam-data-verify: ## CI gate (online): every vendored IAM file must still match AWS; CHANGED="<paths>" checks only the ones they cover
 	@# Every check runs even when an earlier one fails, so one file's drift cannot hide another's

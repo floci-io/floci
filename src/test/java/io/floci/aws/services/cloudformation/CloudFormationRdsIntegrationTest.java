@@ -48,8 +48,8 @@ class CloudFormationRdsIntegrationTest {
                     "GroupName": {"Value": {"Ref": "DbSubnets"}}
                   }
                 }
-                """.formatted(groupName, Ec2Service.defaultSubnetId("us-east-1", "a"),
-                Ec2Service.defaultSubnetId("us-east-1", "b"));
+                """.formatted(groupName, Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"),
+                Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000"));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -199,8 +199,8 @@ class CloudFormationRdsIntegrationTest {
                     "ParameterGroupArn": {"Value": {"Fn::GetAtt": ["DbParams", "DBParameterGroupArn"]}}
                   }
                 }
-                """.formatted(subnetGroupName, Ec2Service.defaultSubnetId("us-east-1", "a"),
-                Ec2Service.defaultSubnetId("us-east-1", "b"), parameterGroupName);
+                """.formatted(subnetGroupName, Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"),
+                Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000"), parameterGroupName);
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -262,7 +262,7 @@ class CloudFormationRdsIntegrationTest {
                     "GroupName": {"Value": {"Ref": "DbSubnets"}}
                   }
                 }
-                """.formatted(groupName, Ec2Service.defaultSubnetId("us-east-1", "a"),
-                Ec2Service.defaultSubnetId("us-east-1", "b"));
+                """.formatted(groupName, Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"),
+                Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000"));
     }
 }

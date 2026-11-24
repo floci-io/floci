@@ -2121,7 +2121,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     /** {@link #unrecognizedClientResponse} for a caller that renders the error itself. */
-    private static AwsException unrecognizedClientException(String credentialScope) {
+    public static AwsException unrecognizedClientException(String credentialScope) {
         return "s3".equals(credentialScope)
                 ? new AwsException("InvalidAccessKeyId", S3_INVALID_ACCESS_KEY_ID, 403)
                 : new AwsException("UnrecognizedClientException", INVALID_SECURITY_TOKEN, 403);
