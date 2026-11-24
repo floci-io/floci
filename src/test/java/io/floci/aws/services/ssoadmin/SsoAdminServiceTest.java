@@ -9,6 +9,7 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.services.identitystore.IdentityStoreService;
 import io.floci.aws.services.organizations.OrganizationsService;
+import io.floci.aws.services.organizations.model.OrganizationAccount;
 import io.floci.aws.services.ssoadmin.model.ApplicationAccessScope;
 import io.floci.aws.services.ssoadmin.model.ApplicationAssignment;
 import io.floci.aws.services.ssoadmin.model.ApplicationAuthenticationMethod;
@@ -32,9 +33,11 @@ import org.mockito.Mockito;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -2055,6 +2058,47 @@ class SsoAdminServiceTest {
         request.put("PrincipalType", "GROUP");
         request.put("PrincipalId", PRINCIPAL_ID);
         return request;
+    }
+
+    @Test
+    void anOrganizationInstancesStoreIsTheOwnersInFullItsMembersToReadAndNoOneElses() {
+        String store = service.getIdentityStoreId();
+        String member = "210987654321";
+        String delegated = "310987654321";
+        Mockito.when(organizationsService.findManagementAccountForResource(member)).thenReturn(Optional.of(ACCOUNT_ID));
+        Mockito.when(organizationsService.findManagementAccountForResource(delegated))
+                .thenReturn(Optional.of(ACCOUNT_ID));
+        Mockito.when(organizationsService.findAccount(member)).thenReturn(Optional.of(account(member)));
+        OrganizationAccount administrator = account(delegated);
+        administrator.getDelegatedServices().put("sso.amazonaws.com", Instant.EPOCH);
+        Mockito.when(organizationsService.findAccount(delegated)).thenReturn(Optional.of(administrator));
+
+        assertEquals(IdentityStoreAccess.FULL, service.identityStoreAccess(store, ACCOUNT_ID));
+        assertEquals(IdentityStoreAccess.READ, service.identityStoreAccess(store, member));
+        assertEquals(IdentityStoreAccess.FULL, service.identityStoreAccess(store, delegated));
+        assertEquals(IdentityStoreAccess.NONE, service.identityStoreAccess(store, "410987654321"));
+        // A store no instance holds is not IAM Identity Center's: any account uses it.
+        assertEquals(IdentityStoreAccess.FULL, service.identityStoreAccess("d-1234567890", "410987654321"));
+    }
+
+    @Test
+    void anAccountInstancesStoreIsItsAccountsAlone() {
+        String owner = "510987654321";
+        instances.put(owner, new SsoInstance("arn:aws:sso:::instance/ssoins-1111111111111111", "d-5555555555",
+                "account-instance", owner, "us-east-1", 0L, "ACTIVE", null, true, new LinkedHashMap<>()));
+        Mockito.when(organizationsService.findManagementAccountForResource(ACCOUNT_ID)).thenReturn(Optional.of(owner));
+
+        assertEquals(IdentityStoreAccess.FULL, service.identityStoreAccess("d-5555555555", owner));
+        assertEquals(IdentityStoreAccess.NONE, service.identityStoreAccess("d-5555555555", ACCOUNT_ID));
+        // An instance a reset or a restore takes away is not answered from what was last found.
+        instances.delete(owner);
+        assertEquals(IdentityStoreAccess.FULL, service.identityStoreAccess("d-5555555555", ACCOUNT_ID));
+    }
+
+    private static OrganizationAccount account(String id) {
+        OrganizationAccount account = new OrganizationAccount();
+        account.setId(id);
+        return account;
     }
 
     private static void assertError(String expectedCode, Runnable operation) {
