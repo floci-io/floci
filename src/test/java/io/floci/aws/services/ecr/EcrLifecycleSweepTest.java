@@ -11,9 +11,12 @@ import io.floci.aws.services.ecr.model.ImageMetadata;
 import io.floci.aws.services.ecr.model.Repository;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.services.ecr.registry.RegistryHttpClient;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Answers;
 import org.mockito.Mockito;
 
@@ -44,6 +47,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
 /** {@link EcrService#applyLifecyclePolicies} against an in-memory registry speaking the distribution API. */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EcrLifecycleSweepTest {
 
     private static final String REGION = "us-east-1";
