@@ -460,6 +460,33 @@ class EksServiceTest {
         verify(clusterManager, times(2)).replaceNodeForServiceLb(running);
     }
 
+    /** An authentication change whose node entry failed makes it on the retry the client token returns. */
+    @Test
+    void aRetriedAuthenticationChangeMakesTheNodeEntryTheFirstAttemptMissed() {
+        Cluster cluster = activeCluster();
+        cluster.setAccessConfig(new AccessConfig("CONFIG_MAP", false));
+        cluster.setComputeConfig(new ComputeConfig(true, List.of("general-purpose"), "arn:aws:iam::000000000000:role/node"));
+        EksAccessEntryService accessEntries = mock(EksAccessEntryService.class);
+        doThrow(new IllegalStateException("entry write failed")).doNothing()
+                .when(accessEntries).ensureAutoModeNodeEntry(any(), any());
+        UpdateClusterConfigRequest request = new UpdateClusterConfigRequest(null, null,
+                new AccessConfig("API_AND_CONFIG_MAP", null), null, "retry-token");
+        Update recorded = new Update("u", "Successful", "AccessConfigUpdate", List.of(), 0, List.of());
+        EksAddonService addons = mock(EksAddonService.class);
+        when(addons.recordUpdate(any(), anyString(), any(), any(), any())).thenReturn(recorded);
+        when(addons.findConfigUpdateByToken(any(), eq("retry-token"))).thenReturn(Optional.empty())
+                .thenReturn(Optional.of(new EksAddonService.StoredUpdate(recorded, null, request)));
+        EksService service = new EksService(fixedStorageFactory(clusterStoreWith(cluster)), testConfig(true),
+                new RegionResolver("us-east-1", "000000000000"), mock(EksClusterManager.class), null,
+                new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
+                        new ObjectMapper()), accessEntries, mock(EksPodIdentityAssociationService.class), addons);
+
+        assertThrows(IllegalStateException.class, () -> service.updateClusterConfig("running-cluster", request));
+        assertEquals(List.of(recorded), service.updateClusterConfig("running-cluster", request));
+
+        verify(accessEntries, times(2)).ensureAutoModeNodeEntry(cluster, "arn:aws:iam::000000000000:role/node");
+    }
+
     @Test
     void aCreateWhoseNodeEntryFailsStoresNoClusterAndLeavesNoEntry() {
         EksAccessEntryService accessEntries = mock(EksAccessEntryService.class);
