@@ -35,6 +35,10 @@ CONSUMERS=(
     # Redshift Serverless and the Redshift Data API, which Step Functions' redshiftdata tasks call, run on Redshift's
     # engine.
     'redshift:/services/(redshiftserverless/|stepfunctions/StepFunctionsRedshiftData)'
+    # Redshift auto-copy follows S3 event notifications, and EMR Serverless Hive keeps its tables on S3.
+    's3:/services/(redshift/RedshiftS3AutoCopy|emrserverless/EmrServerlessHive)DockerNightlyIntegrationTest$'
+    # These CUR checks assert S3's per-account storage through its REST API.
+    's3:/services/cur/Cur(DailyEmissionAccountIsolation|NonDefaultAccountEmission)DockerNightlyIntegrationTest$'
 )
 
 work="$(mktemp -d)"

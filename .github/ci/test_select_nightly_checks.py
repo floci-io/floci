@@ -23,6 +23,11 @@ SOURCES = {
         'import io.floci.aws.services.redshift.RedshiftService;\n',
     'services/redshiftserverless/RedshiftServerlessRuntimeDockerNightlyIntegrationTest': '',
     'services/stepfunctions/StepFunctionsRedshiftDataDockerNightlyIntegrationTest': '',
+    'services/redshift/RedshiftS3AutoCopyDockerNightlyIntegrationTest': '',
+    'services/cur/CurDailyEmissionAccountIsolationDockerNightlyIntegrationTest': '',
+    'services/cur/CurNonDefaultAccountEmissionDockerNightlyIntegrationTest': '',
+    'services/cur/ParquetEmitterDockerNightlyIntegrationTest': 'import io.floci.aws.services.s3.S3Service;\n',
+    'services/emrserverless/EmrServerlessHiveDockerNightlyIntegrationTest': '',
     'services/emr/EmrDockerRunnerNightlyIntegrationTest': '',
     'services/eks/EksEcrMirrorNightlyIntegrationTest': '',
 }
@@ -83,11 +88,20 @@ class SelectNightlyChecksTest(unittest.TestCase):
     def test_redshiftSelectsTheServicesThatRunOnItsEngine(self):
         self.assertEqual(['io/floci/aws/services/firehose/FirehoseRedshiftDeliveryDockerNightlyIntegrationTest',
                           'io/floci/aws/services/redshift/RedshiftCopyJobDockerNightlyIntegrationTest',
+                          'io/floci/aws/services/redshift/RedshiftS3AutoCopyDockerNightlyIntegrationTest',
                           'io/floci/aws/services/redshift/RedshiftSpectrumDockerNightlyIntegrationTest',
                           'io/floci/aws/services/redshiftserverless/'
                           'RedshiftServerlessRuntimeDockerNightlyIntegrationTest',
                           'io/floci/aws/services/stepfunctions/StepFunctionsRedshiftDataDockerNightlyIntegrationTest'],
                          self.e2e({MAIN + '/services/redshift/RedshiftService.java': '+x'}))
+
+    def test_s3SelectsTheChecksThatImportItAndThoseThatReachItThroughItsApi(self):
+        self.assertEqual(['io/floci/aws/services/cur/CurDailyEmissionAccountIsolationDockerNightlyIntegrationTest',
+                          'io/floci/aws/services/cur/CurNonDefaultAccountEmissionDockerNightlyIntegrationTest',
+                          'io/floci/aws/services/cur/ParquetEmitterDockerNightlyIntegrationTest',
+                          'io/floci/aws/services/emrserverless/EmrServerlessHiveDockerNightlyIntegrationTest',
+                          'io/floci/aws/services/redshift/RedshiftS3AutoCopyDockerNightlyIntegrationTest'],
+                         self.e2e({MAIN + '/services/s3/S3Service.java': '+x'}))
 
     def test_anImagePinSelectsEveryContainerCheck(self):
         pins = (('src/main/resources/application.yml',
