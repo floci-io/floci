@@ -697,11 +697,18 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
                                  Connection connection, String sql, Map<String, String> parameters, SpectrumSession context,
                                  RedshiftDataExecution execution, boolean autoCommit)
             throws SQLException {
+        String rewritten = CopyJobSql.rewrite(sql, !autoCommit || !connection.getAutoCommit());
+        ParsedSql parsed = RedshiftDataSqlParameters.parse(RedshiftSqlInterceptor.rewrite(rewritten));
         if (preparation != null && context != null) {
             SpectrumSession session = new SpectrumSession(context.accountId(), context.clusterKey(), context.databaseName(),
                     context.iamRoleArns(), !connection.getAutoCommit());
             try {
-                if (preparation.prepare(sql, session, new RedshiftDataBackendSql(connection, execution))) {
+                RedshiftDataBackendSql backend = new RedshiftDataBackendSql(connection, execution);
+                boolean handled = preparation.handlesDdl(sql, session, backend)
+                        ? preparation.prepare(sql, session, backend)
+                        : preparation.prepare(parsed.sql(), session, backend,
+                                positionalParameters(parsed.parameterOrder(), parameters));
+                if (handled) {
                     stored.status = RedshiftDataStatementStore.Status.FINISHED;
                     return;
                 }
@@ -714,8 +721,6 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
                 throw new SQLException("External query preparation failed: " + exception.getMessage(), "58030", exception);
             }
         }
-        String rewritten = CopyJobSql.rewrite(sql, !autoCommit || !connection.getAutoCommit());
-        ParsedSql parsed = RedshiftDataSqlParameters.parse(RedshiftSqlInterceptor.rewrite(rewritten));
         execution.checkCancellation();
         if (!autoCommit) {
             connection.setAutoCommit(false);
@@ -746,6 +751,20 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
         }
         stored.durationNanos = System.nanoTime() - t0;
         stored.status = RedshiftDataStatementStore.Status.FINISHED;
+    }
+
+    private static List<String> positionalParameters(List<String> order, Map<String, String> valuesByName) {
+        if (order.isEmpty()) {
+            return List.of();
+        }
+        List<String> values = new ArrayList<>(order.size());
+        for (String name : order) {
+            if (!valuesByName.containsKey(name)) {
+                return null;
+            }
+            values.add(valuesByName.get(name));
+        }
+        return values;
     }
 
     private ObjectNode executeResponse(RedshiftDataStatementStore.StoredStatement stored) {

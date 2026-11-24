@@ -1214,14 +1214,24 @@ role, volatility and batch options. `CREATE OR REPLACE` replaces only a function
 the same name with other argument types is a separate function. `DROP FUNCTION` removes both the stub and the
 registration; a `DROP FUNCTION` of any function Floci does not track is left to PostgreSQL.
 
-- **Calling the function is not supported yet.** The stub refuses every call with SQLSTATE `0A000`; invoking Lambda
-  from SQL is a later change. Creating and dropping the function work today.
+- **Calling the function works over both the PostgreSQL wire protocol (Simple and Extended Query) and the Redshift Data API.**
+  Before executing a statement that references a registered external function, Floci runs bounded collect passes (inside a
+  rolled-back transaction or savepoint), batches the collected argument tuples according to `MAX_BATCH_ROWS` and
+  `MAX_BATCH_SIZE`, invokes Lambda via the documented Redshift JSON contract (with `RETRY_TIMEOUT` backoff on throttling),
+  and caches the results in a session temp table for the statement's execution.
+- Nested calls (such as `outer_udf(inner_udf(x))`), `WHERE` filters, `PreparedStatement` bind parameters, Data API named
+  parameters, explicit transactions (`BEGIN` / `COMMIT` / `ROLLBACK`), and write statements (`INSERT ... SELECT`, `UPDATE`,
+  `DELETE`) are supported. Write statements whose target table enforces a `NOT NULL` or `CHECK` constraint that rejects
+  `NULL` during the collect pass will fail with PostgreSQL's constraint error.
+- Results are cached per statement only, never across statements, for both `STABLE` and `VOLATILE` functions.
 - Argument and return types are `SMALLINT`, `INTEGER`, `BIGINT`, `DECIMAL`, `REAL`, `DOUBLE PRECISION`, `CHAR`,
   `VARCHAR`, `BOOLEAN`, `DATE` and `TIMESTAMP`, with their aliases. Any other type is refused with `0A000`.
 - `VOLATILE` or `STABLE` is required, and `IMMUTABLE` is refused with `0A000`, as Redshift does not support it for
   Lambda UDFs. `IAM_ROLE DEFAULT` is refused with `0A000`.
 - `MAX_BATCH_SIZE` takes `KB` or `MB` (`KB` when omitted) between 1 KB and 5 MB, and `MAX_BATCH_ROWS` is at least 1.
-  The defaults are the documented 20000 ms, 2147483647 rows and 5 MB. The options are stored, and not applied yet.
+  The defaults are the documented 20000 ms, 2147483647 rows and 5 MB.
+- When IAM enforcement is enabled, the function's `IAM_ROLE` must trust `redshift.amazonaws.com` and be allowed to call
+  `lambda:InvokeFunction` on the target Lambda function; refusals fail with SQLSTATE `42501`.
 - An unqualified name is created in the session's current schema (`search_path`), failing with `3F000` if no schema is
   selected, and unqualified `DROP FUNCTION` resolves through `search_path`. The role and the Lambda function are not
   checked at creation.

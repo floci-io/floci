@@ -47,6 +47,7 @@ public class SpectrumQueryPreparation {
     private final KinesisSchemaRegistry kinesisSchemas;
     private final MskSchemaRegistry mskSchemas;
     private final ExternalFunctionRegistry functions;
+    private final LambdaUdfEvaluator udfEvaluator;
     private final KinesisStreamingViews views;
     private final MskStreamingViews mskViews;
     private final ExternalTableMaterializer materializer;
@@ -74,12 +75,13 @@ public class SpectrumQueryPreparation {
     @Inject
     public SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
                                     MskSchemaRegistry mskSchemas, ExternalFunctionRegistry functions,
+                                    LambdaUdfEvaluator udfEvaluator,
                                     ExternalTableMaterializer materializer, ExternalStatementParser parser,
                                     GlueService glue, ExternalMetadataWriter metadata,
                                     ExternalCatalogLocks catalogLocks, KinesisStreamingViews views,
                                     MskStreamingViews mskViews, Instance<RedshiftService> redshift) {
-        this(registry, kinesisSchemas, mskSchemas, functions, materializer, parser, glue, metadata, catalogLocks,
-                views, mskViews,
+        this(registry, kinesisSchemas, mskSchemas, functions, udfEvaluator, materializer, parser, glue, metadata,
+                catalogLocks, views, mskViews,
                 (accountId, clusterIdentifier) -> redshift.get().clusterRegion(accountId, clusterIdentifier).orElse(null));
     }
 
@@ -136,7 +138,19 @@ public class SpectrumQueryPreparation {
                              GlueService glue, ExternalMetadataWriter metadata, ExternalCatalogLocks catalogLocks,
                              KinesisStreamingViews views, MskStreamingViews mskViews,
                              BiFunction<String, String, String> clusterRegion) {
+        this(registry, kinesisSchemas, mskSchemas, functions, new LambdaUdfEvaluator(functions, null),
+                materializer, parser, glue, metadata, catalogLocks, views, mskViews, clusterRegion);
+    }
+
+    SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
+                             MskSchemaRegistry mskSchemas, ExternalFunctionRegistry functions,
+                             LambdaUdfEvaluator udfEvaluator,
+                             ExternalTableMaterializer materializer, ExternalStatementParser parser,
+                             GlueService glue, ExternalMetadataWriter metadata, ExternalCatalogLocks catalogLocks,
+                             KinesisStreamingViews views, MskStreamingViews mskViews,
+                             BiFunction<String, String, String> clusterRegion) {
         this.functions = functions;
+        this.udfEvaluator = udfEvaluator;
         this.views = views;
         this.mskViews = mskViews;
         this.clusterRegion = clusterRegion;
@@ -193,7 +207,8 @@ public class SpectrumQueryPreparation {
                 || !ExternalReferenceScanner.scan(sql, kinesisSchemaNames).isEmpty()
                 || !ExternalReferenceScanner.scan(sql, mskSchemaNames).isEmpty()
                 || ExternalReferenceScanner.writeTarget(sql,
-                        externalSchemaNames(schemas, kinesisSchemaNames, mskSchemaNames)).isPresent();
+                        externalSchemaNames(schemas, kinesisSchemaNames, mskSchemaNames)).isPresent()
+                || (udfEvaluator != null && udfEvaluator.referencesExternalFunction(sql, session));
     }
 
     public boolean needsBackendForDdl(String sql, SpectrumSession session) {
@@ -406,6 +421,9 @@ public class SpectrumQueryPreparation {
                 }
             }
         }
+        if (udfEvaluator != null) {
+            udfEvaluator.prepare(sql, session, backend, parameters, catalogRegion(session));
+        }
         return false;
     }
 
@@ -606,8 +624,7 @@ public class SpectrumQueryPreparation {
     }
 
     /**
-     * Creates the stub function the backend holds and remembers what the statement declared. The stub refuses every
-     * call with {@code 0A000}: the backend cannot reach Lambda, so evaluating a call is not wired yet.
+     * Creates the plpgsql stub function the backend holds and remembers what the statement declared.
      */
     private boolean createFunction(ExternalStatement.CreateFunction function, SpectrumSession session,
                                    BackendSql backend) {
@@ -622,7 +639,7 @@ public class SpectrumQueryPreparation {
         // The backend still decides whether the return type differs on a replace (42P13).
         boolean replace = function.orReplace() && functions.findFunction(session, schema, function.functionName(),
                 function.argumentTypes()).isPresent();
-        backend.execute(stubSql(function, schema, replace));
+        backend.execute(LambdaUdfEvaluator.stubSql(function, schema, replace));
         try {
             functions.replace(binding);
         } catch (RuntimeException exception) {
@@ -701,27 +718,11 @@ public class SpectrumQueryPreparation {
                 + "WHERE p.oid = pg_catalog.to_regprocedure(" + PostgresWire.quoteLiteral(signature) + ")";
     }
 
-    private static String stubSql(ExternalStatement.CreateFunction function, String schema, boolean replace) {
-        // The message is an argument, not the format string, so a % in a quoted name is not read as a placeholder.
-        String body = "BEGIN RAISE EXCEPTION '%', "
-                + PostgresWire.quoteLiteral("External function " + schema + "." + function.functionName()
-                        + " cannot be called: invoking Lambda from SQL is not supported yet")
-                + " USING ERRCODE = '0A000'; END";
-        return "CREATE " + (replace ? "OR REPLACE " : "") + "FUNCTION "
-                + signature(schema, function.functionName(), function.argumentTypes())
-                + " RETURNS " + function.returnType() + " LANGUAGE plpgsql " + function.volatility() + " AS "
-                + PostgresWire.quoteLiteral(body);
-    }
-
     private static String dropStubSql(String schema, String functionName, List<String> argumentTypes,
                                       boolean ifExists, boolean cascade) {
-        return "DROP FUNCTION " + (ifExists ? "IF EXISTS " : "") + signature(schema, functionName, argumentTypes)
+        return "DROP FUNCTION " + (ifExists ? "IF EXISTS " : "")
+                + LambdaUdfEvaluator.signature(schema, functionName, argumentTypes)
                 + (cascade ? " CASCADE" : " RESTRICT");
-    }
-
-    private static String signature(String schema, String functionName, List<String> argumentTypes) {
-        return ExternalTableMaterializer.quote(schema) + "." + ExternalTableMaterializer.quote(functionName)
-                + "(" + String.join(", ", argumentTypes) + ")";
     }
 
     /** A name is taken when any kind of external schema already holds it. */

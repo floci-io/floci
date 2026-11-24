@@ -7,6 +7,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -26,6 +28,11 @@ public final class PostgresExtendedBackendSession implements BackendSql {
     }
 
     @Override
+    public boolean inImplicitTransaction() {
+        return true;
+    }
+
+    @Override
     public Object connectionKey() {
         return backend;
     }
@@ -42,7 +49,7 @@ public final class PostgresExtendedBackendSession implements BackendSql {
     @Override
     public Optional<String> queryString(String sql) {
         try {
-            start(sql);
+            start(sql, List.of());
             closeAndFlush();
             return awaitSingleStringClosed();
         } catch (IOException exception) {
@@ -52,9 +59,36 @@ public final class PostgresExtendedBackendSession implements BackendSql {
     }
 
     @Override
+    public List<List<String>> queryRows(String sql) {
+        try {
+            start(sql, List.of());
+            closeAndFlush();
+            return awaitRowsClosed();
+        } catch (IOException exception) {
+            PostgresBackendSession.abandon(backend, exception);
+            throw failure(exception);
+        }
+    }
+
+    @Override
     public void execute(String sql) {
         try {
-            start(atomicCommand(sql));
+            start(atomicCommand(sql), List.of());
+            closeAndFlush();
+            awaitClosed();
+        } catch (IOException exception) {
+            throw failure(exception);
+        }
+    }
+
+    @Override
+    public void execute(String sql, List<String> parameters) {
+        if (parameters == null || parameters.isEmpty()) {
+            execute(sql);
+            return;
+        }
+        try {
+            start(sql, parameters);
             closeAndFlush();
             awaitClosed();
         } catch (IOException exception) {
@@ -73,7 +107,7 @@ public final class PostgresExtendedBackendSession implements BackendSql {
     @Override
     public long copyIn(String sql, InputStream data) {
         try {
-            start(sql);
+            start(sql, List.of());
             frame('H', new byte[0]);
             backend.getOutputStream().flush();
             readUntil('G');
@@ -105,7 +139,7 @@ public final class PostgresExtendedBackendSession implements BackendSql {
         }
     }
 
-    private void start(String sql) throws IOException {
+    private void start(String sql, List<String> parameters) throws IOException {
         if (failedUntilSync) {
             throw new SpectrumReadException("25P02", "Preparation is waiting for Sync after a backend error");
         }
@@ -120,7 +154,16 @@ public final class PostgresExtendedBackendSession implements BackendSql {
         cstring(body, name);
         cstring(body, name);
         body.writeShort(0);
-        body.writeShort(0);
+        body.writeShort(parameters.size());
+        for (String value : parameters) {
+            if (value == null) {
+                body.writeInt(-1);
+            } else {
+                byte[] utf8 = value.getBytes(StandardCharsets.UTF_8);
+                body.writeInt(utf8.length);
+                body.write(utf8);
+            }
+        }
         body.writeShort(0);
         frame('B', bytes.toByteArray());
         bytes.reset();
@@ -162,6 +205,19 @@ public final class PostgresExtendedBackendSession implements BackendSql {
             }
         }
         return Optional.ofNullable(value);
+    }
+
+    private List<List<String>> awaitRowsClosed() throws IOException {
+        List<List<String>> rows = new ArrayList<>();
+        for (int closed = 0; closed < 2;) {
+            Response response = read();
+            if (response.type() == 'D') {
+                rows.add(PostgresBackendSession.decodeRow(response.body()));
+            } else if (response.type() == '3') {
+                closed++;
+            }
+        }
+        return rows;
     }
 
     private void readUntil(char type) throws IOException {

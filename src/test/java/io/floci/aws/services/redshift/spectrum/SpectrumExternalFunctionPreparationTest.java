@@ -55,13 +55,15 @@ class SpectrumExternalFunctionPreparationTest {
     }
 
     @Test
-    void createsAStubThatRefusesCallsAndRemembersTheDeclaration() {
+    void createsAStubThatEvaluatesThroughTheSessionTablesAndRemembersTheDeclaration() {
         assertThat(preparation.handlesDdl(CREATE, SESSION), equalTo(true));
         assertThat(preparation.commandTag(CREATE), equalTo("CREATE FUNCTION"));
         assertThat(preparation.prepare(CREATE, SESSION, backend), equalTo(true));
 
         verify(backend).execute(argThat(sql -> sql.startsWith("CREATE FUNCTION \"public\".\"exfunc_sum\"(integer, integer) "
-                + "RETURNS integer LANGUAGE plpgsql VOLATILE AS E'BEGIN RAISE EXCEPTION")
+                + "RETURNS integer LANGUAGE plpgsql VOLATILE AS E'DECLARE ")
+                && sql.contains("pg_temp._floci_udf_pending")
+                && sql.contains("pg_temp._floci_udf_cache")
                 && sql.contains("USING ERRCODE = ''0A000''")));
         ExternalFunctionBinding binding = bound("public", "exfunc_sum", List.of("integer", "integer")).orElseThrow();
         assertThat(binding.lambdaFunction(), equalTo("lambda_sum"));
@@ -77,8 +79,9 @@ class SpectrumExternalFunctionPreparationTest {
                 + "LAMBDA 'now' IAM_ROLE '" + ROLE + "'", SESSION, backend);
 
         verify(backend).execute(argThat(sql -> sql.startsWith("CREATE FUNCTION \"Sales\".\"f_now\"() "
-                + "RETURNS character varying(8) LANGUAGE plpgsql STABLE")));
-        assertThat(bound("Sales", "f_now", List.of()).isPresent(), equalTo(true));
+                + "RETURNS character varying(8) LANGUAGE plpgsql VOLATILE")));
+        ExternalFunctionBinding binding = bound("Sales", "f_now", List.of()).orElseThrow();
+        assertThat(binding.volatility(), equalTo("STABLE"));
     }
 
     @Test
@@ -231,7 +234,7 @@ class SpectrumExternalFunctionPreparationTest {
         preparation.prepare(CREATE, SESSION, backend);
 
         verify(backend).execute(argThat(sql -> sql.contains("public.exfunc_sum")
-                && sql.contains("invoking Lambda from SQL is not supported yet")));
+                && sql.contains("cannot be called directly")));
     }
 
     @Test

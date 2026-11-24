@@ -7,6 +7,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 
 public final class PostgresBackendSession implements BackendSql {
@@ -29,6 +31,19 @@ public final class PostgresBackendSession implements BackendSql {
             output.write(PostgresWireDecoder.encodeQuery(sql));
             output.flush();
             return awaitSingleString(new PostgresWireDecoder(backend.getInputStream()));
+        } catch (IOException exception) {
+            abandon(backend, exception);
+            throw new SpectrumReadException(SQLSTATE_IO, "Unable to run a statement on the Redshift backend", exception);
+        }
+    }
+
+    @Override
+    public List<List<String>> queryRows(String sql) {
+        try {
+            OutputStream output = backend.getOutputStream();
+            output.write(PostgresWireDecoder.encodeQuery(sql));
+            output.flush();
+            return awaitRows(new PostgresWireDecoder(backend.getInputStream()));
         } catch (IOException exception) {
             abandon(backend, exception);
             throw new SpectrumReadException(SQLSTATE_IO, "Unable to run a statement on the Redshift backend", exception);
@@ -173,6 +188,53 @@ public final class PostgresBackendSession implements BackendSql {
             message = decoder.nextMessage();
         }
         throw new IOException("PostgreSQL closed before ReadyForQuery");
+    }
+
+    private static List<List<String>> awaitRows(PostgresWireDecoder decoder) throws IOException {
+        SpectrumReadException failure = null;
+        List<List<String>> rows = new ArrayList<>();
+        PostgresWireDecoder.FrontendMessage message = decoder.nextMessage();
+        while (message != null) {
+            if (message.type() == 'D') {
+                rows.add(decodeRow(message.body()));
+            } else if (message.type() == 'E') {
+                failure = toException(message.body());
+            } else if (message.type() == 'Z') {
+                if (failure != null) {
+                    throw failure;
+                }
+                return rows;
+            }
+            message = decoder.nextMessage();
+        }
+        throw new IOException("PostgreSQL closed before ReadyForQuery");
+    }
+
+    static List<String> decodeRow(byte[] body) {
+        if (body == null || body.length < 2) {
+            return List.of();
+        }
+        int columns = ((body[0] & 0xff) << 8) | (body[1] & 0xff);
+        List<String> row = new ArrayList<>(columns);
+        int offset = 2;
+        for (int i = 0; i < columns; i++) {
+            if (offset + 4 > body.length) {
+                break;
+            }
+            int length = ((body[offset] & 0xff) << 24) | ((body[offset + 1] & 0xff) << 16)
+                    | ((body[offset + 2] & 0xff) << 8) | (body[offset + 3] & 0xff);
+            offset += 4;
+            if (length < 0) {
+                row.add(null);
+            } else if (offset + length <= body.length) {
+                row.add(new String(body, offset, length, StandardCharsets.UTF_8));
+                offset += length;
+            } else {
+                row.add(null);
+                break;
+            }
+        }
+        return row;
     }
 
     static String firstColumn(byte[] body) {
