@@ -121,6 +121,8 @@ class GelfLogListenerTest {
         LogConfig logConfig = listener.logConfigFor("token-a", ROTATION);
         assertEquals(LogConfig.LoggingType.GELF, logConfig.getType());
         assertEquals("token-a", logConfig.getConfig().get("tag"));
+        assertEquals("non-blocking", logConfig.getConfig().get("mode"),
+                "failed GELF delivery must not skip the daemon's local copy");
         assertEquals("10m", logConfig.getConfig().get("cache-max-size"), "the rotation bounds the daemon's copy");
         assertEquals("3", logConfig.getConfig().get("cache-max-file"));
         String address = logConfig.getConfig().get("gelf-address");
