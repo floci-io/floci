@@ -6,7 +6,6 @@ import jakarta.ws.rs.core.MultivaluedMap;
 
 import java.math.BigInteger;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -79,17 +78,13 @@ public final class QueryConstraintCheck {
     private final JsonNode operations;
     private final JsonNode shapes;
     private final SmithyValidationErrors.Violations messages;
-    private final Map<String, Pattern> patterns = new HashMap<>();
+    private final Map<String, Pattern> patterns;
 
     private QueryConstraintCheck(JsonNode model, SmithyValidationErrors.Violations messages) {
         this.operations = model.path("operations");
         this.shapes = model.path("shapes");
         this.messages = messages;
-        for (Map.Entry<String, JsonNode> shape : shapes.properties()) {
-            if (shape.getValue().has("pattern")) {
-                patterns.put(shape.getKey(), VendoredPatterns.compile(shape.getValue().get("pattern").asText()));
-            }
-        }
+        this.patterns = VendoredShapes.patterns(shapes);
         for (Map.Entry<String, JsonNode> operation : operations.properties()) {
             requireReadableMembers(operation.getKey(), operation.getValue().asText());
         }
@@ -212,7 +207,7 @@ public final class QueryConstraintCheck {
         for (Map.Entry<String, JsonNode> member : structure.path("members").properties()) {
             String name = member.getKey();
             String shapeName = member.getValue().asText();
-            String memberPath = path + memberPath(name);
+            String memberPath = path + VendoredShapes.memberName(name);
             String param = prefix + name;
             boolean mandatory = required.contains(name);
             JsonNode shape = shapes.path(shapeName);
@@ -304,7 +299,7 @@ public final class QueryConstraintCheck {
         JsonNode shape = shapes.path(shapeName);
         return List.of(messages.mapKeys(path, key, SmithyValidationErrors.constraintSet(
                 shape.path("min").asInt(0), shape.path("max").asInt(Integer.MAX_VALUE),
-                VendoredPatterns.quoted(shape), allowedValues(shape))));
+                VendoredPatterns.quoted(shape), VendoredShapes.enumValues(shape))));
     }
 
     /**
@@ -370,12 +365,6 @@ public final class QueryConstraintCheck {
         return structureViolations(shape, param + ".", path + ".", params, Map.of());
     }
 
-    /** The member's name as a validation message spells it, which is the request's with a lower
-     * first letter. */
-    private static String memberPath(String name) {
-        return Character.toLowerCase(name.charAt(0)) + name.substring(1);
-    }
-
     /** Every constraint {@code value} breaks, in the order a shape declares them. */
     private List<String> violations(String shapeName, String value, String path) {
         JsonNode shape = shapes.path(shapeName);
@@ -386,22 +375,7 @@ public final class QueryConstraintCheck {
         if (!"string".equals(type)) {
             return List.of();
         }
-        List<String> violations = new ArrayList<>();
-        String length = messages.lengthOutOfRange(path, value,
-                shape.path("min").asInt(0), shape.path("max").asInt(Integer.MAX_VALUE));
-        if (length != null) {
-            violations.add(length);
-        }
-        Pattern pattern = patterns.get(shapeName);
-        if (pattern != null && !pattern.matcher(value).matches()) {
-            // Quoted as the model declares it, which is what AWS answers and what the service docs
-            // carry, rather than as it was compiled: a wide escape is rewritten to match on. One
-            // member is quoted from a capture instead, where AWS gives a pattern of its own for a
-            // shape botocore shares, and one object decides which text that is.
-            violations.add(messages.pattern(path, value, VendoredPatterns.quoted(shape)));
-        }
-        violations.addAll(single(enumViolation(shape, value, path)));
-        return violations;
+        return VendoredShapes.stringViolations(shape, patterns.get(shapeName), value, path, messages);
     }
 
     private static List<String> single(String violation) {
@@ -444,20 +418,5 @@ public final class QueryConstraintCheck {
             return messages.valueTooLarge(path, number.toString(), max);
         }
         return null;
-    }
-
-    private String enumViolation(JsonNode shape, String value, String path) {
-        List<String> allowed = allowedValues(shape);
-        if (allowed.isEmpty()) {
-            return null;
-        }
-        return allowed.contains(value) ? null : messages.notInEnum(value, path, allowed);
-    }
-
-    /** The values a shape's enum admits, in the model's order, or none for a shape without one. */
-    private static List<String> allowedValues(JsonNode shape) {
-        List<String> allowed = new ArrayList<>();
-        shape.path("enum").forEach(choice -> allowed.add(choice.asText()));
-        return allowed;
     }
 }
