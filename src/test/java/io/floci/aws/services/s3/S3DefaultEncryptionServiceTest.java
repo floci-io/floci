@@ -387,18 +387,22 @@ class S3DefaultEncryptionServiceTest {
     }
 
     @Test
-    void aConfigurationWithoutAnAlgorithmFallsBackToSseS3() {
-        s3Service.putBucketEncryption(BUCKET, "<ServerSideEncryptionConfiguration/>");
-        assertEquals("AES256", put("empty-configuration.txt", new PutObjectOptions()).getServerSideEncryption());
+    void aConfigurationThatDoesNotParseOrNamesNoRuleIsRefusedAndTheBucketFallsBackToSseS3() {
+        assertThrows(AwsException.class,
+                () -> s3Service.putBucketEncryption(BUCKET, "<ServerSideEncryptionConfiguration/>"));
+        assertThrows(AwsException.class, () -> s3Service.putBucketEncryption(BUCKET, "not xml"));
+        assertThrows(AwsException.class, () -> s3Service.putBucketEncryption(BUCKET,
+                configuration("aws:kms", KMS_KEY) + "<Broken>"));
 
-        s3Service.putBucketEncryption(BUCKET, configuration("aws:unknown", null));
-        assertEquals("AES256", put("unsupported-algorithm.txt", new PutObjectOptions()).getServerSideEncryption());
-
-        s3Service.putBucketEncryption(BUCKET, "not xml");
         assertEquals("AES256", put("malformed-configuration.txt", new PutObjectOptions()).getServerSideEncryption());
+    }
 
-        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY) + "<Broken>");
-        assertEquals("AES256", put("truncated-configuration.txt", new PutObjectOptions()).getServerSideEncryption());
+    @Test
+    void aDefaultWithAnUnsupportedAlgorithmIsRefusedAndTheBucketFallsBackToSseS3() {
+        assertThrows(AwsException.class,
+                () -> s3Service.putBucketEncryption(BUCKET, configuration("aws:unknown", null)));
+
+        assertEquals("AES256", put("unsupported-algorithm.txt", new PutObjectOptions()).getServerSideEncryption());
     }
 
     @Test

@@ -6587,8 +6587,57 @@ public class S3Service implements Resettable, ResourceProvider {
     public void putBucketEncryption(String bucketName, String encryptionXml) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> noSuchBucket());
-        bucket.setEncryptionConfiguration(encryptionXml);
+        bucket.setEncryptionConfiguration(validateEncryptionConfiguration(encryptionXml));
         bucketStore.put(bucketName, bucket);
+    }
+
+    /**
+     * The configuration a bucket stores, as the request sent it. AWS refuses a body that is not
+     * well-formed XML or holds no {@code Rule} with {@code MalformedXML}, and one whose
+     * {@code ApplyServerSideEncryptionByDefault} names an algorithm S3 does not serve, pairs a
+     * {@code KMSMasterKeyID} with another algorithm, or carries a KMS key id with a control
+     * character with {@code InvalidArgument}. Storing a refused body would not only diverge from
+     * AWS: a key id with a line break written into a response header makes every later read of the
+     * bucket fail. A {@code Rule} without {@code ApplyServerSideEncryptionByDefault} stays valid,
+     * as the Blocking SSE-C examples in the S3 User Guide send.
+     */
+    private static String validateEncryptionConfiguration(String encryptionXml) {
+        XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(encryptionXml);
+        XmlParser.XmlElement rule = root == null ? null : root.child("Rule");
+        if (rule == null) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our published schema",
+                    400);
+        }
+        XmlParser.XmlElement byDefault = rule.child("ApplyServerSideEncryptionByDefault");
+        if (byDefault == null) {
+            return encryptionXml;
+        }
+        XmlParser.XmlElement algorithm = byDefault.child("SSEAlgorithm");
+        String value = algorithm == null ? null : algorithm.text();
+        if (value == null || !SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES.contains(value)) {
+            throw new AwsException("InvalidArgument",
+                    "The ServerSideEncryptionByDefault element needs an SSEAlgorithm S3 serves: "
+                            + "AES256, aws:kms, aws:kms:dsse or aws:fsx", 400);
+        }
+        XmlParser.XmlElement key = byDefault.child("KMSMasterKeyID");
+        if (key == null) {
+            return encryptionXml;
+        }
+        String keyId = key.text();
+        if (!"aws:kms".equals(value) && !"aws:kms:dsse".equals(value)) {
+            throw new AwsException("InvalidArgument",
+                    "KMSMasterKeyID is allowed if and only if SSEAlgorithm is aws:kms or aws:kms:dsse", 400);
+        }
+        if (hasControlCharacter(keyId)) {
+            throw new AwsException("InvalidArgument",
+                    "The KMSMasterKeyID you provided does not use valid characters", 400);
+        }
+        return encryptionXml;
+    }
+
+    private static boolean hasControlCharacter(String value) {
+        return value.chars().anyMatch(character -> character < 0x20 || character == 0x7f);
     }
 
     public void deleteBucketEncryption(String bucketName) {
