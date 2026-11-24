@@ -69,6 +69,7 @@ class EmrServiceContainerStepsTest {
     private static final String DRIVER_FAILED = "The Spark driver exited with code 1.";
     private static final String INSTALL = "s3://bucket/bootstrap/install.sh";
     private static final String PIG = "[{\"Name\": \"Hadoop\"}, {\"Name\": \"Pig\"}]";
+    private static final String TRINO = "[{\"Name\": \"Trino\"}]";
     private static final String ERROR_CODE_PAGES = "https://docs.aws.amazon.com/emr/latest/ManagementGuide/";
     // The id of the image a bootstrap kept, which the cluster's steps run in.
     private static final String IMAGE = "sha256:" + "2".repeat(64);
@@ -1096,6 +1097,49 @@ class EmrServiceContainerStepsTest {
         assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, job.imageTemplate());
         assertEquals("exectype = tez\nmapreduce.job.working.dir = /user/${user.name}\npig.exec.reducers.max = 8",
                 job.environment().get("FLOCI_PIG_PROPERTIES"));
+    }
+
+    @Test
+    void aClusterWithFlocisTrinoRunsItBesideTheMetastoreWhereItsStepsTrinoCliReachesIt() {
+        EmrService withTrino = fixture.withTrino();
+        EmrStep query = sparkStep("query", "CONTINUE");
+        List<String> args = List.of("trino-cli", "--execute", "SHOW CATALOGS");
+        query.setArgs(args);
+        EmrCluster requested = cluster("trino", true, query);
+        requested.setApplications(TRINO);
+        requested.setConfigurations("[{\"Classification\": \"trino-connector-hive\", \"Properties\": "
+                + "{\"hive.metastore\": \"glue\"}}]");
+        withTrino.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        // The image has Hive, as EMR installs hive-client and hcatalog-server with Trino, and the CLI of the Trino the
+        // release ships, 446 for emr-7.5.0.
+        assertEquals(List.of(List.of("emr-7.5.0", "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
+                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", "true", "false")),
+                fixture.releaseImages.asked);
+        assertEquals(List.of("trinodb/trino:446"), fixture.releaseImages.trinoImages);
+        assertEquals(new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of("hive.metastore", "glue")),
+                fixture.clusterStorage.metastores.get(0).trino());
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals(args, job.command());
+        String host = fixture.clusterStorage.hdfs.get(0).get(1);
+        assertEquals("http://" + host + ":8889", job.environment().get("FLOCI_TRINO_SERVER"));
+    }
+
+    @Test
+    void aClusterWithTrinoRunsNoneWhileFlocisTrinoIsOff() {
+        EmrStep query = sparkStep("query", "CONTINUE");
+        query.setArgs(List.of("trino-cli", "--execute", "SHOW CATALOGS"));
+        EmrCluster requested = cluster("trino", true, query);
+        requested.setApplications(TRINO);
+        service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        assertEquals(List.of(), fixture.releaseImages.asked);
+        assertEquals(List.of(), fixture.clusterStorage.metastores);
+        assertFalse(runner.jobs.get(0).environment().containsKey("FLOCI_TRINO_SERVER"));
     }
 
     @Test

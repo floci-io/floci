@@ -233,6 +233,34 @@ class EmrSparkStepsTest {
     }
 
     @Test
+    void aClusterInstallsTrinoWhereItsApplicationsNameItOnANumberedRelease() {
+        assertTrue(EmrSparkSteps.installsTrino(RELEASE, "[{\"Name\": \"Trino\"}]", objectMapper));
+        assertTrue(EmrSparkSteps.installsTrino(RELEASE, "[{\"Name\": \"Spark\"}, {\"Name\": \"trino\"}]",
+                objectMapper));
+        for (String applications : new String[]{HIVE_AND_SPARK, "[]", null, "[{"}) {
+            assertFalse(EmrSparkSteps.installsTrino(RELEASE, applications, objectMapper));
+        }
+        // The AWS runtime for Apache Spark's applications are "AmazonCloudWatchAgent, Delta, Hudi, Iceberg,
+        // JupyterEnterpriseGateway, Livy, and Spark".
+        assertFalse(EmrSparkSteps.installsTrino("emr-spark-8.1.0", "[{\"Name\": \"Trino\"}]", objectMapper));
+    }
+
+    @Test
+    void trinosHiveCatalogGetsTheClustersTrinoConnectorHiveALaterConfigurationWinning() {
+        String configurations = """
+                [{"Classification": "trino-connector-hive", "Properties": {"hive.metastore": "glue",
+                  "hive.metastore.glue.catalogid": "111122223333"}},
+                 {"Classification": "hive-site", "Properties": {"hive.metastore.uris": "thrift://elsewhere:9083"}},
+                 {"Classification": "trino-connector-hive",
+                  "Properties": {"hive.metastore.glue.catalogid": "444455556666"}}]
+                """;
+
+        assertEquals(Map.of("hive.metastore", "glue", "hive.metastore.glue.catalogid", "444455556666"),
+                EmrSparkSteps.trinoHiveConnector(configurations, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.trinoHiveConnector(null, objectMapper));
+    }
+
+    @Test
     void aPigCommandRunsOnTezWithTheClustersTezSiteThenItsPigProperties() {
         String configurations = """
                 [{"Classification": "pig-properties", "Properties": {"pig.exec.reducers.max": "8"}},

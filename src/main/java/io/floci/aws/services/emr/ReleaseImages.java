@@ -14,7 +14,17 @@ public interface ReleaseImages {
      * Hadoop's services alone, and with Pig or without, made first when the Docker daemon does not have it, which may
      * take as long as pulling the two, and downloading Pig; a failure is thrown.
      */
-    String image(String releaseLabel, String sparkImage, String hiveImage, boolean withHive, boolean withPig);
+    default String image(String releaseLabel, String sparkImage, String hiveImage, boolean withHive,
+                         boolean withPig) {
+        return image(releaseLabel, sparkImage, hiveImage, withHive, withPig, null);
+    }
+
+    /**
+     * {@link #image(String, String, String, boolean, boolean)}, with EMR's {@code trino-cli} for the Trino of
+     * {@code trinoImage}, unless that is null, which pulling that image may take long too.
+     */
+    String image(String releaseLabel, String sparkImage, String hiveImage, boolean withHive, boolean withPig,
+                 String trinoImage);
 
     /**
      * The step or the bootstrap that {@link #image} gave {@code imageId} to has ended, so a newer image of its kind may

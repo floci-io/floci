@@ -180,6 +180,27 @@ class EmrReleaseImagesTest {
     }
 
     @Test
+    void anImageForAClusterWithFlocisTrinoHasTrinosCliFromItsImageAndANameOfItsOwn() {
+        List<String> copied = makesMissing("emr-7.5.0", true, false, "trinodb/trino:446");
+
+        // Hive's, then the CLI, from a container of the Trino image the coordinator runs, never started.
+        List<String> expected = new ArrayList<>(EmrReleaseImages.COPIES.stream().map(EmrReleaseImages.Copy::from)
+                .toList());
+        expected.add("cli:/usr/bin/trino");
+        assertEquals(expected, copied);
+        assertEquals("/usr/lib", EmrReleaseImages.TRINO_CLI.into());
+        assertEquals("trino/trino-cli", EmrReleaseImages.TRINO_CLI.as());
+        verify(docker).removeContainerCmd("cli");
+        ArgumentCaptor<String> tags = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Map<String, String>> labels = mapCaptor();
+        images.image("emr-7.5.0", SPARK, HIVE, true, false);
+        verify(lifecycle, times(2)).commit(eq("target"), anyString(), tags.capture(), anyString(), labels.capture());
+        assertNotEquals(tags.getAllValues().get(0), tags.getAllValues().get(1));
+        assertNotEquals(labels.getAllValues().get(0).get(EmrReleaseImages.KIND_LABEL),
+                labels.getAllValues().get(1).get(EmrReleaseImages.KIND_LABEL));
+    }
+
+    @Test
     void aReleaseOfTheAwsRuntimeForSparkGetsNoPig() throws IOException {
         // "Pig and Oozie are not included."
         List<String> copied = makesMissing("emr-spark-8.1.0", false, true);
@@ -500,6 +521,11 @@ class EmrReleaseImagesTest {
     }
 
     private List<String> makesMissing(String release, boolean withHive, boolean withPig) {
+        return makesMissing(release, withHive, withPig, null);
+    }
+
+    // What the image made copies, a path of the Trino image's container as cli:<path>, with Trino's CLI of trino.
+    private List<String> makesMissing(String release, boolean withHive, boolean withPig, String trino) {
         when(lifecycle.getDockerClient()).thenReturn(docker);
         String repository = ContainerStorageHelper.dockerName(config, "emr-release");
         // The two are pulled as a container's image would be, from the image-registry-base it names.
@@ -527,6 +553,16 @@ class EmrReleaseImagesTest {
             when(from.exec()).thenAnswer(read -> new ByteArrayInputStream(new byte[0]));
             return from;
         });
+        if (trino != null) {
+            resolves("mirror/" + trino, "sha256:trino");
+            container("sha256:trino", "cli");
+            when(docker.copyArchiveFromContainerCmd(eq("cli"), anyString())).thenAnswer(invocation -> {
+                copied.add("cli:" + invocation.getArgument(1));
+                CopyArchiveFromContainerCmd from = mock(CopyArchiveFromContainerCmd.class);
+                when(from.exec()).thenAnswer(read -> new ByteArrayInputStream(new byte[0]));
+                return from;
+            });
+        }
         when(docker.copyArchiveToContainerCmd("target"))
                 .thenReturn(copyCommand());
         when(lifecycle.commit(eq("target"), eq(repository), anyString(), eq("hadoop:hadoop"), any()))
@@ -535,7 +571,7 @@ class EmrReleaseImagesTest {
         when(listImages.exec()).thenAnswer(invocation -> listed);
         when(docker.listImagesCmd()).thenReturn(listImages);
 
-        assertEquals("sha256:made", images.image(release, SPARK, HIVE, withHive, withPig));
+        assertEquals("sha256:made", images.image(release, SPARK, HIVE, withHive, withPig, trino));
         return copied;
     }
 
