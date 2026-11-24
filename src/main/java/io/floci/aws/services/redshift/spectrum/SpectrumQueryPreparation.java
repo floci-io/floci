@@ -15,7 +15,6 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -97,9 +96,7 @@ public class SpectrumQueryPreparation {
         this(registry, kinesisSchemas,
                 new MskSchemaRegistry(AccountAwareStorageBackend.<MskSchemaBinding>inMemory("000000000000")),
                 inMemoryFunctions(), materializer, parser, glue, metadata, catalogLocks,
-                new KinesisStreamingViews(new KinesisViewRegistry(
-                        AccountAwareStorageBackend.<KinesisViewBinding>inMemory("000000000000")),
-                        null, null, null, Clock.systemUTC()), clusterRegion);
+                KinesisStreamingViews.inMemory(), clusterRegion);
     }
 
     SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
@@ -121,13 +118,7 @@ public class SpectrumQueryPreparation {
                              GlueService glue, ExternalMetadataWriter metadata, ExternalCatalogLocks catalogLocks,
                              KinesisStreamingViews views, BiFunction<String, String, String> clusterRegion) {
         this(registry, kinesisSchemas, mskSchemas, functions, materializer, parser, glue, metadata, catalogLocks,
-                views, inMemoryMskViews(), clusterRegion);
-    }
-
-    private static MskStreamingViews inMemoryMskViews() {
-        return new MskStreamingViews(new MskViewRegistry(
-                AccountAwareStorageBackend.<MskViewBinding>inMemory("000000000000")),
-                null, null, null, null, Clock.systemUTC());
+                views, MskStreamingViews.inMemory(), clusterRegion);
     }
 
     SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
