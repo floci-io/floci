@@ -16,6 +16,7 @@ import io.floci.aws.services.iam.AssumeRolePolicyEvaluator;
 import io.floci.aws.services.iam.IamPolicyEvaluator;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.ResourcePolicyProvider;
+import io.floci.aws.services.iam.RoleResourceAccessAuthorizer;
 import io.floci.aws.services.iam.ScpProvider;
 import io.floci.aws.services.iam.model.CallerContext;
 import io.floci.aws.services.iam.model.IamRole;
@@ -89,7 +90,8 @@ class ApiGatewayTaskInvokerTest {
         AssumeRolePolicyEvaluator trust = new AssumeRolePolicyEvaluator(mapper, policies);
         Instance<ResourcePolicyProvider> resourcePolicies = mock(Instance.class);
         when(resourcePolicies.isUnsatisfied()).thenReturn(true);
-        LambdaTaskAuthorizer authorizer = new LambdaTaskAuthorizer(iam, policies, trust, resourcePolicies, scps);
+        RoleResourceAccessAuthorizer access = new RoleResourceAccessAuthorizer(iam, policies, resourcePolicies, scps);
+        LambdaTaskAuthorizer authorizer = new LambdaTaskAuthorizer(iam, policies, trust, resourcePolicies, access);
         when(config.services().iam().enforcementEnabled()).thenReturn(true);
         invoker = new ApiGatewayTaskInvoker(api, iam, trust, authorizer, config, mapper, listener);
         machine = new StateMachine();

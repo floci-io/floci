@@ -6,6 +6,7 @@ import io.floci.aws.services.iam.IamPolicyEvaluator;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.ResourcePolicyProvider;
 import io.floci.aws.services.iam.ResourcePolicyProvider.ResourcePolicy;
+import io.floci.aws.services.iam.RoleResourceAccessAuthorizer;
 import io.floci.aws.services.iam.ScpProvider;
 import io.floci.aws.services.iam.model.CallerContext;
 import io.floci.aws.services.iam.model.IamRole;
@@ -88,8 +89,10 @@ class LambdaTaskAuthorizerTest {
         when(providers.iterator()).thenAnswer(call -> List.of(functionPolicies, bucketPolicies).iterator());
         ObjectMapper mapper = new ObjectMapper();
         IamPolicyEvaluator evaluator = new IamPolicyEvaluator(mapper);
+        RoleResourceAccessAuthorizer access = new RoleResourceAccessAuthorizer(
+                iamService, evaluator, providers, scpProvider);
         authorizer = new LambdaTaskAuthorizer(iamService, evaluator, new AssumeRolePolicyEvaluator(mapper, evaluator),
-                providers, scpProvider);
+                providers, access);
     }
 
     @Test
