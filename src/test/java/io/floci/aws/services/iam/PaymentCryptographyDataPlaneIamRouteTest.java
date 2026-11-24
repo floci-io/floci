@@ -1,9 +1,11 @@
 package io.floci.aws.services.iam;
 
 import io.floci.aws.core.common.SignedServiceRoute;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.URI;
 
@@ -25,6 +27,7 @@ import static org.mockito.Mockito.when;
  * <p>The rest of the repository holds a request to its standard: a request is refused however
  * it is sent. This is that standard for the data plane.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class PaymentCryptographyDataPlaneIamRouteTest {
 
     private final IamActionRegistry registry = new IamActionRegistry();

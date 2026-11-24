@@ -492,6 +492,19 @@ class DynamoDbServiceTest {
         assertThrows(AwsException.class, () -> service.describeTable("NonExistent", "eu-west-1"));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            nope(userId)             | nope
+            ATTRIBUTE_EXISTS(userId) | ATTRIBUTE_EXISTS
+            """)
+    void putItemRefusesAnUnknownConditionFunctionWithoutTheHandler(String condition, String function) {
+        createUsersTable("us-east-1");
+        AwsException exception = assertThrows(AwsException.class, () -> service.putItem("Users",
+                item("userId", "u1"), condition, null, null, "us-east-1", "NONE"));
+        assertEquals("Invalid ConditionExpression: Invalid function name; function: " + function,
+                exception.getMessage());
+    }
+
     @Test
     void applyReplicaUpdatesRejectsBlankRegion() {
         createUsersTable("us-east-1");
@@ -1164,8 +1177,8 @@ class DynamoDbServiceTest {
 
     @Test
     void scanOfEmptyTableDoesNotReadFilterExpression() {
-        // Callers that skip the handler's validation (the Step Functions scan integration)
-        // only see a malformed FilterExpression once an item is evaluated.
+        // The handler and the typed backend check the FilterExpression before the scan,
+        // so the scan reads it only once an item is evaluated.
         String region = "eu-west-1";
         createUsersTable(region);
 

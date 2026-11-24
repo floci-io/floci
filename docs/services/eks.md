@@ -230,6 +230,7 @@ Floci tags the cluster security group with the standard AWS system tags:
 - **Creation**: The security group is created in the resolved cluster VPC when the cluster is created. Both real and mock clusters receive a security group. If a cluster is created without any VPC or subnets, `clusterSecurityGroupId` is omitted from the response. If a caller explicitly provides a `resourcesVpcConfig.vpcId` that does not exist in EC2, the request is rejected with `InvalidParameterException` (HTTP 400).
 - **Deletion**: When the cluster is deleted via `DeleteCluster`, Floci deletes the associated cluster security group from EC2. If the security group was already removed out-of-band, the deletion succeeds idempotently without error.
 - **Backfill**: Existing persisted clusters that were created before this feature receive an auto-generated cluster security group during startup backfill if their VPC is present.
+- **Node network interface**: A node holding an address in the cluster's first subnet has a primary network interface there, at that address, and the node instance and its interface hold the cluster security group, as an EKS node's interface does. The AWS Load Balancer Controller reads the group there to open a target's ports. `DescribeInstances` and `DescribeNetworkInterfaces` report the interface (see [EC2 cluster node instances](ec2.md#cluster-node-instances)), and the group cannot be deleted while the node holds it. Deleting the cluster ends the node in EC2 as terminating it would, so the group goes with the cluster.
 - **Rules**: In accordance with AWS EKS behavior, the cluster security group includes a self-referencing inbound rule allowing all traffic from members of the same security group to enable control plane and node communication, a self-referencing outbound rule for Elastic Fabric Adapter (EFA) traffic, and the standard EC2 outbound rule.
 
 ## Custom control-plane and node arguments (emulator affordance)
@@ -407,9 +408,16 @@ populated"), and one that names a `nodeRoleArn` without node pools with `Invalid
 Compute Config nodeRoleArn is not null or empty, nodePool value(s) must be provided."). A `computeConfig` with
 neither is accepted, as AWS accepts it for Auto Mode without its built-in node pools.
 
-In CloudFormation, `AWS::EKS::Cluster` leaves EKS Auto Mode out for now: it accepts `ComputeConfig`,
-`StorageConfig` and `KubernetesNetworkConfig.ElasticLoadBalancing` and ignores them, so a template that enables
-Auto Mode creates its cluster without it.
+`UpdateClusterConfig` turns Auto Mode on or off for an existing cluster and changes its node pools, taking
+`computeConfig`, `storageConfig` and `kubernetesNetworkConfig.elasticLoadBalancing` together as one update, which
+it records as an `AutoModeUpdate`. A member the request leaves out keeps its stored value, and while compute stays
+on, a `computeConfig` without `nodeRoleArn` keeps the cluster's role, which can't change while it is on. A request
+that changes nothing is refused with `InvalidRequestException` ("No changes needed for EKS Auto Mode
+configuration provided").
+
+In CloudFormation, `AWS::EKS::Cluster` creates its cluster with `ComputeConfig`, `StorageConfig` and
+`KubernetesNetworkConfig.ElasticLoadBalancing`, and an update changes them in place through `UpdateClusterConfig`:
+a property the template drops is read as disabled, and a stack rollback puts the configuration before back.
 
 With IAM enforcement on, `CreateCluster` checks `iam:PassRole` on the cluster role, passed to
 `eks.amazonaws.com`, and not yet on the node role. AWS's Service Reference lists both `ec2.amazonaws.com` and
@@ -701,6 +709,17 @@ Stock Amazon EKS clusters historically define a default `gp2` StorageClass point
 
 Callers requiring dynamic volume provisioning can install a driver (such as the `aws-ebs-csi-driver` addon) and define their desired StorageClass. As on an EKS node, the cluster node's mounts are shared, so a driver's node plugin can mount volumes under `/var/lib/kubelet` with `Bidirectional` propagation.
 
+An [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) cluster with block storage enabled (`storageConfig.blockStorage.enabled`) provisions the claims of a StorageClass whose provisioner is `ebs.csi.eks.amazonaws.com`, as Auto Mode's EBS capability does. Floci serves them from the node's disk with a local-path provisioner registered under that name (`FLOCI_SERVICES_EKS_BLOCK_STORAGE_PROVISIONER_IMAGE`), installed while block storage is enabled. As on AWS, the cluster gets no StorageClass; create one naming the provisioner:
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: auto-ebs-sc
+provisioner: ebs.csi.eks.amazonaws.com
+volumeBindingMode: WaitForFirstConsumer
+```
+
 For local testing workflows that rely on automatic volume binding without a CSI driver, set `floci.services.eks.default-storage-class: true` (or `FLOCI_SERVICES_EKS_DEFAULT_STORAGE_CLASS=true`) to retain k3s's bundled `local-path` provisioner and default StorageClass.
 
 ## Joining EC2 instances as cluster nodes
@@ -762,11 +781,58 @@ does not enable it; omitted or false values keep the simulated behavior.
 | `FLOCI_SERVICES_EKS_ECR_REGISTRY_MIRROR` | `true` | Inject a containerd `registries.yaml` so pods can pull images pushed to [Floci ECR](ecr.md) |
 | `FLOCI_SERVICES_EKS_DISABLE_CNI` | `false` | Start k3s without bundled flannel, network policy, and kube-proxy so an external CNI can take over |
 | `FLOCI_SERVICES_EKS_DEFAULT_STORAGE_CLASS` | `false` | Retain k3s bundled local-path provisioner and default StorageClass (default false matches EKS with no default class) |
+| `FLOCI_SERVICES_EKS_BLOCK_STORAGE_PROVISIONER_IMAGE` | `rancher/local-path-provisioner:v0.0.35` | Provisioner that serves EKS Auto Mode block storage (`ebs.csi.eks.amazonaws.com`) |
+| `FLOCI_SERVICES_EKS_BLOCK_STORAGE_HELPER_IMAGE` | `rancher/mirrored-library-busybox:1.37.0` | Helper pod image of that provisioner |
 | `FLOCI_SERVICES_EKS_IRSA_SIGNING_KEY` | `true` | Pass the cluster OIDC signing key to k3s so in-cluster projected service account tokens can assume IAM roles via Floci STS |
 | `FLOCI_SERVICES_EKS_POD_IDENTITY_WEBHOOK` | `true` | Register a mutating admission webhook that injects pod identity credentials. Needs `FLOCI_TLS_ENABLED=true` |
 | `FLOCI_SERVICES_EKS_IMDS` | `false` | Enable link-local IMDS (`169.254.169.254`) proxy in cluster containers |
 | `FLOCI_SERVICES_EKS_EMBEDDED_DNS` | `true` | Inject Floci's embedded DNS server into cluster containers for Route 53 private hosted zones and internal name resolution |
 | `FLOCI_SERVICES_EKS_VPC_ROUTE_PROGRAMMING` | `true` | Program emulated VPC route table entries into k3s cluster containers |
+| `FLOCI_SERVICES_EKS_VPC_POD_NETWORK` | `false` | Give pods addresses from IPv4 `/28` prefixes of the node's subnet, listed on its network interface, as the VPC CNI's prefix delegation does (see [VPC pod network](#vpc-pod-network)) |
+| `FLOCI_SERVICES_EKS_VPC_POD_PREFIXES` | `2` | How many `/28` prefixes a node holds with `FLOCI_SERVICES_EKS_VPC_POD_NETWORK` |
+
+### VPC pod network
+
+With `FLOCI_SERVICES_EKS_VPC_POD_NETWORK=true`, pods get addresses from the cluster's VPC, as the Amazon VPC CNI plugin
+gives them with prefix delegation, instead of k3s's own pod network. A node holding an address in a Docker-backed subnet
+leases IPv4 `/28` prefixes of that subnet, and its pods take their addresses from them. The node's interface lists the
+prefixes in `ipv4PrefixSet`, on `DescribeInstances` and `DescribeNetworkInterfaces`, where the AWS Load Balancer
+Controller finds the interface behind a pod address, so a target group with `TargetType ip` reaches the pods: Floci's
+health checks and load balancers dial the pod addresses on the VPC's Docker network, as other instances in the VPC do.
+
+- **Count**: `FLOCI_SERVICES_EKS_VPC_POD_PREFIXES`, two by default: under the VPC CNI's default `WARM_PREFIX_TARGET` of
+  one, which keeps one prefix wholly free, a node running pods holds two. With the setting on, Floci refuses to start
+  unless the count is between 1 and 16. A subnet without enough free `/28` blocks leaves the node the ones it could
+  lease, with a warning.
+- **Placement**: prefixes are taken from the top of the subnet down, clear of the subnet's last address, which AWS
+  reserves, and of every address an instance, interface, gateway, endpoint or container already holds. A container Floci
+  joins to the VPC's network without an address of its own, Floci itself or a node holding no subnet address, takes the
+  lowest address of the VPC's range that nothing leases or holds, so it never lands in a prefix. When Docker cannot say
+  which addresses its containers hold, no prefix is leased or re-reserved, with a warning.
+- **Held addresses**: a prefix's sixteen addresses count as held, so no instance or interface gets one, and
+  `DescribeSubnets` leaves them out of `AvailableIpAddressCount`.
+- **Lifecycle**: the node keeps its prefixes across a restart, re-reserving them as it re-reserves its address, and
+  leases new ones only for those another holder took meanwhile. An adopted node keeps the prefixes it was started with
+  and leases no others; a container that replaces it later leases the ones it lacks. Deleting the cluster, or a first
+  start that falls back to the bridge network, gives them back.
+- **On the node**: k3s starts without flannel and its network policy controller (the VPC CNI enforces no network
+  policy unless it is enabled), with the VPC's range as its cluster CIDR. A bridge, `cni0`, hands out the prefixes'
+  addresses, keeping the first host address of each for itself as the pods' gateway, so a prefix gives thirteen pods
+  their addresses. The node answers ARP for them on the VPC network, as the VPC delivers a prefix's traffic to the
+  interface it is delegated to, and traffic from a prefix leaving the VPC takes the node's address, as the VPC CNI's
+  SNAT gives it. Inside the VPC, pods keep their own addresses both ways.
+- **Out of addresses**: pods beyond what the prefixes hold stay in `ContainerCreating`, as on EKS when a node runs out
+  of addresses. `FLOCI_SERVICES_EKS_VPC_POD_PREFIXES` gives the node more.
+- **Link-local endpoints**: the rules that send pods' requests for IMDS (with `FLOCI_SERVICES_EKS_IMDS_POD_NETWORK`) and
+  for the Pod Identity address to Floci match the prefixes instead of `10.42.0.0/16`.
+- **Changing the setting**: a node started with another pod network, or with prefixes it no longer holds all of, is
+  replaced on its data volume when Floci starts, as one with another capacity is. A node on k3s's network is replaced
+  only when its replacement would run the VPC's, so one that fell back stays as it is until its subnet has a free `/28`.
+  A replacement that fails leaves the node running as it was, with the prefixes it was started with.
+- **Falls back to k3s's network** when `FLOCI_SERVICES_EKS_DISABLE_CNI` leaves the pod network to an external CNI, or
+  when the node holds no address or prefix in a Docker-backed subnet; a warning says which. On Docker Desktop for macOS
+  and Windows, as with any container address, the host cannot dial pod addresses; containers and Floci in a container
+  can.
 
 ### Kubernetes versions and network configuration
 
@@ -846,27 +912,37 @@ helm install my-app ./chart \
   --set image.tag=v1
 ```
 
+The same two accounts' registry hosts as AWS names them,
+`<account>.dkr.ecr.<region>.amazonaws.com` (`amazonaws.com.cn` in the China regions), are
+mirrored too, so a chart written for EKS that names its own account's images that way pulls
+them from Floci unchanged:
+
+```bash
+helm install my-app ./chart \
+  --set image.repository=000000000000.dkr.ecr.us-east-1.amazonaws.com/my-repo \
+  --set image.tag=v1
+```
+
+containerd still tries AWS itself last, so an image Floci does not hold is looked for there,
+as it would be without the mirror.
+
 Requirements and limits:
 
 - The k3s container must reach Floci's Docker-network address. Set the global
   `FLOCI_SERVICES_DOCKER_NETWORK` as in the standard `docker-compose.yml` or the
   EKS service network variable.
-- Only Floci-mintable hostnames are mirrored; public registries (docker.io, ghcr.io, …)
-  are never touched.
+- Only Floci-mintable hostnames and the two accounts' AWS registry hosts are mirrored;
+  public registries (docker.io, ghcr.io, …) and other accounts' AWS registries, such as the
+  ones EKS add-on images come from, are never touched.
 - Mirrored hostnames carry the port the repository URIs advertise, which is the host port
   when Floci's container publishes `4566` on another one (see [ECR](ecr.md#docker-compose-port-mapping)).
 - Repository URIs using a non-default `registryId` (account) are not covered.
-- The mirror set is snapshotted when the cluster is created. Clusters created before this
-  feature can be fixed manually because the k3s container filesystem survives a restart. A surviving
-  container keeps the name it was created with, so those clusters are still `floci-eks-<cluster>`
-  while newer ones are `floci-aws-eks-<cluster>`, and a non-default account adds `<account>.` before
-  the cluster name. Look the name up first:
-
-  ```bash
-  docker ps --filter name=<cluster> --format '{{.Names}}'
-  docker cp registries.yaml <container>:/etc/rancher/k3s/registries.yaml
-  docker restart <container>
-  ```
+- A node keeps the mirror set it was started with. When Floci starts, a surviving node whose
+  `registries.yaml` differs from the one Floci gives it now, such as one created before a mirror
+  entry was added, is replaced on its data volume, as one with another capacity is, and the
+  replacement gets the current set. It is not replaced while the registry is unavailable, since the
+  replacement would get no mirror either, nor to take its mirror away when
+  `FLOCI_SERVICES_EKS_ECR_REGISTRY_MIRROR` is off.
 
 ### DNS resolution and Route 53 private hosted zones
 

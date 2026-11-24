@@ -54,10 +54,12 @@ import io.floci.aws.services.eks.model.Update;
 import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
 import io.floci.aws.services.eks.model.UpdateParam;
 import io.floci.aws.services.eks.model.UpgradePolicy;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
@@ -100,6 +102,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class EksServiceTest {
 
     private EksService eksService;
@@ -404,6 +407,45 @@ class EksServiceTest {
     }
 
     @Test
+    void turningAutoModeOnGivesTheRunningNodeBlockStorageAndAPoolChangeDoesNotReapplyIt() {
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Cluster> clusterStore = new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+        Cluster running = new Cluster();
+        running.setName("auto-running");
+        running.setArn("arn:aws:eks:us-east-1:000000000000:cluster/auto-running");
+        running.setStatus(ClusterStatus.ACTIVE);
+        running.setContainerId("k3s-auto-running");
+        running.setKubernetesNetworkConfig(new KubernetesNetworkConfig());
+        clusterStore.putForAccount("000000000000", EksService.clusterKey("us-east-1", "auto-running"), running);
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        EksAddonService addons = mock(EksAddonService.class);
+        when(addons.recordUpdate(any(), anyString(), any(), any(), any()))
+                .thenReturn(new Update("u", "Successful", "AutoModeUpdate", List.of(), 0, List.of()));
+        EksService service = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
+                new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
+                new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
+                        new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class), addons);
+        KubernetesNetworkConfig loadBalancing = new KubernetesNetworkConfig();
+        loadBalancing.setElasticLoadBalancing(new ElasticLoadBalancing(true));
+        String nodeRole = "arn:aws:iam::000000000000:role/eks-auto-node";
+
+        service.updateClusterConfig("auto-running", new UpdateClusterConfigRequest(null, null, null, null, null,
+                new ComputeConfig(true, List.of("general-purpose", "system"), nodeRole),
+                new StorageConfig(new BlockStorage(true)), loadBalancing));
+
+        ArgumentCaptor<Cluster> applied = ArgumentCaptor.forClass(Cluster.class);
+        verify(clusterManager).applyBlockStorage(eq("k3s-auto-running"), applied.capture());
+        assertEquals(Boolean.TRUE, applied.getValue().getStorageConfig().blockStorage().enabled());
+
+        service.updateClusterConfig("auto-running", new UpdateClusterConfigRequest(null, null, null, null, null,
+                new ComputeConfig(true, List.of("general-purpose"), nodeRole),
+                new StorageConfig(new BlockStorage(true)), loadBalancing));
+
+        verify(clusterManager, times(1)).applyBlockStorage(anyString(), any());
+    }
+
+    @Test
     void initRestoresPersistedClustersAfterARestart() {
         // A cluster restored from eks-clusters.json after a Floci/Docker restart (#2609) has no
         // container attached — init must re-latch it and hand it back to the readiness poller.
@@ -635,6 +677,33 @@ class EksServiceTest {
         assertThrows(IllegalStateException.class, () -> service.deleteCluster("running-cluster"));
 
         assertEquals(ClusterStatus.ACTIVE, service.describeCluster("running-cluster").getStatus());
+    }
+
+    @Test
+    void deletingAClusterEndsItsNodeInEc2BeforeDeletingItsSecurityGroup() {
+        Cluster cluster = activeCluster();
+        cluster.setArn("arn:aws:eks:us-east-1:000000000000:cluster/running-cluster");
+        ResourcesVpcConfig vpc = new ResourcesVpcConfig();
+        vpc.setVpcId("vpc-1");
+        vpc.setClusterSecurityGroupId("sg-cluster");
+        cluster.setResourcesVpcConfig(vpc);
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.deriveClusterNodeInstanceId(cluster, "us-east-1", "000000000000")).thenReturn("i-0de00node");
+        Ec2Service ec2 = mock(Ec2Service.class);
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
+        clusterStore.putForAccount("000000000000", EksService.clusterKey("us-east-1", cluster.getName()), cluster);
+        EksService service = new EksService(fixedStorageFactory(clusterStore), testConfig(false, false),
+                new RegionResolver("us-east-1", "000000000000"), clusterManager, ec2,
+                new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
+                        new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        service.deleteCluster(cluster.getName());
+
+        InOrder order = inOrder(clusterManager, ec2);
+        order.verify(clusterManager).stopCluster(cluster);
+        order.verify(ec2).endClusterNodeInstance("000000000000", "us-east-1", "i-0de00node");
+        order.verify(ec2).deleteSecurityGroup("us-east-1", "sg-cluster");
     }
 
     private static Cluster activeCluster() {

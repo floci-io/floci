@@ -101,6 +101,7 @@ public class ContainerLifecycleManager {
     private final long archiveRetryBackoffMillis;
     private final LongSupplier nanoTime;
     private final CreateWait createWait;
+    private final GelfLogListener gelfLogListener;
 
     /** Volumes whose shared-ownership root has already been initialised this process (run-once guard). */
     private final ConcurrentHashMap<String, Boolean> initializedSharedVolumes = new ConcurrentHashMap<>();
@@ -116,9 +117,20 @@ public class ContainerLifecycleManager {
                                      @StreamingDocker DockerClient streamingDockerClient,
                                      ImageCacheService imageCacheService,
                                      ContainerDetector containerDetector,
+                                     EmulatorConfig config,
+                                     GelfLogListener gelfLogListener) {
+        this(dockerClient, streamingDockerClient, imageCacheService, containerDetector, config,
+                RetryingTarCopier.DEFAULT_BACKOFF_MS, System::nanoTime, TimeUnit.NANOSECONDS::sleep,
+                gelfLogListener);
+    }
+
+    public ContainerLifecycleManager(DockerClient dockerClient,
+                                     DockerClient streamingDockerClient,
+                                     ImageCacheService imageCacheService,
+                                     ContainerDetector containerDetector,
                                      EmulatorConfig config) {
         this(dockerClient, streamingDockerClient, imageCacheService, containerDetector, config,
-                RetryingTarCopier.DEFAULT_BACKOFF_MS, System::nanoTime, TimeUnit.NANOSECONDS::sleep);
+                GelfLogListener.disabled());
     }
 
     ContainerLifecycleManager(DockerClient dockerClient,
@@ -138,7 +150,16 @@ public class ContainerLifecycleManager {
                               LongSupplier nanoTime,
                               CreateWait createWait) {
         this(dockerClient, dockerClient, imageCacheService, containerDetector, config, archiveRetryBackoffMillis,
-                nanoTime, createWait);
+                nanoTime, createWait, GelfLogListener.disabled());
+    }
+
+    ContainerLifecycleManager(DockerClient dockerClient,
+                              ImageCacheService imageCacheService,
+                              ContainerDetector containerDetector,
+                              EmulatorConfig config,
+                              GelfLogListener gelfLogListener) {
+        this(dockerClient, dockerClient, imageCacheService, containerDetector, config,
+                RetryingTarCopier.DEFAULT_BACKOFF_MS, System::nanoTime, TimeUnit.NANOSECONDS::sleep, gelfLogListener);
     }
 
     private ContainerLifecycleManager(DockerClient dockerClient,
@@ -148,7 +169,9 @@ public class ContainerLifecycleManager {
                                       EmulatorConfig config,
                                       long archiveRetryBackoffMillis,
                                       LongSupplier nanoTime,
-                                      CreateWait createWait) {
+                                      CreateWait createWait,
+                                      GelfLogListener gelfLogListener) {
+        this.gelfLogListener = gelfLogListener;
         this.dockerClient = dockerClient;
         this.streamingDockerClient = streamingDockerClient;
         this.imageCacheService = imageCacheService;
@@ -157,6 +180,20 @@ public class ContainerLifecycleManager {
         this.archiveRetryBackoffMillis = archiveRetryBackoffMillis;
         this.nanoTime = nanoTime;
         this.createWait = createWait;
+    }
+
+    // A container created in the log-driver mode dials the listener as it starts, a stopped one adopted
+    // after a restart of Floci included, and the start fails when nothing listens there.
+    private void startLogListener() {
+        if (!gelfLogListener.enabled()) {
+            return;
+        }
+        try {
+            gelfLogListener.ensureStarted();
+        } catch (IllegalStateException e) {
+            LOG.warnv("{0}: a container that sends its log there will not start: {1}", e.getMessage(),
+                    e.getCause() == null ? "" : e.getCause().getMessage());
+        }
     }
 
     /** Pause between creation checks; tests advance the monotonic clock instead of sleeping. */
@@ -712,6 +749,7 @@ public class ContainerLifecycleManager {
      * rather than a raw {@code dockerClient.startContainerCmd(...)} call.
      */
     void startContainer(String containerId) {
+        startLogListener();
         try {
             dockerClient.startContainerCmd(containerId).exec();
         } catch (NotModifiedException alreadyRunning) {

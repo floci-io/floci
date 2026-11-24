@@ -14,8 +14,10 @@ import io.floci.aws.services.emrserverless.model.StartSessionRequest;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -48,6 +50,7 @@ import static org.mockito.Mockito.when;
  * EMR Serverless sessions in the docker runner mode, each running a Spark Connect server through the runner: the
  * session's states as its server starts, answers, takes calls and stops, with a runner that stands in for Docker.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class EmrServerlessSessionServerTest {
 
     private static final String REGION = "us-east-1";

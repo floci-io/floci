@@ -13,9 +13,12 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Answers;
 import org.mockito.Mockito;
 
@@ -52,6 +55,7 @@ import static org.mockito.Mockito.withSettings;
  * The pre-configured URL path: a server someone else is already running, with no container
  * management at all. Same contract as {@code floci.services.duck.url}.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class NodeAppSyncJsRuntimeTest {
 
     private final ContainerBuilder containerBuilder = mock(ContainerBuilder.class);

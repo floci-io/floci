@@ -678,6 +678,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         validateHealthCheckTimeout(healthCheckTimeout);
         TargetGroup tg = requireTargetGroup(region, arn);
         validateHealthCheckPort(healthCheckPort);
+        Integer previousInterval = tg.getHealthCheckIntervalSeconds();
         if (healthCheckProtocol != null) tg.setHealthCheckProtocol(healthCheckProtocol);
         if (healthCheckPort != null)     tg.setHealthCheckPort(healthCheckPort);
         if (healthCheckEnabled != null)  tg.setHealthCheckEnabled(healthCheckEnabled);
@@ -688,6 +689,9 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         if (unhealthyThreshold != null)  tg.setUnhealthyThresholdCount(unhealthyThreshold);
         if (matcher != null)             tg.setMatcher(matcher);
         persistRegion(targetGroups, region);
+        if (!Objects.equals(previousInterval, tg.getHealthCheckIntervalSeconds())) {
+            healthChecker.startMonitoring(tg);
+        }
     }
 
     private static void validateHealthCheckTimeout(Integer timeout) {

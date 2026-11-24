@@ -9,9 +9,8 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.util.List;
 import java.util.stream.Stream;
 
-import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.assertSerializationException;
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 
@@ -75,9 +74,7 @@ class SesV2BodyReadIntegrationTest {
     void emptyBody_isReadAsOneWithoutMembers() {
         listTenants("");
         // Reaches the missing-name validation rather than failing to read the body.
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("")
         .when()
             .post("/v2/email/configuration-sets")
@@ -92,9 +89,7 @@ class SesV2BodyReadIntegrationTest {
     }
 
     private static void listTenants(String body) {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body(body)
         .when()
             .post("/v2/email/tenants/list")

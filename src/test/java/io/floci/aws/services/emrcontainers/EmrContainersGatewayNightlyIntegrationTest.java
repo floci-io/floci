@@ -53,9 +53,14 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * An EMR on EKS managed endpoint, run for real in the {@code docker} runner mode: it runs a Jupyter Enterprise Gateway
  * in its release's {@code notebook-spark} image from Amazon ECR Public, and a Jupyter client reaches it at its
- * {@code serverUrl} with a session token, starts a PySpark kernel there, and a session with a kernel of its own, which
- * the kernels and sessions listings show that token alone, and runs code on Floci's S3 over the PySpark kernel's
- * WebSocket, as the guide's "Example: Deploy a JupyterLab notebook" does through {@code JUPYTER_GATEWAY_URL}.
+ * {@code serverUrl} with a session token, as a browser's CORS preflight does without one. The client starts a
+ * PySpark kernel there, and a session with a kernel of its own, which the kernels and sessions listings show that
+ * token alone, and runs code on Floci's S3 over the PySpark kernel's WebSocket, as the guide's "Example: Deploy a
+ * JupyterLab notebook" does through {@code JUPYTER_GATEWAY_URL}, then changes its Spark session's settings with
+ * {@code %%configure}, as "Modifying PySpark session parameters" does, and runs code on Floci's S3 in the "Apache
+ * Spark with Scala" kernel too, where Toree's {@code %AddJar} adds a jar. An endpoint whose {@code jeg-config} sets a
+ * short idle timeout culls a kernel left idle, and one whose {@code jupyter-kernel-overrides} gives its kernels an
+ * image runs each in a container of its own.
  *
  * <p>A nightly check: the release's notebook image is about 6 GB.
  */
@@ -64,10 +69,6 @@ import static org.junit.jupiter.api.Assertions.fail;
 @EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 // One instance, so that the image is pulled once for the class.
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-// The endpoint's gateway answers within its five minutes, the kernel's WebSocket opens within its two, once its Spark
-// session is up, and each of its two cells answers within its two: eleven minutes, and one for the requests between.
-// With the image's pull of up to 21, 33 minutes, which the Nightly checks' docker-runner group counts.
-@Timeout(value = 12, unit = TimeUnit.MINUTES)
 class EmrContainersGatewayNightlyIntegrationTest {
 
     private static final String ACCOUNT = "000000000000";
@@ -76,6 +77,9 @@ class EmrContainersGatewayNightlyIntegrationTest {
     private static final String RELEASE = "emr-7.5.0-latest";
     // The release's notebook image, which the gateway's default template names.
     private static final String NOTEBOOK_IMAGE = "public.ecr.aws/emr-on-eks/notebook-spark/emr-7.5.0:latest";
+    // Jupyter Enterprise Gateway's Scala launcher in that image, which holds launcher.KernelProfile.
+    private static final String TOREE_LAUNCHER =
+            "/usr/local/bin/kernel-launchers/scala/lib/toree-launcher_2.12-1.0.jar";
     private static final Duration ACTIVE_TIMEOUT = Duration.ofMinutes(5);
     // jupyter_server holds a kernel's handshake until the kernel answers, up to its own minute, and the PySpark kernel
     // answers once its Spark session is up.
@@ -103,7 +107,11 @@ class EmrContainersGatewayNightlyIntegrationTest {
         docker.pullImageCmd(NOTEBOOK_IMAGE).exec(new PullImageResultCallback()).awaitCompletion(20, TimeUnit.MINUTES);
     }
 
+    // The endpoint's gateway answers within its five minutes, each kernel's WebSocket opens within its two, once the
+    // kernel is up, and each of the seven cells answers within its two: twenty-three minutes, and one for the requests
+    // between. The Nightly checks' docker-runner group counts it.
     @Test
+    @Timeout(value = 24, unit = TimeUnit.MINUTES)
     void pysparkKernelOnTheEndpointsGatewayRunsCodeOnFlocisS3() throws Exception {
         S3Client s3 = AwsTestClients.create(S3Client.builder().forcePathStyle(true), ACCOUNT, Region.US_EAST_1);
         cleanup.register(s3::close);
@@ -112,44 +120,33 @@ class EmrContainersGatewayNightlyIntegrationTest {
         cleanup.register(() -> S3TestClients.deleteBucket(s3, bucket));
         s3.putObject(request -> request.bucket(bucket).key("lines.txt"), RequestBody.fromString("a\nb\nc\n"));
         String virtualClusterId = virtualCluster();
-        String endpointId = emr().body("""
-                        {"name": "nightly", "type": "JUPYTER_ENTERPRISE_GATEWAY", "releaseLabel": "%s",
-                         "executionRoleArn": "%s", "clientToken": "%s"}
-                        """.formatted(RELEASE, ROLE, UUID.randomUUID()))
-                .post("/virtualclusters/" + virtualClusterId + "/endpoints")
-                .then().statusCode(200)
-                .extract().path("id");
-        cleanup.register(() -> emr().delete("/virtualclusters/" + virtualClusterId + "/endpoints/" + endpointId)
-                .then().statusCode(200));
-
-        await().atMost(ACTIVE_TIMEOUT).pollInterval(Duration.ofSeconds(1)).until(() -> "ACTIVE".equals(
-                emr().get("/virtualclusters/" + virtualClusterId + "/endpoints/" + endpointId)
-                        .then().statusCode(200).extract().path("endpoint.state")));
-        String serverUrl = emr().get("/virtualclusters/" + virtualClusterId + "/endpoints/" + endpointId)
-                .then().extract().path("endpoint.serverUrl");
-        // On the profile's base URL; the test's own server is on a port of its own.
-        String path = URI.create(serverUrl).getPath();
-        assertEquals(EmrContainersService.GATEWAY_PATH + endpointId, path);
-        String gateway = "http://localhost:" + RestAssured.port + path;
+        String endpointId = endpoint(virtualClusterId, "{}");
+        String gateway = gateway(virtualClusterId, endpointId);
         String token = sessionToken(virtualClusterId, endpointId);
 
         HttpClient http = HttpClient.newHttpClient();
         assertEquals(401, http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/kernelspecs")).build(),
                 HttpResponse.BodyHandlers.discarding()).statusCode(), "a request without the session token");
+        // A browser's CORS preflight carries no token, and the gateway answers it.
+        HttpResponse<Void> preflight = http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/kernels"))
+                .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+                .header("Origin", "http://notebook.test").header("Access-Control-Request-Method", "POST").build(),
+                HttpResponse.BodyHandlers.discarding());
+        assertEquals(200, preflight.statusCode());
+        assertTrue(preflight.headers().firstValue("Access-Control-Allow-Methods").orElse("").contains("POST"),
+                preflight.headers().toString());
         HttpResponse<String> specs = http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/kernelspecs"))
                 .header("Authorization", "token " + token).build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(200, specs.statusCode(), specs.body());
-        assertTrue(JSON.readTree(specs.body()).path("kernelspecs").has("spark-python-kubernetes"), specs.body());
+        JsonNode kernelspecs = JSON.readTree(specs.body()).path("kernelspecs");
+        assertTrue(kernelspecs.has("spark-python-kubernetes"), specs.body());
+        assertEquals("Apache Spark with Scala",
+                kernelspecs.at("/spark-scala-kubernetes/spec/display_name").textValue());
         // As a Jupyter client sends its KERNEL_ variables.
-        HttpResponse<String> started = http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/kernels"))
-                .header("Authorization", "token " + token)
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString("""
-                        {"name": "spark-python-kubernetes",
-                         "env": {"KERNEL_EXTRA_SPARK_OPTS": "--conf spark.app.name=from-kernel-env"}}
-                        """)).build(), HttpResponse.BodyHandlers.ofString());
-        assertEquals(201, started.statusCode(), started.body());
-        String kernelId = JSON.readTree(started.body()).path("id").textValue();
+        String kernelId = startKernel(http, gateway, token, """
+                {"name": "spark-python-kubernetes",
+                 "env": {"KERNEL_EXTRA_SPARK_OPTS": "--conf spark.app.name=from-kernel-env"}}
+                """);
         // ListKernels lists the kernels started with the same session token, through the sessions API too, and the
         // sessions listing the sessions holding them.
         HttpResponse<String> created = http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/sessions"))
@@ -166,27 +163,178 @@ class EmrContainersGatewayNightlyIntegrationTest {
         String another = sessionToken(virtualClusterId, endpointId);
         assertEquals(List.of(), ids(http, gateway + "/api/kernels", another), "another session token of the endpoint");
         assertEquals(List.of(), ids(http, gateway + "/api/sessions", another), "another session token of the endpoint");
-        assertEquals(204, http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/sessions/"
-                + notebook.path("id").textValue())).header("Authorization", "token " + token).DELETE().build(),
-                HttpResponse.BodyHandlers.discarding()).statusCode());
+        delete(http, gateway + "/api/sessions/" + notebook.path("id").textValue(), token);
 
         Messages messages = new Messages();
-        WebSocket socket = http.newWebSocketBuilder().header("Authorization", "token " + token)
-                .buildAsync(URI.create(gateway.replaceFirst("^http", "ws") + "/api/kernels/" + kernelId
-                        + "/channels"), messages)
-                .get(HANDSHAKE_TIMEOUT.toSeconds(), TimeUnit.SECONDS);
+        WebSocket socket = connect(http, gateway, token, kernelId, messages);
         String session = UUID.randomUUID().toString();
         assertEquals("3", execute(socket, messages, session,
                 "spark.read.text(\"s3://" + bucket + "/lines.txt\").count()"));
         assertEquals("'from-kernel-env'", execute(socket, messages, session, "spark.conf.get(\"spark.app.name\")"));
+        // The restart ends the cell and keeps the kernel's id; the next cell's session runs with its settings.
+        assertEquals("ok", run(socket, messages, session, """
+                %%configure -f
+                {"conf": {"spark.app.name": "from-configure"}, "executorMemory": "2g"}""", "execute_reply",
+                "/content/status"));
+        assertEquals("('from-configure', '2g')", execute(socket, messages, session,
+                "spark.conf.get(\"spark.app.name\"), spark.conf.get(\"spark.executor.memory\")"));
+        assertEquals(List.of(kernelId), ids(http, gateway + "/api/kernels", token));
         socket.sendClose(WebSocket.NORMAL_CLOSURE, "done").get(10, TimeUnit.SECONDS);
-        assertEquals(204, http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/kernels/" + kernelId))
-                .header("Authorization", "token " + token).DELETE().build(),
-                HttpResponse.BodyHandlers.discarding()).statusCode());
+        delete(http, gateway + "/api/kernels/" + kernelId, token);
+
+        // The Scala kernel's Toree gives its cell a Spark session on Floci's S3 too.
+        String scalaId = startKernel(http, gateway, token, "{\"name\": \"spark-scala-kubernetes\"}");
+        Messages scalaMessages = new Messages();
+        WebSocket scala = connect(http, gateway, token, scalaId, scalaMessages);
+        String count = execute(scala, scalaMessages, session,
+                "spark.read.textFile(\"s3://" + bucket + "/lines.txt\").count()");
+        assertTrue(count.matches("(res\\d+: Long = )?3"), count);
+        // Its magics load: %AddJar puts the image's Toree launcher, which the kernel does not run, on the cell's
+        // class path.
+        assertEquals("ok", run(scala, scalaMessages, session, "%AddJar file:" + TOREE_LAUNCHER, "execute_reply",
+                "/content/status"));
+        String added = execute(scala, scalaMessages, session, "classOf[launcher.KernelProfile].getName");
+        assertTrue(added.matches("(res\\d+: String = )?launcher\\.KernelProfile"), added);
+        scala.sendClose(WebSocket.NORMAL_CLOSURE, "done").get(10, TimeUnit.SECONDS);
+        delete(http, gateway + "/api/kernels/" + scalaId, token);
     }
 
-    // Runs code in the kernel, as a Jupyter client sends an execute_request, and answers its result's text/plain.
+    // The endpoint's gateway answers within its five minutes, and the kernel goes within its one: six minutes, and one
+    // for the requests between. The Nightly checks' docker-runner group counts it.
+    @Test
+    @Timeout(value = 7, unit = TimeUnit.MINUTES)
+    void endpointsJegConfigCullsAKernelLeftIdle() throws Exception {
+        String virtualClusterId = virtualCluster();
+        // The two settings "Jupyter Enterprise Gateway (JEG) configuration options" allow-lists.
+        String endpointId = endpoint(virtualClusterId, """
+                {"applicationConfiguration": [{"classification": "jeg-config", "properties": {
+                  "RemoteMappingKernelManager.cull_idle_timeout": "10",
+                  "RemoteMappingKernelManager.cull_interval": "5"}}]}""");
+        String gateway = gateway(virtualClusterId, endpointId);
+        String token = sessionToken(virtualClusterId, endpointId);
+        HttpClient http = HttpClient.newHttpClient();
+        String kernelId = startKernel(http, gateway, token, "{\"name\": \"python3\"}");
+        assertEquals(List.of(kernelId), ids(http, gateway + "/api/kernels", token));
+
+        await("the idle kernel culled").atMost(Duration.ofMinutes(1)).pollInterval(Duration.ofSeconds(1))
+                .until(() -> ids(http, gateway + "/api/kernels", token).isEmpty());
+    }
+
+    // Starts a kernel as a Jupyter client does, with the request body, and answers its id.
+    private static String startKernel(HttpClient http, String gateway, String token, String body) throws Exception {
+        HttpResponse<String> started = http.send(HttpRequest.newBuilder(URI.create(gateway + "/api/kernels"))
+                .header("Authorization", "token " + token)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(201, started.statusCode(), started.body());
+        return JSON.readTree(started.body()).path("id").textValue();
+    }
+
+    // Opens the kernel's channels WebSocket, its messages going to messages.
+    private static WebSocket connect(HttpClient http, String gateway, String token, String kernelId,
+            Messages messages) throws Exception {
+        return http.newWebSocketBuilder().header("Authorization", "token " + token)
+                .buildAsync(URI.create(gateway.replaceFirst("^http", "ws") + "/api/kernels/" + kernelId
+                        + "/channels"), messages)
+                .get(HANDSHAKE_TIMEOUT.toSeconds(), TimeUnit.SECONDS);
+    }
+
+    private static void delete(HttpClient http, String url, String token) throws Exception {
+        assertEquals(204, http.send(HttpRequest.newBuilder(URI.create(url)).header("Authorization", "token " + token)
+                .DELETE().build(), HttpResponse.BodyHandlers.discarding()).statusCode(), url);
+    }
+
+    // The endpoint's gateway answers within its five minutes; each kernel's container starts, and its WebSocket
+    // opens, within its two, and each of the four cells answers within its two: seventeen minutes, and one for the
+    // requests between. The Nightly checks' docker-runner group counts it.
+    @Test
+    @Timeout(value = 18, unit = TimeUnit.MINUTES)
+    void kernelsTheOverridesGiveAnImageRunInContainersOfTheirOwn() throws Exception {
+        S3Client s3 = AwsTestClients.create(S3Client.builder().forcePathStyle(true), ACCOUNT, Region.US_EAST_1);
+        cleanup.register(s3::close);
+        String bucket = "emr-eks-kernel-" + UUID.randomUUID().toString().substring(0, 8);
+        s3.createBucket(request -> request.bucket(bucket));
+        cleanup.register(() -> S3TestClients.deleteBucket(s3, bucket));
+        s3.putObject(request -> request.bucket(bucket).key("lines.txt"), RequestBody.fromString("a\nb\nc\n"));
+        String virtualClusterId = virtualCluster();
+        // As "Custom kernel image with interactive endpoint" overrides them, with the release's own image.
+        String endpointId = endpoint(virtualClusterId, """
+                {"applicationConfiguration": [{"classification": "jupyter-kernel-overrides", "configurations": [
+                  {"classification": "python3", "properties": {"container-image": "%s"}},
+                  {"classification": "spark-python-kubernetes", "properties": {"container-image": "%s"}}]}]}"""
+                .formatted(NOTEBOOK_IMAGE, NOTEBOOK_IMAGE));
+        String gateway = gateway(virtualClusterId, endpointId);
+        String token = sessionToken(virtualClusterId, endpointId);
+        HttpClient http = HttpClient.newHttpClient();
+        String session = UUID.randomUUID().toString();
+
+        String python = startKernel(http, gateway, token, "{\"name\": \"python3\"}");
+        assertEquals(1, docker.listContainersCmd().withNameFilter(List.of(python)).exec().size(),
+                "the kernel's own container");
+        Messages pythonMessages = new Messages();
+        WebSocket pythonSocket = connect(http, gateway, token, python, pythonMessages);
+        // Jupyter Enterprise Gateway's launcher gives the kernel its gateway's address.
+        assertEquals("True", execute(pythonSocket, pythonMessages, session,
+                "import os; os.environ.get('ENDPOINT_IP') is not None"));
+        pythonSocket.sendClose(WebSocket.NORMAL_CLOSURE, "done").get(10, TimeUnit.SECONDS);
+        delete(http, gateway + "/api/kernels/" + python, token);
+        await("the kernel's container gone").atMost(Duration.ofMinutes(1)).pollInterval(Duration.ofSeconds(1))
+                .until(() -> docker.listContainersCmd().withNameFilter(List.of(python)).exec().isEmpty());
+
+        String pyspark = startKernel(http, gateway, token, "{\"name\": \"spark-python-kubernetes\"}");
+        Messages messages = new Messages();
+        WebSocket socket = connect(http, gateway, token, pyspark, messages);
+        assertEquals("3", execute(socket, messages, session,
+                "spark.read.text(\"s3://" + bucket + "/lines.txt\").count()"));
+        // Its %%configure restarts it in a new container, under the same id, the client staying connected.
+        assertEquals("ok", run(socket, messages, session, """
+                %%configure -f
+                {"conf": {"spark.app.name": "from-configure"}}""", "execute_reply", "/content/status"));
+        assertEquals("'from-configure'", execute(socket, messages, session, "spark.conf.get(\"spark.app.name\")"));
+        assertEquals(List.of(pyspark), ids(http, gateway + "/api/kernels", token));
+        socket.sendClose(WebSocket.NORMAL_CLOSURE, "done").get(10, TimeUnit.SECONDS);
+        delete(http, gateway + "/api/kernels/" + pyspark, token);
+    }
+
+    // An endpoint of the virtual cluster with configurationOverrides, once it is ACTIVE.
+    private String endpoint(String virtualClusterId, String configurationOverrides) {
+        String endpointId = emr().body("""
+                        {"name": "nightly", "type": "JUPYTER_ENTERPRISE_GATEWAY", "releaseLabel": "%s",
+                         "executionRoleArn": "%s", "clientToken": "%s", "configurationOverrides": %s}
+                        """.formatted(RELEASE, ROLE, UUID.randomUUID(), configurationOverrides))
+                .post("/virtualclusters/" + virtualClusterId + "/endpoints")
+                .then().statusCode(200)
+                .extract().path("id");
+        cleanup.register(() -> emr().delete("/virtualclusters/" + virtualClusterId + "/endpoints/" + endpointId)
+                .then().statusCode(200));
+        // ACTIVE once its gateway answers, or ended with errors where it cannot start, which stateDetails says.
+        JsonNode endpoint = await().atMost(ACTIVE_TIMEOUT).pollInterval(Duration.ofSeconds(1))
+                .until(() -> JSON.readTree(emr().get("/virtualclusters/" + virtualClusterId + "/endpoints/"
+                        + endpointId).then().statusCode(200).extract().asString()).path("endpoint"),
+                        settled -> !"CREATING".equals(settled.path("state").textValue()));
+        assertEquals("ACTIVE", endpoint.path("state").textValue(), endpoint.toString());
+        return endpointId;
+    }
+
+    // Where the test reaches the endpoint's gateway: its serverUrl's path, on the test's own port, as the profile's
+    // base URL names another.
+    private static String gateway(String virtualClusterId, String endpointId) {
+        String serverUrl = emr().get("/virtualclusters/" + virtualClusterId + "/endpoints/" + endpointId)
+                .then().extract().path("endpoint.serverUrl");
+        String path = URI.create(serverUrl).getPath();
+        assertEquals(EmrContainersService.GATEWAY_PATH + endpointId, path);
+        return "http://localhost:" + RestAssured.port + path;
+    }
+
+    // Runs code in the kernel and answers its result's text/plain.
     private static String execute(WebSocket socket, Messages messages, String session, String code) throws Exception {
+        return run(socket, messages, session, code, "execute_result", "/content/data/text~1plain");
+    }
+
+    // Runs code in the kernel, as a Jupyter client sends an execute_request, and answers the field at pointer of the
+    // first message of the type that answers it.
+    private static String run(WebSocket socket, Messages messages, String session, String code, String type,
+            String pointer) throws Exception {
         String messageId = UUID.randomUUID().toString();
         ObjectNode request = JSON.createObjectNode();
         request.putObject("header").put("msg_id", messageId).put("username", "nightly").put("session", session)
@@ -198,22 +346,23 @@ class EmrContainersGatewayNightlyIntegrationTest {
         request.putArray("buffers");
         request.put("channel", "shell");
         socket.sendText(JSON.writeValueAsString(request), true).get(10, TimeUnit.SECONDS);
-        return await("an execute_result for " + code).atMost(REPLY_TIMEOUT).pollInterval(Duration.ofMillis(100))
-                .until(() -> result(messages, messageId), Objects::nonNull);
+        return await("a " + type + " for " + code).atMost(REPLY_TIMEOUT).pollInterval(Duration.ofMillis(100))
+                .until(() -> answer(messages, messageId, type, pointer), Objects::nonNull);
     }
 
-    // The text/plain of the result of the request messageId among the messages come so far, or null until it comes.
-    private static String result(Messages messages, String messageId) throws Exception {
+    // The field at pointer of the first message of the type answering the request messageId among the messages come
+    // so far, or null until it comes.
+    private static String answer(Messages messages, String messageId, String type, String pointer) throws Exception {
         for (String text = messages.received.poll(); text != null; text = messages.received.poll()) {
             JsonNode message = JSON.readTree(text);
             if (!messageId.equals(message.at("/parent_header/msg_id").textValue())) {
                 continue;
             }
-            String type = message.at("/header/msg_type").textValue();
-            if ("execute_result".equals(type)) {
-                return message.at("/content/data/text~1plain").textValue();
+            String kind = message.at("/header/msg_type").textValue();
+            if (type.equals(kind)) {
+                return message.at(pointer).textValue();
             }
-            if ("error".equals(type)) {
+            if ("error".equals(kind)) {
                 fail("the kernel raised: " + message.path("content"));
             }
         }

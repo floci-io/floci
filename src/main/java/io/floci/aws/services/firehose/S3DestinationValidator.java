@@ -250,12 +250,6 @@ public final class S3DestinationValidator {
         return !value.isEmpty() && value.length() <= MAPPING_MAX_LENGTH;
     }
 
-    private static String constraintSet(String pattern) {
-        return "[Member must have length less than or equal to " + MAPPING_MAX_LENGTH
-                + ", Member must have length greater than or equal to 1"
-                + ", Member must satisfy regular expression pattern: " + pattern + "]";
-    }
-
     private static Serializer serializer(S3Destination config) {
         DeliveryStreamDescription.DataFormatConversionConfiguration conversion = config.getDataFormatConversionConfiguration();
         if (conversion == null || conversion.getOutputFormatConfiguration() == null) {

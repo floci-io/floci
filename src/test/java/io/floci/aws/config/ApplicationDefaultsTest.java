@@ -2,8 +2,10 @@ package io.floci.aws.config;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
+import io.floci.aws.testing.ParallelLocks;
 import io.smallrye.config.WithDefault;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -14,6 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class ApplicationDefaultsTest {
 
     private static JsonNode productionConfig() throws IOException {
@@ -287,5 +290,29 @@ class ApplicationDefaultsTest {
         assertNotNull(fallback, "warmPoolMaxTotal should declare a fallback default");
         assertEquals("128", fallback.value(),
                 "the @WithDefault must match application.yml, which wins over it");
+    }
+
+    // Catches: the log-driver mode switched on by default, which breaks Docker-in-Docker and remote
+    // daemons, or the yml and the @WithDefault disagreeing.
+    @Test
+    void productionConfigKeepsTheLogDriverModeOff() throws IOException, NoSuchMethodException {
+        JsonNode mode = productionConfig().path("floci").path("docker").path("log-driver-mode");
+
+        assertFalse(mode.isMissingNode(), "log-driver-mode should be declared in application.yml");
+        assertFalse(mode.asBoolean(true));
+        assertEquals("false", EmulatorConfig.DockerConfig.class.getMethod("logDriverMode")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+    }
+
+    // Catches: the log listener's port made ephemeral again, so a container created in the log-driver
+    // mode can no longer start after Floci restarts, or the yml and the @WithDefault disagreeing.
+    @Test
+    void productionConfigFixesTheLogDriverPort() throws IOException, NoSuchMethodException {
+        JsonNode port = productionConfig().path("floci").path("docker").path("log-driver-port");
+
+        assertFalse(port.isMissingNode(), "log-driver-port should be declared in application.yml");
+        assertEquals(12201, port.asInt());
+        assertEquals("12201", EmulatorConfig.DockerConfig.class.getMethod("logDriverPort")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
     }
 }

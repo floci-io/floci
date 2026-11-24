@@ -9,7 +9,10 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.common.docker.PerKeyContainerPool;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.lang.reflect.Field;
@@ -31,6 +34,7 @@ import static org.mockito.Mockito.when;
  * reset, nuke, and shutdown after their in-flight requests complete. Containers are seeded into
  * the pool by reflection, so these tests need no Docker daemon.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class PypiserverSidecarManagerTest {
 
     private final ContainerBuilder containerBuilder = mock(ContainerBuilder.class);

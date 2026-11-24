@@ -11,9 +11,11 @@ import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.services.ec2.Ec2MetadataServer;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.lambda.launcher.BootstrapProcess;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.FreePorts;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.InOrder;
 
 import java.io.IOException;
@@ -49,6 +51,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** A cluster's instance metadata relay, and the link-local addresses its containers are given. */
+@ResourceLock(ParallelLocks.PORTS)
 class EmrMetadataRelaysTest {
 
     private static final String NETWORK = "floci-emr-j-1-hdfs";

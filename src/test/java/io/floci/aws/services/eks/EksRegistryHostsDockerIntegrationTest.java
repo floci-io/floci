@@ -3,7 +3,6 @@ package io.floci.aws.services.eks;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Frame;
-import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.services.ec2.Ec2Service;
@@ -12,6 +11,8 @@ import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterStatus;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.EcrRequests;
+import io.floci.aws.testing.EcrTestImages;
 import io.floci.aws.testing.EksTestNode;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RdsMockProfile;
@@ -19,8 +20,6 @@ import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Assumptions;
@@ -30,8 +29,6 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.ByteArrayOutputStream;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -40,7 +37,6 @@ import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import java.util.zip.GZIPOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -114,10 +110,10 @@ class EksRegistryHostsDockerIntegrationTest {
 
         // ECR answers a push to a repository nobody created with NAME_UNKNOWN, so the account creates it first.
         RestAssuredJsonUtils.configureAwsContentTypes();
-        ecrAsImageAccount("CreateRepository", "{\"repositoryName\":\"" + repo + "\"}");
-        cleanup.register(() -> ecrAsImageAccount("DeleteRepository",
+        EcrRequests.ecr(IMAGE_ACCOUNT, "us-east-1", "CreateRepository", "{\"repositoryName\":\"" + repo + "\"}");
+        cleanup.register(() -> EcrRequests.ecr(IMAGE_ACCOUNT, "us-east-1", "DeleteRepository",
                 "{\"repositoryName\":\"" + repo + "\",\"force\":true}"));
-        pushMinimalImage(host, repo);
+        EcrTestImages.pushSleepImage(dockerClient, host, repo, "v1");
 
         given().contentType(JSON)
                 .body("{\"name\":\"" + clusterName + "\",\"roleArn\":"
@@ -285,168 +281,6 @@ class EksRegistryHostsDockerIntegrationTest {
             problem = "(could not read logs: " + e.getMessage() + ")";
         }
         return out.toString(StandardCharsets.UTF_8) + problem;
-    }
-
-    /**
-     * Pushes a minimal, genuinely pullable image via raw OCI Distribution calls against Floci's
-     * ECR data plane. The image contains a tiny static executable at {@code /bin/sleep} so kubelet
-     * can both unpack and run it to reach {@code Running}.
-     */
-    private void pushMinimalImage(String host, String repo) throws Exception {
-        String arch = "amd64";
-        boolean isArm64 = false;
-        try {
-            String dockerArch = dockerClient.infoCmd().exec().getArchitecture();
-            if (dockerArch != null && (dockerArch.contains("aarch64") || dockerArch.contains("arm64"))) {
-                arch = "arm64";
-                isArm64 = true;
-            }
-        } catch (Exception ignored) {
-            // default to amd64
-        }
-
-        byte[] elfBytes = buildPauseElf(isArm64);
-        byte[] tarBytes;
-        try (ByteArrayOutputStream tarOut = new ByteArrayOutputStream();
-             TarArchiveOutputStream tar = new TarArchiveOutputStream(tarOut)) {
-            TarArchiveEntry entry = new TarArchiveEntry("bin/sleep");
-            entry.setMode(0755);
-            entry.setSize(elfBytes.length);
-            tar.putArchiveEntry(entry);
-            tar.write(elfBytes);
-            tar.closeArchiveEntry();
-            tar.finish();
-            tarBytes = tarOut.toByteArray();
-        }
-        ByteArrayOutputStream gzOut = new ByteArrayOutputStream();
-        try (GZIPOutputStream gzip = new GZIPOutputStream(gzOut)) {
-            gzip.write(tarBytes);
-        }
-        byte[] layerBytes = gzOut.toByteArray();
-        String diffId = "sha256:" + Digests.sha256Hex(tarBytes);
-        String layerDigest = "sha256:" + Digests.sha256Hex(layerBytes);
-
-        byte[] configBytes = ("{\"architecture\":\"" + arch + "\",\"os\":\"linux\",\"config\":{},"
-                + "\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"" + diffId + "\"]}}")
-                .getBytes(StandardCharsets.UTF_8);
-        String configDigest = "sha256:" + Digests.sha256Hex(configBytes);
-
-        uploadBlob(host, repo, layerDigest, layerBytes);
-        uploadBlob(host, repo, configDigest, configBytes);
-
-        String manifestJson = """
-                {
-                  "schemaVersion": 2,
-                  "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
-                  "config": {
-                    "mediaType": "application/vnd.docker.container.image.v1+json",
-                    "size": %d,
-                    "digest": "%s"
-                  },
-                  "layers": [
-                    {
-                      "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
-                      "size": %d,
-                      "digest": "%s"
-                    }
-                  ]
-                }
-                """.formatted(configBytes.length, configDigest, layerBytes.length, layerDigest);
-
-        given().header("Host", host)
-                .contentType("application/vnd.docker.distribution.manifest.v2+json")
-                .body(manifestJson)
-                .when().put("/v2/" + repo + "/manifests/v1")
-                .then().statusCode(201);
-    }
-
-    private static byte[] buildPauseElf(boolean isArm64) {
-        byte[] code;
-        short machine;
-        if (isArm64) {
-            // aarch64: sys_ppoll(NULL, 0, NULL, NULL, 0) (syscall 73) sleeps indefinitely at 0% CPU
-            code = new byte[]{
-                    0x00, 0x00, (byte) 0x80, (byte) 0xd2, // mov x0, #0
-                    0x01, 0x00, (byte) 0x80, (byte) 0xd2, // mov x1, #0
-                    0x02, 0x00, (byte) 0x80, (byte) 0xd2, // mov x2, #0
-                    0x03, 0x00, (byte) 0x80, (byte) 0xd2, // mov x3, #0
-                    0x04, 0x00, (byte) 0x80, (byte) 0xd2, // mov x4, #0
-                    0x28, 0x09, (byte) 0x80, (byte) 0xd2, // mov x8, #73
-                    0x01, 0x00, 0x00, (byte) 0xd4,       // svc #0
-                    (byte) 0xf9, (byte) 0xff, (byte) 0xff, 0x17  // b -7
-            };
-            machine = (short) 0xB7;
-        } else {
-            // x86_64: sys_pause() (syscall 34) sleeps indefinitely at 0% CPU
-            code = new byte[]{
-                    (byte) 0xb8, 0x22, 0x00, 0x00, 0x00, // mov eax, 34
-                    0x0f, 0x05,                         // syscall
-                    (byte) 0xeb, (byte) 0xf7            // jmp -9
-            };
-            machine = (short) 0x3E;
-        }
-        long baseAddr = 0x400000L;
-        long entryPoint = baseAddr + 0x78L;
-        int fileSize = 0x78 + code.length;
-
-        ByteBuffer buf = ByteBuffer.allocate(fileSize).order(ByteOrder.LITTLE_ENDIAN);
-        // ELF header (64 bytes)
-        buf.put(new byte[]{0x7F, 'E', 'L', 'F', 2, 1, 1, 0});
-        buf.put(new byte[8]); // padding
-        buf.putShort((short) 2); // ET_EXEC
-        buf.putShort(machine);
-        buf.putInt(1); // EV_CURRENT
-        buf.putLong(entryPoint);
-        buf.putLong(64L); // e_phoff
-        buf.putLong(0L); // e_shoff
-        buf.putInt(0); // e_flags
-        buf.putShort((short) 64); // e_ehsize
-        buf.putShort((short) 56); // e_phentsize
-        buf.putShort((short) 1); // e_phnum
-        buf.putShort((short) 0); // e_shentsize
-        buf.putShort((short) 0); // e_shnum
-        buf.putShort((short) 0); // e_shstrndx
-
-        // Program header (56 bytes)
-        buf.putInt(1); // PT_LOAD
-        buf.putInt(7); // PF_R | PF_W | PF_X
-        buf.putLong(0L); // p_offset
-        buf.putLong(baseAddr); // p_vaddr
-        buf.putLong(baseAddr); // p_paddr
-        buf.putLong(fileSize); // p_filesz
-        buf.putLong(fileSize); // p_memsz
-        buf.putLong(0x1000L); // p_align
-
-        // Code
-        buf.put(code);
-        return buf.array();
-    }
-
-    private static void ecrAsImageAccount(String action, String body) {
-        given().header("X-Amz-Target", "AmazonEC2ContainerRegistry_V20150921." + action)
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + IMAGE_ACCOUNT
-                        + "/20260923/us-east-1/ecr/aws4_request")
-                .contentType("application/x-amz-json-1.1")
-                .body(body)
-                .when().post("/")
-                .then().statusCode(200);
-    }
-
-    private void uploadBlob(String host, String repo, String digest, byte[] content) {
-        String location = given().header("Host", host)
-                .when().post("/v2/" + repo + "/blobs/uploads/")
-                .then().statusCode(202)
-                .extract().header("Location");
-        assertNotNull(location);
-        String separator = location.contains("?") ? "&" : "?";
-        given().header("Host", host)
-                // The Location header already carries a percent-encoded _state token; RestAssured's
-                // default encoding would double-encode it and corrupt the token.
-                .urlEncodingEnabled(false)
-                .contentType("application/octet-stream")
-                .body(content)
-                .when().put(location + separator + "digest=" + digest)
-                .then().statusCode(201);
     }
 
     private void waitUntilReady(Cluster cluster) {

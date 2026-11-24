@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.floci.aws.services.ses.SesV2TimestampMatchers.DECIMAL_NUMBERS;
 import static io.floci.aws.services.ses.SesV2TimestampMatchers.epochSecondsWithMillis;
 import static io.restassured.RestAssured.given;
@@ -30,14 +31,14 @@ class SesContactV2IntegrationTest {
     private static final String CONTACTS = "/v2/email/contact-lists/" + LIST + "/contacts";
 
     private static Response post(String path, String body) {
-        return given().contentType("application/json").header("Authorization", AUTH)
+        return v2()
                 .body(body).when().post(path);
     }
 
     @Test
     @Order(1)
     void setup_createContactList() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"ContactListName\":\"" + LIST + "\",\"Topics\":["
                         + "{\"TopicName\":\"weekly\",\"DisplayName\":\"Weekly\",\"DefaultSubscriptionStatus\":\"OPT_IN\"},"
                         + "{\"TopicName\":\"promos\",\"DisplayName\":\"Promos\",\"DefaultSubscriptionStatus\":\"OPT_OUT\"}]}")
@@ -145,7 +146,7 @@ class SesContactV2IntegrationTest {
     @Test
     @Order(11)
     void updateContact_unsubscribeAll_replacesAttributesKeepsPreferences() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"UnsubscribeAll\":true}")
         .when().put(CONTACTS + "/" + EMAIL).then().statusCode(200);
 
@@ -162,7 +163,7 @@ class SesContactV2IntegrationTest {
     @Test
     @Order(12)
     void updateContact_topicPreferences_mergeByTopicName() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"TopicPreferences\":[{\"TopicName\":\"promos\",\"SubscriptionStatus\":\"OPT_IN\"}]}")
         .when().put(CONTACTS + "/" + EMAIL).then().statusCode(200);
 
@@ -216,13 +217,13 @@ class SesContactV2IntegrationTest {
         post(CONTACTS, "{\"EmailAddress\":\"carol@example.com\"}").then().statusCode(200);
         given().header("Authorization", AUTH)
         .when().delete("/v2/email/contact-lists/" + LIST).then().statusCode(200);
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"ContactListName\":\"" + LIST + "\",\"Topics\":["
                         + "{\"TopicName\":\"weekly\",\"DisplayName\":\"Weekly\","
                         + "\"DefaultSubscriptionStatus\":\"OPT_IN\"}]}")
         .when().post("/v2/email/contact-lists").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", AUTH).body("{}")
+        v2().body("{}")
         .when().post(CONTACTS + "/list")
         .then().statusCode(200).body("Contacts", hasSize(0));
     }
@@ -258,7 +259,7 @@ class SesContactV2IntegrationTest {
     @Test
     @Order(20)
     void listContacts_nonObjectBody_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH).body("[]")
+        v2().body("[]")
         .when().post(CONTACTS + "/list")
         .then().statusCode(400)
                 .body("__type", equalTo("SerializationException"))
@@ -305,7 +306,7 @@ class SesContactV2IntegrationTest {
         .when().get(CONTACTS + "/type-d@example.com")
         .then().statusCode(200).body("UnsubscribeAll", equalTo(true));
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"UnsubscribeAll\":\"no\"}")
         .when().put(CONTACTS + "/type-d@example.com")
         .then().statusCode(200);
@@ -322,7 +323,7 @@ class SesContactV2IntegrationTest {
     @Test
     @Order(25)
     void updateContact_attributesDataNumber_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"AttributesData\":123}")
         .when().put(CONTACTS + "/" + EMAIL)
         .then().statusCode(400)
@@ -375,7 +376,7 @@ class SesContactV2IntegrationTest {
         .then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"));
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"UnsubscribeAll\":true}")
         .when().put(CONTACTS + "/bob@example.com")
         .then().statusCode(404)

@@ -269,7 +269,24 @@ public class SesTemplateService implements SesTaggable {
         if (name.isEmpty()) {
             throw new AwsException("InvalidParameterValue", "The template name must be specified.", 400);
         }
+        SesNames.requireAllowedCharacters(name, "InvalidParameterValue", "Template name");
         return name;
+    }
+
+    /**
+     * The name rule a send applies to the stored template it names, worded unlike the template
+     * operations' rule and checked just before the sender verification (probe-confirmed on the v1
+     * and v2 sends).
+     */
+    public static void requireSendTemplateName(String name) {
+        if (name.length() > SesNames.MAX_LENGTH) {
+            throw new AwsException("InvalidParameterValue",
+                    "Template name " + name + " exceeds maximum allowed length " + SesNames.MAX_LENGTH, 400);
+        }
+        if (!SesNames.hasOnlyAllowedCharacters(name)) {
+            throw new AwsException("InvalidParameterValue", "Template name " + name
+                    + " is only allowed to contain alphanumeric characters, underscore, and dash", 400);
+        }
     }
 
     /**

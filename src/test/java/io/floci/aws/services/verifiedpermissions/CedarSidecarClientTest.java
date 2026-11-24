@@ -7,9 +7,12 @@ import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.verifiedpermissions.model.Policy;
 import io.floci.aws.services.verifiedpermissions.model.PolicyTemplate;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -32,6 +35,7 @@ import static org.mockito.Mockito.when;
  * how the sidecar's 200 / 400 / other answers become AWS errors. Cedar semantics live in the
  * sidecar's own repository.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CedarSidecarClientTest {
 
     private final ObjectMapper mapper = new ObjectMapper();

@@ -18,6 +18,7 @@ import com.github.dockerjava.api.model.Volume;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.EmrRequests;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.S3TestClients;
 import io.floci.aws.testing.TestDockerClients;
@@ -29,6 +30,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -67,6 +69,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 // Bounded waits: three steps of up to five minutes each and five minutes for the cluster to end, past the default two.
 @Timeout(value = 20, unit = TimeUnit.MINUTES)
+@ResourceLock(ParallelLocks.PORTS)
 class EmrFlociContainerNightlyIntegrationTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();

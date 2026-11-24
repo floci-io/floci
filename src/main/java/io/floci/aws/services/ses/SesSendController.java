@@ -229,6 +229,11 @@ public class SesSendController {
             JsonNode request = readOptionBody(objectMapper, body);
             SesV2RequestShapes.check("SendBulkEmail", request);
             validateTrackingOverrides(request);
+            JsonNode defaultTemplateName = request.path("DefaultContent").path("Template").path("TemplateName");
+            if (defaultTemplateName.isTextual() && defaultTemplateName.textValue().isEmpty()) {
+                throw SmithyValidationErrors.badRequest(SmithyValidationErrors.Violations.WITHOUT_VALUES
+                        .lengthTooShort("defaultContent.template.templateName", "", 1));
+            }
             JsonNode bulkEntries = request.path("BulkEmailEntries");
             if (bulkEntries.isMissingNode() || bulkEntries.isNull()) {
                 throw SmithyValidationErrors.badRequest(SmithyValidationErrors.notNullWithoutValue("bulkEmailEntries"));
@@ -254,7 +259,7 @@ public class SesSendController {
             TemplateSelector selector = TemplateSelector.of(template);
             if (selector.isEmpty()) {
                 throw new AwsException("BadRequestException",
-                        "DefaultContent.Template requires TemplateName, TemplateArn, or TemplateContent.", 400);
+                        "TemplateName and TemplateArn both can not be empty", 400);
             }
             // AWS counts the entries after the inline content check and the sender checks, and
             // before it rejects a stored template named beside the content or looks one up

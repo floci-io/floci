@@ -7,9 +7,12 @@ import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.services.appsync.graphql.AppSyncTransportException;
 import io.floci.aws.services.cognito.CognitoService;
 import io.floci.aws.services.cognito.model.UserPool;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -35,6 +38,7 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CognitoAuthValidatorTest {
 
     private static final Instant NOW = Instant.parse("2026-01-01T00:00:00Z");

@@ -3748,9 +3748,19 @@ public class DynamoDbService {
 
     // --- Condition expression evaluation ---
 
+    public void validateFilterExpression(String filterExpression, JsonNode exprAttrNames, JsonNode exprAttrValues) {
+        validateExpression(filterExpression, "FilterExpression", exprAttrNames, exprAttrValues);
+    }
+
+    private static void validateExpression(String expression, String exprType,
+                                           JsonNode exprAttrNames, JsonNode exprAttrValues) {
+        DynamoDbReservedWords.check(expression, exprType);
+        ExpressionEvaluator.validateExpression(expression, exprType, exprAttrNames, exprAttrValues);
+    }
+
     private void evaluateCondition(JsonNode existingItem, String conditionExpression,
                                     JsonNode exprAttrNames, JsonNode exprAttrValues, String returnValuesOnConditionCheckFailure) {
-        DynamoDbReservedWords.check(conditionExpression, "ConditionExpression");
+        validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
         if (!matchesFilterExpression(existingItem, conditionExpression, exprAttrNames, exprAttrValues)) {
             if ("ALL_OLD".equals(returnValuesOnConditionCheckFailure)){
                 throw new ConditionalCheckFailedException(existingItem);
@@ -4938,7 +4948,7 @@ public class DynamoDbService {
             return;
         }
         validateAttributeValueShape(attr);
-        String expectedType = keyAttributeType(table, keyName);
+        String expectedType = table.attributeType(keyName);
         if (expectedType != null && !attr.has(expectedType)) {
             if (surface == KeySurface.ITEM_BODY) {
                 throw new KeySchemaMismatchException(
@@ -4953,16 +4963,6 @@ public class DynamoDbService {
         if (attr.has("B") && attr.get("B").asText().isEmpty()) {
             throw DynamoDbKeyValueErrors.emptyKeyValue("B", keyName);
         }
-    }
-
-    private String keyAttributeType(TableDefinition table, String keyName) {
-        if (table.getAttributeDefinitions() == null) {
-            return null;
-        }
-        return table.getAttributeDefinitions().stream()
-                .filter(def -> keyName.equals(def.getAttributeName()))
-                .map(AttributeDefinition::getAttributeType)
-                .findFirst().orElse(null);
     }
 
     // AWS validates GSI/LSI key attribute values on every write that produces the item,
@@ -5044,7 +5044,7 @@ public class DynamoDbService {
                 continue;
             }
             validateAttributeValueShape(attr);
-            String expectedType = keyAttributeType(table, attrName);
+            String expectedType = table.attributeType(attrName);
             if (expectedType != null && !attr.has(expectedType)) {
                 throw DynamoDbKeyValueErrors.indexKeyTypeMismatch(attrName, expectedType,
                         attr.fieldNames().next(), indexName);

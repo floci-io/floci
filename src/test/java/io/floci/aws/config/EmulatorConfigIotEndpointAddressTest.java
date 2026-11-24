@@ -1,6 +1,9 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -15,6 +18,8 @@ import static org.mockito.Mockito.when;
  * {@link EmulatorConfig#iotEndpointAddress()}: the configured address when there is one,
  * otherwise the host and port of the effective base URL.
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EmulatorConfigIotEndpointAddressTest {
 
     private static EmulatorConfig config(String effectiveBaseUrl, Optional<String> endpointAddress) {

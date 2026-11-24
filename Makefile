@@ -62,6 +62,9 @@
 # check fails until the actions of no resource type list the model's scope.
 # src/main/resources/aws/iam-paginators.json, what each paged IAM list pages by, is generated
 # from botocore's IAM model and paginators by tools/aws/regen_iam_paginators.py.
+# src/main/resources/aws/iam-cloudtrail-shapes.json, how a CloudTrail record names and types an IAM
+# call's members and errors, is generated from botocore's IAM model by
+# tools/aws/regen_iam_cloudtrail_shapes.py.
 
 PYTHON ?= python3
 
@@ -322,6 +325,7 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_query_services.py
 	$(PYTHON) tools/aws/regen_rest_routes.py
 	$(PYTHON) tools/aws/regen_iam_paginators.py
+	$(PYTHON) tools/aws/regen_iam_cloudtrail_shapes.py
 
 aws-data-check: aws-data-check-botocore ## CI gate: the vendored AWS data must match a fresh generation
 	@$(PYTHON) tools/aws/regen_partitions.py --check || { \
@@ -519,6 +523,12 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 	@$(PYTHON) tools/aws/regen_iam_paginators.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/iam-paginators.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_iam_cloudtrail_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/iam-cloudtrail-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}

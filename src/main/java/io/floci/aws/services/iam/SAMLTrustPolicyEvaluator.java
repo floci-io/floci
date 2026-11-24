@@ -14,6 +14,7 @@ import java.util.stream.StreamSupport;
 @ApplicationScoped
 public class SAMLTrustPolicyEvaluator {
     private static final String ROLE_SESSION_NAME_KEY = "sts:RoleSessionName";
+    private static final String SAML_ACTION = "sts:AssumeRoleWithSAML";
     private final ObjectMapper mapper;
     @Inject
     public SAMLTrustPolicyEvaluator(ObjectMapper mapper) {
@@ -26,6 +27,21 @@ public class SAMLTrustPolicyEvaluator {
      */
     public boolean allows(String document, String providerArn, Map<String, List<String>> claims,
                           String roleSessionName) {
+        return allows(SAML_ACTION, document, providerArn, claims, roleSessionName);
+    }
+
+    /**
+     * Whether the trust policy lets this assertion's holder tag the session it is assuming, read on
+     * the same document with the same principal and the same conditions as the assume itself.
+     */
+    public boolean allowsTagging(String document, String providerArn, Map<String, List<String>> claims,
+                                 String roleSessionName) {
+        return allows(AssumeRolePolicyEvaluator.TAG_SESSION_ACTION, document, providerArn, claims,
+                roleSessionName);
+    }
+
+    private boolean allows(String action, String document, String providerArn,
+                           Map<String, List<String>> claims, String roleSessionName) {
         try {
             JsonNode statements = mapper.readTree(document).path("Statement");
             if (!TrustPolicyStatements.wellFormed(statements)) {
@@ -34,7 +50,7 @@ public class SAMLTrustPolicyEvaluator {
             if (statements.isArray()) {
                 boolean allowed = false;
                 for (JsonNode statement : statements) {
-                    int result = evaluate(statement, providerArn, claims, roleSessionName);
+                    int result = evaluate(action, statement, providerArn, claims, roleSessionName);
                     if (result < 0) {
                         return false;
                     }
@@ -44,15 +60,16 @@ public class SAMLTrustPolicyEvaluator {
                 }
                 return allowed;
             }
-            return statements.isObject() && evaluate(statements, providerArn, claims, roleSessionName) > 0;
+            return statements.isObject()
+                    && evaluate(action, statements, providerArn, claims, roleSessionName) > 0;
         } catch (Exception e) {
             return false;
         }
     }
 
-    private int evaluate(JsonNode statement, String providerArn, Map<String, List<String>> claims,
-                         String roleSessionName) {
-        if (!actionApplies(statement) || !principal(statement.path("Principal"), providerArn)
+    private int evaluate(String action, JsonNode statement, String providerArn,
+                         Map<String, List<String>> claims, String roleSessionName) {
+        if (!actionApplies(statement, action) || !principal(statement.path("Principal"), providerArn)
                 || !conditionsSatisfied(statement.get("Condition"), claims, roleSessionName)) {
             return 0;
         }
@@ -120,31 +137,31 @@ public class SAMLTrustPolicyEvaluator {
         return false;
     }
 
-    private boolean actionApplies(JsonNode statement) {
-        JsonNode action = statement.get("Action");
-        if (action != null) {
-            return action(action);
+    private boolean actionApplies(JsonNode statement, String action) {
+        JsonNode element = statement.get("Action");
+        if (element != null) {
+            return action(element, action);
         }
         JsonNode notAction = statement.get("NotAction");
-        return notAction != null && !action(notAction);
+        return notAction != null && !action(notAction, action);
     }
 
-    private boolean action(JsonNode node) {
+    private boolean action(JsonNode node, String action) {
         if (node.isTextual()) {
-            return matches(node.asText());
+            return matches(node.asText(), action);
         }
         if (node.isArray()) {
             for (JsonNode value : node) {
-                if (value.isTextual() && matches(value.asText())) {
+                if (value.isTextual() && matches(value.asText(), action)) {
                     return true;
                 }
             }
         }
         return false;
     }
-    private boolean matches(String action) {
-        String regex = action.replace(".", "\\.").replace("*", ".*").replace("?", ".");
-        return "sts:AssumeRoleWithSAML".matches("(?i)^" + regex + "$");
+    private boolean matches(String pattern, String action) {
+        String regex = pattern.replace(".", "\\.").replace("*", ".*").replace("?", ".");
+        return action.matches("(?i)^" + regex + "$");
     }
     private boolean principal(JsonNode node, String providerArn) {
         JsonNode federated = node.isObject() ? node.get("Federated") : null;

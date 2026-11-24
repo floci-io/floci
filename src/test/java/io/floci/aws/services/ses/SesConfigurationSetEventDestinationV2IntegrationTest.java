@@ -11,6 +11,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.util.List;
 
 import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -39,9 +40,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
                 "ed-a-updated"}) {
             SnsTopicFixture.create("us-east-1", topic);
         }
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("{\"ConfigurationSetName\": \"" + CS + "\"}")
         .when()
             .post("/v2/email/configuration-sets")
@@ -52,9 +51,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
     @Test
     @Order(2)
     void createEventDestination() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("""
                 {
                   "EventDestinationName": "ed-sns",
@@ -92,9 +89,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
     @Test
     @Order(4)
     void createEventDestination_duplicateRejected() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("""
                 {
                   "EventDestinationName": "ed-sns",
@@ -116,9 +111,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
     @Test
     @Order(5)
     void createEventDestination_unknownConfigSetReturns404() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("""
                 {
                   "EventDestinationName": "ed-x",
@@ -139,9 +132,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
     @Test
     @Order(6)
     void createEventDestination_emptyMatchingEventTypes_returns400() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("""
                 {
                   "EventDestinationName": "ed-empty",
@@ -161,9 +152,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
     @Test
     @Order(7)
     void createEventDestination_noDestination_returns400() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("""
                 {
                   "EventDestinationName": "ed-nodest",
@@ -182,9 +171,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
     @Test
     @Order(8)
     void updateEventDestination_replacesDefinition() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("""
                 {
                   "EventDestination": {
@@ -216,9 +203,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
     @Test
     @Order(9)
     void updateEventDestination_unknownReturns404() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("""
                 {
                   "EventDestination": {
@@ -285,9 +270,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
     @Test
     @Order(13)
     void updateEventDestination_invalidName_returns400() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("""
                 {
                   "EventDestination": {
@@ -323,9 +306,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
     @Order(15)
     void updateEventDestination_preservesOrderAmongMultiple() {
         String cs = "v2-cs-ed-multi";
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("{\"ConfigurationSetName\": \"" + cs + "\"}")
         .when()
             .post("/v2/email/configuration-sets")
@@ -333,9 +314,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
             .statusCode(200);
 
         for (String n : new String[]{"ed-a", "ed-b"}) {
-            given()
-                .contentType("application/json")
-                .header("Authorization", AUTH)
+            v2()
                 .body("""
                     {
                       "EventDestinationName": "%s",
@@ -352,9 +331,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
                 .statusCode(200);
         }
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("""
                 {
                   "EventDestination": {
@@ -387,9 +364,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
     @Order(16)
     void createEventBridgeConfigurationSet() {
         String cs = "v2-cs-ed-ebus";
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("{\"ConfigurationSetName\": \"" + cs + "\"}")
         .when()
             .post("/v2/email/configuration-sets")
@@ -401,9 +376,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
     @Order(17)
     void createEventDestination_eventBridgeCustomBusRejected() {
         String cs = "v2-cs-ed-ebus";
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("""
                 {
                   "EventDestinationName": "ed-eb-custom",
@@ -440,9 +413,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
         String defaultBusArn = "arn:aws:events:us-east-1:000000000000:event-bus/default";
 
         // Seed a destination on the default event bus.
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("""
                 {
                   "EventDestinationName": "ed-eb-default",
@@ -459,9 +430,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
             .statusCode(200);
 
         // An otherwise identical ARN naming a custom event bus must be rejected.
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("""
                 {
                   "EventDestination": {
@@ -542,9 +511,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
     @Order(20)
     void createEventDestination_eventBridgeBlankBusArnRejected() {
         String cs = "v2-cs-ed-ebus";
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("""
                 {
                   "EventDestinationName": "ed-eb-blank",
@@ -577,9 +544,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
     void createEventDestination_eventBridgeInvalidArnRejected(String caseName, String busArn) {
         String cs = "v2-cs-ed-ebus";
         String destinationName = "ed-eb-invalid-create-" + caseName;
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("""
                 {
                   "EventDestinationName": "%s",
@@ -622,9 +587,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
         String cs = "v2-cs-ed-ebus";
         String destinationName = "ed-eb-invalid-update-" + caseName;
         String defaultBusArn = "arn:aws:events:us-east-1:000000000000:event-bus/default";
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("""
                 {
                   "EventDestinationName": "%s",
@@ -641,9 +604,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
             .statusCode(200);
 
         try {
-            given()
-                .contentType("application/json")
-                .header("Authorization", AUTH)
+            v2()
                 .body("""
                     {
                       "EventDestination": {
@@ -756,25 +717,19 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
                 """;
         String message = "SNS topic <arn:aws:sns:us-east-1:000000000000:never-created> not found.";
         String set = "v2-cs-sns-check";
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body("{\"ConfigurationSetName\": \"" + set + "\"}")
         .when()
             .post("/v2/email/configuration-sets")
         .then()
             .statusCode(200);
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body(body.replace("never-created", "x"))
         .when()
             .post("/v2/email/configuration-sets/" + set + "/event-destinations")
         .then()
             .statusCode(200);
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body(body)
         .when()
             .post("/v2/email/configuration-sets/" + set + "/event-destinations")
@@ -782,18 +737,14 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("BadRequestException"))
             .body("message", equalTo(message));
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body(body)
         .when()
             .post("/v2/email/configuration-sets/v2-cs-ghost/event-destinations")
         .then()
             .statusCode(400)
             .body("message", equalTo(message));
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
+        v2()
             .body(body)
         .when()
             .put("/v2/email/configuration-sets/" + set + "/event-destinations/ed-sns")

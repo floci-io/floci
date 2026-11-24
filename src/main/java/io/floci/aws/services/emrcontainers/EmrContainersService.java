@@ -276,15 +276,17 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         }
         if (gateways != null) {
             gateways.servers().shutdown();
+            gateways.kernels().shutdown();
         }
     }
 
     /**
-     * The managed endpoints' gateways of the docker runner mode: the servers that run them, the image they run in
-     * ({@code gateway-image-template}, null when not set), and Floci's base URL, which their {@code serverUrl} is
-     * under.
+     * The managed endpoints' gateways of the docker runner mode: the servers that run them, the containers of their
+     * kernels with images of their own, the image they run in ({@code gateway-image-template}, null when not set), and
+     * Floci's base URL, which their {@code serverUrl} is under.
      */
-    record EndpointGateways(SessionServers servers, String imageTemplate, String baseUrl) {
+    record EndpointGateways(SessionServers servers, EmrContainersKernelContainers kernels, String imageTemplate,
+                            String baseUrl) {
 
         static EndpointGateways of(SparkJobRunner runner, Clock clock, String imageTemplate, String baseUrl) {
             HttpClient probes = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
@@ -292,6 +294,8 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
                     Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-containers-gateway-", 0)
                             .factory()),
                     null, (host, port) -> EmrContainersGateways.unanswered(probes, host, port), clock),
+                    new EmrContainersKernelContainers(runner, Executors.newCachedThreadPool(
+                            Thread.ofPlatform().daemon().name("emr-containers-kernel-", 0).factory())),
                     imageTemplate, baseUrl);
         }
     }
@@ -674,7 +678,8 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         endpoint.put(CLIENT_TOKEN, clientToken);
         endpoints.put(arn, endpoint);
         if (gateways != null) {
-            gateways.servers().launch(EmrContainersGateways.job(endpoint, gateways.imageTemplate(), dockerNetwork),
+            gateways.servers().launch(EmrContainersGateways.job(endpoint, gateways.imageTemplate(), dockerNetwork,
+                    gateways.kernels().secretFor(id, regionResolver.getAccountId(), regionResolver.getRegion())),
                     gatewayOwner);
         }
         return pick(endpoint, "id", "name", "arn", "virtualClusterId");
@@ -770,6 +775,81 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
     }
 
     /**
+     * Where a CORS preflight to endpoint {@code endpointId}'s gateway goes, which Jupyter Enterprise Gateway 2.6.0's
+     * TokenAuthorizationMixin takes without a token: empty where no gateway of this process runs, refused while the
+     * endpoint is not ACTIVE, else its gateway. Called off the event loop, as the account and Region of none.
+     */
+    public Optional<SparkConnectTargets.Route> gatewayPreflightRoute(String endpointId) {
+        return gateways == null ? Optional.empty() : gateways.servers().routeWithoutToken(endpointId, gatewayOwner);
+    }
+
+    /**
+     * Starts the container of kernel {@code kernelId} of endpoint {@code endpointId}, as its gateway asks with
+     * {@code secret}, the one Floci gave it: the kernel's {@code kernel} names one the endpoint's
+     * {@code jupyter-kernel-overrides} gives an image, its {@code responseAddress} and {@code publicKey} where its
+     * launcher sends where the kernel listens, and its {@code env} the kernel's {@code KERNEL_} variables. Null once
+     * started, else why not, as the status and message of the answer. Called off the event loop.
+     */
+    public KernelContainerRefusal startKernelContainer(String endpointId, String kernelId, String secret,
+                                                       JsonNode request) {
+        EmrContainersKernelContainers.Gateway gateway =
+                gateways == null ? null : gateways.kernels().gateway(endpointId, secret);
+        if (gateway == null) {
+            return notSigned(endpointId);
+        }
+        String kernel = request.path("kernel").textValue();
+        String responseAddress = request.path("responseAddress").textValue();
+        String publicKey = request.path("publicKey").textValue();
+        if (!EmrContainersKernelContainers.KERNEL_ID.matcher(kernelId).matches() || responseAddress == null
+                || !EmrContainersKernelContainers.RESPONSE_ADDRESS.matcher(responseAddress).matches()
+                || publicKey == null || !EmrContainersKernelContainers.PUBLIC_KEY.matcher(publicKey).matches()
+                || !request.path("env").isObject()) {
+            return new KernelContainerRefusal(400, "The request names no kernel id, response address, public key "
+                    + "and env.");
+        }
+        Map<String, String> environment = new LinkedHashMap<>();
+        request.get("env").properties().forEach(variable -> {
+            if (variable.getValue().isTextual()) {
+                environment.put(variable.getKey(), variable.getValue().textValue());
+            }
+        });
+        return RequestScopes.callAs(gateway.accountId(), gateway.region(), () -> {
+            synchronized (this) {
+                ObjectNode endpoint = endpointById(endpointId).orElse(null);
+                if (endpoint == null || !ACTIVE.equals(endpoint.path("state").textValue())) {
+                    return new KernelContainerRefusal(409, "Endpoint " + endpointId + " is not ACTIVE.");
+                }
+                if (!EmrContainersGateways.kernelImages(endpoint).containsKey(kernel)) {
+                    return new KernelContainerRefusal(400, "Endpoint " + endpointId
+                            + "'s jupyter-kernel-overrides gives kernel " + kernel + " no image.");
+                }
+                // Refused where the gateway's end has taken its secret and kernels since its secret was checked.
+                return gateways.kernels().launch(endpointId, kernelId, EmrContainersGateways.kernelJob(endpoint,
+                        gateways.kernels().runId(endpointId, kernelId), kernel, kernelId, responseAddress, publicKey,
+                        environment, gateways.imageTemplate(), dockerNetwork)) ? null
+                        : new KernelContainerRefusal(409, "Endpoint " + endpointId + "'s gateway has stopped.");
+            }
+        });
+    }
+
+    /** Stops the container of kernel {@code kernelId}, as its gateway asks with {@code secret}: null, else why not. */
+    public KernelContainerRefusal stopKernelContainer(String endpointId, String kernelId, String secret) {
+        if (gateways == null || gateways.kernels().gateway(endpointId, secret) == null) {
+            return notSigned(endpointId);
+        }
+        gateways.kernels().stop(endpointId, kernelId);
+        return null;
+    }
+
+    /** Why a gateway's call for a kernel's container is refused: the answer's status and message. */
+    public record KernelContainerRefusal(int status, String message) {
+    }
+
+    private static KernelContainerRefusal notSigned(String endpointId) {
+        return new KernelContainerRefusal(403, "The request is not signed by endpoint " + endpointId + "'s gateway.");
+    }
+
+    /**
      * The endpoint as it stands, stored: in the docker runner mode, one whose gateway no thread of this process runs,
      * as after a restart, has ended, TERMINATED_WITH_ERRORS, or TERMINATED where it was being deleted.
      */
@@ -846,6 +926,8 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
 
         @Override
         public void stopped(String endpointId, SparkJobRunner.Outcome outcome) {
+            // Its kernels' own containers go with the gateway.
+            gateways.kernels().stopAll(endpointId);
             synchronized (EmrContainersService.this) {
                 endpointById(endpointId)
                         .filter(stored -> !FINISHED_ENDPOINT_STATES.contains(stored.path("state").textValue()))
@@ -1059,6 +1141,7 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         executing.clear();
         if (gateways != null) {
             gateways.servers().reset();
+            gateways.kernels().reset();
         }
     }
 
@@ -1068,6 +1151,7 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         executing.clear();
         if (gateways != null) {
             gateways.servers().reset();
+            gateways.kernels().reset();
         }
         virtualClusters.clear();
         jobRuns.clear();

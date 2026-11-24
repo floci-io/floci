@@ -3518,6 +3518,22 @@ public interface EmulatorConfig {
         boolean preferLocalImages();
 
         Optional<String> dockerNetwork();
+
+        /**
+         * Run the background sweep that applies repository lifecycle policies, expiring the images their rules
+         * select. When off, policies are checked and stored but nothing expires.
+         * Env: FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_ENABLED
+         */
+        @WithDefault("true")
+        boolean lifecycleSweepEnabled();
+
+        /**
+         * How often the lifecycle sweep runs, in seconds. ECR expires an image within 24 hours of it meeting a
+         * rule, so the interval only bounds how late Floci is.
+         * Env: FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_INTERVAL_SECONDS
+         */
+        @WithDefault("60")
+        long lifecycleSweepIntervalSeconds();
     }
 
     interface LambdaServiceConfig {
@@ -4270,8 +4286,9 @@ public interface EmulatorConfig {
         /**
          * When true (and ECR is enabled), each new k3s cluster gets a generated
          * {@code /etc/rancher/k3s/registries.yaml} that mirrors every ECR repository URI the
-         * emulator can mint to the registry container's in-network endpoint, so pods can pull
-         * images pushed to Floci ECR without any manual containerd configuration.
+         * emulator can mint, and the cluster's and default account's registry hosts as AWS names
+         * them, to the registry container's in-network endpoint, so pods can pull images pushed to
+         * Floci ECR without any manual containerd configuration.
          */
         @WithDefault("true")
         boolean ecrRegistryMirror();
@@ -4301,6 +4318,19 @@ public interface EmulatorConfig {
         boolean defaultStorageClass();
 
         /**
+         * The local-path provisioner image that serves EKS Auto Mode block storage: while a cluster's
+         * {@code storageConfig.blockStorage} is enabled, claims of a StorageClass whose provisioner is
+         * {@code ebs.csi.eks.amazonaws.com} are provisioned from the node's disk by it. The default is the version
+         * k3s v1.36.0+k3s1 bundles.
+         */
+        @WithDefault("rancher/local-path-provisioner:v0.0.35")
+        String blockStorageProvisionerImage();
+
+        /** The image of the helper pods that {@link #blockStorageProvisionerImage()} runs to create and remove volumes. */
+        @WithDefault("rancher/mirrored-library-busybox:1.37.0")
+        String blockStorageHelperImage();
+
+        /**
          * When true, exposes an IMDS link-local proxy (169.254.169.254:80) inside the cluster container's
          * network namespace that relays to Floci's EC2 metadata service.
          */
@@ -4313,6 +4343,22 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean imdsPodNetwork();
+
+        /**
+         * When true, pods get addresses from IPv4 /28 prefixes of their node's subnet, which the node holds on its network
+         * interface, as the Amazon VPC CNI plugin's prefix delegation assigns them, instead of k3s's own pod network. A
+         * node needs an address in a Docker-backed subnet for it.
+         */
+        @WithDefault("false")
+        boolean vpcPodNetwork();
+
+        /**
+         * How many /28 prefixes a node holds with {@link #vpcPodNetwork()}: two, as a node running pods holds under the
+         * VPC CNI's default {@code WARM_PREFIX_TARGET} of one. With {@link #vpcPodNetwork()} on, Floci refuses to start
+         * unless it is between 1 and 16.
+         */
+        @WithDefault("2")
+        int vpcPodPrefixes();
 
         /**
          * When true, configures k3s with the cluster's per-cluster OIDC signing keypair and
@@ -4617,6 +4663,29 @@ public interface EmulatorConfig {
          */
         @WithDefault("1000")
         int logPollIntervalMillis();
+
+        /**
+         * Opt-in: long-lived service containers send their logs to Floci through Docker's {@code gelf}
+         * log driver instead of being read on a timer, so they hold no Docker connection at all. Needs a
+         * daemon that can reach Floci (Docker Desktop, or a daemon on Floci's host), not Docker-in-Docker
+         * or a remote daemon.
+         */
+        @WithDefault("false")
+        boolean logDriverMode();
+
+        /**
+         * The host the daemon dials to reach Floci's log listener in the log-driver mode. Unset, it is
+         * {@code host.docker.internal} on Docker Desktop and {@code 127.0.0.1} otherwise.
+         */
+        Optional<String> logDriverHost();
+
+        /**
+         * The port Floci's log listener takes in the log-driver mode. It is fixed because Docker keeps the
+         * address in each container's log configuration and dials it on every start, including a start of a
+         * container Floci adopts after a restart. The default is GELF's standard port.
+         */
+        @WithDefault("12201")
+        int logDriverPort();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.

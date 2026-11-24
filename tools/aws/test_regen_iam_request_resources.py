@@ -104,6 +104,11 @@ def test_an_optional_arn_member_of_a_type_without_variables_names_it_when_absent
         {"type": "catalog", "fill": {}, "when": {"CatalogArn": [None]}}]
     # A required member is always there.
     assert r.with_absent_arn(named, FORMATS, set()) == named
+    # A format ending in a wildcard (DMS's `cert:*`) names every resource of its type, so a request leaving the member
+    # out names none of them.
+    wildcard = {"cert": "arn:${Partition}:svc:${Region}:${Account}:cert:*"}
+    assert r.with_absent_arn([{"types": ["cert"], "arn": "CertificateArn"}], wildcard, {"CertificateArn"}) == [
+        {"types": ["cert"], "arn": "CertificateArn"}]
 
 
 def test_an_optional_arn_member_of_a_type_with_variables_names_its_services_default_when_absent():
@@ -371,7 +376,6 @@ def model(operations: dict[str, dict[str, str]], protocol: str = "json") -> dict
 @pytest.fixture
 def isolated(monkeypatch):
     monkeypatch.setattr(r, "NAMESPACES", ("svc",))
-    monkeypatch.setattr(r, "HAND_BUILT", ("hand",))
     monkeypatch.setattr(r, "NOT_COVERED", {"later": "a later batch"})
     monkeypatch.setattr(r, "MEASURED", {})
     monkeypatch.setattr(r, "STATEMENT_SOURCES", {})
@@ -548,6 +552,57 @@ def test_a_member_holding_an_account_id_gives_the_account_of_the_types_named_by_
                           ["registryId"]) == [{"type": "catalog", "fill": {}}]
     # Two account members, either of which it could be, give none.
     assert r.with_account([{"type": "thing", "fill": {}}], FORMATS, ["a", "b"]) == [{"type": "thing", "fill": {}}]
+
+
+def test_an_account_and_a_region_a_format_names_beside_its_own_take_the_requests_members(tmp_path):
+    # Config's aggregation authorization: arn:...:<caller>:aggregation-authorization/<authorized account>/<Region>.
+    formats = {"grant": "arn:${Partition}:svc:${Region}:${Account}:grant/${GranteeAccount}/${GranteeRegion}"}
+    write_models(tmp_path, {"svc": model({"PutGrant": {"AuthorizedAccountId": "AccountId",
+                                                       "AuthorizedAwsRegion": "String"}})})
+    models = r.load_models(tmp_path, {"svc"})
+    assert r.region_members(models, "PutGrant") == ["AuthorizedAwsRegion"]
+    filled = r.with_account_variables([{"type": "grant", "fill": {}}], formats,
+                                      r.account_members(models, "PutGrant"), r.region_members(models, "PutGrant"))
+    assert filled == [{"type": "grant", "fill": {"GranteeAccount": "AuthorizedAccountId",
+                                                 "GranteeRegion": "AuthorizedAwsRegion"}}]
+    # The member that fills the format's own account variable is not also the ARN's account, which stays the caller's.
+    assert r.with_account(filled, formats, ["AuthorizedAccountId"]) == filled
+    # A format naming no other account or Region is left as it is.
+    assert r.with_account_variables([{"type": "thing", "fill": {}}], FORMATS, ["registryId"], ["Region"]) == [
+        {"type": "thing", "fill": {}}]
+
+
+def test_lists_a_request_adds_or_removes_name_a_type_no_resource_names_yet():
+    # ElastiCache's ModifyUserGroup changes the users of its UserIdsToAdd and UserIdsToRemove.
+    formats = {"group": "arn:${Partition}:svc:${Region}:${Account}:group:${GroupId}",
+               "user": "arn:${Partition}:svc:${Region}:${Account}:user:${UserId}"}
+    members = {"GroupId": "GroupId", "UserIdsToAdd": "UserIdsToAdd[]", "UserIdsToRemove": "UserIdsToRemove[]"}
+    resources = [{"type": "group", "fill": {"GroupId": "GroupId"}}]
+    assert r.with_change_lists(resources, ["group", "user"], formats, members) == resources + [
+        {"type": "user", "fill": {"UserId": "UserIdsToAdd[]"}}, {"type": "user", "fill": {"UserId": "UserIdsToRemove[]"}}]
+    # A type another resource names already, or a list named after something else, adds nothing.
+    named = resources + [{"type": "user", "fill": {"UserId": "UserIds[]"}}]
+    assert r.with_change_lists(named, ["group", "user"], formats, members) == named
+    assert r.with_change_lists(resources, ["group", "user"], formats, {"TagsToAdd": "TagsToAdd[]"}) == resources
+
+
+def test_a_structure_named_after_the_type_gives_its_name_to_a_type_named_by_nothing_else(tmp_path):
+    # Config's PutConfigurationRecorder names its recorder in ConfigurationRecorder.name.
+    service = model({"PutRecorder": {"Recorder": "Recorder"}})
+    service["shapes"]["Recorder"] = {"type": "structure", "members": {"name": {"shape": "String"},
+                                                                      "roleARN": {"shape": "String"}}}
+    write_models(tmp_path, {"svc": service})
+    models = r.load_models(tmp_path, {"svc"})
+    assert r.structure_name_fields(models, "PutRecorder", ["recorder"]) == {"recorder": "Recorder.name"}
+    formats = {"recorder": "arn:${Partition}:svc:${Region}:${Account}:recorder/${RecorderName}/${RecorderId}"}
+    assert r.with_structure_names([{"type": "recorder", "fill": {}}], formats, {"recorder": "Recorder.name"}) == [
+        {"type": "recorder", "fill": {"RecorderName": "Recorder.name"}}]
+    # A row another rule filled keeps its fill, and a format of two names says nothing about which one it is.
+    given = [{"type": "recorder", "fill": {"RecorderId": "Id"}}]
+    assert r.with_structure_names(given, formats, {"recorder": "Recorder.name"}) == given
+    two = {"recorder": "arn:${Partition}:svc:${Region}:${Account}:recorder/${GroupName}/${RecorderName}"}
+    assert r.with_structure_names([{"type": "recorder", "fill": {}}], two, {"recorder": "Recorder.name"}) == [
+        {"type": "recorder", "fill": {}}]
 
 
 def test_an_account_member_of_a_types_own_structure_gives_that_types_account_alone(tmp_path):
@@ -876,7 +931,7 @@ def test_a_field_of_each_of_a_lists_structures_taking_an_arn_before_a_name_is_re
 
 
 def good_document() -> dict:
-    return {"namespaces": {"svc": ["svc"]}, "handBuilt": ["hand"],
+    return {"namespaces": {"svc": ["svc"]},
             "notCovered": {"later": "a later batch"},
             "otherNamespaces": ["other"], "arnFormats": {"svc": {"thing": FORMATS["thing"], "group": FORMATS["group"]}},
             "pathFormats": {},
@@ -1198,7 +1253,7 @@ def test_the_vendored_file_is_well_formed():
     assert document["integerVariables"] == {"lambda": {"layerVersion": ["LayerVersion"]}}
     # Lambda is read whole: a partial ARN names a function, a provisioned concurrency config acts on the version or
     # alias its Qualifier names, the action the reference gives it, and AddPermission's SourceAccount is its source's.
-    assert "lambda" in document["namespaces"] and "lambda" not in document["handBuilt"]
+    assert "lambda" in document["namespaces"]
     assert operations["lambda:Invoke"]["resources"] == [
         {"type": "function", "fill": {"FunctionName": "FunctionName"}, "partialArn": True}]
     assert operations["lambda:PublishVersion"]["resources"] == [
@@ -1220,7 +1275,7 @@ def test_the_vendored_file_is_well_formed():
         {"type": f"listener-rule/{kind}", "parent": f"listener/{kind}", "arn": "ListenerArn"} for kind in ("app", "net")]
     # S3 is read from the table: an object by its bucket and key, a bucket per client, and DeleteObjects, whose keys
     # its XML body names, left to S3.
-    assert "s3" in document["namespaces"] and "s3" not in document["handBuilt"]
+    assert "s3" in document["namespaces"]
     assert operations["s3:PutObject"]["resources"] == [
         {"type": "object", "fill": {"BucketName": "Bucket", "ObjectName": "Key"}}]
     assert operations["s3:CreateBucket"]["locatedApart"] == {"s3": {"Bucket": "{Bucket}"}, "s3control": {"Bucket": "{name}"}}
@@ -1228,6 +1283,47 @@ def test_the_vendored_file_is_well_formed():
     # An SQS request names its queue by URL, which SQS finds as its handlers do; a create names it by name.
     assert operations["sqs:SendMessage"]["resources"] == [{"type": "queue", "fill": {}, "find": ["QueueUrl"]}]
     assert operations["sqs:CreateQueue"]["resources"] == [{"type": "queue", "fill": {"QueueName": "QueueName"}}]
+    # CloudWatch is read whole: each alarm a list names, and a dashboard by its name, its ARN with no Region.
+    assert "cloudwatch" in document["namespaces"] and "cloudwatch" not in document["notCovered"]
+    assert operations["cloudwatch:DeleteAlarms"]["resources"] == [
+        {"type": "alarm", "fill": {"AlarmName": "AlarmNames[]"}}]
+    assert operations["cloudwatch:DeleteDashboards"]["resources"] == [
+        {"type": "dashboard", "fill": {"DashboardName": "DashboardNames[]"}}]
+    assert document["arnFormats"]["cloudwatch"]["dashboard"] == (
+        "arn:${Partition}:cloudwatch::${Account}:dashboard/${DashboardName}")
+    # Comprehend is read whole; its detection actions act on no resource type, and a classifier's are read by ARN.
+    assert "comprehend" in document["namespaces"] and "comprehend" not in document["notCovered"]
+    assert operations["comprehend:DetectSentiment"] == {
+        "action": "comprehend:DetectSentiment", "types": [], "resources": []}
+    assert operations["comprehend:DescribeDocumentClassifier"]["resources"] == [
+        {"types": ["document-classifier"], "arn": "DocumentClassifierArn"}]
+    # Config is read whole: a rule is found by its name, its ARN ending in the id Config mints; a conformance pack is
+    # its name, the id it mints after it found the same way when Config holds the pack.
+    assert "config" in document["namespaces"] and "config" not in document["notCovered"]
+    assert operations["config:DeleteConfigRule"]["resources"] == [
+        {"type": "ConfigRule", "fill": {}, "find": ["ConfigRuleName"]}]
+    assert operations["config:DeleteConformancePack"]["resources"] == [
+        {"type": "ConformancePack", "fill": {"ConformancePackName": "ConformancePackName"}}]
+    # An aggregation authorization is the caller's, its path the account and Region it authorizes; a recorder put
+    # names its recorder in the ConfigurationRecorder structure.
+    assert operations["config:PutAggregationAuthorization"]["resources"] == [
+        {"type": "AggregationAuthorization",
+         "fill": {"AggregatorAccount": "AuthorizedAccountId", "AggregatorRegion": "AuthorizedAwsRegion"}}]
+    assert {"type": "ConfigurationRecorder", "fill": {"RecorderName": "ConfigurationRecorder.name"}} in operations[
+        "config:PutConfigurationRecorder"]["resources"]
+    # DMS is read whole: an existing resource by the ARN its request names it by, each format ending in a literal `*`.
+    assert document["arnFormats"]["dms"]["Endpoint"] == "arn:${Partition}:dms:${Region}:${Account}:endpoint:*"
+    assert "dms" in document["namespaces"] and "dms" not in document["notCovered"]
+    assert operations["dms:DeleteEndpoint"]["resources"] == [{"types": ["Endpoint"], "arn": "EndpointArn"}]
+    # An endpoint written with no CertificateArn names no certificate.
+    assert not any(resource.get("type") == "Certificate" for resource in operations["dms:CreateEndpoint"]["resources"])
+    # ElastiCache is read whole: a cluster, group or user by the identifier its request names.
+    assert "elasticache" in document["namespaces"] and "elasticache" not in document["notCovered"]
+    assert operations["elasticache:DeleteCacheCluster"]["resources"][0] == {
+        "type": "cluster", "fill": {"CacheClusterId": "CacheClusterId"}}
+    assert operations["elasticache:ModifyUserGroup"]["resources"] == [
+        {"type": "usergroup", "fill": {"UserGroupId": "UserGroupId"}},
+        {"type": "user", "fill": {"UserId": "UserIdsToAdd[]"}}, {"type": "user", "fill": {"UserId": "UserIdsToRemove[]"}}]
     # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
     assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]
@@ -1248,25 +1344,26 @@ def test_the_vendored_file_is_well_formed():
         "type": "loadbalancer/app/", "fill": {"LoadBalancerName": "Name"}, "when": {"Type": ["application", None]}}
 
 
-MEASURED_FORMATS = {"thing": "arn:${Partition}:hand:${Region}:${Account}:thing/${ThingName}"}
+MEASURED_FORMATS = {"thing": "arn:${Partition}:probed:${Region}:${Account}:thing/${ThingName}"}
 PROBED = "real AWS probes in https://example.com/probes accept an allow and enforce a deny on thing/*"
 
 
 def measured_documents(tmp_path, listed: list[str]) -> list[dict]:
-    hand = model({"ListThings": {"StartName": "String"}})
-    hand["metadata"]["endpointPrefix"] = "hand"
-    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}), "hand": hand})
-    return DOCUMENTS + [reference("hand", {"ListThings": listed}, MEASURED_FORMATS)]
+    probed = model({"ListThings": {"StartName": "String"}})
+    probed["metadata"]["endpointPrefix"] = "probed"
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}), "probed": probed})
+    return DOCUMENTS + [reference("probed", {"ListThings": listed}, MEASURED_FORMATS)]
 
 
 def test_a_measured_operation_takes_the_resources_aws_was_measured_to_check_where_the_reference_lists_none(
         isolated, tmp_path):
-    isolated.setattr(r, "MEASURED", {"hand:ListThings": ([{"type": "thing", "fill": {}}], PROBED)})
+    isolated.setattr(r, "NAMESPACES", ("svc", "probed"))
+    isolated.setattr(r, "MEASURED", {"probed:ListThings": ([{"type": "thing", "fill": {}}], PROBED)})
     document = r.build(measured_documents(tmp_path, []), "test", tmp_path, "botocore test")
-    # Read in a namespace otherwise built by hand, keeping the reference's empty types.
-    assert document["operations"]["hand:ListThings"] == {
-        "action": "hand:ListThings", "types": [], "resources": [{"type": "thing", "fill": {}}]}
-    assert r.reads("hand:ListThings")
+    # The measured resources replace what the rules read, keeping the reference's empty types.
+    assert document["operations"]["probed:ListThings"] == {
+        "action": "probed:ListThings", "types": [], "resources": [{"type": "thing", "fill": {}}]}
+    assert r.reads("probed:ListThings")
     assert r.validate(document) == []
     assert r.derive(document, tmp_path) == []
 
@@ -1283,14 +1380,16 @@ def test_a_measured_operation_takes_the_resources_aws_was_measured_to_check_wher
 ])
 def test_a_measured_entry_is_refused_unless_it_cites_aws_for_what_the_metadata_does_not_say(
         isolated, tmp_path, measured, listed, problem):
-    isolated.setattr(r, "MEASURED", {"hand:ListThings": measured})
+    isolated.setattr(r, "NAMESPACES", ("svc", "probed"))
+    isolated.setattr(r, "MEASURED", {"probed:ListThings": measured})
     with pytest.raises(ValueError, match=problem):
         r.build(measured_documents(tmp_path, listed), "test", tmp_path, "botocore test")
 
 
 def test_a_measured_entry_must_name_an_operation_the_file_reads(isolated, tmp_path):
-    isolated.setattr(r, "MEASURED", {"hand:Gone": ([{"type": "thing", "fill": {}}], PROBED)})
-    with pytest.raises(ValueError, match="MEASURED gives hand:Gone, which the file does not read"):
+    isolated.setattr(r, "NAMESPACES", ("svc", "probed"))
+    isolated.setattr(r, "MEASURED", {"probed:Gone": ([{"type": "thing", "fill": {}}], PROBED)})
+    with pytest.raises(ValueError, match="MEASURED gives probed:Gone, which the file does not read"):
         r.build(measured_documents(tmp_path, []), "test", tmp_path, "botocore test")
 
 

@@ -1537,7 +1537,12 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
 
     /** The JVM options that open to Hadoop's classes the packages it reaches into, which Java 8 ignores. */
     public static String yarnJavaOptions() {
-        return YARN_OPENED_PACKAGES.stream().map(name -> "--add-opens=java.base/" + name + "=ALL-UNNAMED")
+        return javaBaseOpens(YARN_OPENED_PACKAGES);
+    }
+
+    /** The JVM options that open these {@code java.base} packages to the classes on the class path. */
+    public static String javaBaseOpens(List<String> packages) {
+        return packages.stream().map(name -> "--add-opens=java.base/" + name + "=ALL-UNNAMED")
                 .collect(Collectors.joining(" "));
     }
 

@@ -37,17 +37,12 @@
 | `PutImageScanningConfiguration` | Set a repository's `scanOnPush` flag and return the updated configuration; a non-boolean value is rejected |
 | `BatchGetRepositoryScanningConfiguration` | Report each repository's `scanOnPush` setting with a derived `scanFrequency` (`SCAN_ON_PUSH` or `MANUAL`); a missing repository fails the whole batch instead of appearing in `failures` |
 | `TagResource` / `UntagResource` / `ListTagsForResource` | Resource tagging |
-| `PutLifecyclePolicy` / `GetLifecyclePolicy` / `DeleteLifecyclePolicy` | Lifecycle policy round-trip (stored, not enforced) |
+| `PutLifecyclePolicy` / `GetLifecyclePolicy` / `DeleteLifecyclePolicy` | Lifecycle policies, applied by a background sweep (see [Lifecycle policies](#lifecycle-policies)) |
 | `SetRepositoryPolicy` / `GetRepositoryPolicy` / `DeleteRepositoryPolicy` | Repository policy round-trip (stored, not enforced) |
 | `PutRegistryPolicy` / `GetRegistryPolicy` / `DeleteRegistryPolicy` | Registry policy round-trip (stored, not enforced) |
 | `PutReplicationConfiguration` / `DescribeRegistry` | Store the registry's replication rules and return them with the registry ID (stored, not acted on) |
 | `PutRegistryScanningConfiguration` / `GetRegistryScanningConfiguration` | Store the registry's scan type and scanning rules (stored, not acted on) |
 | `GetAccountSetting` / `PutAccountSetting` | Read and store account settings for the registry (stored, not acted on) |
-
-`PutLifecyclePolicy` checks that the document is one JSON object with a nonempty
-`rules` array and unique positive integer priorities. Rejected documents return
-`InvalidParameterException` without replacing the prior policy. Selection and
-action validation, expiration, and registry garbage collection remain unimplemented.
 
 `GetAccountSetting` and `PutAccountSetting` keep values per account and Region.
 Supported names are `BASIC_SCAN_TYPE_VERSION` (`AWS_NATIVE`), `REGISTRY_POLICY_SCOPE`
@@ -111,6 +106,54 @@ is refused with the model's message, as AWS does. `imageStatus` and `DescribeIma
 - **Lambda, ECS and EMR Serverless integration.** Image-backed Lambda functions (`PackageType=Image`), ECS task containers and the custom images of EMR Serverless applications (in its `docker` runner mode) reference the same loopback `repositoryUri`. Floci rewrites real-AWS-shaped `<account>.dkr.ecr.<region>.amazonaws.com/...` URIs to the loopback registry at pull time, path style on `localhost` (`localhost:<flociPort>/<account>/<region>/<repo>`) in either URI style and with or without TLS, an address a Linux Docker daemon pulls from over plain HTTP. On Docker Desktop the rewrite is `<account>.dkr.ecr.<region>.localhost:<flociPort>/<repo>` instead: Desktop's daemon runs in a VM and dials `localhost` there, where a host port Docker chose for Floci is not bound, while it sends `*.localhost` through its host proxy to the port Floci publishes. Floci asks the daemon once whether it is Docker Desktop. CDK's `DockerImageFunction` (which generates AWS-shaped URIs in CloudFormation templates) works without any user-side rewriting. With `FLOCI_DOCKER_IMAGE_REGISTRY_BASE` set, the rewritten reference, and a loopback `repositoryUri` named directly, are still pulled from Floci's registry: the base goes in front of the images a mirror holds, never of one on `localhost`.
 - **Locally built images win.** An AWS-shaped URI that names an image already present on the Docker daemon is used as-is instead of being rewritten (`FLOCI_SERVICES_ECR_PREFER_LOCAL_IMAGES`, default `true`). Build the image under the exact URI your function or task definition declares (`docker build -t <account>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag> .`) and it runs without a push to the emulated registry, and without the registry container being started. The check uses the reference Floci would launch, so with `FLOCI_DOCKER_IMAGE_REGISTRY_BASE` set the image must be present as `<base>/<account>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>`.
 
+## Lifecycle policies
+
+`PutLifecyclePolicy`, and an `AWS::ECR::Repository` in CloudFormation, check the document
+as ECR does, against the rules in the ECR user guide:
+
+- The text is 100 to 30720 characters, as the API model bounds it.
+- One to 50 rules, each with a unique positive `rulePriority`, a `selection` and an `action`.
+- `tagStatus` is `tagged`, `untagged` or `any`. A `tagged` rule needs exactly one of `tagPrefixList` (at most 10 prefixes) and `tagPatternList`, and the other two statuses allow neither. A pattern can have at most four `*` wildcards.
+- `countType` is `imageCountMoreThan`, `sinceImagePushed`, `sinceImagePulled` or `sinceImageTransitioned`. The three `since` types need `countUnit` `days`, and `imageCountMoreThan` takes no `countUnit`. `countNumber` is a positive integer, at least 90 for `sinceImageTransitioned`.
+- `storageClass` is `standard`, the default, except for `sinceImageTransitioned`, which needs `archive`.
+- `action.type` is `expire` or `transition`. An `expire` action carries nothing else, a `transition` needs `targetStorageClass` `archive`, and `sinceImageTransitioned` allows only `expire`.
+- Among the rules selecting one storage class, an `any` rule has the highest `rulePriority`, so there is one at most, only one rule selects untagged images, and no tag prefix appears in two rules.
+
+Values are matched exactly as the guide spells them, and a selection member the guide does not
+list is refused. A refused document returns `InvalidParameterException` in ECR's message form,
+`Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: '...'`, with the prior
+policy kept. As on ECR, malformed JSON, or a document that does not map onto ECR's rule types,
+gives `Lifecycle policy parsing failure: ...`, a document breaking the JSON schema gives the schema
+validator's own text after `Lifecycle policy validation failure: `, and a broken rule gives a sentence
+naming it. Where ECR's wording is known, from refusals quoted publicly and replays recorded against
+ECR, Floci uses it.
+
+A background sweep applies every repository's policy every
+`FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_INTERVAL_SECONDS` (60 by default). ECR expires an image within
+24 hours of it meeting a rule, so the interval only bounds how late Floci is. The sweep follows the
+evaluation rules in the user guide:
+
+- The images are every manifest the registry holds for the repository, read from its storage: each tagged one with its tags, and the rest untagged. One pushed before Floci recorded push times counts as pushed when the sweep first sees it.
+- Rules apply in `rulePriority` order. Each selects the images its tag filter matches. `imageCountMoreThan` marks all but the newest `countNumber` of them, and `sinceImagePushed` marks those pushed more than `countNumber` days ago. The push time is the `imagePushedAt` that `DescribeImages` reports.
+- A rule never marks an image that a higher-priority rule selected, so one rule at most expires an image.
+- An image named by a manifest list in the repository, such as one platform of a multi-arch image, is kept until the list is gone. A later sweep expires it if a rule still marks it.
+- An artifact naming another image as its `subject`, such as a signature or an SBOM, is protected from the rules while the repository holds that image. It expires once the image is gone, whether the policy expired it or it was deleted with `BatchDeleteImage`.
+- Floci keeps every image in standard storage, so a rule selecting `archive` storage selects nothing, and a `transition` rule moves nothing. The images a transition rule selects are still off-limits to lower-priority rules.
+- Floci records no pull times, so a `sinceImagePulled` rule marks nothing. The images it selects are still off-limits to lower-priority rules.
+
+`GetLifecyclePolicy` and `DeleteLifecyclePolicy` return `lastEvaluatedAt`, the time the sweep last
+applied the current policy, or the epoch before it has. Floci keeps that time in memory, so after a
+restart it reads as the epoch until the next sweep. `DeleteLifecyclePolicy` also returns the
+policy it deleted. A policy stored before `PutLifecyclePolicy`
+checked every rule, and that it now refuses, is not applied, and the sweep logs a warning for it.
+The sweep reads a repository's images without holding up pushes to it, and takes the repository's
+write lock only to expire what its policy selects. A push in between puts the expiry off to the next
+sweep, and a policy put or deleted while the sweep applies the old one waits for it. The sweep
+never starts the backing registry, so nothing expires while the registry is not running.
+Blobs of expired images stay on disk until garbage collection runs; see
+[Troubleshooting](#troubleshooting). Set `FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_ENABLED=false` to keep
+policies without applying them.
+
 ## Pull-time update exclusions
 
 Exclusions are stored per account and Region, with up to 100 registered IAM role or
@@ -133,6 +176,8 @@ changing image pull-time tracking.
 | `FLOCI_SERVICES_ECR_DATA_PATH` | `./data/ecr` | Bind-mount root for the registry data directory |
 | `FLOCI_SERVICES_ECR_KEEP_RUNNING_ON_SHUTDOWN` | `true` | Leave the registry container running so the next Floci start adopts it |
 | `FLOCI_SERVICES_ECR_DOCKER_NETWORK` | Inherit Floci's container network | Docker network shared by Floci and the backing registry when running in Docker |
+| `FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_ENABLED` | `true` | Apply repository lifecycle policies in the background (see [Lifecycle policies](#lifecycle-policies)) |
+| `FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_INTERVAL_SECONDS` | `60` | How often the lifecycle sweep runs |
 | `FLOCI_SERVICES_ECR_URI_STYLE` | `hostname` | `hostname` = `*.dkr.ecr.<region>.localhost`; `path` = `localhost:<port>/<account>/<region>/<repo>` |
 | `FLOCI_SERVICES_ECR_TLS_URI` | `false` | Report `localhost.floci.io` registry addresses and an HTTPS login endpoint when global `FLOCI_TLS_ENABLED` is also `true` |
 | `FLOCI_SERVICES_ECR_PREFER_LOCAL_IMAGES` | `true` | Use an AWS-shaped ECR image URI as-is when the Docker daemon already has that image, instead of rewriting it to the loopback registry |
@@ -255,11 +300,13 @@ and restart Docker Desktop, following [Docker's CA certificate instructions](htt
 !!! note "Pulling from other containers (EKS, same-network consumers)"
     The `localhost`-based repository URI only works from the host. [Floci EKS](eks.md#pulling-images-from-floci-ecr)
     configures a containerd mirror to reach Floci's data plane, so Helm charts can reference the
-    pushed URI as-is.
+    pushed URI as-is, or the image by its AWS registry host
+    (`<account>.dkr.ecr.<region>.amazonaws.com`) for the cluster's and the default account.
 
     When TLS URI advertising is enabled, newly configured EKS registry mirrors accept both
-    the loopback and TLS names and forward them to the same internal HTTP endpoint. Recreate
-    existing clusters to pick up changed registry mirror settings. Automatic rewrites of
+    the loopback and TLS names and forward them to the same internal HTTP endpoint. An existing
+    cluster picks up a changed mirror set when Floci next starts, which replaces its node on its data
+    volume. Automatic rewrites of
     AWS-shaped Lambda/ECS image references continue using the plain HTTP loopback address; an
     explicitly supplied TLS image reference is used as supplied.
 
@@ -308,13 +355,12 @@ new lambda.DockerImageFunction(this, 'MyFn', {
 
 ## Not Implemented
 
-The following ECR features are **not** implemented. Stored values for policies and lifecycle rules round-trip via the API but are not enforced at runtime:
+The following ECR features are **not** implemented. Stored values for these policies round-trip via the API but are not enforced at runtime:
 
 - Replication and registry scanning (the configurations are stored, but images are not copied or scanned)
 - Pull-through cache image proxying and population. Rule configuration APIs are supported, but pulls are not routed to upstream registries
 - Image scanning (`StartImageScan`, `DescribeImageScanFindings`)
 - Image signing and notary attachments
-- Lifecycle policy enforcement (the policy text is stored but not applied)
 - Applying repository creation templates (they are stored, but Floci never creates repositories through replication, pull through cache or create-on-push)
 - Repository policy enforcement (no IAM evaluation against repository-level policies)
 - TLS via emulated ACM
@@ -334,6 +380,6 @@ does not resolve container names, which Floci uses to reach the registry. Create
 `FLOCI_SERVICES_ECR_DOCKER_NETWORK=floci-net` if selecting the registry network explicitly.
 See [Docker's bridge network documentation](https://docs.docker.com/engine/network/drivers/bridge/).
 
-**Disk not reclaimed after deleting images.** Deleting the last tag of an image, or deleting by digest, removes its manifest, but blobs remain on disk until garbage collection runs. Trigger it with `curl -X POST http://localhost:4566/_floci/ecr/gc`. The endpoint runs `registry garbage-collect` inside the backing container and returns the reclaimed blob list. The operation is serialized: ECR API calls block for its duration (typically a few seconds).
+**Disk not reclaimed after deleting images.** Deleting the last tag of an image, deleting by digest, or a lifecycle policy expiring an image removes its manifest, but blobs remain on disk until garbage collection runs. Trigger it with `curl -X POST http://localhost:4566/_floci/ecr/gc`. The endpoint runs `registry garbage-collect` inside the backing container and returns the reclaimed blob list. The operation is serialized: ECR API calls block for its duration (typically a few seconds).
 
 **`*.localhost` does not resolve to loopback on this platform.** Set `floci.services.ecr.uri-style: path` to fall back to `localhost:<port>/<account>/<region>/<repo>` URIs. On Docker Desktop the rewrite of AWS-shaped Lambda, ECS and EMR Serverless images keeps `<account>.dkr.ecr.<region>.localhost`; there, build the image under the AWS-shaped URI the function or task definition names, and Floci uses it as-is (`FLOCI_SERVICES_ECR_PREFER_LOCAL_IMAGES`).

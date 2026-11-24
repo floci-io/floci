@@ -70,9 +70,9 @@ public final class RequestResources {
     }
 
     /**
-     * Whether the generated table owns this operation, including those of hand-built namespaces it reads. An operation
-     * naming what it acts on in a body the reader does not read ({@code unread}: S3's DeleteObjects, its keys in an XML
-     * body) is not read, as checked on the rest of its request it would be checked on none of what it names.
+     * Whether the generated table owns this operation. An operation naming what it acts on in a body the reader does
+     * not read ({@code unread}: S3's DeleteObjects, its keys in an XML body) is not read, as checked on the rest of its
+     * request it would be checked on none of what it names.
      */
     public static boolean reads(String operation) {
         return readable(RequestResourceMembers.table(), operation);
@@ -92,18 +92,9 @@ public final class RequestResources {
         return operation != null && table.operations().containsKey(operation) && !table.unread().contains(operation);
     }
 
-    /** Whether {@code ResourceArnBuilder} builds the resources of this namespace's requests itself. */
-    public static boolean builtByHand(String namespace) {
-        return namespace != null && RequestResourceMembers.table().handBuilt().contains(namespace);
-    }
-
-    /**
-     * Whether the table reads this namespace whole, every operation's resources from its request as modeled: one it
-     * covers that {@code ResourceArnBuilder} does not build by hand, which a few of its operations may be read for.
-     */
+    /** Whether the table reads this namespace whole, every operation's resources from its request as modeled. */
     public static boolean readsNamespace(String namespace) {
-        return namespace != null && RequestResourceMembers.table().namespaces().contains(namespace)
-                && !builtByHand(namespace);
+        return namespace != null && RequestResourceMembers.table().namespaces().contains(namespace);
     }
 
     /**

@@ -1,8 +1,12 @@
 package io.floci.aws.services.s3;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.core.common.AwsCanonicalUserId;
+import io.floci.aws.services.cloudtrail.CloudTrailLogWriter;
+import io.floci.aws.testing.CloudTrailLogFiles;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.PartitionCleanup;
+import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.S3IamEnforcementProfile;
 import io.floci.aws.testutil.S3RequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -11,15 +15,20 @@ import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ExtractableResponse;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.io.IOException;
 import java.net.URI;
 import java.util.UUID;
 
+import static io.floci.aws.testing.CloudTrailRequests.invokeCloudTrail;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 @QuarkusTest
@@ -33,6 +42,14 @@ class S3BucketPolicyEnforcementIntegrationTest {
 
     @TestHTTPResource("/")
     URI endpoint;
+
+    @Inject
+    CloudTrailLogWriter writer;
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
@@ -73,6 +90,115 @@ class S3BucketPolicyEnforcementIntegrationTest {
             given().filter(owner.signer()).delete("/" + bucket + "/object.txt");
             given().filter(owner.signer()).delete("/" + bucket);
         }
+    }
+
+    /**
+     * Within the bucket's account S3 refuses with the caller, the resource and the policy that refused it, and
+     * CloudTrail records the message S3 answered.
+     */
+    @Test
+    void aRefusalNamesTheCallerTheResourceAndThePolicyThatRefusedIt() throws IOException {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        Credentials owner = adminOf("message-owner-" + suffix, ACCOUNT_A);
+        Credentials reader = userOf("message-reader-" + suffix, ACCOUNT_A);
+        String bucket = bucketWithObject("denied-message-" + suffix, owner);
+        String logs = "denied-message-logs-" + suffix;
+        cleanup.register(() -> EnforcementFixtures.removeBucket(endpoint.getPort(), owner.signer(), logs));
+        createBucketAs(logs, owner.signer());
+        String trail = "denied-message-" + suffix;
+        cloudTrail("CreateTrail", "{\"Name\":\"" + trail + "\",\"S3BucketName\":\"" + logs + "\"}");
+        cleanup.register(() -> cloudTrail("DeleteTrail", "{\"Name\":\"" + trail + "\"}"));
+        cloudTrail("PutEventSelectors", "{\"TrailName\":\"" + trail + "\",\"EventSelectors\":[{\"ReadWriteType\":"
+                + "\"All\",\"IncludeManagementEvents\":false,\"DataResources\":[{\"Type\":\"AWS::S3::Object\","
+                + "\"Values\":[\"arn:aws:s3:::" + bucket + "/\"]}]}]}");
+        cloudTrail("StartLogging", "{\"Name\":\"" + trail + "\"}");
+
+        String message = deniedMessage(reader, bucket);
+
+        assertEquals("User: " + reader.userArn() + " is not authorized to perform: s3:GetObject on resource: "
+                + "\"arn:aws:s3:::" + bucket + "/object.txt\" because no identity-based policy allows the s3:GetObject "
+                + "action", message);
+        writer.flushNow();
+        JsonNode record = CloudTrailLogFiles.records(logs, owner.signer()).stream()
+                .filter(r -> "GetObject".equals(r.path("eventName").asText()))
+                .filter(r -> "AccessDenied".equals(r.path("errorCode").asText()))
+                .findFirst().orElseThrow();
+        assertEquals(message, record.path("errorMessage").asText());
+    }
+
+    @Test
+    void aBucketPolicysExplicitDenyIsNamedAsAResourceBasedPolicys() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        Credentials owner = adminOf("deny-owner-" + suffix, ACCOUNT_A);
+        String bucket = bucketWithObject("bucket-deny-" + suffix, owner);
+        putBucketPolicyAs(bucket, """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":{"AWS":"%s"},
+                  "Action":"s3:GetObject","Resource":"arn:aws:s3:::%s/*"}]}
+                """.formatted(owner.userArn(), bucket), owner.signer());
+
+        assertEquals("User: " + owner.userArn() + " is not authorized to perform: s3:GetObject on resource: "
+                + "\"arn:aws:s3:::" + bucket + "/object.txt\" with an explicit deny in a resource-based policy",
+                deniedMessage(owner, bucket));
+    }
+
+    @Test
+    void anIdentityPolicysExplicitDenyIsNamedAsAnIdentityBasedPolicys() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        Credentials owner = adminOf("identity-owner-" + suffix, ACCOUNT_A);
+        String callerName = "identity-denied-" + suffix;
+        Credentials caller = adminOf(callerName, ACCOUNT_A);
+        putUserPolicy(callerName, "DenyRead", """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"s3:GetObject","Resource":"*"}]}""",
+                ACCOUNT_A);
+        String bucket = bucketWithObject("identity-deny-" + suffix, owner);
+        String refusal = "User: " + caller.userArn() + " is not authorized to perform: s3:GetObject on resource: "
+                + "\"arn:aws:s3:::" + bucket + "/object.txt\" with an explicit deny in an identity-based policy";
+
+        assertEquals(refusal, deniedMessage(caller, bucket));
+        // A copy's source is checked apart from the request, and refused with the same message.
+        assertEquals(refusal, given().filter(caller.signer()).header("x-amz-copy-source", "/" + bucket + "/object.txt")
+                .put("/" + bucket + "/copy.txt").then().statusCode(403).extract().xmlPath().getString("Error.Message"));
+    }
+
+    /** "Cross-account requests outside of the same organization return a generic Access Denied message." */
+    @Test
+    void aCallerFromAnotherAccountIsToldAccessDeniedAlone() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        Credentials owner = adminOf("cross-owner-" + suffix, ACCOUNT_A);
+        Credentials reader = adminOf("cross-reader-" + suffix, ACCOUNT_B);
+        String bucket = bucketWithObject("cross-denied-" + suffix, owner);
+
+        assertEquals("Access Denied", deniedMessage(reader, bucket));
+    }
+
+    /** An account administrator for S3, removed after the test. */
+    private Credentials adminOf(String userName, String accountId) {
+        cleanup.register(() -> EnforcementFixtures.removeUser(endpoint.getPort(), auth(accountId, "iam"), userName));
+        return createAccountAdmin(userName, accountId);
+    }
+
+    /** A user with no policy, removed after the test. */
+    private Credentials userOf(String userName, String accountId) {
+        cleanup.register(() -> EnforcementFixtures.removeUser(endpoint.getPort(), auth(accountId, "iam"), userName));
+        return createUser(userName, accountId);
+    }
+
+    /** {@code bucket}, owned by {@code owner} and holding {@code object.txt}, removed after the test. */
+    private String bucketWithObject(String bucket, Credentials owner) {
+        cleanup.register(() -> EnforcementFixtures.removeBucket(endpoint.getPort(), owner.signer(), bucket));
+        createBucketAs(bucket, owner.signer());
+        putObjectAs(bucket, "object.txt", "data", owner.signer());
+        return bucket;
+    }
+
+    /** The message S3 refuses {@code caller}'s read of {@code object.txt} with. */
+    private static String deniedMessage(Credentials caller, String bucket) {
+        return given().filter(caller.signer()).get("/" + bucket + "/object.txt")
+                .then().statusCode(403).extract().xmlPath().getString("Error.Message");
+    }
+
+    private static void cloudTrail(String action, String body) {
+        invokeCloudTrail(auth(ACCOUNT_A, "cloudtrail"), action, body).then().statusCode(200);
     }
 
     record Credentials(String accessKeyId, String secretAccessKey, String userArn) {

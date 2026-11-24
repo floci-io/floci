@@ -221,6 +221,18 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
     /** globalEndpointTokenVersion's only two values. */
     private static final Set<String> GLOBAL_ENDPOINT_TOKEN_VERSIONS = Set.of("v1Token", "v2Token");
+    /**
+     * The account property namespaces AWS recognises, as its own pages name them.
+     *
+     * <p>Only {@code RoleManager} is named anywhere: in the API Reference's example for
+     * {@code PutAccountProperties}, in the user guide's role manager page, which has the feature
+     * "controlled by the account-level property RoleManager/Enabled", and in the guide's policy
+     * example for {@code iam:AccountPropertyNamespaces}. Each of the three introduces it as an
+     * example, so the whole set is published nowhere, and a namespace AWS recognises but has not
+     * written down is refused here until this names it. That is the cost of answering the refusal
+     * AWS was recorded giving at all; see {@link #putAccountProperties}.
+     */
+    private static final Set<String> ACCOUNT_PROPERTY_NAMESPACES = Set.of("RoleManager");
     /** AWS-documented bounds for the account password policy's numeric fields. */
     /**
      * AWS's documented {@code passwordType} pattern for Create/UpdateLoginProfile: printable
@@ -3714,11 +3726,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
-     * Sets account properties, all of which must be in one namespace.
+     * Sets account properties, all of which must be in one namespace AWS recognises.
      *
      * <p>The key is {@code Namespace/PropertyName}: AWS requires exactly one {@code /}, forbids a
      * leading or trailing one, and states that "all keys must belong to the same namespace". A
      * request mixing namespaces is rejected whole rather than partly applied.
+     *
+     * <p>The one namespace left is then held to the set AWS recognises, which it refuses with
+     * {@code Unsupported namespace: <namespace>}, and the rejected write leaves every stored
+     * property as it was. Storing the property instead left the account holding a key AWS never
+     * accepted, with the caller never told, and a later read reporting it.
+     *
+     * <p>The two refusals are in that order, so a request naming two namespaces is answered for
+     * mixing them whether or not either is recognised: a request names one namespace before there
+     * is a namespace to look up. Which one AWS answers first is not recorded, so the order is this
+     * package's reading, and it is the one that leaves every request already being refused with
+     * the answer it already had.
      */
     public void putAccountProperties(Map<String, String> properties) {
         if (properties == null || properties.isEmpty()) {
@@ -3734,6 +3757,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         "All property keys must belong to the same namespace, but the request "
                                 + "names both " + namespace + " and " + keyNamespace + ".", 400);
             }
+        }
+        if (!ACCOUNT_PROPERTY_NAMESPACES.contains(namespace)) {
+            // AWS's own fixed text for this refusal, carrying the namespace half of the key as
+            // the request spelled it, so nothing here may reword it or fold its case: which
+            // spellings reach it is this package's reading, since only the one namespace is
+            // published and nothing says how AWS reads its case.
+            throw new AwsException("InvalidInput", "Unsupported namespace: " + namespace, 400);
         }
         synchronized (accountPropertiesLock) {
             for (Map.Entry<String, String> entry : properties.entrySet()) {
@@ -5156,6 +5186,88 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
+     * Records the session tags {@code sessionAccessKeyId} was minted with, which its requests then
+     * publish as {@code aws:PrincipalTag/<key>}: "when you request a session, you can specify
+     * principal tags as the session tags. The tags apply to requests that you make using the
+     * session's credentials." Where they came from is the operation's business, a request member
+     * on one, a SAML assertion's attributes or a web identity token's claims on another, and what
+     * reaches here is the pairs themselves.
+     *
+     * <p>Two of those pairs whose keys differ only in case are one tag, the later winning, which is
+     * what a tag key is on an identity as well: "you cannot have separate Department and department
+     * tag keys", and a second such tag "replaces the first tag. A second tag is not added." Stored
+     * as two they would reach a policy as one key with the other's value dropped, and a Deny keyed
+     * on that value would stop matching.
+     *
+     * <p>{@code transitiveTagKeys} are the keys among them the request asked to set as transitive,
+     * which is what {@link #callerTransitiveSessionTags} then carries into a session assumed from
+     * this one. Only a key naming one of these tags selects anything: a key naming none carries no
+     * tag onward, there being no tag of that key in the session to carry, and the keys are matched
+     * against the tags the same way a tag key is compared anywhere else here, without regard to
+     * case. The spellings kept are the ones the request sent, as the tag keys themselves are, and a
+     * key named twice, which a chained request can do by naming one it already inherits, is one
+     * key.
+     */
+    public void recordSessionTags(String sessionAccessKeyId, Map<String, String> tags,
+                                  List<String> transitiveTagKeys) {
+        if (sessionAccessKeyId == null || tags == null || tags.isEmpty()) {
+            return;
+        }
+        Map<String, String> oneTagPerKey = new LinkedHashMap<>();
+        tags.forEach((key, value) -> {
+            oneTagPerKey.keySet().removeIf(stored -> stored.equalsIgnoreCase(key));
+            oneTagPerKey.put(key, value);
+        });
+        List<String> transitive = new ArrayList<>();
+        if (transitiveTagKeys != null) {
+            for (String key : transitiveTagKeys) {
+                if (oneTagPerKey.keySet().stream().anyMatch(key::equalsIgnoreCase)
+                        && transitive.stream().noneMatch(key::equalsIgnoreCase)) {
+                    transitive.add(key);
+                }
+            }
+        }
+        sessions.get(sessionAccessKeyId).ifPresent(session -> {
+            session.setSessionTags(oneTagPerKey);
+            session.setTransitiveTagKeys(transitive);
+            sessions.put(sessionAccessKeyId, session);
+        });
+    }
+
+    /**
+     * The transitive session tags the credentials {@code accessKeyId} carry, which a session
+     * assumed from them inherits: "if you used temporary credentials to perform this operation,
+     * the new session inherits any transitive session tags from the calling session".
+     *
+     * <p>Only session tags are ever in it. A role's own tags are never transitive, which the guide
+     * states outright, "you cannot set role tags as transitive", and shows: the second session of
+     * its chain inherits the first session's two transitive tags and not the tag attached to the
+     * role it assumed. A long-term key carries none, there being no session behind it, and so does
+     * a session that named no transitive key.
+     */
+    public Map<String, String> callerTransitiveSessionTags(String accessKeyId) {
+        return findSessionForCallerContext(accessKeyId)
+                .map(IamService::transitiveSessionTags)
+                .orElseGet(Map::of);
+    }
+
+    private static Map<String, String> transitiveSessionTags(SessionCredential session) {
+        if (session.getTransitiveTagKeys().isEmpty()) {
+            return Map.of();
+        }
+        Set<String> transitive = session.getTransitiveTagKeys().stream()
+                .map(key -> key.toLowerCase(Locale.ROOT))
+                .collect(Collectors.toSet());
+        Map<String, String> tags = new LinkedHashMap<>();
+        session.getSessionTags().forEach((key, value) -> {
+            if (transitive.contains(key.toLowerCase(Locale.ROOT))) {
+                tags.put(key, value);
+            }
+        });
+        return tags;
+    }
+
+    /**
      * When the credentials {@code accessKeyId} names last authenticated with an MFA device, empty
      * for a session minted without one and for every long-term key. A session assumed from such a
      * session inherits the instant rather than taking the instant of the assume, so the age the
@@ -6497,8 +6609,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * @param userName      the request's {@code aws:username}, which only an IAM user has
      * @param permissionsBoundary whether a permissions boundary is attached to the user, or to the
      *                      role a session assumed, which a Deny's {@code NotPrincipal} never spares
-     * @param principalTags the stored user's or assumed role's tags, snapshotted for this request;
-     *                      STS session tags are not yet recorded
+     * @param principalTags the tags this request publishes, snapshotted for it: the stored user's
+     *                      or assumed role's, with the session tags its credentials were minted
+     *                      with over them
      * @param sessionMfa    what the credentials the request was signed with say about multi-factor
      *                      authentication, or null when they publish neither key
      * @param organization  the organization the principal's account belongs to, whose three keys go
@@ -6807,11 +6920,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return delegatedApproverArns(session);
         }
         if (isFederatedUserSession(session)) {
-            // A federated user has no aws:username at all, only the account:name userid.
+            // A federated user has no aws:username at all, only the account:name userid. Its
+            // principal tags are both halves the guide names: "the session principal tags include
+            // the user tags and the passed session tags".
             String federatedArn = session.getRoleArn();
             return Optional.of(new CallerArns(federatedArn, federatedArn,
                     CallerArns.TYPE_FEDERATED_USER,
-                    sessionUserId(session).orElse(null), null));
+                    sessionUserId(session).orElse(null), null, false,
+                    withSessionTags(issuingUser(session).map(IamUser::getTags).orElse(Map.of()),
+                            session.getSessionTags())));
         }
         String roleArn = session.getRoleArn();
         if (roleArn == null) {
@@ -6839,7 +6956,35 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return Optional.of(new CallerArns(sessionArn, roleArn, CallerArns.TYPE_ASSUMED_ROLE,
                 sessionUserId(session).orElse(null), null,
                 role.map(IamRole::getPermissionsBoundaryArn).isPresent(),
-                role.map(IamRole::getTags).orElse(Map.of())));
+                withSessionTags(role.map(IamRole::getTags).orElse(Map.of()), session.getSessionTags())));
+    }
+
+    /**
+     * The principal tags a session's requests publish: the tags of the identity it acts as, with
+     * its own session tags over them. The guide gives the order and the collision rule both. The
+     * principal tags of a session "come from any new session tags, the inherited transitive
+     * session tags, and the role tags", a session tag "overrides the role" tag of the same key,
+     * and a new session tag replaces an existing one "regardless of character case", which is how
+     * IAM compares a tag key on a user or a role as well: "tag key values for IAM users and roles
+     * are not case sensitive, but case is preserved", so the session's own spelling is the one
+     * published and the identity's tag of that key in any other spelling is the one dropped.
+     */
+    private static Map<String, String> withSessionTags(Map<String, String> identityTags,
+                                                       Map<String, String> sessionTags) {
+        if (sessionTags.isEmpty()) {
+            return identityTags;
+        }
+        Set<String> replaced = sessionTags.keySet().stream()
+                .map(key -> key.toLowerCase(Locale.ROOT))
+                .collect(Collectors.toSet());
+        Map<String, String> tags = new LinkedHashMap<>();
+        identityTags.forEach((key, value) -> {
+            if (!replaced.contains(key.toLowerCase(Locale.ROOT))) {
+                tags.put(key, value);
+            }
+        });
+        tags.putAll(sessionTags);
+        return tags;
     }
 
     /**

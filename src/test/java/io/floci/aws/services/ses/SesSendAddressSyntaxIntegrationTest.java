@@ -72,9 +72,7 @@ class SesSendAddressSyntaxIntegrationTest {
 
     @Test
     void v2SendEmail_nonAsciiLocalRecipient_returnsBadRequestException() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",
@@ -92,9 +90,7 @@ class SesSendAddressSyntaxIntegrationTest {
 
     @Test
     void v2SendBulkEmail_fromWithEmptyDomain_returnsInvalidEmailAddress() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("""
                 {
                     "FromEmailAddress": "sender@",
@@ -115,9 +111,7 @@ class SesSendAddressSyntaxIntegrationTest {
     @Test
     void v2SendBulkEmail_malformedEntryRecipient_failsOnlyThatEntry() {
         verifySender();
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("""
                 {
                     "FromEmailAddress": "%2$s",
@@ -209,9 +203,7 @@ class SesSendAddressSyntaxIntegrationTest {
 
     @Test
     void v2SendBulkEmail_malformedFromIsReportedBeforeMissingTemplate() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("""
                 {
                     "FromEmailAddress": "sender.example.com",
@@ -229,9 +221,7 @@ class SesSendAddressSyntaxIntegrationTest {
 
     @Test
     void v2SendEmail_newlineInQuotedLocalPart_returnsInvalidEmailAddress() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("""
                 {
                     "FromEmailAddress": "\\"a\\nb\\"@example.com",
@@ -249,9 +239,7 @@ class SesSendAddressSyntaxIntegrationTest {
 
     @Test
     void v2SendBulkEmail_malformedFeedbackForwarding_rejectsTheRequest() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",

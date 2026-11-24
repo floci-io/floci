@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
@@ -126,7 +127,7 @@ class SesConfigurationSetPagingIntegrationTest {
     }
 
     private static void create(String name) {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"ConfigurationSetName\": \"" + name + "\"}")
         .when().post("/v2/email/configuration-sets").then().statusCode(200);
     }

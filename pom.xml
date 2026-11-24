@@ -20,13 +20,16 @@
         <apicurio.version>2.6.13.Final</apicurio.version>
         <everit.json.schema.version>1.14.6</everit.json.schema.version>
         <wire.version>7.1.2</wire.version>
-        <aws.sdk.version>2.57.7</aws.sdk.version>
+        <aws.sdk.version>2.59.7</aws.sdk.version>
         <!-- Nightly checks skip unless -Dnightly.checks.enabled=true, but a skipped @QuarkusTest still
              costs its profile's application: Quarkus builds every profile's application while JUnit
              discovers the tests, before any class is skipped, and keeps it for the rest of the JVM.
              Leaving them out of discovery saves that heap in every routine run; the nightly-checks
              profile below brings them back. -->
         <nightly.checks.excludes>**/*NightlyIntegrationTest.java</nightly.checks.excludes>
+        <!-- How JUnit runs test classes against each other. Quarkus test classes share one emulator and
+             run one at a time; ci.yml runs the plain classes in a pass of their own with concurrent. -->
+        <test.classes.mode>same_thread</test.classes.mode>
     </properties>
 
     <dependencyManagement>
@@ -873,7 +876,7 @@
                              tests with independent fixtures can share four workers. -->
                         <junit.jupiter.execution.parallel.enabled>true</junit.jupiter.execution.parallel.enabled>
                         <junit.jupiter.execution.parallel.mode.default>same_thread</junit.jupiter.execution.parallel.mode.default>
-                        <junit.jupiter.execution.parallel.mode.classes.default>same_thread</junit.jupiter.execution.parallel.mode.classes.default>
+                        <junit.jupiter.execution.parallel.mode.classes.default>${test.classes.mode}</junit.jupiter.execution.parallel.mode.classes.default>
                         <junit.jupiter.execution.parallel.config.strategy>fixed</junit.jupiter.execution.parallel.config.strategy>
                         <junit.jupiter.execution.parallel.config.fixed.parallelism>4</junit.jupiter.execution.parallel.config.fixed.parallelism>
                         <junit.jupiter.execution.parallel.config.fixed.max-pool-size>4</junit.jupiter.execution.parallel.config.fixed.max-pool-size>

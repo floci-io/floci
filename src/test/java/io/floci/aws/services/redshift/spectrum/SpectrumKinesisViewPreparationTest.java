@@ -8,8 +8,10 @@ import io.floci.aws.services.iam.ServiceRoleAuthorizer;
 import io.floci.aws.services.kinesis.KinesisService;
 import io.floci.aws.services.kinesis.model.KinesisShard;
 import io.floci.aws.services.kinesis.model.KinesisStream;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Clock;
 import java.util.HashMap;
@@ -32,6 +34,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class SpectrumKinesisViewPreparationTest {
     private static final String ACCOUNT = "000000000000";
     private static final String ROLE = "arn:aws:iam::000000000000:role/R";

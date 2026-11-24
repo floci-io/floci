@@ -43,9 +43,7 @@ class SesConfigurationSetNameIntegrationTest {
 
     @Test
     void v2_createWithEmptyName_mustBeSpecified() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("{\"ConfigurationSetName\": \"\"}")
         .when()
             .post("/v2/email/configuration-sets")
@@ -57,9 +55,7 @@ class SesConfigurationSetNameIntegrationTest {
 
     @Test
     void v2_createWithInvalidName_rejectsBeforeStoring() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.AUTH)
+        SesV2Requests.v2()
             .body("{\"ConfigurationSetName\": \"bad name\"}")
         .when()
             .post("/v2/email/configuration-sets")

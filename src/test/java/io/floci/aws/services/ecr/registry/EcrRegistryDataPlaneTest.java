@@ -3,6 +3,7 @@ package io.floci.aws.services.ecr.registry;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.ecr.EcrService;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.FreePorts;
 import io.vertx.core.Context;
 import io.vertx.core.Future;
@@ -24,6 +25,7 @@ import io.vertx.ext.web.Router;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -52,6 +54,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 /** Unit tests for routing AWS-shaped ECR repository URIs through Floci's data plane. */
+@ResourceLock(ParallelLocks.PORTS)
 class EcrRegistryDataPlaneTest {
 
     private Vertx vertx;
@@ -114,6 +117,39 @@ class EcrRegistryDataPlaneTest {
         assertEquals("123456789012", requestNoPort.accountId());
         assertEquals("eu-west-1", requestNoPort.region());
         assertEquals("/v2/123456789012/eu-west-1/team/app/tags/list", requestNoPort.backendUri());
+    }
+
+    @Test
+    void aMirrorRequestForAnAccountsAwsRegistryHostIsServedFromThatAccountsRepository() {
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor("172.17.0.1:4566",
+                "/v2/team/app/manifests/v1", "ns=111122223333.dkr.ecr.eu-west-1.amazonaws.com", "hostname").orElseThrow();
+
+        assertEquals("111122223333", request.accountId());
+        assertEquals("eu-west-1", request.region());
+        assertEquals("team/app", request.repositoryName());
+        assertEquals("111122223333/eu-west-1/team/app", request.storageRepositoryName());
+        assertEquals("v1", request.tag());
+        assertEquals("/v2/111122223333/eu-west-1/team/app/manifests/v1", request.backendUri());
+
+        EcrRegistryDataPlane.RegistryRequest china = EcrRegistryDataPlane.requestFor("172.17.0.1:4566",
+                "/v2/app/blobs/sha256:abc", "ns=111122223333.dkr.ecr.cn-north-1.amazonaws.com.cn", "hostname").orElseThrow();
+        assertEquals("cn-north-1", china.region());
+        assertEquals("/v2/111122223333/cn-north-1/app/blobs/sha256:abc", china.backendUri());
+    }
+
+    @Test
+    void anAwsRegistryHostIsServedOnlyAsAMirrorRequestsNamespaceInItsRegionsPartition() {
+        // A region under another partition's suffix names no registry.
+        assertFalse(EcrRegistryDataPlane.requestFor("172.17.0.1:4566", "/v2/app/manifests/v1",
+                "ns=111122223333.dkr.ecr.cn-north-1.amazonaws.com", "hostname").isPresent());
+        assertFalse(EcrRegistryDataPlane.requestFor("172.17.0.1:4566", "/v2/app/manifests/v1",
+                "ns=111122223333.dkr.ecr.us-east-1.amazonaws.com.cn", "hostname").isPresent());
+        // Another registry's namespace, such as a public registry's, is not Floci's.
+        assertFalse(EcrRegistryDataPlane.requestFor("172.17.0.1:4566", "/v2/library/nginx/manifests/1",
+                "ns=docker.io", "hostname").isPresent());
+        // A request sent to the AWS host itself is not a mirror request.
+        assertFalse(EcrRegistryDataPlane.requestFor("111122223333.dkr.ecr.us-east-1.amazonaws.com",
+                "/v2/app/manifests/v1", null, "hostname").isPresent());
     }
 
     @Test

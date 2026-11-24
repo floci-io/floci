@@ -15,7 +15,10 @@ import io.floci.aws.services.emrserverless.model.StartSessionRequest;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.Map;
@@ -30,6 +33,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /** IAM's lookup of the tags EMR Serverless holds on an application, a job run or a session. */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EmrServerlessStoredResourceArnsTest {
 
     private static final String REGION = "us-east-1";

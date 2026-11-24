@@ -290,7 +290,6 @@ AWS::EFS::FileSystem	ReplicationConfiguration	not modeled: Floci has no EFS repl
 AWS::EKS::Cluster	ActiveCertificateAuthorityId	accepted and ignored
 AWS::EKS::Cluster	BootstrapSelfManagedAddons	accepted and ignored
 AWS::EKS::Cluster	CertificateAuthority	accepted and ignored
-AWS::EKS::Cluster	ComputeConfig	accepted and ignored
 AWS::EKS::Cluster	ControlPlaneScalingConfig	accepted and ignored
 AWS::EKS::Cluster	DeletionProtection	accepted and ignored
 AWS::EKS::Cluster	Force	accepted and ignored
@@ -300,7 +299,6 @@ AWS::EKS::Cluster	KubeSchedulerConfig	accepted and ignored
 AWS::EKS::Cluster	OutpostConfig	accepted and ignored
 AWS::EKS::Cluster	RemoteNetworkConfig	accepted and ignored
 AWS::EKS::Cluster	RollbackConfig	accepted and ignored
-AWS::EKS::Cluster	StorageConfig	accepted and ignored
 AWS::EKS::Cluster	ZonalShiftConfig	accepted and ignored
 AWS::EKS::Nodegroup	AmiType	accepted and ignored
 AWS::EKS::Nodegroup	CapacityType	accepted and ignored
@@ -628,8 +626,6 @@ AWS::SNS::Topic	KmsMasterKeyId	accepted and ignored
 AWS::SNS::Topic	SignatureVersion	accepted and ignored
 AWS::SNS::Topic	Tags	accepted and ignored
 AWS::SNS::Topic	TracingConfig	accepted and ignored
-AWS::SQS::QueuePolicy	PolicyDocument	accepted and ignored
-AWS::SQS::QueuePolicy	Queues	accepted and ignored
 AWS::SSM::Parameter	AllowedPattern	accepted and ignored
 AWS::SSM::Parameter	DataType	accepted and ignored
 AWS::SSM::Parameter	Description	accepted and ignored
@@ -653,6 +649,7 @@ AWS::Transfer::User	Policy	rejected with a ValidationError, not supported by Flo
 AWS::Transfer::User	PosixProfile	rejected with a ValidationError, not supported by Floci (docs/services/cloudformation.md, Transfer Family)
 AWS::WAFv2::LoggingConfiguration	LoggingFilter	accepted and ignored
 AWS::WAFv2::LoggingConfiguration	RedactedFields	accepted and ignored
+AWS::WAFv2::WebACL	AnalyticsConfig	accepted and ignored
 AWS::WAFv2::WebACL	ApplicationConfig	accepted and ignored
 AWS::WAFv2::WebACL	MonetizationConfig	accepted and ignored
 AWS::WAFv2::WebACL	OnSourceDDoSProtectionConfig	accepted and ignored

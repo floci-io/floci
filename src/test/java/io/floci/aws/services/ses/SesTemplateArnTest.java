@@ -55,6 +55,8 @@ class SesTemplateArnTest {
                         "Invalid template ARN <arn:aws:ses:us-west-2:000000000000:configuration-set/welcome>. "
                                 + "Relative ID should start with <template/>"),
                 Arguments.of("arn:aws:ses:us-west-2:000000000000:template/", "The template name must be specified."),
+                Arguments.of("arn:aws:ses:us-west-2:000000000000:template/a.b",
+                        "Template name <a.b>: only alphanumeric ASCII characters, '_', and '-' are allowed."),
                 Arguments.of("not-an-arn", "ARNs must start with 'arn:': not-an-arn"));
     }
 

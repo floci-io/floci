@@ -40,6 +40,7 @@ public class NetworkInterface {
     private List<Tag> tagSet = new ArrayList<>();
     private List<NetworkInterfacePrivateIpAddress> privateIpAddresses = new ArrayList<>();
     private List<String> ipv6Addresses = new ArrayList<>();
+    private List<String> ipv4Prefixes = new ArrayList<>();
     /** The permissions this interface's owner has granted other accounts over it. */
     private List<NetworkInterfacePermission> permissions = new ArrayList<>();
 
@@ -99,6 +100,9 @@ public class NetworkInterface {
     public List<NetworkInterfacePrivateIpAddress> getPrivateIpAddresses() { return privateIpAddresses; }
     public List<String> getIpv6Addresses() { return ipv6Addresses; }
     public void setIpv6Addresses(List<String> ipv6Addresses) { this.ipv6Addresses = ipv6Addresses; }
+
+    public List<String> getIpv4Prefixes() { return ipv4Prefixes; }
+    public void setIpv4Prefixes(List<String> ipv4Prefixes) { this.ipv4Prefixes = ipv4Prefixes; }
     public void setPrivateIpAddresses(List<NetworkInterfacePrivateIpAddress> privateIpAddresses) { this.privateIpAddresses = privateIpAddresses; }
 
     public List<NetworkInterfacePermission> getPermissions() { return permissions; }

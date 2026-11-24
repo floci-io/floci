@@ -11,9 +11,11 @@ import io.floci.aws.core.common.auth.SigV4RequestValidator;
 import io.floci.aws.services.dynamodb.backend.DynamoDbOperations.Api;
 import io.floci.aws.services.dynamodb.backend.DynamoDbOperations.Reply;
 import io.floci.aws.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.FreePorts;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -36,6 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** The signed HTTP client that forwards DynamoDB wire calls to an external DynamoDB Local. */
+@ResourceLock(ParallelLocks.PORTS)
 class DynamoDbLocalClientTest {
 
     private static final Scope SCOPE = new Scope("123456789012", "eu-west-1");

@@ -13,10 +13,13 @@ import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.services.ecs.model.TaskStatus;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -57,6 +60,7 @@ import static org.mockito.Mockito.when;
  * task blocks until the test lets it finish, the way a container that ignores SIGTERM holds its
  * stop until the timeout kills it.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EcsGracefulStopConcurrencyServiceTest {
 
     private static final String REGION = "us-east-1";

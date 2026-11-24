@@ -2,8 +2,11 @@ package io.floci.aws.core.common.docker;
 
 import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.core.common.docker.PerKeyContainerPool.StartedContainer;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -37,6 +40,7 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
  * concurrent-first-use guarantee) that every per-repository sidecar manager needs, independent of
  * what kind of container it actually starts.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class PerKeyContainerPoolTest {
 
     private final ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);

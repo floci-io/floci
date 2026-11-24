@@ -11,8 +11,11 @@ import io.floci.aws.services.ecs.model.ClusterSetting;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.testing.InMemoryStorageFactory;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -42,6 +45,7 @@ import static org.mockito.Mockito.when;
  * per minute, only for a cluster whose containerInsights setting turns it on and only while the
  * service has a RUNNING task.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EcsServiceContainerInsightsTest {
 
     private static final String REGION = "us-east-1";

@@ -8,8 +8,10 @@ import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
+import io.floci.aws.testing.ParallelLocks;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.io.BufferedReader;
@@ -42,6 +44,7 @@ import static org.mockito.Mockito.when;
  * {@code floci.services.elasticache.shell-less-backend}: the server flags go to the container as
  * arguments or through the image's {@code VALKEY_EXTRA_FLAGS} hook, never both.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class ElastiCacheShellLessContainerManagerTest {
 
     private static final Logger LOG = Logger.getLogger(ElastiCacheShellLessContainerManagerTest.class);

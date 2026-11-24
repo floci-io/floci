@@ -1,8 +1,10 @@
 package io.floci.aws.services.ec2;
 
 import io.floci.aws.services.ec2instanceconnect.InstanceConnectKeys;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Context;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -20,6 +22,7 @@ import static org.mockito.Mockito.when;
  * The IMDS paths the unmodified EC2 Instance Connect agent reads, in the shape it reads them:
  * with a trailing slash, and {@code active-keys} probed with HEAD before it is fetched.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class Ec2MetadataInstanceConnectTest {
 
     @Test

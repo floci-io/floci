@@ -34,9 +34,9 @@ jobs:
     # EmrDockerRunnerNightlyIntegrationTest's eleven two-minute tests and two-minute setup,
     # EmrClusterShrinkNightlyIntegrationTest's sixteen-minute method and two-minute setup, and
     # EmrContainersSparkNightlyIntegrationTest's three six-minute methods, eleven-minute method, two-minute setup before
-    # each and 21-minute image pull, and EmrContainersGatewayNightlyIntegrationTest's twelve-minute method and 21-minute
-    # image pull, 133 minutes. A check added, or a bound raised, raises its group's timeout with it, so a slow check
-    # fails with its own message.
+    # each and 21-minute image pull, and EmrContainersGatewayNightlyIntegrationTest's twenty-four-minute, seven-minute
+    # and eighteen-minute methods and 21-minute image pull, 170 minutes. A check added, or a bound raised, raises its
+    # group's timeout with it, so a slow check fails with its own message.
     strategy:
       fail-fast: false
       matrix:
@@ -44,7 +44,7 @@ jobs:
           - group: standard
             timeout: 359
           - group: docker-runner
-            timeout: 153
+            timeout: 190
     timeout-minutes: ${{ matrix.timeout }}
     # A fork's schedule would spend its owner's minutes on checks it never asked for; a draft waits until it is
     # ready for review, as the CI shards do.
@@ -69,7 +69,8 @@ jobs:
             > "$GITHUB_WORKSPACE/all-nightly.txt"
           cd "$GITHUB_WORKSPACE"
           if [ -n "$PR" ]; then
-            gh pr diff "$PR" --repo "$GITHUB_REPOSITORY" --name-only > changed.txt
+            # The files endpoint lists up to 3,000 files; gh pr diff refuses a pull request past 300.
+            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename' > changed.txt
             if ! grep -qx '.github/workflows/nightly-checks.yml' changed.txt; then
               sed -n 's|^src/test/java/\(.*NightlyIntegrationTest\)\.java$|\1|p' changed.txt | LC_ALL=C sort \
                 | comm -12 all-nightly.txt - > selected.txt

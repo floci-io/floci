@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -68,9 +69,11 @@ class ElbV2AliasDnsIntegrationTest {
             ResourceRecordSet installed = null;
             DatagramSocket listener = null;
             try {
+                Optional<String> advertisedResolver = dns.getServerIp();
                 listener = dns.bind(vertx, listenerAddress, 0, false)
                         .toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
-                assertTrue(dns.getServerIp().isEmpty(), "A host listener must not be handed to containers");
+                assertEquals(advertisedResolver, dns.getServerIp(),
+                        "A host listener must not change the resolver handed to containers");
                 subnets.add(ec2.createSubnet(r -> r.vpcId(vpc).cidrBlock("10.73.1.0/24")
                         .availabilityZone("eu-west-1a")).subnet().subnetId());
                 subnets.add(ec2.createSubnet(r -> r.vpcId(vpc).cidrBlock("10.73.2.0/24")

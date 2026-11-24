@@ -2,8 +2,10 @@ package io.floci.aws.config;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
+import io.floci.aws.testing.ParallelLocks;
 import io.smallrye.config.common.utils.StringUtil;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
@@ -20,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * fallback default is invisible to anyone reading the config and cannot be toggled from
  * the file, which is how six services drifted out of both YAMLs before this test existed.
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class ServiceConfigYamlCoverageTest {
 
     private static final List<Path> CONFIGS = List.of(

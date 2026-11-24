@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -44,7 +45,7 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
     @Test
     @Order(0)
     void setup_verifyFromIdentity() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("{\"EmailIdentity\":\"" + FROM + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
     }
@@ -52,7 +53,7 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
     @Test
     @Order(1)
     void createThenGet() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body(body(NAME, FROM, "Verify your email", "https://example.com/ok"))
         .when().post(BASE).then().statusCode(200);
 
@@ -81,7 +82,7 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
     @Test
     @Order(3)
     void createDuplicate_throwsAlreadyExists() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body(body(NAME, FROM, "x", "https://example.com/ok"))
         .when().post(BASE).then().statusCode(400)
                 .body("__type", equalTo("AlreadyExistsException"))
@@ -101,7 +102,7 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
     @Test
     @Order(5)
     void update_replaces() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body(body(NAME, FROM, "Updated subject", "https://example.com/ok2"))
         .when().put(BASE + "/" + NAME).then().statusCode(200);
 
@@ -115,7 +116,7 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
     @Test
     @Order(6)
     void updateMissing_throwsNotFound() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body(body("nope", FROM, "x", "https://example.com/ok"))
         .when().put(BASE + "/nope").then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"))
@@ -143,7 +144,7 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
     @Test
     @Order(9)
     void createWithUnverifiedFrom_throwsNotFound() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body(body("cvet-unverified", "nobody@unverified.test", "x", "https://example.com/ok"))
         .when().post(BASE).then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"))
@@ -153,7 +154,7 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
     @Test
     @Order(10)
     void createWithInvalidRedirectUrl_throwsBadRequest() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body(body("cvet-badurl", FROM, "x", "not-a-url"))
         .when().post(BASE).then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
@@ -166,7 +167,7 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
         // The signature comes from the scanner so it never appears in test source; the JSON needs
         // its one backslash escaped.
         String content = SesTestSignature.value().replace("\\", "\\\\");
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2()
                 .body("""
                     {"TemplateName": "cvet-v2-scan", "FromEmailAddress": "%s", "TemplateSubject": "scan",
                      "TemplateContent": "<p>%s</p>",
@@ -177,7 +178,7 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
 
         // Sending registers the recipient as a pending identity in the shared region, so it is
         // removed again below; a domain other tests assert on must not be used here.
-        String messageId = given().contentType("application/json").header("Authorization", AUTH)
+        String messageId = v2()
                 .body("{\"EmailAddress\":\"scan-target@cvet-scan.floci.test\",\"TemplateName\":\"cvet-v2-scan\"}")
         .when().post("/v2/email/outbound-custom-verification-emails").then().statusCode(200)
                 .extract().jsonPath().getString("MessageId");

@@ -16,6 +16,9 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsStoredResourceArns;
 import io.floci.aws.services.cloudwatch.logs.model.Delivery;
+import io.floci.aws.services.configservice.AwsConfigService;
+import io.floci.aws.services.configservice.ConfigFixtures;
+import io.floci.aws.services.configservice.ConfigStoredResourceArns;
 import io.floci.aws.services.dynamodb.DynamoDbStoredResourceArns;
 import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess;
 import io.floci.aws.services.eks.EksService;
@@ -34,6 +37,7 @@ import io.floci.aws.services.s3.S3RequestPathLabels;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.SqsServiceFactory;
 import io.floci.aws.services.sqs.SqsStoredResourceArns;
+import io.floci.aws.testing.ParallelLocks;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.ext.web.RoutingContext;
@@ -46,6 +50,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -78,6 +83,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class ResourceArnBuilderTest {
 
     private static final String ACCOUNT = "000000000000";
@@ -1835,6 +1841,142 @@ class ResourceArnBuilderTest {
                 builder.buildResources("sns", "sns:TagResource", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
+    // ── CloudWatch ──────────────────────────────────────────────────────────────
+
+    /**
+     * A CloudWatch request is checked on each alarm its AlarmNames list names, or the one its AlarmName names, as
+     * {@code alarm:<name>} in the request's Region, the ARN CloudWatch mints for an alarm; one naming no alarm is
+     * checked on {@code *}.
+     */
+    @Test
+    void cloudWatchChecksTheAlarmsARequestNames() {
+        setFormBody("Action=DeleteAlarms&Version=2010-08-01&AlarmNames.member.1=high-cpu&AlarmNames.member.2=low-disk");
+        assertEquals(List.of("arn:aws:cloudwatch:us-west-2:000000000000:alarm:high-cpu",
+                        "arn:aws:cloudwatch:us-west-2:000000000000:alarm:low-disk"),
+                builder.buildResources("cloudwatch", "cloudwatch:DeleteAlarms", ctx, "us-west-2", ACCOUNT, "aws"));
+        setJsonBody("{\"AlarmName\":\"high-cpu\",\"StateValue\":\"ALARM\",\"StateReason\":\"test\"}");
+        when(ctx.getMediaType()).thenReturn(MediaType.valueOf("application/x-amz-json-1.0"));
+        assertEquals(List.of("arn:aws:cloudwatch:us-west-2:000000000000:alarm:high-cpu"),
+                builder.buildResources("cloudwatch", "cloudwatch:SetAlarmState", ctx, "us-west-2", ACCOUNT, "aws"));
+        setFormBody("Action=DescribeAlarms&Version=2010-08-01&AlarmNamePrefix=high");
+        assertEquals(List.of("*"),
+                builder.buildResources("cloudwatch", "cloudwatch:DescribeAlarms", ctx, "us-west-2", ACCOUNT, "aws"));
+    }
+
+    /**
+     * A dashboard's ARN has no Region, as the Service Reference gives it and CloudWatch mints it, and a metric stream
+     * is checked on the one its Name names; publishing or reading metric data names no resource, so is checked on
+     * {@code *}.
+     */
+    @Test
+    void cloudWatchChecksADashboardWithoutItsRegionAndAMetricStreamByItsName() {
+        setFormBody("Action=DeleteDashboards&Version=2010-08-01&DashboardNames.member.1=ops");
+        assertEquals(List.of("arn:aws:cloudwatch::000000000000:dashboard/ops"),
+                builder.buildResources("cloudwatch", "cloudwatch:DeleteDashboards", ctx, "us-west-2", ACCOUNT, "aws"));
+        setJsonBody("{\"Name\":\"to-firehose\"}");
+        when(ctx.getMediaType()).thenReturn(MediaType.valueOf("application/x-amz-json-1.0"));
+        assertEquals(List.of("arn:aws:cloudwatch:us-west-2:000000000000:metric-stream/to-firehose"),
+                builder.buildResources("cloudwatch", "cloudwatch:GetMetricStream", ctx, "us-west-2", ACCOUNT, "aws"));
+        setFormBody("Action=PutMetricData&Version=2010-08-01&Namespace=App&MetricData.member.1.MetricName=Hits");
+        assertEquals(List.of("*"),
+                builder.buildResources("cloudwatch", "cloudwatch:PutMetricData", ctx, "us-west-2", ACCOUNT, "aws"));
+    }
+
+    // ── AWS Config ──────────────────────────────────────────────────────────────
+
+    /**
+     * A config rule, a configuration recorder and a conformance pack carry an id Config mints in their ARNs, which a
+     * request naming them by name does not give, so each is checked on the ARN Config stores it under; one Config holds
+     * none of is checked on its name with that id open, or on every rule for a rule.
+     */
+    @Test
+    void configChecksARuleARecorderAndAConformancePackOnTheArnsConfigStoresThemUnder() {
+        AwsConfigService config = new AwsConfigService(new RegionResolver("us-east-1", ACCOUNT), null);
+        ConfigFixtures.Stored stored = ConfigFixtures.stored(config, "us-east-1");
+        ResourceArnBuilder reading = reading(new ConfigStoredResourceArns(config));
+
+        setJsonBody("{\"ConfigRuleName\":\"versioning\"}");
+        assertEquals(List.of(stored.rule()), config(reading, "DeleteEvaluationResults"));
+        setJsonBody("{\"ConfigurationRecorderName\":\"default\"}");
+        assertEquals(List.of(stored.recorder()), config(reading, "StopConfigurationRecorder"));
+        setJsonBody("{\"ConformancePackName\":\"pack\"}");
+        assertEquals(List.of(stored.pack()), config(reading, "DeleteConformancePack"));
+
+        setJsonBody("{\"ConfigRuleName\":\"missing\"}");
+        assertEquals(List.of("arn:aws:config:us-east-1:000000000000:config-rule/*"),
+                config(reading, "DeleteEvaluationResults"));
+        setJsonBody("{\"ConformancePackName\":\"other\"}");
+        assertEquals(List.of("arn:aws:config:us-east-1:000000000000:conformance-pack/other/*"),
+                config(reading, "DeleteConformancePack"));
+
+        // A recorder put names its recorder in its ConfigurationRecorder structure, the stored one when it exists.
+        setJsonBody("{\"ConfigurationRecorder\":{\"name\":\"default\",\"roleARN\":\"arn:aws:iam::000000000000:role/r\"}}");
+        assertEquals(List.of(stored.recorder()), config(reading, "PutConfigurationRecorder"));
+        // An aggregation authorization is the caller's, its path the account and Region it authorizes.
+        setJsonBody("{\"AuthorizedAccountId\":\"111122223333\",\"AuthorizedAwsRegion\":\"eu-west-1\"}");
+        assertEquals(List.of("arn:aws:config:us-east-1:000000000000:aggregation-authorization/111122223333/eu-west-1"),
+                config(reading, "PutAggregationAuthorization"));
+    }
+
+    /** The resources an AWS Config request is checked on, as the table reads {@code operation}. */
+    private List<String> config(ResourceArnBuilder builder, String operation) {
+        return builder.buildResources("config", "config:" + operation, ctx, "us-east-1", ACCOUNT, "aws");
+    }
+
+    // ── AWS DMS ─────────────────────────────────────────────────────────────────
+
+    /**
+     * The Service Reference gives each DMS type an ARN format ending in a literal {@code *}, which the reader matches
+     * as written, so a request naming an endpoint by its ARN matches no format and is checked on {@code *}, and one
+     * naming a subnet group by its identifier is checked on the format itself.
+     */
+    @Test
+    void dmsChecksASubnetGroupOnTheFormatTheReferenceGivesIt() {
+        setJsonBody("{\"EndpointArn\":\"arn:aws:dms:us-east-1:000000000000:endpoint:ABCDEFGHIJKLMNOP\"}");
+        assertEquals(List.of("*"),
+                builder.buildResources("dms", "dms:DeleteEndpoint", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ReplicationSubnetGroupIdentifier\":\"default\"}");
+        assertEquals(List.of("arn:aws:dms:us-east-1:000000000000:subgrp:*"),
+                builder.buildResources("dms", "dms:DeleteReplicationSubnetGroup", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{}");
+        assertEquals(List.of("*"),
+                builder.buildResources("dms", "dms:DescribeEndpoints", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    // ── ElastiCache ─────────────────────────────────────────────────────────────
+
+    /**
+     * An ElastiCache request is checked on the cluster, replication group or parameter group its identifier names, as
+     * {@code <type>:<name>} in the request's Region, the ARN ElastiCache mints; a tag call names its resource in
+     * {@code ResourceName}, which the table does not read, so it is checked on {@code *}.
+     */
+    @Test
+    void elastiCacheChecksTheResourceItsIdentifierNames() {
+        setFormBody("Action=DescribeCacheClusters&Version=2015-02-02&CacheClusterId=cache-1");
+        assertEquals(List.of("arn:aws:elasticache:us-west-2:000000000000:cluster:cache-1"),
+                builder.buildResources("elasticache", "elasticache:DescribeCacheClusters", ctx, "us-west-2", ACCOUNT,
+                        "aws"));
+        setFormBody("Action=CreateCacheParameterGroup&Version=2015-02-02&CacheParameterGroupName=tuned"
+                + "&CacheParameterGroupFamily=redis7&Description=d");
+        assertEquals(List.of("arn:aws:elasticache:us-west-2:000000000000:parametergroup:tuned"),
+                builder.buildResources("elasticache", "elasticache:CreateCacheParameterGroup", ctx, "us-west-2",
+                        ACCOUNT, "aws"));
+        setFormBody("Action=ListTagsForResource&Version=2015-02-02"
+                + "&ResourceName=arn%3Aaws%3Aelasticache%3Aus-west-2%3A000000000000%3Acluster%3Acache-1");
+        assertEquals(List.of("*"), builder.buildResources("elasticache", "elasticache:ListTagsForResource", ctx,
+                "us-west-2", ACCOUNT, "aws"));
+        setFormBody("Action=DescribeCacheClusters&Version=2015-02-02");
+        assertEquals(List.of("*"), builder.buildResources("elasticache", "elasticache:DescribeCacheClusters", ctx,
+                "us-west-2", ACCOUNT, "aws"));
+        // A user group's change is checked on the group and on each user it adds or removes.
+        setFormBody("Action=ModifyUserGroup&Version=2015-02-02&UserGroupId=admins&UserIdsToAdd.member.1=alice"
+                + "&UserIdsToRemove.member.1=bob");
+        assertEquals(List.of("arn:aws:elasticache:us-west-2:000000000000:usergroup:admins",
+                        "arn:aws:elasticache:us-west-2:000000000000:user:alice",
+                        "arn:aws:elasticache:us-west-2:000000000000:user:bob"),
+                builder.buildResources("elasticache", "elasticache:ModifyUserGroup", ctx, "us-west-2", ACCOUNT, "aws"));
+    }
+
     // ── S3 and S3 Control ───────────────────────────────────────────────────────
 
     /** The resources an S3 or S3 Control request names, read from the generated table on the route it matches. */
@@ -2544,7 +2686,9 @@ class ResourceArnBuilderTest {
                 eks(eks, "GET", "/clusters/held", "eks:DescribeCluster"));
         assertEquals(List.of("arn:aws:eks:us-east-1:000000000000:cluster/held"),
                 eks(eks, "GET", "/clusters/held/node-groups", "eks:ListNodegroups"));
-        assertEquals(List.of("*"), eks(eks, "GET", "/clusters", "eks:ListClusters"));
+        // ListClusters is checked on every cluster of the account, as measured on AWS (MEASURED, #9039).
+        assertEquals(List.of("arn:aws:eks:us-east-1:000000000000:cluster/*"),
+                eks(eks, "GET", "/clusters", "eks:ListClusters"));
     }
 
     /** CreateCluster is checked on the cluster its body names, as the EKS user guide's example policy grants it. */

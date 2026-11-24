@@ -29,6 +29,8 @@ import io.floci.aws.services.kinesis.KinesisService;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.InOrder;
 
 import java.util.ArrayList;
@@ -158,6 +160,23 @@ class DynamoDbNativeBackendTest {
         backend.deleteTable(SCOPE, TABLE);
 
         assertTrue(backend.findTable(SCOPE, TABLE).isEmpty());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            attribute_not_exist(id) | attribute_not_exist
+            NOT attribute_exist(id) | attribute_exist
+            ATTRIBUTE_EXISTS(id)    | ATTRIBUTE_EXISTS
+            """)
+    void typedScanRefusesAnUnknownFilterFunction(String filter, String function) throws Exception {
+        createTable("");
+        backend.putItem(SCOPE, TABLE, json("{\"id\":{\"S\":\"k\"}}"), null, null, null);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> backend.scan(SCOPE, TABLE, filter, null, null, null, null, null));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals("Invalid FilterExpression: Invalid function name; function: " + function, refused.getMessage());
     }
 
     @Test

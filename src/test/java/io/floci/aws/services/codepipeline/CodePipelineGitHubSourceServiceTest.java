@@ -10,12 +10,15 @@ import io.floci.aws.services.codebuild.CodeBuildService;
 import io.floci.aws.services.codedeploy.CodeDeployService;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.testing.ParallelLocks;
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
 import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
 import org.apache.commons.compress.archivers.zip.ZipFile;
 import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
@@ -50,6 +53,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
  * The archive fetch is the only seam replaced; the artifact is observed through an S3 deploy
  * action that writes the input artifact to the mocked S3 service.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CodePipelineGitHubSourceServiceTest {
 
     private static final String REGION = "us-east-1";

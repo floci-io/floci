@@ -3,6 +3,7 @@ package io.floci.aws.services.iam;
 import io.floci.aws.core.common.AwsProtocolClaimFilter;
 import io.floci.aws.core.common.ProtocolClaim;
 import io.floci.aws.core.common.WireProtocol;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
@@ -11,6 +12,7 @@ import jakarta.ws.rs.core.UriInfo;
 import org.jboss.resteasy.reactive.server.core.ResteasyReactiveRequestContext;
 import org.jboss.resteasy.reactive.server.spi.ResteasyReactiveContainerRequestContext;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvFileSource;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -38,6 +40,7 @@ import static org.mockito.Mockito.when;
  * {@code Action} extraction. The HTTP filter path is covered by SDK
  * compatibility tests; these tests pin the resolver behavior directly.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class IamActionRegistryTest {
 
     private final IamActionRegistry registry = new IamActionRegistry();

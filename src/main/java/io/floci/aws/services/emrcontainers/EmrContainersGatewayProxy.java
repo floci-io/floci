@@ -44,7 +44,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * {@code token} parameter, or an {@code Authorization: token <token>} header. One without such a token gets that
  * gateway's answer, 401 with {@code {"reason": "Unauthorized", "message": ""}}; one whose endpoint is not ACTIVE,
  * 503, its message saying why. The gateway gets the token's SHA-256 in place of the token, in
- * {@link EmrContainersGateways#SESSION_HEADER}, to list a session token's kernels by.
+ * {@link EmrContainersGateways#SESSION_HEADER}, to list a session token's kernels by. A CORS preflight
+ * ({@code OPTIONS}), which a browser sends without the token, goes on without one, as that gateway's
+ * TokenAuthorizationMixin checks none for it.
  */
 @ApplicationScoped
 public class EmrContainersGatewayProxy {
@@ -94,11 +96,13 @@ public class EmrContainersGatewayProxy {
         int slash = rest.indexOf('/');
         String endpointId = slash < 0 ? rest : rest.substring(0, slash);
         String path = slash < 0 ? "/" : rest.substring(slash);
-        String token = token(request);
+        boolean preflight = request.method() == HttpMethod.OPTIONS;
+        String token = preflight ? null : token(request);
         request.pause();
         // A service reads its storage to route a request, so off the event loop.
-        vertx.<Optional<SparkConnectTargets.Route>>executeBlocking(() -> service.gatewayRoute(endpointId, token),
-                false).onComplete(routed -> {
+        vertx.<Optional<SparkConnectTargets.Route>>executeBlocking(() -> preflight
+                ? service.gatewayPreflightRoute(endpointId) : service.gatewayRoute(endpointId, token), false)
+                .onComplete(routed -> {
                     if (routed.failed()) {
                         LOG.warnv(routed.cause(), "A request to endpoint {0}'s gateway could not be routed",
                                 endpointId);
@@ -113,7 +117,8 @@ public class EmrContainersGatewayProxy {
                             refuse(request, 503, "Service Unavailable", refused.refusal());
                         }
                     } else {
-                        forward(request, path + query(request), Digests.sha256Hex(token), routed.result().get());
+                        forward(request, path + query(request), preflight ? null : Digests.sha256Hex(token),
+                                routed.result().get());
                     }
                 });
     }
@@ -179,7 +184,9 @@ public class EmrContainersGatewayProxy {
                 options.addHeader(header.getKey(), header.getValue());
             }
         }
-        options.addHeader(EmrContainersGateways.SESSION_HEADER, session);
+        if (session != null) {
+            options.addHeader(EmrContainersGateways.SESSION_HEADER, session);
+        }
         client.request(options).onComplete(opened -> {
             if (opened.failed()) {
                 refuse(request, 502, "Bad Gateway",

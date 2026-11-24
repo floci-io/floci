@@ -3,9 +3,11 @@ package io.floci.aws.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.Iterator;
 import java.util.List;
@@ -19,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * Unit tests for the SAM Transform processor logic.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class SamTransformProcessorTest {
 
     private ObjectMapper objectMapper;

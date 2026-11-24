@@ -14,10 +14,12 @@ import io.floci.aws.services.lambda.zip.ZipExtractor;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.model.MessageAttributeValue;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -52,6 +54,7 @@ import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
+@ResourceLock(ParallelLocks.PORTS)
 class AsyncInvokeDestinationRouterTest {
 
     private static final String FUNCTION_ARN = "arn:aws:lambda:us-east-1:000000000000:function:bank-pawnshop";

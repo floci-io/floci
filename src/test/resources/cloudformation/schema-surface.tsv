@@ -48,6 +48,7 @@ AWS::CertificateManager::Certificate	CertificateArn	CertificateAuthorityArn,Cert
 AWS::CloudFormation::CustomResource	Id	ServiceTimeout,ServiceToken
 AWS::CloudFormation::StackSet	StackSetId	AdministrationRoleARN,AutoDeployment,CallAs,Capabilities,Description,ExecutionRoleName,ManagedExecution,OperationPreferences,Parameters,PermissionModel,StackInstancesGroup,StackSetName,Tags,TemplateBody,TemplateURL
 AWS::CloudFront::CachePolicy	Id,LastModifiedTime	CachePolicyConfig
+AWS::CloudFront::ConnectionGroup	Arn,CreatedTime,ETag,Id,IsDefault,LastModifiedTime,RoutingEndpoint,Status	AnycastIpListId,Enabled,Ipv6Enabled,Name,Tags,ViewerFallback
 AWS::CloudFront::Distribution	DomainName,Id	DistributionConfig,Tags
 AWS::CloudFront::Function	FunctionARN,Stage	AutoPublish,FunctionCode,FunctionConfig,FunctionMetadata,Name,Tags
 AWS::CloudFront::KeyGroup	Id,LastModifiedTime	KeyGroupConfig
@@ -224,5 +225,5 @@ AWS::VerifiedPermissions::PolicyStore	Arn,EncryptionState,PolicyStoreId	Deletion
 AWS::VerifiedPermissions::PolicyTemplate	PolicyTemplateId	Description,Name,PolicyStoreId,Statement
 AWS::WAFv2::IPSet	Arn,Id	Addresses,Description,IPAddressVersion,Name,Scope,Tags
 AWS::WAFv2::LoggingConfiguration	ManagedByFirewallManager	LogDestinationConfigs,LoggingFilter,RedactedFields,ResourceArn
-AWS::WAFv2::WebACL	Arn,Capacity,Id,LabelNamespace	ApplicationConfig,AssociationConfig,CaptchaConfig,ChallengeConfig,CustomResponseBodies,DataProtectionConfig,DefaultAction,Description,MonetizationConfig,Name,OnSourceDDoSProtectionConfig,Rules,Scope,Tags,TokenDomains,VisibilityConfig
+AWS::WAFv2::WebACL	Arn,Capacity,Id,LabelNamespace	AnalyticsConfig,ApplicationConfig,AssociationConfig,CaptchaConfig,ChallengeConfig,CustomResponseBodies,DataProtectionConfig,DefaultAction,Description,MonetizationConfig,Name,OnSourceDDoSProtectionConfig,Rules,Scope,Tags,TokenDomains,VisibilityConfig
 AWS::WAFv2::WebACLAssociation		ResourceArn,WebACLArn

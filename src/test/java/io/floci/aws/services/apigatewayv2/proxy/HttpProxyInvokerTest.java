@@ -3,9 +3,11 @@ package io.floci.aws.services.apigatewayv2.proxy;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.services.apigatewayv2.model.Integration;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -33,6 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * to a real backend HTTP server, applies RequestParameters transformations,
  * and propagates the response back as a ProxyResult.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class HttpProxyInvokerTest {
 
     private HttpServer backend;

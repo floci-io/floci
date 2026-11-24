@@ -6,9 +6,11 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.XmlParser;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -49,6 +51,7 @@ import static org.mockito.Mockito.when;
  * its {@code maven} settings domain, and deploying/fetching/checking artifacts through it.
  * Reposilite's own behaviour (Maven repository semantics) is not re-tested here.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class ReposiliteSidecarClientTest {
 
     private final ObjectMapper mapper = new ObjectMapper();

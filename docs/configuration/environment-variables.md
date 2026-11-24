@@ -155,6 +155,9 @@ This foundation release provides opt-in security-group filtering for EC2 Docker 
 | `FLOCI_DOCKER_EVENTS_EXIT_DETECTION` | `false` | Watch Lambda containers' exits through one Docker events subscription instead of a wait stream per container. See [Docker Configuration](docker.md#container-exits-through-docker-events) |
 | `FLOCI_DOCKER_SERVICE_MAX_CONTAINERS_<SERVICE>` | _(none)_ | Most containers one service runs at once, named by its `io.floci.service` label in upper case (`FLOCI_DOCKER_SERVICE_MAX_CONTAINERS_LAMBDA=50`); a create past it fails with that service's own capacity error. A service not set is not limited. See [Docker Configuration](docker.md#per-service-container-budgets) |
 | `FLOCI_DOCKER_LOG_POLL_INTERVAL_MILLIS` | `1000` | Milliseconds between the reads of a long-lived service container's log, read on a timer instead of followed; at least 100. See [Docker Configuration](docker.md#container-log-settings) |
+| `FLOCI_DOCKER_LOG_DRIVER_MODE` | `false` | Opt-in: long-lived service containers push their logs to Floci through Docker's `gelf` driver; needs a daemon that can reach Floci. See [Docker Configuration](docker.md#log-driver-mode-opt-in) |
+| `FLOCI_DOCKER_LOG_DRIVER_HOST` | _(unset)_ | Host the daemon dials in the log-driver mode; `host.docker.internal` on Docker Desktop, `127.0.0.1` otherwise |
+| `FLOCI_DOCKER_LOG_DRIVER_PORT` | `12201` | Fixed port of Floci's log listener in the log-driver mode; Docker dials it on every start of a container created in the mode |
 | `FLOCI_DOCKER_IMAGE_REGISTRY_BASE` | _(none)_ | Optional registry/repository base for every Docker image Floci launches. When set, `postgres:16-alpine` resolves as `<base>/postgres:16-alpine` and `public.ecr.aws/docker/library/ubuntu:24.04` resolves as `<base>/public.ecr.aws/docker/library/ubuntu:24.04`. An image in a registry on `localhost` or a loopback address, Floci's own ECR among them, is launched as it is |
 | `FLOCI_DOCKER_LOG_MAX_SIZE` | `10m` | Log rotation max size for spawned containers (e.g. `10m`, `1g`) |
 | `FLOCI_DOCKER_LOG_MAX_FILE` | `3` | Number of rotated log files to keep for spawned containers |
@@ -583,6 +586,8 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ECR_URI_STYLE` | `hostname` | Repository URI style: `hostname` (`<account>.dkr.ecr.<region>.localhost`) or `path` |
 | `FLOCI_SERVICES_ECR_PREFER_LOCAL_IMAGES` | `true` | Use an AWS-shaped ECR image URI as-is when the Docker daemon already has that image, instead of rewriting it to the loopback registry |
 | `FLOCI_SERVICES_ECR_DOCKER_NETWORK` | _(none)_ | Docker network for the ECR registry container |
+| `FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_ENABLED` | `true` | Apply repository lifecycle policies in the background, expiring the images their rules select |
+| `FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_INTERVAL_SECONDS` | `60` | How often the lifecycle sweep runs |
 
 ### EKS (Elastic Kubernetes Service)
 

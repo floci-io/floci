@@ -2,7 +2,10 @@ package io.floci.aws.core.common;
 
 import io.floci.aws.core.common.auth.CredentialScope;
 import io.floci.aws.core.common.auth.SigV4Canonicalization;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -18,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * computed by botocore 1.43.108 ({@code SigV4Auth.add_auth}) for the same method, URL, headers and
  * body, with the clock pinned to 2026-01-01T00:00:00Z and the AWS documentation's example key pair.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SigV4HeaderSignatureFilterTest {
 
     private static final String SECRET = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";

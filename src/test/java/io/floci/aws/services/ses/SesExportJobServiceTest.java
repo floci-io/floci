@@ -12,9 +12,11 @@ import io.floci.aws.services.ses.model.EmailInsights;
 import io.floci.aws.services.ses.model.ExportJob;
 import io.floci.aws.services.ses.model.InsightsEvent;
 import io.floci.aws.services.ses.model.SentEmail;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
@@ -49,6 +51,7 @@ import static org.mockito.Mockito.when;
  * a cancel lands in the window between the object being written and the job being marked complete.
  * The worker runs on a captured task here, so that window is reachable.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class SesExportJobServiceTest {
 
     private static final String REGION = "eu-north-1";

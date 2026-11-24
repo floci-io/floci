@@ -4,6 +4,7 @@ import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.ServiceConfigAccess;
 import io.floci.aws.core.common.SparkConnectTargets;
 import io.floci.aws.core.common.WebSocketUpgrades;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -19,6 +20,8 @@ import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Duration;
 import java.util.Optional;
@@ -41,6 +44,7 @@ import static org.mockito.Mockito.when;
  * Requests to an endpoint's {@code serverUrl} through {@link EmrContainersGatewayProxy}: a server that echoes what it
  * gets stands in for the endpoint's gateway, and the service's routes for its tokens.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EmrContainersGatewayProxyTest {
 
     private static final String ENDPOINT = "ep0123456789a";
@@ -80,6 +84,9 @@ class EmrContainersGatewayProxyTest {
         service = mock(EmrContainersService.class);
         when(service.gatewayRoute(anyString(), any())).thenReturn(Optional.empty());
         when(service.gatewayRoute(ENDPOINT, TOKEN)).thenAnswer(invocation -> Optional.of(
+                SparkConnectTargets.Route.to("127.0.0.1", gateway.actualPort(), requestsEnded::incrementAndGet)));
+        when(service.gatewayPreflightRoute(anyString())).thenReturn(Optional.empty());
+        when(service.gatewayPreflightRoute(ENDPOINT)).thenAnswer(invocation -> Optional.of(
                 SparkConnectTargets.Route.to("127.0.0.1", gateway.actualPort(), requestsEnded::incrementAndGet)));
         ServiceConfigAccess serviceConfigAccess = mock(ServiceConfigAccess.class);
         when(serviceConfigAccess.isEnabled(eq(EmrContainersService.SERVICE))).thenReturn(true);
@@ -122,6 +129,22 @@ class EmrContainersGatewayProxyTest {
 
         assertEquals(201, answer.status);
         assertEquals(Digests.sha256Hex(TOKEN), new JsonObject(answer.body).getString("session"));
+        awaitCount(requestsEnded, 1);
+    }
+
+    @Test
+    void corsPreflightGoesToItsGatewayWithoutAToken() throws Exception {
+        // A browser's preflight carries no token, and Jupyter Enterprise Gateway checks none for one.
+        Answer preflight = request(HttpMethod.OPTIONS, BASE + "/api/kernels", null, null);
+        Answer elsewhere = request(HttpMethod.OPTIONS, EmrContainersService.GATEWAY_PATH + "ep0000000000000/api",
+                null, null);
+
+        assertEquals(201, preflight.status);
+        JsonObject got = new JsonObject(preflight.body);
+        assertEquals("OPTIONS", got.getString("method"));
+        assertEquals("/api/kernels", got.getString("uri"));
+        assertNull(got.getString("session"), "a preflight is no session token's");
+        assertEquals(401, elsewhere.status, "an endpoint with no gateway running");
         awaitCount(requestsEnded, 1);
     }
 

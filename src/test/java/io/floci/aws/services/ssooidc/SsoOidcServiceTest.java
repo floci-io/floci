@@ -9,8 +9,11 @@ import io.floci.aws.services.ssooidc.model.AuthorizationCode;
 import io.floci.aws.services.ssooidc.model.DeviceAuthorization;
 import io.floci.aws.services.ssooidc.model.RegisteredClient;
 import io.floci.aws.services.ssooidc.model.TokenSession;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -21,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SsoOidcServiceTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private SsoOidcService service;

@@ -1,7 +1,9 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import org.bouncycastle.asn1.x509.GeneralName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.Optional;
@@ -21,6 +23,7 @@ import static org.mockito.Mockito.when;
  * Which names {@code ensureHost} accepts: host name syntax, the one-label wildcard rule that
  * X.509 name matching and API Gateway custom domains share, and the local-suffix allow-list.
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class TlsCertificateManagerNameRulesTest extends TlsCertificateManagerFixture {
 
     @Test

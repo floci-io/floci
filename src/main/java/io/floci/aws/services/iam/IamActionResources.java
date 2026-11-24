@@ -6,9 +6,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Which of IAM's own resources each IAM action is authorized against, read once from the vendored
@@ -28,6 +30,10 @@ import java.util.Map;
  * {@code make iam-action-resources-verify} checks every claim in it against AWS, so a type that
  * drifts from what AWS publishes fails in CI rather than quietly authorizing against the wrong
  * resource. {@link SimulatedResourceTemplates} reads it for the templates a simulation names.
+ *
+ * <p>The file also lists the actions the reference gives neither the Write, the Permissions
+ * management nor the Tagging access level: the Read and List ones, which CloudTrail records as
+ * {@code readOnly}. {@link IamCloudTrailEvents} reads them through {@link #isReadOnly}.
  *
  * <p>An action absent from the file is one AWS does not publish, which is different from an action
  * published with no resource type: the first is a gap, the second is a wildcard on purpose. Both
@@ -49,9 +55,13 @@ public final class IamActionResources {
         static final Catalog CATALOG = load();
     }
 
-    /** The two halves of the vendored file: what each action names, and how each type is spelled. */
+    /**
+     * The vendored file: what each action names, how each type is spelled, and which actions are
+     * read-only.
+     */
     record Catalog(Map<String, List<String>> actionResources,
-                   Map<String, List<String>> resourceArnFormats) {
+                   Map<String, List<String>> resourceArnFormats,
+                   Set<String> readOnlyActions) {
     }
 
     private IamActionResources() {
@@ -71,6 +81,11 @@ public final class IamActionResources {
     /** Every resource type AWS publishes an ARN format for, with those formats. */
     public static Map<String, List<String>> arnFormats() {
         return Holder.CATALOG.resourceArnFormats();
+    }
+
+    /** Whether AWS gives {@code action} the Read or List access level; false for one it does not publish. */
+    public static boolean isReadOnly(String action) {
+        return action != null && Holder.CATALOG.readOnlyActions().contains(action);
     }
 
     /** Every action the file carries, which is every action AWS publishes for IAM. */
@@ -106,7 +121,19 @@ public final class IamActionResources {
                 }
             }
         }
-        return new Catalog(actions, formats);
+        JsonNode readOnly = root.path("readOnlyActions");
+        if (!readOnly.isArray() || readOnly.isEmpty()) {
+            throw new IllegalStateException(RESOURCE_NAME + " carries no readOnlyActions");
+        }
+        Set<String> readOnlyActions = new HashSet<>();
+        for (JsonNode action : readOnly) {
+            if (!actions.containsKey(action.asText(""))) {
+                throw new IllegalStateException(RESOURCE_NAME + " lists " + action
+                        + " as read-only, which is not one of its actions");
+            }
+            readOnlyActions.add(action.asText());
+        }
+        return new Catalog(actions, formats, Set.copyOf(readOnlyActions));
     }
 
     private static Map<String, List<String>> readLists(JsonNode node, String field) {

@@ -555,7 +555,7 @@ class IamServiceTest {
     }
 
     @Test
-    void userSessionTokensCarryUserTagsButFederatedAndRootSessionsDoNot() {
+    void userAndFederatedSessionsCarryTheUsersTagsButRootSessionsDoNot() {
         IamUser user = iamService.createUser("tagged", "/");
         user.setTags(Map.of("Team", "platform"));
         String key = iamService.createAccessKey("tagged").getAccessKeyId();
@@ -567,13 +567,128 @@ class IamServiceTest {
         iamService.registerIssuedSession("ASIAROOT", "secret", "token", null, expiration,
                 null, "000000000000", "test");
         Map<String, List<String>> context = new LinkedHashMap<>();
-        iamService.resolveCallerArns("ASIAUSER").orElseThrow().putPrincipalKeys(context);
-        assertEquals(List.of("platform"), context.get("aws:PrincipalTag/Team"));
-        for (String session : List.of("ASIAFEDERATED", "ASIAROOT")) {
+        // The federated user's own half of what the guide gives it: "the session principal tags
+        // include the user tags and the passed session tags".
+        for (String session : List.of("ASIAUSER", "ASIAFEDERATED")) {
             context.clear();
             iamService.resolveCallerArns(session).orElseThrow().putPrincipalKeys(context);
-            assertFalse(context.containsKey("aws:PrincipalTag/Team"));
+            assertEquals(List.of("platform"), context.get("aws:PrincipalTag/Team"));
         }
+        context.clear();
+        iamService.resolveCallerArns("ASIAROOT").orElseThrow().putPrincipalKeys(context);
+        assertFalse(context.containsKey("aws:PrincipalTag/Team"));
+    }
+
+    /**
+     * A session's own tags are principal tags of its requests, over the tags of the identity it
+     * acts as: "when you request a session, you can specify principal tags as the session tags.
+     * The tags apply to requests that you make using the session's credentials."
+     */
+    @Test
+    void sessionTagsArePublishedOverTheTagsOfTheIdentityTheSessionActsAs() {
+        IamRole role = iamService.createRole("Tagged", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
+        role.setTags(Map.of("Team", "role-team", "Owner", "platform"));
+        iamService.registerSession("ASIASESSIONTAGS", "secret", "token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000", "tagged", "AROATAGGED:tagged");
+        iamService.recordSessionTags("ASIASESSIONTAGS", Map.of("Team", "session-team", "Project", "atlas"),
+                List.of());
+
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        iamService.resolveCallerArns("ASIASESSIONTAGS").orElseThrow().putPrincipalKeys(context);
+
+        assertEquals(List.of("session-team"), context.get("aws:PrincipalTag/Team"));
+        assertEquals(List.of("atlas"), context.get("aws:PrincipalTag/Project"));
+        assertEquals(List.of("platform"), context.get("aws:PrincipalTag/Owner"));
+    }
+
+    /**
+     * The key a session tag replaces is matched without case, as IAM matches a tag key on a user or
+     * a role: a new session tag overrides an existing one "regardless of character case", and the
+     * spelling published is the session's own.
+     */
+    @Test
+    void aSessionTagReplacesTheIdentityTagOfThatKeyWhateverItsCase() {
+        IamRole role = iamService.createRole("CaseTagged", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
+        role.setTags(Map.of("department", "finance"));
+        iamService.registerSession("ASIACASETAGS", "secret", "token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000", "cased", "AROACASED:cased");
+        iamService.recordSessionTags("ASIACASETAGS", Map.of("Department", "engineering"), List.of());
+
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        iamService.resolveCallerArns("ASIACASETAGS").orElseThrow().putPrincipalKeys(context);
+
+        assertEquals(List.of("engineering"), context.get("aws:PrincipalTag/Department"));
+        assertFalse(context.containsKey("aws:PrincipalTag/department"));
+    }
+
+    /**
+     * Two session tags whose keys differ only in case are one tag, the later winning, as a tag key
+     * on an identity is: "you cannot have separate Department and department tag keys". Kept as two
+     * they would reach a policy as one key with the other's value dropped.
+     */
+    @Test
+    void sessionTagsThatDifferOnlyInCaseAreOneTag() {
+        IamRole role = iamService.createRole("OneTag", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
+        iamService.registerSession("ASIAONETAG", "secret", "token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000", "one", "AROAONE:one");
+        Map<String, String> sent = new LinkedHashMap<>();
+        sent.put("Team", "first");
+        sent.put("team", "second");
+        iamService.recordSessionTags("ASIAONETAG", sent, List.of());
+
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        iamService.resolveCallerArns("ASIAONETAG").orElseThrow().putPrincipalKeys(context);
+
+        assertEquals(List.of("second"), context.get("aws:PrincipalTag/team"));
+        assertFalse(context.containsKey("aws:PrincipalTag/Team"));
+    }
+
+    /**
+     * Only the tags whose keys a session set as transitive pass down to a session assumed from it:
+     * "if you set a tag key as transitive, the corresponding key and value passes to subsequent
+     * sessions in a role chain", and by default none does. A key naming no tag of the session
+     * selects nothing, there being no tag of that key to carry, and the keys are matched against
+     * the tags without regard to case, as a tag key is everywhere else here.
+     */
+    @Test
+    void onlyTheTagsNamedTransitivePassDownFromASession() {
+        IamRole role = iamService.createRole("Chained", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
+        iamService.registerSession("ASIATRANSITIVE", "secret", "token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000", "chain", "AROACHAIN:chain");
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put("Team", "platform");
+        tags.put("Scratch", "local");
+        iamService.recordSessionTags("ASIATRANSITIVE", tags, List.of("team", "Absent"));
+
+        assertEquals(Map.of("Team", "platform"),
+                iamService.callerTransitiveSessionTags("ASIATRANSITIVE"));
+
+        iamService.registerSession("ASIAUNTRANSITIVE", "secret", "token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000", "none", "AROANONE:none");
+        iamService.recordSessionTags("ASIAUNTRANSITIVE", tags, List.of());
+
+        assertTrue(iamService.callerTransitiveSessionTags("ASIAUNTRANSITIVE").isEmpty(),
+                "no transitive key named means nothing passes down");
+        assertTrue(iamService.callerTransitiveSessionTags("AKIALONGTERMKEY").isEmpty(),
+                "a long-term key has no session behind it to pass anything down");
+    }
+
+    /** A federated user's session tags join the tags of the user whose key minted the session. */
+    @Test
+    void federatedSessionTagsJoinTheIssuingUsersTags() {
+        IamUser user = iamService.createUser("federated-tagged", "/");
+        user.setTags(Map.of("Team", "platform"));
+        String key = iamService.createAccessKey("federated-tagged").getAccessKeyId();
+        iamService.registerIssuedSession("ASIAFEDTAGS", "secret", "token",
+                "arn:aws:sts::000000000000:federated-user/federated-tagged",
+                Instant.now().plusSeconds(3600), null, "000000000000", key);
+        iamService.recordSessionTags("ASIAFEDTAGS", Map.of("Project", "atlas"), List.of());
+
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        iamService.resolveCallerArns("ASIAFEDTAGS").orElseThrow().putPrincipalKeys(context);
+
+        assertEquals(List.of("platform"), context.get("aws:PrincipalTag/Team"));
+        assertEquals(List.of("atlas"), context.get("aws:PrincipalTag/Project"));
     }
 
     @Test
