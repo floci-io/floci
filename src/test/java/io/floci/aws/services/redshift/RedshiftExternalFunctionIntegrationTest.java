@@ -320,6 +320,34 @@ class RedshiftExternalFunctionIntegrationTest {
                     () -> statement.executeQuery("SELECT exfunc_fail(1, 2)"));
             assertEquals("XX000", failed.getSQLState());
             assertTrue(failed.getMessage().contains("boom from lambda"), failed.getMessage());
+
+            // Security: a data-modifying CTE cannot forge rows in pg_temp._floci_udf_cache
+            SQLException forged = assertThrows(SQLException.class, () -> statement.executeQuery(
+                    "WITH forge AS (INSERT INTO pg_temp._floci_udf_cache VALUES "
+                            + "('public.exfunc_sum(integer,integer)', '[\"9\",\"9\"]', '999') RETURNING 1) "
+                            + "SELECT exfunc_sum(9, 9) FROM forge"));
+            assertEquals("42501", forged.getSQLState());
+
+            // Indirect call through a view after a UDF statement must not reuse stale execute mode or cache
+            statement.execute("CREATE VIEW v_indirect_udf AS SELECT exfunc_sum(20, 22) AS val");
+            SQLException indirect = assertThrows(SQLException.class,
+                    () -> statement.executeQuery("SELECT val FROM v_indirect_udf"));
+            assertEquals("0A000", indirect.getSQLState());
+
+            // Multi-statement with transaction control is rejected before collect so no NULL rows are committed
+            SQLException multi = assertThrows(SQLException.class, () -> statement.execute(
+                    "BEGIN; INSERT INTO out_sums SELECT exfunc_sum(1, 2); COMMIT;"));
+            assertEquals("0A000", multi.getSQLState());
+
+            // Volatile argument expression (nextval) is rejected without advancing the sequence
+            statement.execute("CREATE SEQUENCE udf_seq START 1");
+            SQLException volatileErr = assertThrows(SQLException.class,
+                    () -> statement.executeQuery("SELECT exfunc_sum(nextval('udf_seq')::int, 1)"));
+            assertEquals("0A000", volatileErr.getSQLState());
+            try (ResultSet rows = statement.executeQuery("SELECT nextval('udf_seq')")) {
+                assertTrue(rows.next());
+                assertEquals(1L, rows.getLong(1));
+            }
         }
 
         // Redshift Data API with named parameters

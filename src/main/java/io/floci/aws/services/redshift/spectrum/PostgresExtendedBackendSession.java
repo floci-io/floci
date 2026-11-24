@@ -28,8 +28,54 @@ public final class PostgresExtendedBackendSession implements BackendSql {
     }
 
     @Override
-    public boolean inImplicitTransaction() {
+    public boolean usesSubtransactionCollect() {
         return true;
+    }
+
+    @Override
+    public List<Integer> resolveParameterTypeOids(String sql, List<Integer> declaredTypeOids, int parameterCount) {
+        if (declaredTypeOids != null && declaredTypeOids.size() == parameterCount && !declaredTypeOids.contains(0)) {
+            return declaredTypeOids;
+        }
+        try {
+            if (failedUntilSync) {
+                throw new SpectrumReadException("25P02", "Preparation is waiting for Sync after a backend error");
+            }
+            name = "floci_prepare_" + UUID.randomUUID().toString().replace("-", "");
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            DataOutputStream body = new DataOutputStream(bytes);
+            cstring(body, name);
+            cstring(body, sql);
+            List<Integer> declared = declaredTypeOids == null ? List.of() : declaredTypeOids;
+            body.writeShort(declared.size());
+            for (Integer oid : declared) {
+                body.writeInt(oid == null ? 0 : oid);
+            }
+            frame('P', bytes.toByteArray());
+            frame('D', ("S" + name + "\0").getBytes(StandardCharsets.UTF_8));
+            frame('C', ("S" + name + "\0").getBytes(StandardCharsets.UTF_8));
+            frame('H', new byte[0]);
+            backend.getOutputStream().flush();
+            return awaitParameterDescriptionClosed();
+        } catch (IOException exception) {
+            PostgresBackendSession.abandon(backend, exception);
+            throw failure(exception);
+        }
+    }
+
+    @Override
+    public Optional<String> queryString(String sql, RawParameters parameters) {
+        if (parameters == null || parameters.count() == 0) {
+            return queryString(sql);
+        }
+        try {
+            startRaw(sql, parameters);
+            closeAndFlush();
+            return awaitSingleStringClosed();
+        } catch (IOException exception) {
+            PostgresBackendSession.abandon(backend, exception);
+            throw failure(exception);
+        }
     }
 
     @Override
@@ -170,6 +216,65 @@ public final class PostgresExtendedBackendSession implements BackendSql {
         cstring(body, name);
         body.writeInt(0);
         frame('E', bytes.toByteArray());
+    }
+
+    private void startRaw(String sql, RawParameters parameters) throws IOException {
+        if (failedUntilSync) {
+            throw new SpectrumReadException("25P02", "Preparation is waiting for Sync after a backend error");
+        }
+        name = "floci_prepare_" + UUID.randomUUID().toString().replace("-", "");
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        DataOutputStream body = new DataOutputStream(bytes);
+        cstring(body, name);
+        cstring(body, sql);
+        List<Integer> typeOids = parameters.typeOids();
+        body.writeShort(typeOids.size());
+        for (Integer oid : typeOids) {
+            body.writeInt(oid == null ? 0 : oid);
+        }
+        frame('P', bytes.toByteArray());
+        bytes.reset();
+        cstring(body, name);
+        cstring(body, name);
+        body.write(parameters.bindSection());
+        body.writeShort(0);
+        frame('B', bytes.toByteArray());
+        bytes.reset();
+        cstring(body, name);
+        body.writeInt(0);
+        frame('E', bytes.toByteArray());
+    }
+
+    private List<Integer> awaitParameterDescriptionClosed() throws IOException {
+        List<Integer> oids = List.of();
+        while (true) {
+            Response response = read();
+            if (response.type() == 't') {
+                oids = decodeParameterDescription(response.body());
+            } else if (response.type() == '3') {
+                return oids;
+            }
+        }
+    }
+
+    private static List<Integer> decodeParameterDescription(byte[] body) throws IOException {
+        if (body == null || body.length < 2) {
+            throw new IOException("Invalid ParameterDescription response");
+        }
+        int count = ((body[0] & 0xff) << 8) | (body[1] & 0xff);
+        if (body.length < 2 + count * 4) {
+            throw new IOException("Truncated ParameterDescription response");
+        }
+        List<Integer> oids = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            int offset = 2 + i * 4;
+            int oid = ((body[offset] & 0xff) << 24)
+                    | ((body[offset + 1] & 0xff) << 16)
+                    | ((body[offset + 2] & 0xff) << 8)
+                    | (body[offset + 3] & 0xff);
+            oids.add(oid);
+        }
+        return List.copyOf(oids);
     }
 
     private void closeAndFlush() throws IOException {

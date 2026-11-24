@@ -42,11 +42,15 @@ class SpectrumExternalFunctionPreparationTest {
         KinesisStreamingViews views = new KinesisStreamingViews(
                 new KinesisViewRegistry(AccountAwareStorageBackend.<KinesisViewBinding>inMemory(ACCOUNT)),
                 null, null, null, Clock.systemUTC());
+        MskStreamingViews mskViews = new MskStreamingViews(
+                new MskViewRegistry(AccountAwareStorageBackend.<MskViewBinding>inMemory(ACCOUNT)),
+                null, null, null, null, Clock.systemUTC());
+        LambdaUdfEvaluator udfEvaluator = new LambdaUdfEvaluator(functions, mock(LambdaUdfInvoker.class));
         preparation = new SpectrumQueryPreparation(mock(ExternalCatalogRegistry.class),
                 new KinesisSchemaRegistry(AccountAwareStorageBackend.<KinesisSchemaBinding>inMemory(ACCOUNT)),
                 new MskSchemaRegistry(AccountAwareStorageBackend.<MskSchemaBinding>inMemory(ACCOUNT)), functions,
-                mock(ExternalTableMaterializer.class), new ExternalStatementParser(), glue,
-                new ExternalMetadataWriter(glue, new ObjectMapper()), new ExternalCatalogLocks(), views,
+                udfEvaluator, mock(ExternalTableMaterializer.class), new ExternalStatementParser(), glue,
+                new ExternalMetadataWriter(glue, new ObjectMapper()), new ExternalCatalogLocks(), views, mskViews,
                 (accountId, clusterIdentifier) -> null);
     }
 

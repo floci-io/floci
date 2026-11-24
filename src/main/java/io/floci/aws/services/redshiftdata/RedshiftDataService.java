@@ -699,12 +699,14 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
             throws SQLException {
         String rewritten = CopyJobSql.rewrite(sql, !autoCommit || !connection.getAutoCommit());
         ParsedSql parsed = RedshiftDataSqlParameters.parse(RedshiftSqlInterceptor.rewrite(rewritten));
+        boolean udfPrepared = false;
         if (preparation != null && context != null) {
             SpectrumSession session = new SpectrumSession(context.accountId(), context.clusterKey(), context.databaseName(),
                     context.iamRoleArns(), !connection.getAutoCommit());
             try {
                 RedshiftDataBackendSql backend = new RedshiftDataBackendSql(connection, execution);
-                boolean handled = preparation.handlesDdl(sql, session, backend)
+                boolean ddl = preparation.handlesDdl(sql, session, backend);
+                boolean handled = ddl
                         ? preparation.prepare(sql, session, backend)
                         : preparation.prepare(parsed.sql(), session, backend,
                                 positionalParameters(parsed.parameterOrder(), parameters));
@@ -712,6 +714,7 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
                     stored.status = RedshiftDataStatementStore.Status.FINISHED;
                     return;
                 }
+                udfPrepared = !ddl && preparation.referencesExternalFunction(parsed.sql(), session);
             } catch (SpectrumSqlException exception) {
                 throw new SQLException(exception.getMessage(), exception.sqlState(), exception);
             } catch (SpectrumReadException exception) {
@@ -726,6 +729,7 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
             connection.setAutoCommit(false);
         }
         long t0 = System.nanoTime();
+        boolean statementSucceeded = false;
         try (PreparedStatement statement = connection.prepareStatement(parsed.sql())) {
             execution.track(statement);
             try {
@@ -745,8 +749,17 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
                     stored.hasResultSet = false;
                     stored.resultRows = Math.max(statement.getUpdateCount(), 0);
                 }
+                statementSucceeded = true;
             } finally {
                 execution.untrack(statement);
+            }
+        } finally {
+            if (udfPrepared && (statementSucceeded || connection.getAutoCommit()) && !connection.isClosed()) {
+                try {
+                    preparation.resetUdfState(new RedshiftDataBackendSql(connection, execution));
+                } catch (RuntimeException ignored) {
+                    // Best-effort cleanup so a subsequent statement on a retained session cannot see stale UDF state.
+                }
             }
         }
         stored.durationNanos = System.nanoTime() - t0;

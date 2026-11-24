@@ -10,11 +10,40 @@ public interface BackendSql {
     }
 
     /**
-     * Whether commands on this backend already run inside an implicit transaction block (the PostgreSQL Extended
-     * Query cycle), so rollback scopes must use {@code SAVEPOINT} rather than {@code BEGIN}/{@code ROLLBACK}.
+     * Whether this backend runs inside an Extended Query pipeline where {@code SAVEPOINT} is rejected outside an
+     * explicit transaction block and collect passes must run inside a PL/pgSQL subtransaction.
      */
-    default boolean inImplicitTransaction() {
+    default boolean usesSubtransactionCollect() {
         return false;
+    }
+
+    /**
+     * Resolves the PostgreSQL parameter type OIDs for {@code sql}, using any client-supplied {@code declaredTypeOids}.
+     */
+    default List<Integer> resolveParameterTypeOids(String sql, List<Integer> declaredTypeOids, int parameterCount) {
+        return declaredTypeOids == null ? List.of() : declaredTypeOids;
+    }
+
+    /**
+     * Runs a query that returns a single text value, binding raw PostgreSQL wire parameters when provided.
+     */
+    default Optional<String> queryString(String sql, RawParameters parameters) {
+        return queryString(sql);
+    }
+
+    /**
+     * Raw PostgreSQL Bind parameter section and type OIDs, preserving binary-format values verbatim.
+     */
+    record RawParameters(List<Integer> typeOids, int count, byte[] bindSection) {
+        public RawParameters {
+            typeOids = typeOids == null ? List.of() : List.copyOf(typeOids);
+            bindSection = bindSection == null ? new byte[0] : bindSection.clone();
+        }
+
+        @Override
+        public byte[] bindSection() {
+            return bindSection.clone();
+        }
     }
 
     /**
