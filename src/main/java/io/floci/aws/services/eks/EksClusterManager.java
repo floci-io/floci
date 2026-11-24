@@ -61,6 +61,7 @@ import io.floci.aws.services.eks.model.CertificateAuthority;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
 import io.floci.aws.services.eks.model.ClusterOidcKey;
+import io.floci.aws.services.eks.model.ElasticLoadBalancing;
 import io.floci.aws.services.eks.model.LogSetup;
 import io.floci.aws.services.eks.model.Nodegroup;
 import io.floci.aws.services.eks.model.NodegroupStatus;
@@ -147,6 +148,8 @@ public class EksClusterManager
     /** The k3s arguments that leave pod addresses to the VPC pod network's bridge configuration. */
     static final List<String> VPC_POD_NETWORK_SERVER_ARGS = List.of("--flannel-backend=none",
             "--disable-network-policy", "--kube-controller-manager-arg=allocate-node-cidrs=false");
+    /** Whether the node runs k3s's ServiceLB, which an EKS Auto Mode node with load balancing on runs without. */
+    static final String SERVICE_LB_LABEL = "io.floci.eks.service-lb";
     private static final Pattern HOSTNAME = Pattern.compile(
             "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*");
 
@@ -785,6 +788,7 @@ public class EksClusterManager
 
         List<String> serverArgs;
         String endpointHost;
+        boolean serviceLb = serviceLb(cluster);
         ContainerBuilder.Builder specBuilder;
         String webhookLocalFile = null;
         SigningKeyFiles signingKeyFiles = null;
@@ -806,6 +810,9 @@ public class EksClusterManager
             endpointHost = endpointHost();
             if (!"localhost".equals(endpointHost)) {
                 serverArgs.add("--tls-san=" + endpointHost);
+            }
+            if (!serviceLb) {
+                serverArgs.add("--disable=servicelb");
             }
 
             EksNodeCapacity.Limits nodeLimits = resolveNodeCapacity(cluster);
@@ -859,6 +866,7 @@ public class EksClusterManager
             if (registries != null) {
                 labels.put(REGISTRY_MIRROR_LABEL, registryMirrorLabel(registries));
             }
+            labels.put(SERVICE_LB_LABEL, String.valueOf(serviceLb));
             if (!"localhost".equals(endpointHost)) {
                 labels.put(ENDPOINT_HOST_LABEL, endpointHost);
             }
@@ -1120,8 +1128,12 @@ public class EksClusterManager
         // A node started before its mounts were shared keeps private mounts, on which a CSI node plugin's
         // Bidirectional mounts fail: it is replaced on the same data volume, as one with another capacity is.
         boolean privateMounts = existingLabels == null || !"true".equals(existingLabels.get(SHARED_MOUNTS_LABEL));
-        // One started with another pod network or registry mirror is replaced too.
-        if (capacityChanged || privateMounts || onAnotherNetwork(existing.get())
+        // One started with another pod network or registry mirror is replaced too. ServiceLB is a k3s server flag: a
+        // node started with it on while load balancing is on, or the reverse, is replaced too. A node from before the
+        // label ran ServiceLB.
+        boolean serviceLbChanged = serviceLb(cluster) != (existingLabels == null
+                || !"false".equals(existingLabels.get(SERVICE_LB_LABEL)));
+        if (capacityChanged || privateMounts || serviceLbChanged || onAnotherNetwork(existing.get())
                 || !endpointHost.equals(certificateHost(existingLabels)) || podNetworkChanged(cluster, existingLabels)
                 || registryMirrorChanged(cluster, existingLabels)) {
             replaceClusterContainer(cluster, null);
@@ -1629,6 +1641,27 @@ public class EksClusterManager
     static String nodeInstanceType(Cluster cluster) {
         return cluster != null && cluster.getNodeInstanceType() != null
                 ? cluster.getNodeInstanceType() : DEFAULT_NODE_INSTANCE_TYPE;
+    }
+
+    /**
+     * Whether the cluster's node gets k3s's ServiceLB: not while EKS Auto Mode load balancing is on, which serves
+     * the LoadBalancer Services of no class itself, as {@code eks.amazonaws.com/nlb} is then the cluster default.
+     */
+    static boolean serviceLb(Cluster cluster) {
+        return cluster == null || cluster.getKubernetesNetworkConfig() == null
+                || !ElasticLoadBalancing.loadBalancingOn(cluster.getKubernetesNetworkConfig().getElasticLoadBalancing());
+    }
+
+    /**
+     * Whether the cluster's running node was started without ServiceLB, leaving the LoadBalancer Services of no
+     * class to EKS Auto Mode. A node whose load balancing was turned on after it started keeps ServiceLB, and with
+     * it those Services, until it is next replaced.
+     */
+    public boolean runsWithoutServiceLb(Cluster cluster) {
+        return cluster.getDockerName() != null && lifecycleManager.findByName(cluster.getDockerName())
+                .map(Container::getLabels)
+                .map(labels -> "false".equals(labels.get(SERVICE_LB_LABEL)))
+                .orElse(false);
     }
 
     /** Recreate the shared node with its named data volume intact, restoring its old type on failure. */

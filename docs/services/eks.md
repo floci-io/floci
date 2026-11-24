@@ -480,8 +480,13 @@ UDP and SCTP ports get no listener, as Floci's load balancers serve TCP and HTTP
 NodePort, such as one with `allocateLoadBalancerNodePorts: false`, gets no load balancer.
 
 On AWS, `eks.amazonaws.com/nlb` is the cluster's default class, so a Service that names no class gets one too. In
-Floci such a Service stays with k3s's own ServiceLB, which answers it with the node's address; name the class to get
-a load balancer. Ingresses (`eks.amazonaws.com/alb`) don't get one yet.
+Floci it does once the cluster's node runs without k3s's own ServiceLB, which would otherwise answer it with the
+node's address: a node started while load balancing is on, as one of a cluster created with it, runs without
+ServiceLB. ServiceLB is a k3s server flag, so a cluster whose load balancing is turned on by `UpdateClusterConfig`
+keeps it, and its Services of no class stay with it, until the node is next replaced: Floci replaces it on the same
+data volume when it restores the cluster. Name the class to get a load balancer at once. A Service of another class,
+such as the AWS Load Balancer Controller's `service.k8s.aws/nlb`, is left to its controller. Ingresses
+(`eks.amazonaws.com/alb`) don't get one yet.
 
 ## Node group inputs
 
