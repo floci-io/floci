@@ -42,6 +42,7 @@ import io.floci.aws.services.rds.RdsService;
 import io.floci.aws.services.rds.container.RdsContainerManager;
 import io.floci.aws.services.rds.proxy.RdsProxyManager;
 import io.floci.aws.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
+import io.floci.aws.services.sagemaker.SageMakerService;
 import io.floci.aws.services.stepfunctions.StepFunctionsService;
 import io.floci.aws.services.timestreaminfluxdb.TimestreamInfluxDbService;
 import io.floci.aws.testutil.LogCapture;
@@ -121,6 +122,8 @@ class EmulatorLifecycleTest {
     @Mock private ElbV2Service elbV2Service;
     @Mock private ElbClassicService elbClassicService;
     @Mock private EcsService ecsService;
+    @Mock private SageMakerService sageMakerService;
+    @Mock private EmulatorConfig.SageMakerServiceConfig sageMakerServiceConfig;
     @Mock private EksService eksService;
     @Mock private CodeArtifactService codeArtifactService;
     @Mock private CloudWatchMetricsService cloudWatchMetricsService;
@@ -168,6 +171,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(eksServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.codeartifact()).thenReturn(codeArtifactServiceConfig);
         Mockito.lenient().when(codeArtifactServiceConfig.enabled()).thenReturn(true);
+        Mockito.lenient().when(servicesConfig.sagemaker()).thenReturn(sageMakerServiceConfig);
+        Mockito.lenient().when(sageMakerServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.timestreamInfluxdb()).thenReturn(timestreamInfluxDbServiceConfig);
         Mockito.lenient().when(timestreamInfluxDbServiceConfig.enabled()).thenReturn(true);
         Mockito.lenient().when(servicesConfig.iam()).thenReturn(iamServiceConfig);
@@ -183,7 +188,7 @@ class EmulatorLifecycleTest {
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
                 memoryDbContainerManager, memoryDbProxyManager, memoryDbService,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
-                rabbitMqManager, flinkContainerManager, rdsService, timestreamInfluxDbService,
+                rabbitMqManager, flinkContainerManager, sageMakerService, rdsService, timestreamInfluxDbService,
                 elbV2Service, elbClassicService, ecsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecsTaskRoleCredentialsServer, ecrRegistryManager, flociUiManager, initLifecycleState,
@@ -480,6 +485,47 @@ class EmulatorLifecycleTest {
         inOrder.verify(storageFactory).loadAll();
         inOrder.verify(elastiCacheService).restorePersistedRuntime();
         inOrder.verify(elastiCacheMemcachedService).restorePersistedRuntime();
+    }
+
+    @Test
+    void restoresPersistedSageMakerEndpointsAfterStorageLoad() {
+        stubStorageConfig();
+        when(sageMakerServiceConfig.enabled()).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, sageMakerService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(sageMakerService).restorePersistedRuntime();
+    }
+
+    @Test
+    void aFailedSageMakerRestoreDoesNotStopTheOtherRestores() {
+        stubStorageConfig();
+        when(sageMakerServiceConfig.enabled()).thenReturn(true);
+        when(elbv2ServiceConfig.enabled()).thenReturn(true);
+        doThrow(new IllegalStateException("Could not restore SageMaker endpoint demo of account 000000000000"))
+                .when(sageMakerService).restorePersistedRuntime();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(elbV2Service).restorePersistedRuntime();
+        verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void leavesSageMakerEndpointsUntouchedWhenSageMakerIsDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(sageMakerService, never()).restorePersistedRuntime();
     }
 
     @Test
