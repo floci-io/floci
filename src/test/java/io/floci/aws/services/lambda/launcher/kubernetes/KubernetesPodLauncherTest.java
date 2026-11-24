@@ -153,7 +153,7 @@ class KubernetesPodLauncherTest {
                 URI.create(client.getConfiguration().getMasterUrl()), trustAllHttpClient(), null);
         launcher = new KubernetesPodLauncher(apiClient, config, regionResolver, runtimeApiServerFactory, imageResolver,
                 addressResolver, awsEnv, layerService, new LambdaPodSpecFactory(config),
-                logStreamer, s3Service, presignGenerator);
+                logStreamer, s3Service, presignGenerator, System::nanoTime);
     }
 
     @ParameterizedTest
@@ -168,7 +168,8 @@ class KubernetesPodLauncherTest {
                 defaultAccount, region, Map.of(defaultAccount, defaultLayer, owner, ownerLayer));
         KubernetesPodLauncher backgroundLauncher = new KubernetesPodLauncher(
                 apiClient, config, regionResolver, runtimeApiServerFactory, imageResolver, addressResolver, awsEnv,
-                layers, new LambdaPodSpecFactory(config), logStreamer, s3Service, presignGenerator);
+                layers, new LambdaPodSpecFactory(config), logStreamer, s3Service, presignGenerator,
+                System::nanoTime);
         LambdaFunction fn = function();
         fn.setAccountId(account);
         fn.setFunctionArn("arn:aws:lambda:" + region + ":" + account + ":function:my-fn");
@@ -386,7 +387,7 @@ class KubernetesPodLauncherTest {
         doThrow(new RuntimeException("kube api down")).when(failingApiClient).deletePod(anyString(), anyString());
         KubernetesPodLauncher failingLauncher = new KubernetesPodLauncher(failingApiClient, config, regionResolver,
                 runtimeApiServerFactory, imageResolver, addressResolver, awsEnv, layerService,
-                new LambdaPodSpecFactory(config), logStreamer, s3Service, presignGenerator);
+                new LambdaPodSpecFactory(config), logStreamer, s3Service, presignGenerator, System::nanoTime);
         markPodPhaseInBackground("Failed");
 
         assertThatThrownBy(() -> failingLauncher.launch(function()))
@@ -436,14 +437,18 @@ class KubernetesPodLauncherTest {
 
     @Test
     void unschedulablePodFailsOnceTheGracePeriodIsOut() {
-        lenient().when(kubernetes.unschedulableGraceSeconds()).thenReturn(5);
         AtomicLong clock = new AtomicLong(System.nanoTime());
-        launcher.unschedulableClock = clock::get;
+        launcher = new KubernetesPodLauncher(apiClient, config, regionResolver,
+                runtimeApiServerFactory, imageResolver, addressResolver, awsEnv, layerService,
+                new LambdaPodSpecFactory(config), logStreamer, s3Service, presignGenerator, clock::get);
+        lenient().when(kubernetes.unschedulableGraceSeconds()).thenReturn(5);
 
-        // Once the launcher has read the Unschedulable status (anchoring the grace), advancing
-        // its clock past the configured seconds fails the cold start without waiting it out.
+        // Once the launcher has read the Unschedulable status twice (anchoring the grace, then
+        // handling that read), advancing its clock past the configured seconds fails the cold
+        // start without waiting it out.
         CompletableFuture.runAsync(() -> {
             markUnschedulableInBackground(Instant.now()).join();
+            awaitLauncherPodRead();
             awaitLauncherPodRead();
             clock.addAndGet(Duration.ofSeconds(60).toNanos());
         });
@@ -644,7 +649,7 @@ class KubernetesPodLauncherTest {
         }).when(flakyApiClient).listPods(anyString(), anyMap());
         KubernetesPodLauncher retryingLauncher = new KubernetesPodLauncher(flakyApiClient, config, regionResolver,
                 runtimeApiServerFactory, imageResolver, addressResolver, awsEnv, layerService,
-                new LambdaPodSpecFactory(config), logStreamer, s3Service, presignGenerator);
+                new LambdaPodSpecFactory(config), logStreamer, s3Service, presignGenerator, System::nanoTime);
 
         markPodPhaseInBackground("Running");
         ContainerHandle handle = retryingLauncher.launch(function());

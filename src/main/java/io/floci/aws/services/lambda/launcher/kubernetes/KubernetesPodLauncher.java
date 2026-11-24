@@ -113,11 +113,11 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
      */
     private final ConcurrentHashMap<String, Long> unschedulableObservedAt = new ConcurrentHashMap<>();
     /**
-     * Nanosecond clock the grace is measured on, replaceable in tests so a grace expiry can be
-     * simulated without waiting it out in real time, as {@code LambdaExitWatcher}'s
-     * {@code nanoClock} does.
+     * Nanosecond clock the grace is measured on, a package-private constructor argument so a test
+     * can advance it and simulate a grace expiry without waiting it out in real time, as
+     * {@code LambdaExitWatcher}'s {@code nanoClock} does.
      */
-    volatile LongSupplier unschedulableClock = System::nanoTime;
+    private final LongSupplier unschedulableClock;
     private final AtomicBoolean caConfigMapApplied = new AtomicBoolean(false);
     private final AtomicBoolean awsConfigPathWarned = new AtomicBoolean(false);
 
@@ -134,6 +134,23 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
                                  KubernetesPodLogStreamer logStreamer,
                                  S3Service s3Service,
                                  PreSignedUrlGenerator presignGenerator) {
+        this(client, config, regionResolver, runtimeApiServerFactory, imageResolver, addressResolver, awsEnv,
+                layerService, podSpecFactory, logStreamer, s3Service, presignGenerator, System::nanoTime);
+    }
+
+    KubernetesPodLauncher(KubernetesApiClient client,
+                          EmulatorConfig config,
+                          RegionResolver regionResolver,
+                          RuntimeApiServerFactory runtimeApiServerFactory,
+                          ImageResolver imageResolver,
+                          KubernetesFlociAddressResolver addressResolver,
+                          LaunchedContainerAwsEnv awsEnv,
+                          LambdaLayerService layerService,
+                          LambdaPodSpecFactory podSpecFactory,
+                          KubernetesPodLogStreamer logStreamer,
+                          S3Service s3Service,
+                          PreSignedUrlGenerator presignGenerator,
+                          LongSupplier unschedulableClock) {
         this.client = client;
         this.config = config;
         this.regionResolver = regionResolver;
@@ -146,6 +163,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
         this.logStreamer = logStreamer;
         this.s3Service = s3Service;
         this.presignGenerator = presignGenerator;
+        this.unschedulableClock = unschedulableClock;
     }
 
     /**
