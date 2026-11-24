@@ -84,13 +84,23 @@ final class WebhookEventsConfigurations {
         return webhook;
     }
 
-    private static Map.Entry<String, JsonNode> onlyVariant(JsonNode configuration) {
+    /** How many variants a {@code Configuration} sets. */
+    static int variantCount(JsonNode configuration) {
+        return variants(configuration).size();
+    }
+
+    private static List<Map.Entry<String, JsonNode>> variants(JsonNode configuration) {
         List<Map.Entry<String, JsonNode>> members = new ArrayList<>();
         for (Map.Entry<String, JsonNode> member : configuration.properties()) {
             if (!member.getValue().isNull()) {
                 members.add(member);
             }
         }
+        return members;
+    }
+
+    private static Map.Entry<String, JsonNode> onlyVariant(JsonNode configuration) {
+        List<Map.Entry<String, JsonNode>> members = variants(configuration);
         if (members.size() != 1) {
             throw invalidInput("Exactly one Configuration sub-field must be provided");
         }

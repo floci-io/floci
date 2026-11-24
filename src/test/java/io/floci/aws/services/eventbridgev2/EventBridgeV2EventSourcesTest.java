@@ -234,9 +234,92 @@ class EventBridgeV2EventSourcesTest {
     @Test
     void createRefusesAnotherVariantWithFlociOwnWording() {
         AwsException e = assertThrows(AwsException.class, () -> service.createEventSource(json(
-                "{\"Name\":\"hook\",\"EventBusArn\":\"" + bus + "\",\"Configuration\":"
+                "{\"Name\":\"hook\",\"ClientToken\":\"t\",\"EventBusArn\":\"" + bus + "\",\"Configuration\":"
                         + "{\"AwsServiceEventsConfiguration\":{\"AwsService\":\"aws.s3\"}}}"), REGION));
         assertEquals("Only WebhookEventsConfiguration event sources are supported.", e.getMessage());
+    }
+
+    @Test
+    void createWithoutAClientTokenIsRefusedBeforeTheSemanticRules() {
+        ObjectNode request = create("hook", bus, "{\"BasicHttpAuthConfiguration\":{\"Username\":\"u\"}}");
+        request.remove("ClientToken");
+        AwsException e = assertThrows(AwsException.class, () -> service.createEventSource(request, REGION));
+        assertEquals("InvalidInputException", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+        assertEquals("ClientToken is required", e.getMessage());
+    }
+
+    @Test
+    void createChecksTheAccountBeforeTheClientToken() {
+        String otherAccount = "arn:aws:events:us-east-1:111111111111:event-busv2/orders/abcdefghijklmnopqrstuvwxy";
+        ObjectNode request = create("hook", otherAccount, STATIC_AUTH);
+        request.remove("ClientToken");
+        AwsException e = assertThrows(AwsException.class, () -> service.createEventSource(request, REGION));
+        assertEquals("AccessDeniedException", e.getErrorCode());
+        assertEquals(403, e.getHttpStatus());
+    }
+
+    @Test
+    void createChecksTheRegionAndTheConstraintsBeforeTheClientToken() {
+        String otherRegion = "arn:aws:events:eu-west-1:000000000000:event-busv2/orders/abcdefghijklmnopqrstuvwxy";
+        ObjectNode regionRequest = create("hook", otherRegion, STATIC_AUTH);
+        regionRequest.remove("ClientToken");
+        assertEquals("The region or partition in EventBusArn does not match this endpoint",
+                assertThrows(AwsException.class, () -> service.createEventSource(regionRequest, REGION)).getMessage());
+
+        ObjectNode constraintRequest = create("bad name", bus, STATIC_AUTH);
+        constraintRequest.remove("ClientToken");
+        assertEquals("1 validation error detected: Value 'bad name' at 'name' failed to satisfy constraint: "
+                        + "Member must satisfy regular expression pattern: (?!aws\\.)[A-Za-z0-9][\\.\\-_A-Za-z0-9]*",
+                assertThrows(AwsException.class, () -> service.createEventSource(constraintRequest, REGION))
+                        .getMessage());
+    }
+
+    @Test
+    void createWithNoVariantAndNoClientTokenNamesTheClientToken() {
+        AwsException e = assertThrows(AwsException.class, () -> service.createEventSource(json(
+                "{\"Name\":\"hook\",\"EventBusArn\":\"" + bus + "\",\"Configuration\":{}}"), REGION));
+        assertEquals("InvalidInputException", e.getErrorCode());
+        assertEquals("ClientToken is required", e.getMessage());
+    }
+
+    @Test
+    void createWithTwoVariantsAndNoClientTokenNamesTheClientToken() {
+        ObjectNode request = (ObjectNode) twoVariants(bus);
+        request.remove("ClientToken");
+        AwsException e = assertThrows(AwsException.class, () -> service.createEventSource(request, REGION));
+        assertEquals("ClientToken is required", e.getMessage());
+    }
+
+    @Test
+    void createWithTwoVariantsAndAClientTokenNamesTheSubField() {
+        assertExactlyOne(twoVariants(bus));
+    }
+
+    @Test
+    void createWithNoVariantAndAClientTokenNamesTheSubField() {
+        assertExactlyOne(json("{\"Name\":\"hook\",\"ClientToken\":\"t\",\"EventBusArn\":\"" + bus
+                + "\",\"Configuration\":{}}"));
+    }
+
+    @Test
+    void createWithAnyVariantCountOnABusOfAnotherAccountIsAccessDenied() {
+        String otherAccount = "arn:aws:events:us-east-1:111111111111:event-busv2/orders/abcdefghijklmnopqrstuvwxy";
+        JsonNode none = json("{\"Name\":\"hook\",\"ClientToken\":\"t\",\"EventBusArn\":\"" + otherAccount
+                + "\",\"Configuration\":{}}");
+        for (JsonNode request : List.of(twoVariants(otherAccount), none)) {
+            AwsException e = assertThrows(AwsException.class, () -> service.createEventSource(request, REGION));
+            assertEquals("AccessDeniedException", e.getErrorCode());
+            assertEquals(403, e.getHttpStatus());
+            assertEquals("Access denied.", e.getMessage());
+        }
+    }
+
+    private void assertExactlyOne(JsonNode request) {
+        AwsException e = assertThrows(AwsException.class, () -> service.createEventSource(request, REGION));
+        assertEquals("InvalidInputException", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+        assertEquals("Exactly one Configuration sub-field must be provided", e.getMessage());
     }
 
     @Test
@@ -373,6 +456,59 @@ class EventBridgeV2EventSourcesTest {
                 "{\"EventBusArn\":\"arn:aws:events:us-east-1:000000000000:event-busv2/none/abcdefghijklmnopqrstuvwxy\"}"),
                 REGION));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
+        assertEquals(404, e.getHttpStatus());
+        assertEquals("Resource does not exist", e.getMessage());
+    }
+
+    @Test
+    void listForABusOfAnotherAccountDoesNotExistEvenWhenTheNameIsOurs() {
+        AwsException e = assertThrows(AwsException.class, () -> service.listEventSources(json(
+                "{\"EventBusArn\":\"arn:aws:events:us-east-1:111111111111:event-busv2/orders/abcdefghijklmnopqrstuvwxy\"}"),
+                REGION));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        assertEquals(404, e.getHttpStatus());
+        assertEquals("Resource does not exist", e.getMessage());
+    }
+
+    @Test
+    void listNamesTheBusWhenOnlyTheIdInItsArnDiffers() {
+        String otherId = bus.substring(0, bus.lastIndexOf('/') + 1) + "zzzzzzzzzzzzzzzzzzzzzzzzz";
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.listEventSources(json("{\"EventBusArn\":\"" + otherId + "\"}"), REGION));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        assertEquals(404, e.getHttpStatus());
+        assertEquals("Event bus not found: orders", e.getMessage());
+    }
+
+    @Test
+    void listChecksConstraintsThenTheRegionThenTheTokenThenTheBus() {
+        String missing = "arn:aws:events:us-east-1:000000000000:event-busv2/none/abcdefghijklmnopqrstuvwxy";
+        String otherRegion = "arn:aws:events:eu-west-1:000000000000:event-busv2/none/abcdefghijklmnopqrstuvwxy";
+
+        AwsException constraint = assertThrows(AwsException.class, () -> service.listEventSources(json(
+                "{\"MaxResults\":0,\"NextToken\":\"garbage\",\"EventBusArn\":\"" + otherRegion + "\"}"), REGION));
+        assertEquals("1 validation error detected: Value '0' at 'maxResults' failed to satisfy constraint: "
+                + "Member must have value greater than or equal to 1", constraint.getMessage());
+
+        AwsException region = assertThrows(AwsException.class, () -> service.listEventSources(json(
+                "{\"NextToken\":\"garbage\",\"EventBusArn\":\"" + otherRegion + "\"}"), REGION));
+        assertEquals("InvalidInputException", region.getErrorCode());
+        assertEquals("The region or partition in EventBusArn does not match this endpoint", region.getMessage());
+
+        AwsException token = assertThrows(AwsException.class, () -> service.listEventSources(json(
+                "{\"NextToken\":\"garbage\",\"EventBusArn\":\"" + missing + "\"}"), REGION));
+        assertEquals("InvalidInputException", token.getErrorCode());
+        assertEquals(400, token.getHttpStatus());
+        assertEquals("Invalid nextToken", token.getMessage());
+    }
+
+    @Test
+    void listRefusesATokenOfAnotherListing() {
+        service.createEventBus(json("{\"Name\":\"extra\"}"), REGION);
+        String busToken = service.listEventBuses(json("{\"MaxResults\":1}"), REGION).nextToken();
+        AwsException e = assertThrows(AwsException.class, () -> service.listEventSources(
+                json("{\"NextToken\":\"" + busToken + "\"}"), REGION));
+        assertEquals("Invalid nextToken", e.getMessage());
     }
 
     // ──────────────────────────── Update ────────────────────────────
@@ -567,12 +703,19 @@ class EventBridgeV2EventSourcesTest {
         return page.items().stream().map(EventSourceV2::getName).collect(Collectors.toSet());
     }
 
-    private static ObjectNode create(String name, String bus, String auth,
-                                                                          String... extra) {
+    private static ObjectNode create(String name, String bus, String auth, String... extra) {
         String more = extra.length == 0 ? "" : "," + String.join(",", extra);
-        return (ObjectNode) json("{\"Name\":\"" + name + "\",\"EventBusArn\":\""
-                + bus + "\",\"Configuration\":{\"WebhookEventsConfiguration\":{\"AuthConfiguration\":" + auth
-                + ",\"RoleArn\":\"" + ROLE + "\"}}" + more + "}");
+        String token = "t" + Integer.toHexString((name + bus + auth + more).hashCode());
+        return (ObjectNode) json("{\"ClientToken\":\"" + token + "\",\"Name\":\"" + name
+                + "\",\"EventBusArn\":\"" + bus + "\",\"Configuration\":{\"WebhookEventsConfiguration\":"
+                + "{\"AuthConfiguration\":" + auth + ",\"RoleArn\":\"" + ROLE + "\"}}" + more + "}");
+    }
+
+    private static JsonNode twoVariants(String busArn) {
+        ObjectNode request = create("hook", busArn, STATIC_AUTH);
+        ((ObjectNode) request.get("Configuration")).putObject("AwsServiceEventsConfiguration")
+                .put("AwsService", "aws.s3");
+        return request;
     }
 
     private static JsonNode arn(String arn) {

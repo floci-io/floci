@@ -75,7 +75,7 @@ public class EventBridgeV2Service implements Resettable {
     static final int ID_LENGTH = 25;
     private static final int MAX_TAGS = 200;
     private static final int MAX_ENTRIES = 100;
-    private static final int MAX_LIST_RESULTS = 100;
+    static final int MAX_LIST_RESULTS = 100;
     private static final List<String> UPDATABLE_SETTINGS = List.of("Description", "State", "FilterConfiguration",
             "BatchConfiguration", "Transformer", "RetryPolicy", "OnFailureConfiguration", "LogConfiguration");
     private static final String PUT_EVENTS_CONTENT_TYPE = "application/eventbridge+json";
@@ -435,13 +435,7 @@ public class EventBridgeV2Service implements Resettable {
      * with {@code NamePrefix}, in order of the ids in their ARNs.
      */
     public synchronized PaginatedResult<EventSourceV2> listEventSources(JsonNode request, String region) {
-        String namePrefix = optionalNamePrefix(request);
-        String eventBusArn = text(request, "EventBusArn");
-        if (eventBusArn != null) {
-            requireEventBus(eventBusArn, region);
-        }
-        return page(eventSources.list(eventBusArn, namePrefix, region), EventBridgeV2EventSources::id, request,
-                "event-sourcev2");
+        return eventSources.list(request, region, name -> buses.get(storageKey(region, name)));
     }
 
     public String webhookUrl(EventSourceV2 source) {

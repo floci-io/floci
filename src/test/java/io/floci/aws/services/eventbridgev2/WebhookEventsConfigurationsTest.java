@@ -7,7 +7,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -40,13 +42,13 @@ class WebhookEventsConfigurationsTest {
     @Test
     void missingRequiredMembersAreReportedAsNull() {
         assertEquals(List.of(
+                "Value null at 'configuration' failed to satisfy constraint: Member must not be null",
                 "Value null at 'name' failed to satisfy constraint: Member must not be null",
-                "Value null at 'eventBusArn' failed to satisfy constraint: Member must not be null",
-                "Value null at 'configuration' failed to satisfy constraint: Member must not be null"),
+                "Value null at 'eventBusArn' failed to satisfy constraint: Member must not be null"),
                 violations("CreateEventSource", MAPPER.createObjectNode()));
         assertEquals(List.of(
-                "Value null at '" + PATH + ".authConfiguration' failed to satisfy constraint: Member must not be null",
-                "Value null at '" + PATH + ".roleArn' failed to satisfy constraint: Member must not be null"),
+                "Value null at '" + PATH + ".roleArn' failed to satisfy constraint: Member must not be null",
+                "Value null at '" + PATH + ".authConfiguration' failed to satisfy constraint: Member must not be null"),
                 webhookViolations("{}"));
     }
 
@@ -71,13 +73,13 @@ class WebhookEventsConfigurationsTest {
         List<String> violations = violations("CreateEventSource", create("{\"Name\":\"-x\","
                 + "\"EventBusArn\":\"nope\",\"ClientToken\":\"\",\"Configuration\":{}}"));
         assertEquals(4, violations.size());
-        assertTrue(violations.get(0).contains("at 'name'"));
-        assertTrue(violations.get(1).contains("at 'eventBusArn' failed to satisfy constraint: Member must satisfy "
-                + "regular expression pattern: arn:aws(-[a-z0-9]+)*:events:"), violations.get(1));
-        assertEquals("Value '' at 'clientToken' failed to satisfy constraint: Member must have length greater than "
-                + "or equal to 1", violations.get(2));
-        assertTrue(violations.get(3).contains("at 'clientToken' failed to satisfy constraint: Member must satisfy "
+        assertTrue(violations.get(0).contains("at 'clientToken' failed to satisfy constraint: Member must satisfy "
                 + "regular expression pattern: [\\u0021-\\u007E]+"));
+        assertEquals("Value '' at 'clientToken' failed to satisfy constraint: Member must have length greater than "
+                + "or equal to 1", violations.get(1));
+        assertTrue(violations.get(2).contains("at 'name'"));
+        assertTrue(violations.get(3).contains("at 'eventBusArn' failed to satisfy constraint: Member must satisfy "
+                + "regular expression pattern: arn:aws(-[a-z0-9]+)*:events:"), violations.get(3));
     }
 
     @Test
@@ -92,7 +94,7 @@ class WebhookEventsConfigurationsTest {
     }
 
     @Test
-    void enumValuesAreListedSorted() {
+    void enumValuesAreListedInTheMeasuredOrder() {
         assertEquals(List.of("Value 'DEBUG' at '" + PATH + ".logConfiguration.level' failed to satisfy constraint: "
                 + "Member must satisfy enum value set: [ERROR, INFO, OFF]"),
                 webhookViolations("{\"AuthConfiguration\":" + STATIC_AUTH + ",\"RoleArn\":\"" + ROLE + "\","
@@ -153,11 +155,11 @@ class WebhookEventsConfigurationsTest {
 
     @Test
     void tagsAreHeldToTheirShape() {
-        StringBuilder rendered = new StringBuilder();
+        Map<String, String> rendered = new HashMap<>(201);
         for (int i = 0; i < 201; i++) {
-            rendered.append(i == 0 ? "" : ", ").append('k').append(i).append("=v");
+            rendered.put("k" + i, "v");
         }
-        assertEquals(List.of("Value '{" + rendered + "}' at 'tags' failed to satisfy constraint: Member must have "
+        assertEquals(List.of("Value '" + rendered + "' at 'tags' failed to satisfy constraint: Member must have "
                         + "length less than or equal to 200"),
                 violations("CreateEventSource", create(withTags(201))));
         List<String> violations = violations("CreateEventSource", create("{\"Name\":\"hook\","
@@ -176,11 +178,12 @@ class WebhookEventsConfigurationsTest {
     }
 
     @Test
-    void aValueOfTheWrongTypeIsAPlainInvalidInput() {
+    void aValueOfTheWrongTypeIsASerializationExceptionWithNoMessage() {
         AwsException e = assertThrows(AwsException.class, () -> EventBridgeV2RequestShapes.check(
                 "CreateEventSource", create("{\"Name\":5}")));
-        assertEquals("InvalidInputException", e.getErrorCode());
+        assertEquals("SerializationException", e.getErrorCode());
         assertEquals(400, e.getHttpStatus());
+        assertNull(e.getMessage());
     }
 
     @Test

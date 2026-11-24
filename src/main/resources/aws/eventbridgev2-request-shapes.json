@@ -7,6 +7,7 @@
     "CreateEventSource": "CreateEventSourceRequest",
     "DeleteEventSource": "DeleteEventSourceRequest",
     "DescribeEventSource": "DescribeEventSourceRequest",
+    "ListEventSources": "ListEventSourcesRequest",
     "UpdateEventSource": "UpdateEventSourceRequest"
   },
   "shapes": {
@@ -16,9 +17,9 @@
         "AwsService"
       ],
       "members": {
-        "AwsService": "AwsServiceSource",
         "Pattern": "AwsServiceEventsSourceConfigurationPatternString",
-        "OnFailureConfiguration": "OnFailureConfiguration"
+        "OnFailureConfiguration": "OnFailureConfiguration",
+        "AwsService": "AwsServiceSource"
       }
     },
     "AwsServiceEventsSourceConfigurationPatternString": {
@@ -47,12 +48,12 @@
         "Configuration"
       ],
       "members": {
-        "Name": "EventSourceName",
-        "EventBusArn": "EventBusArn",
         "Configuration": "EventSourceConfiguration",
+        "ClientToken": "ClientToken",
+        "Name": "EventSourceName",
         "Description": "Description",
-        "Tags": "TagMap",
-        "ClientToken": "ClientToken"
+        "EventBusArn": "EventBusArn",
+        "Tags": "TagMap"
       }
     },
     "DeadLetterQueueArn": {
@@ -101,8 +102,8 @@
       "type": "structure",
       "members": {
         "AwsServiceEventsConfiguration": "AwsServiceEventsSourceConfiguration",
-        "PartnerEventsConfiguration": "PartnerEventsSourceConfiguration",
-        "WebhookEventsConfiguration": "WebhookEventsSourceConfiguration"
+        "WebhookEventsConfiguration": "WebhookEventsSourceConfiguration",
+        "PartnerEventsConfiguration": "PartnerEventsSourceConfiguration"
       }
     },
     "EventSourceName": {
@@ -114,8 +115,8 @@
     "IncludePayload": {
       "type": "string",
       "enum": [
-        "FULL",
-        "ON_ERROR_ONLY"
+        "ON_ERROR_ONLY",
+        "FULL"
       ]
     },
     "KmsKeyIdentifier": {
@@ -123,6 +124,15 @@
       "min": 0,
       "max": 2048,
       "pattern": "[a-zA-Z0-9_\\-/:]*"
+    },
+    "ListEventSourcesRequest": {
+      "type": "structure",
+      "members": {
+        "MaxResults": "MaxResults",
+        "NextToken": "NextToken",
+        "NamePrefix": "EventSourceName",
+        "EventBusArn": "EventBusArn"
+      }
     },
     "LogConfiguration": {
       "type": "structure",
@@ -138,6 +148,16 @@
         "INFO",
         "OFF"
       ]
+    },
+    "MaxResults": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "NextToken": {
+      "type": "string",
+      "min": 1,
+      "max": 4096
     },
     "OnFailureConfiguration": {
       "type": "structure",
@@ -157,9 +177,9 @@
         "PartnerEventSourceArn"
       ],
       "members": {
-        "PartnerEventSourceArn": "PartnerEventSourceArn",
-        "Pattern": "PartnerEventsSourceConfigurationPatternString",
         "PartnerBusKmsKeyIdentifier": "KmsKeyIdentifier",
+        "Pattern": "PartnerEventsSourceConfigurationPatternString",
+        "PartnerEventSourceArn": "PartnerEventSourceArn",
         "OnFailureConfiguration": "OnFailureConfiguration"
       }
     },
@@ -200,8 +220,8 @@
         "EventSourceArn"
       ],
       "members": {
-        "EventSourceArn": "EventSourceArn",
         "Configuration": "EventSourceConfiguration",
+        "EventSourceArn": "EventSourceArn",
         "Description": "Description"
       }
     },
@@ -209,15 +229,15 @@
       "type": "structure",
       "members": {
         "StaticTokenAuthConfiguration": "WebhookStaticTokenAuthConfiguration",
-        "BasicHttpAuthConfiguration": "WebhookBasicHttpAuthConfiguration",
-        "HmacAuthConfiguration": "WebhookHmacAuthConfiguration"
+        "HmacAuthConfiguration": "WebhookHmacAuthConfiguration",
+        "BasicHttpAuthConfiguration": "WebhookBasicHttpAuthConfiguration"
       }
     },
     "WebhookBasicHttpAuthConfiguration": {
       "type": "structure",
       "members": {
-        "Username": "WebhookUsername",
-        "Password": "WebhookSecretValue"
+        "Password": "WebhookSecretValue",
+        "Username": "WebhookUsername"
       }
     },
     "WebhookDeduplicationConfiguration": {
@@ -248,12 +268,12 @@
         "RoleArn"
       ],
       "members": {
-        "AuthConfiguration": "WebhookAuthConfiguration",
+        "DeduplicationConfiguration": "WebhookDeduplicationConfiguration",
         "KmsKeyIdentifier": "KmsKeyIdentifier",
         "RoleArn": "RoleArn",
+        "LogConfiguration": "LogConfiguration",
         "MetadataHttpHeaders": "WebhookMetadataHttpHeaderList",
-        "DeduplicationConfiguration": "WebhookDeduplicationConfiguration",
-        "LogConfiguration": "LogConfiguration"
+        "AuthConfiguration": "WebhookAuthConfiguration"
       }
     },
     "WebhookHeaderName": {
@@ -278,18 +298,18 @@
         "SignedMessageComposition"
       ],
       "members": {
-        "Algorithm": "WebhookHmacAlgorithm",
-        "Encoding": "WebhookHmacEncoding",
-        "SignatureHttpHeader": "WebhookHeaderName",
+        "SecretEncoding": "WebhookSecretEncoding",
+        "TimestampPrefix": "WebhookTimestampPrefix",
+        "MessageIdHttpHeader": "WebhookHeaderName",
+        "SecretValue": "WebhookSecretValue",
         "SignaturePrefix": "WebhookSignaturePrefix",
         "Delimiter": "WebhookDelimiter",
-        "TimestampHttpHeader": "WebhookHeaderName",
-        "TimestampPrefix": "WebhookTimestampPrefix",
-        "TimestampToleranceInSeconds": "WebhookTimestampToleranceInSeconds",
-        "MessageIdHttpHeader": "WebhookHeaderName",
         "SignedMessageComposition": "WebhookSignedMessageComposition",
-        "SecretValue": "WebhookSecretValue",
-        "SecretEncoding": "WebhookSecretEncoding"
+        "TimestampToleranceInSeconds": "WebhookTimestampToleranceInSeconds",
+        "SignatureHttpHeader": "WebhookHeaderName",
+        "Encoding": "WebhookHmacEncoding",
+        "TimestampHttpHeader": "WebhookHeaderName",
+        "Algorithm": "WebhookHmacAlgorithm"
       }
     },
     "WebhookHmacEncoding": {
@@ -314,8 +334,8 @@
     "WebhookSecretEncoding": {
       "type": "string",
       "enum": [
-        "BASE64",
-        "RAW"
+        "RAW",
+        "BASE64"
       ]
     },
     "WebhookSecretValue": {
@@ -333,9 +353,9 @@
     "WebhookSignedMessageComposition": {
       "type": "string",
       "enum": [
+        "TIMESTAMP_DOT_BODY",
         "BODY",
-        "MESSAGE_ID_DOT_TIMESTAMP_DOT_BODY",
-        "TIMESTAMP_DOT_BODY"
+        "MESSAGE_ID_DOT_TIMESTAMP_DOT_BODY"
       ]
     },
     "WebhookStaticTokenAuthConfiguration": {
@@ -344,8 +364,8 @@
         "TokenHttpHeader"
       ],
       "members": {
-        "TokenHttpHeader": "WebhookHeaderName",
-        "SecretValue": "WebhookSecretValue"
+        "SecretValue": "WebhookSecretValue",
+        "TokenHttpHeader": "WebhookHeaderName"
       }
     },
     "WebhookTimestampPrefix": {

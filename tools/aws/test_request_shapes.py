@@ -591,16 +591,67 @@ def test_kinesis_shapes_keep_tag_bounds_and_leave_wire_types_to_handlers():
     assert "Timestamp" not in shapes["GetShardIteratorInput"]["members"]
 
 
-def test_eventbridgev2_shapes_keep_sorted_enums_and_the_sensitive_mark():
+def test_eventbridgev2_shapes_keep_the_measured_orders_and_the_sensitive_mark():
     doc = json.loads(regen_eventbridgev2_shapes.OUTPUT.read_text(encoding="utf-8"))
     shapes = doc["shapes"]
 
     assert sorted(doc["operations"]) == ["CreateEventSource", "DeleteEventSource", "DescribeEventSource",
-                                         "UpdateEventSource"]
+                                         "ListEventSources", "UpdateEventSource"]
     assert shapes["WebhookSecretValue"] == {"type": "string", "min": 6, "max": 512, "sensitive": True}
-    assert shapes["LogLevel"]["enum"] == ["ERROR", "INFO", "OFF"]
     assert shapes["WebhookMetadataHttpHeaderList"]["max"] == 20
     assert shapes["TagMap"]["max"] == 200
+    assert {name: shape["enum"] for name, shape in shapes.items() if "enum" in shape} == {
+        "WebhookHmacAlgorithm": ["SHA1", "SHA256"],
+        "WebhookHmacEncoding": ["BASE64", "HEX"],
+        "WebhookSignedMessageComposition": ["TIMESTAMP_DOT_BODY", "BODY", "MESSAGE_ID_DOT_TIMESTAMP_DOT_BODY"],
+        "WebhookSecretEncoding": ["RAW", "BASE64"],
+        "WebhookDeduplicationType": ["CONTENT_BASED"],
+        "LogLevel": ["ERROR", "INFO", "OFF"],
+        "IncludePayload": ["ON_ERROR_ONLY", "FULL"],
+    }
+
+
+def test_eventbridgev2_shapes_list_members_in_the_order_aws_walks_them():
+    shapes = json.loads(regen_eventbridgev2_shapes.OUTPUT.read_text(encoding="utf-8"))["shapes"]
+
+    assert list(shapes["CreateEventSourceRequest"]["members"]) == [
+        "Configuration", "ClientToken", "Name", "Description", "EventBusArn", "Tags"]
+    assert list(shapes["UpdateEventSourceRequest"]["members"]) == ["Configuration", "EventSourceArn", "Description"]
+    assert list(shapes["ListEventSourcesRequest"]["members"]) == [
+        "MaxResults", "NextToken", "NamePrefix", "EventBusArn"]
+    assert list(shapes["WebhookEventsSourceConfiguration"]["members"]) == [
+        "DeduplicationConfiguration", "KmsKeyIdentifier", "RoleArn", "LogConfiguration", "MetadataHttpHeaders",
+        "AuthConfiguration"]
+    assert list(shapes["WebhookHmacAuthConfiguration"]["members"])[:5] == [
+        "SecretEncoding", "TimestampPrefix", "MessageIdHttpHeader", "SecretValue", "SignaturePrefix"]
+    assert list(shapes["WebhookStaticTokenAuthConfiguration"]["members"]) == ["SecretValue", "TokenHttpHeader"]
+    assert list(shapes["WebhookBasicHttpAuthConfiguration"]["members"]) == ["Password", "Username"]
+
+
+def test_eventbridgev2_hash_order_follows_java_hash_map():
+    assert regen_eventbridgev2_shapes.java_hash("name") == 3373707
+    assert regen_eventbridgev2_shapes.table_size(12) == 16
+    assert regen_eventbridgev2_shapes.table_size(13) == 32
+    assert regen_eventbridgev2_shapes.hash_order(["Name", "ClientToken", "Configuration"]) == [
+        "Configuration", "ClientToken", "Name"]
+
+
+def test_eventbridgev2_prepare_refuses_an_enum_it_has_no_measured_order_for():
+    model = {"operations": {name: {"input": {"shape": "Request"}} for name in regen_eventbridgev2_shapes.OPERATIONS},
+             "shapes": {"Request": {"type": "structure", "members": {"Mode": {"shape": "Mode"}}},
+                        "Mode": {"type": "string", "enum": ["A", "B"]}}}
+
+    with pytest.raises(SystemExit, match="no measured order for the values of Mode"):
+        regen_eventbridgev2_shapes.prepare(model)
+
+
+def test_eventbridgev2_prepare_refuses_an_enum_whose_values_changed():
+    model = {"operations": {name: {"input": {"shape": "Request"}} for name in regen_eventbridgev2_shapes.OPERATIONS},
+             "shapes": {"Request": {"type": "structure", "members": {"Level": {"shape": "LogLevel"}}},
+                        "LogLevel": {"type": "string", "enum": ["OFF", "ERROR", "INFO", "DEBUG"]}}}
+
+    with pytest.raises(SystemExit, match="LogLevel"):
+        regen_eventbridgev2_shapes.prepare(model)
 
 
 def test_config_shapes_keep_arn_bounds_and_leave_timestamps_to_handlers():

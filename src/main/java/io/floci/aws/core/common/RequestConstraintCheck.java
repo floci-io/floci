@@ -5,8 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.TextNode;
 
 import java.math.BigDecimal;
-import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -230,7 +230,8 @@ public final class RequestConstraintCheck {
 
     /**
      * Every constraint {@code request} breaks for {@code operation}, worded as a Smithy validation
-     * error and in the model's member order, to be thrown with
+     * error and in the order the vendored shape lists its members in, which a generator may set, to be
+     * thrown with
      * {@link SmithyValidationErrors#exception(String, List)}. Paths join the member names with a dot,
      * each with its first letter lower-cased. A shape marked {@code sensitive} leaves its value out
      * of the wording. A value of the wrong JSON type is thrown at once through {@link Messages#type}.
@@ -339,7 +340,8 @@ public final class RequestConstraintCheck {
                 if (!value.isTextual()) {
                     throw messages.type(errorPath, type);
                 }
-                found.addAll(VendoredShapes.stringViolations(shape, patterns.get(name), value.textValue(), path, form));
+                found.addAll(VendoredShapes.stringViolationsPatternFirst(shape, patterns.get(name), value.textValue(),
+                        path, form));
             }
             case "integer", "long" -> collectInteger(shape, type, value, path, errorPath, form, found);
             case "float", "double" -> {
@@ -366,16 +368,16 @@ public final class RequestConstraintCheck {
 
     private void collectInteger(JsonNode shape, String type, JsonNode value, String path, String errorPath,
                                 SmithyValidationErrors.Violations form, List<String> found) {
-        if (!value.isIntegralNumber()) {
+        boolean fits = "integer".equals(type) ? value.isIntegralNumber() && value.canConvertToInt()
+                : value.isIntegralNumber() && value.canConvertToLong();
+        if (!fits) {
             throw messages.type(errorPath, type);
         }
-        BigInteger number = value.bigIntegerValue();
-        if (shape.has("min") && number.compareTo(BigInteger.valueOf(shape.get("min").asLong())) < 0) {
+        long number = value.longValue();
+        if (shape.has("min") && number < shape.get("min").asLong()) {
             found.add(form.valueTooSmall(path, value.asText(), shape.get("min").asLong()));
-        } else if (shape.has("max") && number.compareTo(BigInteger.valueOf(shape.get("max").asLong())) > 0) {
+        } else if (shape.has("max") && number > shape.get("max").asLong()) {
             found.add(form.valueTooLarge(path, value.asText(), shape.get("max").asLong()));
-        } else if (!("integer".equals(type) ? value.canConvertToInt() : value.canConvertToLong())) {
-            throw messages.type(errorPath, type);
         }
     }
 
@@ -404,11 +406,11 @@ public final class RequestConstraintCheck {
         if (!value.isObject()) {
             throw messages.type(errorPath, "map");
         }
-        List<String> entries = new ArrayList<>();
+        Map<String, String> quoted = new HashMap<>(value.size());
         for (Map.Entry<String, JsonNode> entry : value.properties()) {
-            entries.add(entry.getKey() + "=" + elementText(entry.getValue()));
+            quoted.put(entry.getKey(), elementText(entry.getValue()));
         }
-        String mapText = "{" + String.join(", ", entries) + "}";
+        String mapText = quoted.toString();
         String size = sizeViolation(shape, value.size());
         if (size != null) {
             found.add(form.constraint(path, mapText, size));

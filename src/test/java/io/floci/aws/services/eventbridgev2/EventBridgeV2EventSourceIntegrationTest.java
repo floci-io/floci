@@ -1,7 +1,13 @@
 package io.floci.aws.services.eventbridgev2;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import io.floci.aws.testing.AwsTestClients;
+import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.eventbridgev2.EventBridgeV2Client;
@@ -22,6 +28,8 @@ import software.amazon.awssdk.services.secretsmanager.model.DescribeSecretRespon
 import java.util.List;
 import java.util.Map;
 
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -33,6 +41,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class EventBridgeV2EventSourceIntegrationTest {
 
     private static final String ROLE = "arn:aws:iam::000000000000:role/WebhookRole";
+    private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
+
+    @BeforeAll
+    static void configureContentTypes() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
 
     @Test
     void aWebhookEventSourceLivesThroughCreateDescribeUpdateAndDelete() {
@@ -165,6 +179,11 @@ class EventBridgeV2EventSourceIntegrationTest {
                     + "must satisfy regular expression pattern: (?!aws\\.)[A-Za-z0-9][\\.\\-_A-Za-z0-9]*",
                     constraint.awsErrorDetails().errorMessage());
 
+            String missingBus = bus.replace("v2-err-" + suffix, "v2-none-" + suffix);
+            ResourceNotFoundException noBus = assertThrows(ResourceNotFoundException.class,
+                    () -> events.listEventSources(request -> request.eventBusArn(missingBus)));
+            assertEquals("Resource does not exist", noBus.awsErrorDetails().errorMessage());
+
             EventSourceConfiguration valid = EventSourceConfiguration.fromWebhookEventsConfiguration(
                     webhook -> webhook.roleArn(ROLE).authConfiguration(staticToken("X-Token", null)));
             String created = events.createEventSource(request -> request.name("dup-" + suffix).eventBusArn(bus)
@@ -202,6 +221,27 @@ class EventBridgeV2EventSourceIntegrationTest {
                     request -> request.eventSourceArn(created.eventSourceArn())));
             events.deleteEventBus(request -> request.eventBusArn(bus));
         }
+    }
+
+    @Test
+    void aMemberOfTheWrongTypeIsASerializationExceptionWithNoMessage() throws Exception {
+        ObjectNode body = CBOR_MAPPER.createObjectNode().put("Name", 5);
+
+        byte[] answer = given()
+                .contentType("application/cbor")
+                .accept("application/cbor")
+                .header("smithy-protocol", "rpc-v2-cbor")
+                .body(CBOR_MAPPER.writeValueAsBytes(body))
+        .when()
+                .post("/service/AWSEventsV2/operation/CreateEventSource")
+        .then()
+                .statusCode(400)
+                .header("smithy-protocol", equalTo("rpc-v2-cbor"))
+                .extract().asByteArray();
+
+        JsonNode error = CBOR_MAPPER.readTree(answer);
+        assertEquals("SerializationException", error.path("__type").asText());
+        assertNull(error.path("message").textValue());
     }
 
     private static WebhookAuthConfiguration staticToken(String header, String secretValue) {
