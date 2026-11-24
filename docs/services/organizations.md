@@ -68,6 +68,18 @@ call `LeaveOrganization`. An account in no organization gets
   A `RoleName` off the published pattern answers `InvalidInputException` with the reference's
   `Reason` member (`INVALID_PATTERN`, or `INVALID_ROLE_NAME` for the reserved
   `AWSServiceRoleFor` prefix), so SDK callers can read the cause.
+- `CloseAccount` closes a member account at once, skipping the few minutes AWS holds it in
+  `PENDING_CLOSURE`. As on AWS during the 90-day post-closure period, the account stays in the
+  organization: `DescribeAccount`, `ListAccounts` and `ListAccountsForParent` report its `State` as
+  `CLOSED` and its legacy `Status` as `SUSPENDED`, and Account Management's `GetAccountInformation`
+  reports `CLOSED`. Closing it again fails with `AccountAlreadyClosedException`, and it cannot be
+  registered as a delegated administrator. The post-closure period does not end in Floci: the
+  account keeps its resources, and stays closed until `RemoveAccountFromOrganization` removes it.
+- A request whose `Authorization` header or SigV4 presigned URL carries a credential of a closed
+  account (its 12-digit access key id, an IAM user's key, or a session in the account) is refused,
+  whether or not IAM enforcement is on. AWS documents that these calls fail but not the error, so
+  Floci answers as it does for a credential it does not recognize: `InvalidClientTokenId` or
+  `UnrecognizedClientException`, `InvalidAccessKeyId` on S3 and `AuthFailure` on EC2.
 - `DescribeEffectivePolicy` merges every policy of the requested type down the
   root → OU → target chain, with the closest ancestor winning on conflicting keys. As on AWS,
   the access-control types (`SERVICE_CONTROL_POLICY`, `RESOURCE_CONTROL_POLICY`) are rejected.
@@ -110,7 +122,7 @@ call `LeaveOrganization`. An account in no organization gets
 | `MoveAccount` | Moves an account from one root or OU to another. |
 | `RemoveAccountFromOrganization` | Removes a member account from the organization. |
 | `LeaveOrganization` | Removes the calling member account from its organization. |
-| `CloseAccount` | Closes a member account, moving it to PENDING_CLOSURE. |
+| `CloseAccount` | Closes a member account: its `State` becomes `CLOSED` and its credentials stop working. |
 | `CreatePolicy` | Creates a policy of the specified type in the organization. |
 | `UpdatePolicy` | Updates the name, description or content of a customer-managed policy. |
 | `DeletePolicy` | Deletes a policy that is not attached to any target. |
