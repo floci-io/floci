@@ -22,6 +22,14 @@ public final class ParallelLocks {
      */
     public static final String PORTS = "floci-local-ports";
 
+    /**
+     * SmallRye's generation of the {@code EmulatorConfig} mapping classes, which it defines the first time a
+     * {@code SmallRyeConfigBuilder} builds that mapping. Two classes building it at once fail with
+     * {@code NoClassDefFoundError} for a nested group's generated class. {@code ParallelLocksInventoryTest}
+     * checks every plain class that builds it declares this lock.
+     */
+    public static final String CONFIG_MAPPING = "floci-config-mapping";
+
     private ParallelLocks() {
     }
 }

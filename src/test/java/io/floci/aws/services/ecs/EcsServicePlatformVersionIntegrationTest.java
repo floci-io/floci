@@ -142,7 +142,7 @@ class EcsServicePlatformVersionIntegrationTest {
         CreateServiceRequest.Builder request = CreateServiceRequest.builder().cluster(cluster).serviceName(SERVICE)
                 .taskDefinition(taskDefinition).desiredCount(desiredCount).platformVersion(platformVersion)
                 .networkConfiguration(NetworkConfiguration.builder().awsvpcConfiguration(network -> network
-                        .subnets(Ec2Service.defaultSubnetId("us-east-1", "a"))).build());
+                        .subnets(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"))).build());
         if (provider == null) {
             request.launchType("FARGATE");
         } else {

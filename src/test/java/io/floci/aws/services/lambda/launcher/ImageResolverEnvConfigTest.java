@@ -1,16 +1,19 @@
 package io.floci.aws.services.lambda.launcher;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.testing.ParallelLocks;
 import io.smallrye.config.EnvConfigSource;
 import io.smallrye.config.SmallRyeConfig;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
+@ResourceLock(ParallelLocks.CONFIG_MAPPING)
 class ImageResolverEnvConfigTest {
 
     @Test

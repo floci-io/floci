@@ -2,6 +2,7 @@ package io.floci.aws.core.common;
 
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.s3.S3Controller;
+import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ResourceInfo;
 import jakarta.ws.rs.core.MediaType;
@@ -16,6 +17,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -24,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -40,6 +43,7 @@ class AccountContextFilterTest {
     private RegionResolver regionResolver;
     private RequestContext requestContext;
     private Map<String, String> sessionAccounts;
+    private Set<String> closedAccounts;
     private boolean allowUnknownRegions;
     private boolean strictPartitions;
     private boolean enforceIam;
@@ -52,14 +56,16 @@ class AccountContextFilterTest {
         regionResolver = spy(new RegionResolver(DEFAULT_REGION, DEFAULT_ACCOUNT));
         requestContext = new RequestContext();
         sessionAccounts = new HashMap<>();
+        closedAccounts = new HashSet<>();
         allowUnknownRegions = false;
         strictPartitions = false;
         enforceIam = false;
         catalog = mock(ResolvedServiceCatalog.class);
         when(catalog.byResourceClass(S3Controller.class)).thenReturn(Optional.of(legacyDescriptor()));
+        when(catalog.canonicalCredentialScope(anyString())).thenAnswer(call -> call.getArgument(0));
         SessionAccountLookup sessionLookup = akid -> Optional.ofNullable(sessionAccounts.get(akid));
         filter = new AccountContextFilter(accountResolver, regionResolver, requestContext, sessionLookup,
-                this::config, () -> catalog);
+                closedAccountLookup(closedAccounts::contains), this::config, () -> catalog);
     }
 
     private ServiceDescriptor legacyDescriptor() {
@@ -228,7 +234,7 @@ class AccountContextFilterTest {
     void anUnsignedRequestGetsTheDeploymentPartition() {
         RegionResolver china = new RegionResolver("cn-north-1", DEFAULT_ACCOUNT);
         AccountContextFilter chinaFilter = new AccountContextFilter(accountResolver, china, requestContext,
-                akid -> Optional.empty(), this::config, () -> catalog);
+                akid -> Optional.empty(), closedAccountLookup(accountId -> false), this::config, () -> catalog);
         chinaFilter.filter(mockContext(null, null));
         assertEquals("cn-north-1", requestContext.getRegion());
         assertEquals("aws-cn", requestContext.getPartition());
@@ -406,6 +412,118 @@ class AccountContextFilterTest {
         filter.filter(ctx);
         assertEquals("333344445555", requestContext.getAccountId());
         assertEquals("us-west-2", requestContext.getRegion());
+    }
+
+    /** The account's own 12-digit key, an IAM user's key and a session in the account all resolve to it. */
+    @ParameterizedTest
+    @ValueSource(strings = {"333344445555", "AKIAEXAMPLEACCESSKEY", "ASIAEXAMPLESESSIONKEY"})
+    void aClosedAccountsCredentialIsRefused(String accessKeyId) {
+        sessionAccounts.put("AKIAEXAMPLEACCESSKEY", "333344445555");
+        sessionAccounts.put("ASIAEXAMPLESESSIONKEY", "333344445555");
+        closedAccounts.add("333344445555");
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20260617/us-east-1/dynamodb/aws4_request, "
+                + "SignedHeaders=host, Signature=abc",
+            null
+        );
+
+        filter.filter(ctx);
+
+        assertRefusedAsUnrecognized(ctx);
+    }
+
+    @Test
+    void aClosedAccountsPresignedRequestIsRefused() {
+        closedAccounts.add("333344445555");
+        ContainerRequestContext ctx = mockContext(null, "333344445555/20260617/us-east-1/sqs/aws4_request");
+
+        filter.filter(ctx);
+
+        assertRefusedAsUnrecognized(ctx);
+    }
+
+    @Test
+    void aClosedAccountsS3RequestGetsS3sError() {
+        closedAccounts.add("333344445555");
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=333344445555/20260617/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc",
+            null
+        );
+
+        filter.filter(ctx);
+
+        assertRefusedAsS3InvalidAccessKey(ctx);
+    }
+
+    @Test
+    void aClosedAccountsLegacyS3SignatureGetsS3sError() {
+        filter.resourceInfo = mock(ResourceInfo.class);
+        doReturn(S3Controller.class).when(filter.resourceInfo).getResourceClass();
+        closedAccounts.add("333344445555");
+        ContainerRequestContext ctx = mockContext("AWS 333344445555:signature", null);
+
+        filter.filter(ctx);
+
+        assertRefusedAsS3InvalidAccessKey(ctx);
+    }
+
+    @Test
+    void noAccountIsClosedWithoutOrganizations() {
+        @SuppressWarnings("unchecked")
+        Instance<ClosedAccountLookup> absent = mock(Instance.class);
+        AccountContextFilter withoutOrganizations = new AccountContextFilter(accountResolver, regionResolver,
+                requestContext, akid -> Optional.empty(), absent, this::config, () -> catalog);
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=333344445555/20260617/us-east-1/dynamodb/aws4_request, "
+                + "SignedHeaders=host, Signature=abc",
+            null
+        );
+
+        withoutOrganizations.filter(ctx);
+
+        assertEquals("333344445555", requestContext.getAccountId());
+        verify(ctx, never()).abortWith(any());
+    }
+
+    @Test
+    void anotherAccountIsServedWhileOneIsClosed() {
+        closedAccounts.add("333344445555");
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=444455556666/20260617/us-east-1/dynamodb/aws4_request, "
+                + "SignedHeaders=host, Signature=abc",
+            null
+        );
+
+        filter.filter(ctx);
+
+        assertEquals("444455556666", requestContext.getAccountId());
+        verify(ctx, never()).abortWith(any());
+    }
+
+    private static Instance<ClosedAccountLookup> closedAccountLookup(ClosedAccountLookup lookup) {
+        @SuppressWarnings("unchecked")
+        Instance<ClosedAccountLookup> instance = mock(Instance.class);
+        when(instance.isResolvable()).thenReturn(true);
+        when(instance.get()).thenReturn(lookup);
+        return instance;
+    }
+
+    private static void assertRefusedAsUnrecognized(ContainerRequestContext ctx) {
+        ArgumentCaptor<Response> aborted = ArgumentCaptor.forClass(Response.class);
+        verify(ctx).abortWith(aborted.capture());
+        assertEquals(403, aborted.getValue().getStatus());
+        AwsErrorResponse error = (AwsErrorResponse) aborted.getValue().getEntity();
+        assertEquals("UnrecognizedClientException", error.type());
+        assertEquals("The security token included in the request is invalid.", error.message());
+    }
+
+    private static void assertRefusedAsS3InvalidAccessKey(ContainerRequestContext ctx) {
+        ArgumentCaptor<Response> aborted = ArgumentCaptor.forClass(Response.class);
+        verify(ctx).abortWith(aborted.capture());
+        assertEquals(403, aborted.getValue().getStatus());
+        assertTrue(aborted.getValue().getEntity().toString().contains("<Code>InvalidAccessKeyId</Code>"),
+                aborted.getValue().getEntity().toString());
     }
 
     @Test
@@ -618,7 +736,7 @@ class AccountContextFilterTest {
         strictPartitions = true;
         RegionResolver gov = new RegionResolver("us-gov-west-1", DEFAULT_ACCOUNT);
         AccountContextFilter govFilter = new AccountContextFilter(accountResolver, gov, requestContext,
-                key -> Optional.empty(), this::config, () -> catalog);
+                key -> Optional.empty(), closedAccountLookup(accountId -> false), this::config, () -> catalog);
         String credential = "AKID/20261015/custom:222222222222/cloudfront/aws4_request";
         ContainerRequestContext ctx = mockContext(query ? null : "AWS4-HMAC-SHA256 Credential=" + credential,
                 query ? credential : null);

@@ -92,6 +92,79 @@ class OrganizationsServiceTest {
     }
 
     @Test
+    void closeAccountLeavesTheAccountClosedInItsOrganization() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
+                .getAccountId();
+
+        service.closeAccount(MANAGEMENT_ACCOUNT, member);
+
+        OrganizationAccount closed = service.describeAccount(MANAGEMENT_ACCOUNT, member);
+        assertEquals("SUSPENDED", closed.getStatus());
+        assertEquals("CLOSED", OrganizationsService.accountState(closed));
+        assertTrue(service.isClosed(member));
+        assertFalse(service.isClosed(MANAGEMENT_ACCOUNT));
+    }
+
+    @Test
+    void closeAccountRefusesAnAccountAlreadyClosed() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
+                .getAccountId();
+        service.closeAccount(MANAGEMENT_ACCOUNT, member);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.closeAccount(MANAGEMENT_ACCOUNT, member));
+
+        assertEquals("AccountAlreadyClosedException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void anActiveAccountKeepsItsStatusAsItsState() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+
+        OrganizationAccount management = service.describeAccount(MANAGEMENT_ACCOUNT, MANAGEMENT_ACCOUNT);
+
+        assertEquals("ACTIVE", OrganizationsService.accountState(management));
+    }
+
+    @Test
+    void anAccountOutsideEveryOrganizationIsNotClosed() {
+        assertFalse(service.isClosed(OUTSIDER_ACCOUNT));
+        assertFalse(service.isClosed(null));
+    }
+
+    @Test
+    void aClosedAccountCannotBecomeADelegatedAdministrator() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
+                .getAccountId();
+        service.closeAccount(MANAGEMENT_ACCOUNT, member);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.registerDelegatedAdministrator(MANAGEMENT_ACCOUNT, member, "config.amazonaws.com"));
+
+        assertEquals("ConstraintViolationException", error.getErrorCode());
+        assertEquals("You cannot register a suspended account as a delegated administrator.", error.getMessage());
+    }
+
+    @Test
+    void aClosedAccountStaysInItsOrganization() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
+                .getAccountId();
+        service.closeAccount(MANAGEMENT_ACCOUNT, member);
+
+        AwsException removed = assertThrows(AwsException.class,
+                () -> service.removeAccountFromOrganization(MANAGEMENT_ACCOUNT, member));
+        AwsException left = assertThrows(AwsException.class, () -> service.leaveOrganization(member));
+
+        assertEquals("ConstraintViolationException", removed.getErrorCode());
+        assertEquals("ConstraintViolationException", left.getErrorCode());
+        assertTrue(service.isClosed(member));
+    }
+
+    @Test
     void renameAccountRenamesAMemberAccountAndTheManagementAccount() {
         service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
         String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)

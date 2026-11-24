@@ -315,6 +315,15 @@ public class IdentityStoreService implements Resettable {
                 .orElseThrow(() -> notFound("Group membership not found."));
     }
 
+    /**
+     * The membership of that id, which its id alone names, as every identity store's ids are its own; empty when there
+     * is none.
+     */
+    public Optional<Membership> findMembership(String membershipId) {
+        return memberships.scanForAccount(GLOBAL_PARTITION, key -> key.endsWith("::" + membershipId)).stream()
+                .findFirst();
+    }
+
     public synchronized void deleteMembership(JsonNode request) {
         String storeId = requireStore(required(request, "IdentityStoreId"));
         String membershipId = requireResourceId(required(request, "MembershipId"), "MembershipId");

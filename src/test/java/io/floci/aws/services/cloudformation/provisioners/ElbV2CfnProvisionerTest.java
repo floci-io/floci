@@ -43,6 +43,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
@@ -1128,8 +1129,17 @@ class ElbV2CfnProvisionerTest {
     }
 
     private void verifyHealthRestored(int calls) {
-        verify(elb, times(calls)).modifyTargetGroup(REGION, TG_ARN, "TCP", "traffic-port", true,
-                "/", 30, 5, 5, 2, "200");
+        verify(elb, times(calls)).restoreHealthCheck(eq(REGION), eq(TG_ARN),
+                argThat(ElbV2CfnProvisionerTest::isPriorHealth));
+    }
+
+    private static boolean isPriorHealth(TargetGroup prior) {
+        return "TCP".equals(prior.getHealthCheckProtocol()) && "traffic-port".equals(prior.getHealthCheckPort())
+                && Boolean.TRUE.equals(prior.getHealthCheckEnabled()) && "/".equals(prior.getHealthCheckPath())
+                && Integer.valueOf(30).equals(prior.getHealthCheckIntervalSeconds())
+                && Integer.valueOf(5).equals(prior.getHealthCheckTimeoutSeconds())
+                && Integer.valueOf(5).equals(prior.getHealthyThresholdCount())
+                && Integer.valueOf(2).equals(prior.getUnhealthyThresholdCount()) && "200".equals(prior.getMatcher());
     }
 
     @Test
@@ -1202,8 +1212,8 @@ class ElbV2CfnProvisionerTest {
     @Test
     void failedHealthUndoSurvivesRestoringThePreviousResourceAndCanBeRetried() {
         priorHealth();
-        doThrow(internalFailure()).doNothing().when(elb).modifyTargetGroup(REGION, TG_ARN,
-                "TCP", "traffic-port", true, "/", 30, 5, 5, 2, "200");
+        doThrow(internalFailure()).doNothing().when(elb).restoreHealthCheck(eq(REGION), eq(TG_ARN),
+                argThat(ElbV2CfnProvisionerTest::isPriorHealth));
         refusingRegistration();
         assertThrows(AwsException.class, () -> keptTargetGroupUpdatedTo(
                 List.of(), changedHealth(target("10.0.0.5", 70000, null)), null));

@@ -1,15 +1,18 @@
 package io.floci.aws.services.route53;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.testing.ParallelLocks;
 import io.smallrye.config.EnvConfigSource;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+@ResourceLock(ParallelLocks.CONFIG_MAPPING)
 class Route53NameserverConfigTest {
     @Test
     void explicitDefaultLiteralIsDistinctFromAnUnsetNameserver() {

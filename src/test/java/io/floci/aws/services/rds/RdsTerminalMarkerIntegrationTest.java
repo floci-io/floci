@@ -54,8 +54,8 @@ class RdsTerminalMarkerIntegrationTest {
                 .dbClusterParameterGroup().dbClusterParameterGroupName();
         subnetGroup = client.createDBSubnetGroup(request -> request.dbSubnetGroupName(name)
                 .dbSubnetGroupDescription("terminal marker test").subnetIds(
-                        Ec2Service.defaultSubnetId("us-east-1", "a"),
-                        Ec2Service.defaultSubnetId("us-east-1", "b")))
+                        Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"),
+                        Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000")))
                 .dbSubnetGroup().dbSubnetGroupName();
         instance = client.createDBInstance(request -> request.dbInstanceIdentifier(name).engine("postgres")
                 .dbInstanceClass("db.t3.micro").allocatedStorage(20)

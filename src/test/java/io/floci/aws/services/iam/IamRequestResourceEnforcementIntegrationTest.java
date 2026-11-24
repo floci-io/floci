@@ -3495,6 +3495,137 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .formParam("Description", "res").post("/").then();
     }
 
+    /**
+     * An Identity Store user is checked on the identity store and on the user its id names, so a grant on both lets the
+     * caller read that user and not another.
+     */
+    @Test
+    void anIdentityStoreUserIsCheckedOnItsStoreAndItself() {
+        String store = "d-1234567890";
+        String allowed = identityStoreUser(store);
+        String other = identityStoreUser(store);
+        User user = user("res-identitystore");
+        user.policy(allowOn("identitystore:DescribeUser", "arn:aws:identitystore::" + ACCOUNT + ":identitystore/" + store)
+                + "," + allowOn("identitystore:DescribeUser", "arn:aws:identitystore:::user/" + allowed));
+        send(user, "identitystore", "AWSIdentityStore.DescribeUser", "1.1",
+                "{\"IdentityStoreId\":\"" + store + "\",\"UserId\":\"" + allowed + "\"}").statusCode(200);
+        refusedJson(send(user, "identitystore", "AWSIdentityStore.DescribeUser", "1.1",
+                "{\"IdentityStoreId\":\"" + store + "\",\"UserId\":\"" + other + "\"}"),
+                "identitystore:DescribeUser");
+    }
+
+    /**
+     * An Identity Store membership is checked on its group and its user too, which the Service Authorization Reference
+     * requires its actions on and its record holds, so a deny on one group refuses reading a membership of it and not
+     * one of another group.
+     */
+    @Test
+    void anIdentityStoreMembershipIsCheckedOnItsGroupAndItsUser() {
+        String store = "d-1234567890";
+        String member = identityStoreUser(store);
+        String denied = identityStoreGroup(store, "res-denied-" + suffix());
+        String inDenied = identityStoreMembership(store, denied, member);
+        String inOther = identityStoreMembership(store, identityStoreGroup(store, "res-other-" + suffix()), member);
+        User user = user("res-identitystore-membership");
+        user.policy(allowOn("identitystore:DescribeGroupMembership", "*") + ","
+                + denyOn("identitystore:DescribeGroupMembership", "arn:aws:identitystore:::group/" + denied));
+        refusedJson(send(user, "identitystore", "AWSIdentityStore.DescribeGroupMembership", "1.1",
+                "{\"IdentityStoreId\":\"" + store + "\",\"MembershipId\":\"" + inDenied + "\"}"),
+                "identitystore:DescribeGroupMembership");
+        send(user, "identitystore", "AWSIdentityStore.DescribeGroupMembership", "1.1",
+                "{\"IdentityStoreId\":\"" + store + "\",\"MembershipId\":\"" + inOther + "\"}").statusCode(200);
+    }
+
+    /**
+     * An Identity Store lookup is checked on what it finds, which the Service Authorization Reference requires it on:
+     * {@code GetUserId} on the user its alternate identifier names, {@code GetGroupMembershipId} on the membership of
+     * its group and member, so a deny on one refuses that lookup and not another's.
+     */
+    @Test
+    void anIdentityStoreLookupIsCheckedOnWhatItFinds() {
+        String store = "d-1234567890";
+        String deniedName = "res-denied-" + suffix();
+        String denied = identityStoreUser(store, deniedName);
+        String otherName = "res-other-" + suffix();
+        String other = identityStoreUser(store, otherName);
+        String group = identityStoreGroup(store, "res-group-" + suffix());
+        String deniedMembership = identityStoreMembership(store, group, denied);
+        identityStoreMembership(store, group, other);
+        User user = user("res-identitystore-lookup");
+        String membershipArn = "arn:aws:identitystore:::membership/" + deniedMembership;
+        user.policy(allowOn("identitystore:GetUserId", "*") + "," + allowOn("identitystore:GetGroupMembershipId", "*")
+                + "," + denyOn("identitystore:GetUserId", "arn:aws:identitystore:::user/" + denied) + ","
+                + denyOn("identitystore:GetGroupMembershipId", membershipArn));
+        refusedJson(getUserId(user, store, deniedName), "identitystore:GetUserId");
+        getUserId(user, store, otherName).statusCode(200).body("UserId", equalTo(other));
+        refusedJson(getGroupMembershipId(user, store, group, denied), "identitystore:GetGroupMembershipId");
+        getGroupMembershipId(user, store, group, other).statusCode(200);
+    }
+
+    private static ValidatableResponse getUserId(User user, String store, String userName) {
+        return send(user, "identitystore", "AWSIdentityStore.GetUserId", "1.1", "{\"IdentityStoreId\":\"" + store
+                + "\",\"AlternateIdentifier\":{\"UniqueAttribute\":{\"AttributePath\":\"userName\","
+                + "\"AttributeValue\":\"" + userName + "\"}}}");
+    }
+
+    private static ValidatableResponse getGroupMembershipId(User user, String store, String group, String member) {
+        return send(user, "identitystore", "AWSIdentityStore.GetGroupMembershipId", "1.1", "{\"IdentityStoreId\":\""
+                + store + "\",\"GroupId\":\"" + group + "\",\"MemberId\":{\"UserId\":\"" + member + "\"}}");
+    }
+
+    /** A group of the identity store, created as the admin and deleted after the test; its id. */
+    private String identityStoreGroup(String store, String displayName) {
+        String groupId = adminJson("identitystore", "AWSIdentityStore.CreateGroup")
+                .body("{\"IdentityStoreId\":\"" + store + "\",\"DisplayName\":\"" + displayName + "\"}")
+                .post("/").then().statusCode(200).extract().path("GroupId");
+        cleanup.register(() -> adminJson("identitystore", "AWSIdentityStore.DeleteGroup")
+                .body("{\"IdentityStoreId\":\"" + store + "\",\"GroupId\":\"" + groupId + "\"}").post("/"));
+        return groupId;
+    }
+
+    /** The membership of a user in a group of the identity store, created as the admin; its id. */
+    private String identityStoreMembership(String store, String group, String member) {
+        return adminJson("identitystore", "AWSIdentityStore.CreateGroupMembership")
+                .body("{\"IdentityStoreId\":\"" + store + "\",\"GroupId\":\"" + group + "\",\"MemberId\":{"
+                        + "\"UserId\":\"" + member + "\"}}")
+                .post("/").then().statusCode(200).extract().path("MembershipId");
+    }
+
+    /** A user of the identity store, created as the admin and deleted after the test; its id. */
+    private String identityStoreUser(String store) {
+        return identityStoreUser(store, "res-" + suffix());
+    }
+
+    /** A user of the identity store of that name, created as the admin and deleted after the test; its id. */
+    private String identityStoreUser(String store, String userName) {
+        String userId = adminJson("identitystore", "AWSIdentityStore.CreateUser")
+                .body("{\"IdentityStoreId\":\"" + store + "\",\"UserName\":\"" + userName + "\","
+                        + "\"DisplayName\":\"Res\"}")
+                .post("/").then().statusCode(200).extract().path("UserId");
+        cleanup.register(() -> adminJson("identitystore", "AWSIdentityStore.DeleteUser")
+                .body("{\"IdentityStoreId\":\"" + store + "\",\"UserId\":\"" + userId + "\"}").post("/"));
+        return userId;
+    }
+
+    /**
+     * A MemoryDB ACL is checked on the ARN its name gives, {@code acl/<name>}, the one MemoryDB mints, so a grant on one
+     * lets the caller describe it and not another.
+     */
+    @Test
+    void aMemoryDbAclIsCheckedOnTheArnItsNameGives() {
+        String acl = "res-acl-" + suffix();
+        adminJson("memorydb", "AmazonMemoryDB.CreateACL")
+                .body("{\"ACLName\":\"" + acl + "\",\"UserNames\":[\"default\"]}").post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("memorydb", "AmazonMemoryDB.DeleteACL")
+                .body("{\"ACLName\":\"" + acl + "\"}").post("/"));
+        User user = user("res-memorydb");
+        user.policy(allowOn("memorydb:DescribeAcls", "arn:aws:memorydb:" + REGION + ":" + ACCOUNT + ":acl/" + acl));
+        send(user, "memorydb", "AmazonMemoryDB.DescribeACLs", "1.1", "{\"ACLName\":\"" + acl + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "memorydb", "AmazonMemoryDB.DescribeACLs", "1.1",
+                "{\"ACLName\":\"" + acl + "-other\"}"), "memorydb:DescribeAcls");
+    }
+
     private static ValidatableResponse glue(String operation, String body) {
         return adminJson("glue", "AWSGlue." + operation).body(body).post("/").then();
     }
@@ -3775,6 +3906,10 @@ class IamRequestResourceEnforcementIntegrationTest {
 
     private static String allowOn(String action, String resource) {
         return "{\"Effect\":\"Allow\",\"Action\":\"" + action + "\",\"Resource\":\"" + resource + "\"}";
+    }
+
+    private static String denyOn(String action, String resource) {
+        return "{\"Effect\":\"Deny\",\"Action\":\"" + action + "\",\"Resource\":\"" + resource + "\"}";
     }
 
     private User user(String name) {

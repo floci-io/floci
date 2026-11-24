@@ -228,7 +228,7 @@ class ElbV2InitialHealthIntegrationTest {
                 .formParam("Name", name)
                 .formParam("Protocol", "HTTP")
                 .formParam("Port", port)
-                .formParam("VpcId", Ec2Service.defaultVpcId("us-east-1"))
+                .formParam("VpcId", Ec2Service.defaultVpcId("us-east-1", "000000000000"))
                 .formParam("TargetType", "ip")
                 .formParam("HealthCheckPath", "/health")
                 .formParam("HealthCheckIntervalSeconds", 300)

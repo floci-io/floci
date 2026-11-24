@@ -52,6 +52,17 @@ refused inside `MULTI`/`EXEC`, with the same reply as ElastiCache (see
 | `UntagResource` | Remove tags from a cluster, user or ACL |
 <!-- floci:actions:end -->
 
+With IAM enforcement on, each action is checked on the resources the AWS Service Authorization
+Reference lists for it, read from the request: a cluster by its `ClusterName`, an ACL by its
+`ACLName` and a user by its `UserName`, as `arn:aws:memorydb:<region>:<account>:<type>/<name>`, the
+ARN MemoryDB mints, and a tag call on its `ResourceArn`. The reference lists no `cluster` for
+`CreateCluster`, but the multi-Region cluster it may join, which its `MultiRegionClusterName` names,
+`arn:aws:memorydb::<account>:multiregioncluster/<name>`, beside its ACL, parameter group, subnet group
+and snapshot. `DeleteCluster` is checked on the cluster its `ClusterName` names, and on its final
+snapshot and multi-Region cluster when it names them. The reference lists no ACL or user type for `CreateACL` and
+`CreateUser`, so a new ACL is checked on the users its `UserNames` lists, and a new user, or an ACL
+listing none, on `*`.
+
 ## Configuration
 
 | Variable | Default | Description |

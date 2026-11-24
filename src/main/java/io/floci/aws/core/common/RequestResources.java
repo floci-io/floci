@@ -1132,8 +1132,8 @@ public final class RequestResources {
                 return;
             }
             for (String value : values(form, body, resource.find().getFirst())) {
-                foundOne(arns, resource.types().getFirst(), List.of(value), formats, partition, region, account,
-                        accountId, stored);
+                foundOne(arns, resource.types().getFirst(), List.of(resource.find().getFirst().path()),
+                        List.of(value), formats, partition, region, account, accountId, stored);
             }
             return;
         }
@@ -1152,15 +1152,19 @@ public final class RequestResources {
         if (account == null) {
             return;
         }
-        foundOne(arns, resource.types().getFirst(), names, formats, partition, region, account, accountId, stored);
+        foundOne(arns, resource.types().getFirst(), resource.find().stream().map(RequestResourceMembers.Member::path)
+                .toList(), names, formats, partition, region, account, accountId, stored);
     }
 
-    /** The resource of the type {@code stored} finds by the values in the account, or else its ARN with its id open. */
-    private static void foundOne(Set<String> arns, String type, List<String> names,
+    /**
+     * The resource of the type {@code stored} finds by the values of the members in the account, or else its ARN with
+     * its id open.
+     */
+    private static void foundOne(Set<String> arns, String type, List<String> members, List<String> names,
                                  Map<String, RequestResourceMembers.ArnFormat> formats, String partition,
                                  String region, String account, String accountId, StoredResourceArns stored) {
         Optional<String> found = stored == null ? Optional.empty()
-                : account.equals(accountId) ? stored.findByMembers(type, names, region)
+                : account.equals(accountId) ? stored.findByMembers(type, members, names, region)
                 : stored.findInAccount(type, names, account, region);
         arns.add(found.orElseGet(() -> render(formats.get(type).format(), Map.of(), partition, region, account)));
     }
@@ -1264,7 +1268,8 @@ public final class RequestResources {
      * The ARN of the namespace's resource of {@code type} named by {@code id}, the one variable of its format past
      * partition, Region and account, as a request naming the resource by its id gives it.
      */
-    static String idArn(String namespace, String type, String id, String partition, String region, String accountId) {
+    public static String idArn(String namespace, String type, String id, String partition, String region,
+                               String accountId) {
         return idArn(RequestResourceMembers.table().formats().get(namespace).get(type).format(), id, partition, region,
                 accountId);
     }

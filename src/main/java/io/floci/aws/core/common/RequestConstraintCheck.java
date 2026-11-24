@@ -4,10 +4,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.TextNode;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 /**
@@ -17,12 +21,18 @@ import java.util.regex.Pattern;
  * pattern and an enum. A service supplies its own {@link Messages}, so each answers with its own
  * error code and wording.
  *
+ * <p>The check answers either way. {@link #check} throws the first violation in the service's own
+ * wording, {@link #violations} collects all of them in the Smithy wording.
+ *
  * <p>Paths start with the operation name: {@code PutReplicationConfiguration.replicationConfiguration.rules[]},
  * with {@code []} for a list element and {@code .key} for a map key.
  */
 public final class RequestConstraintCheck {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private static final Set<String> SCALAR_TYPES =
+            Set.of("string", "integer", "long", "boolean", "float", "double");
 
     /** How a service words each kind of violation. */
     public interface Messages {
@@ -85,17 +95,14 @@ public final class RequestConstraintCheck {
     }
 
     private final JsonNode model;
-    private final Map<String, Pattern> patterns = new HashMap<>();
+    private final Map<String, Pattern> patterns;
     private final Messages messages;
+    private final Set<String> wordable = ConcurrentHashMap.newKeySet();
 
     private RequestConstraintCheck(JsonNode model, Messages messages) {
         this.model = model;
         this.messages = messages;
-        for (Map.Entry<String, JsonNode> shape : model.path("shapes").properties()) {
-            if (shape.getValue().has("pattern")) {
-                patterns.put(shape.getKey(), VendoredPatterns.compile(shape.getValue().get("pattern").asText()));
-            }
-        }
+        this.patterns = VendoredShapes.patterns(model.path("shapes"));
     }
 
     /** The vendored resource {@code name}; {@code description} names it in a failure. */
@@ -219,5 +226,279 @@ public final class RequestConstraintCheck {
         if (outside) {
             throw messages.bounds(path, type, min, max, size);
         }
+    }
+
+    /**
+     * Every constraint {@code request} breaks for {@code operation}, worded as a Smithy validation
+     * error and in the model's member order, to be thrown with
+     * {@link SmithyValidationErrors#exception(String, List)}. Paths join the member names with a dot,
+     * each with its first letter lower-cased. A shape marked {@code sensitive} leaves its value out
+     * of the wording. A value of the wrong JSON type is thrown at once through {@link Messages#type}.
+     *
+     * @throws IllegalArgumentException when the model holds no input for {@code operation}
+     * @throws IllegalStateException when the operation's input holds a shape this walk cannot word yet
+     */
+    public List<String> violations(String operation, JsonNode request) {
+        if (!hasOperation(operation)) {
+            throw new IllegalArgumentException("No input shape for " + operation);
+        }
+        requireWordable(operation);
+        JsonNode body = request == null || request.isNull() ? MAPPER.createObjectNode() : request;
+        List<String> found = new ArrayList<>();
+        collectStructure(model.path("operations").get(operation).asText(), body, "", operation, found);
+        return found;
+    }
+
+    private void requireWordable(String operation) {
+        if (wordable.contains(operation)) {
+            return;
+        }
+        Set<String> seen = new HashSet<>();
+        String input = model.path("operations").get(operation).asText();
+        seen.add(input);
+        for (Map.Entry<String, JsonNode> member : model.path("shapes").path(input).path("members").properties()) {
+            requireWordableMember(operation, member.getKey(), member.getValue().asText(), seen);
+        }
+        wordable.add(operation);
+    }
+
+    private void requireWordableMember(String operation, String member, String name, Set<String> seen) {
+        JsonNode shape = model.path("shapes").path(name);
+        String type = shape.path("type").asText();
+        switch (type) {
+            case "string", "integer", "long", "float", "double", "boolean" -> {
+            }
+            case "structure" -> {
+                if (seen.add(name)) {
+                    for (Map.Entry<String, JsonNode> field : shape.path("members").properties()) {
+                        requireWordableMember(operation, member + "." + field.getKey(),
+                                field.getValue().asText(), seen);
+                    }
+                }
+            }
+            case "list" -> {
+                JsonNode element = model.path("shapes").path(shape.path("member").asText());
+                String elementType = element.path("type").asText();
+                boolean bounded = element.has("min") || element.has("max");
+                if (!SCALAR_TYPES.contains(elementType) || bounded && !"string".equals(elementType)) {
+                    throw unwordable(operation, member + "[]", elementType);
+                }
+                if (element.path("sensitive").asBoolean(false)) {
+                    throw unwordable(operation, member + "[]", "sensitive " + elementType);
+                }
+            }
+            case "map" -> {
+                for (String side : List.of("key", "value")) {
+                    JsonNode sideShape = model.path("shapes").path(shape.path(side).asText());
+                    String sideType = sideShape.path("type").asText();
+                    if (!"string".equals(sideType)) {
+                        throw unwordable(operation, member + "." + side, sideType);
+                    }
+                    if (sideShape.path("sensitive").asBoolean(false)) {
+                        throw unwordable(operation, member + "." + side, "sensitive " + sideType);
+                    }
+                }
+            }
+            default -> throw unwordable(operation, member, type);
+        }
+    }
+
+    private static IllegalStateException unwordable(String operation, String member, String type) {
+        return new IllegalStateException(operation + "'s " + member + " is a " + type
+                + ", which this check does not word yet");
+    }
+
+    private void collectStructure(String name, JsonNode value, String path, String errorPath, List<String> found) {
+        JsonNode shape = model.path("shapes").path(name);
+        if (!value.isObject()) {
+            throw messages.type(errorPath, "structure");
+        }
+        Set<String> required = new HashSet<>();
+        shape.path("required").forEach(member -> required.add(member.asText()));
+        for (Map.Entry<String, JsonNode> member : shape.path("members").properties()) {
+            String field = member.getKey();
+            String memberPath = (path.isEmpty() ? "" : path + ".") + VendoredShapes.memberName(field);
+            JsonNode child = value.get(field);
+            if (child == null || child.isNull()) {
+                if (required.contains(field)) {
+                    found.add(SmithyValidationErrors.notNull(memberPath));
+                }
+                continue;
+            }
+            collectValue(member.getValue().asText(), child, memberPath, errorPath + "." + field, found);
+        }
+    }
+
+    private void collectValue(String name, JsonNode value, String path, String errorPath, List<String> found) {
+        JsonNode shape = model.path("shapes").path(name);
+        String type = shape.path("type").asText();
+        SmithyValidationErrors.Violations form = formOf(shape);
+        switch (type) {
+            case "structure" -> collectStructure(name, value, path, errorPath, found);
+            case "string" -> {
+                if (!value.isTextual()) {
+                    throw messages.type(errorPath, type);
+                }
+                found.addAll(VendoredShapes.stringViolations(shape, patterns.get(name), value.textValue(), path, form));
+            }
+            case "integer", "long" -> collectInteger(shape, type, value, path, errorPath, form, found);
+            case "float", "double" -> {
+                if (!value.isNumber()) {
+                    throw messages.type(errorPath, type);
+                }
+                BigDecimal number = value.decimalValue();
+                if (shape.has("min") && number.compareTo(BigDecimal.valueOf(shape.get("min").asLong())) < 0) {
+                    found.add(form.valueTooSmall(path, value.asText(), shape.get("min").asLong()));
+                } else if (shape.has("max") && number.compareTo(BigDecimal.valueOf(shape.get("max").asLong())) > 0) {
+                    found.add(form.valueTooLarge(path, value.asText(), shape.get("max").asLong()));
+                }
+            }
+            case "boolean" -> {
+                if (!value.isBoolean()) {
+                    throw messages.type(errorPath, type);
+                }
+            }
+            case "list" -> collectList(shape, value, path, errorPath, form, found);
+            case "map" -> collectMap(shape, value, path, errorPath, form, found);
+            default -> throw unwordable(errorPath, path, type);
+        }
+    }
+
+    private void collectInteger(JsonNode shape, String type, JsonNode value, String path, String errorPath,
+                                SmithyValidationErrors.Violations form, List<String> found) {
+        if (!value.isIntegralNumber()) {
+            throw messages.type(errorPath, type);
+        }
+        BigInteger number = value.bigIntegerValue();
+        if (shape.has("min") && number.compareTo(BigInteger.valueOf(shape.get("min").asLong())) < 0) {
+            found.add(form.valueTooSmall(path, value.asText(), shape.get("min").asLong()));
+        } else if (shape.has("max") && number.compareTo(BigInteger.valueOf(shape.get("max").asLong())) > 0) {
+            found.add(form.valueTooLarge(path, value.asText(), shape.get("max").asLong()));
+        } else if (!("integer".equals(type) ? value.canConvertToInt() : value.canConvertToLong())) {
+            throw messages.type(errorPath, type);
+        }
+    }
+
+    private void collectList(JsonNode shape, JsonNode value, String path, String errorPath,
+                             SmithyValidationErrors.Violations form, List<String> found) {
+        if (!value.isArray()) {
+            throw messages.type(errorPath, "list");
+        }
+        String listText = elementsText(value);
+        String size = sizeViolation(shape, value.size());
+        if (size != null) {
+            found.add(form.constraint(path, listText, size));
+        }
+        String memberName = shape.path("member").asText();
+        boolean broken = false;
+        for (JsonNode item : value) {
+            broken |= item.isNull() || scalarBroken(memberName, item, errorPath + "[]");
+        }
+        if (broken) {
+            found.add(form.constraint(path, listText, "Member must satisfy constraint: " + nullableRules(memberName)));
+        }
+    }
+
+    private void collectMap(JsonNode shape, JsonNode value, String path, String errorPath,
+                            SmithyValidationErrors.Violations form, List<String> found) {
+        if (!value.isObject()) {
+            throw messages.type(errorPath, "map");
+        }
+        List<String> entries = new ArrayList<>();
+        for (Map.Entry<String, JsonNode> entry : value.properties()) {
+            entries.add(entry.getKey() + "=" + elementText(entry.getValue()));
+        }
+        String mapText = "{" + String.join(", ", entries) + "}";
+        String size = sizeViolation(shape, value.size());
+        if (size != null) {
+            found.add(form.constraint(path, mapText, size));
+        }
+        String keyName = shape.path("key").asText();
+        String valueName = shape.path("value").asText();
+        boolean brokenKey = false;
+        boolean brokenValue = false;
+        for (Map.Entry<String, JsonNode> entry : value.properties()) {
+            brokenKey |= scalarBroken(keyName, TextNode.valueOf(entry.getKey()), errorPath + ".key");
+            brokenValue |= entry.getValue().isNull()
+                    || scalarBroken(valueName, entry.getValue(), errorPath + "." + entry.getKey());
+        }
+        if (brokenKey) {
+            found.add(form.mapKeys(path, mapText, rulesOf(keyName)));
+        }
+        if (brokenValue) {
+            found.add(form.mapValues(path, mapText, nullableRules(valueName)));
+        }
+    }
+
+    /** Whether a non-null scalar breaks its shape's rules. A value of another JSON type is a type error. */
+    private boolean scalarBroken(String name, JsonNode item, String errorPath) {
+        JsonNode shape = model.path("shapes").path(name);
+        String type = shape.path("type").asText();
+        boolean fits = switch (type) {
+            case "string" -> item.isTextual();
+            case "boolean" -> item.isBoolean();
+            case "integer" -> item.isIntegralNumber() && item.canConvertToInt();
+            case "long" -> item.isIntegralNumber() && item.canConvertToLong();
+            default -> item.isNumber();
+        };
+        if (!fits) {
+            throw messages.type(errorPath, type);
+        }
+        if (!"string".equals(type)) {
+            return false;
+        }
+        return !VendoredShapes.stringViolations(shape, patterns.get(name), item.textValue(), errorPath,
+                SmithyValidationErrors.Violations.WITHOUT_VALUES).isEmpty();
+    }
+
+    /** The rules a string shape declares, a minimum of zero included, in the order AWS lists them. */
+    private List<String> rulesOf(String name) {
+        JsonNode shape = model.path("shapes").path(name);
+        List<String> rules = new ArrayList<>();
+        if (shape.has("max")) {
+            rules.add("Member must have length less than or equal to " + shape.get("max").asLong());
+        }
+        if (shape.has("min")) {
+            rules.add("Member must have length greater than or equal to " + shape.get("min").asLong());
+        }
+        if (shape.has("pattern")) {
+            rules.add("Member must satisfy regular expression pattern: " + VendoredPatterns.quoted(shape));
+        }
+        if (shape.has("enum")) {
+            rules.add("Member must satisfy enum value set: " + VendoredShapes.enumValues(shape));
+        }
+        return rules;
+    }
+
+    private List<String> nullableRules(String name) {
+        List<String> rules = rulesOf(name);
+        rules.add("Member must not be null");
+        return rules;
+    }
+
+    private static String sizeViolation(JsonNode shape, int size) {
+        if (shape.has("min") && size < shape.get("min").asLong()) {
+            return "Member must have length greater than or equal to " + shape.get("min").asLong();
+        }
+        if (shape.has("max") && size > shape.get("max").asLong()) {
+            return "Member must have length less than or equal to " + shape.get("max").asLong();
+        }
+        return null;
+    }
+
+    private static String elementsText(JsonNode list) {
+        List<String> texts = new ArrayList<>();
+        list.forEach(item -> texts.add(elementText(item)));
+        return texts.toString();
+    }
+
+    private static String elementText(JsonNode item) {
+        return item.isNull() ? "null" : item.asText();
+    }
+
+    private static SmithyValidationErrors.Violations formOf(JsonNode shape) {
+        return shape.path("sensitive").asBoolean(false)
+                ? SmithyValidationErrors.Violations.WITHOUT_VALUES
+                : SmithyValidationErrors.Violations.QUOTED;
     }
 }
