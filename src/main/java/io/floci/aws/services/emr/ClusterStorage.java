@@ -82,9 +82,10 @@ public interface ClusterStorage {
      * unless it is running, and returns the cluster's storage with them: its primary node's {@code host} name, which a
      * step's container resolves to the address given, on the network given, the metastore's URI, and YARN's
      * ResourceManager with the address Floci has on that network, the metastore and YARN only on a network of the
-     * cluster's own. Its core and task nodes, {@code yarn}'s, run in containers of their own on that network, and
-     * {@code yarn} is read as they start, so a resize since the step was queued counts. A failure to start them is
-     * thrown, and {@link Stopped} once {@code stopped} says the step is past starting, or a teardown
+     * cluster's own, where Trino's coordinator runs too, in a container of its own on the primary node's network,
+     * when {@code hiveMetastore} asks for it. Its core and task nodes, {@code yarn}'s, run in containers of their own
+     * on that network, and {@code yarn} is read as they start, so a resize since the step was queued counts. A failure
+     * to start them is thrown, and {@link Stopped} once {@code stopped} says the step is past starting, or a teardown
      * has stopped the HDFS.
      */
     SparkJobRunner.Storage hdfs(String clusterId, String accountId, String region, String host, String image,
@@ -109,9 +110,23 @@ public interface ClusterStorage {
     /**
      * Hive's metastore service on a cluster's primary node, which reaches S3 as the cluster's EC2 instance profile's
      * {@code role} does, or as its account when that is null, with the cluster's {@code settings}, its
-     * {@code core-site} and {@code hive-site} properties, after its own.
+     * {@code core-site} and {@code hive-site} properties, after its own, and {@code trino} beside it unless that is
+     * null, as EMR installs {@code hcatalog-server} with Trino.
      */
-    record HiveMetastore(String role, Map<String, String> settings) {
+    record HiveMetastore(String role, Map<String, String> settings, Trino trino) {
+
+        /** The metastore alone. */
+        HiveMetastore(String role, Map<String, String> settings) {
+            this(role, settings, null);
+        }
+    }
+
+    /**
+     * Trino's coordinator on a cluster's primary node: the {@code image} it runs from, the memory its container gets,
+     * and the cluster's {@code trino-connector-hive} properties, which its {@code hive} catalog gets after Floci's
+     * (see {@link EmrTrino#hiveCatalog}). It reaches S3 and Glue as the metastore does.
+     */
+    record Trino(String image, int memoryMb, Map<String, String> hiveConnector) {
     }
 
     /**

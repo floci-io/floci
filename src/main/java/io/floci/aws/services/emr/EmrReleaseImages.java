@@ -49,7 +49,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * release's HDFS and YARN do not run on its newer Hadoop, so its image gets the whole of that release's Hadoop, in a
  * folder apart, which only its primary node's daemons run from. For a cluster with Pig, which no AWS image carries,
  * the image gets Tez, as Pig's scripts run on it, and Apache Pig, downloaded as it is made ({@link PigDistribution}),
- * whose checksum its name holds.
+ * whose checksum its name holds. For a cluster with Floci's Trino, it gets Trino's CLI from the Trino image the
+ * cluster's coordinator runs, never started either, and EMR's {@code trino-cli} command ({@link EmrTrino#COMMAND}),
+ * and its name holds that image's id.
  */
 @ApplicationScoped
 public class EmrReleaseImages implements ReleaseImages {
@@ -94,6 +96,9 @@ public class EmrReleaseImages implements ReleaseImages {
             new Copy("/usr/lib/tez", "/usr/lib"),
             new Copy("/etc/tez", "/etc"),
             new Copy(GOODIES, EMR_SHARE, HIVE_GOODIES));
+    // What a cluster with Floci's Trino adds, from Trino's image: Trino's CLI, for its trino-cli (EmrTrino.COMMAND).
+    static final Copy TRINO_CLI = new Copy(EmrTrino.IMAGE_CLI, "/usr/lib",
+            EmrTrino.CLI.substring("/usr/lib/".length()));
     private static final String HADOOP_APART = "/opt";
     // What it adds for a release of the AWS runtime for Apache Spark: another release's Hadoop, whole and kept apart.
     static final List<Copy> HADOOP_APART_COPIES = List.of(
@@ -140,27 +145,33 @@ public class EmrReleaseImages implements ReleaseImages {
      */
     @Override
     public String image(String releaseLabel, String sparkImage, String hiveImage, boolean withHive,
-                        boolean withPig) {
+                        boolean withPig, String trinoImage) {
         List<Copy> copies = copies(releaseLabel, withHive, withPig);
         PigDistribution pig = withPig && hadoopFolder(releaseLabel) == null ? pigDistribution : null;
-        // What is copied, and the Pig written after it, by its checksum.
-        String content = copies + (pig != null ? "\n" + pig.identity() : "");
+        String trino = trinoImage != null ? containerBuilder.resolveImage(trinoImage) : null;
+        // What is copied, the Pig written after it, by its checksum, and Trino's CLI with its command.
+        String content = copies + (pig != null ? "\n" + pig.identity() : "")
+                + (trino != null ? "\n" + TRINO_CLI + "\n" + EmrTrino.COMMAND : "");
         String spark = containerBuilder.resolveImage(sparkImage);
         String hive = containerBuilder.resolveImage(hiveImage);
         String repository = ContainerStorageHelper.dockerName(config, COMPONENT);
-        String kind = Digests.sha256Hex(releaseLabel + "\n" + spark + "\n" + hive + "\n" + content).substring(0, 12);
+        String kind = Digests.sha256Hex(releaseLabel + "\n" + spark + "\n" + hive + "\n" + content
+                + (trino != null ? "\n" + trino : "")).substring(0, 12);
         synchronized (making.computeIfAbsent(repository + ":" + kind, name -> new Object())) {
             String sparkId = imageCacheService.resolveForLaunch(spark, ImagePullBehavior.PREFER_CACHED, null)
                     .imageId();
             String hiveId = imageCacheService.resolveForLaunch(hive, ImagePullBehavior.PREFER_CACHED, null).imageId();
-            String tag = releaseLabel + "-"
-                    + Digests.sha256Hex(sparkId + "\n" + hiveId + "\n" + content).substring(0, 12);
+            String trinoId = trino != null
+                    ? imageCacheService.resolveForLaunch(trino, ImagePullBehavior.PREFER_CACHED, null).imageId() : null;
+            String tag = releaseLabel + "-" + Digests.sha256Hex(sparkId + "\n" + hiveId + "\n" + content
+                    + (trinoId != null ? "\n" + trinoId : "")).substring(0, 12);
             DockerClient docker = lifecycleManager.getDockerClient();
             try {
                 return hold(docker.inspectImageCmd(repository + ":" + tag).exec().getId());
             } catch (NotFoundException e) {
                 LOG.infov("Making {0}:{1} for EMR clusters {2}, from {3} and {4}", repository, tag,
-                        (withHive ? "with Hive" : "without Hive") + (pig != null ? ", with Pig" : ""), spark, hive);
+                        (withHive ? "with Hive" : "without Hive") + (pig != null ? ", with Pig" : "")
+                                + (trino != null ? ", with Trino's CLI from " + trino : ""), spark, hive);
             }
             String user = docker.inspectImageCmd(sparkId).exec().getConfig().getUser();
             Map<String, String> labels = new LinkedHashMap<>();
@@ -191,6 +202,15 @@ public class EmrReleaseImages implements ReleaseImages {
                             out -> PigDistribution.write(pigArchive, out));
                     RetryingTarCopier.copyBytes(docker, target, PigDistribution.COMMAND_FOLDER, PigDistribution.NAME,
                             PigDistribution.COMMAND.getBytes(StandardCharsets.UTF_8), 0755);
+                }
+                if (trinoId != null) {
+                    String cli = docker.createContainerCmd(trinoId).withLabels(labels).exec().getId();
+                    containers.add(cli);
+                    RetryingTarCopier.copyStreamed(docker, target, TRINO_CLI.into(), TRINO_CLI.from(),
+                            out -> copy(docker.copyArchiveFromContainerCmd(cli, TRINO_CLI.from()).exec(), out,
+                                    TRINO_CLI));
+                    RetryingTarCopier.copyBytes(docker, target, EmrTrino.COMMAND_FOLDER, EmrTrino.COMMAND_NAME,
+                            EmrTrino.COMMAND.getBytes(StandardCharsets.UTF_8), 0755);
                 }
                 made = lifecycleManager.commit(target, repository, tag,
                         user == null || user.isBlank() ? "root" : user, labels);
