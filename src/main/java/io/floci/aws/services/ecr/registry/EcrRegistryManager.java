@@ -36,10 +36,12 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
@@ -65,6 +67,7 @@ public class EcrRegistryManager {
     private static final int REPOSITORY_DELETION_KILL_GRACE_SECONDS = 1;
     private static final String NAMED_VOLUME = "ecr-registry-data";
     private static final String REPOSITORIES_PATH = "/var/lib/registry/docker/registry/v2/repositories/";
+    private static final Pattern REVISION_LINK = Pattern.compile(".*/_manifests/revisions/sha256/([a-f0-9]{64})/link");
     private static final int GC_KILL_GRACE_SECONDS = 2;
     static final long RECONCILE_RETRY_MILLIS = 30_000;
 
@@ -840,13 +843,47 @@ public class EcrRegistryManager {
             throw new IllegalStateException("ECR registry is not started");
         }
         String path = repositoryStoragePath(internalRepoName);
+        execInRegistry(containerId, "repository deletion", "rm", "-rf",
+                path + "/_layers", path + "/_manifests", path + "/_uploads");
+    }
+
+    /**
+     * The digests of every manifest the registry holds for one repository, untagged ones included, read from the
+     * revision links of its storage, since the distribution API lists tags only. A deleted manifest's link is gone,
+     * and a repository the registry never stored holds none.
+     */
+    public Set<String> heldManifestDigests(String internalRepoName) {
+        String id = containerId;
+        if (!started || id == null) {
+            throw new IllegalStateException("ECR registry is not started");
+        }
+        String revisions = repositoryStoragePath(internalRepoName) + "/_manifests/revisions/sha256";
+        String output = execInRegistry(id, "manifest listing", "sh", "-c",
+                "[ -d '" + revisions + "' ] || exit 0; find '" + revisions + "' -mindepth 2 -maxdepth 2 -name link");
+        Set<String> digests = new LinkedHashSet<>();
+        for (String line : output.split("\n")) {
+            Matcher revision = REVISION_LINK.matcher(line.trim());
+            if (revision.matches()) {
+                digests.add("sha256:" + revision.group(1));
+            }
+        }
+        return digests;
+    }
+
+    /**
+     * Runs {@code command} in the registry container under a bounded {@code timeout}, returning its output; one that
+     * times out, is interrupted or exits non-zero fails as {@code what}.
+     */
+    private String execInRegistry(String container, String what, String... command) {
+        List<String> bounded = new ArrayList<>(List.of("timeout", "-k",
+                String.valueOf(REPOSITORY_DELETION_KILL_GRACE_SECONDS),
+                String.valueOf(REPOSITORY_DELETION_TIMEOUT_SECONDS)));
+        bounded.addAll(List.of(command));
         StringBuilder output = new StringBuilder();
         DockerClient dockerClient = lifecycleManager.getDockerClient();
         ExecCreateCmdResponse exec = dockerClient
-                .execCreateCmd(containerId)
-                .withCmd("timeout", "-k", String.valueOf(REPOSITORY_DELETION_KILL_GRACE_SECONDS),
-                        String.valueOf(REPOSITORY_DELETION_TIMEOUT_SECONDS), "rm", "-rf",
-                        path + "/_layers", path + "/_manifests", path + "/_uploads")
+                .execCreateCmd(container)
+                .withCmd(bounded.toArray(String[]::new))
                 .withAttachStdout(true)
                 .withAttachStderr(true)
                 .exec();
@@ -861,16 +898,17 @@ public class EcrRegistryManager {
                     .awaitCompletion(REPOSITORY_DELETION_TIMEOUT_SECONDS
                             + REPOSITORY_DELETION_KILL_GRACE_SECONDS + 1, TimeUnit.SECONDS);
             if (!completed) {
-                throw new RuntimeException("repository deletion timed out");
+                throw new RuntimeException(what + " timed out");
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new RuntimeException("repository deletion interrupted", e);
+            throw new RuntimeException(what + " interrupted", e);
         }
         Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
         if (exitCode == null || exitCode != 0) {
-            throw new RuntimeException("repository deletion failed: " + output);
+            throw new RuntimeException(what + " failed: " + output);
         }
+        return output.toString();
     }
 
     /** Stops the container if {@code keepRunningOnShutdown=false}. Called from EmulatorLifecycle hooks. */

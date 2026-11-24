@@ -1605,6 +1605,8 @@ class EcrServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.getLifecyclePolicy(REPO, null, REGION));
         assertEquals("LifecyclePolicyNotFoundException", ex.getErrorCode());
+        assertEquals("Lifecycle policy does not exist for the repository with name '" + REPO
+                + "' in the registry with id '" + ACCOUNT + "'", ex.getMessage());
     }
 
     // ------------------------------------------------------------
