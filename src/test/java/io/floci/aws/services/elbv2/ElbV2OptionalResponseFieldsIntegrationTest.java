@@ -11,7 +11,9 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.acm.AcmClient;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.Certificate;
+import software.amazon.awssdk.services.elasticloadbalancingv2.model.ElasticLoadBalancingV2Exception;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.Listener;
+import software.amazon.awssdk.services.elasticloadbalancingv2.model.Matcher;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetGroup;
 
 import java.util.ArrayList;
@@ -25,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -220,11 +223,17 @@ class ElbV2OptionalResponseFieldsIntegrationTest {
                 () -> assertEquals("/", httpGroup.healthCheckPath()),
                 () -> assertEquals("200", httpGroup.matcher().httpCode()));
 
+        ElasticLoadBalancingV2Exception refused = assertThrows(ElasticLoadBalancingV2Exception.class,
+                () -> elb.modifyTargetGroup(request -> request.targetGroupArn(tcp).healthCheckProtocol("HTTP")));
+        assertEquals("ValidationError", refused.awsErrorDetails().errorCode());
+        assertEquals("Path and return code are required for layer 7 health checks.",
+                refused.awsErrorDetails().errorMessage());
         TargetGroup switchedToHttpCheck = elb.modifyTargetGroup(request -> request.targetGroupArn(tcp)
-                .healthCheckProtocol("HTTP")).targetGroups().getFirst();
-        assertAll("Switching to an HTTP check returns the stored path and matcher",
-                () -> assertNotNull(switchedToHttpCheck.healthCheckPath()),
-                () -> assertNotNull(switchedToHttpCheck.matcher()));
+                .healthCheckProtocol("HTTP").healthCheckPath("/ready")
+                .matcher(Matcher.builder().httpCode("200-399").build())).targetGroups().getFirst();
+        assertAll("Switching to an HTTP check takes a path and a matcher, and returns them",
+                () -> assertEquals("/ready", switchedToHttpCheck.healthCheckPath()),
+                () -> assertEquals("200-399", switchedToHttpCheck.matcher().httpCode()));
     }
 
     private String createTargetGroup(String prefix, String protocol, String healthCheckProtocol) {
