@@ -741,6 +741,7 @@ floci:
       max-stored-events: 20000
     cloudwatchmetrics:
       enabled: true
+      max-stored-datapoints: 100000
     paymentcryptography:
       enabled: true
     secretsmanager:

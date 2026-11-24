@@ -2554,6 +2554,16 @@ public interface EmulatorConfig {
     interface CloudWatchMetricsServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Upper bound on metric datapoints kept per account. Every datapoint is its own entry in a
+         * store that is held in memory and written out whole, and a service that publishes its own
+         * metrics adds some for each resource every minute, so without a bound the store outgrows
+         * the heap long before the 15 days AWS keeps one-minute data. Oldest datapoints are dropped
+         * first once exceeded.
+         */
+        @WithDefault("100000")
+        int maxStoredDatapoints();
     }
 
     interface PaymentCryptographyServiceConfig {

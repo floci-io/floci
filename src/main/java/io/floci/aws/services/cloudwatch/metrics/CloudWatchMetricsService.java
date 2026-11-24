@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Digests;
@@ -52,6 +53,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -79,6 +81,7 @@ public class CloudWatchMetricsService {
     /** The most StateReasonData can hold, in Unicode code points as SetAlarmState's length check counts them. */
     private static final int MAX_STATE_REASON_DATA = 4000;
     private static final int LIST_METRICS_PAGE_SIZE = 500;
+    private static final int UNBOUNDED_DATAPOINTS = Integer.MAX_VALUE;
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .setSerializationInclusion(JsonInclude.Include.NON_NULL)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -88,16 +91,24 @@ public class CloudWatchMetricsService {
     private final StorageBackend<String, AlarmHistoryItem> historyStore;
     private final RegionResolver regionResolver;
     private final AlarmSnsNotifier alarmSnsNotifier;
+    private final int maxStoredDatapoints;
+    private final Map<String, DatapointCount> datapointCounts = new ConcurrentHashMap<>();
     private long lastHistorySequence;
     private Instant nextHistoryPrune = Instant.MIN;
 
     public CloudWatchMetricsService(StorageFactory storageFactory, RegionResolver regionResolver) {
-        this(storageFactory, regionResolver, null);
+        this(storageFactory, regionResolver, null, UNBOUNDED_DATAPOINTS);
     }
 
     @Inject
     public CloudWatchMetricsService(StorageFactory storageFactory, RegionResolver regionResolver,
-                                    AlarmSnsNotifier alarmSnsNotifier) {
+                                    AlarmSnsNotifier alarmSnsNotifier, EmulatorConfig config) {
+        this(storageFactory, regionResolver, alarmSnsNotifier,
+                config.services().cloudwatchmetrics().maxStoredDatapoints());
+    }
+
+    CloudWatchMetricsService(StorageFactory storageFactory, RegionResolver regionResolver,
+                             AlarmSnsNotifier alarmSnsNotifier, int maxStoredDatapoints) {
         // Services publish into this store every minute, SQS for every active queue, so under
         // persistent mode it is journaled rather than rewritten in full on every datum.
         this.metricStore = storageFactory.create("cloudwatchmetrics", "cwmetrics.json",
@@ -108,6 +119,7 @@ public class CloudWatchMetricsService {
                 new TypeReference<Map<String, AlarmHistoryItem>>() {}, WriteProfile.APPEND_HEAVY);
         this.regionResolver = regionResolver;
         this.alarmSnsNotifier = alarmSnsNotifier;
+        this.maxStoredDatapoints = maxStoredDatapoints;
     }
 
     CloudWatchMetricsService(StorageBackend<String, MetricDatum> metricStore,
@@ -126,11 +138,20 @@ public class CloudWatchMetricsService {
                              StorageBackend<String, Alarm> alarmStore,
                              StorageBackend<String, AlarmHistoryItem> historyStore,
                              RegionResolver regionResolver, AlarmSnsNotifier alarmSnsNotifier) {
+        this(metricStore, alarmStore, historyStore, regionResolver, alarmSnsNotifier, UNBOUNDED_DATAPOINTS);
+    }
+
+    CloudWatchMetricsService(StorageBackend<String, MetricDatum> metricStore,
+                             StorageBackend<String, Alarm> alarmStore,
+                             StorageBackend<String, AlarmHistoryItem> historyStore,
+                             RegionResolver regionResolver, AlarmSnsNotifier alarmSnsNotifier,
+                             int maxStoredDatapoints) {
         this.metricStore = metricStore;
         this.alarmStore = alarmStore;
         this.historyStore = historyStore;
         this.regionResolver = regionResolver;
         this.alarmSnsNotifier = alarmSnsNotifier;
+        this.maxStoredDatapoints = maxStoredDatapoints;
     }
 
     public void putMetricData(String namespace, List<MetricDatum> datums, String region) {
@@ -192,13 +213,88 @@ public class CloudWatchMetricsService {
         String key = region + "::" + namespace + "::" + datum.getMetricName()
                 + "::" + buildDimKey(datum.getDimensions()) + "::"
                 + String.format("%013d", datum.getTimestamp()) + "::" + id;
-        if (accountId != null && metricStore instanceof AccountAwareStorageBackend<?> rawAware) {
-            @SuppressWarnings("unchecked")
-            AccountAwareStorageBackend<MetricDatum> aware = (AccountAwareStorageBackend<MetricDatum>) rawAware;
-            aware.putForAccount(accountId, key, datum);
-        } else {
-            metricStore.put(key, datum);
+        String account = datapointAccount(accountId);
+        DatapointCount count = datapointCounts.computeIfAbsent(account, ignored -> new DatapointCount());
+        synchronized (count) {
+            boolean replaces = storedDatapoint(account, key).isPresent();
+            try {
+                if (accountId != null && metricStore instanceof AccountAwareStorageBackend<?> rawAware) {
+                    @SuppressWarnings("unchecked")
+                    AccountAwareStorageBackend<MetricDatum> aware = (AccountAwareStorageBackend<MetricDatum>) rawAware;
+                    aware.putForAccount(accountId, key, datum);
+                } else {
+                    metricStore.put(key, datum);
+                }
+            } catch (RuntimeException e) {
+                // The write may or may not have reached the store, so the next one counts again.
+                count.stored = DatapointCount.UNKNOWN;
+                throw e;
+            }
+            if (count.stored == DatapointCount.UNKNOWN) {
+                count.stored = storedDatapointKeys(account).size();
+            } else if (!replaces) {
+                count.stored++;
+            }
+            if (count.stored > maxStoredDatapoints) {
+                count.stored = dropOldestDatapoints(account);
+            }
         }
+    }
+
+    /**
+     * Brings an account's datapoints back under {@link #maxStoredDatapoints} by dropping the oldest,
+     * and returns how many are left. The ceiling bounds the memory footprint and the file the store
+     * is written out to, whichever services and clients publish into it.
+     * <p>
+     * A tenth of the ceiling goes at a time, so that a store at its ceiling is listed and sorted
+     * once in that many writes rather than on every one, with no index held beside the datapoints.
+     * The caller holds the account's {@link DatapointCount} monitor.
+     */
+    private int dropOldestDatapoints(String account) {
+        List<StoredDatapoint> stored = new ArrayList<>();
+        for (String key : storedDatapointKeys(account)) {
+            storedDatapoint(account, key)
+                    .ifPresent(datum -> stored.add(new StoredDatapoint(key, datum.getTimestamp())));
+        }
+        if (stored.size() <= maxStoredDatapoints) {
+            return stored.size();
+        }
+        int excess = stored.size() - (maxStoredDatapoints - maxStoredDatapoints / 10);
+        stored.sort(Comparator.comparingLong(StoredDatapoint::timestamp).thenComparing(StoredDatapoint::key));
+        Set<String> oldest = new LinkedHashSet<>();
+        for (StoredDatapoint datapoint : stored.subList(0, excess)) {
+            oldest.add(datapoint.key());
+        }
+        if (metricStore instanceof AccountAwareStorageBackend<MetricDatum> aware) {
+            aware.deleteAllAtomicallyForAccounts(Map.of(account, oldest));
+        } else {
+            metricStore.deleteAllAtomically(oldest);
+        }
+        LOG.debugv("Dropped the {0} oldest metric datapoint(s) of account {1} to stay within the {2}-datapoint ceiling",
+                excess, account, maxStoredDatapoints);
+        return stored.size() - excess;
+    }
+
+    /** The partition {@code accountId} writes to, or the request's when null; "" for a plain store. */
+    private String datapointAccount(String accountId) {
+        if (metricStore instanceof AccountAwareStorageBackend<MetricDatum> aware) {
+            return accountId != null ? accountId : aware.accountId();
+        }
+        return "";
+    }
+
+    private Optional<MetricDatum> storedDatapoint(String account, String key) {
+        if (metricStore instanceof AccountAwareStorageBackend<MetricDatum> aware) {
+            return aware.getForAccount(account, key);
+        }
+        return metricStore.get(key);
+    }
+
+    private Set<String> storedDatapointKeys(String account) {
+        if (metricStore instanceof AccountAwareStorageBackend<MetricDatum> aware) {
+            return aware.keysForAccount(account);
+        }
+        return metricStore.keys();
     }
 
     /**
@@ -208,7 +304,24 @@ public class CloudWatchMetricsService {
     public void deleteMetricDataBefore(String namespace, Instant cutoff) {
         long cutoffSeconds = cutoff.getEpochSecond();
         deleteInEveryAccount(metricStore, d -> namespace.equals(d.getNamespace()) && d.getTimestamp() < cutoffSeconds);
+        for (DatapointCount count : datapointCounts.values()) {
+            synchronized (count) {
+                count.stored = DatapointCount.UNKNOWN;
+            }
+        }
     }
+
+    /**
+     * How many datapoints one account holds, counted from the store on the first write and again
+     * after a deletion that did not go through it. Its monitor is the one lock for that account's
+     * datapoint writes.
+     */
+    private static final class DatapointCount {
+        private static final int UNKNOWN = -1;
+        private int stored = UNKNOWN;
+    }
+
+    private record StoredDatapoint(String key, long timestamp) {}
 
     private static <V> void deleteInEveryAccount(StorageBackend<String, V> store, Predicate<V> expired) {
         if (store instanceof AccountAwareStorageBackend<V> aware) {

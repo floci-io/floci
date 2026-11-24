@@ -266,6 +266,7 @@ floci:
 
     cloudwatchmetrics:
       enabled: true
+      max-stored-datapoints: 100000   # per account; oldest datapoints are dropped once the store exceeds this
 
     secretsmanager:
       enabled: true

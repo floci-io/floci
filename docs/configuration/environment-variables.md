@@ -418,6 +418,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_CLOUDWATCHMETRICS_ENABLED` | `true` | Enable the CloudWatch Metrics service |
+| `FLOCI_SERVICES_CLOUDWATCHMETRICS_MAX_STORED_DATAPOINTS` | `100000` | Maximum metric datapoints retained per account across all metrics; oldest datapoints are dropped first |
 
 ### Secrets Manager
 

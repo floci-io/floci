@@ -566,6 +566,21 @@ Composite alarms support boolean rules over alarm states. Request `AlarmTypes` c
 action lists are stored but not executed. Action suppression is not implemented and is
 rejected with `ValidationError`.
 
+### Metric storage {#metric-storage}
+
+Every datapoint is one entry in the metric store, which is held in memory and written out as a
+whole: about 500 bytes of JSON each in `cwmetrics.json`. The store keeps at most 100,000
+datapoints per account (`FLOCI_SERVICES_CLOUDWATCHMETRICS_MAX_STORED_DATAPOINTS`), which bounds
+both the memory footprint and the size of that file. A write past the ceiling drops the oldest
+tenth of it, by datapoint timestamp and whichever metrics they belong to, so the store is listed
+once in that many writes instead of on every one. The count is taken per account, and a store
+loaded from disk above the ceiling is cut back by the account's next write.
+
+Services that publish their own metrics fill the store without a `PutMetricData` call: an active
+SQS queue adds 8 to 11 datapoints a minute, so 50 active queues reach the default ceiling in about
+four hours. Raise the ceiling to keep a longer history, up to the 15 days those datapoints are
+kept for.
+
 ### Metric alarm updates
 
 Updating a metric alarm preserves its current state, state reason, state timestamps and tags.
