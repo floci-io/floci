@@ -34,8 +34,8 @@ class ContainerLauncherCopyRetryTest {
         // no longer builds; the copy paths under test read nothing else from it.
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().lambda().codeVolumePopulateConcurrency()).thenReturn(Optional.empty());
-        return new ContainerLauncher(null, null, null, null, null, null, null, config, null, null, null, null, null,
-                null, mock(DockerExitEvents.class));
+        return new ContainerLauncher(null, null, null, null, null, null, null, null, config, null, null, null, null,
+                null, null, mock(DockerExitEvents.class));
     }
 
     @Test

@@ -3,6 +3,7 @@ package io.floci.aws.services.lambda.launcher;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ExecCreateCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.transport.DockerHttpClient;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.Digests;
@@ -123,6 +124,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
     private final DockerClient streamingDocker;
+    private final DockerHttpClient controlPlaneHttp;
     private final ContainerLogStreamer logStreamer;
     private final ImageResolver imageResolver;
     private final RuntimeApiServerFactory runtimeApiServerFactory;
@@ -144,6 +146,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     public ContainerLauncher(ContainerBuilder containerBuilder,
                              ContainerLifecycleManager lifecycleManager,
                              @StreamingDocker DockerClient streamingDocker,
+                             DockerHttpClient controlPlaneHttp,
                              ContainerLogStreamer logStreamer,
                              ImageResolver imageResolver,
                              RuntimeApiServerFactory runtimeApiServerFactory,
@@ -160,6 +163,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.streamingDocker = streamingDocker;
+        this.controlPlaneHttp = controlPlaneHttp;
         this.logStreamer = logStreamer;
         this.imageResolver = imageResolver;
         this.runtimeApiServerFactory = runtimeApiServerFactory;
@@ -459,7 +463,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         if ("Image".equals(fn.getPackageType())) {
             List<String> mountPaths = fn.getFileSystemConfigs() == null ? List.of()
                     : fn.getFileSystemConfigs().stream().map(LambdaFileSystemConfig::getLocalMountPath).toList();
-            WorkingDirectoryAccess.requireLambdaUserCanEnter(dockerClient, containerId, mountPaths);
+            WorkingDirectoryAccess.requireLambdaUserCanEnter(dockerClient, controlPlaneHttp, containerId, mountPaths);
         }
 
         // Now start the container with code in place
