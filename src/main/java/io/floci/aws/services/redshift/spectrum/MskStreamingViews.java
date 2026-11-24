@@ -180,8 +180,7 @@ public class MskStreamingViews {
                     + "kafka_headers pg_catalog.super, refresh_time timestamp); "
                     + "CREATE TABLE " + table(viewSchema, statement.viewName()) + " AS " + statement.select()
                     + " WITH NO DATA");
-            registry.bind(new MskViewBinding(session.accountId(), session.clusterKey(), session.databaseName(),
-                    viewSchema, statement.viewName(), schema.schemaName(), topicName, statement.select(), Map.of()));
+            registry.bind(candidate);
         }
     }
 
