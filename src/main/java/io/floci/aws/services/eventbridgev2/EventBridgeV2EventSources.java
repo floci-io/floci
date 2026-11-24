@@ -41,7 +41,7 @@ import java.util.function.Function;
  */
 @ApplicationScoped
 public class EventBridgeV2EventSources implements Resettable {
-    static final String OWNING_SERVICE = "events-webhook";
+    private static final String OWNING_SERVICE = "events-webhook";
 
     private static final Logger LOG = Logger.getLogger(EventBridgeV2EventSources.class);
     private static final int GENERATED_SECRET_BYTES = 32;
@@ -82,33 +82,29 @@ public class EventBridgeV2EventSources implements Resettable {
         String eventBusArn = request.get("EventBusArn").textValue();
         JsonNode configuration = request.get("Configuration");
         String roleArn = configuration.path(WebhookEventsConfigurations.WEBHOOK).path("RoleArn").asText(null);
-        int variants = WebhookEventsConfigurations.variantCount(configuration);
 
         requireEndpointRegion(eventBusArn, region, "EventBusArn");
         requireOwnAccount(eventBusArn);
         if (roleArn != null) {
             requireOwnAccount(roleArn);
         }
-        String clientToken = request.hasNonNull("ClientToken") ? request.get("ClientToken").textValue() : null;
+        String clientToken = request.path("ClientToken").textValue();
         if (clientToken == null) {
-            throw new AwsException("InvalidInputException", "ClientToken is required", 400);
-        }
-        if (variants != 1) {
-            throw new AwsException("InvalidInputException", "Exactly one Configuration sub-field must be provided", 400);
+            throw EventBridgeV2Service.invalidInput("ClientToken is required");
         }
         JsonNode webhook = WebhookEventsConfigurations.validateForCreate(configuration);
 
         // The request carries credentials, so only its hash is kept.
         String requestHash = Digests.sha256Hex(EventBridgeV2Service.withoutClientToken(request));
-        Optional<EventSourceV2> retried = EventBridgeV2Service.retried(inRegion(region), clientToken, requestHash,
-                EventSourceV2::getClientToken, EventSourceV2::getCreateRequestHash,
+        Optional<EventSourceV2> retried = EventBridgeV2Service.retried(() -> inRegion(region),
+                clientToken, requestHash, EventSourceV2::getClientToken, EventSourceV2::getCreateRequestHash,
                 () -> new AwsException("IdempotentParameterMismatchException",
                         "ClientToken was used by a previous request with different parameters", 409));
         if (retried.isPresent()) {
             return retried.get();
         }
         requireBus(eventBusArn, findBusByName);
-        String key = storageKey(region, name);
+        String key = EventBridgeV2Service.storageKey(region, name);
         if (sources.get(key).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsException", "Resource already exists", 409);
         }
@@ -120,7 +116,7 @@ public class EventBridgeV2EventSources implements Resettable {
         source.setArn(regionResolver.buildArn("events", region,
                 "event-sourcev2/webhook/" + name + "/" + EventBridgeV2Service.newId(random)));
         source.setEventBusArn(eventBusArn);
-        source.setDescription(request.hasNonNull("Description") ? request.get("Description").textValue() : null);
+        source.setDescription(request.path("Description").textValue());
         source.setConfiguration(WebhookEventsConfigurations.echo(webhook));
         source.setState(EventBridgeV2Service.ACTIVE);
         source.setCreationTime(now);
@@ -166,7 +162,7 @@ public class EventBridgeV2EventSources implements Resettable {
             source.setDescription(request.get("Description").textValue());
         }
         source.setLastModifiedTime(clock.instant());
-        sources.put(storageKey(region, source.getName()), source);
+        sources.put(EventBridgeV2Service.storageKey(region, source.getName()), source);
         return source;
     }
 
@@ -194,7 +190,7 @@ public class EventBridgeV2EventSources implements Resettable {
             }
             LOG.warnv("The secret {0} of event source {1} is already gone", source.getSecretArn(), source.getArn());
         }
-        sources.delete(storageKey(region, source.getName()));
+        sources.delete(EventBridgeV2Service.storageKey(region, source.getName()));
     }
 
     /**
@@ -204,15 +200,15 @@ public class EventBridgeV2EventSources implements Resettable {
     PaginatedResult<EventSourceV2> list(JsonNode request, String region,
                                         Function<String, Optional<EventBusV2>> findBusByName) {
         EventBridgeV2RequestShapes.check("ListEventSources", request);
-        String eventBusArn = request.hasNonNull("EventBusArn") ? request.get("EventBusArn").textValue() : null;
-        String namePrefix = request.hasNonNull("NamePrefix") ? request.get("NamePrefix").textValue() : null;
-        String nextToken = request.hasNonNull("NextToken") ? request.get("NextToken").textValue() : null;
+        String eventBusArn = request.path("EventBusArn").textValue();
+        String namePrefix = request.path("NamePrefix").textValue();
+        String nextToken = request.path("NextToken").textValue();
         if (eventBusArn != null) {
             requireEndpointRegion(eventBusArn, region, "EventBusArn");
         }
         String namespace = tokenNamespace(region, eventBusArn, namePrefix);
         if (nextToken != null && !Pagination.tokenStartsWith(nextToken, namespace + ":")) {
-            throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
+            throw invalidNextToken();
         }
         if (eventBusArn != null) {
             if (AwsArnUtils.isForeignAccount(AwsArnUtils.parse(eventBusArn), regionResolver.getAccountId())) {
@@ -227,7 +223,7 @@ public class EventBridgeV2EventSources implements Resettable {
         int maxResults = request.hasNonNull("MaxResults") ? request.get("MaxResults").intValue()
                 : EventBridgeV2Service.MAX_LIST_RESULTS;
         return Pagination.paginate(listed, EventBridgeV2EventSources::id, maxResults, nextToken, namespace,
-                token -> new AwsException("InvalidInputException", "Invalid nextToken", 400));
+                token -> invalidNextToken());
     }
 
     private static String tokenNamespace(String region, String eventBusArn, String namePrefix) {
@@ -289,17 +285,20 @@ public class EventBridgeV2EventSources implements Resettable {
         return Base64.getEncoder().encodeToString(bytes);
     }
 
-    private static EventBusV2 requireBus(String eventBusArn, Function<String, Optional<EventBusV2>> findBusByName) {
-        String busName = AwsArnUtils.parse(eventBusArn).resource().split("/")[1];
+    private static void requireBus(String eventBusArn, Function<String, Optional<EventBusV2>> findBusByName) {
+        String busName = EventBridgeV2Service.busName(eventBusArn);
         EventBusV2 bus = findBusByName.apply(busName).orElseThrow(EventBridgeV2EventSources::busMissing);
         if (!eventBusArn.equals(bus.getArn())) {
             throw new AwsException("ResourceNotFoundException", "Event bus not found: " + busName, 404);
         }
-        return bus;
     }
 
     private static AwsException busMissing() {
         return new AwsException("ResourceNotFoundException", "Resource does not exist", 404);
+    }
+
+    private static AwsException invalidNextToken() {
+        return EventBridgeV2Service.invalidInput("Invalid nextToken");
     }
 
     private void checkArn(String eventSourceArn, String region) {
@@ -310,7 +309,8 @@ public class EventBridgeV2EventSources implements Resettable {
     private EventSourceV2 require(String eventSourceArn, String region) {
         String[] resource = AwsArnUtils.parse(eventSourceArn).resource().split("/");
         Optional<EventSourceV2> found = resource.length == 4 && "event-sourcev2".equals(resource[0])
-                ? sources.get(storageKey(region, resource[2])).filter(source -> eventSourceArn.equals(source.getArn()))
+                ? sources.get(EventBridgeV2Service.storageKey(region, resource[2]))
+                        .filter(source -> eventSourceArn.equals(source.getArn()))
                 : Optional.empty();
         return found.orElseThrow(() -> new AwsException("ResourceNotFoundException",
                 "EventSource not found: " + eventSourceArn, 404));
@@ -319,8 +319,8 @@ public class EventBridgeV2EventSources implements Resettable {
     private void requireEndpointRegion(String arn, String region, String member) {
         AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
         if (!parsed.region().equals(region) || !parsed.partition().equals(regionResolver.partitionForRegion(region))) {
-            throw new AwsException("InvalidInputException",
-                    "The region or partition in " + member + " does not match this endpoint", 400);
+            throw EventBridgeV2Service.invalidInput(
+                    "The region or partition in " + member + " does not match this endpoint");
         }
     }
 
@@ -331,7 +331,8 @@ public class EventBridgeV2EventSources implements Resettable {
     }
 
     private List<EventSourceV2> inRegion(String region) {
-        return sources.scan(key -> key.startsWith(region + "::"));
+        String prefix = region + "::";
+        return sources.scan(key -> key.startsWith(prefix));
     }
 
     private static Map<String, String> tags(JsonNode node) {
@@ -346,9 +347,5 @@ public class EventBridgeV2EventSources implements Resettable {
 
     static String id(EventSourceV2 source) {
         return source.getArn().substring(source.getArn().length() - EventBridgeV2Service.ID_LENGTH);
-    }
-
-    private static String storageKey(String region, String name) {
-        return region + "::" + name;
     }
 }

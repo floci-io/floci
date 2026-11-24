@@ -71,7 +71,7 @@ public class EventBridgeV2Service implements Resettable {
     private static final Set<String> PARAMETER_BLOCKS = Set.of("LambdaParameters", "SqsParameters", "SnsParameters",
             "KinesisParameters", "StepFunctionsParameters", "HttpParameters", "UniversalTargetParameters",
             "EventBusV2Parameters");
-    static final String ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+    private static final String ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
     static final int ID_LENGTH = 25;
     private static final int MAX_TAGS = 200;
     private static final int MAX_ENTRIES = 100;
@@ -134,7 +134,7 @@ public class EventBridgeV2Service implements Resettable {
         String clientToken = optionalClientToken(request);
         String createRequest = withoutClientToken(request);
 
-        Optional<EventBusV2> retried = retried(buses.scan(key -> key.startsWith(region + "::")), clientToken,
+        Optional<EventBusV2> retried = retried(() -> buses.scan(key -> key.startsWith(region + "::")), clientToken,
                 createRequest, EventBusV2::getClientToken, EventBusV2::getCreateRequest,
                 () -> idempotentMismatch(clientToken));
         if (retried.isPresent()) {
@@ -258,7 +258,7 @@ public class EventBridgeV2Service implements Resettable {
         }
         String clientToken = optionalClientToken(request);
         String createRequest = withoutClientToken(request);
-        Optional<SubscriberV2> retried = retried(subscribers.scan(key -> key.startsWith(region + "::")),
+        Optional<SubscriberV2> retried = retried(() -> subscribers.scan(key -> key.startsWith(region + "::")),
                 clientToken, createRequest, SubscriberV2::getClientToken, SubscriberV2::getCreateRequest,
                 () -> idempotentMismatch(clientToken));
         if (retried.isPresent()) {
@@ -801,13 +801,13 @@ public class EventBridgeV2Service implements Resettable {
      * The resource an earlier create made with the same {@code ClientToken}, empty when there is none. A request
      * that differs from the earlier one fails with {@code mismatch}.
      */
-    static <T> Optional<T> retried(List<T> candidates, String clientToken, String createRequest,
+    static <T> Optional<T> retried(Supplier<List<T>> candidates, String clientToken, String createRequest,
                                    Function<T, String> tokenOf, Function<T, String> requestOf,
                                    Supplier<AwsException> mismatch) {
         if (clientToken == null) {
             return Optional.empty();
         }
-        Optional<T> found = candidates.stream().filter(candidate -> clientToken.equals(tokenOf.apply(candidate)))
+        Optional<T> found = candidates.get().stream().filter(candidate -> clientToken.equals(tokenOf.apply(candidate)))
                 .findFirst();
         if (found.isPresent() && !createRequest.equals(requestOf.apply(found.get()))) {
             throw mismatch.get();
@@ -815,7 +815,7 @@ public class EventBridgeV2Service implements Resettable {
         return found;
     }
 
-    private static String storageKey(String region, String name) {
+    static String storageKey(String region, String name) {
         return region + "::" + name;
     }
 
@@ -989,7 +989,7 @@ public class EventBridgeV2Service implements Resettable {
                 "ClientToken " + clientToken + " was used with a different request.", 409);
     }
 
-    private static AwsException invalidInput(String message) {
+    static AwsException invalidInput(String message) {
         return new AwsException("InvalidInputException", message, 400);
     }
 }

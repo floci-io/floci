@@ -10,6 +10,7 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -139,7 +140,10 @@ public final class RequestConstraintCheck {
         return new RequestConstraintCheck(model, messages, order);
     }
 
-    /** A copy of {@code value} that keeps only the members {@code shapeName} declares, at every structure. */
+    /**
+     * A copy of {@code value} that keeps only the members {@code shapeName} declares. Structures and lists are
+     * walked and a map is copied as given.
+     */
     public JsonNode modeled(String shapeName, JsonNode value) {
         JsonNode shape = model.path("shapes").path(shapeName);
         switch (shape.path("type").asText()) {
@@ -397,10 +401,8 @@ public final class RequestConstraintCheck {
                 if (!value.isTextual()) {
                     throw messages.type(errorPath, type);
                 }
-                found.addAll(order.patternBeforeLength()
-                        ? VendoredShapes.stringViolationsPatternFirst(shape, patterns.get(name), value.textValue(),
-                                path, form)
-                        : VendoredShapes.stringViolations(shape, patterns.get(name), value.textValue(), path, form));
+                found.addAll(VendoredShapes.stringViolations(shape, patterns.get(name), value.textValue(), path,
+                        form, order.patternBeforeLength()));
             }
             case "integer", "long" -> collectInteger(shape, type, value, path, errorPath, form, found);
             case "float", "double" -> {
@@ -544,18 +546,11 @@ public final class RequestConstraintCheck {
     }
 
     private String mapText(JsonNode map) {
-        if (order.mapsInHashOrder()) {
-            Map<String, String> quoted = new HashMap<>(map.size());
-            for (Map.Entry<String, JsonNode> entry : map.properties()) {
-                quoted.put(entry.getKey(), elementText(entry.getValue()));
-            }
-            return quoted.toString();
-        }
-        List<String> entries = new ArrayList<>();
+        Map<String, String> quoted = order.mapsInHashOrder() ? new HashMap<>(map.size()) : new LinkedHashMap<>();
         for (Map.Entry<String, JsonNode> entry : map.properties()) {
-            entries.add(entry.getKey() + "=" + elementText(entry.getValue()));
+            quoted.put(entry.getKey(), elementText(entry.getValue()));
         }
-        return "{" + String.join(", ", entries) + "}";
+        return quoted.toString();
     }
 
     private static String elementsText(JsonNode list) {

@@ -43,22 +43,20 @@ final class VendoredShapes {
      */
     static List<String> stringViolations(JsonNode shape, Pattern pattern, String text, String path,
                                          SmithyValidationErrors.Violations messages) {
-        List<String> violations = new ArrayList<>();
-        addLength(violations, shape, text, path, messages);
-        addPattern(violations, shape, pattern, text, path, messages);
-        addEnum(violations, shape, text, path, messages);
-        return violations;
+        return stringViolations(shape, pattern, text, path, messages, false);
     }
 
-    /**
-     * {@link #stringViolations} with the pattern before the length, the order EventBridge V2 answers
-     * in.
-     */
-    static List<String> stringViolationsPatternFirst(JsonNode shape, Pattern pattern, String text, String path,
-                                                     SmithyValidationErrors.Violations messages) {
+    /** {@link #stringViolations} that reports the pattern before the length when {@code patternBeforeLength}. */
+    static List<String> stringViolations(JsonNode shape, Pattern pattern, String text, String path,
+                                         SmithyValidationErrors.Violations messages, boolean patternBeforeLength) {
         List<String> violations = new ArrayList<>();
-        addPattern(violations, shape, pattern, text, path, messages);
-        addLength(violations, shape, text, path, messages);
+        if (patternBeforeLength) {
+            addPattern(violations, shape, pattern, text, path, messages);
+            addLength(violations, shape, text, path, messages);
+        } else {
+            addLength(violations, shape, text, path, messages);
+            addPattern(violations, shape, pattern, text, path, messages);
+        }
         addEnum(violations, shape, text, path, messages);
         return violations;
     }

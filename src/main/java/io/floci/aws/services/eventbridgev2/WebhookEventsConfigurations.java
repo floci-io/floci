@@ -14,6 +14,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
+import static io.floci.aws.services.eventbridgev2.EventBridgeV2Service.invalidInput;
+
 /**
  * The request rules of a webhook event source that AWS checks after the constraints of its model, reported one at
  * a time. It also builds the form of the configuration that {@code DescribeEventSource} returns.
@@ -82,11 +84,6 @@ final class WebhookEventsConfigurations {
         }
         validateWebhook(webhook);
         return webhook;
-    }
-
-    /** How many variants a {@code Configuration} sets. */
-    static int variantCount(JsonNode configuration) {
-        return variants(configuration).size();
     }
 
     private static List<Map.Entry<String, JsonNode>> variants(JsonNode configuration) {
@@ -311,9 +308,5 @@ final class WebhookEventsConfigurations {
         Set<String> set = new HashSet<>(common);
         set.addAll(lowerCased(extras));
         return Set.copyOf(set);
-    }
-
-    private static AwsException invalidInput(String message) {
-        return new AwsException("InvalidInputException", message, 400);
     }
 }
