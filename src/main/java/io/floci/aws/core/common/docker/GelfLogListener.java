@@ -28,6 +28,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadFactory;
 import java.util.function.BiConsumer;
 
 /**
@@ -68,7 +69,9 @@ public class GelfLogListener {
     private final int maxConnections;
     private final Semaphore connections;
     private final Object startLock = new Object();
+    private final ThreadFactory acceptThreads;
     private ServerSocket server;
+    private Thread acceptThread;
     private volatile String address;
 
     @Inject
@@ -84,6 +87,13 @@ public class GelfLogListener {
 
     GelfLogListener(DockerClient dockerClient, boolean enabled, String configuredHost, int port,
                     int maxConnections) {
+        this(dockerClient, enabled, configuredHost, port, maxConnections,
+                Thread.ofVirtual().name("floci-gelf-accept").factory());
+    }
+
+    GelfLogListener(DockerClient dockerClient, boolean enabled, String configuredHost, int port,
+                    int maxConnections, ThreadFactory acceptThreads) {
+        this.acceptThreads = acceptThreads;
         this.dockerClient = dockerClient;
         this.enabled = enabled;
         this.configuredHost = configuredHost;
@@ -204,7 +214,8 @@ public class GelfLogListener {
                     + " (floci.docker.log-driver-port)", e);
         }
         address = host + ":" + server.getLocalPort();
-        Thread.ofVirtual().name("floci-gelf-accept").start(this::acceptLoop);
+        acceptThread = acceptThreads.newThread(this::acceptLoop);
+        acceptThread.start();
         LOG.infov("Long-lived service containers send their logs to Floci over GELF at {0}", address);
     }
 
@@ -342,6 +353,13 @@ public class GelfLogListener {
             if (server != null) {
                 try {
                     server.close();
+                    // A pending accept can retain the bound descriptor until its thread exits.
+                    if (acceptThread != null && !acceptThread.join(Duration.ofSeconds(5))) {
+                        LOG.warnv("Docker log-driver accept thread did not stop after closing its listener");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    LOG.debugv("Interrupted while closing the Docker log-driver listener: {0}", e.getMessage());
                 } catch (IOException e) {
                     LOG.debugv("Could not close the Docker log-driver listener: {0}", e.getMessage());
                 }

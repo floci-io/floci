@@ -395,6 +395,7 @@ floci:
     ecr:
       enabled: true
       tls-uri: false
+      lifecycle-sweep-enabled: false   # tests run the sweep themselves, so no repository's policy applies behind another test's back
     ui:
       enabled: true
     bedrock:

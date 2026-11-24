@@ -163,7 +163,11 @@ public final class EcrTestImages {
         return buf.array();
     }
 
-    private static void uploadBlob(String host, String repo, String digest, byte[] content) {
+    /**
+     * Uploads {@code content} to {@code repo} as one monolithic blob upload, sending {@code host}, one of Floci's
+     * repository hosts, as the {@code Host} header.
+     */
+    public static void uploadBlob(String host, String repo, String digest, byte[] content) {
         String location = given().header("Host", host)
                 .when().post("/v2/" + repo + "/blobs/uploads/")
                 .then().statusCode(202)

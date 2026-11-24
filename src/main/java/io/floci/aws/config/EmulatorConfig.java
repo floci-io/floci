@@ -3518,6 +3518,22 @@ public interface EmulatorConfig {
         boolean preferLocalImages();
 
         Optional<String> dockerNetwork();
+
+        /**
+         * Run the background sweep that applies repository lifecycle policies, expiring the images their rules
+         * select. When off, policies are checked and stored but nothing expires.
+         * Env: FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_ENABLED
+         */
+        @WithDefault("true")
+        boolean lifecycleSweepEnabled();
+
+        /**
+         * How often the lifecycle sweep runs, in seconds. ECR expires an image within 24 hours of it meeting a
+         * rule, so the interval only bounds how late Floci is.
+         * Env: FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_INTERVAL_SECONDS
+         */
+        @WithDefault("60")
+        long lifecycleSweepIntervalSeconds();
     }
 
     interface LambdaServiceConfig {

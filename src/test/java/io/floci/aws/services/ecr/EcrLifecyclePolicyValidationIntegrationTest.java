@@ -13,10 +13,12 @@ import org.junit.jupiter.params.provider.MethodSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.ecr.EcrClient;
+import software.amazon.awssdk.services.ecr.model.DeleteLifecyclePolicyResponse;
 import software.amazon.awssdk.services.ecr.model.InvalidParameterException;
 import software.amazon.awssdk.services.ecr.model.LifecyclePolicyNotFoundException;
 import software.amazon.awssdk.services.ecr.model.RepositoryNotFoundException;
 
+import java.time.Instant;
 import java.util.UUID;
 import java.util.stream.Stream;
 
@@ -125,6 +127,27 @@ class EcrLifecyclePolicyValidationIntegrationTest {
             assertThrows(RepositoryNotFoundException.class,
                     () -> client.putLifecyclePolicy(r -> r.repositoryName(repository)
                             .lifecyclePolicyText(VALID_POLICY)));
+        }
+    }
+
+    /** ECR answers with a time stamp before the sweep first applies the policy, and deleting it echoes it. */
+    @Test
+    void getAndDeleteSayWhenThePolicyWasLastApplied() {
+        String repository = "lifecycle-validation/" + UUID.randomUUID();
+        try (EcrClient client = AwsTestClients.create(EcrClient.builder(), "test", Region.US_EAST_1)) {
+            client.createRepository(r -> r.repositoryName(repository));
+            try {
+                client.putLifecyclePolicy(r -> r.repositoryName(repository).lifecyclePolicyText(VALID_POLICY));
+
+                assertEquals(Instant.EPOCH, client.getLifecyclePolicy(r -> r.repositoryName(repository))
+                        .lastEvaluatedAt());
+                DeleteLifecyclePolicyResponse deleted = client.deleteLifecyclePolicy(
+                        r -> r.repositoryName(repository));
+                assertEquals(VALID_POLICY, deleted.lifecyclePolicyText());
+                assertEquals(Instant.EPOCH, deleted.lastEvaluatedAt());
+            } finally {
+                client.deleteRepository(r -> r.repositoryName(repository));
+            }
         }
     }
 

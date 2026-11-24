@@ -920,6 +920,8 @@ floci:
       uri-style: hostname
       tls-uri: false
       prefer-local-images: true
+      lifecycle-sweep-enabled: true          # FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_ENABLED - apply repository lifecycle policies in the background
+      lifecycle-sweep-interval-seconds: 60   # FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_INTERVAL_SECONDS
     ui:
       enabled: true
       image: "floci/floci-ui:0.7.0"
