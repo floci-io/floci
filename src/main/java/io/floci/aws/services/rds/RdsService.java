@@ -4597,7 +4597,7 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidDBInstanceState",
                     "DB instance " + id + " is not in available state.", 400);
         }
-        if (!isBlank(instance.getDbClusterIdentifier())) {
+        if (!isBlank(instance.getDbClusterIdentifier()) || isAuroraEngine(engineName(instance))) {
             return List.of();
         }
         int maximum = instance.getEngine() == DatabaseEngine.SQLSERVER ? MAX_SQLSERVER_STORAGE_GIB : MAX_STORAGE_GIB;
