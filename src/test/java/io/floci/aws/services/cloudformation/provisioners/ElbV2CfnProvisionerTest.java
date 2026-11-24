@@ -440,6 +440,53 @@ class ElbV2CfnProvisionerTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    void misplacedRegexAndEvaluationOverflowAreRejectedBeforeCreateOrUpdate(boolean update) throws Exception {
+        when(elb.describeRules(REGION, null, List.of(RULE_ARN))).thenReturn(List.of(rule(LISTENER_ARN)));
+        List<String> invalidConditions = List.of(
+                """
+                [{
+                  "Field": "host-header",
+                  "PathPatternConfig": {"RegexValues": ["("]}
+                }]
+                """,
+                """
+                [{
+                  "Field": "path-pattern",
+                  "PathPatternConfig": {"RegexValues": ["/a", "/b", "/c", "/d"]}
+                }]
+                """,
+                """
+                [
+                  {
+                    "Field": "path-pattern",
+                    "PathPatternConfig": {"RegexValues": ["/a", "/b", "/c"]}
+                  },
+                  {
+                    "Field": "host-header",
+                    "HostHeaderConfig": {"Values": ["a.example.com", "b.example.com", "c.example.com"]}
+                  }
+                ]
+                """);
+        List<String> expectedMessages = List.of(
+                "PathPatternConfig.RegexValues requires the path-pattern field.",
+                "A condition can have at most three match evaluations.",
+                "A rule can have at most five match evaluations.");
+        for (int i = 0; i < invalidConditions.size(); i++) {
+            ObjectNode props = mapper.createObjectNode().put("ListenerArn", LISTENER_ARN).put("Priority", "75");
+            props.set("Conditions", mapper.readTree(invalidConditions.get(i)));
+            AwsException error = assertThrows(AwsException.class, () -> provisioner.provision(
+                    resource("AWS::ElasticLoadBalancingV2::ListenerRule", "Rule"), props,
+                    update ? ctx(RULE_ARN) : ctx()));
+            assertEquals("ValidationError", error.getErrorCode());
+            assertEquals(400, error.getHttpStatus());
+            assertEquals(expectedMessages.get(i), error.getMessage());
+        }
+        verify(elb, never()).createRule(anyString(), anyString(), anyList(), anyInt(), anyList(), any());
+        verify(elb, never()).modifyRule(anyString(), anyString(), anyList(), anyList());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     void ruleParsesPathPatternRegexValues(boolean update) {
         when(elb.describeRules(REGION, null, List.of(RULE_ARN))).thenReturn(List.of(rule(LISTENER_ARN)));
         when(elb.modifyRule(eq(REGION), eq(RULE_ARN), anyList(), anyList())).thenReturn(rule(LISTENER_ARN));
@@ -447,7 +494,9 @@ class ElbV2CfnProvisionerTest {
                 .thenReturn(rule(LISTENER_ARN));
         ObjectNode props = mapper.createObjectNode().put("ListenerArn", LISTENER_ARN).put("Priority", "75");
         props.putArray("Conditions").addObject().put("Field", "path-pattern").putObject("PathPatternConfig")
-                .putArray("RegexValues").add("^/api/(items|orders)(/.*)?$");
+                .putArray("RegexValues").add("^/api/(items|orders)(/.*)?$").add("/a").add("/b");
+        props.withArray("Conditions").addObject().put("Field", "host-header").putObject("HostHeaderConfig")
+                .putArray("Values").add("a.example.com").add("b.example.com");
         props.putArray("Actions").addObject().put("Type", "forward").put("TargetGroupArn", TG_ARN);
 
         provisioner.provision(resource("AWS::ElasticLoadBalancingV2::ListenerRule", "Rule"), props,
@@ -460,7 +509,8 @@ class ElbV2CfnProvisionerTest {
         } else {
             verify(elb).createRule(eq(REGION), eq(LISTENER_ARN), conds.capture(), eq(75), anyList(), eq(Map.of()));
         }
-        assertEquals(List.of("^/api/(items|orders)(/.*)?$"), conds.getValue().get(0).getPathPatternRegexValues());
+        assertEquals(List.of("^/api/(items|orders)(/.*)?$", "/a", "/b"),
+                conds.getValue().get(0).getPathPatternRegexValues());
         assertEquals(List.of(), conds.getValue().get(0).getPathPatternValues());
     }
 

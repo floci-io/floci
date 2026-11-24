@@ -1016,12 +1016,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
                 condition.setPathPatternValues(toStringList(pathCfg.path("Values")));
             }
             if (pathCfg.path("RegexValues").isArray()) {
-                List<String> regexValues = toStringList(pathCfg.path("RegexValues"));
-                if ("path-pattern".equals(condition.getField()) && !regexValues.isEmpty()) {
-                    PathPatternRegexValues.validate(regexValues,
-                            !condition.getValues().isEmpty() || !condition.getPathPatternValues().isEmpty());
-                }
-                condition.setPathPatternRegexValues(regexValues);
+                condition.setPathPatternRegexValues(toStringList(pathCfg.path("RegexValues")));
             }
             JsonNode hostCfg = item.path("HostHeaderConfig");
             if (hostCfg.path("Values").isArray()) {
@@ -1055,6 +1050,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
             }
             result.add(condition);
         }
+        PathPatternRegexValues.validateConditions(result);
         return result;
     }
 

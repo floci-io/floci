@@ -210,6 +210,55 @@ class ElbV2PathRegexDataPlaneIntegrationTest {
     }
 
     @Test
+    void sdkRejectsMisplacedRegexAndEvaluationOverflowBeforeMutation() {
+        String ruleArn = createSplitRule(0, 100);
+        RuleCondition regex = RuleCondition.builder().field("path-pattern")
+                .pathPatternConfig(p -> p.regexValues("/a", "/b", "/c")).build();
+        RuleCondition fourRegexes = RuleCondition.builder().field("path-pattern")
+                .pathPatternConfig(p -> p.regexValues("/a", "/b", "/c", "/d")).build();
+        RuleCondition misplaced = RuleCondition.builder().field("host-header")
+                .pathPatternConfig(p -> p.regexValues("(")).build();
+        RuleCondition threeHosts = RuleCondition.builder().field("host-header")
+                .hostHeaderConfig(h -> h.values("a.example.com", "b.example.com", "c.example.com")).build();
+        try (ElasticLoadBalancingV2Client client = AwsTestClients.create(
+                ElasticLoadBalancingV2Client.builder(), "000000000000", Region.US_EAST_1)) {
+            int initialCount = client.describeRules(r -> r.listenerArn(listenerArn)).rules().size();
+            List<List<RuleCondition>> rejectedConditions = List.of(
+                    List.of(misplaced), List.of(fourRegexes), List.of(regex, threeHosts));
+            List<String> expectedMessages = List.of(
+                    "PathPatternConfig.RegexValues requires the path-pattern field.",
+                    "A condition can have at most three match evaluations.",
+                    "A rule can have at most five match evaluations.");
+            for (int i = 0; i < rejectedConditions.size(); i++) {
+                List<RuleCondition> conditions = rejectedConditions.get(i);
+                ElasticLoadBalancingV2Exception createError = assertThrows(ElasticLoadBalancingV2Exception.class,
+                        () -> client.createRule(r -> r.listenerArn(listenerArn).priority(90).conditions(conditions)
+                                .actions(a -> a.type("forward").targetGroupArn(secondaryTg))));
+                assertEquals(400, createError.statusCode());
+                assertEquals("ValidationError", createError.awsErrorDetails().errorCode());
+                assertEquals(expectedMessages.get(i), createError.awsErrorDetails().errorMessage());
+                ElasticLoadBalancingV2Exception updateError = assertThrows(ElasticLoadBalancingV2Exception.class,
+                        () -> client.modifyRule(r -> r.ruleArn(ruleArn).conditions(conditions)));
+                assertEquals(400, updateError.statusCode());
+                assertEquals("ValidationError", updateError.awsErrorDetails().errorCode());
+                assertEquals(expectedMessages.get(i), updateError.awsErrorDetails().errorMessage());
+            }
+            assertEquals(initialCount, client.describeRules(r -> r.listenerArn(listenerArn)).rules().size());
+            assertEquals(MATCH_PATTERNS, client.describeRules(r -> r.ruleArns(ruleArn))
+                    .rules().get(0).conditions().get(0).pathPatternConfig().regexValues());
+
+            RuleCondition twoHosts = threeHosts.toBuilder()
+                    .hostHeaderConfig(h -> h.values("a.example.com", "b.example.com")).build();
+            Rule accepted = client.createRule(r -> r.listenerArn(listenerArn).priority(90)
+                    .conditions(regex, twoHosts).actions(a -> a.type("forward").targetGroupArn(secondaryTg)))
+                    .rules().get(0);
+            assertEquals(List.of("/a", "/b", "/c"), accepted.conditions().get(0).pathPatternConfig().regexValues());
+            Rule updated = client.modifyRule(r -> r.ruleArn(ruleArn).conditions(regex, twoHosts)).rules().get(0);
+            assertEquals(accepted.conditions(), updated.conditions());
+        }
+    }
+
+    @Test
     void nestedRepetitionRoutesLongNonmatchingRequestsWithoutBacktracking() {
         try (ElasticLoadBalancingV2Client client = AwsTestClients.create(
                 ElasticLoadBalancingV2Client.builder(), "000000000000", Region.US_EAST_1)) {

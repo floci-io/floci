@@ -3,19 +3,77 @@ package io.floci.aws.services.elbv2;
 import com.google.re2j.Pattern;
 import com.google.re2j.PatternSyntaxException;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.elbv2.model.RuleCondition;
 
 import java.util.List;
 
 /** Shared admission and linear-time matching for path-pattern regex conditions. */
 public final class PathPatternRegexValues {
 
+    private static final int MAX_CONDITION_EVALUATIONS = 3;
+    private static final int MAX_RULE_EVALUATIONS = 5;
+
     private PathPatternRegexValues() {
+    }
+
+    /** Validates regex-bearing rules at both public admission paths before mutation. */
+    public static void validateConditions(List<RuleCondition> conditions) {
+        boolean hasRegex = conditions.stream().anyMatch(c -> !c.getPathPatternRegexValues().isEmpty());
+        if (!hasRegex) {
+            return;
+        }
+        int evaluations = 0;
+        for (RuleCondition condition : conditions) {
+            List<String> regexValues = condition.getPathPatternRegexValues();
+            if (!regexValues.isEmpty() && !"path-pattern".equals(condition.getField())) {
+                throw new AwsException("ValidationError",
+                        "PathPatternConfig.RegexValues requires the path-pattern field.", 400);
+            }
+            int conditionEvaluations = matchEvaluations(condition);
+            if (conditionEvaluations > MAX_CONDITION_EVALUATIONS) {
+                throw new AwsException("ValidationError",
+                        "A condition can have at most three match evaluations.", 400);
+            }
+            evaluations += conditionEvaluations;
+            if (evaluations > MAX_RULE_EVALUATIONS) {
+                throw new AwsException("ValidationError",
+                        "A rule can have at most five match evaluations.", 400);
+            }
+        }
+        for (RuleCondition condition : conditions) {
+            if (!condition.getPathPatternRegexValues().isEmpty()) {
+                validate(condition.getPathPatternRegexValues(),
+                        !condition.getValues().isEmpty() || !condition.getPathPatternValues().isEmpty());
+            }
+        }
+    }
+
+    private static int matchEvaluations(RuleCondition condition) {
+        return switch (condition.getField()) {
+            case "path-pattern" -> condition.getPathPatternRegexValues().isEmpty()
+                    ? valueCount(condition.getPathPatternValues(), condition.getValues())
+                    : condition.getPathPatternRegexValues().size();
+            case "host-header" -> valueCount(condition.getHostHeaderValues(), condition.getValues());
+            case "http-header" -> condition.getHttpHeaderValues().size();
+            case "http-request-method" -> condition.getHttpMethodValues().size();
+            case "source-ip" -> condition.getSourceIpValues().size();
+            case "query-string" -> condition.getQueryStringValues().size();
+            case null, default -> condition.getValues().size();
+        };
+    }
+
+    private static int valueCount(List<String> configured, List<String> legacy) {
+        return configured.isEmpty() ? legacy.size() : configured.size();
     }
 
     public static void validate(List<String> regexValues, boolean hasGlobValues) {
         if (hasGlobValues) {
             throw new AwsException("ValidationError",
                     "A path-pattern condition can specify either Values or RegexValues, not both.", 400);
+        }
+        if (regexValues.size() > MAX_CONDITION_EVALUATIONS) {
+            throw new AwsException("ValidationError",
+                    "A condition can have at most three match evaluations.", 400);
         }
         for (String regex : regexValues) {
             compile(regex);

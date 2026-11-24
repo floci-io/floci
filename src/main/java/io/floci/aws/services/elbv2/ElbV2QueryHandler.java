@@ -1374,6 +1374,8 @@ public class ElbV2QueryHandler {
                 v++;
             }
             c.setValues(legacyValues);
+            String pathConfig = "Conditions.member." + i + ".PathPatternConfig.";
+            c.setPathPatternRegexValues(readMembers(p, pathConfig + "RegexValues.member."));
 
             switch (field) {
                 case "host-header" -> {
@@ -1389,28 +1391,8 @@ public class ElbV2QueryHandler {
                     else c.setHostHeaderValues(new ArrayList<>(legacyValues));
                 }
                 case "path-pattern" -> {
-                    List<String> vals = new ArrayList<>();
-                    int j = 1;
-                    while (true) {
-                        String val = p.getFirst("Conditions.member." + i + ".PathPatternConfig.Values.member." + j);
-                        if (val == null) break;
-                        vals.add(val);
-                        j++;
-                    }
-                    List<String> regexVals = new ArrayList<>();
-                    j = 1;
-                    while (true) {
-                        String val = p.getFirst("Conditions.member." + i + ".PathPatternConfig.RegexValues.member." + j);
-                        if (val == null) {
-                            break;
-                        }
-                        regexVals.add(val);
-                        j++;
-                    }
-                    if (!regexVals.isEmpty()) {
-                        PathPatternRegexValues.validate(regexVals, !vals.isEmpty() || !legacyValues.isEmpty());
-                        c.setPathPatternRegexValues(regexVals);
-                    } else if (!vals.isEmpty()) {
+                    List<String> vals = readMembers(p, pathConfig + "Values.member.");
+                    if (!vals.isEmpty()) {
                         c.setPathPatternValues(vals);
                     } else {
                         c.setPathPatternValues(new ArrayList<>(legacyValues));
@@ -1469,7 +1451,19 @@ public class ElbV2QueryHandler {
             result.add(c);
             i++;
         }
+        PathPatternRegexValues.validateConditions(result);
         return result;
+    }
+
+    private static List<String> readMembers(MultivaluedMap<String, String> parameters, String prefix) {
+        List<String> values = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String value = parameters.getFirst(prefix + i);
+            if (value == null) {
+                return values;
+            }
+            values.add(value);
+        }
     }
 
     private List<TargetDescription> parseTargets(MultivaluedMap<String, String> p) {

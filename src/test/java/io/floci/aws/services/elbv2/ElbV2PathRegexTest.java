@@ -67,6 +67,15 @@ class ElbV2PathRegexTest {
     }
 
     @Test
+    void validationRejectsAFourthExpressionBeforeCompiling() {
+        assertDoesNotThrow(() -> PathPatternRegexValues.validate(List.of("/a", "/b", "/c"), false));
+        AwsException error = assertThrows(AwsException.class,
+                () -> PathPatternRegexValues.validate(List.of("(", "/b", "/c", "/d"), false));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("A condition can have at most three match evaluations.", error.getMessage());
+    }
+
+    @Test
     void validationRejectsInvalidAndOverlongExpressions() {
         assertThrows(AwsException.class,
                 () -> PathPatternRegexValues.validate(List.of(""), false));
