@@ -9,6 +9,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.util.stream.Stream;
 
 import static io.floci.aws.services.ses.SesV2Requests.authFor;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.EXPECTED_LIST;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.EXPECTED_MAP;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.EXPECTED_NULL;
@@ -16,7 +17,6 @@ import static io.floci.aws.services.ses.SesV2SerializationErrors.LIST;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.NUMBER;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.STRUCTURE;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.assertSerializationException;
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
@@ -77,9 +77,7 @@ class SesMetricsJobsMemberTypeIntegrationTest {
     @ParameterizedTest(name = "{0}")
     @MethodSource("batchGetMetricDataCases")
     void batchGetMetricData_wrongMemberType(String caseName, String body, String message) {
-        given()
-            .contentType("application/json")
-            .header("Authorization", VDM_REGION_AUTH)
+        v2(VDM_REGION_AUTH)
             .body("{\"VdmAttributes\": {\"VdmEnabled\": \"ENABLED\"}}")
         .when()
             .put("/v2/email/account/vdm")
@@ -90,9 +88,7 @@ class SesMetricsJobsMemberTypeIntegrationTest {
 
     @Test
     void batchGetMetricData_vdmGateStaysAheadOfTheShapeCheck() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", VDM_OFF_REGION_AUTH)
+        v2(VDM_OFF_REGION_AUTH)
             .body("{\"Queries\": \"x\"}")
         .when()
             .post(METRICS)

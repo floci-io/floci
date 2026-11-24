@@ -181,7 +181,7 @@ class SesTemplatePagingIntegrationTest {
     @Order(10)
     void withoutAPageSizeBothListsServeTen() {
         for (int i = 0; i < 11; i++) {
-            given().contentType("application/json").header("Authorization", AUTH_ELEVEN)
+            v2(AUTH_ELEVEN)
                     .body("""
                         {"TemplateName": "eleven-%02d", "TemplateContent": {"Subject": "s", "Text": "t"}}
                         """.formatted(i))

@@ -532,6 +532,14 @@ class AccountServiceTest {
     }
 
     @Test
+    void closedAccountReportsClosedRatherThanItsSuspendedStatus() {
+        when(organizations.findAccount(ACCOUNT_ID))
+                .thenReturn(Optional.of(organizationAccount("CREATED", "SUSPENDED", Instant.EPOCH)));
+
+        assertEquals("CLOSED", service.getAccountInformation(ACCOUNT_ID, mapper.createObjectNode()).accountState());
+    }
+
+    @Test
     void putAccountNameRenamesTheOrganizationRecordAndKeepsTheNameForTheAccount() {
         service.putAccountName(ACCOUNT_ID, accountNameRequest("Team Account"));
 

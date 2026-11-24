@@ -230,7 +230,7 @@ class SesImportJobV2IntegrationTest {
         given().header("Authorization", s3AuthA).contentType("text/plain").body("account-a@example.com,BOUNCE\n")
         .when().put("/" + bucketA + "/suppress.csv").then().statusCode(200);
 
-        String jobA = given().contentType("application/json").header("Authorization", authA)
+        String jobA = v2(authA)
                 .body("""
                     {"ImportDataSource":{"S3Url":"s3://%s/suppress.csv","DataFormat":"CSV"},
                      "ImportDestination":{"SuppressionListDestination":{"SuppressionListImportAction":"PUT"}}}
@@ -246,10 +246,10 @@ class SesImportJobV2IntegrationTest {
         given().header("Authorization", authB)
         .when().get("/v2/email/import-jobs/" + jobA).then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"));
-        given().contentType("application/json").header("Authorization", authB)
+        v2(authB)
         .when().post("/v2/email/import-jobs/list").then().statusCode(200)
                 .body("ImportJobs.JobId", not(hasItems(jobA)));
-        given().contentType("application/json").header("Authorization", authA)
+        v2(authA)
         .when().post("/v2/email/import-jobs/list").then().statusCode(200)
                 .body("ImportJobs.JobId", hasItems(jobA));
 

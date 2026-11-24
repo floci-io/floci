@@ -1141,9 +1141,7 @@ class SesV2IntegrationTest {
             .statusCode(200);
 
         // Send from ap-northeast-1
-        given()
-            .contentType("application/json")
-            .header("Authorization", SesV2Requests.authFor("ap-northeast-1"))
+        v2(SesV2Requests.authFor("ap-northeast-1"))
             .body("""
                 {
                     "FromEmailAddress": "multi@example.com",

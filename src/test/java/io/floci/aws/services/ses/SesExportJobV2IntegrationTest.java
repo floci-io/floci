@@ -455,11 +455,11 @@ class SesExportJobV2IntegrationTest {
         // account unless the caller's is carried over: the job would then never be found again.
         String otherAccount = "AWS4-HMAC-SHA256 Credential=111122223333/20260101/eu-west-2/ses/"
                 + "aws4_request";
-        given().contentType("application/json").header("Authorization", otherAccount)
+        v2(otherAccount)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"ENABLED\"}}")
         .when().put("/v2/email/account/vdm").then().statusCode(200);
 
-        String jobId = given().contentType("application/json").header("Authorization", otherAccount)
+        String jobId = v2(otherAccount)
                 .body(insightsSource())
         .when().post("/v2/email/export-jobs").then().statusCode(200).extract().path("JobId");
 
@@ -478,7 +478,7 @@ class SesExportJobV2IntegrationTest {
         given().header("Authorization", AUTH)
         .when().get("/v2/email/export-jobs/" + jobId).then().statusCode(404);
 
-        given().contentType("application/json").header("Authorization", otherAccount)
+        v2(otherAccount)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"DISABLED\"}}")
         .when().put("/v2/email/account/vdm");
     }
