@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
@@ -31,7 +32,7 @@ class SesContactPagingIntegrationTest {
     @Test
     @Order(1)
     void createAListAndContactsOutOfAddressOrder() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"ContactListName\":\"" + LIST + "\"}")
         .when().post("/v2/email/contact-lists").then().statusCode(200);
         for (String name : new String[] {"page-b", "page-c", "page-a"}) {
@@ -122,13 +123,13 @@ class SesContactPagingIntegrationTest {
     }
 
     private static void create(String name) {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"EmailAddress\":\"" + name + "@example.com\"}")
         .when().post(CONTACTS).then().statusCode(200);
     }
 
     private static ValidatableResponse list(String body) {
-        return given().contentType("application/json").header("Authorization", AUTH).body(body)
+        return v2(AUTH).body(body)
         .when().post(CONTACTS + "/list").then();
     }
 }
