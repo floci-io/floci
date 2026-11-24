@@ -635,9 +635,13 @@ class EksServiceTest {
     @Test
     void aDeletedClustersAutoModeLoadBalancersGoWithIt() {
         Cluster cluster = activeCluster();
-        EksService service = serviceWithCluster(cluster, mock(EksClusterManager.class), false);
         EksAutoModeLoadBalancers loadBalancers = mock(EksAutoModeLoadBalancers.class);
-        service.autoModeLoadBalancers = loadBalancers;
+        @SuppressWarnings("unchecked")
+        jakarta.enterprise.inject.Instance<EksAutoModeLoadBalancers> lookup =
+                mock(jakarta.enterprise.inject.Instance.class);
+        when(lookup.isResolvable()).thenReturn(true);
+        when(lookup.get()).thenReturn(loadBalancers);
+        EksService service = serviceWithCluster(cluster, mock(EksClusterManager.class), false, lookup);
 
         service.deleteCluster("running-cluster");
 
@@ -727,6 +731,12 @@ class EksServiceTest {
 
     private EksService serviceWithCluster(Cluster cluster, EksClusterManager clusterManager,
             boolean keepRunningOnShutdown) {
+        return serviceWithCluster(cluster, clusterManager, keepRunningOnShutdown, null);
+    }
+
+    private EksService serviceWithCluster(Cluster cluster, EksClusterManager clusterManager,
+            boolean keepRunningOnShutdown,
+            jakarta.enterprise.inject.Instance<EksAutoModeLoadBalancers> autoModeLoadBalancers) {
         AccountAwareStorageBackend<Cluster> clusterStore =
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
         clusterStore.putForAccount("000000000000", EksService.clusterKey(
@@ -734,7 +744,8 @@ class EksServiceTest {
         return new EksService(fixedStorageFactory(clusterStore), testConfig(false, keepRunningOnShutdown),
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
-                        new ObjectMapper()), mock(EksAccessEntryService.class));
+                        new ObjectMapper()), mock(EksAccessEntryService.class), null, null, null,
+                autoModeLoadBalancers);
     }
 
     private StorageFactory fixedStorageFactory(StorageBackend<String, ?> backend) {

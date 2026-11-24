@@ -126,9 +126,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private final EksAccessEntryService accessEntries;
     private final EksPodIdentityAssociationService podIdentityAssociations;
     private final EksAddonService addons;
-    /** A field, not a constructor argument: the reconciler depends on this service, and gets its client proxy. */
-    @Inject
-    EksAutoModeLoadBalancers autoModeLoadBalancers;
+    /** Looked up when used: the reconciler depends on this service. */
+    private final jakarta.enterprise.inject.Instance<EksAutoModeLoadBalancers> autoModeLoadBalancers;
     private final AutoScalingService autoScaling;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, UserDataClaim> appliedClusterUserData = new ConcurrentHashMap<>();
@@ -147,7 +146,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
             EksOidcService oidcService, EksAccessEntryService accessEntries,
             EksPodIdentityAssociationService podIdentityAssociations,
-            EksAddonService addons, AutoScalingService autoScaling) {
+            EksAddonService addons, AutoScalingService autoScaling,
+            jakarta.enterprise.inject.Instance<EksAutoModeLoadBalancers> autoModeLoadBalancers) {
         this.storage = storageFactory.create("eks", "eks-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {
                 });
@@ -168,9 +168,20 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         this.podIdentityAssociations = podIdentityAssociations;
         this.addons = addons;
         this.autoScaling = autoScaling;
+        this.autoModeLoadBalancers = autoModeLoadBalancers;
         if (this.clusterManager != null) {
             this.clusterManager.setEc2Service(this.ec2Service);
         }
+    }
+
+    /** As above, with no EKS Auto Mode load balancers to delete with a cluster. */
+    public EksService(StorageFactory storageFactory, EmulatorConfig config,
+            RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
+            EksOidcService oidcService, EksAccessEntryService accessEntries,
+            EksPodIdentityAssociationService podIdentityAssociations,
+            EksAddonService addons, AutoScalingService autoScaling) {
+        this(storageFactory, config, regionResolver, clusterManager, ec2Service,
+                oidcService, accessEntries, podIdentityAssociations, addons, autoScaling, null);
     }
 
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
@@ -1669,10 +1680,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
 
     /** The cluster's EKS Auto Mode load balancers go with it, as the controller's go on AWS. */
     private void deleteAutoModeLoadBalancers(Cluster cluster) {
-        if (autoModeLoadBalancers != null) {
+        if (autoModeLoadBalancers != null && autoModeLoadBalancers.isResolvable()) {
             String region = clusterRegion(cluster);
             RequestScopes.runAs(cluster.getAccountId(), region,
-                    () -> autoModeLoadBalancers.deleteLoadBalancers(cluster, region));
+                    () -> autoModeLoadBalancers.get().deleteLoadBalancers(cluster, region));
         }
     }
 
