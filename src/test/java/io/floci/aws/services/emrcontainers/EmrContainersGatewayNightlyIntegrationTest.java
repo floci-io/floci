@@ -58,8 +58,9 @@ import static org.junit.jupiter.api.Assertions.fail;
  * token alone, and runs code on Floci's S3 over the PySpark kernel's WebSocket, as the guide's "Example: Deploy a
  * JupyterLab notebook" does through {@code JUPYTER_GATEWAY_URL}, then changes its Spark session's settings with
  * {@code %%configure}, as "Modifying PySpark session parameters" does, and runs code on Floci's S3 in the "Apache
- * Spark with Scala" kernel too. An endpoint whose {@code jeg-config} sets a short idle timeout culls a kernel left
- * idle, and one whose {@code jupyter-kernel-overrides} gives its kernels an image runs each in a container of its own.
+ * Spark with Scala" kernel too, where Toree's {@code %AddJar} adds a jar. An endpoint whose {@code jeg-config} sets a
+ * short idle timeout culls a kernel left idle, and one whose {@code jupyter-kernel-overrides} gives its kernels an
+ * image runs each in a container of its own.
  *
  * <p>A nightly check: the release's notebook image is about 6 GB.
  */
@@ -76,6 +77,9 @@ class EmrContainersGatewayNightlyIntegrationTest {
     private static final String RELEASE = "emr-7.5.0-latest";
     // The release's notebook image, which the gateway's default template names.
     private static final String NOTEBOOK_IMAGE = "public.ecr.aws/emr-on-eks/notebook-spark/emr-7.5.0:latest";
+    // Jupyter Enterprise Gateway's Scala launcher in that image, which holds launcher.KernelProfile.
+    private static final String TOREE_LAUNCHER =
+            "/usr/local/bin/kernel-launchers/scala/lib/toree-launcher_2.12-1.0.jar";
     private static final Duration ACTIVE_TIMEOUT = Duration.ofMinutes(5);
     // jupyter_server holds a kernel's handshake until the kernel answers, up to its own minute, and the PySpark kernel
     // answers once its Spark session is up.
@@ -104,10 +108,10 @@ class EmrContainersGatewayNightlyIntegrationTest {
     }
 
     // The endpoint's gateway answers within its five minutes, each kernel's WebSocket opens within its two, once the
-    // kernel is up, and each of the five cells answers within its two: nineteen minutes, and one for the requests
+    // kernel is up, and each of the seven cells answers within its two: twenty-three minutes, and one for the requests
     // between. The Nightly checks' docker-runner group counts it.
     @Test
-    @Timeout(value = 20, unit = TimeUnit.MINUTES)
+    @Timeout(value = 24, unit = TimeUnit.MINUTES)
     void pysparkKernelOnTheEndpointsGatewayRunsCodeOnFlocisS3() throws Exception {
         S3Client s3 = AwsTestClients.create(S3Client.builder().forcePathStyle(true), ACCOUNT, Region.US_EAST_1);
         cleanup.register(s3::close);
@@ -185,6 +189,12 @@ class EmrContainersGatewayNightlyIntegrationTest {
         String count = execute(scala, scalaMessages, session,
                 "spark.read.textFile(\"s3://" + bucket + "/lines.txt\").count()");
         assertTrue(count.matches("(res\\d+: Long = )?3"), count);
+        // Its magics load: %AddJar puts the image's Toree launcher, which the kernel does not run, on the cell's
+        // class path.
+        assertEquals("ok", run(scala, scalaMessages, session, "%AddJar file:" + TOREE_LAUNCHER, "execute_reply",
+                "/content/status"));
+        String added = execute(scala, scalaMessages, session, "classOf[launcher.KernelProfile].getName");
+        assertTrue(added.matches("(res\\d+: String = )?launcher\\.KernelProfile"), added);
         scala.sendClose(WebSocket.NORMAL_CLOSURE, "done").get(10, TimeUnit.SECONDS);
         delete(http, gateway + "/api/kernels/" + scalaId, token);
     }
