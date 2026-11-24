@@ -37,6 +37,7 @@ class CopyEtlLoaderTest {
                 Socket client = new Socket("localhost", listener.getLocalPort()); Socket server = listener.accept()) {
             client.setSoTimeout(5000);
             server.setSoTimeout(5000);
+            client.setTcpNoDelay(true);
             FakeCopyBackend fake = new FakeCopyBackend(server);
             fake.countRowsWith(rows -> rows.lines().count());
             CompletableFuture<Void> serving = CompletableFuture.runAsync(() -> {
@@ -100,6 +101,7 @@ class CopyEtlLoaderTest {
                 Socket client = new Socket("localhost", listener.getLocalPort()); Socket server = listener.accept()) {
             client.setSoTimeout(5000);
             server.setSoTimeout(5000);
+            client.setTcpNoDelay(true);
             FakeCopyBackend fake = new FakeCopyBackend(server);
             fake.countRowsWith(rows -> rows.lines().count());
             CompletableFuture<Void> serving = CompletableFuture.runAsync(() -> {
@@ -169,6 +171,7 @@ class CopyEtlLoaderTest {
                 Socket client = new Socket("localhost", listener.getLocalPort()); Socket server = listener.accept()) {
             client.setSoTimeout(5000);
             server.setSoTimeout(5000);
+            client.setTcpNoDelay(true);
             CompletableFuture<Void> serving = CompletableFuture.runAsync(() -> {
                 try {
                     FakeCopyBackend fake = new FakeCopyBackend(server);
@@ -264,6 +267,7 @@ class CopyEtlLoaderTest {
                 Socket client = new Socket("localhost", listener.getLocalPort()); Socket server = listener.accept()) {
             client.setSoTimeout(5000);
             server.setSoTimeout(5000);
+            client.setTcpNoDelay(true);
             CompletableFuture<Void> serving = CompletableFuture.runAsync(() -> {
                 try {
                     FakeCopyBackend fake = new FakeCopyBackend(server);
