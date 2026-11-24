@@ -3,6 +3,7 @@ package io.floci.aws.services.kinesisanalytics.container;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.github.dockerjava.api.model.Container;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -81,6 +82,16 @@ public class FlinkContainerManager {
     private final Map<String, byte[]> pendingJars = new ConcurrentHashMap<>();
     // Applications whose job submission hard-failed (e.g. a bad JAR) — not retried by the poller.
     private final Set<String> submissionFailed = ConcurrentHashMap.newKeySet();
+    // Set by stopAll(). A start still running when shutdown removes the containers, as a restore's can be while an
+    // image pulls, removes its own containers rather than leave them behind after the cleanup.
+    private boolean shuttingDown;
+
+    /** Thrown by a start that shutdown overtook; its containers, if any, are already removed. */
+    public static final class ShuttingDownException extends IllegalStateException {
+        public ShuttingDownException(String applicationName) {
+            super("Floci is shutting down; not starting the Flink cluster of application " + applicationName);
+        }
+    }
 
     @Inject
     public FlinkContainerManager(ContainerBuilder containerBuilder,
@@ -139,6 +150,9 @@ public class FlinkContainerManager {
      * StartApplication fast; the JAR is uploaded/run asynchronously by the readiness poller.
      */
     public void startCluster(FlinkApplication app) {
+        if (isShuttingDown()) {
+            throw new ShuttingDownException(app.getApplicationName());
+        }
         String image = KinesisAnalyticsRuntimes.resolveImage(
                 config.services().kinesisAnalytics().defaultImage(), app.getRuntimeEnvironment());
         String jmName = containerName(app);
@@ -203,8 +217,14 @@ public class FlinkContainerManager {
             lifecycleManager.removeIfExists(jmName);
             throw e;
         }
+        synchronized (this) {
+            if (shuttingDown) {
+                lifecycleManager.stopAndRemove(jm.containerId(), null);
+                throw new ShuttingDownException(app.getApplicationName());
+            }
+            containerIds.put(runtimeKey(app), jm.containerId());
+        }
         app.setContainerId(jm.containerId());
-        containerIds.put(runtimeKey(app), jm.containerId());
         EndpointInfo rest = jm.getEndpoint(JOBMANAGER_REST_PORT);
         app.setRestEndpoint("http://" + rest.host() + ":" + rest.port());
         attachLogs(app, jm.containerId());
@@ -234,7 +254,12 @@ public class FlinkContainerManager {
                         msfStyleLog4j2Config(app), true);
                 ContainerInfo tm = lifecycleManager.startCreated(tmContainerId, tmSpec);
                 app.setTaskManagerContainerId(tm.containerId());
-                taskManagerIds.put(runtimeKey(app), tm.containerId());
+                synchronized (this) {
+                    if (shuttingDown) {
+                        throw new ShuttingDownException(app.getApplicationName());
+                    }
+                    taskManagerIds.put(runtimeKey(app), tm.containerId());
+                }
             } catch (RuntimeException e) {
                 // Roll back the whole cluster so a failed start leaves nothing behind.
                 lifecycleManager.removeIfExists(tmName);
@@ -600,11 +625,78 @@ public class FlinkContainerManager {
     }
 
     /**
+     * Removes whatever of {@code app}'s cluster outlived Floci, under the current or the legacy {@code floci-} names:
+     * for a restore that does not keep that cluster, before it starts a new one, and for an application stopped before
+     * its restore reached it. Nothing else runs a cluster under these names while a restore holds the application.
+     * The record forgets that cluster and its job, as {@link #stopCluster} leaves it, so a later start submits the
+     * code again rather than waiting on the old job. Each removal is confirmed: when Docker cannot remove a container
+     * this throws, and the record still names the cluster.
+     */
+    public void removeSurvivingCluster(FlinkApplication app) {
+        String name = containerName(app);
+        // The TaskManager first, as stopCluster does: it shares the JobManager's network namespace.
+        removeConfirmed(name + "-tm");
+        removeConfirmed(name);
+        forgetCluster(app);
+    }
+
+    /** Removes the container under {@code name} and under its legacy form, failing unless Docker confirms both gone. */
+    private void removeConfirmed(String name) {
+        lifecycleManager.removeIfExistsStrict(name);
+        String legacyName = ContainerStorageHelper.legacyDockerName(config, name);
+        if (!legacyName.equals(name)) {
+            lifecycleManager.removeIfExistsStrict(legacyName);
+        }
+    }
+
+    /**
+     * Removes the cluster {@code app} itself names, by its containers' IDs, for a restore whose application was
+     * stopped, deleted or created again while that cluster started. What the application's key tracks is cleared only
+     * while it still names these containers: an application created again under the same name shares the key, and its
+     * cluster, pending code and logs are left alone. The record forgets the cluster and its job, as
+     * {@link #stopCluster} leaves it. Each removal is confirmed: when Docker cannot remove a container this throws,
+     * and the record still names it and it stays tracked, for shutdown and a later attempt to remove.
+     */
+    public void removeOwnCluster(FlinkApplication app) {
+        String key = runtimeKey(app);
+        String tmId = app.getTaskManagerContainerId();
+        if (tmId != null) {
+            lifecycleManager.stopAndRemove(tmId, null);
+            // stopAndRemove only logs a removal Docker refused; this throws for it, before the tracking is cleared.
+            lifecycleManager.removeIfExistsStrict(tmId);
+            taskManagerIds.remove(key, tmId);
+        }
+        String jmId = app.getContainerId();
+        if (jmId != null) {
+            Closeable logHandle = jmId.equals(containerIds.get(key)) ? logStreams.get(key) : null;
+            lifecycleManager.stopAndRemove(jmId, logHandle);
+            lifecycleManager.removeIfExistsStrict(jmId);
+            if (containerIds.remove(key, jmId)) {
+                if (logHandle != null) {
+                    logStreams.remove(key, logHandle);
+                }
+                pendingJars.remove(key);
+            }
+        }
+        forgetCluster(app);
+    }
+
+    private static void forgetCluster(FlinkApplication app) {
+        app.setContainerId(null);
+        app.setRestEndpoint(null);
+        app.setTaskManagerContainerId(null);
+        app.setFlinkJobId(null);
+    }
+
+    /**
      * Stops and removes every running Flink container (JobManagers and TaskManagers). Wired into
      * {@code EmulatorLifecycle.onStop()} so containers are torn down on shutdown alongside the other
      * container managers.
      */
     public void stopAll() {
+        synchronized (this) {
+            shuttingDown = true;
+        }
         if (!containerIds.isEmpty()) {
             LOG.infov("Stopping {0} Flink cluster(s) on shutdown", containerIds.size());
         }
@@ -622,6 +714,54 @@ public class FlinkContainerManager {
             Closeable logHandle = logStreams.remove(applicationName);
             lifecycleManager.stopAndRemove(jmId, logHandle);
         }
+    }
+
+    /** Whether shutdown has removed the containers, after which no Flink cluster starts. */
+    public synchronized boolean isShuttingDown() {
+        return shuttingDown;
+    }
+
+    /**
+     * Keeps an application's cluster that outlived Floci, as one does when Floci is killed rather than shut down,
+     * when it still serves the application: its JobManager, and its TaskManager when it runs code, are running, the
+     * JobManager answers on the REST endpoint the application's record names, and the job the record names is still
+     * {@code RUNNING}. Its job and its state carry on. The containers are tracked again, so shutdown removes them,
+     * and the JobManager's logs are streamed again. Returns whether the cluster was kept.
+     */
+    public boolean adoptRunningCluster(FlinkApplication app) {
+        String rest = app.getRestEndpoint();
+        if (rest == null || (app.hasCode() && app.getFlinkJobId() == null)) {
+            return false;
+        }
+        Optional<Container> jobManager = runningContainer(containerName(app));
+        Optional<Container> taskManager = app.hasCode()
+                ? runningContainer(containerName(app) + "-tm") : Optional.empty();
+        if (jobManager.isEmpty() || (app.hasCode() && taskManager.isEmpty()) || !flinkRest.isRestUp(rest)
+                || (app.hasCode() && !"RUNNING".equals(flinkRest.jobState(rest, app.getFlinkJobId())))) {
+            return false;
+        }
+        synchronized (this) {
+            if (shuttingDown) {
+                return false;
+            }
+            containerIds.put(runtimeKey(app), jobManager.get().getId());
+            taskManager.ifPresent(container -> taskManagerIds.put(runtimeKey(app), container.getId()));
+        }
+        app.setContainerId(jobManager.get().getId());
+        app.setTaskManagerContainerId(taskManager.map(Container::getId).orElse(null));
+        attachLogs(app, jobManager.get().getId());
+        LOG.infov("Kept the running Flink cluster of application {0}", app.getApplicationName());
+        return true;
+    }
+
+    /** The running container of the name, or of its name before the floci-aws- prefix. */
+    private Optional<Container> runningContainer(String name) {
+        Optional<Container> container = lifecycleManager.findByName(name);
+        String legacyName = ContainerStorageHelper.legacyDockerName(config, name);
+        if (container.isEmpty() && !legacyName.equals(name)) {
+            container = lifecycleManager.findByName(legacyName);
+        }
+        return container.filter(running -> "running".equals(running.getState()));
     }
 
     private void attachLogs(FlinkApplication app, String containerId) {

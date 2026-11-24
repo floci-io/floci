@@ -240,6 +240,14 @@ grep -q '/eks/' "$SHARD_FILE" && [ -n "$K3S_IMAGE" ] && pull "$K3S_IMAGE"
 # pinned in application.yml too.
 RABBITMQ_IMAGE="$(grep -oE 'default-image: *"rabbitmq:[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
 starts AmazonMqBrokerRestartNightlyIntegrationTest && [ -n "$RABBITMQ_IMAGE" ] && pull "$RABBITMQ_IMAGE"
+# The nightly KinesisAnalyticsFlinkRestartNightlyIntegrationTest runs a FLINK-1_20 application, whose image
+# KinesisAnalyticsRuntimes maps, and the EFS init image chowns its savepoints volume.
+FLINK_IMAGE="$(grep -oE '"FLINK-1_20", *"[^"]+"' "$(find src/main/java -name KinesisAnalyticsRuntimes.java -print -quit)" | grep -oE '"apache/flink:[^"]+"' | tr -d '"')"
+EFS_INIT_IMAGE="$(grep -oE '^ +init-image: *[^ #]+' src/main/resources/application.yml | head -n 1 | sed 's/.*init-image: *//')"
+if starts KinesisAnalyticsFlinkRestartNightlyIntegrationTest; then
+    [ -n "$FLINK_IMAGE" ] && pull "$FLINK_IMAGE"
+    [ -n "$EFS_INIT_IMAGE" ] && pull "$EFS_INIT_IMAGE"
+fi
 if [ -n "$ECR_PUBLIC_IMAGES" ]; then
     { for image in $ECR_PUBLIC_IMAGES; do pull_and_log "$image"; sleep 1; done; } &
 fi

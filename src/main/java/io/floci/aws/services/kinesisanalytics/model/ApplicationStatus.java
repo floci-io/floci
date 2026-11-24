@@ -10,8 +10,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * <p>Only the states this emulator transitions through are modelled:
  * {@code CreateApplication} lands in {@link #READY}; {@code StartApplication} moves
  * {@link #STARTING} → {@link #RUNNING} (the backing Flink container coming up);
- * {@code StopApplication} returns to {@link #READY}; {@code DeleteApplication} passes
- * through {@link #DELETING}.
+ * {@code StopApplication} returns to {@link #READY}, through {@link #STOPPING} when the startup
+ * restore is starting the application's cluster; {@code DeleteApplication} passes through
+ * {@link #DELETING}.
  */
 @RegisterForReflection
 public enum ApplicationStatus {

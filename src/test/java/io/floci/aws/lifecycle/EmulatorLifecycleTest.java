@@ -28,6 +28,7 @@ import io.floci.aws.services.elb.ElbClassicService;
 import io.floci.aws.services.elbv2.ElbV2Service;
 import io.floci.aws.services.floci.ui.FlociUiManager;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.kinesisanalytics.KinesisAnalyticsV2Service;
 import io.floci.aws.services.kinesisanalytics.container.FlinkContainerManager;
 import io.floci.aws.services.lambda.DynamoDbStreamsEventSourcePoller;
 import io.floci.aws.services.lambda.KinesisEventSourcePoller;
@@ -125,6 +126,8 @@ class EmulatorLifecycleTest {
     @Mock private EcsService ecsService;
     @Mock private SageMakerService sageMakerService;
     @Mock private AmazonMqService amazonMqService;
+    @Mock private KinesisAnalyticsV2Service kinesisAnalyticsService;
+    @Mock private EmulatorConfig.KinesisAnalyticsServiceConfig kinesisAnalyticsServiceConfig;
     @Mock private EmulatorConfig.AmazonMqServiceConfig amazonMqServiceConfig;
     @Mock private EmulatorConfig.SageMakerServiceConfig sageMakerServiceConfig;
     @Mock private EksService eksService;
@@ -174,6 +177,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(eksServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.codeartifact()).thenReturn(codeArtifactServiceConfig);
         Mockito.lenient().when(codeArtifactServiceConfig.enabled()).thenReturn(true);
+        Mockito.lenient().when(servicesConfig.kinesisAnalytics()).thenReturn(kinesisAnalyticsServiceConfig);
+        Mockito.lenient().when(kinesisAnalyticsServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.amazonmq()).thenReturn(amazonMqServiceConfig);
         Mockito.lenient().when(amazonMqServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.sagemaker()).thenReturn(sageMakerServiceConfig);
@@ -193,7 +198,8 @@ class EmulatorLifecycleTest {
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
                 memoryDbContainerManager, memoryDbProxyManager, memoryDbService,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
-                rabbitMqManager, amazonMqService, flinkContainerManager, sageMakerService, rdsService, timestreamInfluxDbService,
+                rabbitMqManager, amazonMqService, flinkContainerManager, kinesisAnalyticsService,
+                sageMakerService, rdsService, timestreamInfluxDbService,
                 elbV2Service, elbClassicService, ecsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecsTaskRoleCredentialsServer, ecrRegistryManager, flociUiManager, initLifecycleState,
@@ -520,6 +526,48 @@ class EmulatorLifecycleTest {
 
         verify(elbV2Service).restorePersistedRuntime();
         verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void restoresPersistedFlinkApplicationsAfterStorageLoad() {
+        stubStorageConfig();
+        when(kinesisAnalyticsServiceConfig.enabled()).thenReturn(true);
+        when(kinesisAnalyticsService.restorePersistedRuntime()).thenReturn(CompletableFuture.completedFuture(null));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, kinesisAnalyticsService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(kinesisAnalyticsService).restorePersistedRuntime();
+    }
+
+    @Test
+    void aFailedFlinkRestoreDoesNotStopTheOtherRestores() {
+        stubStorageConfig();
+        when(kinesisAnalyticsServiceConfig.enabled()).thenReturn(true);
+        when(elbv2ServiceConfig.enabled()).thenReturn(true);
+        when(kinesisAnalyticsService.restorePersistedRuntime()).thenReturn(CompletableFuture.failedFuture(
+                new IllegalStateException("Could not restore Kinesis Analytics V2 application demo")));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(elbV2Service).restorePersistedRuntime();
+        verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void leavesFlinkApplicationsUntouchedWhenKinesisAnalyticsIsDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(kinesisAnalyticsService, never()).restorePersistedRuntime();
     }
 
     @Test
