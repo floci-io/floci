@@ -90,6 +90,8 @@ public class EcrService implements ResourceProvider, Resettable {
     private static final int MAX_REPO_NAME_LENGTH = 256;
     private static final int MAX_PULL_TIME_EXCLUSIONS = 100;
     private static final int MAX_PULL_THROUGH_CACHE_PREFIX_LENGTH = 30;
+    private static final int MIN_LIFECYCLE_POLICY_LENGTH = 100;
+    private static final int MAX_LIFECYCLE_POLICY_LENGTH = 30720;
     private static final Map<String, String> ACCOUNT_SETTING_DEFAULTS = Map.of(
             "BASIC_SCAN_TYPE_VERSION", "AWS_NATIVE", "REGISTRY_POLICY_SCOPE", "V2", "BLOB_MOUNTING", "DISABLED");
 
@@ -1828,8 +1830,21 @@ public class EcrService implements ResourceProvider, Resettable {
         return repo;
     }
 
-    /** Refuses a lifecycle policy document ECR would refuse; see {@link EcrLifecyclePolicy#parse}. */
+    /**
+     * Refuses a lifecycle policy document ECR would refuse: one outside the model's 100 to 30720 characters, then one
+     * {@link EcrLifecyclePolicy#parse} refuses.
+     */
     public static void validateLifecyclePolicyDocument(String text) {
+        String bound = null;
+        if (text != null && text.length() < MIN_LIFECYCLE_POLICY_LENGTH) {
+            bound = "greater than or equal to " + MIN_LIFECYCLE_POLICY_LENGTH;
+        } else if (text != null && text.length() > MAX_LIFECYCLE_POLICY_LENGTH) {
+            bound = "less than or equal to " + MAX_LIFECYCLE_POLICY_LENGTH;
+        }
+        if (bound != null) {
+            throw new AwsException("InvalidParameterException", "Invalid parameter at 'lifecyclePolicyText' failed to "
+                    + "satisfy constraint: 'Member must have length " + bound + "'", 400);
+        }
         EcrLifecyclePolicy.parse(text);
     }
 

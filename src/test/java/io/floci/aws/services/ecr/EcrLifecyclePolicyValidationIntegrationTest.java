@@ -139,6 +139,9 @@ class EcrLifecyclePolicyValidationIntegrationTest {
             InvalidParameterException malformed = assertThrows(InvalidParameterException.class,
                     () -> client.putLifecyclePolicy(r -> r.repositoryName(repository)
                             .lifecyclePolicyText("{1:2}" + " ".repeat(100))));
+            InvalidParameterException tooShort = assertThrows(InvalidParameterException.class,
+                    () -> client.putLifecyclePolicy(r -> r.repositoryName(repository)
+                            .lifecyclePolicyText("{\"rules\":[]}")));
 
             assertEquals("Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: 'Lifecycle policy "
                     + "validation failure: numeric instance is lower than the required minimum (minimum: 1, found: 0)"
@@ -146,6 +149,8 @@ class EcrLifecyclePolicyValidationIntegrationTest {
             assertEquals("Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: 'Lifecycle policy "
                     + "parsing failure: Could not map policyString into LifecyclePolicy.'",
                     malformed.awsErrorDetails().errorMessage());
+            assertEquals("Invalid parameter at 'lifecyclePolicyText' failed to satisfy constraint: 'Member must have "
+                    + "length greater than or equal to 100'", tooShort.awsErrorDetails().errorMessage());
         }
     }
 

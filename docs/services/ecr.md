@@ -45,20 +45,24 @@
 | `GetAccountSetting` / `PutAccountSetting` | Read and store account settings for the registry (stored, not acted on) |
 
 `PutLifecyclePolicy`, and an `AWS::ECR::Repository` in CloudFormation, check the document
-against the rules in the ECR user guide:
+as ECR does, against the rules in the ECR user guide:
 
-- At least one rule, each with a unique positive `rulePriority`.
-- `tagStatus` is `tagged`, `untagged` or `any`. A `tagged` rule needs exactly one of `tagPrefixList` and `tagPatternList`, and the other two statuses allow neither. A pattern can have at most four `*` wildcards.
-- `countType` is `imageCountMoreThan`, `sinceImagePushed`, `sinceImagePulled` or `sinceImageTransitioned`. The three `since` types need `countUnit` `days`, and `imageCountMoreThan` takes no `countUnit`. `countNumber` is a positive integer.
+- The text is 100 to 30720 characters, as the API model bounds it.
+- One to 50 rules, each with a unique positive `rulePriority`, a `selection` and an `action`.
+- `tagStatus` is `tagged`, `untagged` or `any`. A `tagged` rule needs exactly one of `tagPrefixList` (at most 10 prefixes) and `tagPatternList`, and the other two statuses allow neither. A pattern can have at most four `*` wildcards.
+- `countType` is `imageCountMoreThan`, `sinceImagePushed`, `sinceImagePulled` or `sinceImageTransitioned`. The three `since` types need `countUnit` `days`, and `imageCountMoreThan` takes no `countUnit`. `countNumber` is a positive integer, at least 90 for `sinceImageTransitioned`.
 - `storageClass` is `standard`, the default, except for `sinceImageTransitioned`, which needs `archive`.
-- `action.type` is `expire` or `transition`. A `transition` needs `targetStorageClass` `archive`, and `sinceImageTransitioned` allows only `expire`.
-- Among the rules selecting one storage class, an `any` rule has a higher `rulePriority` than every other rule, only one rule selects untagged images, and no tag prefix appears in two rules.
+- `action.type` is `expire` or `transition`. An `expire` action carries nothing else, a `transition` needs `targetStorageClass` `archive`, and `sinceImageTransitioned` allows only `expire`.
+- Among the rules selecting one storage class, an `any` rule has the highest `rulePriority`, so there is one at most, only one rule selects untagged images, and no tag prefix appears in two rules.
 
-Enum values are matched without regard to case. A refused document returns
-`InvalidParameterException` with ECR's message form, `Invalid parameter at 'LifecyclePolicyText'
-failed to satisfy constraint: 'Lifecycle policy validation failure: ...'` (`Lifecycle policy parsing
-failure: ...` for a document that is not a JSON object of the right shape), and the prior policy is
-kept. Expiration and registry garbage collection remain unimplemented.
+Values are matched exactly as the guide spells them, and a selection member the guide does not
+list is refused. A refused document returns `InvalidParameterException` in ECR's message form,
+`Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: '...'`, with the prior
+policy kept. As on ECR, malformed JSON, or a document that does not map onto ECR's rule types,
+gives `Lifecycle policy parsing failure: ...`, a document breaking the JSON schema gives the schema
+validator's own text after `Lifecycle policy validation failure: `, and a broken rule gives a sentence
+naming it. Where ECR's wording is known, from refusals quoted publicly and replays recorded against
+ECR, Floci uses it. Expiration and registry garbage collection remain unimplemented.
 
 `GetAccountSetting` and `PutAccountSetting` keep values per account and Region.
 Supported names are `BASIC_SCAN_TYPE_VERSION` (`AWS_NATIVE`), `REGISTRY_POLICY_SCOPE`
