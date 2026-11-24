@@ -76,6 +76,8 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
     private static final String IDENTITY_STORE_ID = "d-9067f2a3c1";
     /** The service principal an organization registers a delegated administrator for IAM Identity Center under. */
     private static final String SSO_SERVICE_PRINCIPAL = ServicePrincipals.of("sso");
+    /** How many identity stores no instance holds are remembered before the record starts over. */
+    private static final int UNHELD_LIMIT = 10_000;
     private static final Pattern INSTANCE_ARN_PATTERN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":sso:::instance/(?:sso)?ins-[a-zA-Z0-9-.]{16}");
     private static final Pattern PERMISSION_SET_NAME = Pattern.compile("[\\w+=,.@-]+");
     private static final Pattern PERMISSION_SET_ARN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":sso:::permissionSet/(?:sso)?ins-[a-zA-Z0-9-.]{16}/ps-[a-zA-Z0-9-./]{16}");
@@ -146,6 +148,12 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
      * account's instance before it is used, so one a reset or a restore outdates is found again by the scan.
      */
     private final Map<String, String> identityStoreOwners = new ConcurrentHashMap<>();
+    /**
+     * The identity stores the last look through every instance found none holding, up to {@code UNHELD_LIMIT}, so a
+     * request naming one again is answered without another; emptied whenever an instance is written and on reset, as
+     * only those make a store held that was not.
+     */
+    private final Set<String> unheldIdentityStores = ConcurrentHashMap.newKeySet();
     private final StorageBackend<String, InstanceAccessControlAttributeConfiguration> accessControlAttributeConfigurations;
     private final StorageBackend<String, TrustedTokenIssuer> trustedTokenIssuers;
     private final StorageBackend<String, TrustedTokenIssuer> trustedTokenIssuerUpdateOverrides;
@@ -282,6 +290,11 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         return instanceHoldingIdentityStore(identityStoreId, defaultAccountId).isPresent();
     }
 
+    /** The account whose IAM Identity Center instance holds the identity store; empty for a store no instance holds. */
+    public Optional<String> identityStoreOwner(String identityStoreId) {
+        return instanceHoldingIdentityStore(identityStoreId, defaultAccountId).map(SsoInstance::ownerAccountId);
+    }
+
     /**
      * How an account may use an identity store, as the IAM Identity Center User Guide gives it: the account its
      * instance belongs to, and a delegated administrator for IAM Identity Center in an organization instance's
@@ -311,7 +324,8 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
     /**
      * The instance holding the identity store, read where its account keeps its one instance: the caller's, the
      * default account's, or the one last found holding it ({@code identityStoreOwners}). Only a store none of those
-     * holds is looked for among every account's instances, which records each instance's store for the next request.
+     * holds is looked for among every account's instances, which records each instance's store for the next request,
+     * and a store none holds as such ({@code unheldIdentityStores}).
      */
     private Optional<SsoInstance> instanceHoldingIdentityStore(String identityStoreId, String callerAccountId) {
         if (identityStoreId == null) {
@@ -329,11 +343,22 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
                 return own;
             }
         }
+        if (unheldIdentityStores.contains(identityStoreId)) {
+            return Optional.empty();
+        }
         identityStoreOwners.remove(identityStoreId);
         List<SsoInstance> all = instances instanceof AccountAwareStorageBackend<SsoInstance> accountAware
                 ? accountAware.scanAllAccounts() : instances.scan(key -> true);
         all.forEach(instance -> identityStoreOwners.put(instance.identityStoreId(), instance.ownerAccountId()));
-        return all.stream().filter(instance -> identityStoreId.equals(instance.identityStoreId())).findFirst();
+        Optional<SsoInstance> holding = all.stream()
+                .filter(instance -> identityStoreId.equals(instance.identityStoreId())).findFirst();
+        if (holding.isEmpty()) {
+            if (unheldIdentityStores.size() >= UNHELD_LIMIT) {
+                unheldIdentityStores.clear();
+            }
+            unheldIdentityStores.add(identityStoreId);
+        }
+        return holding;
     }
 
     /**
@@ -351,6 +376,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
             AccountAwareStorageBackend.putInAccount(instances, ownerAccountId, ownerAccountId,
                     new SsoInstance(bootstrapInstanceArn, IDENTITY_STORE_ID, "floci-identity-center", ownerAccountId,
                             region, System.currentTimeMillis(), "ACTIVE", null, false, new LinkedHashMap<>()));
+            unheldIdentityStores.clear();
             return;
         }
         // Before the seeded instance took its partition it was stored as arn:aws: in every
@@ -758,6 +784,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         SsoInstance instance = new SsoInstance(instanceArn, identityStoreId, name, callerAccountId, region,
                 System.currentTimeMillis(), "ACTIVE", null, true, tags);
         instances.put(callerAccountId, instance);
+        unheldIdentityStores.clear();
         instanceDeletionMarkers.delete(callerAccountId);
         instanceClientTokens.put(tokenKey, instanceArn);
         return instance;
@@ -2730,6 +2757,8 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
 
     @Override
     public void clear() {
+        identityStoreOwners.clear();
+        unheldIdentityStores.clear();
         permissionSets.clear();
         assignments.clear();
         assignmentOperations.clear();

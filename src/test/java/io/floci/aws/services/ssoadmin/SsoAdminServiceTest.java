@@ -39,6 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -61,6 +62,7 @@ class SsoAdminServiceTest {
     private InMemoryStorage<String, ApplicationAuthenticationMethod> applicationAuthenticationMethods;
     private InMemoryStorage<String, ApplicationGrant> applicationGrants;
     private InMemoryStorage<String, SsoInstance> instances;
+    private int instanceScans;
 
     @BeforeEach
     void setUp() {
@@ -70,7 +72,13 @@ class SsoAdminServiceTest {
         applicationAccessScopes = new InMemoryStorage<>();
         applicationAuthenticationMethods = new InMemoryStorage<>();
         applicationGrants = new InMemoryStorage<>();
-        instances = new InMemoryStorage<>();
+        instances = new InMemoryStorage<>() {
+            @Override
+            public List<SsoInstance> scan(Predicate<String> keyFilter) {
+                instanceScans++;
+                return super.scan(keyFilter);
+            }
+        };
         service = new SsoAdminService(
                 new InMemoryStorage<String, PermissionSet>(),
                 new InMemoryStorage<String, Assignment>(),
@@ -2079,6 +2087,8 @@ class SsoAdminServiceTest {
         assertEquals(IdentityStoreAccess.NONE, service.identityStoreAccess(store, "410987654321"));
         // A store no instance holds is not IAM Identity Center's: any account uses it.
         assertEquals(IdentityStoreAccess.FULL, service.identityStoreAccess("d-1234567890", "410987654321"));
+        assertEquals(Optional.of(ACCOUNT_ID), service.identityStoreOwner(store));
+        assertEquals(Optional.empty(), service.identityStoreOwner("d-1234567890"));
     }
 
     @Test
@@ -2093,6 +2103,21 @@ class SsoAdminServiceTest {
         // An instance a reset or a restore takes away is not answered from what was last found.
         instances.delete(owner);
         assertEquals(IdentityStoreAccess.FULL, service.identityStoreAccess("d-5555555555", ACCOUNT_ID));
+    }
+
+    @Test
+    void aStoreNoInstanceHoldsIsLookedForOnceUntilAnInstanceIsWritten() {
+        int before = instanceScans;
+        assertEquals(IdentityStoreAccess.FULL, service.identityStoreAccess("d-0000000000", "410987654321"));
+        assertEquals(IdentityStoreAccess.FULL, service.identityStoreAccess("d-0000000000", "410987654321"));
+        assertEquals(Optional.empty(), service.identityStoreOwner("d-0000000000"));
+        assertEquals(before + 1, instanceScans);
+        // A reset forgets it, so a store an instance comes to hold is found.
+        service.clear();
+        String owner = "510987654321";
+        instances.put(owner, new SsoInstance("arn:aws:sso:::instance/ssoins-2222222222222222", "d-0000000000",
+                "account-instance", owner, "us-east-1", 0L, "ACTIVE", null, true, new LinkedHashMap<>()));
+        assertEquals(Optional.of(owner), service.identityStoreOwner("d-0000000000"));
     }
 
     private static OrganizationAccount account(String id) {
