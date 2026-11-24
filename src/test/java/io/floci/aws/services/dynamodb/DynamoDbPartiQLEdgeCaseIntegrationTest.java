@@ -1029,6 +1029,29 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("message", equalTo(refused + list)));
     }
 
+    @Test
+    @Order(38)
+    void writesWithAGroupedOrOrNotInTheWhereClause() {
+        String attributes = "\"y\":{\"N\":\"1\"},\"z\":{\"N\":\"1\"}";
+        String where = " WHERE pk='grouped-or' AND sk='1' AND ";
+        putItem("grouped-or", attributes);
+
+        statement("UPDATE " + QUOTED_TABLE + " SET a=1" + where + "(y=1 OR y=2)").statusCode(200);
+        statement("UPDATE " + QUOTED_TABLE + " SET b=1" + where + "NOT (y=3 OR y=2)").statusCode(200);
+        transaction("UPDATE " + QUOTED_TABLE + " SET c=1" + where + "NOT (y=3 AND z=1)").statusCode(200);
+        getItem("grouped-or")
+            .body("Item.a.N", equalTo("1"))
+            .body("Item.b.N", equalTo("1"))
+            .body("Item.c.N", equalTo("1"));
+
+        statement("DELETE FROM " + QUOTED_TABLE + where + "(y=1 OR y=2)").statusCode(200);
+        getItem("grouped-or").body("Item", nullValue());
+
+        putItem("grouped-or", attributes);
+        transaction("DELETE FROM " + QUOTED_TABLE + where + "NOT (y=3 OR y=2)").statusCode(200);
+        getItem("grouped-or").body("Item", nullValue());
+    }
+
     private static void putItem(String pk, String attributes) {
         putItem(pk, "1", attributes);
     }
