@@ -1997,6 +1997,32 @@ class ResourceArnBuilderTest {
     }
 
     /**
+     * An identity store is checked in the account whose instance holds it, which the service answers for the store an
+     * {@code IdentityStoreId} names, not in the caller's.
+     */
+    @Test
+    void identityStoreChecksTheStoreInTheAccountItsServiceGives() {
+        ResourceArnBuilder reading = reading(new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "identitystore";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return "Identitystore".equals(type)
+                        ? Optional.of("arn:aws:identitystore::111122223333:identitystore/" + names.getFirst())
+                        : Optional.empty();
+            }
+        });
+        setJsonBody("{\"IdentityStoreId\":\"d-1234567890\",\"UserId\":\"1234567890-u1\"}");
+        assertEquals(List.of("arn:aws:identitystore::111122223333:identitystore/d-1234567890",
+                        "arn:aws:identitystore:::user/1234567890-u1"),
+                reading.buildResources("identitystore", "identitystore:DescribeUser", ctx, "us-east-1", ACCOUNT,
+                        "aws"));
+    }
+
+    /**
      * A required type an Identity Store request does not name is asked of the service: a membership's group and user
      * through its id, and a lookup's user by the members of the one way its alternate identifier is given, with their
      * paths, as the table writes them.
