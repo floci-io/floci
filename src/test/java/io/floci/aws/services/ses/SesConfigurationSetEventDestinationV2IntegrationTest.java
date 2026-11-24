@@ -469,18 +469,14 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
         String cnAuthHeader = SesV2Requests.authFor("cn-north-1");
         String cnDefaultBusArn =
                 "arn:aws-cn:events:cn-north-1:000000000000:event-bus/default";
-        given()
-            .contentType("application/json")
-            .header("Authorization", cnAuthHeader)
+        v2(cnAuthHeader)
             .body("{\"ConfigurationSetName\": \"" + cs + "\"}")
         .when()
             .post("/v2/email/configuration-sets")
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", cnAuthHeader)
+        v2(cnAuthHeader)
             .body("""
                 {
                   "EventDestinationName": "ed-eb-default-cn",
@@ -646,18 +642,14 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
     @Order(23)
     void eventBridgeDefaultBusMatchingNonDefaultRequestScopeSucceeds() {
         String cs = "v2-cs-ed-request-scope";
-        given()
-            .contentType("application/json")
-            .header("Authorization", SCOPED_AUTH_HEADER)
+        v2(SCOPED_AUTH_HEADER)
             .body("{\"ConfigurationSetName\": \"" + cs + "\"}")
         .when()
             .post("/v2/email/configuration-sets")
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", SCOPED_AUTH_HEADER)
+        v2(SCOPED_AUTH_HEADER)
             .body("""
                 {
                   "EventDestinationName": "ed-eb-scoped-default",
@@ -673,9 +665,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/json")
-            .header("Authorization", SCOPED_AUTH_HEADER)
+        v2(SCOPED_AUTH_HEADER)
             .body("""
                 {
                   "EventDestination": {

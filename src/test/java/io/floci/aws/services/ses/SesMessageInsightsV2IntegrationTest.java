@@ -49,7 +49,7 @@ class SesMessageInsightsV2IntegrationTest {
     }
 
     private static String send(String auth, String destinationJson, String subject) {
-        return given().contentType("application/json").header("Authorization", auth)
+        return v2(auth)
                 .body("""
                     {
                       "FromEmailAddress": "%s",
@@ -259,7 +259,7 @@ class SesMessageInsightsV2IntegrationTest {
         // pass without ever proving isolation.
         enableVdm(ACCOUNT_A_AUTH);
         enableVdm(ACCOUNT_B_AUTH);
-        given().contentType("application/json").header("Authorization", ACCOUNT_A_AUTH)
+        v2(ACCOUNT_A_AUTH)
                 .body("{\"EmailIdentity\":\"" + SENDER + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
 
@@ -326,13 +326,13 @@ class SesMessageInsightsV2IntegrationTest {
     }
 
     private static void enableVdm(String auth) {
-        given().contentType("application/json").header("Authorization", auth)
+        v2(auth)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"ENABLED\"}}")
         .when().put("/v2/email/account/vdm").then().statusCode(200);
     }
 
     private static void disableVdm(String auth) {
-        given().contentType("application/json").header("Authorization", auth)
+        v2(auth)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"DISABLED\"}}")
         .when().put("/v2/email/account/vdm").then().statusCode(200);
     }

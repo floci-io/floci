@@ -76,11 +76,11 @@ class SesContactPagingIntegrationTest {
     void contacts_aTokenIsReadBeforeTheListIsLookedUp() {
         String token = list("{\"PageSize\":1}").statusCode(200).extract().path("NextToken");
 
-        given().contentType("application/json").header("Authorization", OTHER_REGION_AUTH)
+        v2(OTHER_REGION_AUTH)
                 .body("{\"NextToken\":\"" + token + "\"}")
         .when().post(CONTACTS + "/list").then().statusCode(400)
                 .body("message", equalTo("Provided NextToken is invalid"));
-        given().contentType("application/json").header("Authorization", OTHER_REGION_AUTH).body("{}")
+        v2(OTHER_REGION_AUTH).body("{}")
         .when().post(CONTACTS + "/list").then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"));
     }

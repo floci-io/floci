@@ -466,9 +466,7 @@ class SesTemplateV2IntegrationTest {
     @Order(20)
     void crossRegionIsolation_templateNotVisibleInOtherRegion() {
         // Create template in eu-west-1
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_EU_WEST_1)
+        v2(AUTH_EU_WEST_1)
             .body("""
                 {
                   "TemplateName": "region-test",

@@ -4,7 +4,7 @@ import org.junit.jupiter.params.provider.Arguments;
 
 import java.util.stream.Stream;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
@@ -39,9 +39,7 @@ final class SesV2SerializationErrors {
     }
 
     static void assertError(String auth, String method, String path, String body, String type, String message) {
-        given()
-            .contentType("application/json")
-            .header("Authorization", auth)
+        v2(auth)
             .body(body)
         .when()
             .request(method, path)
