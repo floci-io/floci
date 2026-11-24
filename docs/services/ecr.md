@@ -44,10 +44,21 @@
 | `PutRegistryScanningConfiguration` / `GetRegistryScanningConfiguration` | Store the registry's scan type and scanning rules (stored, not acted on) |
 | `GetAccountSetting` / `PutAccountSetting` | Read and store account settings for the registry (stored, not acted on) |
 
-`PutLifecyclePolicy` checks that the document is one JSON object with a nonempty
-`rules` array and unique positive integer priorities. Rejected documents return
-`InvalidParameterException` without replacing the prior policy. Selection and
-action validation, expiration, and registry garbage collection remain unimplemented.
+`PutLifecyclePolicy`, and an `AWS::ECR::Repository` in CloudFormation, check the document
+against the rules in the ECR user guide:
+
+- At least one rule, each with a unique positive `rulePriority`.
+- `tagStatus` is `tagged`, `untagged` or `any`. A `tagged` rule needs exactly one of `tagPrefixList` and `tagPatternList`, and the other two statuses allow neither. A pattern can have at most four `*` wildcards.
+- `countType` is `imageCountMoreThan`, `sinceImagePushed`, `sinceImagePulled` or `sinceImageTransitioned`. The three `since` types need `countUnit` `days`, and `imageCountMoreThan` takes no `countUnit`. `countNumber` is a positive integer.
+- `storageClass` is `standard`, the default, except for `sinceImageTransitioned`, which needs `archive`.
+- `action.type` is `expire` or `transition`. A `transition` needs `targetStorageClass` `archive`, and `sinceImageTransitioned` allows only `expire`.
+- Among the rules selecting one storage class, an `any` rule has a higher `rulePriority` than every other rule, only one rule selects untagged images, and no tag prefix appears in two rules.
+
+Enum values are matched without regard to case. A refused document returns
+`InvalidParameterException` with ECR's message form, `Invalid parameter at 'LifecyclePolicyText'
+failed to satisfy constraint: 'Lifecycle policy validation failure: ...'` (`Lifecycle policy parsing
+failure: ...` for a document that is not a JSON object of the right shape), and the prior policy is
+kept. Expiration and registry garbage collection remain unimplemented.
 
 `GetAccountSetting` and `PutAccountSetting` keep values per account and Region.
 Supported names are `BASIC_SCAN_TYPE_VERSION` (`AWS_NATIVE`), `REGISTRY_POLICY_SCOPE`
