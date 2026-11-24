@@ -50,6 +50,7 @@ class BackendResponseCoordinatorRecoveryTest {
         assertSame(nextCopy, session.portal("p").orElseThrow(),
                 "A Sync already sent to the backend starts a new frontend query cycle");
         assertFalse(coordinator.isDiscardingUntilSync());
+        assertTrue(coordinator.extendedCycleFailed(), "Frontend Sync must retain the backend failure");
         assertFalse(coordinator.awaitIdle(1, TimeUnit.MILLISECONDS));
         FutureTask<BackendResponseCoordinator.GateResult> turn =
                 new FutureTask<>(() -> coordinator.awaitExtendedExecuteTurn(next));
@@ -58,6 +59,7 @@ class BackendResponseCoordinatorRecoveryTest {
             assertThrows(TimeoutException.class, () -> turn.get(25, TimeUnit.MILLISECONDS),
                     "The new Execute must still wait for the previous Sync response");
             coordinator.onBackendFrame('Z', new byte[]{'I'});
+            assertFalse(coordinator.extendedCycleFailed(), "ReadyForQuery ends the failed backend cycle");
             assertSame(nextCopy, session.portal("p").orElseThrow());
             coordinator.onBackendFrame('1', new byte[0]);
             coordinator.onBackendFrame('2', new byte[0]);

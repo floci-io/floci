@@ -18,6 +18,7 @@ final class BackendResponseCoordinator {
     private final Map<Long, GateResult> resolvedGates = new HashMap<>();
     private long nextSequence = 1;
     private boolean discardingUntilSync;
+    private boolean extendedCycleFailed;
     private boolean closed;
     private char lastReadyStatus = 'I';
 
@@ -171,6 +172,7 @@ final class BackendResponseCoordinator {
                 confirm(head);
                 if (operation == Operation.SYNC) {
                     discardingUntilSync = false;
+                    extendedCycleFailed = false;
                 }
                 changed.signalAll();
             }
@@ -223,6 +225,15 @@ final class BackendResponseCoordinator {
         }
     }
 
+    boolean extendedCycleFailed() {
+        lock.lock();
+        try {
+            return extendedCycleFailed;
+        } finally {
+            lock.unlock();
+        }
+    }
+
     char lastReadyStatus() {
         lock.lock();
         try {
@@ -257,6 +268,7 @@ final class BackendResponseCoordinator {
     }
 
     private void discardQueuedOperationsBeforeSync() {
+        extendedCycleFailed = true;
         while (!pending.isEmpty() && pending.peekFirst().ticket().operation() != Operation.SYNC) {
             PendingOperation skipped = pending.removeFirst();
             reject(skipped);
