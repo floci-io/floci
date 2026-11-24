@@ -1216,18 +1216,19 @@ registration; a `DROP FUNCTION` of any function Floci does not track is left to 
 
 - **Calling the function works over both the PostgreSQL wire protocol (Simple and Extended Query) and the Redshift Data API.**
   Before executing a statement that references a registered external function, Floci runs bounded collect passes (inside a
-  rolled-back transaction, savepoint, or PL/pgSQL subtransaction for Extended Query), batches the collected argument tuples
+  rolled-back savepoint, or a PL/pgSQL subtransaction for Extended Query), batches the collected argument tuples
   according to `MAX_BATCH_ROWS` and `MAX_BATCH_SIZE`, invokes Lambda via the documented Redshift JSON contract (with
   `RETRY_TIMEOUT` backoff on throttling), and caches the results in a trigger-guarded session temp table for the
-  statement's execution.
+  statement's execution. In autocommit the collect passes and the statement share one transaction, so transaction-time
+  arguments such as `now()` and `current_timestamp` keep the value Lambda was called with.
 - Nested calls (such as `outer_udf(inner_udf(x))`), `WHERE` filters, `PreparedStatement` bind parameters (including
   binary-format parameters and interleaved bound portals), Data API named parameters, explicit transactions
   (`BEGIN` / `COMMIT` / `ROLLBACK`), and write statements (`INSERT ... SELECT`, `UPDATE`, `DELETE`) are supported. Write
   statements whose target table enforces a `NOT NULL` or `CHECK` constraint that rejects `NULL` during the collect pass
   will fail with PostgreSQL's constraint error.
 - Multi-statement queries, transaction-control statements (`BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`), procedural blocks
-  (`DO`, `CALL`), and volatile argument expressions (`nextval`, `setval`, `random`, `clock_timestamp`, `timeofday`,
-  `gen_random_uuid`, `txid_current`) cannot be combined with external function calls and fail with SQLSTATE `0A000`.
+  (`DO`, `CALL`), and volatile argument expressions (`nextval`, `setval`, `random`, `clock_timestamp`,
+  `statement_timestamp`, `timeofday`, `gen_random_uuid`, `txid_current`) cannot be combined with external function calls and fail with SQLSTATE `0A000`.
 - Results are cached per statement only, never across statements, for both `STABLE` and `VOLATILE` functions; execute
   mode and cached rows are cleared after each statement.
 - Argument and return types are `SMALLINT`, `INTEGER`, `BIGINT`, `DECIMAL`, `REAL`, `DOUBLE PRECISION`, `CHAR`,

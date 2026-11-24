@@ -37,7 +37,7 @@ public class LambdaUdfEvaluator {
     private static final Set<String> DISALLOWED_LEADING_KEYWORDS = Set.of(
             "begin", "start", "commit", "end", "rollback", "abort", "savepoint", "release", "prepare", "do", "call");
     private static final Set<String> VOLATILE_ARGUMENT_FUNCTIONS = Set.of(
-            "nextval", "setval", "random", "clock_timestamp", "timeofday",
+            "nextval", "setval", "random", "clock_timestamp", "statement_timestamp", "timeofday",
             "gen_random_uuid", "uuid_generate_v4", "txid_current", "pg_current_xact_id");
 
     static final String CURRENT_USER_SQL = "SELECT current_user";

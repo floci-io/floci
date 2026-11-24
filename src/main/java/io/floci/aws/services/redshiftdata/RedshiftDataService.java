@@ -708,17 +708,33 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
                 boolean ddl = preparation.needsBackendForDdl(sql, session)
                         ? preparation.handlesDdl(sql, session, backend)
                         : preparation.handlesDdl(sql, session);
-                boolean handled = ddl
-                        ? preparation.prepare(sql, session, backend)
-                        : parsed.parameterOrder().isEmpty()
-                                ? preparation.prepare(parsed.sql(), session, backend)
-                                : preparation.prepare(parsed.sql(), session, backend,
-                                        positionalParameters(parsed.parameterOrder(), parameters));
+                boolean usesUdf = !ddl && preparation.referencesExternalFunction(parsed.sql(), session);
+                List<String> positional = positionalParameters(parsed.parameterOrder(), parameters);
+                boolean handled;
+                if (ddl) {
+                    handled = preparation.prepare(sql, session, backend);
+                } else if (usesUdf) {
+                    handled = preparation.prepareTables(parsed.sql(), session, backend, positional);
+                    if (!handled) {
+                        // The collect passes and the statement share one transaction, so now() and the other
+                        // transaction-time arguments the cached results are keyed on cannot change between them.
+                        if (!autoCommit) {
+                            connection.setAutoCommit(false);
+                        }
+                        preparation.prepareExternalFunctions(parsed.sql(), new SpectrumSession(context.accountId(),
+                                context.clusterKey(), context.databaseName(), context.iamRoleArns(),
+                                !connection.getAutoCommit()), backend, positional, null);
+                    }
+                } else if (parsed.parameterOrder().isEmpty()) {
+                    handled = preparation.prepare(parsed.sql(), session, backend);
+                } else {
+                    handled = preparation.prepare(parsed.sql(), session, backend, positional);
+                }
                 if (handled) {
                     stored.status = RedshiftDataStatementStore.Status.FINISHED;
                     return;
                 }
-                udfPrepared = !ddl && preparation.referencesExternalFunction(parsed.sql(), session);
+                udfPrepared = usesUdf;
             } catch (SpectrumSqlException exception) {
                 throw new SQLException(exception.getMessage(), exception.sqlState(), exception);
             } catch (SpectrumReadException exception) {

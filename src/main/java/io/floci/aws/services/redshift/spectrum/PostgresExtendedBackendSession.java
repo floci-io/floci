@@ -1,5 +1,7 @@
 package io.floci.aws.services.redshift.spectrum;
 
+import io.floci.aws.core.common.PostgresWire;
+
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -317,7 +319,7 @@ public final class PostgresExtendedBackendSession implements BackendSql {
         for (int closed = 0; closed < 2;) {
             Response response = read();
             if (response.type() == 'D') {
-                rows.add(PostgresBackendSession.decodeRow(response.body()));
+                rows.add(PostgresWire.dataRowValues(response.body()));
             } else if (response.type() == '3') {
                 closed++;
             }

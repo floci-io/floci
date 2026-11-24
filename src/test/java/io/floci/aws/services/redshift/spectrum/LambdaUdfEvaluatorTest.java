@@ -117,6 +117,12 @@ class LambdaUdfEvaluatorTest {
         assertThat(rand.sqlState(), equalTo("0A000"));
         assertThat(rand.getMessage(), containsString("random()"));
 
+        SpectrumSqlException statementTime = assertThrows(SpectrumSqlException.class,
+                () -> evaluator.prepare("SELECT exfunc_sum(extract(second FROM statement_timestamp())::int, 1)",
+                        SESSION, backend, List.of(), "us-east-1"));
+        assertThat(statementTime.sqlState(), equalTo("0A000"));
+        assertThat(statementTime.getMessage(), containsString("statement_timestamp()"));
+
         verifyNoInteractions(backend, invoker);
     }
 

@@ -312,6 +312,11 @@ public class RedshiftInterceptingBridge {
                     LOG.debugv(exception, "Could not reset external function state before Simple Query");
                 }
             }
+            if (usesUdf && coordinator.lastReadyStatus() == 'I' && parseS3Statement(sql) == null
+                    && runExternalFunctionStatementInOneTransaction(sql)) {
+                udfStateDirty = true;
+                return;
+            }
             SpectrumInterceptor.Decision[] decision = new SpectrumInterceptor.Decision[1];
             boolean intercepted;
             try {
@@ -942,6 +947,109 @@ public class RedshiftInterceptingBridge {
     private static void writeCString(ByteArrayOutputStream out, String value) {
         out.writeBytes(value.getBytes(StandardCharsets.UTF_8));
         out.write(0);
+    }
+
+    /**
+     * Runs an autocommit Simple Query statement that calls an external function inside one transaction together
+     * with its collect passes, so {@code now()} and the other transaction-time values the calls are keyed on stay
+     * the same from the first pass to the statement itself. The bridge owns the backend for the whole exchange,
+     * relays the statement's response, and reports the transaction closed once it has committed or rolled back.
+     *
+     * @return {@code false} when the statement is not a plain forwarded one or the backend could not be owned, so
+     *         the caller handles it the usual way
+     */
+    private boolean runExternalFunctionStatementInOneTransaction(String sql) throws IOException {
+        return runWithBackendOwned(() -> {
+            PostgresBackendSession backendSql = new PostgresBackendSession(backend);
+            SpectrumSession autocommit = spectrumSession();
+            try {
+                if (!(spectrumInterceptor.plan(sql, autocommit, backendSql) instanceof SpectrumInterceptor.Plan.Forward)) {
+                    return false;
+                }
+                spectrumInterceptor.preparation().prepareTables(sql, autocommit, backendSql, List.of());
+                backendSql.execute("BEGIN");
+            } catch (RuntimeException exception) {
+                writeSimpleSpectrumError(exception);
+                return true;
+            }
+            try {
+                spectrumInterceptor.preparation().prepareExternalFunctions(sql, new SpectrumSession(clusterAccountId,
+                        clusterKey, databaseName, iamRoleArns, true), backendSql, List.of(), null);
+            } catch (RuntimeException exception) {
+                endOwnedTransaction(backendSql, true);
+                writeSimpleSpectrumError(exception);
+                return true;
+            }
+            String statement = sql;
+            try {
+                statement = rewriteSql(sql);
+            } catch (RuntimeException e) {
+                LOG.warnv("RedshiftSqlInterceptor failed, forwarding original query: {0}", e.getMessage());
+            }
+            write(backend.getOutputStream(), PostgresWireDecoder.encodeQuery(statement));
+            boolean failed = relayUntilReady(auditResponses(sql));
+            RuntimeException commitFailure = endOwnedTransaction(backendSql, failed);
+            if (commitFailure != null) {
+                write(client.getOutputStream(),
+                        errorResponse(spectrumSqlState(commitFailure), commitFailure.getMessage()));
+            }
+            byte[] idle = new byte[]{'I'};
+            write(client.getOutputStream(), readyForQuery('I'));
+            coordinator.onBackendFrame('Z', idle);
+            completeUserChanges(idle);
+            return true;
+        });
+    }
+
+    /**
+     * Relays the backend's response to one Simple Query to the client, holding back its ReadyForQuery because the
+     * transaction the bridge opened around it is still to be ended.
+     *
+     * @return whether the statement failed
+     */
+    private boolean relayUntilReady(BiConsumer<Character, byte[]> audit) throws IOException {
+        PostgresWireDecoder decoder = new PostgresWireDecoder(backend.getInputStream());
+        OutputStream out = client.getOutputStream();
+        boolean failed = false;
+        PostgresWireDecoder.FrontendMessage message = decoder.nextMessage();
+        while (message != null) {
+            if (message.type() == 'Z') {
+                out.flush();
+                return failed;
+            }
+            if (message.type() == 'E') {
+                failed = true;
+            }
+            audit.accept(message.type(), message.body());
+            out.write(message.toPacketBytes());
+            message = decoder.nextMessage();
+        }
+        throw new IOException("PostgreSQL closed before ReadyForQuery");
+    }
+
+    /**
+     * Commits, or rolls back after a failure, the transaction the bridge opened around a statement, and publishes
+     * or drops the external table state it staged.
+     *
+     * @return the failure of a COMMIT, which the client has not been told about yet; null otherwise
+     */
+    private RuntimeException endOwnedTransaction(PostgresBackendSession backendSql, boolean failed) {
+        RuntimeException commitFailure = null;
+        try {
+            backendSql.execute(failed ? "ROLLBACK" : "COMMIT");
+        } catch (RuntimeException exception) {
+            if (failed) {
+                LOG.warnv(exception, "Could not roll back the transaction around an external function statement");
+            } else {
+                commitFailure = exception;
+            }
+        }
+        if (failed || commitFailure != null) {
+            spectrumInterceptor.preparation().finishCycle(relationalBackend);
+        } else {
+            spectrumInterceptor.preparation().finishCycle(relationalBackend, true);
+        }
+        return commitFailure;
     }
 
     private void writeSimpleSpectrumError(RuntimeException exception) throws IOException {

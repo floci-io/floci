@@ -1,5 +1,6 @@
 package io.floci.aws.services.redshift.spectrum;
 
+import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.services.redshift.proxy.PostgresWireDecoder;
 
 import java.io.IOException;
@@ -196,7 +197,7 @@ public final class PostgresBackendSession implements BackendSql {
         PostgresWireDecoder.FrontendMessage message = decoder.nextMessage();
         while (message != null) {
             if (message.type() == 'D') {
-                rows.add(decodeRow(message.body()));
+                rows.add(PostgresWire.dataRowValues(message.body()));
             } else if (message.type() == 'E') {
                 failure = toException(message.body());
             } else if (message.type() == 'Z') {
@@ -210,47 +211,9 @@ public final class PostgresBackendSession implements BackendSql {
         throw new IOException("PostgreSQL closed before ReadyForQuery");
     }
 
-    static List<String> decodeRow(byte[] body) {
-        if (body == null || body.length < 2) {
-            return List.of();
-        }
-        int columns = ((body[0] & 0xff) << 8) | (body[1] & 0xff);
-        List<String> row = new ArrayList<>(columns);
-        int offset = 2;
-        for (int i = 0; i < columns; i++) {
-            if (offset + 4 > body.length) {
-                break;
-            }
-            int length = ((body[offset] & 0xff) << 24) | ((body[offset + 1] & 0xff) << 16)
-                    | ((body[offset + 2] & 0xff) << 8) | (body[offset + 3] & 0xff);
-            offset += 4;
-            if (length < 0) {
-                row.add(null);
-            } else if (offset + length <= body.length) {
-                row.add(new String(body, offset, length, StandardCharsets.UTF_8));
-                offset += length;
-            } else {
-                row.add(null);
-                break;
-            }
-        }
-        return row;
-    }
-
     static String firstColumn(byte[] body) {
-        if (body == null || body.length < 6) {
-            return null;
-        }
-        int columns = ((body[0] & 0xff) << 8) | (body[1] & 0xff);
-        if (columns < 1) {
-            return null;
-        }
-        int length = ((body[2] & 0xff) << 24) | ((body[3] & 0xff) << 16)
-                | ((body[4] & 0xff) << 8) | (body[5] & 0xff);
-        if (length < 0 || body.length < 6 + length) {
-            return null;
-        }
-        return new String(body, 6, length, StandardCharsets.UTF_8);
+        List<String> row = PostgresWire.dataRowValues(body);
+        return row.isEmpty() ? null : row.get(0);
     }
 
     private static long rowCount(String tag) {

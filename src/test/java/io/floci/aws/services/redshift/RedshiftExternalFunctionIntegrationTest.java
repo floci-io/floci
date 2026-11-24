@@ -15,6 +15,7 @@ import io.floci.aws.testing.DockerAvailability;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
@@ -29,9 +30,11 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Types;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 import static io.floci.aws.services.redshift.RedshiftConnections.waitForConnection;
@@ -50,6 +53,7 @@ class RedshiftExternalFunctionIntegrationTest {
     private static final String ACCOUNT = "000000000000";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/FunctionItRole";
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final Set<String> FINAL_STATUSES = Set.of("FINISHED", "FAILED", "ABORTED");
 
     @Inject
     RedshiftService redshiftService;
@@ -247,6 +251,49 @@ class RedshiftExternalFunctionIntegrationTest {
 
     @Test
     @Timeout(120)
+    void keepsTransactionTimeArgumentsStableInAutocommit() throws Exception {
+        clusterId = "it-fn-" + UUID.randomUUID().toString().substring(0, 8);
+        Cluster cluster = redshiftService.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+        String sameNow = "SELECT exfunc_sum(extract(microseconds FROM now())::int, 0) "
+                + "= extract(microseconds FROM now())::int";
+        try (Connection connection = waitForConnection(cluster, "admin", "Secret123");
+             Statement statement = connection.createStatement()) {
+            statement.execute(create("exfunc_sum", "INT, INT", "lambda_sum"));
+            statement.execute(create("exfunc_fail", "INT, INT", "lambda_fail"));
+            statement.execute("CREATE TABLE stamped (val INT)");
+        }
+
+        try (Connection simple = waitForConnection(
+                RedshiftConnections.jdbcUrl(cluster) + "?preferQueryMode=simple", "admin", "Secret123");
+             Statement statement = simple.createStatement()) {
+            try (ResultSet rows = statement.executeQuery(sameNow)) {
+                assertTrue(rows.next());
+                assertTrue(rows.getBoolean(1));
+            }
+            statement.execute("INSERT INTO stamped SELECT exfunc_sum(extract(microseconds FROM current_timestamp)::int, 1)");
+            SQLException failed = assertThrows(SQLException.class,
+                    () -> statement.executeQuery("SELECT exfunc_fail(extract(microseconds FROM now())::int, 1)"));
+            assertEquals("XX000", failed.getSQLState());
+            try (ResultSet rows = statement.executeQuery("SELECT count(*) FROM stamped")) {
+                assertTrue(rows.next());
+                assertEquals(1, rows.getInt(1));
+            }
+        }
+
+        ObjectNode request = JSON.createObjectNode();
+        request.put("ClusterIdentifier", clusterId);
+        request.put("Database", "dev");
+        request.put("DbUser", "admin");
+        request.put("Sql", sameNow);
+        String statementId = redshiftDataService.executeStatement(request, "us-east-1").get("Id").asText();
+        ObjectNode described = awaitDataStatement(statementId);
+        assertEquals("FINISHED", described.get("Status").asText(), described.toString());
+        ObjectNode result = redshiftDataService.getStatementResult(JSON.createObjectNode().put("Id", statementId));
+        assertTrue(result.get("Records").get(0).get(0).get("booleanValue").asBoolean(), result.toString());
+    }
+
+    @Test
+    @Timeout(120)
     void evaluatesNestedWhereWriteTransactionExtendedQueryAndDataApi() throws Exception {
         clusterId = "it-fn-" + UUID.randomUUID().toString().substring(0, 8);
         Cluster cluster = redshiftService.createCluster(clusterId, "dc2.large", "admin", "Secret123");
@@ -373,17 +420,11 @@ class RedshiftExternalFunctionIntegrationTest {
         assertEquals(20L, result.get("Records").get(0).get(0).get("longValue").asLong());
     }
 
-    private ObjectNode awaitDataStatement(String statementId) throws InterruptedException {
+    private ObjectNode awaitDataStatement(String statementId) {
         ObjectNode describeReq = JSON.createObjectNode().put("Id", statementId);
-        long deadline = System.currentTimeMillis() + 30_000;
-        while (System.currentTimeMillis() < deadline) {
-            ObjectNode status = redshiftDataService.describeStatement(describeReq);
-            String state = status.get("Status").asText();
-            if ("FINISHED".equals(state) || "FAILED".equals(state) || "ABORTED".equals(state)) {
-                return status;
-            }
-            Thread.sleep(50);
-        }
-        return redshiftDataService.describeStatement(describeReq);
+        return Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
+                .pollInterval(Duration.ofMillis(50))
+                .until(() -> redshiftDataService.describeStatement(describeReq),
+                        status -> FINAL_STATUSES.contains(status.get("Status").asText()));
     }
 }
