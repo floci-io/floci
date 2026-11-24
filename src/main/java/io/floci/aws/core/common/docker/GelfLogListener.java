@@ -118,6 +118,7 @@ public class GelfLogListener {
         Map<String, String> options = new HashMap<>();
         options.put("gelf-address", "tcp://" + ensureStarted());
         options.put("tag", token);
+        options.put("mode", "non-blocking");
         if (jsonFileOptions != null) {
             copyOption(jsonFileOptions, "max-size", options, "cache-max-size");
             copyOption(jsonFileOptions, "max-file", options, "cache-max-file");
