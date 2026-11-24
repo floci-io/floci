@@ -572,6 +572,20 @@ def test_an_account_and_a_region_a_format_names_beside_its_own_take_the_requests
         {"type": "thing", "fill": {}}]
 
 
+def test_lists_a_request_adds_or_removes_name_a_type_no_resource_names_yet():
+    # ElastiCache's ModifyUserGroup changes the users of its UserIdsToAdd and UserIdsToRemove.
+    formats = {"group": "arn:${Partition}:svc:${Region}:${Account}:group:${GroupId}",
+               "user": "arn:${Partition}:svc:${Region}:${Account}:user:${UserId}"}
+    members = {"GroupId": "GroupId", "UserIdsToAdd": "UserIdsToAdd[]", "UserIdsToRemove": "UserIdsToRemove[]"}
+    resources = [{"type": "group", "fill": {"GroupId": "GroupId"}}]
+    assert r.with_change_lists(resources, ["group", "user"], formats, members) == resources + [
+        {"type": "user", "fill": {"UserId": "UserIdsToAdd[]"}}, {"type": "user", "fill": {"UserId": "UserIdsToRemove[]"}}]
+    # A type another resource names already, or a list named after something else, adds nothing.
+    named = resources + [{"type": "user", "fill": {"UserId": "UserIds[]"}}]
+    assert r.with_change_lists(named, ["group", "user"], formats, members) == named
+    assert r.with_change_lists(resources, ["group", "user"], formats, {"TagsToAdd": "TagsToAdd[]"}) == resources
+
+
 def test_a_structure_named_after_the_type_gives_its_name_to_a_type_named_by_nothing_else(tmp_path):
     # Config's PutConfigurationRecorder names its recorder in ConfigurationRecorder.name.
     service = model({"PutRecorder": {"Recorder": "Recorder"}})
@@ -1303,6 +1317,13 @@ def test_the_vendored_file_is_well_formed():
     assert operations["dms:DeleteEndpoint"]["resources"] == [{"types": ["Endpoint"], "arn": "EndpointArn"}]
     # An endpoint written with no CertificateArn names no certificate.
     assert not any(resource.get("type") == "Certificate" for resource in operations["dms:CreateEndpoint"]["resources"])
+    # ElastiCache is read whole: a cluster, group or user by the identifier its request names.
+    assert "elasticache" in document["namespaces"] and "elasticache" not in document["notCovered"]
+    assert operations["elasticache:DeleteCacheCluster"]["resources"][0] == {
+        "type": "cluster", "fill": {"CacheClusterId": "CacheClusterId"}}
+    assert operations["elasticache:ModifyUserGroup"]["resources"] == [
+        {"type": "usergroup", "fill": {"UserGroupId": "UserGroupId"}},
+        {"type": "user", "fill": {"UserId": "UserIdsToAdd[]"}}, {"type": "user", "fill": {"UserId": "UserIdsToRemove[]"}}]
     # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
     assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]

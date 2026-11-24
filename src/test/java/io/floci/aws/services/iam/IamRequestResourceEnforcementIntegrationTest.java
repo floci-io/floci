@@ -3455,6 +3455,46 @@ class IamRequestResourceEnforcementIntegrationTest {
                 "dms:DeleteReplicationSubnetGroup");
     }
 
+    /**
+     * An ElastiCache parameter group is checked on the ARN ElastiCache mints for it, {@code parametergroup:<name>}, so a
+     * grant on one lets the caller create it and not another.
+     */
+    @Test
+    void anElastiCacheParameterGroupIsCheckedOnTheArnItsNameGives() {
+        String group = "res-pg-" + suffix();
+        cleanup.register(() -> admin("elasticache").formParam("Action", "DeleteCacheParameterGroup")
+                .formParam("Version", "2015-02-02").formParam("CacheParameterGroupName", group).post("/"));
+        User user = user("res-elasticache");
+        user.policy(allowOn("elasticache:CreateCacheParameterGroup",
+                "arn:aws:elasticache:" + REGION + ":" + ACCOUNT + ":parametergroup:" + group));
+        createCacheParameterGroup(user, group).statusCode(200);
+        refused(createCacheParameterGroup(user, group + "-other"), "elasticache:CreateCacheParameterGroup");
+    }
+
+    /**
+     * An ElastiCache user group's change is checked on each user it adds or removes too, so a deny scoped to one user
+     * refuses a change that adds that user, and not one that adds another.
+     */
+    @Test
+    void anElastiCacheUserGroupChangeIsCheckedOnTheUsersItAdds() {
+        User user = user("res-elasticache-users");
+        user.policy(allowOn("elasticache:ModifyUserGroup", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"elasticache:ModifyUserGroup\",\"Resource\":\"arn:aws:elasticache:" + REGION + ":" + ACCOUNT
+                + ":user:res-denied\"}");
+        refused(user.query("elasticache", "ModifyUserGroup").formParam("Version", "2015-02-02")
+                .formParam("UserGroupId", "res-group").formParam("UserIdsToAdd.member.1", "res-denied").post("/")
+                .then(), "elasticache:ModifyUserGroup");
+        user.query("elasticache", "ModifyUserGroup").formParam("Version", "2015-02-02")
+                .formParam("UserGroupId", "res-group").formParam("UserIdsToAdd.member.1", "res-other").post("/")
+                .then().body(not(containsString("not authorized to perform")));
+    }
+
+    private static ValidatableResponse createCacheParameterGroup(User user, String name) {
+        return user.query("elasticache", "CreateCacheParameterGroup").formParam("Version", "2015-02-02")
+                .formParam("CacheParameterGroupName", name).formParam("CacheParameterGroupFamily", "redis7")
+                .formParam("Description", "res").post("/").then();
+    }
+
     private static ValidatableResponse glue(String operation, String body) {
         return adminJson("glue", "AWSGlue." + operation).body(body).post("/").then();
     }
