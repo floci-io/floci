@@ -402,7 +402,7 @@ class ElbV2CfnProvisionerTest {
     @ValueSource(booleans = {false, true})
     void invalidRuleRegexIsRejectedBeforeCreateOrUpdate(boolean update) {
         when(elb.describeRules(REGION, null, List.of(RULE_ARN))).thenReturn(List.of(rule(LISTENER_ARN)));
-        for (String invalid : List.of("(", "", "a".repeat(129), "/a(?=b)", "\\p{L}")) {
+        for (String invalid : List.of("", "a".repeat(129))) {
             ObjectNode props = mapper.createObjectNode().put("ListenerArn", LISTENER_ARN).put("Priority", "75");
             props.putArray("Conditions").addObject().put("Field", "path-pattern").putObject("PathPatternConfig")
                     .putArray("RegexValues").add(invalid);
@@ -411,6 +411,24 @@ class ElbV2CfnProvisionerTest {
                     update ? ctx(RULE_ARN) : ctx()));
             assertEquals("ValidationError", error.getErrorCode());
             assertEquals(400, error.getHttpStatus());
+        }
+        verify(elb, never()).createRule(anyString(), anyString(), anyList(), anyInt(), anyList(), any());
+        verify(elb, never()).modifyRule(anyString(), anyString(), anyList(), anyList());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void ruleRejectsUncompilableRegexWithTheAwsMessage(boolean update) {
+        for (String invalid : List.of("^/bad/(unclosed", "/a(?=b)", "\\p{L}")) {
+            ObjectNode props = mapper.createObjectNode().put("ListenerArn", LISTENER_ARN).put("Priority", "75");
+            props.putArray("Conditions").addObject().put("Field", "path-pattern").putObject("PathPatternConfig")
+                    .putArray("RegexValues").add(invalid);
+            AwsException error = assertThrows(AwsException.class, () -> provisioner.provision(
+                    resource("AWS::ElasticLoadBalancingV2::ListenerRule", "Rule"), props,
+                    update ? ctx(RULE_ARN) : ctx()));
+            assertEquals("ValidationError", error.getErrorCode());
+            assertEquals(400, error.getHttpStatus());
+            assertEquals("One or more provided condition regex values are not valid", error.getMessage());
         }
         verify(elb, never()).createRule(anyString(), anyString(), anyList(), anyInt(), anyList(), any());
         verify(elb, never()).modifyRule(anyString(), anyString(), anyList(), anyList());
@@ -431,7 +449,8 @@ class ElbV2CfnProvisionerTest {
                     update ? ctx(RULE_ARN) : ctx()));
             assertEquals("ValidationError", error.getErrorCode());
             assertEquals(400, error.getHttpStatus());
-            assertEquals("A path-pattern condition can specify either Values or RegexValues, not both.",
+            assertEquals("You must provide exactly one of the following: ['Values' 'RegexValues']"
+                    + " for config of type 'PathPatternConfig'",
                     error.getMessage());
         }
         verify(elb, never()).createRule(anyString(), anyString(), anyList(), anyInt(), anyList(), any());
@@ -470,7 +489,7 @@ class ElbV2CfnProvisionerTest {
         List<String> expectedMessages = List.of(
                 "PathPatternConfig.RegexValues requires the path-pattern field.",
                 "A condition can have at most three match evaluations.",
-                "A rule can have at most five match evaluations.");
+                "A rule can only have '5' condition values and regex values");
         for (int i = 0; i < invalidConditions.size(); i++) {
             ObjectNode props = mapper.createObjectNode().put("ListenerArn", LISTENER_ARN).put("Priority", "75");
             props.set("Conditions", mapper.readTree(invalidConditions.get(i)));

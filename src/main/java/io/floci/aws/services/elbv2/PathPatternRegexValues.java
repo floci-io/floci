@@ -37,7 +37,7 @@ public final class PathPatternRegexValues {
             evaluations += conditionEvaluations;
             if (evaluations > MAX_RULE_EVALUATIONS) {
                 throw new AwsException("ValidationError",
-                        "A rule can have at most five match evaluations.", 400);
+                        "A rule can only have '5' condition values and regex values", 400);
             }
         }
         for (RuleCondition condition : conditions) {
@@ -69,7 +69,8 @@ public final class PathPatternRegexValues {
     public static void validate(List<String> regexValues, boolean hasGlobValues) {
         if (hasGlobValues) {
             throw new AwsException("ValidationError",
-                    "A path-pattern condition can specify either Values or RegexValues, not both.", 400);
+                    "You must provide exactly one of the following: ['Values' 'RegexValues']"
+                            + " for config of type 'PathPatternConfig'", 400);
         }
         if (regexValues.size() > MAX_CONDITION_EVALUATIONS) {
             throw new AwsException("ValidationError",
@@ -91,7 +92,8 @@ public final class PathPatternRegexValues {
             }
             return new Compiled(Pattern.compile(regex));
         } catch (PatternSyntaxException e) {
-            throw new AwsException("ValidationError", "Invalid path-pattern regex value '" + regex + "'.", 400);
+            throw new AwsException("ValidationError",
+                    "One or more provided condition regex values are not valid", 400);
         }
     }
 

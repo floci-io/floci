@@ -32,7 +32,6 @@ import static io.floci.aws.testing.AlbFixtures.deleteTargetGroup;
 import static io.floci.aws.testing.AlbFixtures.registerTarget;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
-import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -141,18 +140,29 @@ class ElbV2PathRegexDataPlaneIntegrationTest {
 
     @Test
     void valuesAndRegexValuesTogetherAreRejected() {
-        given().header("Authorization", AUTH)
-                .formParam("Action", "CreateRule")
-                .formParam("ListenerArn", listenerArn)
-                .formParam("Priority", "90")
-                .formParam("Conditions.member.1.Field", "path-pattern")
-                .formParam("Conditions.member.1.PathPatternConfig.Values.member.1", "/a/*")
-                .formParam("Conditions.member.1.PathPatternConfig.RegexValues.member.1", "^/a/.*$")
-                .formParam("Actions.member.1.Type", "forward")
-                .formParam("Actions.member.1.TargetGroupArn", secondaryTg)
-                .post("/")
-                .then().statusCode(400)
-                .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+        String ruleArn = createSplitRule(0, 100);
+        RuleCondition condition = RuleCondition.builder().field("path-pattern")
+                .pathPatternConfig(p -> p.values("/a/*").regexValues("^/a/.*$")).build();
+        String expectedMessage = "You must provide exactly one of the following: ['Values' 'RegexValues']"
+                + " for config of type 'PathPatternConfig'";
+        try (ElasticLoadBalancingV2Client client = AwsTestClients.create(
+                ElasticLoadBalancingV2Client.builder(), "000000000000", Region.US_EAST_1)) {
+            int initialCount = client.describeRules(r -> r.listenerArn(listenerArn)).rules().size();
+            ElasticLoadBalancingV2Exception createError = assertThrows(ElasticLoadBalancingV2Exception.class,
+                    () -> client.createRule(r -> r.listenerArn(listenerArn).priority(90).conditions(condition)
+                            .actions(a -> a.type("forward").targetGroupArn(secondaryTg))));
+            assertEquals(400, createError.statusCode());
+            assertEquals("ValidationError", createError.awsErrorDetails().errorCode());
+            assertEquals(expectedMessage, createError.awsErrorDetails().errorMessage());
+            ElasticLoadBalancingV2Exception updateError = assertThrows(ElasticLoadBalancingV2Exception.class,
+                    () -> client.modifyRule(r -> r.ruleArn(ruleArn).conditions(condition)));
+            assertEquals(400, updateError.statusCode());
+            assertEquals("ValidationError", updateError.awsErrorDetails().errorCode());
+            assertEquals(expectedMessage, updateError.awsErrorDetails().errorMessage());
+            assertEquals(initialCount, client.describeRules(r -> r.listenerArn(listenerArn)).rules().size());
+            assertEquals(MATCH_PATTERNS, client.describeRules(r -> r.ruleArns(ruleArn))
+                    .rules().get(0).conditions().get(0).pathPatternConfig().regexValues());
+        }
     }
 
     @Test
@@ -186,21 +196,27 @@ class ElbV2PathRegexDataPlaneIntegrationTest {
     }
 
     @Test
-    void unsupportedSyntaxCannotCreateOrModifySdkRules() {
+    void invalidRegexCannotCreateOrModifySdkRules() {
         String ruleArn = createSplitRule(0, 100);
         try (ElasticLoadBalancingV2Client client = AwsTestClients.create(
                 ElasticLoadBalancingV2Client.builder(), "000000000000", Region.US_EAST_1)) {
             int initialCount = client.describeRules(r -> r.listenerArn(listenerArn)).rules().size();
-            for (String regex : List.of("^/a(?=b)$", "^/(?>a)$", "^/\\p{L}+$")) {
+            for (String regex : List.of("^/bad/(unclosed", "^/a(?=b)$", "^/(?>a)$", "^/\\p{L}+$")) {
                 ElasticLoadBalancingV2Exception createError = assertThrows(ElasticLoadBalancingV2Exception.class,
                         () -> client.createRule(r -> r.listenerArn(listenerArn).priority(90)
                                 .conditions(c -> c.field("path-pattern").pathPatternConfig(p -> p.regexValues(regex)))
                                 .actions(a -> a.type("forward").targetGroupArn(secondaryTg))));
                 assertEquals("ValidationError", createError.awsErrorDetails().errorCode());
+                assertEquals(400, createError.statusCode());
+                assertEquals("One or more provided condition regex values are not valid",
+                        createError.awsErrorDetails().errorMessage());
                 ElasticLoadBalancingV2Exception updateError = assertThrows(ElasticLoadBalancingV2Exception.class,
                         () -> client.modifyRule(r -> r.ruleArn(ruleArn)
                                 .conditions(c -> c.field("path-pattern").pathPatternConfig(p -> p.regexValues(regex)))));
                 assertEquals("ValidationError", updateError.awsErrorDetails().errorCode());
+                assertEquals(400, updateError.statusCode());
+                assertEquals("One or more provided condition regex values are not valid",
+                        updateError.awsErrorDetails().errorMessage());
             }
             assertEquals(initialCount, client.describeRules(r -> r.listenerArn(listenerArn)).rules().size());
             assertEquals(MATCH_PATTERNS, client.describeRules(r -> r.ruleArns(ruleArn))
@@ -228,7 +244,7 @@ class ElbV2PathRegexDataPlaneIntegrationTest {
             List<String> expectedMessages = List.of(
                     "PathPatternConfig.RegexValues requires the path-pattern field.",
                     "A condition can have at most three match evaluations.",
-                    "A rule can have at most five match evaluations.");
+                    "A rule can only have '5' condition values and regex values");
             for (int i = 0; i < rejectedConditions.size(); i++) {
                 List<RuleCondition> conditions = rejectedConditions.get(i);
                 ElasticLoadBalancingV2Exception createError = assertThrows(ElasticLoadBalancingV2Exception.class,

@@ -64,6 +64,8 @@ class ElbV2PathRegexTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> PathPatternRegexValues.validate(List.of("^/a$"), true));
         assertEquals("ValidationError", e.getErrorCode());
+        assertEquals("You must provide exactly one of the following: ['Values' 'RegexValues']"
+                + " for config of type 'PathPatternConfig'", e.getMessage());
     }
 
     @Test
@@ -79,8 +81,10 @@ class ElbV2PathRegexTest {
     void validationRejectsInvalidAndOverlongExpressions() {
         assertThrows(AwsException.class,
                 () -> PathPatternRegexValues.validate(List.of(""), false));
-        assertThrows(AwsException.class,
+        AwsException error = assertThrows(AwsException.class,
                 () -> PathPatternRegexValues.validate(List.of("(unclosed"), false));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("One or more provided condition regex values are not valid", error.getMessage());
         assertThrows(AwsException.class,
                 () -> PathPatternRegexValues.validate(List.of("a".repeat(129)), false));
         assertDoesNotThrow(() -> PathPatternRegexValues.validate(List.of("a".repeat(128)), false));
@@ -94,6 +98,7 @@ class ElbV2PathRegexTest {
             AwsException error = assertThrows(AwsException.class,
                     () -> PathPatternRegexValues.validate(List.of(regex), false), regex);
             assertEquals("ValidationError", error.getErrorCode(), regex);
+            assertEquals("One or more provided condition regex values are not valid", error.getMessage(), regex);
             assertTrue(ElbV2DataPlane.compilePathRegexes(List.of(regex)).isEmpty(), regex);
         }
     }
