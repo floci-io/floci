@@ -26,6 +26,7 @@ public class ImageResolver {
             Map.entry("python3.11", "python:3.11"),
             Map.entry("python3.10", "python:3.10"),
             Map.entry("python3.9", "python:3.9"),
+            Map.entry("nodejs26.x", "nodejs:26"),
             Map.entry("nodejs24.x", "nodejs:24"),
             Map.entry("nodejs22.x", "nodejs:22"),
             Map.entry("nodejs20.x", "nodejs:20"),
