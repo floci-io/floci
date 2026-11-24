@@ -43,6 +43,7 @@ import io.floci.aws.services.rds.RdsService;
 import io.floci.aws.services.rds.container.RdsContainerManager;
 import io.floci.aws.services.rds.proxy.RdsProxyManager;
 import io.floci.aws.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
+import io.floci.aws.services.sagemaker.SageMakerService;
 import io.floci.aws.services.stepfunctions.StepFunctionsService;
 import io.floci.aws.services.timestreaminfluxdb.TimestreamInfluxDbService;
 import io.quarkus.runtime.Quarkus;
@@ -102,6 +103,7 @@ public class EmulatorLifecycle {
     private final NeptuneProxyManager neptuneProxyManager;
     private final RabbitMqManager rabbitMqManager;
     private final FlinkContainerManager flinkContainerManager;
+    private final SageMakerService sageMakerService;
     private final RdsService rdsService;
     private final TimestreamInfluxDbService timestreamInfluxDbService;
     private final ElbV2Service elbV2Service;
@@ -149,6 +151,7 @@ public class EmulatorLifecycle {
                              NeptuneProxyManager neptuneProxyManager,
                              RabbitMqManager rabbitMqManager,
                              FlinkContainerManager flinkContainerManager,
+                             SageMakerService sageMakerService,
                              RdsService rdsService,
                              TimestreamInfluxDbService timestreamInfluxDbService,
                              ElbV2Service elbV2Service,
@@ -193,6 +196,7 @@ public class EmulatorLifecycle {
         this.neptuneProxyManager = neptuneProxyManager;
         this.rabbitMqManager = rabbitMqManager;
         this.flinkContainerManager = flinkContainerManager;
+        this.sageMakerService = sageMakerService;
         this.rdsService = rdsService;
         this.timestreamInfluxDbService = timestreamInfluxDbService;
         this.elbV2Service = elbV2Service;
@@ -293,6 +297,14 @@ public class EmulatorLifecycle {
                 LOG.warnv("ElastiCache Memcached restore failed: {0}", ex.getMessage());
                 return null;
             });
+        }
+        if (config.services().sagemaker().enabled()) {
+            // Restores every endpoint it can and throws the ones it could not, which must not stop Floci starting.
+            try {
+                sageMakerService.restorePersistedRuntime();
+            } catch (RuntimeException e) {
+                LOG.error("Failed to restore persisted SageMaker endpoints at startup", e);
+            }
         }
         if (config.services().elbv2().enabled()) {
             elbV2Service.restorePersistedRuntime();

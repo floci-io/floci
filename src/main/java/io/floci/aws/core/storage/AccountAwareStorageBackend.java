@@ -107,6 +107,15 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         }
     }
 
+    /** Deletes {@code key} in {@code accountId}; the counterpart of {@link #getInAccount}. */
+    public static <V> void deleteInAccount(StorageBackend<String, V> store, String accountId, String key) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<V> aware) {
+            aware.deleteForAccount(accountId, key);
+        } else {
+            store.delete(key);
+        }
+    }
+
     @Override
     public void put(String key, V value) {
         String account = prefix();
