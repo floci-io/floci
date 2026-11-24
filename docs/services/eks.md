@@ -450,11 +450,17 @@ spec:
     targetPort: 8080
 ```
 
-Each port gets a target group on the Service's NodePort, with the cluster's node registered by instance ID, and a
-listener on the Service port. The load balancer's DNS name is written to the Service's
-`status.loadBalancer.ingress[0].hostname`, and the load balancer, its listeners and target groups are deleted with
-the Service. Floci checks the cluster's Services every 10 seconds. The load balancers carry the
-`elbv2.k8s.aws/cluster` and `service.k8s.aws/stack` tags the AWS Load Balancer Controller uses.
+Each TCP port gets a target group on the Service's NodePort, with the cluster's node registered by instance ID and a
+TCP health check, and a listener on the Service port. Once the node is registered, the load balancer's DNS name is
+written to the Service's `status.loadBalancer.ingress[0].hostname`. The load balancer, its listeners and target
+groups are deleted with the Service, with the cluster, and when the cluster's load balancing is turned off. Floci
+checks the cluster's Services every 10 seconds, and each check makes whatever a Service's ports are missing, so a
+port added later gets its listener and a changed NodePort its target group. The load balancers carry the
+`elbv2.k8s.aws/cluster` and `service.k8s.aws/stack` tags the AWS Load Balancer Controller uses, and Floci takes as
+its own only those it named for the Service.
+
+UDP and SCTP ports get no listener, as Floci's load balancers serve TCP and HTTP only, and a Service with no TCP
+NodePort, such as one with `allocateLoadBalancerNodePorts: false`, gets no load balancer.
 
 On AWS, `eks.amazonaws.com/nlb` is the cluster's default class, so a Service that names no class gets one too. In
 Floci such a Service stays with k3s's own ServiceLB, which answers it with the node's address; name the class to get

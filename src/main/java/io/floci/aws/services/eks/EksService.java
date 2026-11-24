@@ -126,6 +126,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private final EksAccessEntryService accessEntries;
     private final EksPodIdentityAssociationService podIdentityAssociations;
     private final EksAddonService addons;
+    /** A field, not a constructor argument: the reconciler depends on this service, and gets its client proxy. */
+    @Inject
+    EksAutoModeLoadBalancers autoModeLoadBalancers;
     private final AutoScalingService autoScaling;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, UserDataClaim> appliedClusterUserData = new ConcurrentHashMap<>();
@@ -294,14 +297,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
      * The ACTIVE clusters, in every account, that have EKS Auto Mode's load balancing capability on and a running
      * node: the ones whose LoadBalancer Services get a load balancer.
      */
-    List<AccountAwareStorageBackend.AccountEntry<Cluster>> autoModeLoadBalancingClusters() {
-        return allClusterEntries().stream().filter(entry -> {
-            Cluster cluster = entry.value();
-            KubernetesNetworkConfig network = cluster == null ? null : cluster.getKubernetesNetworkConfig();
-            return network != null && network.getElasticLoadBalancing() != null
-                    && Boolean.TRUE.equals(network.getElasticLoadBalancing().enabled())
-                    && cluster.getStatus() == ClusterStatus.ACTIVE && cluster.getContainerId() != null;
-        }).toList();
+    List<AccountAwareStorageBackend.AccountEntry<Cluster>> runningClusters() {
+        return allClusterEntries().stream().filter(entry -> entry.value() != null
+                && entry.value().getStatus() == ClusterStatus.ACTIVE && entry.value().getContainerId() != null).toList();
     }
 
     private List<AccountAwareStorageBackend.AccountEntry<Cluster>> allClusterEntries() {
@@ -810,7 +808,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                                                     ElasticLoadBalancing loadBalancing) {
         boolean computeEnabled = compute != null && Boolean.TRUE.equals(compute.enabled());
         boolean blockStorageEnabled = StorageConfig.blockStorageOn(storage);
-        boolean loadBalancingEnabled = loadBalancing != null && Boolean.TRUE.equals(loadBalancing.enabled());
+        boolean loadBalancingEnabled = ElasticLoadBalancing.loadBalancingOn(loadBalancing);
         if (computeEnabled != blockStorageEnabled || computeEnabled != loadBalancingEnabled) {
             throw new AwsException("InvalidParameterException", "For EKS Auto Mode, please ensure that all "
                     + "required configs, including computeConfig, kubernetesNetworkConfig, and blockStorage are "
@@ -1268,7 +1266,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             return List.of(true, compute.nodePools() == null ? Set.of() : Set.copyOf(compute.nodePools()),
                     String.valueOf(compute.nodeRoleArn()),
                     StorageConfig.blockStorageOn(storage),
-                    loadBalancing != null && Boolean.TRUE.equals(loadBalancing.enabled()));
+                    ElasticLoadBalancing.loadBalancingOn(loadBalancing));
         }
     }
 
@@ -1647,6 +1645,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             endClusterNodeInstance(cluster);
             deleteClusterSecurityGroup(cluster);
             deleteNodeGroupAutoScalingGroups(cluster.getAccountId(), cluster);
+            deleteAutoModeLoadBalancers(cluster);
             accessEntries.deleteClusterEntries(cluster);
             if (podIdentityAssociations != null) {
                 podIdentityAssociations.deleteClusterAssociations(cluster);
@@ -1665,6 +1664,15 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             return cluster;
         } finally {
             clustersBeingDeleted.remove(cluster);
+        }
+    }
+
+    /** The cluster's EKS Auto Mode load balancers go with it, as the controller's go on AWS. */
+    private void deleteAutoModeLoadBalancers(Cluster cluster) {
+        if (autoModeLoadBalancers != null) {
+            String region = clusterRegion(cluster);
+            RequestScopes.runAs(cluster.getAccountId(), region,
+                    () -> autoModeLoadBalancers.deleteLoadBalancers(cluster, region));
         }
     }
 
