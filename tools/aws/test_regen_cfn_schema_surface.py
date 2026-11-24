@@ -123,3 +123,34 @@ def test_an_incomplete_read_is_a_read_failure(tmp_path, monkeypatch, capsys):
     args, _ = _setup(tmp_path, {})
     assert r.main(args[2:]) == 2
     assert "could not read" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("committed", [
+    "AWS::Test::Thing\tArn\tName\n",
+    None,
+    "AWS::Test::Thing\tArn\tName,Nested,Secret",
+], ids=["changed", "missing", "missing-final-newline"])
+def test_verify_shows_the_actual_difference_without_writing(tmp_path, capsys, committed):
+    source = tmp_path / "schemas"
+    source.mkdir()
+    (source / "aws-test-thing.json").write_text(json.dumps(SCHEMA), encoding="utf-8")
+    inventory = tmp_path / "inventory.tsv"
+    inventory.write_text("AWS::Test::Thing\tThingProvisioner\n", encoding="utf-8")
+    output = tmp_path / "surface.tsv"
+    if committed is not None:
+        output.write_text(committed, encoding="utf-8")
+    args = ["--source-dir", str(source), "--inventory", str(inventory), "--output", str(output), "--verify"]
+
+    assert r.main(args) == 1
+
+    error = capsys.readouterr().err
+    assert f"--- {output}" in error
+    assert f"+++ --source-dir {source}" in error
+    assert "+AWS::Test::Thing\tArn\tName,Nested,Secret" in error
+    if committed is None:
+        assert not output.exists()
+    else:
+        assert "-AWS::Test::Thing\tArn\tName" in error
+        assert output.read_text(encoding="utf-8") == committed
+        if not committed.endswith("\n"):
+            assert f"-{committed}\n\\ No newline at end of file\n+{committed}\n" in error
