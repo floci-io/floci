@@ -231,8 +231,8 @@ public class SesSendController {
             validateTrackingOverrides(request);
             JsonNode defaultTemplateName = request.path("DefaultContent").path("Template").path("TemplateName");
             if (defaultTemplateName.isTextual() && defaultTemplateName.textValue().isEmpty()) {
-                throw SmithyValidationErrors.badRequest("Value at 'defaultContent.template.templateName' failed to "
-                        + "satisfy constraint: Member must have length greater than or equal to 1");
+                throw SmithyValidationErrors.badRequest(SmithyValidationErrors.Violations.WITHOUT_VALUES
+                        .lengthTooShort("defaultContent.template.templateName", "", 1));
             }
             JsonNode bulkEntries = request.path("BulkEmailEntries");
             if (bulkEntries.isMissingNode() || bulkEntries.isNull()) {
