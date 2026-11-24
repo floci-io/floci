@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.Gzip;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
@@ -24,14 +25,12 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.zip.GZIPOutputStream;
 
 /**
  * Delivers matching log events to CloudWatch Logs subscription filter destinations
@@ -257,7 +256,7 @@ public class CloudWatchLogsSubscriptionDeliveryService {
                     List.of(filter.getFilterName()),
                     slice);
             byte[] jsonBytes = objectMapper.writeValueAsBytes(payload);
-            gzippedBytes = gzip(jsonBytes);
+            gzippedBytes = Gzip.compress(jsonBytes);
         } catch (Exception e) {
             LOG.warnv(e, "Cannot serialize subscription payload: filter={0}", filter.getFilterName());
             return;
@@ -317,13 +316,5 @@ public class CloudWatchLogsSubscriptionDeliveryService {
         Record record = new Record(gzippedBytes);
         firehoseService.putRecord(targetAccount, targetRegion, streamName, record);
         LOG.debugv("Subscription filter delivered to Firehose delivery stream: {0}", streamName);
-    }
-
-    static byte[] gzip(byte[] input) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(64, input.length / 2));
-        try (GZIPOutputStream gzip = new GZIPOutputStream(out)) {
-            gzip.write(input);
-        }
-        return out.toByteArray();
     }
 }
