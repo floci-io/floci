@@ -1,0 +1,116 @@
+package io.floci.aws.services.rds.integration;
+
+import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.rds.model.Integration;
+import io.floci.aws.services.redshift.RedshiftService;
+import io.floci.aws.services.redshift.RedshiftZeroEtlEndpoints;
+import io.floci.aws.services.redshift.spectrum.BackendSql;
+import io.floci.aws.services.redshift.spectrum.ExternalStatement;
+import io.floci.aws.services.redshift.spectrum.IntegrationDatabaseCreator;
+import io.floci.aws.services.redshift.spectrum.SpectrumSession;
+import io.floci.aws.services.redshift.spectrum.SpectrumSqlException;
+import io.floci.aws.services.redshiftserverless.RedshiftServerlessRuntime;
+import io.floci.aws.services.redshiftserverless.RedshiftServerlessService;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+
+/**
+ * {@code CREATE DATABASE <name> FROM INTEGRATION '<id>' DATABASE <source>} on the Redshift cluster or
+ * workgroup an RDS zero-ETL integration replicates into: creates the database and starts the initial
+ * load of the source database into it.
+ */
+@ApplicationScoped
+public class RdsIntegrationDatabases implements IntegrationDatabaseCreator {
+
+    private static final String UNDEFINED_OBJECT = "42704";
+    private static final String SYNTAX_ERROR = "42601";
+    private static final String INVALID_PARAMETER_VALUE = "22023";
+    private static final String DUPLICATE_DATABASE = "42P04";
+    private static final String NOT_IN_PREREQUISITE_STATE = "55000";
+    private static final String FEATURE_NOT_SUPPORTED = "0A000";
+
+    private final RdsIntegrationService integrations;
+    private final RdsIntegrationLoader loader;
+    private final RedshiftService redshiftService;
+    private final RedshiftServerlessService serverlessService;
+
+    @Inject
+    public RdsIntegrationDatabases(RdsIntegrationService integrations, RdsIntegrationLoader loader,
+                                   RedshiftService redshiftService, RedshiftServerlessService serverlessService) {
+        this.integrations = integrations;
+        this.loader = loader;
+        this.redshiftService = redshiftService;
+        this.serverlessService = serverlessService;
+    }
+
+    @Override
+    public void create(ExternalStatement.CreateIntegrationDatabase statement, SpectrumSession session,
+                       BackendSql backend) {
+        String integrationId = statement.integrationId();
+        Integration integration = integrations.findById(integrationId)
+                .filter(found -> replicatesInto(found, session))
+                .orElseThrow(() -> notFound(integrationId, session));
+        String sourceDatabase = statement.sourceDatabase();
+        if (sourceDatabase == null || sourceDatabase.isBlank()) {
+            throw new SpectrumSqlException(SYNTAX_ERROR, "Integration " + integrationId
+                    + " replicates a PostgreSQL source, so CREATE DATABASE must name the source database with"
+                    + " DATABASE '<source_database>'");
+        }
+        if (!IntegrationDataFilter.parsePostgres(integration.getDataFilter()).includesDatabase(sourceDatabase)) {
+            throw new SpectrumSqlException(INVALID_PARAMETER_VALUE, "Source database \"" + sourceDatabase
+                    + "\" is not included in the data filter of integration " + integrationId);
+        }
+        Integration syncing;
+        try {
+            syncing = integrations.addDestination(integration, statement.databaseName(), sourceDatabase);
+        } catch (AwsException e) {
+            String state = "IntegrationAlreadyExistsFault".equals(e.getErrorCode())
+                    ? DUPLICATE_DATABASE : NOT_IN_PREREQUISITE_STATE;
+            throw new SpectrumSqlException(state, e.getMessage());
+        }
+        try {
+            backend.execute("CREATE DATABASE " + quoteIdentifier(statement.databaseName()));
+        } catch (RuntimeException e) {
+            integrations.removeDestination(integration, sourceDatabase);
+            throw e;
+        }
+        loader.submit(syncing, sourceDatabase, statement.databaseName());
+    }
+
+    /** Whether the integration's target is the provisioned cluster or the workgroup the session runs on. */
+    private boolean replicatesInto(Integration integration, SpectrumSession session) {
+        String sessionTarget = session.clusterIdentifier();
+        if (sessionTarget == null || !session.accountId().equals(integration.getAccountId())) {
+            return false;
+        }
+        String targetArn = integration.getTargetArn();
+        if (RedshiftZeroEtlEndpoints.isNamespaceArn(targetArn)) {
+            try {
+                RedshiftServerlessService.WorkgroupTarget workgroup =
+                        serverlessService.getNamespaceWorkgroupTarget(targetArn, integration.getRegion());
+                return sessionTarget.equals(
+                        RedshiftServerlessRuntime.backendId(integration.getRegion(), workgroup.workgroupName()));
+            } catch (AwsException expected) {
+                // A namespace without a workgroup serves no session, so no session's statement can name it.
+                return false;
+            }
+        }
+        String resource = AwsArnUtils.parse(targetArn).resource();
+        return sessionTarget.equals(resource.substring("cluster:".length()));
+    }
+
+    private SpectrumSqlException notFound(String integrationId, SpectrumSession session) {
+        if (redshiftService.integrationExists(session.accountId(), integrationId)) {
+            return new SpectrumSqlException(FEATURE_NOT_SUPPORTED, "CREATE DATABASE ... FROM INTEGRATION is only "
+                    + "supported for integrations from RDS and Aurora PostgreSQL; integration " + integrationId
+                    + " replicates another source");
+        }
+        return new SpectrumSqlException(UNDEFINED_OBJECT, "Integration " + integrationId
+                + " does not exist or does not replicate into this database");
+    }
+
+    private static String quoteIdentifier(String name) {
+        return "\"" + name.replace("\"", "\"\"") + "\"";
+    }
+}

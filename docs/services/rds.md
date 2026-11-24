@@ -1181,10 +1181,51 @@ or by its name.
 `DeleteIntegration` reports `deleting`, as on AWS. `ModifyIntegration` only accepts an `active`
 integration, otherwise it fails with `InvalidIntegrationStateFault`.
 
+### Initial load into a destination database
+
+An integration reads back as `active` once created. Its data lands in Redshift once a database is
+created from it on the target, as on AWS. Connect to the cluster or workgroup and run:
+
+```sql
+CREATE DATABASE orders_dw FROM INTEGRATION '<integration-id>' DATABASE 'orders';
+```
+
+`<integration-id>` is the last part of the integration ARN. `DATABASE` names the source database,
+which a PostgreSQL source requires and its `DataFilter` must include. The integration then reports
+`syncing` while Floci copies the source database in, and `active` again once the copy is done.
+Floci copies each table that the filter includes and that has a primary key into a table of the same
+schema and name. As on RDS, the filter's entries apply in order, the last matching entry decides, and
+a table that no entry matches is not copied. Column types follow the
+[Aurora PostgreSQL to Redshift mapping](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/zero-etl.querying.html):
+`text` becomes `VARCHAR(65535)`, `numeric(p,s)` becomes `DECIMAL(p,s)`, `json`, `jsonb` and arrays
+become `SUPER`, `bytea` becomes `VARBYTE`, and so on.
+
+The statement fails with:
+
+- SQLSTATE `42704` when the integration does not exist or replicates into another cluster or
+  workgroup, and `0A000` for a DynamoDB integration's id.
+- `42601` without `DATABASE`, and `22023` for a source database the filter does not include.
+- `42P04` when a database was already created from that source database, and `55000` while the
+  integration is not `active`.
+- `25001` inside a transaction block.
+
+The `SET` and `WITH` options are accepted and ignored. A load that a restart interrupts starts
+again from the beginning. A load that fails, for example because the source database does not
+exist, leaves the integration `failed`, with the cause under `Errors` (`InitialLoadFailed`).
+
 What differs from RDS:
 
-- No data is copied into Redshift yet: an integration reads back as `active` straight after it is
-  created or modified, without passing through `syncing`.
+- Only the initial load is copied. Changes made to the source after it are not replicated.
+- A table without a primary key, or with a column type AWS does not replicate (an enum, a domain, a
+  range, a type from an extension, `numeric` without a precision), is skipped and logged as a
+  warning. Floci also skips `bit` and `bit varying` columns. The table states of
+  `SVV_INTEGRATION_TABLE_STATE` are not reported.
+- With `FLOCI_SERVICES_RDS_MOCK=true` there is no source database, so the destination database is
+  created empty and the integration goes back to `active`.
+- On Redshift Serverless the Data API only reaches the namespace's own database, so query the
+  destination database over the workgroup's PostgreSQL endpoint. A provisioned cluster serves it
+  through both.
+- Changing `DataFilter` with `ModifyIntegration` does not load or drop tables.
 - Only PostgreSQL sources are accepted. An `aurora-mysql`, `mysql` or `mariadb` source, and a
   Multi-AZ `postgres` DB cluster, are refused with `InvalidParameterValue`.
 - A target that does not exist is refused with `InvalidParameterValue`. The target's resource

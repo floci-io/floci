@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * A zero-ETL integration from an RDS or Aurora database into Amazon Redshift, as
@@ -67,6 +68,10 @@ public class Integration {
     @JsonProperty("AccountId")
     private String accountId;
 
+    /** The Redshift databases created from the integration; Floci's own state, not part of the AWS shape. */
+    @JsonProperty("Destinations")
+    private List<Destination> destinations = new ArrayList<>();
+
     public Integration() {}
 
     public Integration(Integration other) {
@@ -84,6 +89,10 @@ public class Integration {
         this.errors = new ArrayList<>(other.errors);
         this.region = other.region;
         this.accountId = other.accountId;
+        this.destinations = new ArrayList<>();
+        for (Destination destination : other.destinations) {
+            this.destinations.add(new Destination(destination));
+        }
     }
 
     /** The id AWS mints for the integration: the last part of its ARN. */
@@ -139,6 +148,67 @@ public class Integration {
 
     public String getAccountId() { return accountId; }
     public void setAccountId(String accountId) { this.accountId = accountId; }
+
+    public List<Destination> getDestinations() { return destinations; }
+    public void setDestinations(List<Destination> destinations) {
+        this.destinations = destinations != null ? new ArrayList<>(destinations) : new ArrayList<>();
+    }
+
+    /** The destination created from {@code sourceDatabase}, if there is one. */
+    public Optional<Destination> destinationFor(String sourceDatabase) {
+        return destinations.stream()
+                .filter(destination -> destination.getSourceDatabase().equals(sourceDatabase))
+                .findFirst();
+    }
+
+    /**
+     * A database {@code CREATE DATABASE ... FROM INTEGRATION} created on the target, and how far the initial
+     * load of its source database has got.
+     */
+    @RegisterForReflection
+    public static class Destination {
+
+        public static final String STATE_SYNCING = "Syncing";
+        public static final String STATE_SYNCED = "Synced";
+        public static final String STATE_FAILED = "Failed";
+
+        @JsonProperty("DatabaseName")
+        private String databaseName;
+
+        @JsonProperty("SourceDatabase")
+        private String sourceDatabase;
+
+        @JsonProperty("State")
+        private String state;
+
+        @JsonProperty("CreateTime")
+        private Instant createTime;
+
+        public Destination() {}
+
+        public Destination(String databaseName, String sourceDatabase, String state, Instant createTime) {
+            this.databaseName = databaseName;
+            this.sourceDatabase = sourceDatabase;
+            this.state = state;
+            this.createTime = createTime;
+        }
+
+        public Destination(Destination other) {
+            this(other.databaseName, other.sourceDatabase, other.state, other.createTime);
+        }
+
+        public String getDatabaseName() { return databaseName; }
+        public void setDatabaseName(String databaseName) { this.databaseName = databaseName; }
+
+        public String getSourceDatabase() { return sourceDatabase; }
+        public void setSourceDatabase(String sourceDatabase) { this.sourceDatabase = sourceDatabase; }
+
+        public String getState() { return state; }
+        public void setState(String state) { this.state = state; }
+
+        public Instant getCreateTime() { return createTime; }
+        public void setCreateTime(Instant createTime) { this.createTime = createTime; }
+    }
 
     /** One entry of an integration's {@code Errors}. */
     @RegisterForReflection
