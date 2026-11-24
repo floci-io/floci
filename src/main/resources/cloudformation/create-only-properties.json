@@ -205,6 +205,9 @@
     "Name"
   ],
   "AWS::CloudFront::Distribution": [],
+  "AWS::CloudFront::DistributionTenant": [
+    "Name"
+  ],
   "AWS::CloudFront::Function": [
     "Name"
   ],

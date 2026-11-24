@@ -5,11 +5,13 @@ import io.floci.aws.services.cloudfront.model.CloudFrontFunction;
 import io.floci.aws.services.cloudfront.model.ConnectionGroup;
 import io.floci.aws.services.cloudfront.model.ContinuousDeploymentPolicy;
 import io.floci.aws.services.cloudfront.model.Distribution;
+import io.floci.aws.services.cloudfront.model.DistributionTenant;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -864,6 +866,48 @@ class CloudFrontControllerTest {
                     "a marker past the last group answers an empty page");
             assertTrue(XmlParser.extractAll(lastXml, "NextMarker").isEmpty());
         }
+    }
+
+    @Test
+    void listDistributionTenantsStopsAtTheExactEndOfASecondPage() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        DistributionTenant alpha = tenant("alpha");
+        DistributionTenant beta = tenant("beta");
+        DistributionTenant gamma = tenant("gamma");
+        when(service.listDistributionTenants(null, 3, null, null)).thenReturn(List.of(alpha, beta, gamma));
+        when(service.listDistributionTenants("beta", 3, null, null)).thenReturn(List.of(gamma));
+
+        CloudFrontController controller = new CloudFrontController(service);
+
+        try (Response firstPage = controller.listDistributionTenants(listTenantsBody(null, 2));
+             Response secondPage = controller.listDistributionTenants(listTenantsBody("beta", 2))) {
+            String firstXml = (String) firstPage.getEntity();
+            String secondXml = (String) secondPage.getEntity();
+
+            assertEquals(List.of("alpha", "beta"), XmlParser.extractAll(firstXml, "Name"));
+            assertEquals("beta", XmlParser.extractFirst(firstXml, "NextMarker", null));
+            assertEquals(List.of("gamma"), XmlParser.extractAll(secondXml, "Name"));
+            assertTrue(XmlParser.extractAll(secondXml, "NextMarker").isEmpty(),
+                    "the final page carries no next marker");
+        }
+    }
+
+    private static String listTenantsBody(String marker, int maxItems) {
+        return """
+                <ListDistributionTenantsRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  %s<MaxItems>%d</MaxItems>
+                </ListDistributionTenantsRequest>
+                """.formatted(marker == null ? "" : "<Marker>" + marker + "</Marker>", maxItems);
+    }
+
+    private static DistributionTenant tenant(String name) {
+        DistributionTenant tenant = new DistributionTenant();
+        tenant.setName(name);
+        tenant.setDomains(List.of(name + ".example.com"));
+        tenant.setEnabled(true);
+        tenant.setCreatedTime(Instant.EPOCH);
+        tenant.setLastModifiedTime(Instant.EPOCH);
+        return tenant;
     }
 
     private static String listConnectionGroupsBody(String marker, int maxItems) {

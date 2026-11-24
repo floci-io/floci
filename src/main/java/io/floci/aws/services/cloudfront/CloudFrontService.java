@@ -23,6 +23,7 @@ import io.floci.aws.services.cloudfront.model.ContinuousDeploymentPolicy;
 import io.floci.aws.services.cloudfront.model.DefaultCacheBehavior;
 import io.floci.aws.services.cloudfront.model.Distribution;
 import io.floci.aws.services.cloudfront.model.DistributionConfig;
+import io.floci.aws.services.cloudfront.model.DistributionTenant;
 import io.floci.aws.services.cloudfront.model.FieldLevelEncryptionConfig;
 import io.floci.aws.services.cloudfront.model.FieldLevelEncryptionProfile;
 import io.floci.aws.services.cloudfront.model.Invalidation;
@@ -36,6 +37,7 @@ import io.floci.aws.services.cloudfront.model.PublicKey;
 import io.floci.aws.services.cloudfront.model.RealtimeLogConfig;
 import io.floci.aws.services.cloudfront.model.ResponseHeadersPolicy;
 import io.floci.aws.services.cloudfront.model.StreamingDistribution;
+import io.floci.aws.services.cloudfront.model.TenantCustomizations;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.ServerCertificateReferenceProvider;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -95,6 +97,15 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private static final Set<String> CONNECTION_MODES = Set.of("direct", "tenant-only");
     /** AWS names the account's automatically created connection group "default". */
     private static final String DEFAULT_CONNECTION_GROUP_NAME = "default";
+    /** A distribution tenant's Name: the pattern its request shape declares (3 to 128 characters). */
+    private static final Pattern TENANT_NAME = Pattern.compile("[a-zA-Z0-9][a-zA-Z0-9-.]{1,126}[a-zA-Z0-9]");
+    /** The pattern a tenant parameter's Name declares, and the length its Value is held to. */
+    private static final Pattern TENANT_PARAMETER_NAME = Pattern.compile("[a-zA-Z0-9-_]{1,128}");
+    private static final int TENANT_PARAMETER_VALUE_MAX_LENGTH = 256;
+    /** UpdateDistributionTenant documents "up to 5 domains" for a tenant. */
+    private static final int TENANT_MAX_DOMAINS = 5;
+    private static final Set<String> TENANT_WEB_ACL_ACTIONS = Set.of("override", "disable");
+    private static final Set<String> TENANT_GEO_RESTRICTION_TYPES = Set.of("blacklist", "whitelist", "none");
     /** The documented maximum a connection group's Name may reach (AWS's own limit). */
     private static final int CONNECTION_GROUP_NAME_MAX_LENGTH = 256;
     /**
@@ -157,6 +168,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     private final AccountAwareStorageBackend<Distribution> distStore;
     private final AccountAwareStorageBackend<ConnectionGroup> connectionGroupStore;
+    private final AccountAwareStorageBackend<DistributionTenant> tenantStore;
     private final StorageBackend<String, List<Invalidation>> invalidationStore;
     private final StorageBackend<String, CachePolicy> cachePolicyStore;
     private final StorageBackend<String, OriginRequestPolicy> orpStore;
@@ -207,6 +219,8 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                 new TypeReference<Map<String, Distribution>>() {});
         this.connectionGroupStore = factory.create("cloudfront", "cloudfront-connection-groups.json",
                 new TypeReference<Map<String, ConnectionGroup>>() {});
+        this.tenantStore = factory.create("cloudfront", "cloudfront-distribution-tenants.json",
+                new TypeReference<Map<String, DistributionTenant>>() {});
         this.invalidationStore = factory.create("cloudfront", "cloudfront-invalidations.json",
                 new TypeReference<Map<String, List<Invalidation>>>() {});
         this.cachePolicyStore = factory.create("cloudfront", "cloudfront-cache-policies.json",
@@ -913,6 +927,12 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             if (requested == null || requested.isBlank()) {
                 continue;
             }
+            for (DistributionTenant tenant : tenantStore.scan(k -> true)) {
+                if (containsIgnoreCase(tenant.getDomains(), requested)) {
+                    throw new AwsException("CNAMEAlreadyExists",
+                            "The CNAME you provided is already associated with a different resource.", 409);
+                }
+            }
             for (Distribution existing : distStore.scan(k -> true)) {
                 if (existing.getId().equals(currentDistributionId) || existing.getConfig() == null
                         || existing.getConfig().getAliases() == null) {
@@ -1148,6 +1168,12 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             throw new AwsException("CannotDeleteEntityWhileInUse",
                     "The default connection group cannot be deleted.", 409);
         }
+        for (DistributionTenant tenant : tenantStore.scan(k -> true)) {
+            if (id.equals(tenant.getConnectionGroupId())) {
+                throw new AwsException("CannotDeleteEntityWhileInUse",
+                        "The connection group is still used by a distribution tenant.", 409);
+            }
+        }
         if (Boolean.TRUE.equals(group.getEnabled())) {
             throw new AwsException("ResourceNotDisabled",
                     "The connection group has not been disabled.", 409);
@@ -1219,6 +1245,321 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             sb.append(CHARS.charAt(RANDOM.nextInt(CHARS.length())));
         }
         return sb.toString();
+    }
+
+    // ── Distribution tenants ──────────────────────────────────────────────────
+
+    public synchronized DistributionTenant createDistributionTenant(String distributionId, String name,
+                                                                    List<String> domains,
+                                                                    Map<String, String> tags,
+                                                                    TenantCustomizations customizations,
+                                                                    Map<String, String> parameters,
+                                                                    String connectionGroupId,
+                                                                    Boolean enabled) {
+        requireTenantName(name);
+        requireTenantDomains(domains);
+        requireTenantOnlyDistribution(distributionId);
+        String groupId = connectionGroupId == null || connectionGroupId.isBlank()
+                ? ensureDefaultConnectionGroup().getId()
+                : getConnectionGroup(connectionGroupId).getId();
+        validateTenantCustomizations(customizations);
+        validateTenantParameters(parameters);
+        for (DistributionTenant existing : tenantStore.scan(k -> true)) {
+            if (name.equals(existing.getName())) {
+                throw new AwsException("EntityAlreadyExists",
+                        "The distribution tenant " + name + " already exists.", 409);
+            }
+        }
+        ensureTenantDomainsAvailable(domains, null);
+        DistributionTenant tenant = new DistributionTenant();
+        String id = "dt_" + randomIdSuffix(24);
+        tenant.setId(id);
+        tenant.setArn(regionResolver.buildGlobalArn("cloudfront", accountId, "distribution-tenant/" + id));
+        tenant.setName(name);
+        tenant.setDistributionId(distributionId);
+        tenant.setConnectionGroupId(groupId);
+        tenant.setDomains(new ArrayList<>(domains));
+        tenant.setCustomizations(customizations);
+        tenant.setParameters(parameters == null || parameters.isEmpty() ? null : new LinkedHashMap<>(parameters));
+        tenant.setEnabled(enabled == null || enabled);
+        tenant.setStatus("Deployed");
+        tenant.setCreatedTime(Instant.now());
+        tenant.setLastModifiedTime(tenant.getCreatedTime());
+        tenant.setEtag("E" + randomIdSuffix(12));
+        if (tags != null && !tags.isEmpty()) {
+            tagStore.put(tenant.getArn(), new LinkedHashMap<>(tags));
+        }
+        tenantStore.put(id, tenant);
+        return tenant;
+    }
+
+    /**
+     * A tenant is addressed by its id, name or ARN wherever the API documents {@code Identifier}
+     * ("You can specify the ARN, ID, or name of the distribution tenant").
+     */
+    public DistributionTenant getDistributionTenant(String identifier) {
+        if (identifier == null || identifier.isBlank()) {
+            throw tenantNotFound(identifier);
+        }
+        if (AwsArnUtils.looksLikeArn(identifier)) {
+            for (DistributionTenant tenant : tenantStore.scan(k -> true)) {
+                if (identifier.equals(tenant.getArn())) {
+                    return tenant;
+                }
+            }
+            throw tenantNotFound(identifier);
+        }
+        DistributionTenant tenant = tenantStore.get(identifier).orElse(null);
+        if (tenant != null) {
+            return tenant;
+        }
+        for (DistributionTenant candidate : tenantStore.scan(k -> true)) {
+            if (identifier.equals(candidate.getName())) {
+                return candidate;
+            }
+        }
+        throw tenantNotFound(identifier);
+    }
+
+    public DistributionTenant getDistributionTenantByDomain(String domain) {
+        if (domain != null) {
+            for (DistributionTenant tenant : tenantStore.scan(k -> true)) {
+                if (containsIgnoreCase(tenant.getDomains(), domain)) {
+                    return tenant;
+                }
+            }
+        }
+        throw new AwsException("EntityNotFound",
+                "No distribution tenant was found for domain " + domain + ".", 404);
+    }
+
+    /**
+     * A member the request omits keeps its stored value; one it carries replaces the stored one
+     * ({@code Domains}, {@code Parameters} and {@code Customizations} wholesale). {@code Name} is
+     * immutable and {@code Tags} change through TagResource, so neither is a parameter here.
+     */
+    public synchronized DistributionTenant updateDistributionTenant(String id, String ifMatch,
+                                                                    String distributionId,
+                                                                    List<String> domains,
+                                                                    TenantCustomizations customizations,
+                                                                    Map<String, String> parameters,
+                                                                    String connectionGroupId,
+                                                                    Boolean enabled) {
+        requireIfMatch(ifMatch);
+        DistributionTenant tenant = requireDistributionTenant(id);
+        if (!tenant.getEtag().equals(ifMatch)) {
+            throw new AwsException("PreconditionFailed",
+                    "The specified If-Match didn't match the ETag header.", 412);
+        }
+        if (domains != null) {
+            requireTenantDomains(domains);
+            ensureTenantDomainsAvailable(domains, id);
+        }
+        if (distributionId != null && !distributionId.isBlank()) {
+            requireTenantOnlyDistribution(distributionId);
+        }
+        String groupId = connectionGroupId == null || connectionGroupId.isBlank() ? null
+                : getConnectionGroup(connectionGroupId).getId();
+        validateTenantCustomizations(customizations);
+        validateTenantParameters(parameters);
+        if (distributionId != null && !distributionId.isBlank()) {
+            tenant.setDistributionId(distributionId);
+        }
+        if (groupId != null) {
+            tenant.setConnectionGroupId(groupId);
+        }
+        if (domains != null) {
+            tenant.setDomains(new ArrayList<>(domains));
+        }
+        if (customizations != null) {
+            tenant.setCustomizations(customizations);
+        }
+        if (parameters != null) {
+            tenant.setParameters(parameters.isEmpty() ? null : new LinkedHashMap<>(parameters));
+        }
+        if (enabled != null) {
+            tenant.setEnabled(enabled);
+        }
+        tenant.setLastModifiedTime(Instant.now());
+        tenant.setEtag("E" + randomIdSuffix(12));
+        tenantStore.put(id, tenant);
+        return tenant;
+    }
+
+    public synchronized void deleteDistributionTenant(String id, String ifMatch) {
+        requireIfMatch(ifMatch);
+        DistributionTenant tenant = requireDistributionTenant(id);
+        if (!tenant.getEtag().equals(ifMatch)) {
+            throw new AwsException("PreconditionFailed",
+                    "The specified If-Match didn't match the ETag header.", 412);
+        }
+        if (Boolean.TRUE.equals(tenant.getEnabled())) {
+            throw new AwsException("ResourceNotDisabled",
+                    "The distribution tenant has not been disabled.", 409);
+        }
+        tenantStore.delete(id);
+        tagStore.delete(tenant.getArn());
+    }
+
+    public List<DistributionTenant> listDistributionTenants(String marker, int maxItems,
+                                                            String distributionIdFilter,
+                                                            String connectionGroupIdFilter) {
+        List<DistributionTenant> all = new ArrayList<>(tenantStore.scan(k -> true));
+        all.removeIf(tenant -> distributionIdFilter != null
+                && !distributionIdFilter.equals(tenant.getDistributionId()));
+        all.removeIf(tenant -> connectionGroupIdFilter != null
+                && !connectionGroupIdFilter.equals(tenant.getConnectionGroupId()));
+        all.sort((a, b) -> a.getName().compareTo(b.getName()));
+        return paginate(all, marker, maxItems, DistributionTenant::getName);
+    }
+
+    /** AWS: "You must specify either the CertificateArn parameter or WebACLArn parameter, but not both". */
+    public List<DistributionTenant> listDistributionTenantsByCustomization(String marker, int maxItems,
+                                                                           String webAclArn,
+                                                                           String certificateArn) {
+        boolean byWebAcl = webAclArn != null && !webAclArn.isBlank();
+        boolean byCertificate = certificateArn != null && !certificateArn.isBlank();
+        if (byWebAcl == byCertificate) {
+            throw new AwsException("InvalidArgument",
+                    "You must specify either WebACLArn or CertificateArn, but not both.", 400);
+        }
+        List<DistributionTenant> all = new ArrayList<>(tenantStore.scan(k -> true));
+        all.removeIf(tenant -> {
+            TenantCustomizations customizations = tenant.getCustomizations();
+            if (customizations == null) {
+                return true;
+            }
+            return byWebAcl ? !webAclArn.equals(customizations.getWebAclArn())
+                    : !certificateArn.equals(customizations.getCertificateArn());
+        });
+        all.sort((a, b) -> a.getName().compareTo(b.getName()));
+        return paginate(all, marker, maxItems, DistributionTenant::getName);
+    }
+
+    private DistributionTenant requireDistributionTenant(String id) {
+        DistributionTenant tenant = id == null ? null : tenantStore.get(id).orElse(null);
+        if (tenant == null) {
+            throw tenantNotFound(id);
+        }
+        return tenant;
+    }
+
+    private static AwsException tenantNotFound(String identifier) {
+        return new AwsException("EntityNotFound",
+                "The distribution tenant " + identifier + " does not exist.", 404);
+    }
+
+    /**
+     * Only a multi-tenant distribution ({@code ConnectionMode: tenant-only}) can have tenants.
+     * The API declares no code for a standard distribution, so Floci reads it as
+     * {@code InvalidArgument}; a distribution that does not exist is {@code EntityNotFound}.
+     */
+    private void requireTenantOnlyDistribution(String distributionId) {
+        Distribution dist = distributionId == null || distributionId.isBlank() ? null
+                : distStore.get(distributionId).orElse(null);
+        if (dist == null) {
+            throw new AwsException("EntityNotFound",
+                    "The distribution " + distributionId + " does not exist.", 404);
+        }
+        if (!"tenant-only".equals(effectiveConnectionMode(dist))) {
+            throw new AwsException("InvalidArgument",
+                    "The distribution " + distributionId + " is not a multi-tenant distribution.", 400);
+        }
+    }
+
+    private static void requireTenantName(String name) {
+        if (name == null || !TENANT_NAME.matcher(name).matches()) {
+            throw new AwsException("InvalidArgument", "The Name specified is not valid.", 400);
+        }
+    }
+
+    private static void requireTenantDomains(List<String> domains) {
+        if (domains == null || domains.isEmpty()) {
+            throw new AwsException("InvalidArgument", "At least one domain must be specified.", 400);
+        }
+        if (domains.size() > TENANT_MAX_DOMAINS) {
+            throw new AwsException("EntityLimitExceeded",
+                    "A distribution tenant can have up to " + TENANT_MAX_DOMAINS + " domains.", 400);
+        }
+        Set<String> seen = new HashSet<>();
+        for (String domain : domains) {
+            if (domain == null || domain.isBlank()) {
+                throw new AwsException("InvalidArgument", "The Domain specified is not valid.", 400);
+            }
+            if (!seen.add(domain.toLowerCase(Locale.ROOT))) {
+                throw new AwsException("InvalidArgument",
+                        "The domain " + domain + " is specified more than once.", 400);
+            }
+        }
+    }
+
+    /** A domain belongs to one tenant or one distribution alias; the check is case-insensitive. */
+    private void ensureTenantDomainsAvailable(List<String> domains, String currentTenantId) {
+        for (DistributionTenant other : tenantStore.scan(k -> true)) {
+            if (other.getId().equals(currentTenantId)) {
+                continue;
+            }
+            for (String domain : domains) {
+                if (containsIgnoreCase(other.getDomains(), domain)) {
+                    throw domainTaken();
+                }
+            }
+        }
+        for (Distribution dist : distStore.scan(k -> true)) {
+            if (dist.getConfig() == null) {
+                continue;
+            }
+            for (String domain : domains) {
+                if (containsIgnoreCase(dist.getConfig().getAliases(), domain)) {
+                    throw domainTaken();
+                }
+            }
+        }
+    }
+
+    private static AwsException domainTaken() {
+        return new AwsException("CNAMEAlreadyExists",
+                "The CNAME you provided is already associated with a different resource.", 409);
+    }
+
+    private static boolean containsIgnoreCase(List<String> values, String candidate) {
+        if (values == null) {
+            return false;
+        }
+        for (String value : values) {
+            if (candidate != null && candidate.equalsIgnoreCase(value)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void validateTenantCustomizations(TenantCustomizations customizations) {
+        if (customizations == null) {
+            return;
+        }
+        if (customizations.getWebAclAction() != null
+                && !TENANT_WEB_ACL_ACTIONS.contains(customizations.getWebAclAction())) {
+            throw new AwsException("InvalidArgument", "The WebAcl Action specified is not valid.", 400);
+        }
+        if (customizations.getGeoRestrictionType() != null
+                && !TENANT_GEO_RESTRICTION_TYPES.contains(customizations.getGeoRestrictionType())) {
+            throw new AwsException("InvalidArgument", "The GeoRestrictions RestrictionType is not valid.", 400);
+        }
+    }
+
+    private static void validateTenantParameters(Map<String, String> parameters) {
+        if (parameters == null) {
+            return;
+        }
+        for (Map.Entry<String, String> parameter : parameters.entrySet()) {
+            String value = parameter.getValue();
+            if (!TENANT_PARAMETER_NAME.matcher(parameter.getKey()).matches()
+                    || value == null || value.isEmpty() || value.length() > TENANT_PARAMETER_VALUE_MAX_LENGTH) {
+                throw new AwsException("InvalidArgument",
+                        "The Parameter " + parameter.getKey() + " is not valid.", 400);
+            }
+        }
     }
 
     // ── Invalidations ─────────────────────────────────────────────────────────

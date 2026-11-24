@@ -329,6 +329,149 @@ public class CloudFrontController {
         return Response.ok(xml.build(), XML).build();
     }
 
+    // ── Distribution tenants ──────────────────────────────────────────────────
+
+    @POST
+    @Path("/distribution-tenant")
+    public Response createDistributionTenant(String body) {
+        try {
+            XmlParser.XmlElement request = XmlParser.extractElementTree(body, "CreateDistributionTenantRequest");
+            DistributionTenant tenant = service.createDistributionTenant(
+                    tenantText(request, "DistributionId"),
+                    tenantText(request, "Name"),
+                    tenantDomains(request),
+                    parseTags(body),
+                    tenantCustomizations(request),
+                    tenantParameters(request),
+                    tenantText(request, "ConnectionGroupId"),
+                    xmlBoolean(tenantText(request, "Enabled")));
+            return Response.created(URI.create("/2020-05-31/distribution-tenant/" + tenant.getId()))
+                    .type(XML)
+                    .header("ETag", tenant.getEtag())
+                    .entity(xmlDistributionTenant(tenant))
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/distribution-tenant/{Identifier}")
+    public Response getDistributionTenant(@PathParam("Identifier") String identifier) {
+        try {
+            DistributionTenant tenant = service.getDistributionTenant(identifier);
+            return Response.ok(xmlDistributionTenant(tenant), XML)
+                    .header("ETag", tenant.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/distribution-tenant")
+    public Response getDistributionTenantByDomain(@QueryParam("domain") String domain) {
+        try {
+            DistributionTenant tenant = service.getDistributionTenantByDomain(domain);
+            return Response.ok(xmlDistributionTenant(tenant), XML)
+                    .header("ETag", tenant.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @PUT
+    @Path("/distribution-tenant/{Id}")
+    public Response updateDistributionTenant(@PathParam("Id") String id,
+                                             @HeaderParam("If-Match") String ifMatch,
+                                             String body) {
+        try {
+            XmlParser.XmlElement request = XmlParser.extractElementTree(body, "UpdateDistributionTenantRequest");
+            DistributionTenant tenant = service.updateDistributionTenant(id, ifMatch,
+                    tenantText(request, "DistributionId"),
+                    tenantDomains(request),
+                    tenantCustomizations(request),
+                    tenantParameters(request),
+                    tenantText(request, "ConnectionGroupId"),
+                    xmlBoolean(tenantText(request, "Enabled")));
+            return Response.ok(xmlDistributionTenant(tenant), XML)
+                    .header("ETag", tenant.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @DELETE
+    @Path("/distribution-tenant/{Id}")
+    public Response deleteDistributionTenant(@PathParam("Id") String id,
+                                             @HeaderParam("If-Match") String ifMatch) {
+        try {
+            service.deleteDistributionTenant(id, ifMatch);
+            return Response.noContent().build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @POST
+    @Path("/distribution-tenants")
+    public Response listDistributionTenants(String body) {
+        try {
+            Map<String, String> request = XmlParser.extractGroups(body, "ListDistributionTenantsRequest")
+                    .stream().findFirst().orElse(Map.of());
+            String distributionId = null;
+            String connectionGroupId = null;
+            for (Map<String, String> filter : XmlParser.extractGroups(body, "AssociationFilter")) {
+                distributionId = blankToNull(filter.get("DistributionId"));
+                connectionGroupId = blankToNull(filter.get("ConnectionGroupId"));
+            }
+            int pageSize = pageSizeOf(parseMaxItems(request.get("MaxItems")));
+            Page<DistributionTenant> page = page(
+                    service.listDistributionTenants(request.get("Marker"), paginationFetchLimit(pageSize),
+                            distributionId, connectionGroupId),
+                    pageSize, DistributionTenant::getName);
+            return distributionTenantListResponse("ListDistributionTenantsResult", page);
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @POST
+    @Path("/distribution-tenants-by-customization")
+    public Response listDistributionTenantsByCustomization(String body) {
+        try {
+            Map<String, String> request =
+                    XmlParser.extractGroups(body, "ListDistributionTenantsByCustomizationRequest")
+                            .stream().findFirst().orElse(Map.of());
+            int pageSize = pageSizeOf(parseMaxItems(request.get("MaxItems")));
+            Page<DistributionTenant> page = page(
+                    service.listDistributionTenantsByCustomization(request.get("Marker"),
+                            paginationFetchLimit(pageSize), blankToNull(request.get("WebACLArn")),
+                            blankToNull(request.get("CertificateArn"))),
+                    pageSize, DistributionTenant::getName);
+            return distributionTenantListResponse("ListDistributionTenantsByCustomizationResult", page);
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private static int pageSizeOf(Integer maxItems) {
+        return maxItems == null ? 100 : maxItems;
+    }
+
+    private Response distributionTenantListResponse(String root, Page<DistributionTenant> page) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(root, NS)
+                .elem("NextMarker", page.nextMarker())
+                .start("DistributionTenantList");
+        for (DistributionTenant tenant : page.items()) {
+            xml.raw(xmlDistributionTenantSummary(tenant));
+        }
+        return Response.ok(xml.end("DistributionTenantList").end(root).build(), XML).build();
+    }
+
     // ── Invalidations ─────────────────────────────────────────────────────────
 
     @POST
@@ -4196,5 +4339,166 @@ public class CloudFrontController {
             return blankToNull(fallback.get("DistributionId"));
         }
         return null;
+    }
+
+    private static String tenantText(XmlParser.XmlElement request, String name) {
+        XmlParser.XmlElement child = request == null ? null : request.child(name);
+        return child == null || child.text().isEmpty() ? null : child.text();
+    }
+
+    /** The {@code Domains} members, or null when the request carries no {@code Domains}. */
+    private static List<String> tenantDomains(XmlParser.XmlElement request) {
+        XmlParser.XmlElement domains = request == null ? null : request.child("Domains");
+        if (domains == null) {
+            return null;
+        }
+        List<String> result = new ArrayList<>();
+        for (XmlParser.XmlElement item : domains.children()) {
+            XmlParser.XmlElement domain = item.child("Domain");
+            result.add(domain == null ? null : domain.text());
+        }
+        return result;
+    }
+
+    private static Map<String, String> tenantParameters(XmlParser.XmlElement request) {
+        XmlParser.XmlElement parameters = request == null ? null : request.child("Parameters");
+        if (parameters == null) {
+            return null;
+        }
+        Map<String, String> result = new LinkedHashMap<>();
+        for (XmlParser.XmlElement parameter : parameters.children()) {
+            result.put(tenantText(parameter, "Name"), tenantText(parameter, "Value"));
+        }
+        return result;
+    }
+
+    private static TenantCustomizations tenantCustomizations(XmlParser.XmlElement request) {
+        XmlParser.XmlElement element = request == null ? null : request.child("Customizations");
+        if (element == null) {
+            return null;
+        }
+        TenantCustomizations customizations = new TenantCustomizations();
+        XmlParser.XmlElement webAcl = element.child("WebAcl");
+        if (webAcl != null) {
+            customizations.setWebAclAction(tenantText(webAcl, "Action"));
+            customizations.setWebAclArn(tenantText(webAcl, "Arn"));
+        }
+        XmlParser.XmlElement certificate = element.child("Certificate");
+        if (certificate != null) {
+            customizations.setCertificateArn(tenantText(certificate, "Arn"));
+        }
+        XmlParser.XmlElement geo = element.child("GeoRestrictions");
+        if (geo != null) {
+            customizations.setGeoRestrictionType(tenantText(geo, "RestrictionType"));
+            XmlParser.XmlElement locations = geo.child("Locations");
+            if (locations != null) {
+                List<String> codes = new ArrayList<>();
+                for (XmlParser.XmlElement location : locations.children()) {
+                    codes.add(location.text());
+                }
+                customizations.setGeoLocations(codes);
+            }
+        }
+        return customizations;
+    }
+
+    private String xmlDistributionTenant(DistributionTenant tenant) {
+        XmlBuilder xml = new XmlBuilder().start("DistributionTenant", NS)
+                .elem("Id", tenant.getId())
+                .elem("DistributionId", tenant.getDistributionId())
+                .elem("Name", tenant.getName())
+                .elem("Arn", tenant.getArn());
+        appendTenantDomains(xml, tenant);
+        Map<String, String> tags = service.listTagsForResource(tenant.getArn());
+        if (!tags.isEmpty()) {
+            xml.start("Tags").start("Items");
+            for (Map.Entry<String, String> tag : tags.entrySet()) {
+                xml.start("Tag")
+                        .elem("Key", tag.getKey())
+                        .elem("Value", tag.getValue())
+                        .end("Tag");
+            }
+            xml.end("Items").end("Tags");
+        }
+        appendTenantCustomizations(xml, tenant);
+        if (tenant.getParameters() != null && !tenant.getParameters().isEmpty()) {
+            xml.start("Parameters");
+            for (Map.Entry<String, String> parameter : tenant.getParameters().entrySet()) {
+                xml.start("member")
+                        .elem("Name", parameter.getKey())
+                        .elem("Value", parameter.getValue())
+                        .end("member");
+            }
+            xml.end("Parameters");
+        }
+        xml.elem("ConnectionGroupId", tenant.getConnectionGroupId())
+                .elem("CreatedTime", tenant.getCreatedTime().toString())
+                .elem("LastModifiedTime", tenant.getLastModifiedTime().toString())
+                .elem("Enabled", tenant.getEnabled())
+                .elem("Status", tenant.getStatus());
+        return xml.end("DistributionTenant").build();
+    }
+
+    private static String xmlDistributionTenantSummary(DistributionTenant tenant) {
+        XmlBuilder xml = new XmlBuilder().start("DistributionTenantSummary", NS)
+                .elem("Id", tenant.getId())
+                .elem("DistributionId", tenant.getDistributionId())
+                .elem("Name", tenant.getName())
+                .elem("Arn", tenant.getArn());
+        appendTenantDomains(xml, tenant);
+        xml.elem("ConnectionGroupId", tenant.getConnectionGroupId());
+        appendTenantCustomizations(xml, tenant);
+        xml.elem("CreatedTime", tenant.getCreatedTime().toString())
+                .elem("LastModifiedTime", tenant.getLastModifiedTime().toString())
+                .elem("ETag", tenant.getEtag())
+                .elem("Enabled", tenant.getEnabled())
+                .elem("Status", tenant.getStatus());
+        return xml.end("DistributionTenantSummary").build();
+    }
+
+    /**
+     * Every domain reads back {@code active}: Floci performs no DNS or certificate validation. The
+     * {@code Domains} and {@code Parameters} lists declare no member name, so the SDKs read their
+     * items as {@code member} elements; requests are read by position, whatever the items are called.
+     */
+    private static void appendTenantDomains(XmlBuilder xml, DistributionTenant tenant) {
+        xml.start("Domains");
+        for (String domain : tenant.getDomains()) {
+            xml.start("member")
+                    .elem("Domain", domain)
+                    .elem("Status", "active")
+                    .end("member");
+        }
+        xml.end("Domains");
+    }
+
+    private static void appendTenantCustomizations(XmlBuilder xml, DistributionTenant tenant) {
+        TenantCustomizations customizations = tenant.getCustomizations();
+        if (customizations == null || customizations.isEmpty()) {
+            return;
+        }
+        xml.start("Customizations");
+        if (customizations.getWebAclAction() != null) {
+            xml.start("WebAcl").elem("Action", customizations.getWebAclAction());
+            if (customizations.getWebAclArn() != null) {
+                xml.elem("Arn", customizations.getWebAclArn());
+            }
+            xml.end("WebAcl");
+        }
+        if (customizations.getCertificateArn() != null) {
+            xml.start("Certificate").elem("Arn", customizations.getCertificateArn()).end("Certificate");
+        }
+        if (customizations.getGeoRestrictionType() != null) {
+            xml.start("GeoRestrictions").elem("RestrictionType", customizations.getGeoRestrictionType());
+            if (customizations.getGeoLocations() != null && !customizations.getGeoLocations().isEmpty()) {
+                xml.start("Locations");
+                for (String location : customizations.getGeoLocations()) {
+                    xml.elem("Location", location);
+                }
+                xml.end("Locations");
+            }
+            xml.end("GeoRestrictions");
+        }
+        xml.end("Customizations");
     }
 }
