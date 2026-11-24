@@ -9,6 +9,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.function.Supplier;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -42,7 +43,7 @@ class SesImportJobV2IntegrationTest {
     @Order(0)
     void setupBucketAndContactList() {
         given().when().put("/" + BUCKET).then().statusCode(200);
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"ContactListName":"%s","Topics":[
                       {"TopicName":"Sports","DisplayName":"Sports","DefaultSubscriptionStatus":"OPT_OUT"},
@@ -56,7 +57,7 @@ class SesImportJobV2IntegrationTest {
     void createImportJob_suppressionCsv_runsToCompletedAndFillsTheList() {
         putObject("suppress.csv", "alice@example.com,BOUNCE\nbob@example.com,COMPLAINT\ncarol@example.com,SPAM\n");
 
-        suppressionJobId = given().contentType("application/json").header("Authorization", AUTH)
+        suppressionJobId = v2(AUTH)
                 .body("""
                     {"ImportDataSource":{"S3Url":"s3://%s/suppress.csv","DataFormat":"CSV"},
                      "ImportDestination":{"SuppressionListDestination":{"SuppressionListImportAction":"PUT"}}}
@@ -95,7 +96,7 @@ class SesImportJobV2IntegrationTest {
                 {"emailAddress":"dave@example.com","unsubscribeAll":true}
                 """);
 
-        contactJobId = given().contentType("application/json").header("Authorization", AUTH)
+        contactJobId = v2(AUTH)
                 .body("""
                     {"ImportDataSource":{"S3Url":"s3://%s/contacts.json","DataFormat":"JSON"},
                      "ImportDestination":{"ContactListDestination":{"ContactListName":"%s","ContactListImportAction":"PUT"}}}
@@ -124,20 +125,20 @@ class SesImportJobV2IntegrationTest {
     @Test
     @Order(3)
     void listImportJobs_returnsSummariesAndFiltersByDestinationType() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
         .when().post("/v2/email/import-jobs/list").then().statusCode(200)
                 .body("ImportJobs.JobId", hasItems(suppressionJobId, contactJobId))
                 .body("ImportJobs.find { it.JobId == '" + contactJobId + "' }.JobStatus", equalTo("COMPLETED"))
                 .body("ImportJobs.find { it.JobId == '" + contactJobId + "' }.ImportDataSource", nullValue())
                 .body("NextToken", nullValue());
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"ImportDestinationType\":\"SUPPRESSION_LIST\",\"PageSize\":10}")
         .when().post("/v2/email/import-jobs/list").then().statusCode(200)
                 .body("ImportJobs.JobId", hasItems(suppressionJobId))
                 .body("ImportJobs.JobId", not(hasItems(contactJobId)));
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"ImportDestinationType\":\"EXPORT\"}")
         .when().post("/v2/email/import-jobs/list").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"));
@@ -146,7 +147,7 @@ class SesImportJobV2IntegrationTest {
     @Test
     @Order(4)
     void createImportJob_missingObject_failsTheJob() {
-        String jobId = given().contentType("application/json").header("Authorization", AUTH)
+        String jobId = v2(AUTH)
                 .body("""
                     {"ImportDataSource":{"S3Url":"s3://%s/does-not-exist.csv","DataFormat":"CSV"},
                      "ImportDestination":{"SuppressionListDestination":{"SuppressionListImportAction":"DELETE"}}}
@@ -187,17 +188,17 @@ class SesImportJobV2IntegrationTest {
                 """.formatted(BUCKET);
 
         for (String body : new String[] {badFormat, bothDestinations, noDataSource}) {
-            given().contentType("application/json").header("Authorization", AUTH).body(body)
+            v2(AUTH).body(body)
             .when().post("/v2/email/import-jobs").then().statusCode(400)
                     .body("__type", equalTo("BadRequestException"));
         }
-        given().contentType("application/json").header("Authorization", AUTH).body(trailingTokens)
+        v2(AUTH).body(trailingTokens)
         .when().post("/v2/email/import-jobs").then().statusCode(400)
                 .body("__type", equalTo("SerializationException"));
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
         .when().post("/v2/email/import-jobs").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"));
-        given().contentType("application/json").header("Authorization", AUTH).body(unknownList)
+        v2(AUTH).body(unknownList)
         .when().post("/v2/email/import-jobs").then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"));
     }
