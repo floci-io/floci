@@ -19,9 +19,15 @@ final class EventBridgeV2RequestShapes {
     private static final int MAX_VIOLATIONS = 10;
 
     private static final RequestConstraintCheck CHECK = RequestConstraintCheck.load(
-            "aws/eventbridgev2-request-shapes.json", "EventBridge V2 request shapes", new Messages());
+            "aws/eventbridgev2-request-shapes.json", "EventBridge V2 request shapes", new Messages(),
+            new RequestConstraintCheck.ViolationOrder(true, true));
 
     private EventBridgeV2RequestShapes() {
+    }
+
+    /** {@code value} without the members that {@code shapeName} does not declare. */
+    static JsonNode modeled(String shapeName, JsonNode value) {
+        return CHECK.modeled(shapeName, value);
     }
 
     static void check(String operation, JsonNode request) {

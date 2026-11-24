@@ -266,12 +266,12 @@ final class WebhookEventsConfigurations {
     }
 
     /**
-     * The {@code Configuration} a describe returns for a validated request: as given, less the members that hold
-     * secrets, and with no member that was sent as null.
+     * The {@code Configuration} a describe returns for a validated request: as given, less the members the model
+     * does not declare and the members that hold secrets, and with no member that was sent as null.
      */
     static JsonNode echo(JsonNode webhook) {
-        ObjectNode copy = webhook.deepCopy();
-        JsonNode auth = copy.get("AuthConfiguration");
+        ObjectNode copy = (ObjectNode) EventBridgeV2RequestShapes.modeled("WebhookEventsSourceConfiguration", webhook);
+        JsonNode auth = copy.path("AuthConfiguration");
         for (String member : AUTH_MEMBERS) {
             if (auth.get(member) instanceof ObjectNode configuration) {
                 SECRET_MEMBERS.forEach(configuration::remove);

@@ -210,7 +210,8 @@ public class EventBridgeV2EventSources implements Resettable {
         if (eventBusArn != null) {
             requireEndpointRegion(eventBusArn, region, "EventBusArn");
         }
-        if (nextToken != null && !Pagination.tokenStartsWith(nextToken, TOKEN_NAMESPACE + ":")) {
+        String namespace = tokenNamespace(region, eventBusArn, namePrefix);
+        if (nextToken != null && !Pagination.tokenStartsWith(nextToken, namespace + ":")) {
             throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
         }
         if (eventBusArn != null) {
@@ -225,8 +226,14 @@ public class EventBridgeV2EventSources implements Resettable {
                 .toList();
         int maxResults = request.hasNonNull("MaxResults") ? request.get("MaxResults").intValue()
                 : EventBridgeV2Service.MAX_LIST_RESULTS;
-        return Pagination.paginate(listed, EventBridgeV2EventSources::id, maxResults, nextToken, TOKEN_NAMESPACE,
+        return Pagination.paginate(listed, EventBridgeV2EventSources::id, maxResults, nextToken, namespace,
                 token -> new AwsException("InvalidInputException", "Invalid nextToken", 400));
+    }
+
+    private static String tokenNamespace(String region, String eventBusArn, String namePrefix) {
+        String filters = region + "\n" + (eventBusArn == null ? "-" : "+" + eventBusArn) + "\n"
+                + (namePrefix == null ? "-" : "+" + namePrefix);
+        return TOKEN_NAMESPACE + "-" + Digests.sha256Hex(filters);
     }
 
     boolean hasSourcesOn(String eventBusArn, String region) {

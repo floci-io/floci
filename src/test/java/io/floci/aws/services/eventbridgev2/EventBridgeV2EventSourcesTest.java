@@ -511,6 +511,84 @@ class EventBridgeV2EventSourcesTest {
         assertEquals("Invalid nextToken", e.getMessage());
     }
 
+    @Test
+    void listTokenKeepsWorkingWithTheSameFilters() {
+        for (String name : List.of("a-one", "a-two", "a-three")) {
+            service.createEventSource(create(name, bus, STATIC_AUTH), REGION);
+        }
+        String filters = "\"EventBusArn\":\"" + bus + "\",\"NamePrefix\":\"a-\",\"MaxResults\":2";
+        PaginatedResult<EventSourceV2> first = service.listEventSources(json("{" + filters + "}"), REGION);
+
+        PaginatedResult<EventSourceV2> second = service.listEventSources(
+                json("{" + filters + ",\"NextToken\":\"" + first.nextToken() + "\"}"), REGION);
+
+        assertEquals(1, second.items().size());
+    }
+
+    @Test
+    void listRefusesATokenOfAListingWithOtherFilters() {
+        for (String name : List.of("a-one", "a-two", "a-three")) {
+            service.createEventSource(create(name, bus, STATIC_AUTH), REGION);
+        }
+        String token = service.listEventSources(json("{\"NamePrefix\":\"a-\",\"MaxResults\":1}"), REGION)
+                .nextToken();
+        String withBusToken = service.listEventSources(json("{\"EventBusArn\":\"" + bus + "\",\"MaxResults\":1}"),
+                REGION).nextToken();
+        String unfilteredToken = service.listEventSources(json("{\"MaxResults\":1}"), REGION).nextToken();
+
+        for (String request : List.of(
+                "{\"NamePrefix\":\"b-\",\"NextToken\":\"" + token + "\"}",
+                "{\"NamePrefix\":\"a-\",\"EventBusArn\":\"" + bus + "\",\"NextToken\":\"" + token + "\"}",
+                "{\"EventBusArn\":\"" + bus + "\",\"NamePrefix\":\"a-\",\"NextToken\":\"" + withBusToken + "\"}",
+                "{\"NamePrefix\":\"a-\",\"NextToken\":\"" + unfilteredToken + "\"}")) {
+            AwsException e = assertThrows(AwsException.class, () -> service.listEventSources(json(request), REGION),
+                    request);
+            assertEquals("InvalidInputException", e.getErrorCode());
+            assertEquals("Invalid nextToken", e.getMessage());
+        }
+    }
+
+    @Test
+    void listRefusesATokenOfAnotherRegion() {
+        for (String name : List.of("a-one", "a-two")) {
+            service.createEventSource(create(name, bus, STATIC_AUTH), REGION);
+        }
+        String token = service.listEventSources(json("{\"MaxResults\":1}"), REGION).nextToken();
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listEventSources(
+                json("{\"NextToken\":\"" + token + "\"}"), "eu-west-1"));
+
+        assertEquals("Invalid nextToken", e.getMessage());
+    }
+
+    @Test
+    void createDoesNotKeepMembersTheModelDoesNotDeclare() {
+        EventSourceV2 source = service.createEventSource(create("hook", bus,
+                "{\"StaticTokenAuthConfiguration\":{\"TokenHttpHeader\":\"X-Token\",\"secretValue\":\"s3cret!!\","
+                        + "\"password\":\"p\"},\"Extra\":1}").deepCopy(), REGION);
+        ObjectNode withExtra = create("hook2", bus, STATIC_AUTH);
+        ((ObjectNode) withExtra.path("Configuration").path("WebhookEventsConfiguration")).put("Unknown", "x");
+
+        EventSourceV2 other = service.createEventSource(withExtra, REGION);
+
+        assertEquals(json("{\"WebhookEventsConfiguration\":{\"AuthConfiguration\":" + STATIC_AUTH
+                + ",\"RoleArn\":\"" + ROLE + "\"}}"), source.getConfiguration());
+        assertEquals(source.getConfiguration(), other.getConfiguration());
+    }
+
+    @Test
+    void updateDoesNotKeepMembersTheModelDoesNotDeclare() {
+        EventSourceV2 source = service.createEventSource(create("hook", bus, STATIC_AUTH), REGION);
+
+        EventSourceV2 updated = service.updateEventSource(json("{\"EventSourceArn\":\"" + source.getArn()
+                + "\",\"Configuration\":{\"WebhookEventsConfiguration\":{\"AuthConfiguration\":"
+                + "{\"StaticTokenAuthConfiguration\":{\"TokenHttpHeader\":\"X-Token\",\"secretValue\":\"s\","
+                + "\"password\":\"p\"}},\"RoleArn\":\"" + ROLE + "\",\"Unknown\":true}}}"), REGION);
+
+        assertEquals(json("{\"WebhookEventsConfiguration\":{\"AuthConfiguration\":" + STATIC_AUTH
+                + ",\"RoleArn\":\"" + ROLE + "\"}}"), updated.getConfiguration());
+    }
+
     // ──────────────────────────── Update ────────────────────────────
 
     @Test

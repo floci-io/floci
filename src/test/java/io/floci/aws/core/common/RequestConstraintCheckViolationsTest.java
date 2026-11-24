@@ -48,7 +48,19 @@ class RequestConstraintCheckViolationsTest {
             """;
 
     private static final RequestConstraintCheck CHECK = RequestConstraintCheck.of(json(MODEL),
+            RequestConstraintCheck.standardMessages("InvalidInputException"),
+            new RequestConstraintCheck.ViolationOrder(true, true));
+
+    private static final RequestConstraintCheck STANDARD = RequestConstraintCheck.of(json(MODEL),
             RequestConstraintCheck.standardMessages("InvalidInputException"));
+
+    private static final RequestConstraintCheck PATTERN_FIRST = RequestConstraintCheck.of(json(MODEL),
+            RequestConstraintCheck.standardMessages("InvalidInputException"),
+            new RequestConstraintCheck.ViolationOrder(true, false));
+
+    private static final RequestConstraintCheck HASH_ORDER = RequestConstraintCheck.of(json(MODEL),
+            RequestConstraintCheck.standardMessages("InvalidInputException"),
+            new RequestConstraintCheck.ViolationOrder(false, true));
 
     private static final String REQUIRED_OK = "\"Name\": \"abc\", \"Inner\": {\"Leaf\": \"abc\"}";
 
@@ -90,6 +102,50 @@ class RequestConstraintCheckViolationsTest {
         assertEquals(List.of(
                 "Value 'abcdef' at 'name' failed to satisfy constraint: Member must have length less than or equal to 5"),
                 CHECK.violations("Put", json("{\"Name\": \"abcdef\", \"Inner\": {\"Leaf\": \"abc\"}}")));
+    }
+
+    @Test
+    void standardOrderReportsLengthBeforePattern() {
+        String request = "{\"Name\": \"A\", \"Inner\": {\"Leaf\": \"abc\"}}";
+        String length = "Value 'A' at 'name' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 2";
+        String pattern = "Value 'A' at 'name' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [a-z]+";
+
+        assertEquals(List.of(length, pattern), STANDARD.violations("Put", json(request)));
+        assertEquals(List.of(length, pattern), HASH_ORDER.violations("Put", json(request)));
+        assertEquals(List.of(pattern, length), PATTERN_FIRST.violations("Put", json(request)));
+        assertEquals(List.of(pattern, length), CHECK.violations("Put", json(request)));
+    }
+
+    @Test
+    void standardOrderQuotesAMapInRequestOrder() {
+        String request = "{" + REQUIRED_OK + ", \"Tags\": {\"b\": \"x\", \"a\": \"y\", \"c\": \"z\"}}";
+        String text = "Value '%s' at 'tags' failed to satisfy constraint: Member must have length less than or equal to 2";
+
+        assertEquals(List.of(String.format(text, "{b=x, a=y, c=z}")), STANDARD.violations("Put", json(request)));
+        assertEquals(List.of(String.format(text, "{b=x, a=y, c=z}")), PATTERN_FIRST.violations("Put", json(request)));
+        assertEquals(List.of(String.format(text, "{a=y, b=x, c=z}")), HASH_ORDER.violations("Put", json(request)));
+        assertEquals(List.of(String.format(text, "{a=y, b=x, c=z}")), CHECK.violations("Put", json(request)));
+    }
+
+    @Test
+    void modeledKeepsOnlyDeclaredMembersThroughStructuresAndListsOfStructures() {
+        JsonNode value = json("{\"Items\": [{\"Leaf\": \"a\", \"Extra\": 1}, {\"Other\": \"b\", \"x\": {}}],"
+                + " \"Unknown\": true}");
+
+        assertEquals(json("{\"Items\": [{\"Leaf\": \"a\"}, {\"Other\": \"b\"}]}"),
+                CHECK.modeled("ListyInput", value));
+    }
+
+    @Test
+    void modeledCopiesMapsAndScalarsAsTheyAre() {
+        JsonNode marks = json("{\"k\": {\"Leaf\": \"a\", \"Extra\": 1}}");
+
+        assertEquals(marks, CHECK.modeled("Marks", marks));
+        assertEquals(json("\"text\""), CHECK.modeled("Name", json("\"text\"")));
+        assertEquals(json("{\"Name\": \"a\", \"Self\": {\"Name\": \"b\"}}"),
+                CHECK.modeled("LoopInput", json("{\"Name\": \"a\", \"Self\": {\"Name\": \"b\", \"z\": 1}, \"y\": 2}")));
     }
 
     @Test
