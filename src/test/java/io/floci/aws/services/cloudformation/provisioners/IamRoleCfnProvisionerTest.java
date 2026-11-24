@@ -651,6 +651,32 @@ class IamRoleCfnProvisionerTest {
     }
 
     @Test
+    void failedUpdateReconcilesOffTheKeysThisUpdateAdded() {
+        IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
+        existing.getTags().put("team", "prior");
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600),
+                eq(Map.of("team", "new", "env", "prod")), any()))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getRole("app-role")).thenReturn(existing);
+        doThrow(new AwsException("NoSuchEntity", "missing policy", 404))
+                .when(iam).attachRolePolicy("app-role", "arn:aws:iam::aws:policy/Missing");
+
+        StackResource r = resource();
+        r.setPhysicalId("app-role");
+        r.getAttributes().put("RoleId", "AROAapp-role");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"RoleName": "app-role", "Tags": [{"Key": "team", "Value": "new"},
+                 {"Key": "env", "Value": "prod"}],
+                 "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Missing"]}
+                """), ctx()));
+
+        verify(iam).untagRole("app-role", List.of("env"));
+        verify(iam).tagRole("app-role", Map.of("team", "prior"));
+    }
+
+    @Test
     void stackRollbackRestoresThePriorTags() throws Exception {
         IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
         IamRoleCfnProvisioner owner = new IamRoleCfnProvisioner(realIam);

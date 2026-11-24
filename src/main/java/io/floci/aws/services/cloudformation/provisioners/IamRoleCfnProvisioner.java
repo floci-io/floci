@@ -333,9 +333,12 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                 }
             }
             if (ownedTags != null) {
+                // The keys this update touched, its template's plus the previous deployment's: a
+                // key the update added is reconciled off the role with the same set, instead of
+                // surviving a rolled-back update only because the previous deployment never owned it.
                 if (!CfnRollback.attemptIamCleanup(failure,
                         "restore prior tags on role " + resolvedRoleName,
-                        () -> reconcileTags(resolvedRoleName, ownedTags, tagsToRestore))) {
+                        () -> reconcileTags(resolvedRoleName, Ec2Tags.touched(ownedTags, tags), tagsToRestore))) {
                     cleanupSucceeded = false;
                 }
             }
