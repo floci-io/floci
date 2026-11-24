@@ -12,8 +12,11 @@ import io.floci.aws.services.kinesisanalytics.model.ApplicationStatus;
 import io.floci.aws.services.kinesisanalytics.model.FlinkApplication;
 import io.floci.aws.services.kinesisanalytics.model.Snapshot;
 import io.floci.aws.services.kinesisanalytics.model.SnapshotStatus;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Mockito;
 
 import java.time.Instant;
@@ -28,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class KinesisAnalyticsV2ServiceTest {
 
     private static final String ROLE = "arn:aws:iam::000000000000:role/x";

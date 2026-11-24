@@ -10,7 +10,9 @@ import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrInstanceGroup;
 import io.floci.aws.services.emr.model.EmrSession;
 import io.floci.aws.testing.InMemoryStorageFactory;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -28,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** A cluster's Spark Connect sessions, through {@link EmrService}: their lifecycle and what refuses one. */
+@ResourceLock(ParallelLocks.PORTS)
 class EmrSessionsTest {
 
     private static final String RELEASE = "emr-spark-8.0.0";

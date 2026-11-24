@@ -1,7 +1,9 @@
 package io.floci.aws.core.common.port;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.StartGate;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -15,6 +17,7 @@ import java.util.function.IntPredicate;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+@ResourceLock(ParallelLocks.PORTS)
 class PortAllocatorTest {
 
     // Pool bookkeeping is asserted against a host where every port is free, so these tests do

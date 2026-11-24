@@ -2,9 +2,11 @@ package io.floci.aws.services.ec2;
 
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.LaunchTemplateData;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -19,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * 401 so the caller fetches a new token. A token is not valid on other instances. When the
  * instance's HttpTokens is required, a GET without a valid token also gets 401.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class Ec2MetadataTokenTest {
 
     private Ec2MetadataTestFixture fixture;

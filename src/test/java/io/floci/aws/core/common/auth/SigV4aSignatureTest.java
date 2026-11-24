@@ -1,7 +1,10 @@
 package io.floci.aws.core.common.auth;
 
 import io.floci.aws.core.common.Digests;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -11,6 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code V4_ASYMMETRIC}), the signer botocore and the Java SDK use for SigV4A, so a pass shows the
  * key derivation and the ECDSA check agree with a real client rather than with this class.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SigV4aSignatureTest {
 
     private static final String ACCESS_KEY = "AKIDEXAMPLE";

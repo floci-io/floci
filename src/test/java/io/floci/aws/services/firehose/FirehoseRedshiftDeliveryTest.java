@@ -15,8 +15,10 @@ import io.floci.aws.services.redshiftserverless.RedshiftServerlessService;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessService.WorkgroupTarget;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.SecretVersion;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -44,6 +46,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class FirehoseRedshiftDeliveryTest {
 
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();

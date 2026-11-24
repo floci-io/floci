@@ -36,8 +36,11 @@ import io.floci.aws.services.msk.model.Scram;
 import io.floci.aws.services.msk.model.Serverless;
 import io.floci.aws.services.msk.model.StorageInfo;
 import io.floci.aws.services.msk.model.VpcConfig;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Mockito;
 
 import java.util.HashSet;
@@ -50,6 +53,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class MskServiceTest {
 
     private MskService mskService;

@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
@@ -40,7 +41,7 @@ class SesAccountDetailsV2IntegrationTest {
     @Test
     @Order(1)
     void putDetails_roundTripsThroughGetAccount() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"MailType":"TRANSACTIONAL","WebsiteURL":"https://example.com",
                      "ContactLanguage":"EN","UseCaseDescription":"transactional mail",
@@ -63,7 +64,7 @@ class SesAccountDetailsV2IntegrationTest {
     @Order(2)
     void putDetails_missingBothRequired_reportsAggregatedError() {
         // AWS reports both null violations at once (mailType before websiteURL).
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{}")
         .when().post("/v2/email/account/details").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
@@ -75,7 +76,7 @@ class SesAccountDetailsV2IntegrationTest {
     @Test
     @Order(3)
     void putDetails_missingWebsiteUrl_reportsSingleError() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"MailType\":\"TRANSACTIONAL\"}")
         .when().post("/v2/email/account/details").then().statusCode(400)
                 .body("message", equalTo("1 validation error detected: Value at 'websiteURL' failed to "
@@ -85,7 +86,7 @@ class SesAccountDetailsV2IntegrationTest {
     @Test
     @Order(4)
     void putDetails_invalidMailTypeEnum_returnsBadRequest() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"MailType\":\"SPAM\",\"WebsiteURL\":\"https://example.com\"}")
         .when().post("/v2/email/account/details").then().statusCode(400)
                 .body("message", equalTo("1 validation error detected: Value at 'mailType' failed to "
@@ -95,7 +96,7 @@ class SesAccountDetailsV2IntegrationTest {
     @Test
     @Order(5)
     void putDetails_invalidContactLanguageEnum_returnsBadRequest() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"MailType\":\"TRANSACTIONAL\",\"WebsiteURL\":\"https://example.com\","
                         + "\"ContactLanguage\":\"FR\"}")
         .when().post("/v2/email/account/details").then().statusCode(400)
@@ -106,7 +107,7 @@ class SesAccountDetailsV2IntegrationTest {
     @Test
     @Order(6)
     void putDetails_blankWebsiteUrl_returnsLengthError() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"MailType\":\"TRANSACTIONAL\",\"WebsiteURL\":\"\"}")
         .when().post("/v2/email/account/details").then().statusCode(400)
                 .body("message", equalTo("1 validation error detected: Value at 'websiteURL' failed to "
@@ -116,7 +117,7 @@ class SesAccountDetailsV2IntegrationTest {
     @Test
     @Order(7)
     void putDetails_nonUrlWebsite_returnsFormatError() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"MailType\":\"TRANSACTIONAL\",\"WebsiteURL\":\"not a url\"}")
         .when().post("/v2/email/account/details").then().statusCode(400)
                 .body("message", equalTo("Url contains invalid format"));
@@ -127,7 +128,7 @@ class SesAccountDetailsV2IntegrationTest {
     void putDetails_nonStringTypedMember_returnsBadRequest() {
         // A present-but-wrong-type typed member is rejected rather than coerced (asText would turn 123
         // into "123"), matching the identity/configuration-set string members.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"MailType\":123,\"WebsiteURL\":\"https://example.com\"}")
         .when().post("/v2/email/account/details").then().statusCode(400)
                 .body("__type", equalTo("SerializationException"));
@@ -136,7 +137,7 @@ class SesAccountDetailsV2IntegrationTest {
     @Test
     @Order(9)
     void putDetails_nonArrayAdditionalContacts_returnsBadRequest() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"MailType\":\"TRANSACTIONAL\",\"WebsiteURL\":\"https://example.com\","
                         + "\"AdditionalContactEmailAddresses\":\"ops@example.com\"}")
         .when().post("/v2/email/account/details").then().statusCode(400)
@@ -146,7 +147,7 @@ class SesAccountDetailsV2IntegrationTest {
     @Test
     @Order(10)
     void putDetails_nonBooleanProductionAccess_returnsBadRequest() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"MailType\":\"TRANSACTIONAL\",\"WebsiteURL\":\"https://example.com\","
                         + "\"ProductionAccessEnabled\":\"abc\"}")
         .when().post("/v2/email/account/details").then().statusCode(400)
@@ -158,7 +159,7 @@ class SesAccountDetailsV2IntegrationTest {
     @Order(11)
     void putDetails_websiteUrlTooLong_returnsLengthError() {
         String longUrl = "https://example.com/" + "a".repeat(1001);
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"MailType\":\"TRANSACTIONAL\",\"WebsiteURL\":\"" + longUrl + "\"}")
         .when().post("/v2/email/account/details").then().statusCode(400)
                 .body("message", equalTo("1 validation error detected: Value at 'websiteURL' failed to "
@@ -169,7 +170,7 @@ class SesAccountDetailsV2IntegrationTest {
     @Order(12)
     void putDetails_useCaseDescriptionTooLong_returnsLengthError() {
         String longDesc = "x".repeat(5001);
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"MailType\":\"TRANSACTIONAL\",\"WebsiteURL\":\"https://example.com\","
                         + "\"UseCaseDescription\":\"" + longDesc + "\"}")
         .when().post("/v2/email/account/details").then().statusCode(400)
@@ -180,7 +181,7 @@ class SesAccountDetailsV2IntegrationTest {
     @Test
     @Order(13)
     void putDetails_tooManyContacts_returnsLengthError() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"MailType\":\"TRANSACTIONAL\",\"WebsiteURL\":\"https://example.com\","
                         + "\"AdditionalContactEmailAddresses\":[\"a1@example.com\",\"a2@example.com\","
                         + "\"a3@example.com\",\"a4@example.com\",\"a5@example.com\"]}")
@@ -193,7 +194,7 @@ class SesAccountDetailsV2IntegrationTest {
     @Test
     @Order(14)
     void putDetails_emptyContactsList_returnsLengthError() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"MailType\":\"TRANSACTIONAL\",\"WebsiteURL\":\"https://example.com\","
                         + "\"AdditionalContactEmailAddresses\":[]}")
         .when().post("/v2/email/account/details").then().statusCode(400)
@@ -205,7 +206,7 @@ class SesAccountDetailsV2IntegrationTest {
     @Test
     @Order(15)
     void putDetails_contactElementTooShort_returnsElementConstraint() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"MailType\":\"TRANSACTIONAL\",\"WebsiteURL\":\"https://example.com\","
                         + "\"AdditionalContactEmailAddresses\":[\"a@b\"]}")
         .when().post("/v2/email/account/details").then().statusCode(400)
@@ -221,7 +222,7 @@ class SesAccountDetailsV2IntegrationTest {
     void putDetails_multipleLengthViolations_areAggregated() {
         String longUrl = "https://example.com/" + "a".repeat(1001);
         String longDesc = "x".repeat(5001);
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"MailType\":\"TRANSACTIONAL\",\"WebsiteURL\":\"" + longUrl + "\","
                         + "\"UseCaseDescription\":\"" + longDesc + "\"}")
         .when().post("/v2/email/account/details").then().statusCode(400)
@@ -235,7 +236,7 @@ class SesAccountDetailsV2IntegrationTest {
     @Order(17)
     void putDetails_malformedJson_returnsSerializationException() {
         // AWS reports a malformed JSON body as a SerializationException, not BadRequestException.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{ not json")
         .when().post("/v2/email/account/details").then().statusCode(400)
                 .body("__type", equalTo("SerializationException"));

@@ -42,6 +42,14 @@ final class SAMLAssertionVerifier {
     /** What a session tag attribute naming no key is refused with, this package's own wording. */
     static final String TAG_KEY_MISSING =
             "A PrincipalTag attribute must name the tag key after the colon.";
+    /**
+     * What an attribute naming the keys to set as transitive is named: "include another Attribute
+     * element with the Name attribute set to
+     * https://aws.amazon.com/SAML/Attributes/TransitiveTagKeys", which unlike a tag attribute "is
+     * an optional multivalued attribute", so each of its values is one key.
+     */
+    private static final String TRANSITIVE_TAG_KEYS =
+            "https://aws.amazon.com/SAML/Attributes/TransitiveTagKeys";
     // The pattern AWS names in its error for a RoleSessionName attribute outside it.
     static final String ROLE_SESSION_NAME_INVALID = "RoleSessionName in AuthnResponse must match [a-zA-Z_0-9+=,.@-]{2,64}";
     private static final Pattern ROLE_SESSION_NAME_PATTERN = Pattern.compile("[a-zA-Z_0-9+=,.@-]{2,64}");
@@ -52,12 +60,14 @@ final class SAMLAssertionVerifier {
     private SAMLAssertionVerifier() {}
 
     /**
-     * {@code roleSessionName} is null when the assertion carries no RoleSessionName attribute, and
-     * {@code principalTags} is empty when it carries no session tags.
+     * {@code roleSessionName} is null when the assertion carries no RoleSessionName attribute,
+     * {@code principalTags} is empty when it carries no session tags, and
+     * {@code transitiveTagKeys} is empty when it asks for none to be transitive, which is AWS's
+     * default for a session.
      */
     record Verified(String issuer, String subject, String subjectType, String nameQualifier,
                     Instant expiration, List<RolePair> roles, String roleSessionName,
-                    Map<String, String> principalTags) {}
+                    Map<String, String> principalTags, List<String> transitiveTagKeys) {}
     record RolePair(String roleArn, String principalArn) {}
 
     static Verified verify(String encoded, SAMLProvider provider, Instant now) throws InvalidAssertionException {
@@ -190,7 +200,7 @@ final class SAMLAssertionVerifier {
             String nameQualifier = Base64.getEncoder().encodeToString(
                     Digests.sha1((issuer + provider.getArn()).getBytes(StandardCharsets.UTF_8)));
             return new Verified(issuer, name, subjectType, nameQualifier, notOnOrAfter, roles,
-                    roleSessionName, principalTags(attributes));
+                    roleSessionName, principalTags(attributes), transitiveTagKeys(attributes));
         } catch (InvalidAssertionException e) {
             throw e;
         } catch (Exception e) {
@@ -253,6 +263,30 @@ final class SAMLAssertionVerifier {
             tags.put(key, values.item(0).getTextContent());
         }
         return tags;
+    }
+
+    /**
+     * The keys the assertion asks to set as transitive, in the order its values read.
+     *
+     * <p>This attribute is the one AWS publishes as multivalued, each value naming one key, so
+     * several values are read rather than refused as a session tag's would be, and an attribute
+     * carrying none asks for nothing. The value is taken as the assertion signed it, as a tag key
+     * attribute's is. Which of them select a tag is the session's business, not this one's: a key
+     * naming no session tag carries no tag onward, and nothing published says AWS refuses it.
+     */
+    private static List<String> transitiveTagKeys(NodeList attributes) {
+        List<String> keys = new ArrayList<>();
+        for (int i = 0; i < attributes.getLength(); i++) {
+            Element attribute = (Element) attributes.item(i);
+            if (!TRANSITIVE_TAG_KEYS.equals(attribute.getAttribute("Name"))) {
+                continue;
+            }
+            NodeList values = attribute.getElementsByTagNameNS(SAML, "AttributeValue");
+            for (int j = 0; j < values.getLength(); j++) {
+                keys.add(values.item(j).getTextContent());
+            }
+        }
+        return keys;
     }
 
     /** What an attribute carrying no single value for its tag is refused with, Floci's wording. */

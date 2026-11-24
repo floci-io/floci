@@ -6,6 +6,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -170,7 +171,7 @@ class SesBooleanCoercionV2IntegrationTest {
     }
 
     private static ValidatableResponse send(String method, String path, String body) {
-        return given().contentType("application/json").header("Authorization", AUTH).body(body)
+        return v2(AUTH).body(body)
                 .when().request(method, path).then();
     }
 

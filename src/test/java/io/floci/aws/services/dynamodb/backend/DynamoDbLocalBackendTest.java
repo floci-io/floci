@@ -17,8 +17,10 @@ import io.floci.aws.services.dynamodb.model.KeySchemaElement;
 import io.floci.aws.services.dynamodb.model.LocalSecondaryIndex;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.kinesis.KinesisService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
@@ -50,6 +52,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** The DynamoDB Local engine: identity translation, Floci-held tags, typed operations and lifecycle. */
+@ResourceLock(ParallelLocks.PORTS)
 class DynamoDbLocalBackendTest {
 
     private static final String ACCOUNT = "123456789012";

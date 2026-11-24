@@ -2,7 +2,10 @@ package io.floci.aws.services.rdsdata;
 
 import com.mysql.cj.conf.ConnectionUrl;
 import io.floci.aws.services.rds.model.DatabaseEngine;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.postgresql.Driver;
 
 import java.util.List;
@@ -11,6 +14,7 @@ import java.util.Properties;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class RdsDataConnectionFactoryTest {
 
     @Test

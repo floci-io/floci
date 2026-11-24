@@ -1,5 +1,6 @@
 package io.floci.aws.core.common;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Future;
 import io.vertx.core.MultiMap;
 import io.vertx.core.Vertx;
@@ -15,6 +16,7 @@ import io.vertx.ext.web.Router;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Duration;
 import java.util.List;
@@ -35,6 +37,7 @@ import static org.mockito.Mockito.when;
  * Requests to an application UI's own host through {@link AppUiProxy}: a server stands in for the interface, an EMR
  * cluster's primary node's here, and a service's routes for what the link's host resolves to.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class AppUiProxyTest {
 
     private static final String HOST = "s".repeat(26) + "-8088.emrappui.localhost";

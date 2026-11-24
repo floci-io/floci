@@ -7,8 +7,11 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.codepipeline.CodePipelineService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.util.HashMap;
@@ -24,6 +27,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** The CodePipeline CFN provisioner in isolation, with the service mocked. */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CodePipelineCfnProvisionerTest {
 
     private final CodePipelineService service = mock(CodePipelineService.class);

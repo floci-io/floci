@@ -1,10 +1,12 @@
 package io.floci.aws.services.lambdaweb;
 
 import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Vertx;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -19,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class LambdaWebMetadataServerTest {
 
     private static final String PATH = "/2026-01-15/metadata/execution-environment";

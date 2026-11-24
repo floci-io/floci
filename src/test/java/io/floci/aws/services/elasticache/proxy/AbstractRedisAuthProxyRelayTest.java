@@ -1,7 +1,9 @@
 package io.floci.aws.services.elasticache.proxy;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.FreePorts;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -11,6 +13,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+@ResourceLock(ParallelLocks.PORTS)
 class AbstractRedisAuthProxyRelayTest {
 
     @Test

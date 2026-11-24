@@ -89,6 +89,15 @@ public class SessionCredential {
      * Floci recorded them.
      */
     private Map<String, String> sessionTags = new LinkedHashMap<>();
+    /**
+     * The keys among those session tags the session was asked to set as transitive, in the order
+     * the request named them: "if you set a tag key as transitive, the corresponding key and value
+     * passes to subsequent sessions in a role chain". A session assumed from this one inherits
+     * those tags and keeps their keys transitive, so a chain carries them all the way down. Empty
+     * for a session that named none, which is AWS's default: "if you choose not to specify a
+     * transitive tag key, then no tags are passed from this session to any subsequent sessions".
+     */
+    private List<String> transitiveTagKeys = new ArrayList<>();
 
     public SessionCredential() {}
 
@@ -219,5 +228,14 @@ public class SessionCredential {
 
     public void setSessionTags(Map<String, String> sessionTags) {
         this.sessionTags = sessionTags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(sessionTags);
+    }
+
+    public List<String> getTransitiveTagKeys() {
+        return transitiveTagKeys;
+    }
+
+    public void setTransitiveTagKeys(List<String> transitiveTagKeys) {
+        this.transitiveTagKeys = transitiveTagKeys == null
+                ? new ArrayList<>() : new ArrayList<>(transitiveTagKeys);
     }
 }

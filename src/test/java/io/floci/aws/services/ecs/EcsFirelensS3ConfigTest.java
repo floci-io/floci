@@ -12,7 +12,10 @@ import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.services.ecs.model.NetworkMode;
 import io.floci.aws.services.ecs.model.TaskDefinition;
 import io.floci.aws.services.ecs.model.TaskStatus;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Duration;
 import java.util.List;
@@ -40,6 +43,7 @@ import static org.mockito.Mockito.when;
  * aws-for-fluent-bit init process its {@code aws_fluent_bit_init_s3_*} environment variables,
  * which ECS never inspects; the last test pins that Floci does not over-reach and reject it.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EcsFirelensS3ConfigTest {
 
     private static final String S3_CONFIG_ARN = "arn:aws:s3:::firelens-configs/extra.conf";

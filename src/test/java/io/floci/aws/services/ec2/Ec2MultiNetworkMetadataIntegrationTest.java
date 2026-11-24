@@ -17,7 +17,9 @@ import io.floci.aws.core.common.docker.PortAllocator;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.net.VpcNetworkManager;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.http.HttpResponse;
 import java.util.LinkedHashMap;
@@ -26,6 +28,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+@ResourceLock(ParallelLocks.PORTS)
 class Ec2MultiNetworkMetadataIntegrationTest {
     @Test
     void restoredGuestCanReadMetadataThroughItsSharedNetworkAddress() throws Exception {

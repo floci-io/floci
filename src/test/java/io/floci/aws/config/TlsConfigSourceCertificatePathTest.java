@@ -1,5 +1,6 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.smallrye.config.PropertiesConfigSource;
 import io.smallrye.config.SmallRyeConfig;
 import io.smallrye.config.SmallRyeConfigBuilder;
@@ -7,6 +8,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -35,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * and is mangled. Nothing else records that distinction, so switching back would silently
  * reintroduce the bug; these tests fail if that happens.
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class TlsConfigSourceCertificatePathTest {
 
     /** A Windows path with no {@code $}, the shape that broke floci-az. */

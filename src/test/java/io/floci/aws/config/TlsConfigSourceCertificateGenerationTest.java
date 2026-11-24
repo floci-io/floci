@@ -1,9 +1,11 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.ByteArrayInputStream;
 import java.nio.file.Files;
@@ -26,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * - Verifies that the combined SANs are passed to CertificateGenerator
  * - Verifies that logging shows custom hostnames when present
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class TlsConfigSourceCertificateGenerationTest {
 
     @TempDir

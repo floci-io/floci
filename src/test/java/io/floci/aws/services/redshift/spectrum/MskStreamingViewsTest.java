@@ -16,9 +16,11 @@ import io.floci.aws.services.iam.ServiceRoleAuthorizer.Permission;
 import io.floci.aws.services.msk.MskService;
 import io.floci.aws.services.msk.model.ClusterState;
 import io.floci.aws.services.msk.model.MskCluster;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.io.IOException;
@@ -60,6 +62,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class MskStreamingViewsTest {
     private static final String ACCOUNT = "000000000000";
     private static final String ROLE = "arn:aws:iam::000000000000:role/R";

@@ -6,8 +6,10 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.codeartifact.model.CodeArtifactRepository;
 import io.floci.aws.services.codeartifact.model.ExternalConnection;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -35,6 +37,7 @@ import static org.mockito.Mockito.when;
  * VerdaccioSidecarClient} and {@link NpmExternalConnectionClient} are both mocked, so no real
  * network or Verdaccio call ever happens here; their own wire contracts have their own tests.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class CodeArtifactNpmExternalConnectionImporterTest {
 
     private static final String REGION = "us-east-1";

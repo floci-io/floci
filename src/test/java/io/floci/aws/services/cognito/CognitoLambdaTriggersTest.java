@@ -26,10 +26,12 @@ import io.floci.aws.services.ses.model.EmailContent;
 import io.floci.aws.services.ses.model.SendEmailRequest;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.NullSource;
@@ -86,6 +88,7 @@ import static org.mockito.Mockito.when;
  * triggerSource, and that their responses are correctly applied to the auth flow.
  */
 @Execution(ExecutionMode.CONCURRENT)
+@ResourceLock(ParallelLocks.PORTS)
 class CognitoLambdaTriggersTest {
     private static final List<String> AUTH_FLOWS = List.of("ALLOW_USER_PASSWORD_AUTH",
             "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_CUSTOM_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH");

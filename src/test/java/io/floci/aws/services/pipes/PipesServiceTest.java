@@ -13,8 +13,10 @@ import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.pipes.model.DesiredState;
 import io.floci.aws.services.pipes.model.Pipe;
 import io.floci.aws.services.pipes.model.PipeState;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
@@ -28,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class PipesServiceTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

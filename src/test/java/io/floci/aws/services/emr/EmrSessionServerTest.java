@@ -8,7 +8,9 @@ import io.floci.aws.services.emrserverless.SessionServers;
 import io.floci.aws.services.emrserverless.SparkConnectSessionOwner;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Duration;
 import java.util.List;
@@ -35,6 +37,7 @@ import static org.mockito.Mockito.mock;
  * EMR sessions in the docker runner mode, each running a Spark Connect server on its cluster as a step runs: the
  * session's states as its server starts, answers, takes calls and stops, with a runner that stands in for Docker.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class EmrSessionServerTest {
 
     private static final String RELEASE = "emr-spark-8.1.0";

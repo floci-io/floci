@@ -7,12 +7,14 @@ import com.sun.net.httpserver.HttpsServer;
 import io.floci.aws.core.common.Pem;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
+import io.floci.aws.testing.ParallelLocks;
 import org.apache.hc.client5.http.DnsResolver;
 import org.apache.hc.client5.http.protocol.HttpClientContext;
 import org.apache.hc.core5.http.message.BasicHttpResponse;
 import org.apache.hc.core5.util.TimeValue;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import javax.net.ssl.ExtendedSSLSession;
 import javax.net.ssl.KeyManagerFactory;
@@ -58,6 +60,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+@ResourceLock(ParallelLocks.PORTS)
 class CloudFrontOriginHttpClientTest {
 
     @Test

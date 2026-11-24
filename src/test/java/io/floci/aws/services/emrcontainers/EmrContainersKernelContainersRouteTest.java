@@ -2,6 +2,7 @@ package io.floci.aws.services.emrcontainers;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.core.common.ServiceConfigAccess;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -14,6 +15,8 @@ import io.vertx.ext.web.Router;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.util.concurrent.TimeUnit;
@@ -30,6 +33,7 @@ import static org.mockito.Mockito.when;
  * Calls to {@link EmrContainersKernelContainersRoute}, as an endpoint's gateway makes them for its kernels' containers:
  * a mock of the service stands behind it.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EmrContainersKernelContainersRouteTest {
 
     private static final String ENDPOINT = "ep0123456789a";

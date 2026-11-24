@@ -11,6 +11,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
@@ -76,7 +77,7 @@ class SesMessageInsightsV2IntegrationTest {
     void enableVdmAndVerifyTheSender() {
         enableVdm(AUTH);
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"EmailIdentity\":\"" + SENDER + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
     }
@@ -178,7 +179,7 @@ class SesMessageInsightsV2IntegrationTest {
         String encoded = Base64.getEncoder()
                 .encodeToString(raw.getBytes(StandardCharsets.UTF_8));
 
-        String messageId = given().contentType("application/json").header("Authorization", AUTH)
+        String messageId = v2(AUTH)
                 .body("""
                     {"FromEmailAddress": "%s",
                      "Destination": {"ToAddresses": ["raw@example.com"]},
@@ -194,7 +195,7 @@ class SesMessageInsightsV2IntegrationTest {
 
         // The MIME parser yields "" for a missing Subject header; the member must stay absent.
         String noSubject = "From: " + SENDER + "\r\nTo: raw@example.com\r\n\r\nhi\r\n";
-        String noSubjectId = given().contentType("application/json").header("Authorization", AUTH)
+        String noSubjectId = v2(AUTH)
                 .body("""
                     {"FromEmailAddress": "%s",
                      "Destination": {"ToAddresses": ["raw@example.com"]},
@@ -215,7 +216,7 @@ class SesMessageInsightsV2IntegrationTest {
         // Account-level suppression defaults to [BOUNCE, COMPLAINT], so no configuration set is
         // needed for the entry to take effect on the send.
         for (String entry : new String[] {"suppressed@example.com:COMPLAINT", "bounced@example.com:BOUNCE"}) {
-            given().contentType("application/json").header("Authorization", AUTH)
+            v2(AUTH)
                     .body("{\"EmailAddress\":\"%s\",\"Reason\":\"%s\"}"
                             .formatted(entry.split(":")[0], entry.split(":")[1]))
             .when().put("/v2/email/suppression/addresses").then().statusCode(200);
@@ -292,7 +293,7 @@ class SesMessageInsightsV2IntegrationTest {
                 + "Subject: rejected-mime-subject\r\n"
                 + SesRawMessage.HEADER_MESSAGE_TAGS + ": campaign=fromheader\r\n\r\n"
                 + SesTestSignature.value() + "\r\n";
-        String messageId = given().contentType("application/json").header("Authorization", AUTH)
+        String messageId = v2(AUTH)
                 .body("""
                     {"FromEmailAddress": "%s",
                      "Destination": {"ToAddresses": ["raw@example.com"]},

@@ -3864,7 +3864,8 @@ floci populates:
   federated user carries the tags of the user whose key minted it. An account-root principal has
   no stored tags and no way to pass one. A session tag replaces the identity's tag of that key
   whatever its case; [STS](sts.md#session-tags) has where each operation takes its session tags
-  from, and the transitive inheritance that is not implemented.
+  from, and [Transitive tags](sts.md#transitive-tags) how a chained session inherits the ones the
+  calling session passes down, which are its own tags from then on.
 - `aws:PrincipalType` and `aws:userid`: resolved from the same lookup as `aws:PrincipalArn`, so
   they always describe the same credential. The values follow the user guide's principal key
   values list: `Account` with the account id for the account-root principal and for a session
@@ -3997,7 +3998,10 @@ floci populates:
   The actions and request members come from the same `request-condition-keys.json`.
   `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` are not signed, so no identity-based policy is
   evaluated for them. `sts:SourceIdentity`, `sts:TransitiveTagKeys`, `aws:RequestTag/<key>` and `aws:TagKeys`
-  are not populated for `AssumeRole`: Floci does not model source identity or session tags.
+  are not populated for `AssumeRole`: source identity is not modelled, and the three tag keys are not in
+  this file for the action, which is what fills the context here. A session's own tags are modelled, and
+  reach a policy as `aws:PrincipalTag/<key>`; `sts:TransitiveTagKeys` reaches the role's trust policy,
+  which the STS handler reads with a context of its own (see [STS](sts.md#transitive-tags)).
 
 **Any other condition key is absent from the request context.** A positive scalar operator
 without `IfExists` on an absent key makes the whole statement *not apply*: it neither matches nor

@@ -1,7 +1,9 @@
 package io.floci.aws.core.common.docker;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.StartGate;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -17,6 +19,7 @@ import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@ResourceLock(ParallelLocks.PORTS)
 class PortAllocatorTest {
 
     @Test

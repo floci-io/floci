@@ -6,8 +6,11 @@ import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.core.DefaultDockerClientConfig;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.Digests;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -46,6 +49,7 @@ import static org.mockito.Mockito.when;
  * assertion failure, normalizeDockerHost method does not exist yet,
  * confirming the missing normalization logic).
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class DockerClientProducerTest {
 
     /**

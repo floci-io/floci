@@ -29,11 +29,13 @@ import io.floci.aws.services.cognito.verification.VerificationCode;
 import io.floci.aws.services.cognito.verification.VerificationCodeException;
 import io.floci.aws.services.cognito.verification.VerificationCodeService;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -79,6 +81,7 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.*;
 
 @Execution(ExecutionMode.CONCURRENT)
+@ResourceLock(ParallelLocks.PORTS)
 class CognitoServiceTest {
 
     @Test

@@ -2,9 +2,12 @@ package io.floci.aws.services.codeartifact;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -37,6 +40,7 @@ import static org.mockito.Mockito.when;
  * HttpServer} fake standing in for it, named {@code fake} in these tests rather than the real
  * {@code public:npmjs} connection name.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class NpmExternalConnectionClientTest {
 
     private HttpServer server;

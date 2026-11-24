@@ -5,9 +5,12 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.eventbridge.model.Rule;
 import io.floci.aws.services.eventbridge.model.RuleState;
 import io.floci.aws.services.eventbridge.model.Target;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.time.Clock;
@@ -33,6 +36,7 @@ import static org.mockito.Mockito.when;
  * scheduling (deleted or disabled) while target delivery was still in progress.
  * The timer is driven by hand through a mocked Vertx, so no real time passes.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class RuleSchedulerTest {
 
     private static final String ACCOUNT = "000000000000";

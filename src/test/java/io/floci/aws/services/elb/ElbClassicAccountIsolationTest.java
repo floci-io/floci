@@ -9,12 +9,15 @@ import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.elb.model.ClassicHealthCheck;
 import io.floci.aws.services.elb.model.ClassicListener;
 import io.floci.aws.services.elb.model.ClassicLoadBalancer;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Duration;
 import java.util.List;
@@ -35,6 +38,7 @@ import static org.mockito.Mockito.when;
  * run a balancer called {@code web}. These tests run the real health checker against a backend on
  * loopback and check that one account's balancer never changes the health the other one reports.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class ElbClassicAccountIsolationTest {
 
     private static final String REGION = "us-west-2";

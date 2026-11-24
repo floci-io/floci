@@ -14,10 +14,13 @@ import io.floci.aws.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.floci.aws.services.codeartifact.model.CodeArtifactRepository;
 import io.floci.aws.services.codeartifact.model.PackageGroup;
 import io.floci.aws.services.codeartifact.model.PackageOriginConfig;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -51,6 +54,7 @@ import static org.mockito.Mockito.when;
  * {@link CodeArtifactService} against a real {@link PersistentStorage}, the same backend
  * {@code persistent} storage mode uses in production.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CodeArtifactAssetPersistenceTest {
 
     private static final String REGION = "us-east-1";

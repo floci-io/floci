@@ -1,6 +1,8 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -36,6 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code sagemaker/instance-type-catalog.yaml} through a constant without the matching include,
  * which would have failed every GPU training job in the native image while passing every JVM test.
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class NativeImageResourceIncludesTest {
 
     private static final Path MAIN_SOURCE_ROOT = Path.of("src", "main", "java");

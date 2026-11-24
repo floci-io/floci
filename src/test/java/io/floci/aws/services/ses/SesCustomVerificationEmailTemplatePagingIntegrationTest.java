@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
@@ -37,7 +38,7 @@ class SesCustomVerificationEmailTemplatePagingIntegrationTest {
     @Test
     @Order(1)
     void createTemplatesOutOfNameOrder() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"EmailIdentity\": \"" + FROM + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
         for (String name : new String[] {"page-b", "page-c", "page-a"}) {
@@ -131,7 +132,7 @@ class SesCustomVerificationEmailTemplatePagingIntegrationTest {
     }
 
     private static void create(String name) {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {
                       "TemplateName": "%s",

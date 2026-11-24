@@ -590,7 +590,8 @@ class IamServiceTest {
         role.setTags(Map.of("Team", "role-team", "Owner", "platform"));
         iamService.registerSession("ASIASESSIONTAGS", "secret", "token", role.getArn(),
                 Instant.now().plusSeconds(3600), null, "000000000000", "tagged", "AROATAGGED:tagged");
-        iamService.recordSessionTags("ASIASESSIONTAGS", Map.of("Team", "session-team", "Project", "atlas"));
+        iamService.recordSessionTags("ASIASESSIONTAGS", Map.of("Team", "session-team", "Project", "atlas"),
+                List.of());
 
         Map<String, List<String>> context = new LinkedHashMap<>();
         iamService.resolveCallerArns("ASIASESSIONTAGS").orElseThrow().putPrincipalKeys(context);
@@ -611,7 +612,7 @@ class IamServiceTest {
         role.setTags(Map.of("department", "finance"));
         iamService.registerSession("ASIACASETAGS", "secret", "token", role.getArn(),
                 Instant.now().plusSeconds(3600), null, "000000000000", "cased", "AROACASED:cased");
-        iamService.recordSessionTags("ASIACASETAGS", Map.of("Department", "engineering"));
+        iamService.recordSessionTags("ASIACASETAGS", Map.of("Department", "engineering"), List.of());
 
         Map<String, List<String>> context = new LinkedHashMap<>();
         iamService.resolveCallerArns("ASIACASETAGS").orElseThrow().putPrincipalKeys(context);
@@ -633,13 +634,43 @@ class IamServiceTest {
         Map<String, String> sent = new LinkedHashMap<>();
         sent.put("Team", "first");
         sent.put("team", "second");
-        iamService.recordSessionTags("ASIAONETAG", sent);
+        iamService.recordSessionTags("ASIAONETAG", sent, List.of());
 
         Map<String, List<String>> context = new LinkedHashMap<>();
         iamService.resolveCallerArns("ASIAONETAG").orElseThrow().putPrincipalKeys(context);
 
         assertEquals(List.of("second"), context.get("aws:PrincipalTag/team"));
         assertFalse(context.containsKey("aws:PrincipalTag/Team"));
+    }
+
+    /**
+     * Only the tags whose keys a session set as transitive pass down to a session assumed from it:
+     * "if you set a tag key as transitive, the corresponding key and value passes to subsequent
+     * sessions in a role chain", and by default none does. A key naming no tag of the session
+     * selects nothing, there being no tag of that key to carry, and the keys are matched against
+     * the tags without regard to case, as a tag key is everywhere else here.
+     */
+    @Test
+    void onlyTheTagsNamedTransitivePassDownFromASession() {
+        IamRole role = iamService.createRole("Chained", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
+        iamService.registerSession("ASIATRANSITIVE", "secret", "token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000", "chain", "AROACHAIN:chain");
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put("Team", "platform");
+        tags.put("Scratch", "local");
+        iamService.recordSessionTags("ASIATRANSITIVE", tags, List.of("team", "Absent"));
+
+        assertEquals(Map.of("Team", "platform"),
+                iamService.callerTransitiveSessionTags("ASIATRANSITIVE"));
+
+        iamService.registerSession("ASIAUNTRANSITIVE", "secret", "token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000", "none", "AROANONE:none");
+        iamService.recordSessionTags("ASIAUNTRANSITIVE", tags, List.of());
+
+        assertTrue(iamService.callerTransitiveSessionTags("ASIAUNTRANSITIVE").isEmpty(),
+                "no transitive key named means nothing passes down");
+        assertTrue(iamService.callerTransitiveSessionTags("AKIALONGTERMKEY").isEmpty(),
+                "a long-term key has no session behind it to pass anything down");
     }
 
     /** A federated user's session tags join the tags of the user whose key minted the session. */
@@ -651,7 +682,7 @@ class IamServiceTest {
         iamService.registerIssuedSession("ASIAFEDTAGS", "secret", "token",
                 "arn:aws:sts::000000000000:federated-user/federated-tagged",
                 Instant.now().plusSeconds(3600), null, "000000000000", key);
-        iamService.recordSessionTags("ASIAFEDTAGS", Map.of("Project", "atlas"));
+        iamService.recordSessionTags("ASIAFEDTAGS", Map.of("Project", "atlas"), List.of());
 
         Map<String, List<String>> context = new LinkedHashMap<>();
         iamService.resolveCallerArns("ASIAFEDTAGS").orElseThrow().putPrincipalKeys(context);

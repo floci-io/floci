@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
@@ -38,7 +39,7 @@ class SesAccountVdmV2IntegrationTest {
     @Test
     @Order(1)
     void putVdm_enablesAndRoundTripsThroughGetAccount() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"VdmAttributes":{"VdmEnabled":"ENABLED",
                       "DashboardAttributes":{"EngagementMetrics":"ENABLED"},
@@ -56,7 +57,7 @@ class SesAccountVdmV2IntegrationTest {
     @Test
     @Order(2)
     void putVdm_invalidEnum_returnsBadRequest() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"MAYBE\"}}")
         .when().put("/v2/email/account/vdm").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"));
@@ -65,7 +66,7 @@ class SesAccountVdmV2IntegrationTest {
     @Test
     @Order(3)
     void putVdm_missingVdmEnabled_returnsBadRequest() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"VdmAttributes\":{}}")
         .when().put("/v2/email/account/vdm").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"));
@@ -74,7 +75,7 @@ class SesAccountVdmV2IntegrationTest {
     @Test
     @Order(4)
     void putVdm_emptyBody_returnsBadRequest() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
         .when().put("/v2/email/account/vdm").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"));
     }
@@ -84,7 +85,7 @@ class SesAccountVdmV2IntegrationTest {
     void putVdm_enabledWithoutNested_defaultsNestedToDisabled() {
         // Enabling VDM without supplying the optional members: AWS surfaces both nested objects with
         // their DISABLED defaults once VdmEnabled is ENABLED.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"ENABLED\"}}")
         .when().put("/v2/email/account/vdm").then().statusCode(200);
 
@@ -99,7 +100,7 @@ class SesAccountVdmV2IntegrationTest {
     @Order(8)
     void putVdm_disabled_omitsNestedAttributes() {
         // Disabling VDM drops the nested objects again, and restores this region to DISABLED.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"DISABLED\"}}")
         .when().put("/v2/email/account/vdm").then().statusCode(200);
 
