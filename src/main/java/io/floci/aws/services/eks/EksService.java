@@ -1251,6 +1251,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         AutoMode nextAutoMode = request.changesAutoMode() ? requireAutoModeChange(cluster, request) : null;
         // Read before the write below, which may change this very object.
         boolean blockStorageWasOn = StorageConfig.blockStorageOn(cluster.getStorageConfig());
+        boolean loadBalancingWasOn = ElasticLoadBalancing.loadBalancingOn(
+                elasticLoadBalancing(cluster.getKubernetesNetworkConfig()));
 
         Boolean finalPublicAccess = publicAccess;
         Boolean finalPrivateAccess = privateAccess;
@@ -1310,6 +1312,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 && !config.services().eks().mock() && clusterManager != null && cluster.getContainerId() != null) {
             // The running node gets the block storage provisioner, or loses it, as it would when it next starts.
             clusterManager.applyBlockStorage(cluster.getContainerId(), requireClusterInRequestRegion(name));
+        }
+        if (nextAutoMode != null && ElasticLoadBalancing.loadBalancingOn(nextAutoMode.loadBalancing()) != loadBalancingWasOn
+                && !config.services().eks().mock() && clusterManager != null && cluster.getContainerId() != null) {
+            replaceNodeForServiceLb(requireClusterInRequestRegion(name));
         }
         if (nextAutoMode != null && nextAutoMode.computeOn()) {
             ensureAutoModeNodeEntry(requireClusterInRequestRegion(name));
@@ -1969,6 +1975,28 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             }
         }
         return nodeGroup;
+    }
+
+    /**
+     * Load balancing turned on or off by UpdateClusterConfig takes effect at once, as on AWS: k3s's ServiceLB is a
+     * server flag, so the node is replaced on its data volume to start with ServiceLB off or on, and its pods restart,
+     * as they do on AWS, where turning it off terminates Auto Mode's instances. The readiness poller verifies the new
+     * node, as it does one replaced for capacity. A replacement that fails keeps the old node, logged.
+     */
+    private void replaceNodeForServiceLb(Cluster cluster) {
+        try {
+            if (!clusterManager.replaceNodeForServiceLb(cluster)) {
+                LOG.warnv("EKS cluster {0} keeps its node, which still runs ServiceLB as before, until it is replaced",
+                        cluster.getName());
+            }
+            // Set only now, as for a capacity change: before the swap the poller would verify the old container.
+            cluster.setFinalizePending(true);
+        } catch (RuntimeException e) {
+            cluster.setStatus(ClusterStatus.FAILED);
+            LOG.errorv("EKS cluster {0} could not recover after its load balancing changed: {1}", cluster.getName(),
+                    e.getMessage());
+        }
+        storage.put(clusterKey(cluster), cluster);
     }
 
     private void applyFirstNodeGroupCapacity(String clusterName, String nodegroupName,

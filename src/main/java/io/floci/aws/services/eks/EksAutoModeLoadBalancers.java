@@ -53,9 +53,11 @@ import java.util.regex.Pattern;
  * {@code service.eks.amazonaws.com/stack}, and a name hashed from the cluster's ARN and the Service, and is found
  * again by both.
  *
- * <p>A Service with no {@code loadBalancerClass}, which Auto Mode also serves as its cluster default, stays with
- * k3s's own ServiceLB here. UDP and SCTP ports get no listener, as Floci's load balancers serve TCP and HTTP only,
- * and a Service with no TCP NodePort gets no load balancer.
+ * <p>A Service with no {@code loadBalancerClass} gets one too, as {@code eks.amazonaws.com/nlb} is then the cluster
+ * default, while the cluster's node runs without k3s's own ServiceLB: a node started with load balancing on does.
+ * A node whose load balancing was turned on after it started keeps ServiceLB, and with it those Services, until it
+ * is next replaced, so that no Service has two load balancers. UDP and SCTP ports get no listener, as Floci's load
+ * balancers serve TCP and HTTP only, and a Service with no TCP NodePort gets no load balancer.
  */
 @ApplicationScoped
 public class EksAutoModeLoadBalancers {
@@ -143,7 +145,7 @@ public class EksAutoModeLoadBalancers {
      * Services that are gone.
      */
     void reconcile(Cluster cluster, String region) {
-        List<NlbService> services = nlbServices(readServices(cluster));
+        List<NlbService> services = nlbServices(readServices(cluster), clusterManager.runsWithoutServiceLb(cluster));
         Map<String, LoadBalancer> existing = loadBalancersOf(cluster, region);
         Instance node = clusterManager.getRegisteredClusterNodeInstance(cluster);
         for (NlbService service : services) {
@@ -165,13 +167,15 @@ public class EksAutoModeLoadBalancers {
 
     /**
      * The Services of {@code kubectl get services -A -o json} that get an Auto Mode Network Load Balancer: of type
-     * LoadBalancer, of its class, with a TCP port on a NodePort.
+     * LoadBalancer, of its class (and with {@code classless}, of no class), with a TCP port on a NodePort.
      */
-    static List<NlbService> nlbServices(JsonNode list) {
+    static List<NlbService> nlbServices(JsonNode list, boolean classless) {
         List<NlbService> services = new ArrayList<>();
         for (JsonNode item : list.path("items")) {
             JsonNode spec = item.path("spec");
-            if (!"LoadBalancer".equals(spec.path("type").asText()) || !NLB_CLASS.equals(spec.path("loadBalancerClass").asText())) {
+            String lbClass = spec.path("loadBalancerClass").asText("");
+            if (!"LoadBalancer".equals(spec.path("type").asText())
+                    || !(NLB_CLASS.equals(lbClass) || classless && lbClass.isEmpty())) {
                 continue;
             }
             List<ServicePort> ports = new ArrayList<>();

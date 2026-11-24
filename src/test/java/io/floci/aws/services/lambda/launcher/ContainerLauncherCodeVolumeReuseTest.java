@@ -2,6 +2,7 @@ package io.floci.aws.services.lambda.launcher;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+import com.github.dockerjava.transport.DockerHttpClient;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
@@ -67,7 +68,7 @@ class ContainerLauncherCodeVolumeReuseTest {
 
         RecordingLauncher(ContainerLifecycleManager lifecycleManager, EmulatorConfig config) {
             super(mock(ContainerBuilder.class), lifecycleManager, mock(DockerClient.class),
-                    mock(ContainerLogStreamer.class),
+                    mock(DockerHttpClient.class), mock(ContainerLogStreamer.class),
                     mock(ImageResolver.class), mock(RuntimeApiServerFactory.class),
                     mock(DockerHostResolver.class), config, new RegionResolver("us-east-1", "000000000000"),
                     mock(EcrRegistryManager.class),
@@ -284,7 +285,7 @@ class ContainerLauncherCodeVolumeReuseTest {
         when(containerBuilder.newContainer("img")).thenReturn(builder);
         when(builder.build()).thenThrow(new IllegalStateException("stop before Docker"));
         ContainerLauncher real = new ContainerLauncher(containerBuilder, lifecycleManager,
-                mock(DockerClient.class), mock(ContainerLogStreamer.class), mock(ImageResolver.class),
+                mock(DockerClient.class), mock(DockerHttpClient.class), mock(ContainerLogStreamer.class), mock(ImageResolver.class),
                 mock(RuntimeApiServerFactory.class), mock(DockerHostResolver.class), config,
                 new RegionResolver("us-east-1", "000000000000"),
                 mock(EcrRegistryManager.class), mock(LambdaLayerService.class),

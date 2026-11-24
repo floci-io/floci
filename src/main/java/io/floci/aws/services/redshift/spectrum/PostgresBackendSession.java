@@ -1,5 +1,6 @@
 package io.floci.aws.services.redshift.spectrum;
 
+import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.services.redshift.proxy.PostgresWireDecoder;
 
 import java.io.IOException;
@@ -7,6 +8,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 
 public final class PostgresBackendSession implements BackendSql {
@@ -29,6 +32,19 @@ public final class PostgresBackendSession implements BackendSql {
             output.write(PostgresWireDecoder.encodeQuery(sql));
             output.flush();
             return awaitSingleString(new PostgresWireDecoder(backend.getInputStream()));
+        } catch (IOException exception) {
+            abandon(backend, exception);
+            throw new SpectrumReadException(SQLSTATE_IO, "Unable to run a statement on the Redshift backend", exception);
+        }
+    }
+
+    @Override
+    public List<List<String>> queryRows(String sql) {
+        try {
+            OutputStream output = backend.getOutputStream();
+            output.write(PostgresWireDecoder.encodeQuery(sql));
+            output.flush();
+            return awaitRows(new PostgresWireDecoder(backend.getInputStream()));
         } catch (IOException exception) {
             abandon(backend, exception);
             throw new SpectrumReadException(SQLSTATE_IO, "Unable to run a statement on the Redshift backend", exception);
@@ -175,20 +191,29 @@ public final class PostgresBackendSession implements BackendSql {
         throw new IOException("PostgreSQL closed before ReadyForQuery");
     }
 
+    private static List<List<String>> awaitRows(PostgresWireDecoder decoder) throws IOException {
+        SpectrumReadException failure = null;
+        List<List<String>> rows = new ArrayList<>();
+        PostgresWireDecoder.FrontendMessage message = decoder.nextMessage();
+        while (message != null) {
+            if (message.type() == 'D') {
+                rows.add(PostgresWire.dataRowValues(message.body()));
+            } else if (message.type() == 'E') {
+                failure = toException(message.body());
+            } else if (message.type() == 'Z') {
+                if (failure != null) {
+                    throw failure;
+                }
+                return rows;
+            }
+            message = decoder.nextMessage();
+        }
+        throw new IOException("PostgreSQL closed before ReadyForQuery");
+    }
+
     static String firstColumn(byte[] body) {
-        if (body == null || body.length < 6) {
-            return null;
-        }
-        int columns = ((body[0] & 0xff) << 8) | (body[1] & 0xff);
-        if (columns < 1) {
-            return null;
-        }
-        int length = ((body[2] & 0xff) << 24) | ((body[3] & 0xff) << 16)
-                | ((body[4] & 0xff) << 8) | (body[5] & 0xff);
-        if (length < 0 || body.length < 6 + length) {
-            return null;
-        }
-        return new String(body, 6, length, StandardCharsets.UTF_8);
+        List<String> row = PostgresWire.dataRowValues(body);
+        return row.isEmpty() ? null : row.get(0);
     }
 
     private static long rowCount(String tag) {
