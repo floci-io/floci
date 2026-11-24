@@ -153,9 +153,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {_shown(args.output)} no longer matches {provenance}; run "
                   f"'make cfn-schema-surface-sync' and commit the result.", file=sys.stderr)
             for line in difflib.unified_diff(
-                    (committed or "").splitlines(), document.splitlines(),
-                    fromfile=str(_shown(args.output)), tofile=provenance, lineterm=""):
-                print(line, file=sys.stderr)
+                    (committed or "").splitlines(keepends=True), document.splitlines(keepends=True),
+                    fromfile=str(_shown(args.output)), tofile=provenance):
+                print(line, end="", file=sys.stderr)
+                if not line.endswith("\n"):
+                    print("\n\\ No newline at end of file", file=sys.stderr)
             return 1
         print(f"{_shown(args.output)} matches {provenance}.")
         return 0

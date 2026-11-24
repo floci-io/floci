@@ -128,7 +128,8 @@ def test_an_incomplete_read_is_a_read_failure(tmp_path, monkeypatch, capsys):
 @pytest.mark.parametrize("committed", [
     "AWS::Test::Thing\tArn\tName\n",
     None,
-])
+    "AWS::Test::Thing\tArn\tName,Nested,Secret",
+], ids=["changed", "missing", "missing-final-newline"])
 def test_verify_shows_the_actual_difference_without_writing(tmp_path, capsys, committed):
     source = tmp_path / "schemas"
     source.mkdir()
@@ -151,3 +152,5 @@ def test_verify_shows_the_actual_difference_without_writing(tmp_path, capsys, co
     else:
         assert "-AWS::Test::Thing\tArn\tName" in error
         assert output.read_text(encoding="utf-8") == committed
+        if not committed.endswith("\n"):
+            assert f"-{committed}\n\\ No newline at end of file\n+{committed}\n" in error
