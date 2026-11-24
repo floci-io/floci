@@ -4,11 +4,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.URI;
 import java.util.ArrayList;
@@ -26,6 +29,7 @@ import static org.mockito.Mockito.when;
  * else. Integrations that validate the event against a strict schema
  * (additionalProperties: false) reject the request outright when an undeclared key appears.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class ProxyEventPathParametersTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

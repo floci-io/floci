@@ -14,12 +14,15 @@ import io.floci.aws.services.eventbridge.model.Rule;
 import io.floci.aws.services.eventbridge.model.RuleState;
 import io.floci.aws.services.eventbridge.model.Target;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Vertx;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Clock;
 import java.util.List;
@@ -29,6 +32,7 @@ import java.util.OptionalInt;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EventBridgeSchedulerIntegrationTest {
 
     private static final String REGION = "us-east-1";

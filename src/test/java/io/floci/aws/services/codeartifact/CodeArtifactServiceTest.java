@@ -27,10 +27,12 @@ import io.floci.aws.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.floci.aws.services.codeartifact.model.CodeArtifactRepository;
 import io.floci.aws.services.codeartifact.model.PackageGroup;
 import io.floci.aws.services.codeartifact.model.PackageOriginConfig;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
@@ -100,6 +102,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class CodeArtifactServiceTest {
     private static final String REGION = "us-east-1";
     private static final String OTHER_REGION = "us-west-2";

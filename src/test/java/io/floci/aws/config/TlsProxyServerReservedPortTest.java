@@ -1,11 +1,13 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.net.NetClient;
 import io.vertx.core.net.NetServer;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -23,6 +25,7 @@ import static org.mockito.Mockito.when;
  * privileged and its failure is non-fatal, so a port the proxy never acquired has to stay
  * available: anything that yields to the proxy on configuration alone would leave it unserved.
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class TlsProxyServerReservedPortTest {
 
     private static TlsProxyServer proxyWith(int flociPort, boolean tlsEnabled, int awsHttpsPort) {

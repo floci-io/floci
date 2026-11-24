@@ -9,8 +9,11 @@ import io.floci.aws.services.sns.model.Topic;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.SqsServiceFactory;
 import io.floci.aws.services.sqs.model.Message;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.Map;
@@ -20,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SnsSqsSubscriptionDlqIntegrationTest {
 
     private static final String REGION = "us-east-1";

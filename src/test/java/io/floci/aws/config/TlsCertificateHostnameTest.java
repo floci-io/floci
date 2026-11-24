@@ -5,6 +5,7 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.Pem;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
+import io.floci.aws.testing.ParallelLocks;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.GeneralName;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
@@ -12,6 +13,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
@@ -37,6 +40,8 @@ import static org.junit.jupiter.api.Assertions.*;
  * - Handles user-provided certificates correctly
  * - Manages certificate reuse and regeneration appropriately
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class TlsCertificateHostnameTest {
 
     @TempDir

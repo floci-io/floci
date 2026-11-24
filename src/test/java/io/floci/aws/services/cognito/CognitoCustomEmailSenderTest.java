@@ -21,8 +21,10 @@ import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.ses.SesService;
 import io.floci.aws.services.sns.SnsService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -73,6 +75,7 @@ import static org.mockito.Mockito.when;
  * The CustomEmailSender trigger: Cognito hands its email codes, encrypted under the pool's KMS key
  * as AWS Encryption SDK messages, to a Lambda function instead of sending the email itself.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class CognitoCustomEmailSenderTest {
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT_ID = "000000000000";

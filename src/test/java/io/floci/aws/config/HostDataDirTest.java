@@ -1,6 +1,8 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.nio.file.Path;
 import java.util.Map;
@@ -8,6 +10,7 @@ import java.util.Map;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class HostDataDirTest {
 
     @Test

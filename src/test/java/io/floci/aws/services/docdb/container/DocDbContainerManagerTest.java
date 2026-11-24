@@ -7,8 +7,11 @@ import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
+import io.floci.aws.testing.ParallelLocks;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Mockito;
 
 import java.io.Closeable;
@@ -35,6 +38,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class DocDbContainerManagerTest {
 
     private static final Logger LOG = Logger.getLogger(DocDbContainerManagerTest.class);

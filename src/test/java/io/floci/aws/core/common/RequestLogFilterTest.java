@@ -2,11 +2,13 @@ package io.floci.aws.core.common;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.RequestLogFilter.Body;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -34,6 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * {@link RequestLogFilter}'s helpers: how bodies are stored, redaction of headers, query parameters and URLs, and
  * {@link RequestLogWriter}'s handling of the log file.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class RequestLogFilterTest {
 
     private final RequestLogFilter filter = new RequestLogFilter(new ObjectMapper(), () -> null);

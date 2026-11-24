@@ -141,15 +141,32 @@ jobs:
           cmp -s all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" \
             || { echo "::error::test class list from src/test/java differs from target/test-classes:"; diff all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" | head -50; exit 1; }
 
-      # surefire.timeout bounds the reused test fork for 25 minutes from its first test set,
-      # including deadlocks or blocking I/O that ignore JUnit's interrupt. The 35-minute job
-      # ceiling also covers compilation, test startup, and report upload.
+      # Two passes. The plain JUnit classes, which start no Quarkus application, run four at a time
+      # in a fork of their own; the @QuarkusTest classes share one emulator and run one at a time
+      # after them. split-concurrent.py says which is which. A pass with no classes is skipped: an
+      # empty includesFile makes surefire run the whole suite.
+      # surefire.timeout bounds each pass's reused test fork from its first test set, including
+      # deadlocks or blocking I/O that ignore JUnit's interrupt: 10 minutes for the plain pass,
+      # 25 for the Quarkus one. The 35-minute job ceiling also covers compilation, test startup,
+      # and report upload.
       - name: Run tests
-        run: >
-          ./mvnw surefire:test -B
-          -Dsurefire.includesFile="$GITHUB_WORKSPACE/shard.txt"
-          -Dsurefire.failIfNoTests=true
-          -Dsurefire.timeout=1500
+        run: |
+          python3 .github/ci/split-concurrent.py shard.txt quarkus.txt plain.txt
+          status=0
+          if [ -s plain.txt ]; then
+            ./mvnw surefire:test -B \
+              -Dsurefire.includesFile="$GITHUB_WORKSPACE/plain.txt" \
+              -Dsurefire.failIfNoTests=true \
+              -Dsurefire.timeout=600 \
+              -Dtest.classes.mode=concurrent || status=$?
+          fi
+          if [ -s quarkus.txt ]; then
+            ./mvnw surefire:test -B \
+              -Dsurefire.includesFile="$GITHUB_WORKSPACE/quarkus.txt" \
+              -Dsurefire.failIfNoTests=true \
+              -Dsurefire.timeout=1500 || status=$?
+          fi
+          exit "$status"
 
       # The prefetch runs in the background past its own step, so its per-image
       # results are only complete once the tests are done. A pull still running

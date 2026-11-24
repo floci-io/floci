@@ -20,10 +20,12 @@ import io.floci.aws.services.ecr.model.Repository;
 import io.floci.aws.services.ecr.model.RepositoryCreationTemplate;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.services.ecr.registry.RegistryHttpClient;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Mockito;
 
 import java.io.IOException;
@@ -62,6 +64,7 @@ import static org.mockito.Mockito.when;
  * Unit tests for {@link EcrService}. Uses an in-memory storage backend and a
  * mocked {@link EcrRegistryManager} so the test never touches Docker.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class EcrServiceTest {
 
     private static final String REGION = "us-east-1";

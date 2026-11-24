@@ -1,10 +1,12 @@
 package io.floci.aws.core.common.dns;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Vertx;
 import io.vertx.core.datagram.DatagramSocket;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -22,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /** Linux routes all of 127/8 locally, allowing distinct client and server addresses. */
 @EnabledOnOs(OS.LINUX)
+@ResourceLock(ParallelLocks.PORTS)
 class EmbeddedDnsReplySourceTest {
 
     // The host listener (forContainers false) answers Floci's own names with its own address too, and

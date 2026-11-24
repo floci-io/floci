@@ -7,8 +7,11 @@ import io.floci.aws.services.acm.AcmService;
 import io.floci.aws.services.cognito.model.CognitoAuthEvent;
 import io.floci.aws.services.cognito.model.CognitoUser;
 import io.floci.aws.services.cognito.model.UserPool;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -27,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CognitoAuthEventsServiceTest {
 
     private InMemoryStorage<String, CognitoAuthEvent> authEvents;

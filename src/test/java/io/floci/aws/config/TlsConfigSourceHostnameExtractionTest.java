@@ -1,7 +1,10 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.lang.reflect.Method;
 import java.util.List;
@@ -19,6 +22,8 @@ import static org.junit.jupiter.api.Assertions.*;
  * - Deduplication of hostnames
  * - Edge case handling (malformed URLs, missing host, IPv6 addresses)
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class TlsConfigSourceHostnameExtractionTest {
 
     @AfterEach

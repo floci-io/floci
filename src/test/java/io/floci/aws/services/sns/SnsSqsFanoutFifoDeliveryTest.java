@@ -5,8 +5,11 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.SqsServiceFactory;
 import io.floci.aws.services.sqs.model.Message;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.Map;
@@ -18,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * through to subscribed SQS FIFO queues, and that the topic's FifoThroughputScope
  * decides whether deduplication is topic-wide or per message group.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SnsSqsFanoutFifoDeliveryTest {
 
     private static final String REGION = "us-east-1";

@@ -4,7 +4,10 @@ import io.floci.aws.services.cloudfront.CloudFrontOriginRequestBuilder.Forwardin
 import io.floci.aws.services.cloudfront.CloudFrontOriginRequestBuilder.Header;
 import io.floci.aws.services.cloudfront.CloudFrontOriginRequestBuilder.OriginRequest;
 import io.floci.aws.services.cloudfront.CloudFrontOriginRequestBuilder.ViewerRequest;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -16,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CloudFrontOriginRequestBuilderTest {
 
     private static final String VIA_HOST = "d111111abcdef8.cloudfront.net";

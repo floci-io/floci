@@ -2,7 +2,10 @@ package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.floci.aws.services.cloudformation.CloudFormationService.S3TemplateRef;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
@@ -11,6 +14,7 @@ import static org.hamcrest.Matchers.equalTo;
  * Bucket/key extraction from a {@code TemplateURL}, which decides whether the URL is
  * virtual-hosted or path-style.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CloudFormationTemplateUrlTest {
 
     private static final String SUFFIX = EmbeddedDnsServer.DEFAULT_SUFFIX;

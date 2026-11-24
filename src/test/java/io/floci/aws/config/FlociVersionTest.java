@@ -1,12 +1,15 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
 
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class FlociVersionTest {
 
     @Test

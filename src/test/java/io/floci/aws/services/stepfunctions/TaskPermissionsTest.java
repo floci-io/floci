@@ -6,7 +6,9 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.services.stepfunctions.LambdaTaskAuthorizer.Permission;
 import io.floci.aws.services.stepfunctions.model.StateMachine;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -27,6 +29,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class TaskPermissionsTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

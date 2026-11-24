@@ -2,14 +2,18 @@ package io.floci.aws.services.lambda;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.lambda.model.EventSourceMapping;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EventSourceMappingSerializationTest {
 
     private ObjectMapper objectMapper;

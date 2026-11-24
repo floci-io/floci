@@ -19,7 +19,9 @@ import io.floci.aws.services.appsync.model.SchemaCreationStatusType;
 import io.floci.aws.services.cloudformation.CfnDropPolicyTable;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
@@ -49,6 +51,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /** The AppSync CFN provisioner in isolation, with only AppSyncService mocked. */
+@ResourceLock(ParallelLocks.PORTS)
 class AppSyncCfnProvisionerTest {
 
     private static final String API_ID = "abcd1234";

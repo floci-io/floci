@@ -1,15 +1,18 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.smallrye.config.ConfigMapping;
 import io.smallrye.config.PropertiesConfigSource;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class AlbZoneRuleConfigTest {
     @ConfigMapping(prefix = "floci.services.elbv2")
     interface Settings extends EmulatorConfig.ElbV2ServiceConfig {}

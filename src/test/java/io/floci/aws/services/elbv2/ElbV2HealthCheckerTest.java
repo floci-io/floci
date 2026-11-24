@@ -5,6 +5,7 @@ import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.elbv2.model.TargetDescription;
 import io.floci.aws.services.elbv2.model.TargetGroup;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.Promise;
@@ -17,6 +18,7 @@ import io.vertx.core.net.NetServer;
 import io.vertx.core.net.NetSocket;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -47,6 +49,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class ElbV2HealthCheckerTest {
 
     private final Vertx vertx = Vertx.vertx();

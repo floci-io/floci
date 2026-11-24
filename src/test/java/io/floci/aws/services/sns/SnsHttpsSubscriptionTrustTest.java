@@ -7,10 +7,12 @@ import io.floci.aws.config.FlociCertificateAuthority;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.testing.ExtraCaConfigs;
 import io.floci.aws.testing.LocalHttpsServer;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.StorageFactories;
 import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.nio.file.Path;
 import java.time.Duration;
@@ -31,6 +33,7 @@ import static org.mockito.Mockito.when;
  * An HTTPS subscription's endpoint is reached through Floci's outbound trust, so a certificate from a CA in
  * floci.tls.extra-ca-path is accepted, with TLS off.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class SnsHttpsSubscriptionTrustTest {
 
     private static final String REGION = "us-east-1";

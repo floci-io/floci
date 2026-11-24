@@ -3,12 +3,14 @@ package io.floci.aws.services.iam;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.RequestResources;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -37,6 +39,7 @@ import static org.mockito.Mockito.when;
  * {@code iam-authorized-actions.json} names for the operation, or its route's method names for an operation it
  * authorizes by method, or else the operation's own name.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class IamRestRouteCoverageTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

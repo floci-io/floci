@@ -18,9 +18,11 @@ import io.floci.aws.services.redshiftdata.RedshiftTargetAuthorizer;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.stepfunctions.StepFunctionsService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -38,6 +40,7 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
+@ResourceLock(ParallelLocks.PORTS)
 class PipesTargetInvokerTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

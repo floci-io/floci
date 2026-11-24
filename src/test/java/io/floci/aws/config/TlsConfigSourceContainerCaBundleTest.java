@@ -2,9 +2,11 @@ package io.floci.aws.config;
 
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -21,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@link TlsConfigSource} writes the container CA bundle at boot, in both certificate modes, and
  * a bundle that cannot be written never stops the boot.
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class TlsConfigSourceContainerCaBundleTest {
 
     @TempDir

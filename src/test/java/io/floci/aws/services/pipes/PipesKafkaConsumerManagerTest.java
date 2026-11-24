@@ -7,9 +7,12 @@ import io.floci.aws.core.common.kafka.KafkaRestClient;
 import io.floci.aws.core.common.kafka.KarapaceManager;
 import io.floci.aws.services.msk.MskService;
 import io.floci.aws.services.pipes.model.Pipe;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.URI;
 
@@ -25,6 +28,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class PipesKafkaConsumerManagerTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

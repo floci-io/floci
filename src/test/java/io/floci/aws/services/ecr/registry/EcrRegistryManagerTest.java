@@ -31,9 +31,11 @@ import io.floci.aws.core.common.docker.HostBlindPortAllocator;
 import io.floci.aws.core.common.docker.PortAllocator;
 import io.floci.aws.core.common.docker.SidecarHealthHelper;
 import io.floci.aws.testing.ManualClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -74,6 +76,7 @@ import static org.mockito.Mockito.when;
  * {@link PortAllocator} that skips the host probe ({@link HostBlindPortAllocator}) and a mocked Docker layer so the
  * failure path can be exercised without a Docker daemon or free host ports.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class EcrRegistryManagerTest {
 
     private static final int BASE_PORT = 6100;

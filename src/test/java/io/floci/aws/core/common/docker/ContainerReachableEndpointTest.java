@@ -3,7 +3,9 @@ package io.floci.aws.core.common.docker;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.TlsCertificateManager;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.Optional;
 
@@ -19,6 +21,7 @@ import static org.mockito.Mockito.when;
  * With {@code docker run -p 4811:4566 -e FLOCI_BASE_URL=http://localhost:4811}, port 4811 exists
  * only on the host; inside the Docker network Floci answers on 4566.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class ContainerReachableEndpointTest {
 
     private final EmulatorConfig config = mock(EmulatorConfig.class);

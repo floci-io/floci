@@ -4,12 +4,15 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.floci.aws.core.common.docker.DockerBridgeAddress;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.datagram.DatagramSocket;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.InetAddress;
 import java.net.SocketException;
@@ -34,6 +37,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** The address the embedded DNS server gives the containers Floci launches. */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EmbeddedDnsServerAddressTest {
 
     @Test

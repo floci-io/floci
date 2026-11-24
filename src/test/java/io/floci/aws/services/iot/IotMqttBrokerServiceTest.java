@@ -23,6 +23,7 @@ import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.testing.IotWebSocketSigV4;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.ThreadStates;
 import io.floci.aws.testutil.FreePorts;
 import io.netty.handler.codec.mqtt.MqttProperties;
@@ -60,6 +61,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.AdditionalAnswers;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
@@ -145,6 +147,7 @@ import static org.mockito.Mockito.when;
  * reaches the next handshake without a restart. Also that a publish's topic rules run on the
  * broker's own single-thread worker, off the event loop, and the AWS lifecycle events of a session.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class IotMqttBrokerServiceTest {
 
     private static final CertificateGenerator GENERATOR = new CertificateGenerator();

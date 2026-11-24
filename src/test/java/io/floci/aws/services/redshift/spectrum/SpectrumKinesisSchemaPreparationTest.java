@@ -3,8 +3,10 @@ package io.floci.aws.services.redshift.spectrum;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.glue.GlueService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.Optional;
@@ -24,6 +26,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class SpectrumKinesisSchemaPreparationTest {
     private static final String ACCOUNT = "000000000000";
     private static final String ROLE = "arn:aws:iam::000000000000:role/R";

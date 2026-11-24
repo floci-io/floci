@@ -7,9 +7,11 @@ import io.floci.aws.core.common.ServiceRegistry;
 import io.floci.aws.services.appsync.model.DataSource;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.ServiceRoleAuthorizer;
+import io.floci.aws.testing.ParallelLocks;
 import io.quarkus.vertx.http.HttpServer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
@@ -31,6 +33,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class AwsIamHttpDataSourceInvokerTest {
 
     private static final String ACCOUNT = "724600001234";

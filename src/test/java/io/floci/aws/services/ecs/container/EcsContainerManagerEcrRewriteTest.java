@@ -17,8 +17,11 @@ import io.floci.aws.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.ssm.SsmService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
@@ -48,6 +51,7 @@ import static org.mockito.Mockito.when;
  * test asserts the image that <em>would</em> be handed to Docker without launching one —
  * runnable under {@code mvn test} (CI) with no Docker daemon.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EcsContainerManagerEcrRewriteTest {
 
     private static final String ECR_IMAGE = "123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1";

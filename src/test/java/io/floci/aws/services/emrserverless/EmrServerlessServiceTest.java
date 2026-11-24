@@ -17,8 +17,10 @@ import io.floci.aws.services.emrserverless.model.UpdateApplicationRequest;
 import io.floci.aws.services.emrserverless.model.WorkerTypeSpecification;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
@@ -44,6 +46,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class EmrServerlessServiceTest {
 
     private static final String REGION = "us-east-1";

@@ -3,6 +3,7 @@ package io.floci.aws.services.ecr.registry;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.ecr.EcrService;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.FreePorts;
 import io.vertx.core.Context;
 import io.vertx.core.Future;
@@ -24,6 +25,7 @@ import io.vertx.ext.web.Router;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -52,6 +54,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 /** Unit tests for routing AWS-shaped ECR repository URIs through Floci's data plane. */
+@ResourceLock(ParallelLocks.PORTS)
 class EcrRegistryDataPlaneTest {
 
     private Vertx vertx;

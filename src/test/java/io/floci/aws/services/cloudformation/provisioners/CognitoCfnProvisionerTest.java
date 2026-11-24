@@ -10,7 +10,9 @@ import io.floci.aws.services.cognito.CognitoService;
 import io.floci.aws.services.cognito.model.UserPool;
 import io.floci.aws.services.cognito.model.UserPoolClient;
 import io.floci.aws.services.cognito.model.UserPoolDomain;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
@@ -48,6 +50,7 @@ import static org.mockito.Mockito.when;
  * physical id and the exact {@code Fn::GetAtt} attribute keys, since an unmapped type still
  * reports CREATE_COMPLETE through the dispatcher's stub arm.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class CognitoCfnProvisionerTest {
 
     private static final String TYPE = "AWS::Cognito::UserPoolDomain";

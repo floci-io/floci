@@ -1,6 +1,8 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -38,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * initialization. Regression context: CloudMapService (#1217) added a static
  * {@code SecureRandom} without the registration and broke the nightly (#1234).
  */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class NativeImageRuntimeInitializationTest {
 
     private static final Path MAIN_SOURCE_ROOT = Path.of("src", "main", "java");

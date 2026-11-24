@@ -18,9 +18,12 @@ import io.floci.aws.services.cognito.model.RevokedTokenInfo;
 import io.floci.aws.services.cognito.model.UserPool;
 import io.floci.aws.services.cognito.model.UserPoolClient;
 import io.floci.aws.services.cognito.model.UserPoolDomain;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -51,6 +54,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CognitoFederationServiceTest {
 
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-09-16T00:00:00Z"), ZoneOffset.UTC);

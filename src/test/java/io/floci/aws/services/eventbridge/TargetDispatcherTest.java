@@ -10,8 +10,10 @@ import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.model.MessageAttributeValue;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
@@ -31,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+@ResourceLock(ParallelLocks.PORTS)
 class TargetDispatcherTest {
 
     private static final Instant T0 = Instant.parse("2026-06-15T12:00:00Z");

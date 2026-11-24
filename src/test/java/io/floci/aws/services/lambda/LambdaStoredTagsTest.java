@@ -8,8 +8,11 @@ import io.floci.aws.services.lambda.model.EventSourceMapping;
 import io.floci.aws.services.lambda.model.LambdaFunction;
 import io.floci.aws.services.lambda.zip.CodeStore;
 import io.floci.aws.services.lambda.zip.ZipExtractor;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -19,6 +22,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class LambdaStoredTagsTest {
 
     private static final String REGION = "us-east-1";
