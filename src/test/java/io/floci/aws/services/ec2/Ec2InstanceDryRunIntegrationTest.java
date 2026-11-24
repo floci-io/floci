@@ -1,17 +1,20 @@
 package io.floci.aws.services.ec2;
 
 import io.floci.aws.testing.QueryRequests;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.net.URI;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -29,77 +32,88 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * TerminateInstances, monitoring, metadata options and attributes, the EBS encryption defaults, and Spot
  * requests. A dry run the real call would refuse keeps that call's error, even when it also names an
  * instance it would accept.
+ *
+ * <p>The cases that only read share one fixture, built once for the class. The two that change an
+ * instance or a Spot request, the terminated start and the Spot cancel, build a fixture of their own.
  */
 @QuarkusTest
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Ec2InstanceDryRunIntegrationTest {
 
-    /** Each test works in an account of its own, so DescribeInstances lists only the fixture's instances. */
+    /** Each fixture works in an account of its own, so DescribeInstances lists only the fixture's instances. */
     private static final AtomicLong ACCOUNTS = new AtomicLong(726200000000L);
     private static final String MISSING_INSTANCE = "i-0123456789abcdef0";
     private static final String IMAGE = "ami-1234567890abcdef0";
     private static final String USER_DATA = "IyEvYmluL3NoCg==";
     private static final String INSTANCE = "DescribeInstancesResponse.reservationSet.item.instancesSet.item";
 
-    private String account;
-    private String runningId;
-    private String stoppedId;
+    private static Fixture shared;
 
-    @BeforeEach
+    /** The test port: RestAssured learns it only per test, and the fixture is built before the first one. */
+    private static int port;
+
+    @TestHTTPResource("/")
+    URI baseUri;
+
+    @BeforeAll
     void launchARunningAndAStoppedInstance() {
-        account = Long.toString(ACCOUNTS.incrementAndGet());
-        runningId = launch();
-        stoppedId = launch();
-        ec2("StopInstances", "InstanceId.1", stoppedId);
-        awaitState(stoppedId, "stopped");
+        port = baseUri.getPort();
+        shared = Fixture.launch();
     }
 
-    @AfterEach
+    @AfterAll
     void terminateTheInstances() {
-        ec2("TerminateInstances", "InstanceId.1", runningId, "InstanceId.2", stoppedId);
+        shared.terminate();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"StartInstances", "StopInstances", "RebootInstances", "TerminateInstances"})
     void aDryRunIsAnsweredWithDryRunOperationAndChangesNothing(String action) {
-        Map<String, String> before = states();
+        Map<String, String> before = shared.states();
 
-        request(action, "InstanceId.1", "StartInstances".equals(action) ? stoppedId : runningId)
+        shared.request(action, "InstanceId.1", "StartInstances".equals(action) ? shared.stoppedId : shared.runningId)
                 .formParam("DryRun", "true").post("/").then()
                 .statusCode(412)
                 .body("Response.Errors.Error.Code", equalTo("DryRunOperation"))
                 .body("Response.Errors.Error.Message",
                         equalTo("Request would have succeeded, but DryRun flag is set."));
 
-        assertEquals(before, states());
+        assertEquals(before, shared.states());
     }
 
     /** Every instance is checked before the dry run is answered, so one the call would refuse refuses it. */
     @ParameterizedTest
     @ValueSource(strings = {"StartInstances", "StopInstances", "RebootInstances", "TerminateInstances"})
     void aDryRunNamingAMissingInstanceKeepsTheRealCallsError(String action) {
-        Map<String, String> before = states();
+        Map<String, String> before = shared.states();
 
-        request(action, "InstanceId.1", "StartInstances".equals(action) ? stoppedId : runningId,
+        shared.request(action, "InstanceId.1", "StartInstances".equals(action) ? shared.stoppedId : shared.runningId,
                 "InstanceId.2", MISSING_INSTANCE).formParam("DryRun", "true").post("/").then()
                 .statusCode(400)
                 .body("Response.Errors.Error.Code", equalTo("InvalidInstanceID.NotFound"));
 
-        assertEquals(before, states());
+        assertEquals(before, shared.states());
     }
 
     @Test
     void aDryRunStartOfATerminatedInstanceKeepsTheRealCallsError() {
-        ec2("TerminateInstances", "InstanceId.1", runningId);
-        awaitState(runningId, "terminated");
-        Map<String, String> before = states();
+        Fixture own = Fixture.launch();
+        try {
+            own.ec2("TerminateInstances", "InstanceId.1", own.runningId);
+            own.awaitState(own.runningId, "terminated");
+            Map<String, String> before = own.states();
 
-        for (String dryRun : List.of("true", "false")) {
-            request("StartInstances", "InstanceId.1", runningId).formParam("DryRun", dryRun).post("/").then()
-                    .statusCode(400)
-                    .body("Response.Errors.Error.Code", equalTo("IncorrectInstanceState"));
+            for (String dryRun : List.of("true", "false")) {
+                own.request("StartInstances", "InstanceId.1", own.runningId).formParam("DryRun", dryRun)
+                        .post("/").then()
+                        .statusCode(400)
+                        .body("Response.Errors.Error.Code", equalTo("IncorrectInstanceState"));
+            }
+
+            assertEquals(before, own.states());
+        } finally {
+            own.terminate();
         }
-
-        assertEquals(before, states());
     }
 
     /** A DryRun value that is not a boolean is refused as one, and no instance changes. */
@@ -111,15 +125,15 @@ class Ec2InstanceDryRunIntegrationTest {
             "TerminateInstances, maybe", "TerminateInstances, ''"
     })
     void aDryRunValueThatIsNotABooleanIsRefused(String action, String value) {
-        Map<String, String> before = states();
+        Map<String, String> before = shared.states();
 
-        request(action, "InstanceId.1", "StartInstances".equals(action) ? stoppedId : runningId)
+        shared.request(action, "InstanceId.1", "StartInstances".equals(action) ? shared.stoppedId : shared.runningId)
                 .formParam("DryRun", value).post("/").then()
                 .statusCode(400)
                 .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"))
                 .body("Response.Errors.Error.Message", equalTo("DryRun is not a valid boolean."));
 
-        assertEquals(before, states());
+        assertEquals(before, shared.states());
     }
 
     /** Requests the real call accepts, for the instance calls other than start, stop, reboot and terminate. */
@@ -142,26 +156,26 @@ class Ec2InstanceDryRunIntegrationTest {
     @ParameterizedTest
     @MethodSource("otherInstanceCalls")
     void aDryRunOfAnotherInstanceCallIsAnsweredWithDryRunOperationAndChangesNothing(String action, String params) {
-        String before = snapshot();
+        String before = shared.snapshot();
 
-        request(action, params(params)).formParam("DryRun", "true").post("/").then()
+        shared.request(action, shared.params(params)).formParam("DryRun", "true").post("/").then()
                 .statusCode(412)
                 .body("Response.Errors.Error.Code", equalTo("DryRunOperation"));
 
-        assertEquals(before, snapshot());
+        assertEquals(before, shared.snapshot());
     }
 
     @ParameterizedTest
     @MethodSource("otherInstanceCalls")
     void aDryRunValueThatIsNotABooleanIsRefusedByTheOtherInstanceCalls(String action, String params) {
-        String before = snapshot();
+        String before = shared.snapshot();
 
-        request(action, params(params)).formParam("DryRun", "maybe").post("/").then()
+        shared.request(action, shared.params(params)).formParam("DryRun", "maybe").post("/").then()
                 .statusCode(400)
                 .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"))
                 .body("Response.Errors.Error.Message", equalTo("DryRun is not a valid boolean."));
 
-        assertEquals(before, snapshot());
+        assertEquals(before, shared.snapshot());
     }
 
     /** The real call refuses each of these; its dry run keeps the same error, and neither changes anything. */
@@ -176,99 +190,128 @@ class Ec2InstanceDryRunIntegrationTest {
             "CancelSpotInstanceRequests | SpotInstanceRequestId.1=sir-01234567 | InvalidSpotInstanceRequestID.NotFound"
     })
     void aDryRunTheRealCallWouldRefuseKeepsItsError(String action, String params, String code) {
-        String before = snapshot();
+        String before = shared.snapshot();
 
         for (String dryRun : List.of("true", "false")) {
-            request(action, params(params)).formParam("DryRun", dryRun).post("/").then()
+            shared.request(action, shared.params(params)).formParam("DryRun", dryRun).post("/").then()
                     .statusCode(400)
                     .body("Response.Errors.Error.Code", equalTo(code));
         }
 
-        assertEquals(before, snapshot());
+        assertEquals(before, shared.snapshot());
     }
 
     @Test
     void aDryRunCancelOfASpotRequestCancelsNothing() {
-        XmlPath requested = ec2("RequestSpotInstances", "LaunchSpecification.ImageId", IMAGE,
+        Fixture own = Fixture.launch();
+        XmlPath requested = own.ec2("RequestSpotInstances", "LaunchSpecification.ImageId", IMAGE,
                 "LaunchSpecification.InstanceType", "t3.micro");
         String request = "RequestSpotInstancesResponse.spotInstanceRequestSet.item";
         String requestId = requested.getString(request + ".spotInstanceRequestId");
         String instanceId = requested.getString(request + ".instanceId");
         try {
-            awaitState(instanceId, "running");
-            String before = snapshot();
+            own.awaitState(instanceId, "running");
+            String before = own.snapshot();
 
-            request("CancelSpotInstanceRequests", "SpotInstanceRequestId.1", requestId)
+            own.request("CancelSpotInstanceRequests", "SpotInstanceRequestId.1", requestId)
                     .formParam("DryRun", "true").post("/").then()
                     .statusCode(412)
                     .body("Response.Errors.Error.Code", equalTo("DryRunOperation"));
 
-            assertEquals(before, snapshot());
+            assertEquals(before, own.snapshot());
         } finally {
-            ec2("CancelSpotInstanceRequests", "SpotInstanceRequestId.1", requestId);
-            ec2("TerminateInstances", "InstanceId.1", instanceId);
+            own.ec2("CancelSpotInstanceRequests", "SpotInstanceRequestId.1", requestId);
+            own.ec2("TerminateInstances", "InstanceId.1", instanceId);
+            own.terminate();
         }
     }
 
-    /**
-     * Everything the instance calls can change in the test's account, as the describe calls report it:
-     * the instances, the stopped instance's user data, the EBS encryption defaults and the Spot requests.
-     */
-    private String snapshot() {
-        return String.join("\n",
-                body("DescribeInstances"),
-                body("DescribeInstanceAttribute", "InstanceId", stoppedId, "Attribute", "userData"),
-                body("GetEbsEncryptionByDefault"),
-                body("GetEbsDefaultKmsKeyId"),
-                body("DescribeSpotInstanceRequests"));
-    }
+    /** An account holding a running instance and a stopped one. */
+    private static final class Fixture {
 
-    /** A describe call's answer without the request id, the one part that differs on every call. */
-    private String body(String action, String... params) {
-        return request(action, params).post("/").then().statusCode(200).extract().asString()
-                .replaceAll("<requestId>[^<]*</requestId>", "");
-    }
+        private final String account;
+        private final String runningId;
+        private final String stoppedId;
 
-    /** {@code Key=Value} pairs separated by spaces, with {running} and {stopped} standing for the fixture's ids. */
-    private String[] params(String spec) {
-        if (spec == null || spec.isBlank()) {
-            return new String[0];
+        private Fixture(String account, String runningId, String stoppedId) {
+            this.account = account;
+            this.runningId = runningId;
+            this.stoppedId = stoppedId;
         }
-        return Stream.of(spec.trim().split(" +"))
-                .flatMap(pair -> Stream.of(pair.split("=", 2)))
-                .map(part -> part.replace("{running}", runningId).replace("{stopped}", stoppedId))
-                .toArray(String[]::new);
-    }
 
-    private String launch() {
-        String instanceId = ec2("RunInstances", "ImageId", IMAGE, "InstanceType", "t3.micro",
-                "MinCount", "1", "MaxCount", "1").getString("RunInstancesResponse.instancesSet.item.instanceId");
-        awaitState(instanceId, "running");
-        return instanceId;
-    }
-
-    private void awaitState(String instanceId, String state) {
-        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100)).untilAsserted(() ->
-                assertEquals(state, states().get(instanceId)));
-    }
-
-    /** Every instance of the account with its state, ordered by instance id. */
-    private Map<String, String> states() {
-        XmlPath described = ec2("DescribeInstances");
-        List<String> ids = described.getList(INSTANCE + ".instanceId", String.class);
-        List<String> states = described.getList(INSTANCE + ".instanceState.name", String.class);
-        Map<String, String> byId = new TreeMap<>();
-        for (int i = 0; i < ids.size(); i++) {
-            byId.put(ids.get(i), states.get(i));
+        static Fixture launch() {
+            Fixture empty = new Fixture(Long.toString(ACCOUNTS.incrementAndGet()), null, null);
+            String runningId = empty.launchInstance();
+            String stoppedId = empty.launchInstance();
+            empty.ec2("StopInstances", "InstanceId.1", stoppedId);
+            empty.awaitState(stoppedId, "stopped");
+            return new Fixture(empty.account, runningId, stoppedId);
         }
-        return byId;
-    }
 
-    private XmlPath ec2(String action, String... params) {
-        return request(action, params).post("/").then().statusCode(200).extract().xmlPath();
-    }
+        void terminate() {
+            ec2("TerminateInstances", "InstanceId.1", runningId, "InstanceId.2", stoppedId);
+        }
 
-    private RequestSpecification request(String action, String... params) {
-        return QueryRequests.request(account, "ec2", action, params);
+        /**
+         * Everything the instance calls can change in the fixture's account, as the describe calls report it:
+         * the instances, the stopped instance's user data, the EBS encryption defaults and the Spot requests.
+         */
+        String snapshot() {
+            return String.join("\n",
+                    body("DescribeInstances"),
+                    body("DescribeInstanceAttribute", "InstanceId", stoppedId, "Attribute", "userData"),
+                    body("GetEbsEncryptionByDefault"),
+                    body("GetEbsDefaultKmsKeyId"),
+                    body("DescribeSpotInstanceRequests"));
+        }
+
+        /** A describe call's answer without the request id, the one part that differs on every call. */
+        private String body(String action, String... params) {
+            return request(action, params).post("/").then().statusCode(200).extract().asString()
+                    .replaceAll("<requestId>[^<]*</requestId>", "");
+        }
+
+        /** {@code Key=Value} pairs separated by spaces, with {running} and {stopped} standing for the fixture's ids. */
+        String[] params(String spec) {
+            if (spec == null || spec.isBlank()) {
+                return new String[0];
+            }
+            return Stream.of(spec.trim().split(" +"))
+                    .flatMap(pair -> Stream.of(pair.split("=", 2)))
+                    .map(part -> part.replace("{running}", runningId).replace("{stopped}", stoppedId))
+                    .toArray(String[]::new);
+        }
+
+        private String launchInstance() {
+            String instanceId = ec2("RunInstances", "ImageId", IMAGE, "InstanceType", "t3.micro",
+                    "MinCount", "1", "MaxCount", "1").getString("RunInstancesResponse.instancesSet.item.instanceId");
+            awaitState(instanceId, "running");
+            return instanceId;
+        }
+
+        void awaitState(String instanceId, String state) {
+            await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100)).untilAsserted(() ->
+                    assertEquals(state, states().get(instanceId)));
+        }
+
+        /** Every instance of the account with its state, ordered by instance id. */
+        Map<String, String> states() {
+            XmlPath described = ec2("DescribeInstances");
+            List<String> ids = described.getList(INSTANCE + ".instanceId", String.class);
+            List<String> states = described.getList(INSTANCE + ".instanceState.name", String.class);
+            Map<String, String> byId = new TreeMap<>();
+            for (int i = 0; i < ids.size(); i++) {
+                byId.put(ids.get(i), states.get(i));
+            }
+            return byId;
+        }
+
+        XmlPath ec2(String action, String... params) {
+            return request(action, params).post("/").then().statusCode(200).extract().xmlPath();
+        }
+
+        RequestSpecification request(String action, String... params) {
+            return QueryRequests.request(account, "ec2", action, params).port(port);
+        }
     }
 }

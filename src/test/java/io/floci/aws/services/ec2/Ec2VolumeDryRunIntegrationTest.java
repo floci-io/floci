@@ -2,19 +2,21 @@ package io.floci.aws.services.ec2;
 
 import io.floci.aws.testing.QueryRequests;
 import io.quarkus.test.InjectMock;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.net.URI;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicLong;
 
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
@@ -22,7 +24,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
@@ -31,12 +32,16 @@ import static org.mockito.Mockito.verify;
  * HTTP 412 once the request has passed every check the real call makes, and it changes nothing: no
  * volume is created or deleted, no attachment made or ended, no tag written or removed, and no
  * backing device touched. The driver's controller sends a dry run CreateVolume each time it starts.
+ *
+ * <p>No case changes the fixture, so every case shares one, built once for the class. It is built before
+ * the first case installs its mock block device manager, so each case's mock sees only that case's calls.
  */
 @QuarkusTest
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Ec2VolumeDryRunIntegrationTest {
 
-    /** Each test works in an account of its own, so DescribeVolumes lists only the fixture's volumes. */
-    private static final AtomicLong ACCOUNTS = new AtomicLong(726100000000L);
+    /** The class works in an account of its own, so DescribeVolumes lists only the fixture's volumes. */
+    private static final String ACCOUNT = "726100000001";
     private static final String MISSING_VOLUME = "vol-0123456789abcdef0";
     private static final String VOLUME = "DescribeVolumesResponse.volumeSet.item";
     private static final String INSTANCE = "DescribeInstancesResponse.reservationSet.item.instancesSet.item";
@@ -44,17 +49,22 @@ class Ec2VolumeDryRunIntegrationTest {
     @InjectMock
     Ec2VolumeBlockDeviceManager blockDevices;
 
-    private String account;
-    private String instanceId;
-    private String zone;
+    private static String instanceId;
+    private static String zone;
     /** Attached to the instance at /dev/xvdf. */
-    private String attachedVolumeId;
+    private static String attachedVolumeId;
     /** Not attached, tagged team=storage. */
-    private String availableVolumeId;
+    private static String availableVolumeId;
 
-    @BeforeEach
+    /** The test port: RestAssured learns it only per test, and the fixture is built before the first one. */
+    private static int port;
+
+    @TestHTTPResource("/")
+    URI baseUri;
+
+    @BeforeAll
     void launchAnInstanceWithAnAttachedAndAnAvailableVolume() {
-        account = Long.toString(ACCOUNTS.incrementAndGet());
+        port = baseUri.getPort();
         XmlPath launched = ec2("RunInstances", "ImageId", "ami-1234567890abcdef0", "InstanceType", "t3.micro",
                 "MinCount", "1", "MaxCount", "1");
         instanceId = launched.getString("RunInstancesResponse.instancesSet.item.instanceId");
@@ -67,11 +77,13 @@ class Ec2VolumeDryRunIntegrationTest {
         ec2("AttachVolume", "VolumeId", attachedVolumeId, "InstanceId", instanceId, "Device", "/dev/xvdf");
         availableVolumeId = createVolume();
         ec2("CreateTags", "ResourceId.1", availableVolumeId, "Tag.1.Key", "team", "Tag.1.Value", "storage");
-        clearInvocations(blockDevices);
     }
 
-    @AfterEach
-    void terminateTheInstance() {
+    @AfterAll
+    void deleteTheVolumesAndTerminateTheInstance() {
+        ec2("DetachVolume", "VolumeId", attachedVolumeId, "InstanceId", instanceId);
+        ec2("DeleteVolume", "VolumeId", attachedVolumeId);
+        ec2("DeleteVolume", "VolumeId", availableVolumeId);
         ec2("TerminateInstances", "InstanceId.1", instanceId);
     }
 
@@ -192,16 +204,16 @@ class Ec2VolumeDryRunIntegrationTest {
         return volumes;
     }
 
-    private String createVolume() {
+    private static String createVolume() {
         return ec2("CreateVolume", "AvailabilityZone", zone, "Size", "1")
                 .getString("CreateVolumeResponse.volumeId");
     }
 
-    private XmlPath ec2(String action, String... params) {
+    private static XmlPath ec2(String action, String... params) {
         return request(action, params).post("/").then().statusCode(200).extract().xmlPath();
     }
 
-    private RequestSpecification request(String action, String... params) {
-        return QueryRequests.request(account, "ec2", action, params);
+    private static RequestSpecification request(String action, String... params) {
+        return QueryRequests.request(ACCOUNT, "ec2", action, params).port(port);
     }
 }
