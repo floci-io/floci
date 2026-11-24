@@ -784,24 +784,6 @@ public final class S3CopySimulator {
         return CopyRecordTransformer.ColumnKind.OTHER;
     }
 
-    static List<String> parseDataRow(byte[] body) {
-        int count = ((body[0] & 0xFF) << 8) | (body[1] & 0xFF);
-        List<String> values = new ArrayList<>(count);
-        int offset = 2;
-        for (int i = 0; i < count; i++) {
-            int length = ((body[offset] & 0xFF) << 24) | ((body[offset + 1] & 0xFF) << 16)
-                    | ((body[offset + 2] & 0xFF) << 8) | (body[offset + 3] & 0xFF);
-            offset += 4;
-            if (length < 0) {
-                values.add(null);
-                continue;
-            }
-            values.add(new String(body, offset, length, StandardCharsets.UTF_8));
-            offset += length;
-        }
-        return values;
-    }
-
     static String columnInfoQuery(CopyStatementParser.S3CopyFrom spec) {
         // 1042 = bpchar, 1043 = varchar; atttypmod carries the declared length plus a 4-byte header.
         return "SELECT a.attname, CASE WHEN a.atttypid IN (1042, 1043) AND a.atttypmod > 4 "
@@ -836,7 +818,7 @@ public final class S3CopySimulator {
         while ((msg = backendDecoder.nextMessage()) != null) {
             char type = msg.type();
             if (type == 'D') {
-                List<String> values = parseDataRow(msg.body());
+                List<String> values = PostgresWire.dataRowValues(msg.body());
                 if (!values.isEmpty() && values.get(0) != null) {
                     cols.add(columnInfo(values));
                 }
