@@ -145,7 +145,7 @@ public class SpectrumQueryPreparation {
     }
 
     private static LambdaUdfInvoker unconfiguredUdfInvoker() {
-        return new LambdaUdfInvoker(null, null, null, null, null, Clock.systemUTC()) {
+        return new LambdaUdfInvoker(null, null, null, null, null, null) {
             @Override
             public List<String> invoke(ExternalFunctionBinding function, SpectrumSession session, String clusterRegion,
                                        String user, long queryId, List<List<String>> rows) {
