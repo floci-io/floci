@@ -69,7 +69,8 @@ jobs:
             > "$GITHUB_WORKSPACE/all-nightly.txt"
           cd "$GITHUB_WORKSPACE"
           if [ -n "$PR" ]; then
-            gh pr diff "$PR" --repo "$GITHUB_REPOSITORY" --name-only > changed.txt
+            # The files endpoint lists up to 3,000 files; gh pr diff refuses a pull request past 300.
+            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename' > changed.txt
             if ! grep -qx '.github/workflows/nightly-checks.yml' changed.txt; then
               sed -n 's|^src/test/java/\(.*NightlyIntegrationTest\)\.java$|\1|p' changed.txt | LC_ALL=C sort \
                 | comm -12 all-nightly.txt - > selected.txt
