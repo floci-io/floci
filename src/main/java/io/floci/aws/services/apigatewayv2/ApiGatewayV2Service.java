@@ -1458,7 +1458,11 @@ public class ApiGatewayV2Service {
     // ──────────────────────────── Model CRUD ────────────────────────────
 
     public Model createModel(String region, String apiId, Map<String, Object> request) {
-        getApi(region, apiId);
+        Api api = getApi(region, apiId);
+        if (!"WEBSOCKET".equals(api.getProtocolType())) {
+            throw new AwsException("BadRequestException",
+                    "Currently, Models are not permitted for APIs with a protocol type of HTTP", 400);
+        }
         Model model = new Model();
         model.setModelId(shortId(10));
         model.setName((String) request.get("name"));
@@ -1475,12 +1479,9 @@ public class ApiGatewayV2Service {
     }
 
     public String getModelTemplate(String region, String apiId, String modelId) {
-        Api api = getApi(region, apiId);
-        if (!"WEBSOCKET".equals(api.getProtocolType())) {
-            throw new AwsException("BadRequestException", "Model templates are supported only for WebSocket APIs.", 400);
-        }
+        getApi(region, apiId);
         Model model = getModel(region, apiId, modelId);
-        return ModelTemplateGenerator.generate(model.getSchema(), model.getContentType(), true);
+        return ModelTemplateGenerator.generate(model.getSchema(), model.getContentType());
     }
 
     public List<Model> getModels(String region, String apiId) {

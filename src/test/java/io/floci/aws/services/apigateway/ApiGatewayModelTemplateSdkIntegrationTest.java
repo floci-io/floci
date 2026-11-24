@@ -127,45 +127,62 @@ class ApiGatewayModelTemplateSdkIntegrationTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void generatedTemplatesRenderTypedNestedAndEscapedJson(boolean websocket) throws Exception {
+    void generatedSamplesRenderNestedValuesAndArrayPlaceholders(boolean websocket) throws Exception {
         try (Fixture fixture = new Fixture(websocket)) {
             String model = fixture.createModel("TypedModel", SCHEMA);
             String template = fixture.template(model);
-            JsonNode input = json.readTree("""
-                    {"name":"quote\\\" slash\\\\ line\\n tab\\t apostrophe' Ω", "count":0,"ratio":2.5,
-                    "enabled":false,"nothing":null,"nested":{"with space":"","a.b":false},
-                    "words":["one","two's"],"rows":[{"label":"alpha","values":[1,2]},
-                    {"label":"beta","values":[]}]}
-                    """);
-            JsonNode output = render(template, input.toString());
-            if (websocket) {
-                assertEquals(input, output);
-                JsonNode nullable = json.readTree("""
-                        {"name":null,"count":null,"ratio":null,"enabled":null,"nothing":null,
-                        "nested":null,"words":null,"rows":[]}
-                        """);
-                assertEquals(nullable, render(template, nullable.toString()));
-            } else {
-                assertTrue(output.get("name").isTextual());
-                assertTrue(output.get("count").isIntegralNumber());
-                assertTrue(output.get("ratio").isNumber());
-                assertTrue(output.get("enabled").isBoolean());
-                assertTrue(output.get("nothing").isNull());
-                assertTrue(output.at("/nested/with space").isTextual());
-                assertTrue(output.at("/nested/a.b").isBoolean());
-                assertTrue(output.at("/words/0").isTextual());
-                assertTrue(output.at("/rows/0/values/0").isIntegralNumber());
-            }
+            assertTrue(template.contains("\n  \"name\" : \"foo\","));
+            assertTrue(template.contains("##TODO: Update this placeholder input path to match your source data"));
+            assertTrue(template.contains("#foreach($elem in $inputRoot.TODO)"));
+            JsonNode output = render(template, "{\"TODO\":[{},{}]}");
+            assertEquals("foo", output.get("name").textValue());
+            assertEquals(1, output.get("count").intValue());
+            assertEquals(3.1415, output.get("ratio").doubleValue());
+            assertTrue(output.get("enabled").booleanValue());
+            assertTrue(output.get("nothing").isNull());
+            assertEquals("foo", output.at("/nested/with space").textValue());
+            assertTrue(output.at("/nested/a.b").booleanValue());
+            assertEquals(2, output.get("words").size());
+            assertEquals("foo", output.at("/words/0").textValue());
+            assertEquals(1, output.at("/rows/0/values/0").intValue());
             String reference = fixture.createModel("ReferenceModel", REFERENCE_SCHEMA);
             JsonNode referenceInput = json.readTree("""
                     {"first":{"hyphen-key":"left"},"second":{"hyphen-key":"right"}}
                     """);
             JsonNode referenceOutput = render(fixture.template(reference), referenceInput.toString());
-            assertTrue(referenceOutput.at("/first/hyphen-key").isTextual());
-            assertTrue(referenceOutput.at("/second/hyphen-key").isTextual());
-            if (websocket) {
-                assertEquals(referenceInput, referenceOutput);
-            }
+            assertEquals("foo", referenceOutput.at("/first/hyphen-key").textValue());
+            assertEquals("foo", referenceOutput.at("/second/hyphen-key").textValue());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void bothSdkRoutesReturnTheDocumentedAwsSample(boolean websocket) {
+        String schema = """
+                {"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"},
+                "op":{"type":"string"},"c":{"type":"number"}}}
+                """;
+        String expected = """
+                #set($inputRoot = $input.path('$'))
+                {
+                  "a" : 3.1415,
+                  "b" : 3.1415,
+                  "op" : "foo",
+                  "c" : 3.1415
+                }""";
+        try (Fixture fixture = new Fixture(websocket)) {
+            assertEquals(expected, fixture.template(fixture.createModel("DocumentedSample", schema)));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void topLevelStringModelsCannotGenerateTemplates(boolean websocket) {
+        try (Fixture fixture = new Fixture(websocket)) {
+            String model = fixture.createModel("Scalar", "{\"type\":\"string\"}");
+            AwsServiceException error = assertThrows(AwsServiceException.class, () -> fixture.template(model));
+            assertEquals(400, error.statusCode());
+            assertEquals("Unsupported data type for mapping template: string", error.awsErrorDetails().errorMessage());
         }
     }
 
@@ -173,10 +190,10 @@ class ApiGatewayModelTemplateSdkIntegrationTest {
     @ValueSource(booleans = {false, true})
     void modelUpdatesDeletionAndOwnedApiBoundariesAreObserved(boolean websocket) throws Exception {
         try (Fixture fixture = new Fixture(websocket)) {
-            String model = fixture.createModel("LifecycleModel", "{\"type\":\"string\"}");
-            assertTrue(render(fixture.template(model), "\"input\"").isTextual());
-            fixture.update(model, "{\"type\":\"integer\"}");
-            assertTrue(render(fixture.template(model), "42").isIntegralNumber());
+            String model = fixture.createModel("LifecycleModel", valueSchema("string"));
+            assertTrue(render(fixture.template(model), "{}").get("value").isTextual());
+            fixture.update(model, valueSchema("integer"));
+            assertTrue(render(fixture.template(model), "{}").get("value").isIntegralNumber());
             assertStatus(404, () -> fixture.templateAs(model, "test", Region.US_WEST_2));
             assertStatus(404, () -> fixture.templateAs(model, "987654321098", Region.US_EAST_1));
             assertStatus(404, () -> fixture.template("MissingModel"));
@@ -200,7 +217,7 @@ class ApiGatewayModelTemplateSdkIntegrationTest {
             String model = fixture.createModel("CompositionModel", schema);
             assertStatus(501, () -> fixture.template(model));
             assertEquals(schema, fixture.schema(model));
-            fixture.update(model, "{\"type\":\"boolean\"}");
+            fixture.update(model, valueSchema("boolean"));
             assertFalse(fixture.template(model).isBlank());
         }
     }
@@ -211,7 +228,7 @@ class ApiGatewayModelTemplateSdkIntegrationTest {
             String model = fixture.createModel("JsonPathModel", SCHEMA);
             assertEquals(fixture.template(model), jsonTemplate(fixture.apiId, model).statusCode(200)
                     .extract().path("Value"));
-            fixture.update(model, "{\"type\":\"boolean\"}");
+            fixture.update(model, valueSchema("boolean"));
             assertEquals(fixture.template(model), jsonTemplate(fixture.apiId, model).statusCode(200)
                     .extract().path("Value"));
             fixture.update(model, "{\"allOf\":[{\"type\":\"object\"}]}");
@@ -223,18 +240,33 @@ class ApiGatewayModelTemplateSdkIntegrationTest {
     }
 
     @Test
-    void httpApiTemplatesRemainOutsideTheWebSocketScope() {
+    void httpApisRejectModelCreationBeforePersistingAnything() {
         try (ApiGatewayV2Client client = v2("test", Region.US_EAST_1)) {
             String api = client.createApi(request -> request.name("http-template-boundary").protocolType("HTTP")).apiId();
             try {
-                String model = client.createModel(request -> request.apiId(api).name("HttpModel")
-                        .contentType("application/json").schema("{\"type\":\"string\"}")).modelId();
-                assertStatus(400, () -> client.getModelTemplate(request -> request.apiId(api).modelId(model)));
-                jsonTemplate(api, model).statusCode(400).body(containsString("BadRequestException"));
+                String message = "Currently, Models are not permitted for APIs with a protocol type of HTTP";
+                AwsServiceException error = assertThrows(AwsServiceException.class,
+                        () -> client.createModel(request -> request.apiId(api).name("HttpModel")
+                                .contentType("application/json").schema(valueSchema("string"))));
+                assertEquals(400, error.statusCode());
+                assertEquals(message, error.awsErrorDetails().errorMessage());
+                given().port(endpoint.getPort()).contentType("application/x-amz-json-1.1")
+                        .header("X-Amz-Target", "AmazonApiGatewayV2.CreateModel")
+                        .header("Authorization", auth("test", "apigatewayv2"))
+                        .body(Map.of("ApiId", api, "Name", "HttpModel", "ContentType", "application/json",
+                                "Schema", valueSchema("string")))
+                        .post("/").then().statusCode(400).body(containsString(message));
+                assertTrue(client.getModels(request -> request.apiId(api)).items().isEmpty());
+                assertStatus(404, () -> client.getModelTemplate(request -> request.apiId(api).modelId("missing")));
+                jsonTemplate(api, "missing").statusCode(404).body(containsString("NotFoundException"));
             } finally {
                 client.deleteApi(request -> request.apiId(api));
             }
         }
+    }
+
+    private static String valueSchema(String type) {
+        return "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"" + type + "\"}}}";
     }
 
     private JsonNode render(String template, String body) throws Exception {

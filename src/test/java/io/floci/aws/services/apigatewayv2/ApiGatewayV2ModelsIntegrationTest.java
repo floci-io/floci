@@ -24,14 +24,14 @@ class ApiGatewayV2ModelsIntegrationTest {
         apiId = given()
                 .contentType(ContentType.JSON)
                 .body("""
-                        {"name":"models-rest-test","protocolType":"HTTP"}
+                        {"name":"models-rest-test","protocolType":"WEBSOCKET","routeSelectionExpression":"$request.body.action"}
                         """)
                 .when().post("/v2/apis")
                 .then()
                 .statusCode(201)
                 .body("apiId", notNullValue())
                 .body("name", equalTo("models-rest-test"))
-                .body("protocolType", equalTo("HTTP"))
+                .body("protocolType", equalTo("WEBSOCKET"))
                 .extract().path("apiId");
     }
 
@@ -168,7 +168,7 @@ class ApiGatewayV2ModelsIntegrationTest {
         String secondApiId = given()
                 .contentType(ContentType.JSON)
                 .body("""
-                        {"name":"models-rest-test-2","protocolType":"HTTP"}
+                        {"name":"models-rest-test-2","protocolType":"WEBSOCKET","routeSelectionExpression":"$request.body.action"}
                         """)
                 .when().post("/v2/apis")
                 .then()

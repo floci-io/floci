@@ -11,7 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 
-/** Bounded JSON Schema traversal shared by the API Gateway sample and mapping template APIs. */
+/** Bounded JSON Schema traversal for API Gateway's sample mapping templates. */
 public final class ModelTemplateGenerator {
     private static final ObjectMapper JSON = new ObjectMapper()
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -23,7 +23,7 @@ public final class ModelTemplateGenerator {
 
     private ModelTemplateGenerator() {}
 
-    public static String generate(String schema, String contentType, boolean mapping) {
+    public static String generate(String schema, String contentType) {
         if (contentType != null && !contentType.split(";", 2)[0].trim().equalsIgnoreCase("application/json")) {
             throw unsupported("Only application/json model templates are supported.");
         }
@@ -41,16 +41,19 @@ public final class ModelTemplateGenerator {
         }
         Compiler compiler = new Compiler(document);
         Shape shape = compiler.read(document, 0, new HashSet<>());
+        if (!"object".equals(shape.type()) && !"array".equals(shape.type())) {
+            throw new AwsException("BadRequestException",
+                    "Unsupported data type for mapping template: " + shape.type(), 400);
+        }
         Output output = new Output();
         output.append("#set($inputRoot = $input.path('$'))\n");
-        render(shape, "$inputRoot", 0, mapping, output);
+        render(shape, 0, output);
         return output.text.toString();
     }
 
-    private static void render(Shape shape, String path, int loop, boolean mapping, Output output) {
-        if (mapping && !"null".equals(shape.type())) {
-            output.append("#if(" + path + " == $null)null#else");
-        }
+    private static void render(Shape shape, int depth, Output output) {
+        String indent = "  ".repeat(depth);
+        String childIndent = indent + "  ";
         switch (shape.type()) {
             case "object" -> {
                 output.append("{");
@@ -60,33 +63,28 @@ public final class ModelTemplateGenerator {
                         output.append(",");
                     }
                     first = false;
-                    output.append(TextNode.valueOf(property.getKey()).toString() + ":");
-                    render(property.getValue(), path + ".get('" + property.getKey() + "')", loop, mapping, output);
+                    output.append("\n" + childIndent + TextNode.valueOf(property.getKey()) + " : ");
+                    render(property.getValue(), depth + 1, output);
+                }
+                if (!first) {
+                    output.append("\n" + indent);
                 }
                 output.append("}");
             }
             case "array" -> {
-                output.append("[");
-                if (mapping) {
-                    String item = "$modelItem" + loop;
-                    output.append("#foreach(" + item + " in " + path + ")");
-                    render(shape.items(), item, loop + 1, true, output);
-                    output.append("#if($foreach.hasNext),#end#end");
-                } else {
-                    render(shape.items(), path, loop + 1, false, output);
-                }
-                output.append("]");
+                output.append("[\n" + childIndent
+                        + "##TODO: Update this placeholder input path to match your source data\n"
+                        + childIndent + "#foreach($elem in $inputRoot.TODO)\n" + childIndent);
+                render(shape.items(), depth + 1, output);
+                output.append("\n" + childIndent + "#if($foreach.hasNext),#end\n"
+                        + childIndent + "#end\n" + indent + "]");
             }
-            case "string" -> output.append(mapping
-                    ? "\"$util.escapeJavaScript(" + path + ").replaceAll(\"\\\\'\",\"'\")\"" : "\"foo\"");
-            case "integer" -> output.append(mapping ? path : "0");
-            case "number" -> output.append(mapping ? path : "0.0");
-            case "boolean" -> output.append(mapping ? path : "true");
+            case "string" -> output.append("\"foo\"");
+            case "integer" -> output.append("1");
+            case "number" -> output.append("3.1415");
+            case "boolean" -> output.append("true");
             case "null" -> output.append("null");
             default -> throw new IllegalStateException("Uncompiled schema type");
-        }
-        if (mapping && !"null".equals(shape.type())) {
-            output.append("#end");
         }
     }
 

@@ -2508,7 +2508,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
     public String getModelTemplate(String region, String apiId, String modelName) {
         getRestApi(region, apiId);
         Model model = getModel(region, apiId, modelName);
-        return ModelTemplateGenerator.generate(model.getSchema(), model.getContentType(), false);
+        return ModelTemplateGenerator.generate(model.getSchema(), model.getContentType());
     }
 
     public List<Model> getModels(String region, String apiId) {

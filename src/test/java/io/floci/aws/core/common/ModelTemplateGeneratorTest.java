@@ -26,40 +26,37 @@ class ModelTemplateGeneratorTest {
     })
     void explicitlyRefusesUnsupportedSchemas(String schema) {
         AwsException error = assertThrows(AwsException.class,
-                () -> ModelTemplateGenerator.generate(schema, "application/json", true));
+                () -> ModelTemplateGenerator.generate(schema, "application/json"));
         assertEquals(501, error.getHttpStatus());
     }
 
     @Test
     void malformedSchemaHasAClientError() {
         assertEquals(400, assertThrows(AwsException.class,
-                () -> ModelTemplateGenerator.generate("{", "application/json", true)).getHttpStatus());
+                () -> ModelTemplateGenerator.generate("{", "application/json")).getHttpStatus());
         assertEquals(400, assertThrows(AwsException.class,
-                () -> ModelTemplateGenerator.generate(null, "application/json", false)).getHttpStatus());
+                () -> ModelTemplateGenerator.generate(null, "application/json")).getHttpStatus());
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"{\"type\":\"string\"} garbage", "{\"type\":\"string\"} {\"type\":\"number\"}"})
-    void rejectsTrailingTokensInEitherTemplateMode(String schema) {
-        for (boolean mapping : new boolean[]{false, true}) {
-            AwsException error = assertThrows(AwsException.class,
-                    () -> ModelTemplateGenerator.generate(schema, "application/json", mapping));
-            assertEquals(400, error.getHttpStatus());
-            assertEquals("The model schema is not valid JSON.", error.getMessage());
-        }
+    void rejectsTrailingTokens(String schema) {
+        AwsException error = assertThrows(AwsException.class,
+                () -> ModelTemplateGenerator.generate(schema, "application/json"));
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("The model schema is not valid JSON.", error.getMessage());
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void acceptsWhitespaceAfterTheSchema(boolean mapping) {
-        assertTrue(ModelTemplateGenerator.generate("{\"type\":\"string\"} \n\t", "application/json", mapping)
+    @Test
+    void acceptsWhitespaceAfterTheSchema() {
+        assertTrue(ModelTemplateGenerator.generate("{\"type\":\"object\"} \n\t", "application/json")
                 .startsWith("#set($inputRoot"));
     }
 
     @Test
     void refusesNonJsonContent() {
         assertEquals(501, assertThrows(AwsException.class,
-                () -> ModelTemplateGenerator.generate("{\"type\":\"string\"}", "application/xml", false))
+                () -> ModelTemplateGenerator.generate("{\"type\":\"string\"}", "application/xml"))
                 .getHttpStatus());
     }
 
@@ -71,15 +68,14 @@ class ModelTemplateGeneratorTest {
         }
         String deep = schema;
         assertEquals(501, assertThrows(AwsException.class,
-                () -> ModelTemplateGenerator.generate(deep, "application/json", true)).getHttpStatus());
+                () -> ModelTemplateGenerator.generate(deep, "application/json")).getHttpStatus());
         assertEquals(501, assertThrows(AwsException.class,
-                () -> ModelTemplateGenerator.generate("x".repeat(1_048_577), "application/json", true))
+                () -> ModelTemplateGenerator.generate("x".repeat(1_048_577), "application/json"))
                 .getHttpStatus());
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void boundsGeneratedOutputIndependentlyOfSchemaTraversal(boolean mapping) {
+    @Test
+    void boundsGeneratedOutputIndependentlyOfSchemaTraversal() {
         ObjectNode schema = new ObjectMapper().createObjectNode().put("type", "object");
         ObjectNode properties = schema.putObject("properties");
         String name = "a".repeat(8_000);
@@ -87,7 +83,7 @@ class ModelTemplateGeneratorTest {
             properties.putObject(name + i).put("type", "string");
         }
         AwsException error = assertThrows(AwsException.class,
-                () -> ModelTemplateGenerator.generate(schema.toString(), "application/json", mapping));
+                () -> ModelTemplateGenerator.generate(schema.toString(), "application/json"));
         assertEquals(501, error.getHttpStatus());
         assertTrue(error.getMessage().contains("output limit"));
     }
@@ -98,8 +94,8 @@ class ModelTemplateGeneratorTest {
                 {"definitions":{"S":{"type":"string"}},"type":"object","properties":{
                 "left":{"$ref":"#/definitions/S"},"right":{"$ref":"#/definitions/S"}}}
                 """;
-        assertTrue(ModelTemplateGenerator.generate(schema, "application/json; charset=utf-8", true)
-                .contains(".get('right')"));
+        assertTrue(ModelTemplateGenerator.generate(schema, "application/json; charset=utf-8")
+                .contains("\"right\" : "));
         String many = "{\"type\":\"object\",\"properties\":{";
         StringBuilder properties = new StringBuilder(many);
         for (int i = 0; i < 4_100; i++) {
@@ -110,7 +106,7 @@ class ModelTemplateGeneratorTest {
         }
         properties.append("}}");
         assertEquals(501, assertThrows(AwsException.class,
-                () -> ModelTemplateGenerator.generate(properties.toString(), "application/json", true))
+                () -> ModelTemplateGenerator.generate(properties.toString(), "application/json"))
                 .getHttpStatus());
     }
 }

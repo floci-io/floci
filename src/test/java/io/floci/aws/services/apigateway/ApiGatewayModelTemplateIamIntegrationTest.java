@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
+import static io.floci.aws.testing.EnforcementFixtures.statement;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -49,7 +50,7 @@ class ApiGatewayModelTemplateIamIntegrationTest {
                 .delete(prefix + api));
         String model = given().header("Authorization", auth("test", "apigateway"))
                 .contentType("application/json")
-                .body(Map.of("name", "IamModel", "contentType", "application/json", "schema", "{\"type\":\"string\"}"))
+                .body(Map.of("name", "IamModel", "contentType", "application/json", "schema", "{\"type\":\"object\"}"))
                 .post(prefix + api + "/models").then().statusCode(201).extract().path(websocket ? "modelId" : "name");
         String path = prefix + api + "/models/" + model + (websocket ? "/template" : "/default_template");
         String resource = "arn:aws:apigateway:us-east-1::" + (websocket ? path.substring(3) : path);
@@ -85,7 +86,4 @@ class ApiGatewayModelTemplateIamIntegrationTest {
                 "{\"Version\":\"2012-10-17\",\"Statement\":[" + statements + "]}");
     }
 
-    private static String statement(String effect, String action, String resource) {
-        return "{\"Effect\":\"" + effect + "\",\"Action\":\"" + action + "\",\"Resource\":\"" + resource + "\"}";
-    }
 }

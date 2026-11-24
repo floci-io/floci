@@ -125,34 +125,36 @@ changing the API. Leading/trailing whitespace and non-ASCII lookalikes are not a
 
 ### Model templates
 
-`GetModelTemplate` reads the current stored model schema. REST APIs return a VTL template
-containing a typed example JSON payload; WebSocket APIs return a VTL mapping template that
-reads the input JSON. WebSocket string values are JSON-escaped, including quotes, backslashes,
-newlines and apostrophes. Nested objects, typed arrays and finite local JSON Pointer
-references (`#/definitions/...`) are supported. Updating the model changes the next generated
-template; no generated-template cache or additional persistent state is used.
+`GetModelTemplate` returns the same sample VTL format for REST and WebSocket API models.
+Object properties use two-space indentation and sample values, including `"foo"` for
+strings and `3.1415` for numbers. Arrays contain a `##TODO:` comment and a
+`#foreach($elem in $inputRoot.TODO)` placeholder to customize for the source payload.
+This is a starting point for a mapping template, not a projection of the input JSON.
 
-Floci's existing `AmazonApiGatewayV2` JSON compatibility target also accepts
-`GetModelTemplate`, with `ApiId` and `ModelId` inputs and a `Value` response. It uses the
-same WebSocket generation and error handling as the canonical REST route.
+Nested objects, typed arrays and finite local JSON Pointer references
+(`#/definitions/...`) are supported. Updating a model changes its next template;
+no generated-template cache or additional persistent state is used. The existing
+`AmazonApiGatewayV2` JSON compatibility target also accepts `GetModelTemplate`, with
+`ApiId` and `ModelId` inputs and a `Value` response.
 
-This is a bounded JSON-schema subset for `application/json` models. Schema composition
-(`allOf`, `anyOf`, `oneOf`, `not`), enums, const values, union types, tuple/untyped arrays,
-external or cyclic references, and property names containing VTL delimiters (`'`, `"`, `\`,
-`$`, `#`) or control characters return `UnsupportedOperation` (HTTP 501). Validation-only
-constraints such as ranges and formats do not determine the example values. A schema must
-state a supported type, or provide `properties`/`items` from which the type can be inferred.
-The WebSocket mapping projects declared properties; undeclared input fields are not copied,
-and missing or null declared values become JSON null. Mapping inputs must match the declared
-scalar and container types; templates do not validate or coerce payloads. HTTP API templates
-remain unsupported.
+Template generation supports a bounded JSON-schema subset for `application/json` models.
+Composition (`allOf`, `anyOf`, `oneOf`, `not`), enums, const values, union types,
+tuple/untyped arrays, external or cyclic references, and property names containing
+VTL delimiters (`'`, `"`, `\`, `$`, `#`) or control characters return
+`UnsupportedOperation` (HTTP 501). Constraints such as ranges and formats do not
+choose the sample values. A schema must state a supported type or provide
+`properties`/`items` from which a type can be inferred.
 
-Template reads reject malformed JSON, including extra tokens after the schema, with
-`BadRequestException` (HTTP 400). Model creation and update validation are unchanged;
-valid schemas outside this template generator's subset remain usable for other purposes.
+Malformed JSON, including extra tokens after the schema, returns
+`BadRequestException` (HTTP 400). Top-level scalar models also return HTTP 400,
+with `Unsupported data type for mapping template: <type>`. Schema admission at
+model creation and update is unchanged; valid schemas outside the generator's
+subset remain storable. HTTP APIs reject model creation because models are only
+supported for WebSocket APIs in API Gateway v2.
 
-Local generation limits are 1,048,576 schema characters, 4,096 visited schema nodes, 32 levels
-of nesting and 262,144 output characters. These are Floci limits, not AWS service quotas.
+Local generation limits are 1,048,576 schema characters, 4,096 visited schema nodes,
+32 levels of nesting and 262,144 output characters. These are Floci limits, not
+AWS service quotas.
 
 ### Supported Operations
 

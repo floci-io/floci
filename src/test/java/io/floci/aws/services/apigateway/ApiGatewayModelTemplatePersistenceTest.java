@@ -30,11 +30,11 @@ class ApiGatewayModelTemplatePersistenceTest {
     void restTemplateUsesTheLatestPersistedSchemaAfterRestart(@TempDir Path directory) {
         Services first = services(directory);
         String api = first.rest().createRestApi(REGION, Map.of("name", "rest-template")).getId();
-        first.rest().createModel(REGION, api, Map.of("name", "Model", "schema", "{\"type\":\"string\"}"));
+        first.rest().createModel(REGION, api, Map.of("name", "Model", "schema", schema("string")));
         String original = first.rest().getModelTemplate(REGION, api, "Model");
         assertEquals(original, services(directory).rest().getModelTemplate(REGION, api, "Model"));
         first.rest().updateModel(REGION, api, "Model",
-                List.of(Map.of("op", "replace", "path", "/schema", "value", "{\"type\":\"boolean\"}")));
+                List.of(Map.of("op", "replace", "path", "/schema", "value", schema("boolean"))));
         Services restarted = services(directory);
         assertNotEquals(original, restarted.rest().getModelTemplate(REGION, api, "Model"));
         restarted.rest().deleteModel(REGION, api, "Model");
@@ -48,15 +48,19 @@ class ApiGatewayModelTemplatePersistenceTest {
         String api = first.socket().createApi(REGION, Map.of("name", "socket-template", "protocolType", "WEBSOCKET",
                 "routeSelectionExpression", "$request.body.action")).getApiId();
         String model = first.socket().createModel(REGION, api,
-                Map.of("name", "Model", "schema", "{\"type\":\"string\"}")).getModelId();
+                Map.of("name", "Model", "schema", schema("string"))).getModelId();
         String original = first.socket().getModelTemplate(REGION, api, model);
         assertEquals(original, services(directory).socket().getModelTemplate(REGION, api, model));
-        first.socket().updateModel(REGION, api, model, Map.of("schema", "{\"type\":\"boolean\"}"));
+        first.socket().updateModel(REGION, api, model, Map.of("schema", schema("boolean")));
         Services restarted = services(directory);
         assertNotEquals(original, restarted.socket().getModelTemplate(REGION, api, model));
         restarted.socket().deleteModel(REGION, api, model);
         assertEquals(404, assertThrows(AwsException.class,
                 () -> services(directory).socket().getModelTemplate(REGION, api, model)).getHttpStatus());
+    }
+
+    private static String schema(String type) {
+        return "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"" + type + "\"}}}";
     }
 
     private Services services(Path directory) {
