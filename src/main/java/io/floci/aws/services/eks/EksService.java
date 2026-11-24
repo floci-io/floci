@@ -1044,6 +1044,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 }
             }
 
+            ensureAutoModeNodeEntry(cluster);
             storage.put(clusterKey(region, name), cluster);
         } catch (RuntimeException e) {
             if (clusterSg != null) {
@@ -1316,6 +1317,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 && !config.services().eks().mock() && clusterManager != null && cluster.getContainerId() != null) {
             replaceNodeForServiceLb(requireClusterInRequestRegion(name));
         }
+        if (nextAutoMode != null && nextAutoMode.computeOn()) {
+            ensureAutoModeNodeEntry(requireClusterInRequestRegion(name));
+        }
         LOG.infov("Updated the configuration of EKS cluster {0}: {1}", cluster.getName(),
                 updates.stream().map(Update::type).toList());
         return updates;
@@ -1362,6 +1366,17 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     String.valueOf(compute.nodeRoleArn()),
                     StorageConfig.blockStorageOn(storage),
                     ElasticLoadBalancing.loadBalancingOn(loadBalancing));
+        }
+    }
+
+    /**
+     * EKS makes the node role's access entry, of type {@code EC2} with {@code AmazonEKSAutoNodePolicy}, once the
+     * cluster's EKS Auto Mode compute capability is on (measured on AWS for CreateCluster).
+     */
+    private void ensureAutoModeNodeEntry(Cluster cluster) {
+        ComputeConfig compute = cluster.getComputeConfig();
+        if (accessEntries != null && compute != null && Boolean.TRUE.equals(compute.enabled())) {
+            accessEntries.ensureAutoModeNodeEntry(cluster, compute.nodeRoleArn());
         }
     }
 

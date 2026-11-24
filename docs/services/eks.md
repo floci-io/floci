@@ -42,11 +42,11 @@ or list operations. Resource tags are not retained for post-deletion policy cond
 | `UpdateClusterConfig` | Update a cluster's endpoint access, logging, authentication mode or upgrade policy |
 | `ListClusters` | List cluster names with pagination (`maxResults` 1-100 and `nextToken`) |
 | `DeleteCluster` | Delete a cluster |
-| `CreateAccessEntry` | Create STANDARD or EC2_LINUX access-entry metadata |
+| `CreateAccessEntry` | Create STANDARD, EC2_LINUX or EC2 (EKS Auto Mode) access-entry metadata |
 | `DescribeAccessEntry` | Describe an access entry by IAM principal ARN |
 | `ListAccessEntries` | List principal ARNs with pagination |
 | `DeleteAccessEntry` | Delete access-entry metadata |
-| `AssociateAccessPolicy` | Associate an EKS access policy and its cluster or namespace scope with a STANDARD access entry |
+| `AssociateAccessPolicy` | Associate an EKS access policy and its cluster or namespace scope with a STANDARD or EC2 access entry |
 | `ListAssociatedAccessPolicies` | List the access policies associated with an access entry, with pagination |
 | `DisassociateAccessPolicy` | Remove an access policy from an access entry |
 | `CreatePodIdentityAssociation` | Create a pod identity association between a service account and IAM role |
@@ -78,7 +78,7 @@ or list operations. Resource tags are not retained for post-deletion policy cond
 
 `CreateCluster` accepts `accessConfig.authenticationMode` (`CONFIG_MAP`, `API_AND_CONFIG_MAP`, or `API`) and `bootstrapClusterCreatorAdminPermissions`. The API default is `CONFIG_MAP`; access-entry operations require an ACTIVE cluster created with `API` or `API_AND_CONFIG_MAP`.
 
-The access-entry management operations support `STANDARD` (the default) and `EC2_LINUX`. STANDARD accepts existing IAM users or roles, including principals in another account. EC2_LINUX requires a role in the cluster account and generates `system:node:{{EC2PrivateDNSName}}`; custom usernames and Kubernetes groups are not accepted for node entries. Tags supplied at creation are preserved. Repeating a create with the same client token and normalized parameters returns the existing entry. Listing accepts `maxResults` from 1 to 100 and cluster-specific `nextToken` values.
+The access-entry management operations support `STANDARD` (the default) and `EC2_LINUX`. STANDARD accepts existing IAM users or roles, including principals in another account. EC2_LINUX requires a role in the cluster account and generates `system:node:{{EC2PrivateDNSName}}`; custom usernames and Kubernetes groups are not accepted for node entries. `EC2`, the type of EKS Auto Mode's node role, accepts roles only and generates `system:node:{{SessionName}}` in the `system:nodes` group; like AWS, it refuses Kubernetes groups, a username or an IAM user with AWS's messages, and access policies can be associated with it. When a cluster's EKS Auto Mode compute capability is turned on, by `CreateCluster` or `UpdateClusterConfig`, Floci makes the node role's `EC2` entry with `AmazonEKSAutoNodePolicy` on the cluster scope, as EKS does, unless the role already has an entry, IAM doesn't have the role, or the cluster's authentication mode is `CONFIG_MAP`. Tags supplied at creation are preserved. Repeating a create with the same client token and normalized parameters returns the existing entry. Listing accepts `maxResults` from 1 to 100 and cluster-specific `nextToken` values.
 
 Access policies are management metadata, like the entries they belong to: Floci stores and returns them but does not enforce their Kubernetes permissions. `policyArn` must be an `arn:<partition>:eks::aws:cluster-access-policy/<name>` ARN in the cluster's partition. The policy name itself is not checked against AWS's list of access policies. The scope `type` is `cluster` (no namespaces) or `namespace` (one or more names; wildcards such as `dev-*` are kept as given, and a repeated name is stored once). Associating a policy that is already associated replaces its scope and keeps its `associatedAt`. Only STANDARD entries accept access policies, and deleting an entry removes its policies. Disassociating a policy the entry does not hold succeeds. `ListAccessEntries` accepts `associatedPolicyArn`.
 

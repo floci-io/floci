@@ -351,6 +351,81 @@ class EksAccessEntryServiceTest {
                 .associatedAccessPolicies().isEmpty());
     }
 
+    /** Measured on AWS: an EC2 entry gets the Auto Mode node identity and can hold access policies. */
+    @Test
+    void anEc2EntryGetsTheAutoModeNodeIdentityAndTakesAccessPolicies() {
+        Fixture fixture = fixture();
+        AccessEntry entry = fixture.service.create(fixture.cluster, request(PRINCIPAL, "EC2", null));
+
+        assertEquals("EC2", entry.type());
+        assertEquals("system:node:{{SessionName}}", entry.username());
+        assertEquals(List.of("system:nodes"), entry.kubernetesGroups());
+        assertTrue(fixture.service.listAccessPolicies(fixture.cluster, PRINCIPAL, null, null)
+                .associatedAccessPolicies().isEmpty());
+        fixture.service.associate(fixture.cluster, PRINCIPAL, policy(ADMIN, "cluster", null));
+        assertEquals(List.of(ADMIN), fixture.service.listAccessPolicies(fixture.cluster, PRINCIPAL, null, null)
+                .associatedAccessPolicies().stream().map(AssociatedAccessPolicy::policyArn).toList());
+    }
+
+    /** AWS's messages, measured. */
+    @Test
+    void anEc2EntryRefusesGroupsAUsernameAndAnIamUserAsAwsDoes() {
+        Fixture fixture = fixture();
+        AwsException groups = assertThrows(AwsException.class, () -> fixture.service.create(fixture.cluster,
+                new CreateAccessEntryRequest(PRINCIPAL, "EC2", null, List.of("g1"), null, null)));
+        assertEquals("InvalidParameterException", groups.getErrorCode());
+        assertEquals("The specified kubernetesGroups is invalid: setting kubernetesGroups is not allowed when the type "
+                + "is \"EC2\".", groups.getMessage());
+        AwsException username = assertThrows(AwsException.class, () -> fixture.service.create(fixture.cluster,
+                new CreateAccessEntryRequest(PRINCIPAL, "EC2", "someone", null, null, null)));
+        assertEquals("The specified username is invalid: setting username is not allowed when the type is \"EC2\".",
+                username.getMessage());
+        AwsException user = assertThrows(AwsException.class, () -> fixture.service.create(fixture.cluster,
+                request("arn:aws:iam::123456789012:user/floci-cli", "EC2", null)));
+        assertEquals("AccessEntry principalArn must be IAM role when using types "
+                + "[EC2_LINUX, EC2_WINDOWS, FARGATE_LINUX, HYBRID_LINUX, EC2]", user.getMessage());
+    }
+
+    @Test
+    void autoModeMakesTheNodeRolesEntryWithTheAutoNodePolicyOnTheClusterOnce() {
+        Fixture fixture = fixture();
+        fixture.cluster.setStatus(ClusterStatus.CREATING);
+
+        fixture.service.ensureAutoModeNodeEntry(fixture.cluster, PRINCIPAL);
+        fixture.service.ensureAutoModeNodeEntry(fixture.cluster, PRINCIPAL);
+
+        fixture.cluster.setStatus(ClusterStatus.ACTIVE);
+        AccessEntry entry = fixture.service.describe(fixture.cluster, PRINCIPAL);
+        assertEquals("EC2", entry.type());
+        assertEquals("system:node:{{SessionName}}", entry.username());
+        assertEquals(List.of("system:nodes"), entry.kubernetesGroups());
+        assertEquals("AROA-worker", fixture.storage.scan(key -> true).getFirst().principalId());
+        List<AssociatedAccessPolicy> policies = fixture.service.listAccessPolicies(fixture.cluster, PRINCIPAL, null,
+                null).associatedAccessPolicies();
+        assertEquals(List.of("arn:aws:eks::aws:cluster-access-policy/AmazonEKSAutoNodePolicy"),
+                policies.stream().map(AssociatedAccessPolicy::policyArn).toList());
+        assertEquals(new AccessScope("cluster", List.of()), policies.getFirst().accessScope());
+        assertEquals(List.of(PRINCIPAL), fixture.service.list(fixture.cluster, null, null).accessEntries());
+    }
+
+    @Test
+    void autoModeKeepsAnEntryTheNodeRoleHasAndMakesNoneWithoutAccessEntriesOrTheRole() {
+        Fixture standard = fixture();
+        AccessEntry existing = standard.service.create(standard.cluster, request(PRINCIPAL, "STANDARD", null));
+        standard.service.ensureAutoModeNodeEntry(standard.cluster, PRINCIPAL);
+        assertEquals(existing, standard.service.describe(standard.cluster, PRINCIPAL));
+
+        Fixture configMap = fixture();
+        configMap.cluster.setAccessConfig(new AccessConfig("CONFIG_MAP", true));
+        configMap.service.ensureAutoModeNodeEntry(configMap.cluster, PRINCIPAL);
+        assertTrue(configMap.storage.scan(key -> true).isEmpty());
+
+        Fixture noRole = fixture();
+        when(noRole.iam.findRole("123456789012", "worker")).thenReturn(Optional.empty());
+        noRole.service.ensureAutoModeNodeEntry(noRole.cluster, PRINCIPAL);
+        assertTrue(noRole.storage.scan(key -> true).isEmpty());
+    }
+
     private static String cn(String arn) {
         return arn.replace("arn:aws:", "arn:aws-cn:");
     }
