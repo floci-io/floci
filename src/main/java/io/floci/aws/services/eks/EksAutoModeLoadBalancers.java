@@ -49,8 +49,9 @@ import java.util.regex.Pattern;
  * <p>Floci reads the cluster with {@code kubectl} in the node, so this reconciles on an interval rather than
  * watching. It keeps no state of its own: each pass makes the load balancer, target groups, registration and
  * listeners the Service needs, so a pass that failed halfway is finished by the next. What it made carries the
- * cluster and the Service in the tags the AWS Load Balancer Controller uses, and a name hashed from the cluster's
- * ARN and the Service, and is found again by both.
+ * cluster and the Service in the tags Auto Mode sets, {@code eks:eks-cluster-name} and
+ * {@code service.eks.amazonaws.com/stack}, and a name hashed from the cluster's ARN and the Service, and is found
+ * again by both.
  *
  * <p>A Service with no {@code loadBalancerClass}, which Auto Mode also serves as its cluster default, stays with
  * k3s's own ServiceLB here. UDP and SCTP ports get no listener, as Floci's load balancers serve TCP and HTTP only,
@@ -61,8 +62,9 @@ public class EksAutoModeLoadBalancers {
 
     private static final Logger LOG = Logger.getLogger(EksAutoModeLoadBalancers.class);
     static final String NLB_CLASS = "eks.amazonaws.com/nlb"; // partition-literal: a Kubernetes class name, not a host
-    static final String CLUSTER_TAG = "elbv2.k8s.aws/cluster";
-    static final String STACK_TAG = "service.k8s.aws/stack";
+    /** The tag keys Auto Mode sets, the only ones {@code AmazonEKSLoadBalancingPolicy} lets it set on them. */
+    static final String CLUSTER_TAG = "eks:eks-cluster-name";
+    static final String STACK_TAG = "service.eks.amazonaws.com/stack"; // partition-literal: a tag key, not a host
     static final String SCHEME_ANNOTATION = "service.beta.kubernetes.io/aws-load-balancer-scheme";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     /** A target group's name ends with the Service port it serves and the hash. */
