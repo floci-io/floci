@@ -2116,6 +2116,24 @@ class ResourceArnBuilderTest {
                         ACCOUNT, "aws"));
     }
 
+    // ── SageMaker ───────────────────────────────────────────────────────────────
+
+    /**
+     * A SageMaker request is checked on the model, endpoint configuration, endpoint or training job its name names, as
+     * {@code <type>/<name>}, the ARN Floci's SageMaker mints: CreateEndpoint on the endpoint it makes and the
+     * configuration it runs, each named after its type.
+     */
+    @Test
+    void sageMakerChecksTheResourceItsNameNames() {
+        setJsonBody("{\"ModelName\":\"churn\"}");
+        assertEquals(List.of("arn:aws:sagemaker:us-east-1:000000000000:model/churn"),
+                builder.buildResources("sagemaker", "sagemaker:DescribeModel", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"EndpointName\":\"churn\",\"EndpointConfigName\":\"churn-config\"}");
+        assertEquals(List.of("arn:aws:sagemaker:us-east-1:000000000000:endpoint/churn",
+                        "arn:aws:sagemaker:us-east-1:000000000000:endpoint-config/churn-config"),
+                builder.buildResources("sagemaker", "sagemaker:CreateEndpoint", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
     // ── S3 and S3 Control ───────────────────────────────────────────────────────
 
     /** The resources an S3 or S3 Control request names, read from the generated table on the route it matches. */

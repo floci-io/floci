@@ -363,7 +363,7 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs", "cloudwatch",
               "comprehend", "config", "dms", "elasticache", "identitystore", "memorydb", "route53resolver",
-              "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms", "dynamodb", "iam")
+              "sagemaker", "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms", "dynamodb", "iam")
 
 # ---------------------------------------------------------------------------------------------------------------------
 # MEASURED: what AWS was measured to check where neither botocore nor the Service Reference says it.
@@ -634,7 +634,6 @@ NOT_COVERED: dict[str, str] = {
     "organizations": _LATER,
     "rds-data": _REST,
     "rum": _REST,
-    "sagemaker": _LATER,
     "servicecatalog": "not read yet: CreatePortfolioShare, UpdatePortfolioShare and DeletePortfolioShare give in "
                       "AccountId the account a portfolio is shared with, which the rule reads as the portfolio's; a "
                       "portfolio or product imported from another account keeps its owner's account in its ARN while "
@@ -2111,11 +2110,14 @@ def with_lookup_find(resources: list[dict], types: list[str], formats: dict[str,
 
 
 def with_type_named_members(resources: list[dict], types: list[str], formats: dict[str, str],
-                            members: dict[str, str]) -> list[dict]:
-    """The resources, a type of one variable of its own read from the one top-level member of the request named after
-    the type and ending in the variable's name (MemoryDB's `MultiRegionClusterName`, of its `multiregioncluster`,
-    `multiregioncluster/${ClusterName}`): read from it where no resource names the type yet (DeleteCluster's
-    `ClusterName`, of its `cluster`), and instead of a member named after something else where one fills it
+                            members: dict[str, str], subject: str | None = None) -> list[dict]:
+    """The resources, a type of one variable of its own read from the one top-level member of the request that names
+    that variable: named after the type and ending in the variable's name (MemoryDB's `MultiRegionClusterName`, of its
+    `multiregioncluster`, `multiregioncluster/${ClusterName}`), or, for the type the operation is about (`subject`,
+    its name past the verb), a name or id with a word of its own that the variable's name ends in (SageMaker's
+    `JobName`, of `DescribeInferenceRecommendationsJob`'s `${InferenceRecommendationsJobName}`). It is read where no
+    resource names the type yet (DeleteCluster's `ClusterName`, of its `cluster`), where a resource leaves its id open
+    (CreateInferenceRecommendationsJob's job), and instead of a member named after something else where one fills it
     (CreateCluster's `ClusterName`, the new regional cluster, which the multi-Region cluster's `${ClusterName}` would
     otherwise take). Where another type the action acts on has a variable of that name, the member names this type only
     when that one has a member named after it too: SSM's `InstanceId` may name an `instance` or a `managed-instance`,
@@ -2124,8 +2126,10 @@ def with_type_named_members(resources: list[dict], types: list[str], formats: di
     found = [dict(resource) for resource in resources]
 
     def own_members(kind: str, variable: str) -> list[str]:
-        return [member for member, path in members.items() if path == member and stem(member) == stem(kind)
-                and member.endswith(variable)]
+        return [member for member, path in members.items() if path == member
+                and ((stem(member) == stem(kind) and member.endswith(variable))
+                     or (subject == stem(kind) and stem(member) and kind_of(member) in ("name", "id")
+                         and member != variable and variable.endswith(member)))]
 
     for kind in types:
         variables = [v for v in VARIABLE_RE.findall(formats.get(kind, "")) if v not in KNOWN_VARIABLES]
@@ -2142,8 +2146,10 @@ def with_type_named_members(resources: list[dict], types: list[str], formats: di
             continue
         for resource in found:
             fill = resource.get("fill")
-            if resource.get("type") == kind and fill and list(fill) == [variable] and fill[variable] != own[0] \
-                    and "." not in fill[variable] and stem(fill[variable].removesuffix("[]")) != stem(kind):
+            if resource.get("type") != kind or fill is None or {"find", "when", "unless", "default"} & set(resource):
+                continue
+            if fill == {} or (list(fill) == [variable] and fill[variable] != own[0] and "." not in fill[variable]
+                              and stem(fill[variable].removesuffix("[]")) != stem(kind)):
                 resource["fill"] = {variable: own[0]}
     return found
 
@@ -2358,10 +2364,16 @@ def with_made(resources: list[dict], operation: str, formats: dict[str, str]) ->
     if not CREATING_RE.match(name):
         return resources
     created = stem(CREATING_RE.sub("", name))
-    exact = {kind for kind in formats if stem(kind) == created}
+    # A type's whole name says what it is before its stem does, which drops a trailing word: SageMaker's CreateEndpoint
+    # makes an `endpoint`, not the `endpoint-config` whose stem is `endpoint` too.
+    named = re.sub(r"[^a-z0-9]", "", CREATING_RE.sub("", name).lower())
+    whole = {kind for kind in formats if re.sub(r"[^a-z0-9]", "", kind.lower()) == named}
+    exact = whole or {kind for kind in formats if stem(kind) == created}
 
     def is_created(kind: str) -> bool:
         word = RESOURCE_PART_RE.match(formats.get(kind, ""))
+        if whole:
+            return kind in whole or (word is not None and re.sub(r"[^a-z0-9]", "", word.group(1).lower()) == named)
         if exact:
             return kind in exact or (word is not None and stem(word.group(1)) == created)
         variables = [variable for variable in VARIABLE_RE.findall(formats.get(kind, ""))
@@ -3809,7 +3821,7 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
     resources = with_structure_account(resources, formats, structure_account_members(models, name, types))
     resources = with_structure_names(resources, formats, structure_name_fields(models, name, types))
     resources = with_change_lists(resources, types, formats, members)
-    resources = with_type_named_members(resources, types, formats, members)
+    resources = with_type_named_members(resources, types, formats, members, stem(SUBJECT_RE.sub("", name)))
     resources = with_arn_of(resources, formats, name_or_arn_members(models, name),
                             documented_name_or_arn_members(models, name))
     resources = with_default_pairs(resources, formats, optional)

@@ -3670,6 +3670,69 @@ class IamRequestResourceEnforcementIntegrationTest {
         return id;
     }
 
+    /**
+     * A SageMaker model is checked on the ARN its name gives, {@code model/<name>}, so a grant on one lets the request
+     * reach SageMaker, which answers that the model does not exist, and the same grant refuses another.
+     */
+    @Test
+    void aSageMakerModelIsCheckedOnTheArnItsNameGives() {
+        String model = "res-model-" + suffix();
+        User user = user("res-sagemaker");
+        user.policy(allowOn("sagemaker:DescribeModel", "arn:aws:sagemaker:" + REGION + ":" + ACCOUNT + ":model/" + model));
+        send(user, "sagemaker", "SageMaker.DescribeModel", "1.1", "{\"ModelName\":\"" + model + "\"}")
+                .statusCode(400).body(containsString("Could not find model"));
+        refusedJson(send(user, "sagemaker", "SageMaker.DescribeModel", "1.1",
+                "{\"ModelName\":\"" + model + "-other\"}"), "sagemaker:DescribeModel");
+    }
+
+    /**
+     * A SageMaker create that tags what it makes also needs {@code sagemaker:AddTags}, which the Service Reference
+     * lists among CreateModel's authorized actions: a caller allowed the create alone is refused it with tags, and
+     * one allowed AddTags too is not.
+     */
+    @Test
+    void aTaggedSageMakerCreateAlsoNeedsAddTags() {
+        String model = "res-tagged-model-" + suffix();
+        String request = "{\"ModelName\":\"" + model + "\",\"ExecutionRoleArn\":\"arn:aws:iam::" + ACCOUNT
+                + ":role/res-sagemaker-role\",\"PrimaryContainer\":{\"Image\":\"example/model:1\"},"
+                + "\"Tags\":[{\"Key\":\"team\",\"Value\":\"a\"}]}";
+        cleanup.register(() -> adminJson("sagemaker", "SageMaker.DeleteModel")
+                .body("{\"ModelName\":\"" + model + "\"}").post("/"));
+        User creator = user("res-sagemaker-create");
+        creator.policy(allowOn("sagemaker:CreateModel", "*") + "," + allowOn("iam:PassRole", "*"));
+        refusedJson(send(creator, "sagemaker", "SageMaker.CreateModel", "1.1", request), "sagemaker:AddTags");
+        User tagger = user("res-sagemaker-tag");
+        tagger.policy(allowOn("sagemaker:CreateModel", "*") + "," + allowOn("iam:PassRole", "*") + ","
+                + allowOn("sagemaker:AddTags", "*"));
+        send(tagger, "sagemaker", "SageMaker.CreateModel", "1.1", request)
+                .body(not(containsString("not authorized to perform")));
+    }
+
+    /**
+     * A tagged SageMaker CreateEndpoint needs {@code sagemaker:AddTags} on the endpoint it makes alone, not on the
+     * endpoint configuration it runs: a caller allowed to tag the new endpoint creates it, one allowed to tag the
+     * configuration alone is refused.
+     */
+    @Test
+    void aTaggedSageMakerEndpointNeedsAddTagsOnTheEndpointAlone() {
+        String endpoint = "res-tagged-endpoint-" + suffix();
+        String config = "res-endpoint-config-" + suffix();
+        String prefix = "arn:aws:sagemaker:" + REGION + ":" + ACCOUNT + ":";
+        String request = "{\"EndpointName\":\"" + endpoint + "\",\"EndpointConfigName\":\"" + config + "\","
+                + "\"Tags\":[{\"Key\":\"team\",\"Value\":\"a\"}]}";
+        String create = allowOn("sagemaker:CreateEndpoint", prefix + "endpoint/" + endpoint) + ","
+                + allowOn("sagemaker:CreateEndpoint", prefix + "endpoint-config/" + config);
+        cleanup.register(() -> adminJson("sagemaker", "SageMaker.DeleteEndpoint")
+                .body("{\"EndpointName\":\"" + endpoint + "\"}").post("/"));
+        User endpointTagger = user("res-sagemaker-endpoint-tag");
+        endpointTagger.policy(create + "," + allowOn("sagemaker:AddTags", prefix + "endpoint/" + endpoint));
+        send(endpointTagger, "sagemaker", "SageMaker.CreateEndpoint", "1.1", request)
+                .body(not(containsString("not authorized to perform")));
+        User configTagger = user("res-sagemaker-config-tag");
+        configTagger.policy(create + "," + allowOn("sagemaker:AddTags", prefix + "endpoint-config/" + config));
+        refusedJson(send(configTagger, "sagemaker", "SageMaker.CreateEndpoint", "1.1", request), "sagemaker:AddTags");
+    }
+
     private static ValidatableResponse glue(String operation, String body) {
         return adminJson("glue", "AWSGlue." + operation).body(body).post("/").then();
     }
