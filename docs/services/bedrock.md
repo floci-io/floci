@@ -120,11 +120,12 @@ those tags, as `TagResource` and `UntagResource` do.
 `ListFoundationModels` and `GetFoundationModel` read a fixed catalog,
 `bedrock/model-catalog.yaml`. System-defined inference profiles come from the same seed,
 while application inference profiles are created and stored by the Bedrock control plane.
-The catalog is a seed rather than a mirror of AWS: a few real models (Amazon Nova Micro
-and Nova Lite, Titan Text Embeddings V2, Llama 3.1 8B Instruct and Claude Sonnet 4.5)
+The catalog is a seed rather than a mirror of AWS: a few real models (Amazon Nova Micro,
+Nova Lite and Nova Pro, Titan Text Embeddings V2, Llama 3.1 8B Instruct and Claude Sonnet 4.5)
 with the modalities, streaming support, lifecycle status and Regional availability their
 [model cards](https://docs.aws.amazon.com/bedrock/latest/userguide/model-cards.html) publish,
-and their US and EU system-defined inference profiles.
+and selected US and EU system-defined inference profiles. Nova Pro is seeded for its
+direct In-Region availability; its system-defined inference profiles are not seeded.
 
 The answers depend on the calling Region, as on AWS:
 

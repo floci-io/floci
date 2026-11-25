@@ -9,7 +9,8 @@
 # A model is listed in a Region when the card shows it In-Region there (inRegion) or when one of
 # its inference profiles can be called from that Region. A profile is listed in a Region only
 # when that Region is one of its source Regions, and its models are the foundation models in the
-# destination Regions the card gives for that source Region. Commercial Regions only.
+# destination Regions the card gives for that source Region. Inference profiles are seeded in
+# commercial Regions; foundation models follow each model card.
 
 foundationModels:
   - modelId: amazon.nova-micro-v1:0
@@ -30,6 +31,15 @@ foundationModels:
     lifecycleStatus: ACTIVE
     inRegion: [us-east-1, us-east-2, us-west-2, eu-north-1, eu-west-2, ap-northeast-1, ap-southeast-2,
                ap-southeast-3, me-central-1]
+
+  - modelId: amazon.nova-pro-v1:0
+    modelName: Nova Pro
+    providerName: Amazon
+    inputModalities: [TEXT, IMAGE, VIDEO]
+    outputModalities: [TEXT]
+    responseStreamingSupported: true
+    lifecycleStatus: ACTIVE
+    inRegion: [us-east-1, us-gov-west-1, eu-west-2, ap-southeast-2, ap-southeast-3, me-central-1]
 
   - modelId: amazon.titan-embed-text-v2:0
     modelName: Titan Text Embeddings V2
