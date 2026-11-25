@@ -39,6 +39,7 @@ import io.floci.aws.services.memorydb.container.MemoryDbContainerManager;
 import io.floci.aws.services.memorydb.proxy.MemoryDbProxyManager;
 import io.floci.aws.services.neptune.container.NeptuneContainerManager;
 import io.floci.aws.services.neptune.proxy.NeptuneProxyManager;
+import io.floci.aws.services.opensearch.OpenSearchService;
 import io.floci.aws.services.pipes.PipesService;
 import io.floci.aws.services.rds.RdsService;
 import io.floci.aws.services.rds.container.RdsContainerManager;
@@ -128,6 +129,8 @@ class EmulatorLifecycleTest {
     @Mock private AmazonMqService amazonMqService;
     @Mock private KinesisAnalyticsV2Service kinesisAnalyticsService;
     @Mock private EmulatorConfig.KinesisAnalyticsServiceConfig kinesisAnalyticsServiceConfig;
+    @Mock private OpenSearchService openSearchService;
+    @Mock private EmulatorConfig.OpenSearchServiceConfig openSearchServiceConfig;
     @Mock private EmulatorConfig.AmazonMqServiceConfig amazonMqServiceConfig;
     @Mock private EmulatorConfig.SageMakerServiceConfig sageMakerServiceConfig;
     @Mock private EksService eksService;
@@ -179,6 +182,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(codeArtifactServiceConfig.enabled()).thenReturn(true);
         Mockito.lenient().when(servicesConfig.kinesisAnalytics()).thenReturn(kinesisAnalyticsServiceConfig);
         Mockito.lenient().when(kinesisAnalyticsServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.opensearch()).thenReturn(openSearchServiceConfig);
+        Mockito.lenient().when(openSearchServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.amazonmq()).thenReturn(amazonMqServiceConfig);
         Mockito.lenient().when(amazonMqServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.sagemaker()).thenReturn(sageMakerServiceConfig);
@@ -199,6 +204,7 @@ class EmulatorLifecycleTest {
                 memoryDbContainerManager, memoryDbProxyManager, memoryDbService,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
                 rabbitMqManager, amazonMqService, flinkContainerManager, kinesisAnalyticsService,
+                openSearchService,
                 sageMakerService, rdsService, timestreamInfluxDbService,
                 elbV2Service, elbClassicService, ecsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
@@ -568,6 +574,48 @@ class EmulatorLifecycleTest {
         emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
 
         verify(kinesisAnalyticsService, never()).restorePersistedRuntime();
+    }
+
+    @Test
+    void restoresPersistedOpenSearchDomainsAfterStorageLoad() {
+        stubStorageConfig();
+        when(openSearchServiceConfig.enabled()).thenReturn(true);
+        when(openSearchService.restorePersistedRuntime()).thenReturn(CompletableFuture.completedFuture(null));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, openSearchService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(openSearchService).restorePersistedRuntime();
+    }
+
+    @Test
+    void aFailedOpenSearchRestoreDoesNotStopTheOtherRestores() {
+        stubStorageConfig();
+        when(openSearchServiceConfig.enabled()).thenReturn(true);
+        when(elbv2ServiceConfig.enabled()).thenReturn(true);
+        when(openSearchService.restorePersistedRuntime()).thenReturn(CompletableFuture.failedFuture(
+                new IllegalStateException("Could not restore OpenSearch domain demo")));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(elbV2Service).restorePersistedRuntime();
+        verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void leavesOpenSearchDomainsUntouchedWhenOpenSearchIsDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(openSearchService, never()).restorePersistedRuntime();
     }
 
     @Test

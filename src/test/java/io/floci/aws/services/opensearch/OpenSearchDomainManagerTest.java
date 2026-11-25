@@ -20,6 +20,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.MockMakers;
 import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -29,11 +30,13 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doThrow;
@@ -296,6 +299,8 @@ class OpenSearchDomainManagerTest {
         verify(builder, never()).withNamedVolume(anyString(), anyString());
         assertNull(domain.getDockerVolumeName());
         assertEquals(VolumeOwnership.OPERATOR_BIND, domain.getVolumeOwnership());
+        // Kept, for the domain started again to find its data whatever the setting says then.
+        assertEquals(expectedBind, domain.getDataDirectory());
     }
 
     /**
@@ -360,6 +365,90 @@ class OpenSearchDomainManagerTest {
         verify(lifecycleManager, never()).ensureUnmanagedVolume(anyString());
         assertNull(domain.getDockerVolumeName());
         assertEquals(VolumeOwnership.OPERATOR_BIND, domain.getVolumeOwnership());
+    }
+
+    /**
+     * A domain created on an operator-named volume and started again once that volume is no longer configured keeps
+     * it, data included, and it stays the operator's: deleting the domain does not remove it.
+     */
+    @Test
+    void aDomainStartedAgainKeepsItsOperatorNamedVolume() {
+        when(storage.pruneVolumesOnDelete()).thenReturn(true);
+        Domain domain = domain("000000000000", "us-east-1");
+        domain.setVolumeId("abc123");
+        domain.setDockerVolumeName("opensearch-data-000000000000-us-east-1-my-domain");
+        domain.setVolumeOwnership(VolumeOwnership.OPERATOR_NAMED);
+
+        manager.tryRestartDomain(domain);
+
+        verify(lifecycleManager).ensureUnmanagedVolume("opensearch-data-000000000000-us-east-1-my-domain");
+        verify(builder).withNamedVolume("opensearch-data-000000000000-us-east-1-my-domain", "/usr/share/opensearch/data");
+        assertEquals("opensearch-data-000000000000-us-east-1-my-domain", domain.getDockerVolumeName());
+        assertEquals(VolumeOwnership.OPERATOR_NAMED, domain.getVolumeOwnership());
+        manager.removeDomainStorage(domain);
+        verify(lifecycleManager, never()).removeVolume(anyString());
+    }
+
+    /** A domain started again keeps the operator-named volume its record names, whatever the setting names now. */
+    @Test
+    void aDomainStartedAgainKeepsItsOperatorNamedVolumeWhateverTheSettingSays() {
+        when(opensearch.dataVolume()).thenReturn(Optional.of("other-data"));
+        Domain domain = domain("000000000000", "us-east-1");
+        domain.setDockerVolumeName("opensearch-data-000000000000-us-east-1-my-domain");
+        domain.setVolumeOwnership(VolumeOwnership.OPERATOR_NAMED);
+
+        manager.tryRestartDomain(domain);
+
+        verify(builder).withNamedVolume("opensearch-data-000000000000-us-east-1-my-domain", "/usr/share/opensearch/data");
+        verify(lifecycleManager, never()).ensureUnmanagedVolume("other-data-000000000000-us-east-1-my-domain");
+        assertEquals("opensearch-data-000000000000-us-east-1-my-domain", domain.getDockerVolumeName());
+    }
+
+    /** A domain started again keeps the bind-mounted directory its record names, once the setting is gone too. */
+    @Test
+    void aDomainStartedAgainKeepsItsBindDirectory() {
+        Domain domain = domain("000000000000", "us-east-1");
+        domain.setVolumeOwnership(VolumeOwnership.OPERATOR_BIND);
+        domain.setDataDirectory("/srv/opensearch/000000000000/us-east-1/my-domain");
+
+        manager.tryRestartDomain(domain);
+
+        verify(lifecycleManager).ensureBindDirectory("/srv/opensearch/000000000000/us-east-1/my-domain",
+                "opensearchproject/opensearch:2.11.0", "/usr/share/opensearch/data");
+        verify(builder).withBind("/srv/opensearch/000000000000/us-east-1/my-domain", "/usr/share/opensearch/data");
+        verify(builder, never()).withNamedVolume(anyString(), anyString());
+        assertEquals(VolumeOwnership.OPERATOR_BIND, domain.getVolumeOwnership());
+    }
+
+    /**
+     * A domain whose record names a bind-mounted directory without its path, from before the path was kept, is not
+     * started once the setting that named it is gone, rather than started on other, empty storage.
+     */
+    @Test
+    void aDomainWhoseDirectoryIsNoLongerKnownIsNotStartedOnOtherStorage() {
+        Domain domain = domain("000000000000", "us-east-1");
+        domain.setVolumeOwnership(VolumeOwnership.OPERATOR_BIND);
+
+        IllegalStateException refused = assertThrows(IllegalStateException.class,
+                () -> manager.tryRestartDomain(domain));
+
+        assertTrue(refused.getMessage().contains("floci.services.opensearch.data-volume"), refused.getMessage());
+        verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    /** A Floci-managed domain started again keeps its own volume, though a data volume is configured now. */
+    @Test
+    void aFlociManagedDomainStartedAgainKeepsItsVolume() {
+        when(opensearch.dataVolume()).thenReturn(Optional.of("opensearch-data"));
+        Domain domain = domain("000000000000", "us-east-1");
+        domain.setDockerVolumeName("floci-aws-opensearch-abc123");
+        domain.setVolumeOwnership(VolumeOwnership.FLOCI_MANAGED);
+
+        manager.tryRestartDomain(domain);
+
+        verify(builder).withNamedVolume("floci-aws-opensearch-abc123", "/usr/share/opensearch/data");
+        verify(lifecycleManager, never()).ensureUnmanagedVolume(anyString());
+        assertEquals(VolumeOwnership.FLOCI_MANAGED, domain.getVolumeOwnership());
     }
 
     /** An operator-named volume is never deleted with the domain, whatever the storage policy. */
@@ -641,6 +730,127 @@ class OpenSearchDomainManagerTest {
         verify(builder).withBind(hostRoot.resolve("opensearch")
                 .resolve("floci-aws-opensearch-000000000000-us-east-1-my-domain")
                 .toAbsolutePath().normalize().toString(), "/usr/share/opensearch/data");
+    }
+
+    /** A start shutdown overtakes removes the container it started and gives its port back. */
+    @Test
+    void aStartShutdownOvertakesRemovesItsContainer() {
+        Domain domain = domain("000000000000", "us-east-1");
+        when(lifecycleManager.createAndStart(any())).thenAnswer(start -> {
+            manager.markShuttingDown();
+            return new ContainerLifecycleManager.ContainerInfo("container-id", Map.of(
+                    9200, new ContainerLifecycleManager.EndpointInfo("172.17.0.5", 9200)));
+        });
+
+        assertThrows(OpenSearchDomainManager.ShuttingDownException.class, () -> manager.startDomain(domain));
+
+        verify(lifecycleManager).stopAndRemove("container-id", null);
+        verify(portAllocator).release(9400);
+        assertNull(domain.getContainerId());
+    }
+
+    /** Once shutdown is under way no container starts, and the refusal is not mistaken for a missing daemon. */
+    @Test
+    void noDomainStartsAfterShutdown() {
+        manager.markShuttingDown();
+        when(lifecycleManager.isDockerReachable()).thenReturn(false);
+
+        assertThrows(OpenSearchDomainManager.ShuttingDownException.class,
+                () -> manager.tryStartDomain(domain("000000000000", "us-east-1")));
+
+        verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    /** The container a domain's record names is kept: its endpoint read afresh, its host port reserved again. */
+    @Test
+    void aRunningContainerIsKept() {
+        Domain domain = domain("000000000000", "us-east-1");
+        domain.setContainerId("old-id");
+        domain.setEndpoint("http://172.17.0.2:9200");
+        when(lifecycleManager.adopt(eq("old-id"), eq(List.of(9200)), any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("old-id",
+                        Map.of(9200, new ContainerLifecycleManager.EndpointInfo("172.17.0.9", 9200)),
+                        Map.of(9200, 9411)));
+
+        assertTrue(manager.adoptRunningDomain(domain));
+
+        verify(portAllocator).markReserved(9411);
+        assertEquals(9411, domain.getHostPort());
+        assertEquals("http://172.17.0.9:9200", domain.getEndpoint());
+        assertEquals("old-id", domain.getContainerId());
+    }
+
+    /**
+     * No container is kept for a domain whose record names none, whose container is gone, which publishes no port, or
+     * once shutdown is under way, before or while it is looked for.
+     */
+    @Test
+    void aContainerThatCannotBeKeptIsNot() {
+        Domain none = domain("000000000000", "us-east-1");
+        assertFalse(manager.adoptRunningDomain(none));
+        verify(lifecycleManager, never()).adopt(anyString(), any(), any());
+
+        Domain gone = domain("000000000000", "us-east-1");
+        gone.setContainerId("gone-id");
+        when(lifecycleManager.adopt(eq("gone-id"), any(), any()))
+                .thenThrow(new IllegalStateException("No such container: gone-id"));
+        assertFalse(manager.adoptRunningDomain(gone));
+
+        Domain unpublished = domain("000000000000", "us-east-1");
+        unpublished.setContainerId("unpublished-id");
+        when(lifecycleManager.adopt(eq("unpublished-id"), any(), any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("unpublished-id",
+                        Map.of(9200, new ContainerLifecycleManager.EndpointInfo("172.17.0.9", 9200))));
+        assertFalse(manager.adoptRunningDomain(unpublished));
+
+        Domain overtaken = domain("000000000000", "us-east-1");
+        overtaken.setContainerId("overtaken-id");
+        when(lifecycleManager.adopt(eq("overtaken-id"), any(), any())).thenAnswer(adopt -> {
+            manager.markShuttingDown();
+            return new ContainerLifecycleManager.ContainerInfo("overtaken-id",
+                    Map.of(9200, new ContainerLifecycleManager.EndpointInfo("172.17.0.9", 9200)), Map.of(9200, 9412));
+        });
+        assertFalse(manager.adoptRunningDomain(overtaken));
+        verify(portAllocator, never()).markReserved(Mockito.anyInt());
+        assertEquals("overtaken-id", overtaken.getContainerId(), "shutdown still finds it by the ID its record names");
+
+        Domain late = domain("000000000000", "us-east-1");
+        late.setContainerId("late-id");
+        assertFalse(manager.adoptRunningDomain(late));
+        verify(lifecycleManager, never()).adopt(eq("late-id"), any(), any());
+    }
+
+    /** A deleted domain's container goes by its ID and under both name forms, each removal confirmed. */
+    @Test
+    void removingADeletedDomainsContainersConfirmsEach() {
+        Domain domain = domain("000000000000", "us-east-1");
+        domain.setContainerId("old-id");
+        domain.setHostPort(9405);
+
+        manager.removeDomainContainers(domain);
+
+        String current = ContainerStorageHelper.resourceName(config, "opensearch", null,
+                "000000000000-us-east-1-my-domain");
+        ArgumentCaptor<String> removed = ArgumentCaptor.forClass(String.class);
+        verify(lifecycleManager, times(3)).removeIfExistsStrict(removed.capture());
+        assertEquals(List.of("old-id", current, ContainerStorageHelper.legacyDockerName(config, current)),
+                removed.getAllValues());
+        verify(portAllocator).release(9405);
+        assertNull(domain.getContainerId());
+        assertNull(domain.getHostPort());
+    }
+
+    /** A container Docker will not remove stays named in the record, for a later attempt. */
+    @Test
+    void aContainerDockerKeepsStaysNamed() {
+        Domain domain = domain("000000000000", "us-east-1");
+        domain.setContainerId("kept-id");
+        doThrow(new IllegalStateException("Failed to remove stale container kept-id"))
+                .when(lifecycleManager).removeIfExistsStrict("kept-id");
+
+        assertThrows(IllegalStateException.class, () -> manager.removeDomainContainers(domain));
+
+        assertEquals("kept-id", domain.getContainerId());
     }
 
     private Domain domain(String accountId, String region) {
