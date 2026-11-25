@@ -195,6 +195,15 @@ Tagged REST APIs, stages, API keys, usage plans and custom domain names are disc
 [Resource Groups Tagging API](resource-groups-tagging.md), whose `TagResources` and `UntagResources`
 write REST API, stage, API key, usage plan and custom domain name tags through to API Gateway.
 
+### Base Path Mapping Pagination
+
+`GetBasePathMappings` accepts `limit` and `position`, returns 25 mappings by default,
+and caps pages at 500. A nonterminal page includes an opaque `position`; the final
+page omits it. Positions belong to the caller's account, Region and domain. Paging
+uses each record's stored base path, so legacy root records that report the same
+`basePath` remain distinct. Looking up a missing domain still returns `NotFoundException`.
+
+
 ### API Key Behaviour Notes
 
 #### `CreateApiKey` and `ImportApiKeys` share one route
