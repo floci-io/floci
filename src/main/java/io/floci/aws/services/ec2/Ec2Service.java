@@ -46,6 +46,7 @@ import io.floci.aws.services.ec2.model.InstanceConnectEndpoint;
 import io.floci.aws.services.ec2.model.InstanceCreditSpecification;
 import io.floci.aws.services.ec2.model.InstanceCreditSpecificationListResult;
 import io.floci.aws.services.ec2.model.InstanceNetworkInterface;
+import io.floci.aws.services.ec2.model.InstanceOperator;
 import io.floci.aws.services.ec2.model.InstanceState;
 import io.floci.aws.services.ec2.model.InternetGateway;
 import io.floci.aws.services.ec2.model.InternetGatewayAttachment;
@@ -5427,12 +5428,40 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return Cidr4.parse(address + "/32").map(host -> Cidr4.format(host.network()));
     }
 
+    /** Whether a service provider manages the instance and EC2 hides it from list and filter calls by default. */
+    private static boolean hiddenManaged(Instance instance) {
+        return instance.getOperator() != null && instance.getOperator().isManaged()
+                && instance.getOperator().isHiddenByDefault();
+    }
+
+    /**
+     * Marks an instance as managed by a service provider, as EC2 marks the instances a service such as EKS Auto Mode
+     * launches for the account.
+     */
+    public void setInstanceOperator(String region, String instanceId, InstanceOperator operator) {
+        Instance instance = getRequiredInstance(region, instanceId);
+        synchronized (instance) {
+            instance.setOperator(operator);
+            instances.put(key(region, instanceId), instance);
+        }
+    }
+
     public List<Reservation> describeInstances(String region, List<String> instanceIds, Map<String, List<String>> filters) {
         return describeInstances(region, instanceIds, filterList(filters));
     }
 
     List<Reservation> describeInstances(String region, List<String> instanceIds,
                                         List<Map.Entry<String, List<String>>> filters) {
+        return describeInstances(region, instanceIds, filters, true);
+    }
+
+    /**
+     * As above; with {@code includeManaged} false, as a DescribeInstances call without {@code IncludeManagedResources}
+     * is, an instance a service provider manages and hides by default is left out of a list or filter call. One named
+     * by its ID is returned whatever the setting, as on AWS.
+     */
+    List<Reservation> describeInstances(String region, List<String> instanceIds,
+                                        List<Map.Entry<String, List<String>>> filters, boolean includeManaged) {
         ensureDefaultResources(region);
         if (!instanceIds.isEmpty()) {
             for (String id : instanceIds) {
@@ -5460,6 +5489,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         List<Instance> matched = all.stream()
                 .filter(i -> i.getRegion().equals(region))
                 .filter(i -> instanceIds.isEmpty() || instanceIds.contains(i.getInstanceId()))
+                .filter(i -> includeManaged || !instanceIds.isEmpty() || !hiddenManaged(i))
                 .filter(i -> matchesFilters(i, filters, region))
                 .collect(Collectors.toList());
 
@@ -6183,6 +6213,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public List<Instance> describeInstanceStatus(String region, List<String> instanceIds) {
+        return describeInstanceStatus(region, instanceIds, true);
+    }
+
+    /** As above; with {@code includeManaged} false, hidden managed instances are left out as in DescribeInstances. */
+    public List<Instance> describeInstanceStatus(String region, List<String> instanceIds, boolean includeManaged) {
         ensureDefaultResources(region);
         if (config.services().ec2().mock()) {
             instances.scan(k -> true).stream()
@@ -6205,6 +6240,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return all.stream()
                 .filter(i -> i.getRegion().equals(region))
                 .filter(i -> instanceIds.isEmpty() || instanceIds.contains(i.getInstanceId()))
+                .filter(i -> includeManaged || !instanceIds.isEmpty() || !hiddenManaged(i))
                 .filter(i -> "running".equals(i.getState().getName()))
                 .collect(Collectors.toList());
     }
@@ -15956,6 +15992,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             return switch (filterName) {
                 case "instance-id" -> matchesValue(values, inst.getInstanceId());
                 case "instance-state-name" -> matchesValue(values, inst.getState().getName());
+                case "operator.managed" -> matchesValue(values,
+                        String.valueOf(inst.getOperator() != null && inst.getOperator().isManaged()));
+                case "operator.principal" -> inst.getOperator() != null
+                        && matchesValue(values, inst.getOperator().getPrincipal());
                 case "instance-type" -> matchesValue(values, inst.getInstanceType());
                 case "vpc-id" -> matchesValue(values, inst.getVpcId());
                 case "subnet-id" -> matchesValue(values, inst.getSubnetId());

@@ -389,6 +389,22 @@ When an EKS cluster is running, its synthesized node instance is registered and 
 - **Operations**: Supports volume attachments (`AttachVolume`, `DetachVolume`), instance attribute inspection and modification, and resource tagging (`CreateTags`, `DeleteTags`, `DescribeTags`), its network interface's tags included.
 - **Lifecycle protection**: Lifecycle actions that would mutate or delete the node through EC2 (`TerminateInstances`, `StopInstances`, `StartInstances`, `RebootInstances`), `ModifyInstanceMetadataOptions`, which the node's IMDS would not see, and `ModifyNetworkInterfaceAttribute`, `AssignIpv6Addresses` and `UnassignIpv6Addresses` on its network interface are rejected with `OperationNotPermitted` (HTTP 400) as a Floci emulation limitation because the instance directly represents the underlying k3s cluster container. In real AWS, cluster node instances in an Auto Scaling group can be terminated or stopped and are subsequently replaced by the ASG. In Floci, the node instance lifecycle is managed solely through the EKS cluster lifecycle.
 
+### Managed instances
+
+An instance a service provider runs for the account, such as an [EKS Auto Mode node](eks.md#auto-mode-nodes), is a
+managed instance, as on AWS. Its `operator` says so: `managed` is `true`, `principal` names the service
+(`eks.amazonaws.com`), and `hiddenByDefault` is `true`.
+
+- **Hidden from lists and filters.** A `DescribeInstances` or `DescribeInstanceStatus` call that lists or filters
+  instances leaves it out, unless it sets `IncludeManagedResources` to `true`. A value that isn't a boolean is refused
+  with `InvalidParameterValue`.
+- **Named by ID, it is returned.** A call naming it in `InstanceId` returns it whatever `IncludeManagedResources` says.
+- **Filters.** `operator.managed` (`true` or `false`) and `operator.principal` select by its operator.
+
+Floci doesn't have the account's managed resource visibility setting (`ModifyManagedResourceVisibility`): managed
+instances are always hidden by default. It doesn't refuse `TerminateInstances` on a managed instance either. AWS
+doesn't let the account terminate one, but documents no error code for it.
+
 ## Default Resources
 
 Floci seeds the following resources on first use in each region so Terraform, the AWS CLI, and SDK clients work out of the box without any setup:

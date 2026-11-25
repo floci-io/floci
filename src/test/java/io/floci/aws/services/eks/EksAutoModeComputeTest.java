@@ -132,6 +132,9 @@ class EksAutoModeComputeTest {
                 isNull(), isNull(), eq(0), isNull(), isNull(), isNull(), anyString(), eq(false), isNull(), isNull(),
                 isNull(), eq(false), isNull(), isNull());
         assertEquals(List.of("sg-cluster"), groups.getValue());
+        // A managed instance, hidden from list and filter calls by default, as Auto Mode's are.
+        verify(ec2).setInstanceOperator(eq(REGION), eq("i-1"), argThat(operator -> operator.isManaged()
+                && "eks.amazonaws.com".equals(operator.getPrincipal()) && operator.isHiddenByDefault()));
         assertEquals(List.of("eks:eks-cluster-name=prod", "eks:kubernetes-node-pool-name=general-purpose",
                         "eks:kubernetes-node-class-name=default", "kubernetes.io/cluster/prod=owned",
                         "aws:ec2:managed-launch=eks-auto"),
