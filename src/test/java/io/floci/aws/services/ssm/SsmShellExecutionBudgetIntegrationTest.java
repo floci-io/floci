@@ -12,7 +12,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -43,8 +42,7 @@ class SsmShellExecutionBudgetIntegrationTest extends SsmCommandIntegrationFixtur
                     Map.of("Destination", instance, "MessagesRequestId", "budget")));
             assertEquals(200, poll.statusCode());
             assertEquals(1, poll.jsonPath().getList("Messages").size());
-            JsonNode payload = mapper.readTree(Base64.getDecoder().decode(
-                    poll.jsonPath().getString("Messages[0].Payload")));
+            JsonNode payload = mapper.readTree(poll.jsonPath().getString("Messages[0].Payload"));
             JsonNode command = mapper.readTree(response.asByteArray()).path("Command");
             assertAll("public metadata and delivered document",
                     () -> assertEquals(30, command.path("TimeoutSeconds").asInt()),

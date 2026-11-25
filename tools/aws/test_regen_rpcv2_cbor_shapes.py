@@ -1,4 +1,19 @@
-from regen_rpcv2_cbor_shapes import project_model
+from regen_rpcv2_cbor_shapes import build, project_model
+
+
+def test_agent_target_prefixes_share_the_string_only_wire_model(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    catalog = tmp_path / "Catalog.java"
+    catalog.write_text('Set.of("AmazonSSMMessageDeliveryService.", "EC2WindowsMessageDeliveryService.")')
+
+    result = build(data, catalog, "test")
+
+    assert {prefix: result["aliases"][prefix] for prefix in (
+        "AmazonSSMMessageDeliveryService", "EC2WindowsMessageDeliveryService")
+    } == {"AmazonSSMMessageDeliveryService": "ec2messages", "EC2WindowsMessageDeliveryService": "ec2messages"}
+    assert result["services"]["ec2messages"] == {
+        "timestampFormat": "unixTimestamp", "shapes": {}, "operations": {}}
 
 
 def model(shapes, operations=None, protocol="json"):

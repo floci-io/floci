@@ -22,7 +22,6 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -473,7 +472,7 @@ public class SsmCommandService implements Resettable {
         LOG.debugv("AcknowledgeMessage: messageId={0} commandId={1}", messageId, commandId);
     }
 
-    public void sendReply(String messageId, String payloadBase64) {
+    public void sendReply(String messageId, String content) {
         MessageCorrelation meta = ownedCorrelation(messageId, true);
         if (meta == null) {
             LOG.warnv("SendReply: unknown messageId={0}", messageId);
@@ -484,8 +483,7 @@ public class SsmCommandService implements Resettable {
         String region = meta.owner().region();
 
         try {
-            byte[] decoded = Base64.getDecoder().decode(payloadBase64);
-            JsonNode payload = objectMapper.readTree(decoded);
+            JsonNode payload = objectMapper.readTree(content);
 
             String status = "Success";
             int returnCode = 0;
@@ -721,7 +719,7 @@ public class SsmCommandService implements Resettable {
             payload.set("Parameters", params);
             payload.set("DocumentContent", buildDocumentContent(documentName, parameters, timeoutSeconds));
 
-            return Base64.getEncoder().encodeToString(objectMapper.writeValueAsBytes(payload));
+            return objectMapper.writeValueAsString(payload);
         } catch (Exception e) {
             throw new RuntimeException("Failed to build command payload", e);
         }
