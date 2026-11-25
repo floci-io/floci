@@ -1278,7 +1278,8 @@ public class AslExecutor {
                 taskToken != null, new TaskPermissions.ControlServices(
                         cloudFormationHandler == null ? null : cloudFormationHandler.storedResourceArns(),
                         sdkManagementTaskInvoker == null ? null : sdkManagementTaskInvoker.secretsStoredResourceArns(),
-                        sfnService == null || !sfnService.isResolvable() ? null : sfnService.get()));
+                        sfnService == null || !sfnService.isResolvable() ? null : sfnService.get(),
+                        schedulerService));
         if (required.isEmpty()) {
             return;
         }

@@ -97,9 +97,11 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
      *                       the ARN its format gives the name
      * @param states         the state machine or activity whose task a callback's token names; without it a token
      *                       names nothing
+     * @param scheduler      the schedule group a Scheduler request naming none acts on, Scheduler's default; without
+     *                       it such a request's group is open
      */
     record ControlServices(StoredResourceArns cloudFormation, StoredResourceArns secrets,
-                           StoredResourceArns states) {
+                           StoredResourceArns states, StoredResourceArns scheduler) {
     }
 
     /** The permissions of a mapped integration, or nothing for one that is not checked. */
@@ -130,7 +132,8 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
      */
     static Optional<TaskPermissions> of(StatesIntegration integration, JsonNode input, StateMachine machine,
                                         StoredResourceArns redshiftData, StoredResourceArns ecs, boolean callback) {
-        return of(integration, input, machine, redshiftData, ecs, callback, new ControlServices(null, null, null));
+        return of(integration, input, machine, redshiftData, ecs, callback,
+                new ControlServices(null, null, null, null));
     }
 
     /**
@@ -148,7 +151,7 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
                                         StoredResourceArns redshiftData, StoredResourceArns ecs, boolean callback,
                                         ControlServices control) {
         if (integration.isSdkService("scheduler") && SCHEDULER.contains(integration.api())) {
-            return Optional.of(scheduler(integration.api(), input, machine));
+            return Optional.of(scheduler(integration.api(), input, machine, control.scheduler()));
         }
         if (integration.isSdkService("cloudformation") && servedByCloudFormation(integration.api())) {
             return Optional.of(cloudFormation(AslExecutor.capitalizeFirst(integration.api()), input, machine,
@@ -538,18 +541,22 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     }
 
     /**
-     * The action on the schedule its name and group give, read as the integration reads them, a group left out being
-     * {@code default}. A request naming no schedule is refused by Scheduler.
+     * The action on the schedule the request names, as the request-resources table reads it for a direct Scheduler
+     * request: its name and group, a group left out being the one {@code stored} gives as Scheduler's default. A request
+     * naming no schedule is refused by Scheduler.
      */
-    private static TaskPermissions scheduler(String api, JsonNode input, StateMachine machine) {
-        String name = text(input.path("Name"));
-        if (name == null) {
+    private static TaskPermissions scheduler(String api, JsonNode input, StateMachine machine,
+                                             StoredResourceArns stored) {
+        if (text(input.path("Name")) == null) {
             return accessDenied(SCHEDULER_PREFIX, List.of());
         }
-        String group = text(input.path("GroupName"));
-        return accessDenied(SCHEDULER_PREFIX, List.of(new Permission(
-                "scheduler:" + AslExecutor.capitalizeFirst(api),
-                arn(machine, "scheduler", "schedule/" + (group == null ? "default" : group) + "/" + name))));
+        String operation = AslExecutor.capitalizeFirst(api);
+        String action = IamAuthorizedActions.actionFor("scheduler", operation);
+        AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
+        return accessDenied(SCHEDULER_PREFIX, RequestResources.ofBody("scheduler:" + operation, input,
+                        owner.partition(), owner.region(), owner.accountId(), stored).stream()
+                .map(resource -> new Permission(action, resource))
+                .toList());
     }
 
     /**
@@ -634,12 +641,6 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
             LOG.debugv("The {0} request names no task: {1}", operation, expected.getMessage());
             return List.of();
         }
-    }
-
-    /** The ARN of a resource of the state machine's partition, Region and account. */
-    private static String arn(StateMachine machine, String service, String resource) {
-        AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
-        return new AwsArnUtils.Arn(owner.partition(), service, owner.region(), owner.accountId(), resource).toString();
     }
 
     /** The value when it is the non-blank string an id has to be, as the integrations require of one. */
