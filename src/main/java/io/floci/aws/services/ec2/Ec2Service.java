@@ -1206,6 +1206,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         if (containerManager != null) {
             containerManager.setPersister(persister);
+            containerManager.setGuestShutdownHandler(this::applyGuestShutdown);
         }
         stampUntimedTerminatedRecords();
         if (config.services().ec2().mock()) {
@@ -6464,8 +6465,26 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 inst.setSourceDestCheck(Boolean.parseBoolean(value));
             }
             case "ebsOptimized" -> inst.setEbsOptimized(Boolean.parseBoolean(value));
+            case "instanceInitiatedShutdownBehavior" -> inst.setInstanceInitiatedShutdownBehavior(value);
         }
         storeInstance(region, inst);
+    }
+
+    /**
+     * A guest that powered itself off: the instance stops, as on EC2, or terminates when launched with
+     * {@code InstanceInitiatedShutdownBehavior=terminate}. Runs off a request, as the instance's account.
+     */
+    void applyGuestShutdown(Instance instance) {
+        String region = instance.getRegion();
+        List<String> ids = List.of(instance.getInstanceId());
+        RequestScopes.runAs(instance.getOwnerId(), region, () -> {
+            Instance stored = instances.get(key(region, instance.getInstanceId())).orElse(instance);
+            if ("terminate".equals(stored.getInstanceInitiatedShutdownBehavior())) {
+                terminateInstances(region, ids);
+            } else {
+                stopInstances(region, ids);
+            }
+        });
     }
 
     public record InstanceBlockDeviceMappingChange(String deviceName, String volumeId, boolean deleteOnTermination) {}

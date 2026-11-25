@@ -999,6 +999,19 @@ public class Ec2QueryHandler {
             }
         }
 
+        // Applied after the launch, on this API path only, as EbsOptimized is.
+        String shutdownBehavior = p.getFirst("InstanceInitiatedShutdownBehavior");
+        if (shutdownBehavior == null && launchTemplateData != null) {
+            shutdownBehavior = launchTemplateData.getInstanceInitiatedShutdownBehavior();
+        }
+        if (shutdownBehavior != null) {
+            for (Instance inst : res.getInstances()) {
+                service.modifyInstanceAttribute(region, inst.getInstanceId(), "instanceInitiatedShutdownBehavior",
+                        shutdownBehavior);
+                inst.setInstanceInitiatedShutdownBehavior(shutdownBehavior);
+            }
+        }
+
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();
             for (Instance inst : res.getInstances()) {
@@ -1692,6 +1705,11 @@ public class Ec2QueryHandler {
             xml.start("disableApiStop").elem("value", String.valueOf(inst.isDisableApiStop())).end("disableApiStop");
         } else if ("disableApiTermination".equals(attribute)) {
             xml.start("disableApiTermination").elem("value", String.valueOf(inst.isDisableApiTermination())).end("disableApiTermination");
+        } else if ("instanceInitiatedShutdownBehavior".equals(attribute)) {
+            xml.start("instanceInitiatedShutdownBehavior")
+                    .elem("value", inst.getInstanceInitiatedShutdownBehavior() == null
+                            ? "stop" : inst.getInstanceInitiatedShutdownBehavior())
+                    .end("instanceInitiatedShutdownBehavior");
         } else if ("groupSet".equals(attribute)) {
             xml.start("groupSet");
             for (GroupIdentifier gi : inst.getSecurityGroups()) {

@@ -2562,6 +2562,42 @@ class Ec2ServiceTest {
         assertNull(instance.getPublicIpAddress());
     }
 
+    @Test
+    void aGuestShutdownStopsAnInstanceByDefault() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        AmiImageResolver images = mock(AmiImageResolver.class);
+        when(images.resolveImage(any())).thenReturn(ResolvedAmiImage.minimal("floci/base:latest"));
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class),
+                images, mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        Instance instance = runningContainerInstance(service, region, publicSubnet(service, region, "10.252.0.0/24"),
+                null);
+
+        service.applyGuestShutdown(instance);
+
+        verify(containerManager).stop(instance);
+        verify(containerManager, never()).terminate(eq(instance), any());
+    }
+
+    @Test
+    void aGuestShutdownTerminatesAnInstanceWhoseShutdownBehaviorIsTerminate() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        AmiImageResolver images = mock(AmiImageResolver.class);
+        when(images.resolveImage(any())).thenReturn(ResolvedAmiImage.minimal("floci/base:latest"));
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class),
+                images, mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        Instance instance = runningContainerInstance(service, region, publicSubnet(service, region, "10.253.0.0/24"),
+                null);
+        service.modifyInstanceAttribute(region, instance.getInstanceId(), "instanceInitiatedShutdownBehavior",
+                "terminate");
+
+        service.applyGuestShutdown(instance);
+
+        verify(containerManager).terminate(eq(instance), any());
+        verify(containerManager, never()).stop(instance);
+    }
+
     /** Ec2Service in container mode, with a container manager whose containers answer on loopback. */
     private static Ec2Service containerModeService() {
         Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);

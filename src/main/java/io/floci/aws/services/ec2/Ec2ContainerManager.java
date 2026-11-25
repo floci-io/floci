@@ -4,6 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.exception.NotModifiedException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
@@ -16,6 +17,7 @@ import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerExec;
+import io.floci.aws.core.common.docker.ContainerExitWatcher;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLiveness;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
@@ -185,6 +187,9 @@ public class Ec2ContainerManager {
      * write would restore it as {@code pending} or {@code shutting-down} for good.
      */
     private volatile Consumer<Instance> persister = instance -> { };
+    private volatile Consumer<Instance> guestShutdownHandler = instance -> { };
+    /** Containers Floci itself is stopping or restarting while their instance stays running. */
+    private final Set<String> flociStoppedContainers = ConcurrentHashMap.newKeySet();
     /** Instances whose service-network lookup failed and is retried on the next address read. */
     private final Set<String> serviceNetworkRetries = ConcurrentHashMap.newKeySet();
     /** The latest service-network lookup started per instance; only that one may publish. */
@@ -621,6 +626,7 @@ public class Ec2ContainerManager {
                     return;
                 }
                 persist(instance);
+                watchForGuestShutdown(instance, containerId);
 
                 LOG.infov("EC2 instance {0} running in container {1} (SSH host port {2})",
                         instanceId, containerId, String.valueOf(sshHostPort));
@@ -861,6 +867,39 @@ public class Ec2ContainerManager {
         } else {
             spec.withCgroupnsMode("host").withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
         }
+    }
+
+    /**
+     * Watches the container of a running instance for an exit Floci did not cause: a guest that powers
+     * itself off. A stop or terminate has moved the instance out of running first; a reboot or Floci's
+     * own shutdown marks the container instead, and a container running again after a reboot is no exit.
+     */
+    private void watchForGuestShutdown(Instance instance, String containerId) {
+        flociStoppedContainers.remove(containerId);
+        ContainerExitWatcher.watch(dockerClient, lifecycleManager.getStreamingDockerClient(), containerId,
+                exitCode -> onContainerExit(instance, containerId, exitCode));
+    }
+
+    private void onContainerExit(Instance instance, String containerId, int exitCode) {
+        if (flociStoppedContainers.contains(containerId)) {
+            return;
+        }
+        synchronized (instance) {
+            if (!containerId.equals(instance.getDockerContainerId()) || !"running".equals(stateName(instance))) {
+                return;
+            }
+        }
+        if (lifecycleManager.isContainerRunning(containerId)) {
+            return;
+        }
+        LOG.infov("EC2 instance {0} shut down from its guest (container exit code {1})",
+                instance.getInstanceId(), String.valueOf(exitCode));
+        guestShutdownHandler.accept(instance);
+    }
+
+    /** Called when an instance's guest shuts itself down, so its shutdown behavior can be applied. */
+    void setGuestShutdownHandler(Consumer<Instance> guestShutdownHandler) {
+        this.guestShutdownHandler = guestShutdownHandler;
     }
 
     void setPersister(Consumer<Instance> persister) {
@@ -1112,6 +1151,7 @@ public class Ec2ContainerManager {
         if (containerId == null) {
             return;
         }
+        flociStoppedContainers.add(containerId);
         portForwardManager.unpublishAll(instance);
         try {
             dockerClient.stopContainerCmd(containerId).withTimeout(5).exec();
@@ -1167,6 +1207,8 @@ public class Ec2ContainerManager {
                 dockerClient.stopContainerCmd(containerId).withTimeout(30).exec();
             } catch (NotFoundException ignored) {
                 // An already removed container needs no further stop.
+            } catch (NotModifiedException ignored) {
+                // An already stopped container, such as a guest that powered itself off, needs no stop.
             } catch (Exception e) {
                 LOG.warnv("Error stopping EC2 container {0}: {1}", containerId, e.getMessage());
             }
@@ -1274,6 +1316,7 @@ public class Ec2ContainerManager {
                 return;
             }
             persist(instance);
+            watchForGuestShutdown(instance, containerId);
             if (postStart != null) {
                 try {
                     postStart.run();
@@ -1849,11 +1892,14 @@ public class Ec2ContainerManager {
             return;
         }
         executor.submit(() -> {
+            flociStoppedContainers.add(containerId);
             try {
                 dockerClient.restartContainerCmd(containerId).exec();
                 LOG.infov("Rebooted EC2 container {0}", containerId);
             } catch (Exception e) {
                 LOG.warnv("Error rebooting EC2 container {0}: {1}", containerId, e.getMessage());
+            } finally {
+                watchForGuestShutdown(instance, containerId);
             }
         });
     }

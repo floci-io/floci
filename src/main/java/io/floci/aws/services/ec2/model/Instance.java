@@ -67,6 +67,7 @@ public class Instance {
     // without model backing, a modify → plan cycle would show drift. Tracked as a known limitation.
     private boolean disableApiStop = false;
     private boolean disableApiTermination = false;
+    private String instanceInitiatedShutdownBehavior;
     // EC2's copy of an instance a cluster serves, its node, which a change through EC2 stores.
     private boolean clusterNodeCopy;
 
@@ -306,6 +307,11 @@ public class Instance {
 
     public boolean isDisableApiTermination() { return disableApiTermination; }
     public void setDisableApiTermination(boolean disableApiTermination) { this.disableApiTermination = disableApiTermination; }
+
+    public String getInstanceInitiatedShutdownBehavior() { return instanceInitiatedShutdownBehavior; }
+    public void setInstanceInitiatedShutdownBehavior(String instanceInitiatedShutdownBehavior) {
+        this.instanceInitiatedShutdownBehavior = instanceInitiatedShutdownBehavior;
+    }
 
     public boolean isClusterNodeCopy() { return clusterNodeCopy; }
     public void setClusterNodeCopy(boolean clusterNodeCopy) { this.clusterNodeCopy = clusterNodeCopy; }
