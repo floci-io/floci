@@ -10,6 +10,7 @@ import io.floci.aws.services.verifiedpermissions.model.Policy;
 import io.floci.aws.services.verifiedpermissions.model.PolicyTemplate;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.HashSet;
 import java.util.Iterator;
@@ -27,6 +28,8 @@ import java.util.Set;
  */
 @ApplicationScoped
 public class CedarAuthorizationEvaluator {
+    private static final Logger LOG = Logger.getLogger(CedarAuthorizationEvaluator.class);
+
     private final ObjectMapper objectMapper;
     private final CedarSidecarClient cedarClient;
 
@@ -134,6 +137,7 @@ public class CedarAuthorizationEvaluator {
         try {
             parsed = objectMapper.readTree(schema);
         } catch (JsonProcessingException e) {
+            LOG.warnv(e, "Stored policy store schema is not valid JSON; authorizing without schema-derived action entities");
             return out;
         }
         if (parsed == null || !parsed.isObject()) {

@@ -65,6 +65,7 @@ class CedarAuthorizationEvaluatorTest {
 
         assertThat(evaluator.withSchemaActions(request, null), sameInstance(request));
         assertThat(evaluator.withSchemaActions(request, " "), sameInstance(request));
+        assertThat(evaluator.withSchemaActions(request, "{not json"), sameInstance(request));
         assertThat(evaluator.withSchemaActions(request, "{\"Demo\":{\"entityTypes\":{}}}"), sameInstance(request));
     }
 
