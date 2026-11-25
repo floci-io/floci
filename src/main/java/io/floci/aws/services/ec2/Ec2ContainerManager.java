@@ -489,7 +489,7 @@ public class Ec2ContainerManager {
 
     public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region,
                        Ec2PortForwardManager.DesiredPorts appPorts, List<SecurityGroup> groups,
-                       Map<String, List<String>> prefixLists, Runnable afterRunning) {
+                       Map<String, List<String>> prefixLists, Runnable beforeRunning) {
         instance.setState(InstanceState.pending());
 
         // An instance record is metadata: id, addresses, tags and lifecycle state are all
@@ -605,21 +605,22 @@ public class Ec2ContainerManager {
                     exposeReachablePublicAddress(instance);
                 }
 
+                // The launch's volumes are attached by the time a poller sees running, and before UserData.
+                if (beforeRunning != null) {
+                    try {
+                        beforeRunning.run();
+                    } catch (Exception e) {
+                        LOG.warnv("Error in before-running hook for instance {0}: {1}",
+                                instanceId, e.getMessage());
+                    }
+                }
+
                 // Published before the state flips, so a poller that sees running never sees it without the address.
                 if (!markRunning(instance)) {
                     failLaunch(instance, leasedPrivateIp);
                     return;
                 }
                 persist(instance);
-                // Before UserData, which may wait for the volumes the launch attached.
-                if (afterRunning != null) {
-                    try {
-                        afterRunning.run();
-                    } catch (Exception e) {
-                        LOG.warnv("Error in after-running hook for instance {0}: {1}",
-                                instanceId, e.getMessage());
-                    }
-                }
 
                 LOG.infov("EC2 instance {0} running in container {1} (SSH host port {2})",
                         instanceId, containerId, String.valueOf(sshHostPort));

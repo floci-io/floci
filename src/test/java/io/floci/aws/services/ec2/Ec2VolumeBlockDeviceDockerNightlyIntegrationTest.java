@@ -385,7 +385,7 @@ class Ec2VolumeBlockDeviceDockerNightlyIntegrationTest {
     }
 
     @Test
-    void volumeALaunchCreatesIsABlockDeviceOnceTheInstanceRuns() {
+    void volumeALaunchCreatesIsABlockDeviceByTheTimeTheInstanceRuns() {
         LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
         ebs.setVolumeSize(1);
         ebs.setDeleteOnTermination(true);
@@ -398,8 +398,8 @@ class Ec2VolumeBlockDeviceDockerNightlyIntegrationTest {
         try {
             ec2Service.awaitContainerLaunch(instance);
 
-            await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(500)).until(() ->
-                    execIn(instance.getDockerContainerId(), "test -b /dev/sdf || test -L /dev/sdf").exitCode() == 0);
+            ContainerExec.Result checkDev = execIn(instance.getDockerContainerId(), "test -b /dev/sdf || test -L /dev/sdf");
+            assertEquals(0, checkDev.exitCode(), "Block device should exist once the instance runs: " + checkDev.summary());
         } finally {
             ec2Service.terminateInstances("us-east-1", List.of(instance.getInstanceId()));
         }

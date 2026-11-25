@@ -7558,28 +7558,36 @@ class Ec2ServiceTest {
         service.attachVolume("us-east-1", volume.getVolumeId(), instance.getInstanceId(), "/dev/xvdf");
         List<String> events = new CopyOnWriteArrayList<>();
         CountDownLatch restoring = new CountDownLatch(1);
-        CountDownLatch detaching = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
         when(blockDevices.attachVolume(any(), any(), anyString())).thenAnswer(invocation -> {
             events.add("restore starts");
             restoring.countDown();
-            detaching.await(1, TimeUnit.SECONDS);
+            assertTrue(release.await(10, TimeUnit.SECONDS));
             events.add("restore ends");
             return Optional.of("/dev/xvdf");
         });
         doAnswer(invocation -> {
             events.add("detach");
-            detaching.countDown();
             return null;
         }).when(blockDevices).detachVolume(any(), any(), anyString());
-        ExecutorService executor = Executors.newSingleThreadExecutor();
-        try {
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
             Future<?> restore = executor.submit(() -> service.restoreAttachedVolumesForInstance("us-east-1", instance));
-            assertTrue(restoring.await(5, TimeUnit.SECONDS));
-
-            service.detachVolume("us-east-1", volume.getVolumeId(), instance.getInstanceId(), "/dev/xvdf", false);
-            restore.get(5, TimeUnit.SECONDS);
-        } finally {
-            executor.shutdownNow();
+            try {
+                assertTrue(restoring.await(10, TimeUnit.SECONDS));
+                AtomicReference<Thread> detacher = new AtomicReference<>();
+                Future<?> detach = executor.submit(() -> {
+                    detacher.set(Thread.currentThread());
+                    service.detachVolume("us-east-1", volume.getVolumeId(), instance.getInstanceId(),
+                            "/dev/xvdf", false);
+                });
+                awaitBlockedOrDone(detacher, detach);
+                assertFalse(detach.isDone(), "detach must wait for the restore");
+                release.countDown();
+                restore.get(10, TimeUnit.SECONDS);
+                detach.get(10, TimeUnit.SECONDS);
+            } finally {
+                release.countDown();
+            }
         }
 
         assertEquals(List.of("restore starts", "restore ends", "detach"), events);
