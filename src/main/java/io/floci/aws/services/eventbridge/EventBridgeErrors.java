@@ -28,7 +28,7 @@ final class EventBridgeErrors {
         return notFound("Replay " + replay + " does not exist.");
     }
 
-    /** {@code verb} is the failing call: create, describe, update, delete or deauthorize. */
+    /** {@code verb} is the failing call: describe or update. */
     static AwsException connectionNotFound(String verb, String connection) {
         return notFound("Failed to " + verb + " the connection(s). " + connectionMissing(connection));
     }
@@ -58,11 +58,6 @@ final class EventBridgeErrors {
 
     static AwsException replayAlreadyExists(String replay) {
         return alreadyExists("Replay " + replay + " already exists.");
-    }
-
-    static AwsException connectionAlreadyExists(String connection) {
-        return alreadyExists("Failed to create the connection(s). A connection with name '" + connection
-                + "' already exists.");
     }
 
     static AwsException replayNotCancellable(String replay) {

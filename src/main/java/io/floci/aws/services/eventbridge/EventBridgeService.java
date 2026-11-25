@@ -1922,7 +1922,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         }
         String key = connectionKey(region, name);
         if (connectionStore.get(key).isPresent()) {
-            throw EventBridgeErrors.connectionAlreadyExists(name);
+            // AWS's wording for this duplicate is not recorded, so it keeps Floci's own.
+            throw new AwsException("ResourceAlreadyExistsException",
+                    "Connection " + name + " already exists.", 400);
         }
         String connectionId = UUID.randomUUID().toString();
         Instant now = Instant.now();
@@ -2035,7 +2037,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     public Connection deleteConnection(String name, String region) {
         String key = connectionKey(region, name);
         Connection connection = connectionStore.get(key)
-                .orElseThrow(() -> EventBridgeErrors.connectionNotFound("delete", name));
+                // AWS's delete wording is not recorded (the suite covers describe, update and create), so it keeps Floci's own.
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Connection " + name + " does not exist.", 400));
         connectionStore.delete(key);
         LOG.infov("Deleted connection: {0}", name);
         return connection;
@@ -2209,7 +2213,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     public synchronized ApiDestination deleteApiDestination(String name, String region) {
         String key = apiDestinationKey(region, name);
         ApiDestination destination = apiDestinationStore.get(key)
-                .orElseThrow(() -> EventBridgeErrors.apiDestinationNotFound("delete", name));
+                // AWS's delete wording is not recorded (the suite covers describe, update and create), so it keeps Floci's own.
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "ApiDestination " + name + " does not exist.", 400));
         apiDestinationStore.delete(key);
         LOG.infov("Deleted API Destination: {0}", name);
         return destination;

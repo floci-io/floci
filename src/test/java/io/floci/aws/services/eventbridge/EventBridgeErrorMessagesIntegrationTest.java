@@ -103,7 +103,7 @@ class EventBridgeErrorMessagesIntegrationTest {
                 + "{\"ApiKeyAuthParameters\":{\"ApiKeyName\":\"k\",\"ApiKeyValue\":\"v\"}}}";
         ok("CreateConnection", conn);
         refused("CreateConnection", conn, ae,
-                "Failed to create the connection(s). A connection with name 'emsg-dup-conn' already exists.");
+                "Connection emsg-dup-conn already exists.");
 
         String replay = "{\"ReplayName\":\"emsg-dup-replay\",\"EventSourceArn\":\"arn:aws:events:us-east-1:"
                 + "000000000000:archive/emsg-dup-arch\",\"EventStartTime\":1700000000,\"EventEndTime\":1700000100,"
@@ -140,11 +140,11 @@ class EventBridgeErrorMessagesIntegrationTest {
         refused("UpdateConnection", "{\"Name\":\"emsg-w-conn\",\"Description\":\"d\"}", nf,
                 "Failed to update the connection(s). Connection 'emsg-w-conn' does not exist.");
         refused("DeleteConnection", "{\"Name\":\"emsg-w-conn\"}", nf,
-                "Failed to delete the connection(s). Connection 'emsg-w-conn' does not exist.");
+                "Connection emsg-w-conn does not exist.");
         refused("UpdateApiDestination", "{\"Name\":\"emsg-w-dest\",\"Description\":\"d\"}", nf,
                 "Failed to update the api-destination(s). An api-destination 'emsg-w-dest' does not exist.");
         refused("DeleteApiDestination", "{\"Name\":\"emsg-w-dest\"}", nf,
-                "Failed to delete the api-destination(s). An api-destination 'emsg-w-dest' does not exist.");
+                "ApiDestination emsg-w-dest does not exist.");
     }
 
     @Test
