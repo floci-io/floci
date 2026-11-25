@@ -16,7 +16,8 @@ import java.util.concurrent.TimeUnit;
  * Shared scheduling, minute claims and retention for service-generated CloudWatch metrics. A tick
  * runs just after each minute boundary and stamps its samples with the minute that ended, so a call
  * lands in the minute it was made, as on AWS. Once an hour it drops the namespace's datapoints older
- * than the 15 days AWS keeps one-minute data, so the generated history stays bounded.
+ * than the 15 days AWS keeps one-minute data, and every minute the oldest of an account's beyond the
+ * ceiling it was given, so the generated history stays bounded. A ceiling of 0 or less keeps them all.
  */
 public abstract class MinuteMetricsPublisher<T> {
 
@@ -28,23 +29,27 @@ public abstract class MinuteMetricsPublisher<T> {
     private final CloudWatchMetricsService metricsService;
     private final String namespace;
     private final boolean enabled;
+    private final int maxStoredDatapoints;
     private final Clock clock;
     private final ScheduledExecutorService scheduler;
     private long lastAttemptedMinute = Long.MIN_VALUE;
 
-    protected MinuteMetricsPublisher(CloudWatchMetricsService metricsService, String namespace, boolean enabled) {
-        this(metricsService, namespace, enabled, Clock.systemUTC(), Executors.newSingleThreadScheduledExecutor(task -> {
-            Thread thread = new Thread(task, namespace + "-metrics-publisher");
-            thread.setDaemon(true);
-            return thread;
-        }));
+    protected MinuteMetricsPublisher(CloudWatchMetricsService metricsService, String namespace, boolean enabled,
+                                     int maxStoredDatapoints) {
+        this(metricsService, namespace, enabled, maxStoredDatapoints, Clock.systemUTC(),
+                Executors.newSingleThreadScheduledExecutor(task -> {
+                    Thread thread = new Thread(task, namespace + "-metrics-publisher");
+                    thread.setDaemon(true);
+                    return thread;
+                }));
     }
 
     protected MinuteMetricsPublisher(CloudWatchMetricsService metricsService, String namespace, boolean enabled,
-                                     Clock clock, ScheduledExecutorService scheduler) {
+                                     int maxStoredDatapoints, Clock clock, ScheduledExecutorService scheduler) {
         this.metricsService = metricsService;
         this.namespace = namespace;
         this.enabled = enabled;
+        this.maxStoredDatapoints = maxStoredDatapoints;
         this.clock = clock;
         this.scheduler = scheduler;
     }
@@ -106,6 +111,14 @@ public abstract class MinuteMetricsPublisher<T> {
             } catch (RuntimeException e) {
                 LOG.warnv(e, "Dropping {0} datapoints older than {1} failed; the next hour tries again",
                         namespace, RETENTION);
+            }
+        }
+        if (maxStoredDatapoints > 0) {
+            try {
+                metricsService.deleteOldestMetricData(namespace, maxStoredDatapoints);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Dropping the oldest {0} datapoints over the ceiling of {1} failed; the next minute"
+                        + " tries again", namespace, maxStoredDatapoints);
             }
         }
     }

@@ -52,6 +52,12 @@ public interface DynamoDbTableAccess {
     /** One UpdateTable that changes the capacity and warm throughput of the table and of the named indexes. */
     TableDefinition updateThroughput(Scope scope, String tableName, ThroughputChange change);
 
+    /**
+     * Turns server-side encryption on as CreateTable's {@code SSESpecification} does, with its checks.
+     * A null {@code sseType} means KMS, and a null {@code kmsMasterKeyId} the AWS managed key.
+     */
+    TableDefinition enableServerSideEncryption(Scope scope, String tableName, String sseType, String kmsMasterKeyId);
+
     TableDefinition createOnDemandTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
                                         List<AttributeDefinition> attributeDefinitions,
                                         List<GlobalSecondaryIndex> globalSecondaryIndexes,

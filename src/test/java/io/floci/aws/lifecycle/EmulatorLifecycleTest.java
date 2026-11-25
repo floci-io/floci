@@ -7,6 +7,7 @@ import io.floci.aws.core.storage.PersistentPathValidator;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.lifecycle.inithook.InitializationHook;
 import io.floci.aws.lifecycle.inithook.InitializationHooksRunner;
+import io.floci.aws.services.amazonmq.AmazonMqService;
 import io.floci.aws.services.amazonmq.container.RabbitMqManager;
 import io.floci.aws.services.appsync.graphql.SchemaCreationWorker;
 import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
@@ -43,6 +44,7 @@ import io.floci.aws.services.rds.container.RdsContainerManager;
 import io.floci.aws.services.rds.integration.RdsIntegrationLoader;
 import io.floci.aws.services.rds.proxy.RdsProxyManager;
 import io.floci.aws.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
+import io.floci.aws.services.sagemaker.SageMakerService;
 import io.floci.aws.services.stepfunctions.StepFunctionsService;
 import io.floci.aws.services.timestreaminfluxdb.TimestreamInfluxDbService;
 import io.floci.aws.testutil.LogCapture;
@@ -122,6 +124,10 @@ class EmulatorLifecycleTest {
     @Mock private ElbV2Service elbV2Service;
     @Mock private ElbClassicService elbClassicService;
     @Mock private EcsService ecsService;
+    @Mock private SageMakerService sageMakerService;
+    @Mock private AmazonMqService amazonMqService;
+    @Mock private EmulatorConfig.AmazonMqServiceConfig amazonMqServiceConfig;
+    @Mock private EmulatorConfig.SageMakerServiceConfig sageMakerServiceConfig;
     @Mock private EksService eksService;
     @Mock private CodeArtifactService codeArtifactService;
     @Mock private CloudWatchMetricsService cloudWatchMetricsService;
@@ -170,6 +176,10 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(eksServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.codeartifact()).thenReturn(codeArtifactServiceConfig);
         Mockito.lenient().when(codeArtifactServiceConfig.enabled()).thenReturn(true);
+        Mockito.lenient().when(servicesConfig.amazonmq()).thenReturn(amazonMqServiceConfig);
+        Mockito.lenient().when(amazonMqServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.sagemaker()).thenReturn(sageMakerServiceConfig);
+        Mockito.lenient().when(sageMakerServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.timestreamInfluxdb()).thenReturn(timestreamInfluxDbServiceConfig);
         Mockito.lenient().when(timestreamInfluxDbServiceConfig.enabled()).thenReturn(true);
         Mockito.lenient().when(servicesConfig.iam()).thenReturn(iamServiceConfig);
@@ -185,7 +195,7 @@ class EmulatorLifecycleTest {
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
                 memoryDbContainerManager, memoryDbProxyManager, memoryDbService,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
-                rabbitMqManager, flinkContainerManager, rdsService, timestreamInfluxDbService,
+                rabbitMqManager, amazonMqService, flinkContainerManager, sageMakerService, rdsService, timestreamInfluxDbService,
                 elbV2Service, elbClassicService, ecsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecsTaskRoleCredentialsServer, ecrRegistryManager, flociUiManager, initLifecycleState,
@@ -482,6 +492,89 @@ class EmulatorLifecycleTest {
         inOrder.verify(storageFactory).loadAll();
         inOrder.verify(elastiCacheService).restorePersistedRuntime();
         inOrder.verify(elastiCacheMemcachedService).restorePersistedRuntime();
+    }
+
+    @Test
+    void restoresPersistedSageMakerEndpointsAfterStorageLoad() {
+        stubStorageConfig();
+        when(sageMakerServiceConfig.enabled()).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, sageMakerService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(sageMakerService).restorePersistedRuntime();
+    }
+
+    @Test
+    void aFailedSageMakerRestoreDoesNotStopTheOtherRestores() {
+        stubStorageConfig();
+        when(sageMakerServiceConfig.enabled()).thenReturn(true);
+        when(elbv2ServiceConfig.enabled()).thenReturn(true);
+        doThrow(new IllegalStateException("Could not restore SageMaker endpoint demo of account 000000000000"))
+                .when(sageMakerService).restorePersistedRuntime();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(elbV2Service).restorePersistedRuntime();
+        verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void restoresPersistedAmazonMqBrokersAfterStorageLoad() {
+        stubStorageConfig();
+        when(amazonMqServiceConfig.enabled()).thenReturn(true);
+        when(amazonMqService.restorePersistedRuntime()).thenReturn(CompletableFuture.completedFuture(null));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, amazonMqService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(amazonMqService).restorePersistedRuntime();
+    }
+
+    @Test
+    void aFailedAmazonMqRestoreDoesNotStopTheOtherRestores() {
+        stubStorageConfig();
+        when(amazonMqServiceConfig.enabled()).thenReturn(true);
+        when(elbv2ServiceConfig.enabled()).thenReturn(true);
+        when(amazonMqService.restorePersistedRuntime()).thenReturn(CompletableFuture.failedFuture(
+                new IllegalStateException("Could not restore Amazon MQ broker us-east-1::b-1 of account 000000000000")));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(elbV2Service).restorePersistedRuntime();
+        verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void leavesAmazonMqBrokersUntouchedWhenAmazonMqIsDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(amazonMqService, never()).restorePersistedRuntime();
+    }
+
+    @Test
+    void leavesSageMakerEndpointsUntouchedWhenSageMakerIsDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(sageMakerService, never()).restorePersistedRuntime();
     }
 
     @Test

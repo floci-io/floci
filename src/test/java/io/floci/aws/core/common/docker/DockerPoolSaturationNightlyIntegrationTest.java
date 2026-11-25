@@ -11,6 +11,7 @@ import com.github.dockerjava.core.DefaultDockerClientConfig;
 import com.github.dockerjava.core.DockerClientImpl;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.TestImages;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import org.apache.hc.core5.http.ConnectionRequestTimeoutException;
@@ -21,6 +22,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -58,6 +60,7 @@ import static org.junit.jupiter.api.Assertions.fail;
  * three-minute bound fits the default on a hosted runner, so a much larger ramp needs it raised too.
  */
 @EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
+@ResourceLock(ParallelLocks.CONFIG_MAPPING)
 class DockerPoolSaturationNightlyIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(DockerPoolSaturationNightlyIntegrationTest.class);

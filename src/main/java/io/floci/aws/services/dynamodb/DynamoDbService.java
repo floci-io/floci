@@ -3750,7 +3750,11 @@ public class DynamoDbService {
 
     public void validateConditionExpression(String conditionExpression, JsonNode exprAttrNames,
                                             JsonNode exprAttrValues) {
-        validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+        try {
+            validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+        } catch (AwsException e) {
+            throw SmithyValidationErrors.inEnvelope(e);
+        }
     }
 
     public void validateFilterExpression(String filterExpression, JsonNode exprAttrNames, JsonNode exprAttrValues) {

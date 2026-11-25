@@ -121,10 +121,11 @@ starts ElbV2LambdaTargetDataPlaneIntegrationTest && ecr public.ecr.aws/lambda/py
 # EmrServerlessCustomImageNightlyIntegrationTest builds its custom image on it,
 # EmrFlociContainerNightlyIntegrationTest runs a cluster's steps in it from Floci in a container,
 # EmrPigStepsNightlyIntegrationTest a cluster's Pig steps, EmrAppUiNightlyIntegrationTest a MapReduce step,
-# and EmrClusterShrinkNightlyIntegrationTest a cluster shrink.
+# EmrClusterShrinkNightlyIntegrationTest a cluster shrink, and EmrTrinoNightlyIntegrationTest a cluster's trino-cli
+# steps.
 starts EmrDockerRunnerNightlyIntegrationTest EmrHiveStepsNightlyIntegrationTest EmrServerlessCustomImageNightlyIntegrationTest \
     EmrFlociContainerNightlyIntegrationTest EmrPigStepsNightlyIntegrationTest EmrNotebookExecutionNightlyIntegrationTest \
-    EmrAppUiNightlyIntegrationTest EmrClusterShrinkNightlyIntegrationTest \
+    EmrAppUiNightlyIntegrationTest EmrClusterShrinkNightlyIntegrationTest EmrTrinoNightlyIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest
 # EmrServerlessHiveDockerIntegrationTest runs EMR Serverless Hive job runs, and EmrHiveStepsNightlyIntegrationTest EMR
 # Hive steps, in the emr-7.5.0 Hive image the runner's default Hive template names, 2.7 GB; every EMR cluster runs its
@@ -134,7 +135,11 @@ starts EmrDockerRunnerNightlyIntegrationTest EmrHiveStepsNightlyIntegrationTest 
 starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsNightlyIntegrationTest EmrDockerRunnerNightlyIntegrationTest \
     EmrFlociContainerNightlyIntegrationTest EmrPigStepsNightlyIntegrationTest EmrSessionServerNightlyIntegrationTest \
     EmrNotebookExecutionNightlyIntegrationTest EmrAppUiNightlyIntegrationTest EmrClusterShrinkNightlyIntegrationTest \
+    EmrTrinoNightlyIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest
+# EmrTrinoNightlyIntegrationTest runs a cluster's Trino coordinator from the Trino project's image of emr-7.5.0's
+# Trino, 446, about 1 GB, from Docker Hub.
+starts EmrTrinoNightlyIntegrationTest && pull trinodb/trino:446
 # The nightly EmrServerlessSparkConnectNightlyIntegrationTest runs a session's Spark Connect server, and its client, in
 # the emr-7.13.0 image, 3.7 GB, the first release with sessions, and EmrServerlessDashboardNightlyIntegrationTest a job
 # run and a session in it, whose dashboards it opens.
@@ -231,6 +236,10 @@ INFLUX_IMAGE="$(grep -oE 'default-image: *"influxdb:[^"]+"' src/main/resources/a
 grep -q '/timestreaminfluxdb/' "$SHARD_FILE" && [ -n "$INFLUX_IMAGE" ] && pull "$INFLUX_IMAGE"
 K3S_IMAGE="$(grep -oE 'default-image: *"rancher/k3s:[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
 grep -q '/eks/' "$SHARD_FILE" && [ -n "$K3S_IMAGE" ] && pull "$K3S_IMAGE"
+# The nightly AmazonMqBrokerRestartNightlyIntegrationTest runs a broker in the RabbitMQ image Amazon MQ defaults to,
+# pinned in application.yml too.
+RABBITMQ_IMAGE="$(grep -oE 'default-image: *"rabbitmq:[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
+starts AmazonMqBrokerRestartNightlyIntegrationTest && [ -n "$RABBITMQ_IMAGE" ] && pull "$RABBITMQ_IMAGE"
 if [ -n "$ECR_PUBLIC_IMAGES" ]; then
     { for image in $ECR_PUBLIC_IMAGES; do pull_and_log "$image"; sleep 1; done; } &
 fi

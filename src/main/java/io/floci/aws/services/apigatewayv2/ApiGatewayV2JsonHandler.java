@@ -83,6 +83,7 @@ public class ApiGatewayV2JsonHandler {
                 case "DeleteIntegrationResponse" -> handleDeleteIntegrationResponse(request, region);
                 case "CreateModel" -> handleCreateModel(request, region);
                 case "GetModel" -> handleGetModel(request, region);
+                case "GetModelTemplate" -> handleGetModelTemplate(request, region);
                 case "GetModels" -> handleGetModels(request, region);
                 case "UpdateModel" -> handleUpdateModel(request, region);
                 case "DeleteModel" -> handleDeleteModel(request, region);
@@ -492,6 +493,14 @@ public class ApiGatewayV2JsonHandler {
         return Response.ok(root.toString()).build();
     }
 
+    private Response handleGetModelTemplate(JsonNode request, String region) {
+        String apiId = request.path("ApiId").asText();
+        String modelId = request.path("ModelId").asText();
+        String template = service.getModelTemplate(region, apiId, modelId);
+        ObjectNode response = objectMapper.createObjectNode().put("Value", template);
+        return Response.ok(response.toString()).build();
+    }
+
     private Response handleUpdateModel(JsonNode request, String region) {
         String apiId = request.path("ApiId").asText();
         String modelId = request.path("ModelId").asText();
@@ -664,6 +673,12 @@ public class ApiGatewayV2JsonHandler {
         }
         if (i.getConnectionType() != null) node.put("ConnectionType", i.getConnectionType());
         if (i.getConnectionId() != null) node.put("ConnectionId", i.getConnectionId());
+        if (i.getTlsConfig() != null) {
+            ObjectNode tlsConfig = node.putObject("TlsConfig");
+            if (i.getTlsConfig().getServerNameToVerify() != null) {
+                tlsConfig.put("ServerNameToVerify", i.getTlsConfig().getServerNameToVerify());
+            }
+        }
         node.put("PayloadFormatVersion", i.getPayloadFormatVersion());
         if (i.getCredentialsArn() != null) {
             node.put("CredentialsArn", i.getCredentialsArn());

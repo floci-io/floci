@@ -123,6 +123,42 @@ Unknown integration type strings produce warnings and leave the method without a
 integration. With `failOnWarnings=true`, the import or update is rejected before
 changing the API. Leading/trailing whitespace and non-ASCII lookalikes are not accepted.
 
+### Model templates
+
+`GetModelTemplate` returns the same sample VTL format for REST and WebSocket API models.
+Object properties use two-space indentation and sample values, including `"foo"` for
+strings and `3.1415` for numbers. Arrays contain a `##TODO:` comment and a
+`#foreach($elem in $inputRoot.TODO)` placeholder to customize for the source payload.
+This is a starting point for a mapping template, not a projection of the input JSON.
+Top-level array directives are unindented, with one space surrounding each sample element.
+
+Nested objects, typed arrays and finite local JSON Pointer references
+(`#/definitions/...`) are supported. Updating a model changes its next template;
+no generated-template cache or additional persistent state is used. The existing
+`AmazonApiGatewayV2` JSON compatibility target also accepts `GetModelTemplate`, with
+`ApiId` and `ModelId` inputs and a `Value` response.
+
+Template generation supports a bounded JSON-schema subset for `application/json` models.
+Composition (`allOf`, `anyOf`, `oneOf`, `not`), enums, const values, union types,
+tuple/untyped arrays, external or cyclic references, and property names containing
+VTL delimiters (`'`, `"`, `\`, `$`, `#`) or control characters return
+`UnsupportedOperation` (HTTP 501). Constraints such as ranges and formats do not
+choose the sample values. A schema must state a supported type or provide
+`properties`/`items` from which a type can be inferred.
+
+Malformed JSON, including extra tokens after the schema, returns
+`BadRequestException` (HTTP 400). Top-level scalar models also return HTTP 400,
+with `Unsupported data type for mapping template: <type>`. Schema admission at
+model creation and update is unchanged; valid schemas outside the generator's
+subset remain storable. HTTP APIs reject model creation because models are only
+supported for WebSocket APIs in API Gateway v2.
+Template reads for a missing WebSocket model return `NotFoundException` (HTTP 404)
+with `Invalid model identifier specified: <id>`.
+
+Local generation limits are 1,048,576 schema characters, 4,096 visited schema nodes,
+32 levels of nesting and 262,144 output characters. These are Floci limits, not
+AWS service quotas.
+
 ### Supported Operations
 
 | Category | Operations |
@@ -141,7 +177,7 @@ changing the API. Leading/trailing whitespace and non-ASCII lookalikes are not a
 | **Usage Plan Keys** | CreateUsagePlanKey, GetUsagePlanKey, GetUsagePlanKeys, DeleteUsagePlanKey |
 | **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, UpdateRequestValidator, DeleteRequestValidator |
 | **Gateway Responses** | PutGatewayResponse, GetGatewayResponse, GetGatewayResponses, UpdateGatewayResponse, DeleteGatewayResponse |
-| **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
+| **Models** | CreateModel, GetModel, GetModels, GetModelTemplate, UpdateModel, DeleteModel |
 | **Documentation Parts** | CreateDocumentationPart, GetDocumentationPart, GetDocumentationParts, UpdateDocumentationPart, DeleteDocumentationPart |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, UpdateDomainName, DeleteDomainName |
 | **Base Path Mappings** | CreateBasePathMapping, GetBasePathMapping, GetBasePathMappings, UpdateBasePathMapping, DeleteBasePathMapping |
@@ -432,7 +468,6 @@ treated as a gateway response.
 These management-plane operations have no handler in v1. Calls will return `404` or an error:
 
 - Authorizer testing: `TestInvokeAuthorizer`
-- Model templates: `GetModelTemplate`
 - Documentation versions (5 operations)
 - Client Certificates (5 operations)
 - `ImportDocumentationParts`
@@ -1104,7 +1139,7 @@ listener relays the request unchanged and does not add a hop.
 | **Authorizers** | CreateAuthorizer, GetAuthorizer, GetAuthorizers, UpdateAuthorizer, DeleteAuthorizer |
 | **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage |
 | **Deployments** | CreateDeployment, GetDeployment, GetDeployments, UpdateDeployment, DeleteDeployment |
-| **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
+| **Models** | CreateModel, GetModel, GetModels, GetModelTemplate, UpdateModel, DeleteModel |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, UpdateDomainName, DeleteDomainName |
 | **API Mappings** | CreateApiMapping, GetApiMapping, GetApiMappings, UpdateApiMapping, DeleteApiMapping |
 | **VPC Links** | CreateVpcLink, GetVpcLink, GetVpcLinks, UpdateVpcLink, DeleteVpcLink |

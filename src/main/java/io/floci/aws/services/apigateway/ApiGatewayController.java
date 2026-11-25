@@ -1213,6 +1213,16 @@ public class ApiGatewayController {
         return Response.ok(toModelNode(service.getModel(region, apiId, modelName)).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
+    @GET
+    @Path("/restapis/{apiId}/models/{modelName}/default_template")
+    public Response getModelTemplate(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                     @PathParam("modelName") String modelName) {
+        String region = regionResolver.resolveRegion(headers);
+        String value = service.getModelTemplate(region, apiId, modelName);
+        return Response.ok(objectMapper.createObjectNode().put("value", value).toString())
+                .type(MediaType.APPLICATION_JSON).build();
+    }
+
     @PATCH
     @Path("/restapis/{apiId}/models/{modelName}")
     public Response updateModel(@Context HttpHeaders headers, @PathParam("apiId") String apiId, @PathParam("modelName") String modelName, String body) {
@@ -2239,6 +2249,16 @@ public class ApiGatewayController {
         return Response.ok(toV2ModelNode(v2Service.getModel(region, apiId, modelId)).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
+    @GET
+    @Path("/v2/apis/{apiId}/models/{modelId}/template")
+    public Response getV2ModelTemplate(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                     @PathParam("modelId") String modelId) {
+        String region = regionResolver.resolveRegion(headers);
+        String value = v2Service.getModelTemplate(region, apiId, modelId);
+        return Response.ok(objectMapper.createObjectNode().put("value", value).toString())
+                .type(MediaType.APPLICATION_JSON).build();
+    }
+
     @PATCH
     @Path("/v2/apis/{apiId}/models/{modelId}")
     public Response updateV2Model(@Context HttpHeaders headers,
@@ -2879,6 +2899,12 @@ public class ApiGatewayController {
         }
         if (i.getConnectionType() != null) node.put("connectionType", i.getConnectionType());
         if (i.getConnectionId() != null) node.put("connectionId", i.getConnectionId());
+        if (i.getTlsConfig() != null) {
+            ObjectNode tlsConfig = node.putObject("tlsConfig");
+            if (i.getTlsConfig().getServerNameToVerify() != null) {
+                tlsConfig.put("serverNameToVerify", i.getTlsConfig().getServerNameToVerify());
+            }
+        }
         node.put("payloadFormatVersion", i.getPayloadFormatVersion());
         if (i.getCredentialsArn() != null) {
             node.put("credentialsArn", i.getCredentialsArn());

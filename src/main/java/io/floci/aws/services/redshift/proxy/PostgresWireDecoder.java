@@ -1,6 +1,7 @@
 package io.floci.aws.services.redshift.proxy;
 
 import io.floci.aws.core.common.PostgresWire;
+import io.floci.aws.services.redshift.spectrum.BackendSql;
 
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
@@ -149,6 +150,36 @@ public class PostgresWireDecoder {
     public BindMessage decodeBind(FrontendMessage message) throws IOException {
         BodyCursor cursor = cursorFor(message, 'B');
         return new BindMessage(cursor.readCString(), cursor.readCString());
+    }
+
+    /**
+     * Extracts the raw parameter format codes and parameter value bytes from a Bind ({@code 'B'}) message so binary
+     * bind parameters can be replayed without lossy text decoding. Returns {@code null} if the section is malformed.
+     */
+    public BackendSql.RawParameters extractBindParameters(FrontendMessage message, List<Integer> parameterTypeOids)
+            throws IOException {
+        BodyCursor cursor = cursorFor(message, 'B');
+        cursor.readCString();
+        cursor.readCString();
+        int start = cursor.offset;
+        try {
+            int formatCount = cursor.readInt16();
+            cursor.skip(formatCount * 2);
+            int parameterCount = cursor.readInt16();
+            if (formatCount > 1 && formatCount != parameterCount) {
+                return null;
+            }
+            for (int i = 0; i < parameterCount; i++) {
+                int length = cursor.readInt32();
+                if (length > 0) {
+                    cursor.skip(length);
+                }
+            }
+            byte[] section = Arrays.copyOfRange(message.body(), start, cursor.offset);
+            return new BackendSql.RawParameters(parameterTypeOids, parameterCount, section);
+        } catch (IOException expected) {
+            return null;
+        }
     }
 
     /**

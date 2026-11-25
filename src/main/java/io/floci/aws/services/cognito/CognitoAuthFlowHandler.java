@@ -2700,8 +2700,9 @@ final class CognitoAuthFlowHandler {
 
     /** {@code scopes} are those of the grant being refreshed, or null for a sign-in through the API. */
     CognitoService.ClaimsOverride preTokenGenerationForRefresh(UserPool pool, UserPoolClient client, CognitoUser user,
-                                                               List<String> scopes) {
-        return firePreTokenGeneration(pool, client, user, Map.of(), "TokenGeneration_RefreshTokens", scopes);
+                                                               List<String> scopes,
+                                                               Map<String, String> clientMetadata) {
+        return firePreTokenGeneration(pool, client, user, clientMetadata, "TokenGeneration_RefreshTokens", scopes);
     }
 
     /**

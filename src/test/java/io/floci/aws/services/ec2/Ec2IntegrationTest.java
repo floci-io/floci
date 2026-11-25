@@ -20,6 +20,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +30,7 @@ import java.util.zip.GZIPOutputStream;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.emptyOrNullString;
@@ -61,6 +63,11 @@ class Ec2IntegrationTest {
     /** A second account, which reaches the default account's IPAM pools by id. */
     private static final String WORKLOAD_AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=000000000002/20260205/us-east-1/ec2/aws4_request";
+    private static final String IAM_AUTH_HEADER =
+            "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/iam/aws4_request";
+    private static final String PROFILE_BY_ARN = "my-app-role";
+    private static final String PROFILE_BY_NAME = "my-app-profile";
+    private static final String LAUNCH_KEY_NAME = "launch-imported-key";
 
     private static String instanceId;
     private static String vpcId;
@@ -78,6 +85,10 @@ class Ec2IntegrationTest {
     private static String rootVolumeId;
     private static String networkInterfaceId;
     private static String launchTemplateId;
+    private static String instanceWithUserData;
+    private static String instanceWithProfile;
+    private static String instanceWithProfileName;
+    private static final List<String> launchedInstances = new ArrayList<>();
     private static String launchTemplateUserData;
     private static String launchTemplateVersionUserData;
     private static String vpcEndpointId;
@@ -3889,7 +3900,8 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .body("StopInstancesResponse.instancesSet.item.instanceId", equalTo(instanceId))
-            .body("StopInstancesResponse.instancesSet.item.currentState.name", equalTo("stopping"));
+            .body("StopInstancesResponse.instancesSet.item.currentState.name", equalTo("stopping"))
+            .body("StopInstancesResponse.instancesSet.item.previousState.name", equalTo("running"));
     }
 
     @Test
@@ -3904,7 +3916,9 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .body("StartInstancesResponse.instancesSet.item.instanceId", equalTo(instanceId))
-            .body("StartInstancesResponse.instancesSet.item.currentState.name", equalTo("pending"));
+            .body("StartInstancesResponse.instancesSet.item.currentState.name", equalTo("pending"))
+            .body("StartInstancesResponse.instancesSet.item.previousState.name", anyOf(
+                    equalTo("stopped"), equalTo("stopping"), equalTo("running")));
     }
 
     @Test
@@ -4650,7 +4664,22 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .body("TerminateInstancesResponse.instancesSet.item.instanceId", equalTo(instanceId))
-            .body("TerminateInstancesResponse.instancesSet.item.currentState.name", equalTo("shutting-down"));
+            .body("TerminateInstancesResponse.instancesSet.item.currentState.name", equalTo("shutting-down"))
+            .body("TerminateInstancesResponse.instancesSet.item.previousState.name", notNullValue());
+    }
+
+    @Test
+    @Order(101)
+    void startTerminatedInstanceFails() {
+        given()
+            .formParam("Action", "StartInstances")
+            .formParam("InstanceId.1", instanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("IncorrectInstanceState"));
     }
 
     @Test
@@ -4841,8 +4870,320 @@ class Ec2IntegrationTest {
     }
 
     // =========================================================================
+    // Launch options: user data, instance profiles, key pairs, counts, tags
+    // =========================================================================
+
+    @Test
+    @Order(110)
+    void runInstancesWithUserData() {
+        String script = "#!/bin/bash\necho hello > /tmp/test.txt";
+        String encoded = Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
+
+        instanceWithUserData = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-amazonlinux2023")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("UserData", encoded)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RunInstancesResponse.instancesSet.item.instanceId", startsWith("i-"))
+            .body("RunInstancesResponse.instancesSet.item.imageId", equalTo("ami-amazonlinux2023"))
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+        launchedInstances.add(instanceWithUserData);
+    }
+
+    @Test
+    @Order(111)
+    void describeInstanceLaunchedWithUserData() {
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", instanceWithUserData)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceId",
+                    equalTo(instanceWithUserData))
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceState.name",
+                    equalTo("running"));
+    }
+
+    @Test
+    @Order(112)
+    void runInstancesWithIamInstanceProfile() {
+        String profileArn = "arn:aws:iam::000000000000:instance-profile/" + PROFILE_BY_ARN;
+        given().header("Authorization", IAM_AUTH_HEADER)
+                .formParam("Action", "CreateInstanceProfile").formParam("InstanceProfileName", PROFILE_BY_ARN)
+                .post("/").then().statusCode(200);
+
+        instanceWithProfile = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-ubuntu2204")
+            .formParam("InstanceType", "t3.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("IamInstanceProfile.Arn", profileArn)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RunInstancesResponse.instancesSet.item.instanceId", startsWith("i-"))
+            .body("RunInstancesResponse.instancesSet.item.instanceType", equalTo("t3.micro"))
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+        launchedInstances.add(instanceWithProfile);
+    }
+
+    @Test
+    @Order(113)
+    void describeInstanceWithProfile() {
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", instanceWithProfile)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceId",
+                    equalTo(instanceWithProfile))
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceState.name",
+                    equalTo("running"));
+    }
+
+    @Test
+    @Order(114)
+    void runInstancesWithIamInstanceProfileName() {
+        given().header("Authorization", IAM_AUTH_HEADER)
+                .formParam("Action", "CreateInstanceProfile").formParam("InstanceProfileName", PROFILE_BY_NAME)
+                .post("/").then().statusCode(200);
+
+        instanceWithProfileName = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-ubuntu2204")
+            .formParam("InstanceType", "t3.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("IamInstanceProfile.Name", PROFILE_BY_NAME)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RunInstancesResponse.instancesSet.item.instanceId", startsWith("i-"))
+            .body("RunInstancesResponse.instancesSet.item.iamInstanceProfile.arn",
+                    equalTo("arn:aws:iam::000000000000:instance-profile/" + PROFILE_BY_NAME))
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+        launchedInstances.add(instanceWithProfileName);
+    }
+
+    @Test
+    @Order(115)
+    void describeInstanceWithProfileName() {
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", instanceWithProfileName)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceId",
+                    equalTo(instanceWithProfileName))
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.iamInstanceProfile.arn",
+                    equalTo("arn:aws:iam::000000000000:instance-profile/" + PROFILE_BY_NAME));
+    }
+
+    @Test
+    @Order(116)
+    void importKeyPairForSsh() {
+        // AWS wire format: PublicKeyMaterial must be base64-encoded. The key has to be whole, as
+        // ImportKeyPair refuses a truncated blob.
+        String publicKey = Ec2KeyMaterial.generateRsa().openSshPublicKey() + " test@test";
+        String encodedKey = Base64.getEncoder().encodeToString(publicKey.getBytes(StandardCharsets.UTF_8));
+
+        given()
+            .formParam("Action", "ImportKeyPair")
+            .formParam("KeyName", LAUNCH_KEY_NAME)
+            .formParam("PublicKeyMaterial", encodedKey)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ImportKeyPairResponse.keyName", equalTo(LAUNCH_KEY_NAME))
+            .body("ImportKeyPairResponse.keyPairId", startsWith("key-"));
+    }
+
+    @Test
+    @Order(117)
+    void runInstancesWithImportedKey() {
+        String launched = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-amazonlinux2023")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("KeyName", LAUNCH_KEY_NAME)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RunInstancesResponse.instancesSet.item.instanceId", startsWith("i-"))
+            .body("RunInstancesResponse.instancesSet.item.keyName", equalTo(LAUNCH_KEY_NAME))
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+        launchedInstances.add(launched);
+    }
+
+    @Test
+    @Order(118)
+    void runMultipleInstances() {
+        List<String> launched = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-amazonlinux2023")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "2")
+            .formParam("MaxCount", "2")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RunInstancesResponse.instancesSet.item.size()", equalTo(2))
+            .body("RunInstancesResponse.instancesSet.item[0].instanceId", startsWith("i-"))
+            .body("RunInstancesResponse.instancesSet.item[1].instanceId", startsWith("i-"))
+            .body("RunInstancesResponse.instancesSet.item[0].amiLaunchIndex", equalTo("0"))
+            .body("RunInstancesResponse.instancesSet.item[1].amiLaunchIndex", equalTo("1"))
+            .extract().xmlPath().getList("RunInstancesResponse.instancesSet.item.instanceId", String.class);
+        launchedInstances.addAll(launched);
+    }
+
+    @Test
+    @Order(119)
+    void runInstancesWithTagSpecification() {
+        String tagged = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-amazonlinux2023")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("TagSpecification.1.ResourceType", "instance")
+            .formParam("TagSpecification.1.Tag.1.Key", "Env")
+            .formParam("TagSpecification.1.Tag.1.Value", "test")
+            .formParam("TagSpecification.1.Tag.2.Key", "Name")
+            .formParam("TagSpecification.1.Tag.2.Value", "tag-specification-instance")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RunInstancesResponse.instancesSet.item.instanceId", startsWith("i-"))
+            .body("RunInstancesResponse.instancesSet.item.tagSet.item.find { it.key == 'Env' }.value",
+                    equalTo("test"))
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+        launchedInstances.add(tagged);
+
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", tagged)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.tagSet.item.size()",
+                    equalTo(2));
+    }
+
+    @Test
+    @Order(120)
+    void runInstancesDefaultPlacement() {
+        String placed = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-amazonlinux2023")
+            .formParam("InstanceType", "m5.large")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RunInstancesResponse.instancesSet.item.instanceType", equalTo("m5.large"))
+            .body("RunInstancesResponse.instancesSet.item.placement.availabilityZone",
+                    startsWith("us-east-1"))
+            .body("RunInstancesResponse.instancesSet.item.privateIpAddress", not(emptyOrNullString()))
+            .body("RunInstancesResponse.instancesSet.item.vpcId", not(emptyOrNullString()))
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+        launchedInstances.add(placed);
+    }
+
+    @Test
+    @Order(121)
+    void cleanupLaunchOptionResources() {
+        RequestSpecification terminate = given()
+            .formParam("Action", "TerminateInstances")
+            .header("Authorization", AUTH_HEADER);
+        for (int i = 0; i < launchedInstances.size(); i++) {
+            terminate.formParam("InstanceId." + (i + 1), launchedInstances.get(i));
+        }
+        terminate.when().post("/").then().statusCode(200);
+        launchedInstances.clear();
+
+        given()
+            .formParam("Action", "DeleteKeyPair")
+            .formParam("KeyName", LAUNCH_KEY_NAME)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        for (String profile : List.of(PROFILE_BY_ARN, PROFILE_BY_NAME)) {
+            given().header("Authorization", IAM_AUTH_HEADER)
+                    .formParam("Action", "DeleteInstanceProfile").formParam("InstanceProfileName", profile)
+                    .post("/").then().statusCode(200);
+        }
+    }
+
+    // =========================================================================
     // Error cases
     // =========================================================================
+
+    @Test
+    @Order(200)
+    void terminateNonExistentInstance() {
+        given()
+            .formParam("Action", "TerminateInstances")
+            .formParam("InstanceId.1", "i-0000000000000dead")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidInstanceID.NotFound"));
+    }
+
+    @Test
+    @Order(200)
+    void stopNonExistentInstance() {
+        given()
+            .formParam("Action", "StopInstances")
+            .formParam("InstanceId.1", "i-0000000000000dead")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidInstanceID.NotFound"));
+    }
 
     @Test
     @Order(200)

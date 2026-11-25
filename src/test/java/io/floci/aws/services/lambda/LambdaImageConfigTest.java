@@ -3,6 +3,7 @@ package io.floci.aws.services.lambda;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerCmd;
+import com.github.dockerjava.transport.DockerHttpClient;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
@@ -259,7 +260,7 @@ class LambdaImageConfigTest {
                     new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566);
             LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
             launcher = new ContainerLauncher(containerBuilder, lifecycleManager, mock(DockerClient.class),
-                    logStreamer, imageResolver,
+                    mock(DockerHttpClient.class), logStreamer, imageResolver,
                     runtimeApiServerFactory, dockerHostResolver, config,
                     new RegionResolver("us-east-1", "000000000000"), ecrRegistryManager,
                     mock(LambdaLayerService.class), awsEnv,

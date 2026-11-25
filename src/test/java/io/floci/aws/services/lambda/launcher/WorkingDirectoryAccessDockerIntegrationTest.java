@@ -3,14 +3,17 @@ package io.floci.aws.services.lambda.launcher;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.BuildImageResultCallback;
 import com.github.dockerjava.api.command.CreateContainerCmd;
+import com.github.dockerjava.transport.DockerHttpClient;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.DockerBuildContext;
 import io.floci.aws.core.common.docker.DockerClientProducer;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.TestImages;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
@@ -23,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /** Reads the working directory's permissions from a created, unstarted container of a real image. */
+@ResourceLock(ParallelLocks.CONFIG_MAPPING)
 class WorkingDirectoryAccessDockerIntegrationTest {
 
     private static final String DOCKERFILE = """
@@ -37,33 +41,35 @@ class WorkingDirectoryAccessDockerIntegrationTest {
 
     @Test
     void aWorkingDirectoryOnlyTheImageUserCanEnterFailsInitAsAnInvalidEntrypoint() throws Exception {
-        withContainer(null, (docker, containerId) -> {
+        withContainer(null, (docker, http, containerId) -> {
             LambdaInitException error = assertThrows(LambdaInitException.class,
-                    () -> WorkingDirectoryAccess.requireLambdaUserCanEnter(docker, containerId, List.of()));
+                    () -> WorkingDirectoryAccess.requireLambdaUserCanEnter(docker, http, containerId, List.of()));
             assertEquals("Runtime.InvalidEntrypoint", error.errorType());
         });
     }
 
     @Test
     void aSymlinkToADirectoryOnlyTheImageUserCanEnterFailsInit() throws Exception {
-        withContainer("/app", (docker, containerId) -> assertThrows(LambdaInitException.class,
-                () -> WorkingDirectoryAccess.requireLambdaUserCanEnter(docker, containerId, List.of())));
+        withContainer("/app", (docker, http, containerId) -> assertThrows(LambdaInitException.class,
+                () -> WorkingDirectoryAccess.requireLambdaUserCanEnter(docker, http, containerId, List.of())));
     }
 
     @Test
     void aWorkingDirectoryEveryoneCanEnterStartsAsBefore() throws Exception {
-        withContainer("/srv/open", (docker, containerId) -> assertDoesNotThrow(
-                () -> WorkingDirectoryAccess.requireLambdaUserCanEnter(docker, containerId, List.of())));
+        withContainer("/srv/open", (docker, http, containerId) -> assertDoesNotThrow(
+                () -> WorkingDirectoryAccess.requireLambdaUserCanEnter(docker, http, containerId, List.of())));
     }
 
     private interface ContainerTest {
-        void run(DockerClient docker, String containerId) throws Exception;
+        void run(DockerClient docker, DockerHttpClient http, String containerId) throws Exception;
     }
 
     private static void withContainer(String workingDir, ContainerTest test) throws Exception {
         EmulatorConfig config = new SmallRyeConfigBuilder().withMapping(EmulatorConfig.class)
                 .build().getConfigMapping(EmulatorConfig.class);
-        try (DockerClient docker = new DockerClientProducer(config).dockerClient()) {
+        DockerClientProducer producer = new DockerClientProducer(config);
+        try (DockerClient docker = producer.dockerClient();
+             DockerHttpClient http = producer.controlPlaneHttpClient()) {
             Assumptions.assumeTrue(DockerAvailability.answers(docker), "Docker daemon is unavailable");
             String image = "floci/lambda-workdir-test:" + UUID.randomUUID();
             byte[] context = DockerBuildContext.ofDockerfile(DOCKERFILE.getBytes(StandardCharsets.UTF_8));
@@ -78,7 +84,7 @@ class WorkingDirectoryAccessDockerIntegrationTest {
                 }
                 String containerId = create.exec().getId();
                 try {
-                    test.run(docker, containerId);
+                    test.run(docker, http, containerId);
                 } finally {
                     docker.removeContainerCmd(containerId).withForce(true).exec();
                 }

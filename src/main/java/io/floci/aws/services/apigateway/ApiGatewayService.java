@@ -15,6 +15,7 @@ import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.AwsRegionFacts;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.CloudFrontEdgeDomain;
+import io.floci.aws.core.common.ModelTemplateGenerator;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ReservedTags;
@@ -2502,6 +2503,12 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         model.setContentType(newContentType);
         modelStore.put(modelKey(region, apiId, modelName), model);
         return model;
+    }
+
+    public String getModelTemplate(String region, String apiId, String modelName) {
+        getRestApi(region, apiId);
+        Model model = getModel(region, apiId, modelName);
+        return ModelTemplateGenerator.generate(model.getSchema(), model.getContentType());
     }
 
     public List<Model> getModels(String region, String apiId) {

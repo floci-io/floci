@@ -134,6 +134,19 @@ to the upstream resolvers, which would answer with the wrong address for a name 
 elsewhere. Every other name resolves as usual. This needs no switch of its own: it applies wherever
 cluster DNS does, governed by `floci.services.eks.embedded-dns`.
 
+## IAM enforcement
+
+With IAM enforcement on, each action is checked on the resources the AWS Service Authorization
+Reference lists for it, read from the request: a resolver rule by its `ResolverRuleId`, an endpoint
+by its `ResolverEndpointId` and a firewall domain list by its `FirewallDomainListId`, each as
+`arn:aws:route53resolver:<region>:<account>:<type>/<id>`, the ARN this service mints, and a tag call
+on its `ResourceArn`. The reference's DNSSEC configuration format takes a `ResourceId`, which the
+request gives as the VPC's id, so `GetResolverDnssecConfig` and `UpdateResolverDnssecConfig` are
+checked on `resolver-dnssec-config/<vpc-id>`. A managed domain list, which AWS owns, is checked on
+the ARN this service gives it, the one `ListFirewallDomainLists` returns, not under the caller's
+account. `CreateOutpostResolver` is checked on `outpost-resolver/*`. The list actions name no
+resource and are checked on `*`.
+
 ## Limitations
 
 - **All create/update operations complete synchronously.** Real AWS transitions a

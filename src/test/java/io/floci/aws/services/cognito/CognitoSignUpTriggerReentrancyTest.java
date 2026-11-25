@@ -60,6 +60,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 @ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
+@ResourceLock(ParallelLocks.CONFIG_MAPPING)
 class CognitoSignUpTriggerReentrancyTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String FUNCTION = "signup-trigger";

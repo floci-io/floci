@@ -41,7 +41,7 @@ class RedshiftMetricsIntegrationTest {
 
     @BeforeEach
     void setUp() {
-        publisher = new RedshiftMetricsPublisher(redshift, cloudWatch, collectors, true);
+        publisher = new RedshiftMetricsPublisher(redshift, cloudWatch, collectors, true, 0);
     }
 
     @AfterEach

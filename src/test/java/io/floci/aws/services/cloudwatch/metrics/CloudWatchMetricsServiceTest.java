@@ -458,6 +458,100 @@ class CloudWatchMetricsServiceTest {
                 60, List.of("Sum"), null, REGION).stream().map(CloudWatchMetricsService.Datapoint::sum).toList());
     }
 
+    @Test
+    void deleteOldestMetricData_cutsOnlyThatNamespaceBackToNineTenthsOfTheCeiling() {
+        long minute = (Instant.now().getEpochSecond() / 60) * 60 - 6000;
+        putOnePerMinute(service, null, "AWS/SQS", minute, 12);
+        putOnePerMinute(service, null, NAMESPACE, minute, 12);
+
+        service.deleteOldestMetricData("AWS/SQS", 10);
+
+        assertEquals(minutesFrom(minute, 3, 12), storedMinutes("AWS/SQS", minute));
+        assertEquals(minutesFrom(minute, 0, 12), storedMinutes(NAMESPACE, minute));
+    }
+
+    @Test
+    void deleteOldestMetricData_leavesANamespaceThatHoldsExactlyTheCeiling() {
+        long minute = (Instant.now().getEpochSecond() / 60) * 60 - 6000;
+        putOnePerMinute(service, null, "AWS/SQS", minute, 10);
+
+        service.deleteOldestMetricData("AWS/SQS", 10);
+
+        assertEquals(minutesFrom(minute, 0, 10), storedMinutes("AWS/SQS", minute));
+    }
+
+    @Test
+    void deleteOldestMetricData_countsEachAccountOnItsOwn() {
+        AccountAwareStorageBackend<MetricDatum> store = AccountAwareStorageBackend.inMemory("000000000000");
+        CloudWatchMetricsService accountAware = new CloudWatchMetricsService(store, new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"));
+        long minute = (Instant.now().getEpochSecond() / 60) * 60 - 6000;
+        putOnePerMinute(accountAware, "111111111111", "AWS/SQS", minute, 12);
+        putOnePerMinute(accountAware, null, "AWS/SQS", minute, 8);
+
+        accountAware.deleteOldestMetricData("AWS/SQS", 10);
+
+        assertEquals(9, store.scanForAccount("111111111111", k -> true).size());
+        assertEquals(8, store.scan(k -> true).size());
+    }
+
+    @Test
+    void deleteOldestMetricData_cutsBackAStoreThatWasLoadedPastTheCeiling() {
+        AccountAwareStorageBackend<MetricDatum> store = AccountAwareStorageBackend.inMemory("000000000000");
+        RegionResolver resolver = new RegionResolver("us-east-1", "000000000000");
+        long minute = (Instant.now().getEpochSecond() / 60) * 60 - 6000;
+        putOnePerMinute(new CloudWatchMetricsService(store, new InMemoryStorage<>(), resolver), null, "AWS/SQS",
+                minute, 30);
+        CloudWatchMetricsService restarted = new CloudWatchMetricsService(store, new InMemoryStorage<>(), resolver);
+
+        restarted.deleteOldestMetricData("AWS/SQS", 10);
+
+        assertEquals(9, store.scan(k -> true).size());
+    }
+
+    @Test
+    void deleteOldestMetricData_waitsForTheKeyIndex() {
+        long minute = (Instant.now().getEpochSecond() / 60) * 60 - 6000;
+        putOnePerMinute(service, null, "AWS/SQS", minute, 12);
+        service.beforeReset();
+
+        service.deleteOldestMetricData("AWS/SQS", 10);
+        assertEquals(minutesFrom(minute, 0, 12), storedMinutes("AWS/SQS", minute));
+
+        service.afterReset();
+        service.deleteOldestMetricData("AWS/SQS", 10);
+        assertEquals(minutesFrom(minute, 3, 12), storedMinutes("AWS/SQS", minute));
+    }
+
+    private void putOnePerMinute(CloudWatchMetricsService target, String accountId, String namespace,
+                                 long firstMinute, int count) {
+        for (int i = 0; i < count; i++) {
+            MetricDatum datum = datum(i % 2 == 0 ? "Sent" : "Received", 1);
+            datum.setTimestamp(firstMinute + 60L * i);
+            target.putMetricDataForAccount(accountId, namespace, List.of(datum), REGION);
+        }
+    }
+
+    /** The minutes for which {@code namespace} still holds a datapoint of either metric, oldest first. */
+    private List<Instant> storedMinutes(String namespace, long firstMinute) {
+        List<Instant> minutes = new ArrayList<>();
+        for (String metric : List.of("Sent", "Received")) {
+            service.getMetricStatistics(namespace, metric, null, Instant.ofEpochSecond(firstMinute),
+                            Instant.ofEpochSecond(firstMinute + 6000), 60, List.of("Sum"), null, REGION)
+                    .forEach(point -> minutes.add(point.timestamp()));
+        }
+        minutes.sort(null);
+        return minutes;
+    }
+
+    private static List<Instant> minutesFrom(long firstMinute, int from, int to) {
+        List<Instant> minutes = new ArrayList<>();
+        for (int i = from; i < to; i++) {
+            minutes.add(Instant.ofEpochSecond(firstMinute + 60L * i));
+        }
+        return minutes;
+    }
+
     // ──────────────────────────── GetMetricStatistics ────────────────────────────
 
     @Test

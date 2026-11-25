@@ -3495,6 +3495,244 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .formParam("Description", "res").post("/").then();
     }
 
+    /**
+     * An Identity Store user is checked on the identity store and on the user its id names, so a grant on both lets the
+     * caller read that user and not another.
+     */
+    @Test
+    void anIdentityStoreUserIsCheckedOnItsStoreAndItself() {
+        String store = "d-1234567890";
+        String allowed = identityStoreUser(store);
+        String other = identityStoreUser(store);
+        User user = user("res-identitystore");
+        user.policy(allowOn("identitystore:DescribeUser", "arn:aws:identitystore::" + ACCOUNT + ":identitystore/" + store)
+                + "," + allowOn("identitystore:DescribeUser", "arn:aws:identitystore:::user/" + allowed));
+        send(user, "identitystore", "AWSIdentityStore.DescribeUser", "1.1",
+                "{\"IdentityStoreId\":\"" + store + "\",\"UserId\":\"" + allowed + "\"}").statusCode(200);
+        refusedJson(send(user, "identitystore", "AWSIdentityStore.DescribeUser", "1.1",
+                "{\"IdentityStoreId\":\"" + store + "\",\"UserId\":\"" + other + "\"}"),
+                "identitystore:DescribeUser");
+    }
+
+    /**
+     * An Identity Store membership is checked on its group and its user too, which the Service Authorization Reference
+     * requires its actions on and its record holds, so a deny on one group refuses reading a membership of it and not
+     * one of another group.
+     */
+    @Test
+    void anIdentityStoreMembershipIsCheckedOnItsGroupAndItsUser() {
+        String store = "d-1234567890";
+        String member = identityStoreUser(store);
+        String denied = identityStoreGroup(store, "res-denied-" + suffix());
+        String inDenied = identityStoreMembership(store, denied, member);
+        String inOther = identityStoreMembership(store, identityStoreGroup(store, "res-other-" + suffix()), member);
+        User user = user("res-identitystore-membership");
+        user.policy(allowOn("identitystore:DescribeGroupMembership", "*") + ","
+                + denyOn("identitystore:DescribeGroupMembership", "arn:aws:identitystore:::group/" + denied));
+        refusedJson(send(user, "identitystore", "AWSIdentityStore.DescribeGroupMembership", "1.1",
+                "{\"IdentityStoreId\":\"" + store + "\",\"MembershipId\":\"" + inDenied + "\"}"),
+                "identitystore:DescribeGroupMembership");
+        send(user, "identitystore", "AWSIdentityStore.DescribeGroupMembership", "1.1",
+                "{\"IdentityStoreId\":\"" + store + "\",\"MembershipId\":\"" + inOther + "\"}").statusCode(200);
+    }
+
+    /**
+     * An Identity Store lookup is checked on what it finds, which the Service Authorization Reference requires it on:
+     * {@code GetUserId} on the user its alternate identifier names, {@code GetGroupMembershipId} on the membership of
+     * its group and member, so a deny on one refuses that lookup and not another's.
+     */
+    @Test
+    void anIdentityStoreLookupIsCheckedOnWhatItFinds() {
+        String store = "d-1234567890";
+        String deniedName = "res-denied-" + suffix();
+        String denied = identityStoreUser(store, deniedName);
+        String otherName = "res-other-" + suffix();
+        String other = identityStoreUser(store, otherName);
+        String group = identityStoreGroup(store, "res-group-" + suffix());
+        String deniedMembership = identityStoreMembership(store, group, denied);
+        identityStoreMembership(store, group, other);
+        User user = user("res-identitystore-lookup");
+        String membershipArn = "arn:aws:identitystore:::membership/" + deniedMembership;
+        user.policy(allowOn("identitystore:GetUserId", "*") + "," + allowOn("identitystore:GetGroupMembershipId", "*")
+                + "," + denyOn("identitystore:GetUserId", "arn:aws:identitystore:::user/" + denied) + ","
+                + denyOn("identitystore:GetGroupMembershipId", membershipArn));
+        refusedJson(getUserId(user, store, deniedName), "identitystore:GetUserId");
+        getUserId(user, store, otherName).statusCode(200).body("UserId", equalTo(other));
+        refusedJson(getGroupMembershipId(user, store, group, denied), "identitystore:GetGroupMembershipId");
+        getGroupMembershipId(user, store, group, other).statusCode(200);
+    }
+
+    private static ValidatableResponse getUserId(User user, String store, String userName) {
+        return send(user, "identitystore", "AWSIdentityStore.GetUserId", "1.1", "{\"IdentityStoreId\":\"" + store
+                + "\",\"AlternateIdentifier\":{\"UniqueAttribute\":{\"AttributePath\":\"userName\","
+                + "\"AttributeValue\":\"" + userName + "\"}}}");
+    }
+
+    private static ValidatableResponse getGroupMembershipId(User user, String store, String group, String member) {
+        return send(user, "identitystore", "AWSIdentityStore.GetGroupMembershipId", "1.1", "{\"IdentityStoreId\":\""
+                + store + "\",\"GroupId\":\"" + group + "\",\"MemberId\":{\"UserId\":\"" + member + "\"}}");
+    }
+
+    /** A group of the identity store, created as the admin and deleted after the test; its id. */
+    private String identityStoreGroup(String store, String displayName) {
+        String groupId = adminJson("identitystore", "AWSIdentityStore.CreateGroup")
+                .body("{\"IdentityStoreId\":\"" + store + "\",\"DisplayName\":\"" + displayName + "\"}")
+                .post("/").then().statusCode(200).extract().path("GroupId");
+        cleanup.register(() -> adminJson("identitystore", "AWSIdentityStore.DeleteGroup")
+                .body("{\"IdentityStoreId\":\"" + store + "\",\"GroupId\":\"" + groupId + "\"}").post("/"));
+        return groupId;
+    }
+
+    /** The membership of a user in a group of the identity store, created as the admin; its id. */
+    private String identityStoreMembership(String store, String group, String member) {
+        return adminJson("identitystore", "AWSIdentityStore.CreateGroupMembership")
+                .body("{\"IdentityStoreId\":\"" + store + "\",\"GroupId\":\"" + group + "\",\"MemberId\":{"
+                        + "\"UserId\":\"" + member + "\"}}")
+                .post("/").then().statusCode(200).extract().path("MembershipId");
+    }
+
+    /** A user of the identity store, created as the admin and deleted after the test; its id. */
+    private String identityStoreUser(String store) {
+        return identityStoreUser(store, "res-" + suffix());
+    }
+
+    /** A user of the identity store of that name, created as the admin and deleted after the test; its id. */
+    private String identityStoreUser(String store, String userName) {
+        String userId = adminJson("identitystore", "AWSIdentityStore.CreateUser")
+                .body("{\"IdentityStoreId\":\"" + store + "\",\"UserName\":\"" + userName + "\","
+                        + "\"DisplayName\":\"Res\"}")
+                .post("/").then().statusCode(200).extract().path("UserId");
+        cleanup.register(() -> adminJson("identitystore", "AWSIdentityStore.DeleteUser")
+                .body("{\"IdentityStoreId\":\"" + store + "\",\"UserId\":\"" + userId + "\"}").post("/"));
+        return userId;
+    }
+
+    /**
+     * A MemoryDB ACL is checked on the ARN its name gives, {@code acl/<name>}, the one MemoryDB mints, so a grant on one
+     * lets the caller describe it and not another.
+     */
+    @Test
+    void aMemoryDbAclIsCheckedOnTheArnItsNameGives() {
+        String acl = "res-acl-" + suffix();
+        adminJson("memorydb", "AmazonMemoryDB.CreateACL")
+                .body("{\"ACLName\":\"" + acl + "\",\"UserNames\":[\"default\"]}").post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("memorydb", "AmazonMemoryDB.DeleteACL")
+                .body("{\"ACLName\":\"" + acl + "\"}").post("/"));
+        User user = user("res-memorydb");
+        user.policy(allowOn("memorydb:DescribeAcls", "arn:aws:memorydb:" + REGION + ":" + ACCOUNT + ":acl/" + acl));
+        send(user, "memorydb", "AmazonMemoryDB.DescribeACLs", "1.1", "{\"ACLName\":\"" + acl + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "memorydb", "AmazonMemoryDB.DescribeACLs", "1.1",
+                "{\"ACLName\":\"" + acl + "-other\"}"), "memorydb:DescribeAcls");
+    }
+
+    /**
+     * A Route 53 Resolver firewall domain list is checked on the ARN its id gives, {@code firewall-domain-list/<id>},
+     * the one Route 53 Resolver mints, so a grant on one lets the caller read it and not another.
+     */
+    @Test
+    void aRoute53ResolverDomainListIsCheckedOnTheArnItsIdGives() {
+        String allowed = domainList("res-fdl-" + suffix());
+        String other = domainList("res-fdl-other-" + suffix());
+        User user = user("res-resolver");
+        user.policy(allowOn("route53resolver:GetFirewallDomainList",
+                "arn:aws:route53resolver:" + REGION + ":" + ACCOUNT + ":firewall-domain-list/" + allowed));
+        send(user, "route53resolver", "Route53Resolver.GetFirewallDomainList", "1.1",
+                "{\"FirewallDomainListId\":\"" + allowed + "\"}").statusCode(200);
+        refusedJson(send(user, "route53resolver", "Route53Resolver.GetFirewallDomainList", "1.1",
+                "{\"FirewallDomainListId\":\"" + other + "\"}"), "route53resolver:GetFirewallDomainList");
+    }
+
+    /**
+     * A managed firewall domain list, which AWS owns, is checked on the ARN Route 53 Resolver gives it, so a grant on
+     * the ARN ListFirewallDomainLists returns lets the caller read that list.
+     */
+    @Test
+    void aManagedRoute53ResolverDomainListIsCheckedOnTheArnTheServiceGivesIt() {
+        String id = adminJson("route53resolver", "Route53Resolver.ListFirewallDomainLists").body("{}").post("/")
+                .then().statusCode(200).extract().path("FirewallDomainLists.find { it.ManagedOwnerName != null }.Id");
+        String arn = adminJson("route53resolver", "Route53Resolver.ListFirewallDomainLists").body("{}").post("/")
+                .then().statusCode(200).extract()
+                .path("FirewallDomainLists.find { it.Id == '" + id + "' }.Arn");
+        User user = user("res-resolver-managed");
+        user.policy(allowOn("route53resolver:GetFirewallDomainList", arn));
+        send(user, "route53resolver", "Route53Resolver.GetFirewallDomainList", "1.1",
+                "{\"FirewallDomainListId\":\"" + id + "\"}").statusCode(200);
+    }
+
+    /** A firewall domain list of the name, created as the admin and deleted after the test; its id. */
+    private String domainList(String name) {
+        String id = adminJson("route53resolver", "Route53Resolver.CreateFirewallDomainList")
+                .body("{\"CreatorRequestId\":\"" + name + "\",\"Name\":\"" + name + "\"}")
+                .post("/").then().statusCode(200).extract().path("FirewallDomainList.Id");
+        cleanup.register(() -> adminJson("route53resolver", "Route53Resolver.DeleteFirewallDomainList")
+                .body("{\"FirewallDomainListId\":\"" + id + "\"}").post("/"));
+        return id;
+    }
+
+    /**
+     * A SageMaker model is checked on the ARN its name gives, {@code model/<name>}, so a grant on one lets the request
+     * reach SageMaker, which answers that the model does not exist, and the same grant refuses another.
+     */
+    @Test
+    void aSageMakerModelIsCheckedOnTheArnItsNameGives() {
+        String model = "res-model-" + suffix();
+        User user = user("res-sagemaker");
+        user.policy(allowOn("sagemaker:DescribeModel", "arn:aws:sagemaker:" + REGION + ":" + ACCOUNT + ":model/" + model));
+        send(user, "sagemaker", "SageMaker.DescribeModel", "1.1", "{\"ModelName\":\"" + model + "\"}")
+                .statusCode(400).body(containsString("Could not find model"));
+        refusedJson(send(user, "sagemaker", "SageMaker.DescribeModel", "1.1",
+                "{\"ModelName\":\"" + model + "-other\"}"), "sagemaker:DescribeModel");
+    }
+
+    /**
+     * A SageMaker create that tags what it makes also needs {@code sagemaker:AddTags}, which the Service Reference
+     * lists among CreateModel's authorized actions: a caller allowed the create alone is refused it with tags, and
+     * one allowed AddTags too is not.
+     */
+    @Test
+    void aTaggedSageMakerCreateAlsoNeedsAddTags() {
+        String model = "res-tagged-model-" + suffix();
+        String request = "{\"ModelName\":\"" + model + "\",\"ExecutionRoleArn\":\"arn:aws:iam::" + ACCOUNT
+                + ":role/res-sagemaker-role\",\"PrimaryContainer\":{\"Image\":\"example/model:1\"},"
+                + "\"Tags\":[{\"Key\":\"team\",\"Value\":\"a\"}]}";
+        cleanup.register(() -> adminJson("sagemaker", "SageMaker.DeleteModel")
+                .body("{\"ModelName\":\"" + model + "\"}").post("/"));
+        User creator = user("res-sagemaker-create");
+        creator.policy(allowOn("sagemaker:CreateModel", "*") + "," + allowOn("iam:PassRole", "*"));
+        refusedJson(send(creator, "sagemaker", "SageMaker.CreateModel", "1.1", request), "sagemaker:AddTags");
+        User tagger = user("res-sagemaker-tag");
+        tagger.policy(allowOn("sagemaker:CreateModel", "*") + "," + allowOn("iam:PassRole", "*") + ","
+                + allowOn("sagemaker:AddTags", "*"));
+        send(tagger, "sagemaker", "SageMaker.CreateModel", "1.1", request)
+                .body(not(containsString("not authorized to perform")));
+    }
+
+    /**
+     * A tagged SageMaker CreateEndpoint needs {@code sagemaker:AddTags} on the endpoint it makes alone, not on the
+     * endpoint configuration it runs: a caller allowed to tag the new endpoint creates it, one allowed to tag the
+     * configuration alone is refused.
+     */
+    @Test
+    void aTaggedSageMakerEndpointNeedsAddTagsOnTheEndpointAlone() {
+        String endpoint = "res-tagged-endpoint-" + suffix();
+        String config = "res-endpoint-config-" + suffix();
+        String prefix = "arn:aws:sagemaker:" + REGION + ":" + ACCOUNT + ":";
+        String request = "{\"EndpointName\":\"" + endpoint + "\",\"EndpointConfigName\":\"" + config + "\","
+                + "\"Tags\":[{\"Key\":\"team\",\"Value\":\"a\"}]}";
+        String create = allowOn("sagemaker:CreateEndpoint", prefix + "endpoint/" + endpoint) + ","
+                + allowOn("sagemaker:CreateEndpoint", prefix + "endpoint-config/" + config);
+        cleanup.register(() -> adminJson("sagemaker", "SageMaker.DeleteEndpoint")
+                .body("{\"EndpointName\":\"" + endpoint + "\"}").post("/"));
+        User endpointTagger = user("res-sagemaker-endpoint-tag");
+        endpointTagger.policy(create + "," + allowOn("sagemaker:AddTags", prefix + "endpoint/" + endpoint));
+        send(endpointTagger, "sagemaker", "SageMaker.CreateEndpoint", "1.1", request)
+                .body(not(containsString("not authorized to perform")));
+        User configTagger = user("res-sagemaker-config-tag");
+        configTagger.policy(create + "," + allowOn("sagemaker:AddTags", prefix + "endpoint-config/" + config));
+        refusedJson(send(configTagger, "sagemaker", "SageMaker.CreateEndpoint", "1.1", request), "sagemaker:AddTags");
+    }
+
     private static ValidatableResponse glue(String operation, String body) {
         return adminJson("glue", "AWSGlue." + operation).body(body).post("/").then();
     }
@@ -3775,6 +4013,10 @@ class IamRequestResourceEnforcementIntegrationTest {
 
     private static String allowOn(String action, String resource) {
         return "{\"Effect\":\"Allow\",\"Action\":\"" + action + "\",\"Resource\":\"" + resource + "\"}";
+    }
+
+    private static String denyOn(String action, String resource) {
+        return "{\"Effect\":\"Deny\",\"Action\":\"" + action + "\",\"Resource\":\"" + resource + "\"}";
     }
 
     private User user(String name) {

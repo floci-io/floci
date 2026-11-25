@@ -1,5 +1,6 @@
 package io.floci.aws.services.amazonmq.container;
 
+import com.github.dockerjava.api.model.Container;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
@@ -24,6 +25,8 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -46,6 +49,12 @@ public class RabbitMqManager {
     private static final Logger LOG = Logger.getLogger(RabbitMqManager.class);
     private static final int AMQP_PORT = 5672;
     private static final int MGMT_PORT = 15672;
+    /**
+     * The node name every broker container runs as. RabbitMQ keeps its data under
+     * {@code /var/lib/rabbitmq/mnesia/<node name>}, and the name defaults to the hostname, which Docker sets to the
+     * container's id: without a fixed name, a new container on the same volume starts an empty node.
+     */
+    static final String NODE_NAME = "rabbit@localhost";
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -56,13 +65,24 @@ public class RabbitMqManager {
     private final RegionResolver regionResolver;
     private final Map<String, Closeable> logStreams = new ConcurrentHashMap<>();
     private final Map<String, String> containerIds = new ConcurrentHashMap<>();
-    // Host ports reserved for each running broker (in-memory only, like containerIds):
-    // released when the container goes away so repeated create/delete cycles do not
-    // exhaust the configured ranges.
+    // Host ports this process reserved for each running broker: released when the container
+    // goes away so repeated create/delete cycles do not exhaust the configured ranges. The
+    // broker records them too, so a restart can publish the broker on the same ones.
     private final Map<String, HostPorts> hostPorts = new ConcurrentHashMap<>();
 
     /** The pair of host ports a broker's container is published on. */
     record HostPorts(int amqp, int console) {}
+
+    // Set by stopAll(). A start still running when shutdown removes the containers, as a restore's can be while an
+    // image pulls, removes its own container rather than leave it behind after the cleanup.
+    private boolean shuttingDown;
+
+    /** Thrown by a start that shutdown overtook; its container, if any, is already removed. */
+    public static final class ShuttingDownException extends IllegalStateException {
+        public ShuttingDownException(String brokerId) {
+            super("Floci is shutting down; not starting the RabbitMQ container of broker " + brokerId);
+        }
+    }
 
     @Inject
     public RabbitMqManager(ContainerBuilder containerBuilder,
@@ -86,7 +106,24 @@ public class RabbitMqManager {
         return ContainerStorageHelper.dockerName(config, "amazonmq-" + brokerId);
     }
 
+    /** Starts the container of a new broker, seeding its admin user. */
     public void startContainer(Broker broker) {
+        start(broker, true);
+    }
+
+    /**
+     * Starts the container of a broker that ran before Floci restarted, on its volume, where its node already holds
+     * its users, vhosts and messages, so nothing is seeded: the admin password is never stored. It is published on
+     * the host ports it had when they are still free.
+     */
+    public void restoreContainer(Broker broker) {
+        start(broker, false);
+    }
+
+    private void start(Broker broker, boolean seedAdmin) {
+        if (isShuttingDown()) {
+            throw new ShuttingDownException(broker.getBrokerId());
+        }
         String image = config.services().amazonmq().defaultImage();
         String containerName = containerName(broker.getBrokerId());
         LOG.infov("Starting RabbitMQ container for broker {0} using image {1}",
@@ -100,14 +137,14 @@ public class RabbitMqManager {
                 .withDockerNetwork(config.services().dockerNetwork())
                 .withLogRotation()
                 .withPushedLogs()
+                .withEnv("RABBITMQ_NODENAME", NODE_NAME)
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "amazonmq", broker.getBrokerId(), regionResolver.getAccountId(),
-                        brokerRegion(broker)));
+                        "amazonmq", broker.getBrokerId(), brokerAccount(broker), brokerRegion(broker)));
 
         // Seed the broker's admin user. RabbitMQ's built-in `guest` user is
         // loopback-only, so it cannot authenticate over the mapped host port; a user
         // created via RABBITMQ_DEFAULT_USER/PASS is not loopback-restricted and can.
-        if (!broker.getUsers().isEmpty()) {
+        if (seedAdmin && !broker.getUsers().isEmpty()) {
             MqUser admin = broker.getUsers().get(0);
             if (admin.getPassword() == null) {
                 // The password is in-memory only (a secret we do not persist). It is
@@ -125,7 +162,7 @@ public class RabbitMqManager {
         // A re-provision of the same broker has just removed its old container, so any
         // reservation held for it is stale; hand the ports back before allocating anew.
         releaseHostPorts(broker.getBrokerId());
-        HostPorts ports = allocateHostPorts();
+        HostPorts ports = allocateHostPorts(broker);
 
         // Publish both ports on the host in every topology (see class javadoc). The
         // endpoints resolved below stay topology-aware: localhost:<hostPort> natively,
@@ -156,37 +193,98 @@ public class RabbitMqManager {
             portAllocator.release(ports.console());
             throw e;
         }
-        broker.setContainerId(info.containerId());
-        containerIds.put(broker.getBrokerId(), info.containerId());
-        hostPorts.put(broker.getBrokerId(), ports);
+        synchronized (this) {
+            if (shuttingDown) {
+                lifecycleManager.stopAndRemove(info.containerId(), null);
+                portAllocator.release(ports.amqp());
+                portAllocator.release(ports.console());
+                throw new ShuttingDownException(broker.getBrokerId());
+            }
+            containerIds.put(broker.getBrokerId(), info.containerId());
+            hostPorts.put(broker.getBrokerId(), ports);
+        }
+        try {
+            EndpointInfo amqp = info.getEndpoint(AMQP_PORT);
+            EndpointInfo mgmt = info.getEndpoint(MGMT_PORT);
+            BrokerInstance instance = new BrokerInstance(
+                    "http://" + mgmt.host() + ":" + mgmt.port(),
+                    List.of("amqp://" + amqp.host() + ":" + amqp.port()),
+                    amqp.host());
+            attachLogs(broker, info.containerId());
+            broker.setContainerId(info.containerId());
+            broker.setBrokerInstances(new ArrayList<>(List.of(instance)));
+            LOG.infov("RabbitMQ container {0} started for broker {1}: amqp={2} (host ports amqp={3}, console={4})",
+                    info.containerId(), broker.getBrokerName(), instance.getEndpoints().get(0),
+                    String.valueOf(ports.amqp()), String.valueOf(ports.console()));
+        } catch (RuntimeException e) {
+            // A container that started but could not be wired up is not left running behind a failed broker.
+            containerIds.remove(broker.getBrokerId());
+            releaseHostPorts(broker.getBrokerId());
+            lifecycleManager.stopAndRemove(info.containerId(), logStreams.remove(broker.getBrokerId()));
+            throw e;
+        }
+        // Recorded only once the container is up and wired: a broker that has them ran under the fixed node name.
+        broker.setNodeName(NODE_NAME);
+        broker.setAmqpHostPort(ports.amqp());
+        broker.setConsoleHostPort(ports.console());
+    }
 
-        EndpointInfo amqp = info.getEndpoint(AMQP_PORT);
-        EndpointInfo mgmt = info.getEndpoint(MGMT_PORT);
-        BrokerInstance instance = new BrokerInstance(
-                "http://" + mgmt.host() + ":" + mgmt.port(),
-                List.of("amqp://" + amqp.host() + ":" + amqp.port()),
-                amqp.host());
-        broker.setBrokerInstances(new ArrayList<>(List.of(instance)));
-        LOG.infov("RabbitMQ container {0} started for broker {1}: amqp={2} (host ports amqp={3}, console={4})",
-                info.containerId(), broker.getBrokerName(), instance.getEndpoints().get(0),
-                String.valueOf(ports.amqp()), String.valueOf(ports.console()));
+    /**
+     * Keeps a broker's container that outlived Floci, as one does when Floci is killed rather than shut down,
+     * when it still answers on the console its record names: whatever its node name, its node is the one holding
+     * the broker's data. The container is tracked again, so shutdown removes it, and its logs are streamed again.
+     * Returns whether the container was kept.
+     */
+    public boolean adoptRunningContainer(Broker broker) {
+        String name = containerName(broker.getBrokerId());
+        Optional<Container> container = lifecycleManager.findByName(name);
+        String legacyName = ContainerStorageHelper.legacyDockerName(config, name);
+        if (container.isEmpty() && !legacyName.equals(name)) {
+            // A broker created before the floci-aws- prefix runs in a container of the old name.
+            container = lifecycleManager.findByName(legacyName);
+        }
+        if (container.isEmpty() || !"running".equals(container.get().getState()) || !isReady(broker)) {
+            return false;
+        }
+        String containerId = container.get().getId();
+        synchronized (this) {
+            if (shuttingDown) {
+                return false;
+            }
+            containerIds.put(broker.getBrokerId(), containerId);
+        }
+        broker.setContainerId(containerId);
+        attachLogs(broker, containerId);
+        LOG.infov("Kept the running RabbitMQ container {0} of broker {1}", containerId, broker.getBrokerName());
+        return true;
+    }
 
-        String shortId = info.containerId().length() >= 8
-                ? info.containerId().substring(0, 8)
-                : info.containerId();
-        String logGroup = broker.generalLogGroup();
-        String logStream = logStreamer.generateLogStreamName(shortId);
-        String region = brokerRegion(broker);
-        Closeable logHandle = logStreamer.attachPolled(
-                info.containerId(), logGroup, logStream, region, "amazonmq:" + broker.getBrokerId());
+    private void attachLogs(Broker broker, String containerId) {
+        String shortId = containerId.length() >= 8 ? containerId.substring(0, 8) : containerId;
+        Closeable logHandle = logStreamer.attachPolledForAccount(brokerAccount(broker), containerId,
+                broker.generalLogGroup(), logStreamer.generateLogStreamName(shortId), brokerRegion(broker),
+                "amazonmq:" + broker.getBrokerId());
         if (logHandle != null) {
             logStreams.put(broker.getBrokerId(), logHandle);
         }
     }
 
+    /**
+     * The account that owns the broker. A restore runs outside any request, where the resolver answers the default
+     * account; a broker recorded without its account is the request's.
+     */
+    private String brokerAccount(Broker broker) {
+        return broker.getAccountId() != null ? broker.getAccountId() : regionResolver.getAccountId();
+    }
+
     /** The Region the broker's ARN names, and the default Region for a broker recorded without one. */
     private String brokerRegion(Broker broker) {
         return regionResolver.regionOf(broker.getBrokerArn());
+    }
+
+    /** Whether shutdown has removed the containers, after which no broker container starts. */
+    public synchronized boolean isShuttingDown() {
+        return shuttingDown;
     }
 
     /**
@@ -247,6 +345,9 @@ public class RabbitMqManager {
      * alongside the other container managers.
      */
     public void stopAll() {
+        synchronized (this) {
+            shuttingDown = true;
+        }
         if (!containerIds.isEmpty()) {
             LOG.infov("Stopping {0} RabbitMQ container(s) on shutdown", containerIds.size());
         }
@@ -261,17 +362,31 @@ public class RabbitMqManager {
         }
     }
 
-    private HostPorts allocateHostPorts() {
+    /**
+     * The broker's host ports: the ones it had, each that is still free and in its range, as a restored broker has,
+     * and new ones otherwise, as a new broker, which has none, always gets.
+     */
+    private HostPorts allocateHostPorts(Broker broker) {
         EmulatorConfig.AmazonMqServiceConfig mq = config.services().amazonmq();
-        int amqp = portAllocator.allocate(mq.amqpHostPortBase(), mq.amqpHostPortMax());
+        int amqp = reuseOrAllocate(broker.getAmqpHostPort(), mq.amqpHostPortBase(), mq.amqpHostPortMax());
         int console;
         try {
-            console = portAllocator.allocate(mq.consoleHostPortBase(), mq.consoleHostPortMax());
+            console = reuseOrAllocate(broker.getConsoleHostPort(), mq.consoleHostPortBase(), mq.consoleHostPortMax());
         } catch (RuntimeException e) {
             portAllocator.release(amqp);
             throw e;
         }
         return new HostPorts(amqp, console);
+    }
+
+    private int reuseOrAllocate(Integer previous, int base, int max) {
+        if (previous != null && previous >= base && previous <= max) {
+            OptionalInt reused = portAllocator.allocateIfFree(previous);
+            if (reused.isPresent()) {
+                return reused.getAsInt();
+            }
+        }
+        return portAllocator.allocate(base, max);
     }
 
     private void releaseHostPorts(String brokerId) {

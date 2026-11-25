@@ -893,16 +893,8 @@ public class NativeDynamoDbJsonHandler {
             checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression));
             checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression));
         } catch (AwsException e) {
-            throw inValidationEnvelope(e);
+            throw SmithyValidationErrors.inEnvelope(e);
         }
-    }
-
-    // A size check and a BETWEEN error add the envelope themselves.
-    private static AwsException inValidationEnvelope(AwsException e) {
-        if (!"ValidationException".equals(e.getErrorCode()) || e.getMessage().startsWith(VALIDATION_ENVELOPE)) {
-            return e;
-        }
-        return SmithyValidationErrors.validationException(e.getMessage());
     }
 
     private static void requireNonEmptyMap(JsonNode map, String member) {
@@ -1090,7 +1082,7 @@ public class NativeDynamoDbJsonHandler {
                 checkUnusedEav(exprAttrValues, colonTokensAll);
             }
         } catch (AwsException e) {
-            throw inValidationEnvelope(e);
+            throw SmithyValidationErrors.inEnvelope(e);
         }
 
         if (exprAttrValues != null) {
@@ -2609,13 +2601,8 @@ public class NativeDynamoDbJsonHandler {
         addIndexViolations(request.path("GlobalSecondaryIndexes"), "globalSecondaryIndexes", true, violations);
         addOlderEnumError(request, "BillingMode", "billingMode", DynamoDbService.BILLING_MODES, violations);
         JsonNode sse = request.path("SSESpecification");
-        String kmsMasterKeyId = textOrNull(sse, "KMSMasterKeyId");
-        if (kmsMasterKeyId != null) {
-            addIfPresent(violations, SmithyValidationErrors.lengthOutOfRange(
-                    "sSESpecification.kMSMasterKeyId", kmsMasterKeyId, 1, 2048));
-        }
-        addOlderEnumError(sse, "SSEType", "sSESpecification.sSEType", NativeDynamoDbTableService.SSE_TYPES,
-                violations);
+        violations.addAll(NativeDynamoDbTableService.sseSpecificationViolations(textOrNull(sse, "SSEType"),
+                textOrNull(sse, "KMSMasterKeyId")));
         addKeySchemaViolations(request.path("KeySchema"), "keySchema", violations);
         violations.addAll(throughputViolations(request.path("ProvisionedThroughput"), "provisionedThroughput"));
         JsonNode stream = request.path("StreamSpecification");

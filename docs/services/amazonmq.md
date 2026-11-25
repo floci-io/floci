@@ -71,6 +71,21 @@ authentication, and other Docker settings see [Docker Configuration](../configur
   `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`.
 - **Readiness**: The broker state transitions to `RUNNING` once the RabbitMQ management
   API answers on its port.
+- **Restarts**: Floci removes broker containers when it shuts down. With persistent storage,
+  each broker that was `RUNNING`, or still starting, goes back to `CREATION_IN_PROGRESS` when
+  Floci starts again, and its container starts in the background, so Floci reports itself
+  ready without waiting for it. A container that outlived Floci, as when Floci is killed
+  rather than shut down, is kept when it still answers. Otherwise the broker gets a new
+  container on its volume, published on the host ports it had when they are still free, and
+  turns `RUNNING` once the management API answers. Broker containers run as the fixed
+  RabbitMQ node name `rabbit@localhost`, which names the node's data directory, so the new
+  container keeps the broker's users, vhosts and messages. The admin password Floci never
+  stores isn't needed. A broker whose container can't be started is reported
+  `CREATION_FAILED` and tried again the next time Floci starts. A broker created before node
+  names were fixed kept its data under its old container's hostname, which no new container
+  can find, so with no surviving container it is reported `CREATION_FAILED`; delete and
+  create it again. A broker `CreateBroker` failed for stays as it is, and one a crash left
+  `DELETION_IN_PROGRESS` is deleted with its container and volume.
 
 ## Examples
 

@@ -30,6 +30,7 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -1608,6 +1609,165 @@ class ElbV2ServiceTest {
         service.modifyTargetGroup(REGION, group.getTargetGroupArn(), null, null, null,
                 null, null, timeout == 2 ? 120 : 2, null, null, null);
         assertEquals(timeout == 2 ? 120 : 2, group.getHealthCheckTimeoutSeconds());
+    }
+
+    /**
+     * "For Application Load Balancers, the default is HTTP. For Network Load Balancers and Gateway Load Balancers,
+     * the default is TCP", and a target type of alb supports only HTTP and HTTPS checks. A TCP check has no path or
+     * matcher.
+     */
+    @ParameterizedTest
+    @CsvSource({"HTTP, instance, HTTP", "HTTPS, ip, HTTP", "TCP, instance, TCP", "TLS, ip, TCP", "UDP, instance, TCP",
+            "TCP_UDP, ip, TCP", "GENEVE, ip, TCP", "TCP, alb, HTTP"})
+    void theHealthCheckProtocolDefaultsByTheTargetGroupProtocol(String protocol, String targetType, String expected) {
+        TargetGroup group = healthCheckedGroup("defaults-" + protocol.toLowerCase().replace('_', '-') + "-" + targetType,
+                protocol, targetType, null, null, null);
+
+        assertEquals(expected, group.getHealthCheckProtocol());
+        assertEquals("HTTP".equals(expected) ? "/" : null, group.getHealthCheckPath());
+        assertEquals("HTTP".equals(expected) ? "200" : null, group.getMatcher());
+    }
+
+    /**
+     * A health check uses HTTP, HTTPS or TCP, and TCP is not supported for an HTTP or HTTPS target group or a target
+     * type of alb. The refusal names the protocols the target group takes, as AWS's does for a TCP check of an HTTP
+     * target group, on create and on modify alike: "Health check protocol 'TCP' must be one of 'HTTP, HTTPS'".
+     */
+    @ParameterizedTest
+    @CsvSource({"HTTP, instance, TCP, 'HTTP, HTTPS'", "HTTPS, ip, TCP, 'HTTP, HTTPS'", "TCP, alb, TCP, 'HTTP, HTTPS'",
+            "HTTP, ip, TLS, 'HTTP, HTTPS'", "TCP, ip, TLS, 'HTTP, HTTPS, TCP'", "TCP, ip, UDP, 'HTTP, HTTPS, TCP'",
+            "UDP, ip, TCP_UDP, 'HTTP, HTTPS, TCP'", "TCP, ip, GENEVE, 'HTTP, HTTPS, TCP'",
+            "TCP, ip, QUIC, 'HTTP, HTTPS, TCP'", "TCP_UDP, ip, TCP_QUIC, 'HTTP, HTTPS, TCP'"})
+    void aHealthCheckProtocolTheTargetGroupDoesNotTakeIsRefused(String protocol, String targetType,
+                                                               String healthCheckProtocol, String supported) {
+        String message = "Health check protocol '" + healthCheckProtocol + "' must be one of '" + supported + "'";
+        assertRefused("ValidationError", message,
+                () -> healthCheckedGroup("refused", protocol, targetType, healthCheckProtocol, null, null));
+        assertTrue(service.describeTargetGroups(REGION, null, null, null).isEmpty());
+
+        TargetGroup created = healthCheckedGroup("kept", protocol, targetType, null, null, null);
+        String arn = created.getTargetGroupArn();
+        String checkProtocol = created.getHealthCheckProtocol();
+        assertRefused("ValidationError", message, () -> service.modifyTargetGroup(REGION, arn, healthCheckProtocol,
+                "8080", null, null, null, null, null, null, null));
+        assertEquals(checkProtocol, storedGroup(arn).getHealthCheckProtocol());
+        assertEquals("traffic-port", storedGroup(arn).getHealthCheckPort());
+    }
+
+    /**
+     * {@code HealthCheckPath} and {@code Matcher} are "[HTTP/HTTPS health checks]" members, judged against the check
+     * the request leaves: the protocol it names, the default, or the one the target group has.
+     */
+    @Test
+    void aTcpCheckCarriesNoPathOrMatcher() {
+        String paths = "Health check paths are not supported for TCP health checks";
+        String matchers = "Health check matchers are not supported for TCP health checks";
+        assertRefused("InvalidConfigurationRequest", paths,
+                () -> healthCheckedGroup("named-tcp", "TCP", "ip", "TCP", "/health", null));
+        assertRefused("InvalidConfigurationRequest", paths,
+                () -> healthCheckedGroup("default-tcp", "TLS", "ip", null, "/health", null));
+        assertRefused("InvalidConfigurationRequest", matchers,
+                () -> healthCheckedGroup("default-tcp", "TCP", "ip", null, null, "200-399"));
+        assertTrue(service.describeTargetGroups(REGION, null, null, null).isEmpty());
+
+        String tcp = healthCheckedGroup("tcp", "TCP", "ip", null, null, null).getTargetGroupArn();
+        assertRefused("InvalidConfigurationRequest", paths, () -> service.modifyTargetGroup(REGION, tcp, null, "8080",
+                null, "/health", null, null, null, null, null));
+        assertEquals("traffic-port", storedGroup(tcp).getHealthCheckPort());
+        String http = healthCheckedGroup("http", "TCP", "ip", "HTTP", "/ready", "200-399").getTargetGroupArn();
+        assertRefused("InvalidConfigurationRequest", matchers, () -> service.modifyTargetGroup(REGION, http, "TCP",
+                null, null, null, null, null, null, null, "200"));
+        assertEquals("HTTP", storedGroup(http).getHealthCheckProtocol());
+        assertEquals("/ready", storedGroup(http).getHealthCheckPath());
+        assertEquals("200-399", storedGroup(http).getMatcher());
+    }
+
+    /**
+     * Moving a TCP check to HTTP or HTTPS takes both a path and a matcher: the modify fills in neither. A check that
+     * is HTTP or HTTPS already keeps its own, and one moved to TCP drops them.
+     */
+    @Test
+    void movingATcpCheckToHttpTakesAPathAndAMatcher() {
+        String arn = healthCheckedGroup("to-http", "TCP", "ip", null, null, null).getTargetGroupArn();
+        for (String[] members : new String[][]{{null, null}, {"/ready", null}, {null, "200-399"}}) {
+            assertRefused("ValidationError", "Path and return code are required for layer 7 health checks.",
+                    () -> service.modifyTargetGroup(REGION, arn, "HTTP", "8080", null, members[0], null, null, null,
+                            null, members[1]));
+            assertEquals("TCP", storedGroup(arn).getHealthCheckProtocol());
+            assertEquals("traffic-port", storedGroup(arn).getHealthCheckPort());
+            assertNull(storedGroup(arn).getHealthCheckPath());
+        }
+
+        service.modifyTargetGroup(REGION, arn, "HTTPS", "8443", null, "/ready", null, null, null, null, "200-399");
+        assertEquals("HTTPS", storedGroup(arn).getHealthCheckProtocol());
+        assertEquals("/ready", storedGroup(arn).getHealthCheckPath());
+        assertEquals("200-399", storedGroup(arn).getMatcher());
+
+        service.modifyTargetGroup(REGION, arn, "HTTP", null, null, null, null, null, null, null, null);
+        assertEquals("HTTP", storedGroup(arn).getHealthCheckProtocol());
+        assertEquals("/ready", storedGroup(arn).getHealthCheckPath());
+        assertEquals("200-399", storedGroup(arn).getMatcher());
+
+        service.modifyTargetGroup(REGION, arn, "TCP", null, null, null, null, null, null, null, null);
+        assertEquals("TCP", storedGroup(arn).getHealthCheckProtocol());
+        assertNull(storedGroup(arn).getHealthCheckPath());
+        assertNull(storedGroup(arn).getMatcher());
+    }
+
+    /**
+     * A rollback puts back the health check it saved. A TCP check saved before TCP checks dropped their path and
+     * matcher still holds them, and they are not put back.
+     */
+    @Test
+    void aRestoredTcpCheckGetsNoPathOrMatcher() {
+        String arn = healthCheckedGroup("restored", "TCP", "ip", "HTTP", "/ready", "200-399").getTargetGroupArn();
+        TargetGroup saved = new TargetGroup();
+        saved.setHealthCheckProtocol("TCP");
+        saved.setHealthCheckPort("traffic-port");
+        saved.setHealthCheckEnabled(true);
+        saved.setHealthCheckPath("/");
+        saved.setHealthCheckIntervalSeconds(10);
+        saved.setHealthCheckTimeoutSeconds(6);
+        saved.setHealthyThresholdCount(3);
+        saved.setUnhealthyThresholdCount(4);
+        saved.setMatcher("200");
+
+        service.restoreHealthCheck(REGION, arn, saved);
+
+        TargetGroup restored = storedGroup(arn);
+        assertEquals("TCP", restored.getHealthCheckProtocol());
+        assertNull(restored.getHealthCheckPath());
+        assertNull(restored.getMatcher());
+        assertEquals(10, restored.getHealthCheckIntervalSeconds());
+        assertEquals(6, restored.getHealthCheckTimeoutSeconds());
+        assertEquals(3, restored.getHealthyThresholdCount());
+        assertEquals(4, restored.getUnhealthyThresholdCount());
+
+        saved.setHealthCheckProtocol("HTTPS");
+        saved.setHealthCheckPath("/live");
+        saved.setMatcher("204");
+        service.restoreHealthCheck(REGION, arn, saved);
+
+        assertEquals("HTTPS", storedGroup(arn).getHealthCheckProtocol());
+        assertEquals("/live", storedGroup(arn).getHealthCheckPath());
+        assertEquals("204", storedGroup(arn).getMatcher());
+    }
+
+    private TargetGroup healthCheckedGroup(String name, String protocol, String targetType,
+                                           String healthCheckProtocol, String healthCheckPath, String matcher) {
+        return service.createTargetGroup(REGION, name, protocol, null, 80, "vpc-a", targetType, healthCheckProtocol,
+                null, null, healthCheckPath, null, null, null, null, matcher, null, Map.of());
+    }
+
+    private TargetGroup storedGroup(String arn) {
+        return service.describeTargetGroups(REGION, null, List.of(arn), null).getFirst();
+    }
+
+    private static void assertRefused(String code, String message, Executable call) {
+        AwsException refusal = assertThrows(AwsException.class, call);
+        assertEquals(code, refusal.getErrorCode());
+        assertEquals(message, refusal.getMessage());
+        assertEquals(400, refusal.getHttpStatus());
     }
 
     private String createTargetGroup(String name) {

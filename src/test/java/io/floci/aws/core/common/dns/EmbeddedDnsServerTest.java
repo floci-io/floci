@@ -409,6 +409,36 @@ class EmbeddedDnsServerTest {
     }
 
     @Test
+    void planQuery_answersAnOwnNameWhoseStoredAddressIsRefusedLikeAnyOtherOwnName() {
+        DnsRecordSource refusing = new DnsRecordSource() {
+            @Override
+            public Optional<DnsAnswer> resolveAuthoritative(String name, int type) {
+                return Optional.of(DnsAnswer.refused());
+            }
+
+            @Override
+            public Optional<DnsAnswer> resolveIpv4(String name) {
+                return Optional.empty();
+            }
+        };
+        EmbeddedDnsServer dns = withRules(List.of(refusing),
+                rules("vpc-a", forward("rule.localhost.floci.io", "10.1.0.53")), clientVpc("vpc-a"));
+
+        assertEquals(List.of(MY_IP),
+                dns.planQuery("api.auth.localhost.floci.io", CLIENT, MY_IP, 1).answer().orElseThrow().addresses());
+        assertEquals(DnsAnswer.noData(),
+                dns.planQuery("api.auth.localhost.floci.io", CLIENT, MY_IP, 28).answer().orElseThrow());
+        assertEquals(DnsAnswer.refused(),
+                dns.planQuery("api.auth.localhost.floci.io", CLIENT, MY_IP, 16).answer().orElseThrow());
+        assertEquals(DnsAnswer.refused(),
+                dns.planQuery("api.auth.example.test", CLIENT, MY_IP, 1).answer().orElseThrow());
+        assertEquals(DnsAnswer.refused(),
+                dns.planQuery("ip-172-16-128-9.ec2.internal", CLIENT, MY_IP, 1).answer().orElseThrow());
+        assertEquals(List.of(new DnsForwardingRule.Target("10.1.0.53", 53)),
+                dns.planQuery("api.rule.localhost.floci.io", CLIENT, MY_IP, 1).ruleTargets());
+    }
+
+    @Test
     void planQuery_keepsResolvingWhenARuleSourceThrows() {
         DnsForwardingRuleSource failing = (accountId, region, vpcId) -> {
             throw new IllegalStateException("storage is down");

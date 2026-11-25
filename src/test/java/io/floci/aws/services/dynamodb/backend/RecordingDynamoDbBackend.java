@@ -106,6 +106,12 @@ public final class RecordingDynamoDbBackend implements DynamoDbItemAccess, Dynam
     }
 
     @Override
+    public TableDefinition enableServerSideEncryption(Scope scope, String tableName, String sseType,
+                                                      String kmsMasterKeyId) {
+        return record("enableServerSideEncryption", scope);
+    }
+
+    @Override
     public TableDefinition createOnDemandTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
                                                List<AttributeDefinition> attributeDefinitions,
                                                List<GlobalSecondaryIndex> globalSecondaryIndexes,

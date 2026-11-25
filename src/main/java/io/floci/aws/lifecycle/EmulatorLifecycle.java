@@ -8,6 +8,7 @@ import io.floci.aws.core.storage.PersistentPathValidator;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.lifecycle.inithook.InitializationHook;
 import io.floci.aws.lifecycle.inithook.InitializationHooksRunner;
+import io.floci.aws.services.amazonmq.AmazonMqService;
 import io.floci.aws.services.amazonmq.container.RabbitMqManager;
 import io.floci.aws.services.appsync.graphql.SchemaCreationWorker;
 import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
@@ -44,6 +45,7 @@ import io.floci.aws.services.rds.container.RdsContainerManager;
 import io.floci.aws.services.rds.integration.RdsIntegrationLoader;
 import io.floci.aws.services.rds.proxy.RdsProxyManager;
 import io.floci.aws.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
+import io.floci.aws.services.sagemaker.SageMakerService;
 import io.floci.aws.services.stepfunctions.StepFunctionsService;
 import io.floci.aws.services.timestreaminfluxdb.TimestreamInfluxDbService;
 import io.quarkus.runtime.Quarkus;
@@ -102,7 +104,9 @@ public class EmulatorLifecycle {
     private final NeptuneContainerManager neptuneContainerManager;
     private final NeptuneProxyManager neptuneProxyManager;
     private final RabbitMqManager rabbitMqManager;
+    private final AmazonMqService amazonMqService;
     private final FlinkContainerManager flinkContainerManager;
+    private final SageMakerService sageMakerService;
     private final RdsService rdsService;
     private final TimestreamInfluxDbService timestreamInfluxDbService;
     private final ElbV2Service elbV2Service;
@@ -150,7 +154,9 @@ public class EmulatorLifecycle {
                              NeptuneContainerManager neptuneContainerManager,
                              NeptuneProxyManager neptuneProxyManager,
                              RabbitMqManager rabbitMqManager,
+                             AmazonMqService amazonMqService,
                              FlinkContainerManager flinkContainerManager,
+                             SageMakerService sageMakerService,
                              RdsService rdsService,
                              TimestreamInfluxDbService timestreamInfluxDbService,
                              ElbV2Service elbV2Service,
@@ -195,7 +201,9 @@ public class EmulatorLifecycle {
         this.neptuneContainerManager = neptuneContainerManager;
         this.neptuneProxyManager = neptuneProxyManager;
         this.rabbitMqManager = rabbitMqManager;
+        this.amazonMqService = amazonMqService;
         this.flinkContainerManager = flinkContainerManager;
+        this.sageMakerService = sageMakerService;
         this.rdsService = rdsService;
         this.timestreamInfluxDbService = timestreamInfluxDbService;
         this.elbV2Service = elbV2Service;
@@ -296,6 +304,21 @@ public class EmulatorLifecycle {
             });
             elastiCacheMemcachedService.restorePersistedRuntime().exceptionally(ex -> {
                 LOG.warnv("ElastiCache Memcached restore failed: {0}", ex.getMessage());
+                return null;
+            });
+        }
+        if (config.services().sagemaker().enabled()) {
+            // Restores every endpoint it can and throws the ones it could not, which must not stop Floci starting.
+            try {
+                sageMakerService.restorePersistedRuntime();
+            } catch (RuntimeException e) {
+                LOG.error("Failed to restore persisted SageMaker endpoints at startup", e);
+            }
+        }
+        if (config.services().amazonmq().enabled()) {
+            // Starts the brokers' containers in the background, failing the future with the ones it could not.
+            amazonMqService.restorePersistedRuntime().exceptionally(ex -> {
+                LOG.error("Failed to restore persisted Amazon MQ brokers at startup", ex);
                 return null;
             });
         }

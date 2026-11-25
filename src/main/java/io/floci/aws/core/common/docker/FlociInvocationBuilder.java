@@ -36,6 +36,14 @@ final class FlociInvocationBuilder implements InvocationBuilder {
     /** docker-java stream callbacks running now, each on its own virtual thread. */
     private static final AtomicInteger ACTIVE_STREAMS = new AtomicInteger();
 
+    /**
+     * How much of a {@link #get()} body left unread at close is read to keep its pooled connection.
+     * Past this the call is aborted instead: httpclient5 reads a body to its end on close, and an
+     * archive closed after its first entry, as the Lambda working directory check does, would
+     * otherwise download the whole directory.
+     */
+    static final long DRAIN_ON_CLOSE_LIMIT = 64 * 1024;
+
     private final DockerHttpClient.Request.Builder requestBuilder;
     private final DockerHttpClient dockerHttpClient;
     private final ObjectMapper objectMapper;
@@ -211,15 +219,56 @@ final class FlociInvocationBuilder implements InvocationBuilder {
 
         DockerHttpClient.Response response = execute(request);
         return new FilterInputStream(response.getBody()) {
+            private boolean closed;
+
             @Override
             public void close() throws IOException {
+                if (closed) {
+                    return;
+                }
+                closed = true;
                 try {
-                    super.close();
+                    if (endsWithin(in, DRAIN_ON_CLOSE_LIMIT)) {
+                        super.close();
+                    } else {
+                        // Abort first: closing the body would read the rest of it to keep the connection.
+                        response.close();
+                        closeAbandoned();
+                    }
                 } finally {
                     response.close();
                 }
             }
+
+            private void closeAbandoned() {
+                try {
+                    super.close();
+                } catch (IOException expected) {
+                    // The aborted connection is gone, and the body was not wanted.
+                }
+            }
         };
+    }
+
+    /**
+     * Whether {@code stream} ends within {@code limit} more bytes. Reads (and discards) them, so a
+     * body that ends here gives its connection back to the pool; a read that fails counts as not ending.
+     */
+    static boolean endsWithin(InputStream stream, long limit) {
+        byte[] buffer = new byte[8192];
+        long read = 0;
+        try {
+            while (read <= limit) {
+                int n = stream.read(buffer);
+                if (n == -1) {
+                    return true;
+                }
+                read += n;
+            }
+        } catch (IOException e) {
+            return false;
+        }
+        return false;
     }
 
     @Override

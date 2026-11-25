@@ -1,0 +1,128 @@
+{
+  "_source": {
+    "pages": [
+      "https://docs.aws.amazon.com/service-authorization/latest/reference/list_awsidentitystore.html"
+    ],
+    "fetcher": "tools/aws/fetch_required_resource_types.py",
+    "retrieved": "2026-11-24",
+    "note": "Each action of each page's actions table with its resource type cells, an asterisk marking a required type, copied as they stand."
+  },
+  "namespaces": {
+    "identitystore": {
+      "page": "https://docs.aws.amazon.com/service-authorization/latest/reference/list_awsidentitystore.html",
+      "actions": {
+        "AddRegion": [
+          "Identitystore*"
+        ],
+        "CreateGroup": [
+          "Identitystore*"
+        ],
+        "CreateGroupMembership": [
+          "Group*",
+          "Identitystore*",
+          "User*"
+        ],
+        "CreateIdentityStore": [],
+        "CreateUser": [
+          "Identitystore*"
+        ],
+        "DeleteGroup": [
+          "Group*",
+          "Identitystore*"
+        ],
+        "DeleteGroupMembership": [
+          "Group*",
+          "GroupMembership*",
+          "Identitystore*",
+          "User*"
+        ],
+        "DeleteIdentityStore": [
+          "Identitystore*"
+        ],
+        "DeleteUser": [
+          "Identitystore*",
+          "User*"
+        ],
+        "DescribeGroup": [
+          "Group*",
+          "Identitystore*"
+        ],
+        "DescribeGroupMembership": [
+          "Group*",
+          "GroupMembership*",
+          "Identitystore*",
+          "User*"
+        ],
+        "DescribeIdentityStore": [
+          "Identitystore*"
+        ],
+        "DescribeRegion": [
+          "Identitystore*"
+        ],
+        "DescribeUser": [
+          "Identitystore*",
+          "User*"
+        ],
+        "GetGroupId": [
+          "Group*",
+          "Identitystore*"
+        ],
+        "GetGroupMembershipId": [
+          "Group*",
+          "GroupMembership*",
+          "Identitystore*",
+          "User*"
+        ],
+        "GetUserId": [
+          "Identitystore*",
+          "User*"
+        ],
+        "IsMemberInGroups": [
+          "AllGroupMemberships*",
+          "Group*",
+          "Identitystore*",
+          "User*"
+        ],
+        "ListGroupMemberships": [
+          "AllGroupMemberships*",
+          "Group*",
+          "Identitystore*"
+        ],
+        "ListGroupMembershipsForMember": [
+          "AllGroupMemberships*",
+          "Identitystore*",
+          "User*"
+        ],
+        "ListGroups": [
+          "AllGroups*",
+          "Identitystore*"
+        ],
+        "ListIdentityStores": [],
+        "ListRegions": [
+          "Identitystore*"
+        ],
+        "ListUsers": [
+          "AllUsers*",
+          "Identitystore*"
+        ],
+        "RemoveRegion": [
+          "Identitystore*"
+        ],
+        "ReserveUser": [
+          "Identitystore*"
+        ],
+        "UpdateGroup": [
+          "Group*",
+          "Identitystore*"
+        ],
+        "UpdateIdentityStore": [
+          "Identitystore*"
+        ],
+        "UpdateUser": [
+          "Identitystore*",
+          "User*"
+        ]
+      }
+    }
+  }
+}

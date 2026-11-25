@@ -92,6 +92,19 @@ describe('API Gateway v2', () => {
       expect(res.ApiKeySelectionExpression).toBe('$request.header.x-api-key');
     });
 
+    it('should reject models for HTTP APIs', async () => {
+      await expect(gw.send(new CreateModelCommand({
+        ApiId: apiId,
+        Name: 'HttpModel',
+        Schema: JSON.stringify({ type: 'object' }),
+        ContentType: 'application/json',
+      }))).rejects.toMatchObject({
+        name: 'BadRequestException',
+        message: 'Currently, Models are not permitted for APIs with a protocol type of HTTP',
+        $metadata: { httpStatusCode: 400 },
+      });
+    });
+
     it('should list APIs including the created one', async () => {
       const res = await gw.send(new GetApisCommand({}));
       expect(res.Items!.some(a => a.ApiId === apiId)).toBe(true);
@@ -500,7 +513,8 @@ describe('API Gateway v2', () => {
     beforeAll(async () => {
       const res = await gw.send(new CreateApiCommand({
         Name: uniqueName('model-test'),
-        ProtocolType: 'HTTP',
+        ProtocolType: 'WEBSOCKET',
+        RouteSelectionExpression: '$request.body.action',
       }));
       apiId = res.ApiId!;
     });

@@ -263,10 +263,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         }
         TargetGroup prior = MAPPER.convertValue(saved, TargetGroup.class);
         String arn = resource.getPhysicalId();
-        elbV2Service.modifyTargetGroup(AwsArnUtils.parse(arn).region(), arn, prior.getHealthCheckProtocol(),
-                prior.getHealthCheckPort(), prior.getHealthCheckEnabled(), prior.getHealthCheckPath(),
-                prior.getHealthCheckIntervalSeconds(), prior.getHealthCheckTimeoutSeconds(),
-                prior.getHealthyThresholdCount(), prior.getUnhealthyThresholdCount(), prior.getMatcher());
+        elbV2Service.restoreHealthCheck(AwsArnUtils.parse(arn).region(), arn, prior);
         resource.getAttributes().remove(HEALTH_UPDATE_SNAPSHOT_ATTR);
     }
 

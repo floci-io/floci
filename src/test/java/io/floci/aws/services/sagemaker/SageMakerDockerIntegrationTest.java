@@ -2,8 +2,10 @@ package io.floci.aws.services.sagemaker;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Event;
 import com.github.dockerjava.api.model.EventType;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.TestImages;
@@ -42,6 +44,8 @@ class SageMakerDockerIntegrationTest {
 
     @Inject DockerClient dockerClient;
     @Inject S3Service s3Service;
+    @Inject SageMakerService sageMakerService;
+    @Inject EmulatorConfig config;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -85,13 +89,49 @@ class SageMakerDockerIntegrationTest {
 
     @Test
     void endpointHostsRealContainerAndRuntimeProxiesInvocations() throws Exception {
+        String endpoint = createUppercasingEndpoint("sm-ep");
+        waitForEndpoint(endpoint, "InService");
+        invoke(endpoint).then().statusCode(200).body(equalTo("MODEL:HELLO"));
+        post("SageMaker.DeleteEndpoint", "{\"EndpointName\":\"%s\"}".formatted(endpoint)).then().statusCode(200);
+    }
+
+    /**
+     * #5664: Floci's shutdown removes every endpoint container, and the stored endpoint still says InService. The
+     * startup restore starts it again from its model, model data included, so InvokeEndpoint answers again. Removing
+     * the container stands in for the shutdown, and the restore is what startup calls.
+     */
+    @Test
+    void anEndpointWhoseContainerIsGoneServesAgainOnceRestored() throws Exception {
+        String endpoint = createUppercasingEndpoint("sm-restore");
+        waitForEndpoint(endpoint, "InService");
+        try {
+            for (Container container : dockerClient.listContainersCmd().withShowAll(true)
+                    .withNameFilter(List.of(containerName(endpoint))).exec()) {
+                dockerClient.removeContainerCmd(container.getId()).withForce(true).exec();
+            }
+            invoke(endpoint).then().statusCode(424).body("__type", equalTo("ModelError"));
+
+            sageMakerService.restorePersistedRuntime();
+
+            waitForEndpoint(endpoint, "InService");
+            invoke(endpoint).then().statusCode(200).body(equalTo("MODEL:HELLO"));
+        } finally {
+            post("SageMaker.DeleteEndpoint", "{\"EndpointName\":\"%s\"}".formatted(endpoint));
+        }
+    }
+
+    /**
+     * Creates an endpoint whose model answers an invocation with its model data, {@code MODEL:}, followed by the
+     * request body upper-cased, and returns its name. The model data is copied in from S3 as the endpoint starts.
+     */
+    private String createUppercasingEndpoint(String prefix) {
         String suffix = Long.toString(System.nanoTime(), 36);
-        String bucket = "sm-ep-" + suffix;
+        String bucket = prefix + "-" + suffix;
         s3Service.createBucket(bucket, "us-east-1");
         s3Service.putObject(bucket, "prefix.txt", "MODEL:".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
-        String model = "sm-ep-model-" + suffix;
-        String cfg = "sm-ep-cfg-" + suffix;
-        String endpoint = "sm-endpoint-" + suffix;
+        String model = prefix + "-model-" + suffix;
+        String cfg = prefix + "-cfg-" + suffix;
+        String endpoint = prefix + "-endpoint-" + suffix;
         String script = "trap 'exit 0' TERM; cat > /server.py <<'PY'\nfrom http.server import BaseHTTPRequestHandler,HTTPServer\nfrom pathlib import Path\nmodel=Path('/opt/ml/model/prefix.txt').read_bytes()\nclass H(BaseHTTPRequestHandler):\n def do_GET(self):\n  self.send_response(200 if self.path == '/ping' else 404); self.end_headers()\n def do_POST(self):\n  n=int(self.headers.get('content-length','0')); b=self.rfile.read(n); self.send_response(200); self.send_header('Content-Type','text/plain'); self.end_headers(); self.wfile.write(model+b.upper())\nHTTPServer(('0.0.0.0',8080),H).serve_forever()\nPY\npython /server.py & wait $!";
         post("SageMaker.CreateModel", """
                 {"ModelName":"%s","PrimaryContainer":{"Image":"%s","ModelDataUrl":"s3://%s/prefix.txt","ContainerEntrypoint":["/bin/sh","-c"],"ContainerArguments":[%s]}}
@@ -101,12 +141,18 @@ class SageMakerDockerIntegrationTest {
                 """.formatted(cfg, model)).then().statusCode(200);
         post("SageMaker.CreateEndpoint", "{\"EndpointName\":\"%s\",\"EndpointConfigName\":\"%s\"}".formatted(endpoint, cfg))
                 .then().statusCode(200);
-        waitForEndpoint(endpoint, "InService");
-        given().header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/runtime.sagemaker/aws4_request")
+        return endpoint;
+    }
+
+    /** The container of an endpoint of the default account in us-east-1, named as production names it. */
+    private String containerName(String endpoint) {
+        return SageMakerEndpointManager.containerName(config, "000000000000", "us-east-1", endpoint);
+    }
+
+    private Response invoke(String endpoint) {
+        return given().header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/runtime.sagemaker/aws4_request")
                 .contentType("text/plain").body("hello")
-                .when().post("/endpoints/%s/invocations".formatted(endpoint))
-                .then().statusCode(200).body(equalTo("MODEL:HELLO"));
-        post("SageMaker.DeleteEndpoint", "{\"EndpointName\":\"%s\"}".formatted(endpoint)).then().statusCode(200);
+                .when().post("/endpoints/%s/invocations".formatted(endpoint));
     }
 
     @Test
@@ -162,7 +208,7 @@ class SageMakerDockerIntegrationTest {
         // rather than polling for the container means a container that is created and discarded
         // between two polls is still seen: events are queued and replayed from the watch's start.
         try (ContainerDestroyWatch discarded =
-                new ContainerDestroyWatch(dockerClient, "floci-aws-sagemaker-endpoint-" + endpoint)) {
+                new ContainerDestroyWatch(dockerClient, containerName(endpoint))) {
             post("SageMaker.CreateEndpoint", "{\"EndpointName\":\"%s\",\"EndpointConfigName\":\"%s\"}".formatted(endpoint, cfg))
                     .then().statusCode(200);
             post("SageMaker.DeleteEndpoint", "{\"EndpointName\":\"%s\"}".formatted(endpoint)).then().statusCode(200);

@@ -5,7 +5,7 @@ blank_issues_enabled: true
 
 contact_links:
   - name: 💬 Floci Community on Slack
-    url: https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw
+    url: https://floci.io/slack
     about: Ask a question, talk through AWS behaviour or a design tradeoff, or get help before filing.
 
   - name: 🗣️ GitHub Discussions

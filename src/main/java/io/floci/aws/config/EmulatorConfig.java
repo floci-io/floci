@@ -2456,6 +2456,9 @@ public interface EmulatorConfig {
         /** Apache Pig for a {@code docker} cluster's Pig steps, which no AWS image carries; off unless enabled. */
         EmrPigConfig pig();
 
+        /** Trino on a {@code docker} cluster's primary node, which no AWS image carries; off unless enabled. */
+        EmrTrinoConfig trino();
+
         /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR step driver and bootstrap
          * container a previous run of <em>this same</em> Floci left on the daemon (matched by the
@@ -2498,6 +2501,35 @@ public interface EmulatorConfig {
          */
         @WithDefault("6845adb936a3c3bcc71451765953cae4103e410ba2f6c5a47cc9becade0a434a")
         String sha256();
+    }
+
+    interface EmrTrinoConfig {
+        /**
+         * When true, a {@code docker} cluster whose {@code Applications} name Trino runs Trino's coordinator on its
+         * primary node, from {@link #image()}, and its steps run {@code trino-cli}. Off by default, as the image is the
+         * Trino project's, not AWS's, about 1 GB to pull, and its container takes {@link #memoryMb()}.
+         *
+         * Env var: FLOCI_SERVICES_EMR_TRINO_ENABLED
+         */
+        @WithDefault("false")
+        boolean enabled();
+
+        /**
+         * The image Trino runs from, {@code %s} the Trino version of the cluster's release as the Release Guide gives
+         * it, without AWS's build suffix. One with no {@code %s} serves every release.
+         *
+         * Env var: FLOCI_SERVICES_EMR_TRINO_IMAGE
+         */
+        @WithDefault("trinodb/trino:%s")
+        String image();
+
+        /**
+         * The memory, in MiB, of the container Trino runs in, 80% of which its image gives Trino's heap.
+         *
+         * Env var: FLOCI_SERVICES_EMR_TRINO_MEMORY_MB
+         */
+        @WithDefault("2048")
+        int memoryMb();
     }
 
     interface WafV2ServiceConfig {
@@ -2554,6 +2586,17 @@ public interface EmulatorConfig {
     interface CloudWatchMetricsServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Upper bound on the datapoints kept per account in each namespace a service publishes by
+         * itself, such as AWS/SQS. Every datapoint is its own entry in a store that is held in memory
+         * and written out whole, and those services add some for each resource every minute, so
+         * without a bound the store outgrows the heap long before the 15 days AWS keeps one-minute
+         * data. Oldest datapoints are dropped first once exceeded; 0 or less keeps them all. Other
+         * namespaces, where only a client's PutMetricData writes, are never cut back.
+         */
+        @WithDefault("100000")
+        int maxStoredDatapoints();
     }
 
     interface PaymentCryptographyServiceConfig {
@@ -3849,6 +3892,20 @@ public interface EmulatorConfig {
              */
             @WithDefault("busybox:1.36")
             String initImage();
+
+            /**
+             * Seconds a Lambda pod the scheduler marks Unschedulable may stay that way before
+             * its cold start is failed, so a cluster autoscaler has time to add a node. The
+             * grace is measured from when this launcher first observes the Unschedulable
+             * reason (the PodScheduled condition's lastTransitionTime records status
+             * transitions only, so a SchedulingGated to Unschedulable flip keeps the older
+             * timestamp), and {@code 0}, the default, keeps failing the cold start the
+             * moment the pod is reported Unschedulable.
+             *
+             * Env var: FLOCI_SERVICES_LAMBDA_KUBERNETES_UNSCHEDULABLE_GRACE_SECONDS
+             */
+            @WithDefault("0")
+            int unschedulableGraceSeconds();
         }
 
         HotReload hotReload();

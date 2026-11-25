@@ -6,30 +6,43 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.services.identitystore.model.Group;
 import io.floci.aws.services.identitystore.model.Membership;
 import io.floci.aws.services.identitystore.model.User;
+import io.floci.aws.services.ssoadmin.IdentityStoreAccess;
+import io.floci.aws.services.ssoadmin.SsoAdminService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class IdentityStoreJsonHandler {
     private static final String ENTERPRISE_EXTENSION = "aws:identitystore:enterprise";
+    /** The actions that change an identity store, which the Service Authorization Reference gives the Write level. */
+    private static final Pattern WRITE_ACTION = Pattern.compile("(Create|Update|Delete)[A-Z]");
 
     private final IdentityStoreService service;
     private final ObjectMapper mapper;
+    private final SsoAdminService ssoAdmin;
+    private final RequestContext requestContext;
 
     @Inject
-    public IdentityStoreJsonHandler(IdentityStoreService service, ObjectMapper mapper) {
+    public IdentityStoreJsonHandler(IdentityStoreService service, ObjectMapper mapper, SsoAdminService ssoAdmin,
+                                    RequestContext requestContext) {
         this.service = service;
         this.mapper = mapper;
+        this.ssoAdmin = ssoAdmin;
+        this.requestContext = requestContext;
     }
 
     public Response handle(String action, JsonNode request) {
+        requireAccess(action, request);
         return switch (action) {
             case "CreateGroup" -> createGroup(request);
             case "DeleteGroup" -> emptyAfter(() -> service.deleteGroup(request));
@@ -53,6 +66,26 @@ public class IdentityStoreJsonHandler {
             default -> throw new AwsException("UnknownOperationException",
                     "Operation " + action + " is not supported.", 400);
         };
+    }
+
+    /**
+     * Refuses a request on an identity store the caller may not use so ({@link SsoAdminService#identityStoreAccess}):
+     * one it cannot see as not found, and a change from an account that may only read the store as access denied.
+     */
+    private void requireAccess(String action, JsonNode request) {
+        String storeId = request == null ? null : request.path("IdentityStoreId").asText(null);
+        if (storeId == null) {
+            return;
+        }
+        IdentityStoreAccess access = ssoAdmin.identityStoreAccess(storeId, requestContext.getAccountId());
+        if (access == IdentityStoreAccess.NONE) {
+            throw new AwsException("ResourceNotFoundException", "Identity store not found: " + storeId, 400,
+                    Map.of("ResourceType", "IDENTITY_STORE", "ResourceId", storeId));
+        }
+        if (access == IdentityStoreAccess.READ && WRITE_ACTION.matcher(action).lookingAt()) {
+            throw new AwsException("AccessDeniedException",
+                    "You do not have sufficient access to perform this action.", 400);
+        }
     }
 
     private Response createGroup(JsonNode request) {

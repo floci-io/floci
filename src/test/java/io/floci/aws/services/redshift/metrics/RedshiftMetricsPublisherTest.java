@@ -58,7 +58,7 @@ class RedshiftMetricsPublisherTest {
     }
 
     private RedshiftMetricsPublisher publisher(RedshiftMetricCollector... collectors) {
-        return new RedshiftMetricsPublisher(redshift, cloudWatch, List.of(collectors), true);
+        return new RedshiftMetricsPublisher(redshift, cloudWatch, List.of(collectors), true, 0);
     }
 
     @Test

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.redshift.spectrum.BackendSql;
 import io.floci.aws.services.redshift.spectrum.SpectrumQueryPreparation;
 import io.floci.aws.services.redshift.spectrum.SpectrumReadException;
 import io.floci.aws.services.redshift.spectrum.SpectrumSession;
@@ -18,6 +19,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -36,6 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -161,6 +164,37 @@ class RedshiftDataServiceTest {
         ObjectNode described = service.describeStatement(idOf(executed.path("Id").asText()));
         assertEquals("FAILED", described.path("Status").asText());
         assertEquals("S3 access denied", described.path("Error").asText());
+    }
+
+    @Test
+    void externalFunctionCallsArePreparedInTheStatementsOwnTransaction() throws SQLException {
+        try (Connection connection = DriverManager.getConnection(jdbcUrl, "sa", "");
+                Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE udf_marker (id int)");
+        }
+        String succeeds = "SELECT 1";
+        String fails = "SELECT * FROM udf_missing_table";
+        for (String sql : List.of(succeeds, fails)) {
+            when(preparation.referencesExternalFunction(eq(sql), any())).thenReturn(true);
+            when(preparation.prepareExternalFunctions(eq(sql), any(), any(), any(), any())).thenAnswer(invocation -> {
+                invocation.<BackendSql>getArgument(2).execute("INSERT INTO udf_marker VALUES (1)");
+                return true;
+            });
+        }
+
+        String finished = service.executeStatement(req(succeeds), REGION).path("Id").asText();
+        String failed = service.executeStatement(req(fails), REGION).path("Id").asText();
+
+        assertEquals("FINISHED", service.describeStatement(idOf(finished)).path("Status").asText());
+        assertEquals("FAILED", service.describeStatement(idOf(failed)).path("Status").asText());
+        verify(preparation).prepareExternalFunctions(eq(succeeds), argThat(SpectrumSession::inTransaction), any(),
+                eq(List.of()), isNull());
+        try (Connection connection = DriverManager.getConnection(jdbcUrl, "sa", "");
+                Statement statement = connection.createStatement();
+                ResultSet rows = statement.executeQuery("SELECT count(*) FROM udf_marker")) {
+            assertTrue(rows.next());
+            assertEquals(1, rows.getInt(1), "the failed statement must roll back what its collect passes wrote");
+        }
     }
 
     @Test

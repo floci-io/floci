@@ -37,6 +37,11 @@ import java.util.function.UnaryOperator;
 /** Access-entry and access-policy management metadata; Kubernetes authorization is handled separately. */
 @ApplicationScoped
 public class EksAccessEntryService {
+    /** The type of the access entry of an EKS Auto Mode cluster's node role. */
+    static final String AUTO_MODE_NODE_TYPE = "EC2";
+    static final String AUTO_MODE_NODE_USERNAME = "system:node:{{SessionName}}";
+    static final String AUTO_MODE_NODE_POLICY = "AmazonEKSAutoNodePolicy";
+
     private final StorageBackend<String, StoredEntry> entries;
     private final IamService iam;
     private final Clock clock;
@@ -78,9 +83,9 @@ public class EksAccessEntryService {
         }
         requireAccessPolicyArn(cluster, request.policyArn());
         AccessScope scope = accessScope(request.accessScope());
-        if (!"STANDARD".equals(stored.entry().type())) {
+        if (!"STANDARD".equals(stored.entry().type()) && !AUTO_MODE_NODE_TYPE.equals(stored.entry().type())) {
             throw new AwsException("InvalidRequestException",
-                    "Access policies can only be associated with STANDARD access entries", 400);
+                    "Access policies can only be associated with STANDARD and EC2 access entries", 400);
         }
         double now = EpochSeconds.fromMillis(clock.millis());
         double associatedAt = stored.accessPolicies().stream()
@@ -151,16 +156,28 @@ public class EksAccessEntryService {
             throw invalid("principalArn is required");
         }
         String type = request.type() == null ? "STANDARD" : request.type();
-        if (!"STANDARD".equals(type) && !"EC2_LINUX".equals(type)) {
-            throw invalid("Floci currently supports STANDARD and EC2_LINUX access entries");
+        if (!"STANDARD".equals(type) && !"EC2_LINUX".equals(type) && !AUTO_MODE_NODE_TYPE.equals(type)) {
+            throw invalid("Floci currently supports STANDARD, EC2_LINUX and EC2 access entries");
         }
         boolean node = "EC2_LINUX".equals(type);
         if (node && (request.username() != null || request.kubernetesGroups() != null)) {
             throw invalid("EC2_LINUX entries cannot specify username or kubernetesGroups");
         }
+        boolean autoModeNode = AUTO_MODE_NODE_TYPE.equals(type);
+        if (autoModeNode && request.kubernetesGroups() != null) {
+            throw invalid("The specified kubernetesGroups is invalid: setting kubernetesGroups is not allowed when the "
+                    + "type is \"EC2\".");
+        }
+        if (autoModeNode && request.username() != null) {
+            throw invalid("The specified username is invalid: setting username is not allowed when the type is \"EC2\".");
+        }
         String principal = request.principalArn();
         AwsArnUtils.Arn arn = AwsArnUtils.isArn(principal) ? AwsArnUtils.parse(principal) : null;
         AwsArnUtils.Arn clusterArn = AwsArnUtils.parse(cluster.getArn());
+        if (autoModeNode && arn != null && arn.resource().startsWith("user/")) {
+            throw invalid("AccessEntry principalArn must be IAM role when using types "
+                    + "[EC2_LINUX, EC2_WINDOWS, FARGATE_LINUX, HYBRID_LINUX, EC2]");
+        }
         if (arn == null || !arn.partition().equals(clusterArn.partition())
                 || !"iam".equals(arn.service()) || !arn.region().isEmpty() || !arn.accountId().matches("[0-9]{12}")
                 || !(arn.resource().startsWith("role/") || (!node && arn.resource().startsWith("user/")))
@@ -175,12 +192,13 @@ public class EksAccessEntryService {
                         .map(IamRole::getRoleId).orElseThrow(() -> invalid("IAM role does not exist"))
                 : iam.findUser(arn.accountId(), name).filter(value -> principal.equals(value.getArn()))
                         .map(IamUser::getUserId).orElseThrow(() -> invalid("IAM user does not exist"));
-        String username = node ? "system:node:{{EC2PrivateDNSName}}" : request.username();
-        if (username != null && !node && (username.isBlank()
+        String username = node ? "system:node:{{EC2PrivateDNSName}}"
+                : autoModeNode ? AUTO_MODE_NODE_USERNAME : request.username();
+        if (username != null && !node && !autoModeNode && (username.isBlank()
                 || username.matches("^(system|eks|aws|amazon|iam):.*"))) {
             throw invalid("Invalid username");
         }
-        if (username != null && !node) {
+        if (username != null && !node && !autoModeNode) {
             for (String placeholder : List.of("{{SessionName}}", "{{SessionNameRaw}}")) {
                 int position = username.indexOf(placeholder);
                 if (position >= 0 && !username.substring(0, position).contains(":")) {
@@ -192,7 +210,7 @@ public class EksAccessEntryService {
             username = role ? AwsArnUtils.Arn.global(arn.partition(), "sts", arn.accountId(),
                     "assumed-role/" + name + "/{{SessionName}}").toString() : principal;
         }
-        List<String> groups = node ? List.of("system:nodes")
+        List<String> groups = node || autoModeNode ? List.of("system:nodes")
                 : request.kubernetesGroups() == null ? List.of() : request.kubernetesGroups();
         if (groups.stream().anyMatch(group -> group == null || group.isBlank())) {
             throw invalid("kubernetesGroups must contain nonempty strings");
@@ -223,13 +241,53 @@ public class EksAccessEntryService {
             throw new AwsException("ResourceInUseException", "Access entry already exists", 409);
         }
         double now = EpochSeconds.fromMillis(clock.millis());
-        String entryArn = new AwsArnUtils.Arn(clusterArn.partition(), "eks", clusterArn.region(), clusterArn.accountId(),
-                "access-entry/" + cluster.getName() + "/" + (role ? "role" : "user") + "/" + arn.accountId() + "/" + name
-                        + "/" + UUID.randomUUID()).toString();
-        AccessEntry entry = new AccessEntry(entryArn, cluster.getName(), principal,
+        AccessEntry entry = new AccessEntry(entryArn(cluster, arn, role), cluster.getName(), principal,
                 type, username, List.copyOf(groups), Map.copyOf(tags), now, now);
         entries.put(key, new StoredEntry(entry, principalId, token, List.of()));
         return entry;
+    }
+
+    private static String entryArn(Cluster cluster, AwsArnUtils.Arn principal, boolean role) {
+        AwsArnUtils.Arn clusterArn = AwsArnUtils.parse(cluster.getArn());
+        String name = principal.resource().substring(principal.resource().lastIndexOf('/') + 1);
+        return new AwsArnUtils.Arn(clusterArn.partition(), "eks", clusterArn.region(), clusterArn.accountId(),
+                "access-entry/" + cluster.getName() + "/" + (role ? "role" : "user") + "/" + principal.accountId() + "/"
+                        + name + "/" + UUID.randomUUID()).toString();
+    }
+
+    /**
+     * Makes the access entry EKS makes for the node role when a cluster's EKS Auto Mode compute capability is turned
+     * on: type {@code EC2}, username {@code system:node:{{SessionName}}}, group {@code system:nodes}, with
+     * {@code AmazonEKSAutoNodePolicy} on the cluster. An entry the role already has is kept as it is. Nothing is made
+     * for a cluster whose authentication mode is {@code CONFIG_MAP}, which has no access entries, or for a role IAM
+     * doesn't have.
+     */
+    public synchronized void ensureAutoModeNodeEntry(Cluster cluster, String nodeRoleArn) {
+        if (nodeRoleArn == null || !AwsArnUtils.isArn(nodeRoleArn) || cluster.getAccessConfig() == null
+                || "CONFIG_MAP".equals(cluster.getAccessConfig().authenticationMode())) {
+            return;
+        }
+        String key = prefix(cluster) + nodeRoleArn;
+        if (entries.get(key).isPresent()) {
+            return;
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(nodeRoleArn);
+        String name = arn.resource().substring(arn.resource().lastIndexOf('/') + 1);
+        Optional<String> roleId = arn.resource().startsWith("role/")
+                ? iam.findRole(arn.accountId(), name).filter(found -> nodeRoleArn.equals(found.getArn()))
+                        .map(IamRole::getRoleId)
+                : Optional.empty();
+        if (roleId.isEmpty()) {
+            return;
+        }
+        double now = EpochSeconds.fromMillis(clock.millis());
+        AccessEntry entry = new AccessEntry(entryArn(cluster, arn, true), cluster.getName(), nodeRoleArn,
+                AUTO_MODE_NODE_TYPE, AUTO_MODE_NODE_USERNAME, List.of("system:nodes"), Map.of(), now, now);
+        String policy = new AwsArnUtils.Arn(AwsArnUtils.parse(cluster.getArn()).partition(), "eks", "",
+                "aws", // partition-literal: the AWS-managed account, "aws" in every partition
+                "cluster-access-policy/" + AUTO_MODE_NODE_POLICY).toString();
+        entries.put(key, new StoredEntry(entry, roleId.get(), null,
+                List.of(new AssociatedAccessPolicy(policy, new AccessScope("cluster", List.of()), now, now))));
     }
 
     synchronized Optional<AccessEntry> workerEntry(Cluster cluster, String accountId, String principal, String roleId) {

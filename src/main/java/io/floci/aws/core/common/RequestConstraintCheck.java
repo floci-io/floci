@@ -7,7 +7,6 @@ import com.fasterxml.jackson.databind.node.TextNode;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -96,18 +95,14 @@ public final class RequestConstraintCheck {
     }
 
     private final JsonNode model;
-    private final Map<String, Pattern> patterns = new HashMap<>();
+    private final Map<String, Pattern> patterns;
     private final Messages messages;
     private final Set<String> wordable = ConcurrentHashMap.newKeySet();
 
     private RequestConstraintCheck(JsonNode model, Messages messages) {
         this.model = model;
         this.messages = messages;
-        for (Map.Entry<String, JsonNode> shape : model.path("shapes").properties()) {
-            if (shape.getValue().has("pattern")) {
-                patterns.put(shape.getKey(), VendoredPatterns.compile(shape.getValue().get("pattern").asText()));
-            }
-        }
+        this.patterns = VendoredShapes.patterns(model.path("shapes"));
     }
 
     /** The vendored resource {@code name}; {@code description} names it in a failure. */
@@ -322,7 +317,7 @@ public final class RequestConstraintCheck {
         shape.path("required").forEach(member -> required.add(member.asText()));
         for (Map.Entry<String, JsonNode> member : shape.path("members").properties()) {
             String field = member.getKey();
-            String memberPath = (path.isEmpty() ? "" : path + ".") + lowerFirst(field);
+            String memberPath = (path.isEmpty() ? "" : path + ".") + VendoredShapes.memberName(field);
             JsonNode child = value.get(field);
             if (child == null || child.isNull()) {
                 if (required.contains(field)) {
@@ -344,7 +339,7 @@ public final class RequestConstraintCheck {
                 if (!value.isTextual()) {
                     throw messages.type(errorPath, type);
                 }
-                collectString(name, shape, value.textValue(), path, form, found);
+                found.addAll(VendoredShapes.stringViolations(shape, patterns.get(name), value.textValue(), path, form));
             }
             case "integer", "long" -> collectInteger(shape, type, value, path, errorPath, form, found);
             case "float", "double" -> {
@@ -381,21 +376,6 @@ public final class RequestConstraintCheck {
             found.add(form.valueTooLarge(path, value.asText(), shape.get("max").asLong()));
         } else if (!("integer".equals(type) ? value.canConvertToInt() : value.canConvertToLong())) {
             throw messages.type(errorPath, type);
-        }
-    }
-
-    private void collectString(String name, JsonNode shape, String text, String path,
-                               SmithyValidationErrors.Violations form, List<String> found) {
-        String length = form.lengthOutOfRange(path, text, shape.path("min").asInt(0),
-                shape.has("max") ? shape.get("max").asInt() : Integer.MAX_VALUE);
-        if (length != null) {
-            found.add(length);
-        }
-        if (patternBroken(name, text)) {
-            found.add(form.pattern(path, text, VendoredPatterns.quoted(shape)));
-        }
-        if (shape.has("enum") && !inEnum(shape, text)) {
-            found.add(form.notInEnum(text, path, enumValues(shape)));
         }
     }
 
@@ -467,34 +447,8 @@ public final class RequestConstraintCheck {
         if (!"string".equals(type)) {
             return false;
         }
-        String text = item.textValue();
-        return lengthBroken(shape, text) || patternBroken(name, text)
-                || shape.has("enum") && !inEnum(shape, text);
-    }
-
-    private static boolean lengthBroken(JsonNode shape, String text) {
-        int length = text.codePointCount(0, text.length());
-        return shape.has("min") && length < shape.get("min").asInt()
-                || shape.has("max") && length > shape.get("max").asInt();
-    }
-
-    private boolean patternBroken(String name, String text) {
-        return patterns.containsKey(name) && !patterns.get(name).matcher(text).matches();
-    }
-
-    private static boolean inEnum(JsonNode shape, String text) {
-        for (JsonNode choice : shape.get("enum")) {
-            if (choice.asText().equals(text)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static List<String> enumValues(JsonNode shape) {
-        List<String> values = new ArrayList<>();
-        shape.get("enum").forEach(choice -> values.add(choice.asText()));
-        return values;
+        return !VendoredShapes.stringViolations(shape, patterns.get(name), item.textValue(), errorPath,
+                SmithyValidationErrors.Violations.WITHOUT_VALUES).isEmpty();
     }
 
     /** The rules a string shape declares, a minimum of zero included, in the order AWS lists them. */
@@ -511,7 +465,7 @@ public final class RequestConstraintCheck {
             rules.add("Member must satisfy regular expression pattern: " + VendoredPatterns.quoted(shape));
         }
         if (shape.has("enum")) {
-            rules.add("Member must satisfy enum value set: " + enumValues(shape));
+            rules.add("Member must satisfy enum value set: " + VendoredShapes.enumValues(shape));
         }
         return rules;
     }
@@ -546,9 +500,5 @@ public final class RequestConstraintCheck {
         return shape.path("sensitive").asBoolean(false)
                 ? SmithyValidationErrors.Violations.WITHOUT_VALUES
                 : SmithyValidationErrors.Violations.QUOTED;
-    }
-
-    private static String lowerFirst(String name) {
-        return Character.toLowerCase(name.charAt(0)) + name.substring(1);
     }
 }
