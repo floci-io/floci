@@ -117,6 +117,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -184,6 +185,18 @@ public class EksClusterManager
             # EKS Auto Mode block storage is off for this cluster.
             # k3s deletes the provisioner an earlier version of this file created.
             """;
+    static final String COMPUTE_MANIFEST_FILE = "floci-eks-auto-mode-compute.yaml";
+    static final String COMPUTE_MANIFEST_TAR_ENTRY = "server/manifests/" + COMPUTE_MANIFEST_FILE;
+    // The manifest once compute is off: no objects, so k3s deletes the node pools, node class and their kinds.
+    static final String COMPUTE_MANIFEST_REMOVED = """
+            # EKS Auto Mode compute is off for this cluster.
+            # k3s deletes the node pools, node class and kinds an earlier version of this file created.
+            """;
+    /** The comment in the compute manifest that starts the {@code default} NodeClass. */
+    private static final String DEFAULT_NODE_CLASS_MARKER = "# The default NodeClass";
+    /** The label EKS Auto Mode's nodes carry, given to the cluster's node while compute is on. */
+    static final String AUTO_COMPUTE_LABEL_KEY = "eks.amazonaws.com/compute-type"; // partition-literal: a label
+    static final String AUTO_COMPUTE_LABEL = AUTO_COMPUTE_LABEL_KEY + "=auto";
     private static final String ENDPOINT_MODE_NETWORK = "network";
     public static final String DEFAULT_POD_CIDR = "10.42.0.0/16";
 
@@ -814,6 +827,10 @@ public class EksClusterManager
             if (!serviceLb) {
                 serverArgs.add("--disable=servicelb");
             }
+            if (computeOn(cluster)) {
+                // Auto Mode's nodes carry this label, which workloads select them by.
+                serverArgs.add("--node-label=" + AUTO_COMPUTE_LABEL);
+            }
 
             EksNodeCapacity.Limits nodeLimits = resolveNodeCapacity(cluster);
             if (nodeLimits != null) {
@@ -1025,6 +1042,7 @@ public class EksClusterManager
         linkContainerdCertsDir(containerId, cluster.getName());
         registerPodIdentityWebhook(containerId, cluster);
         applyBlockStorage(containerId, cluster);
+        applyCompute(containerId, cluster);
         if (signingKeyFiles != null) {
             copySigningKeysIntoContainer(containerId, signingKeyFiles, cluster.getName());
         }
@@ -1187,6 +1205,8 @@ public class EksClusterManager
         registerPodIdentityWebhook(info.containerId(), cluster,
                 () -> survivingNodeResolvesThroughFloci(info.containerId()));
         applyBlockStorage(info.containerId(), cluster);
+        applyCompute(info.containerId(), cluster);
+        applyComputeLabel(cluster, info.containerId());
         activeClusters.put(clusterResourceName(cluster), cluster);
         attachClusterLogs(cluster, true, true, false);
 
@@ -1472,6 +1492,8 @@ public class EksClusterManager
             pruneLegacyClusterNodes(cluster, containerId);
 
             registerAllJoinedNodes(cluster, containerId);
+
+            applyComputeLabel(cluster, containerId);
 
             LOG.infov("Finalized EKS cluster {0} with CA data extracted", cluster.getName());
         } catch (Exception e) {
@@ -3080,19 +3102,124 @@ public class EksClusterManager
      * the manifest lives on the cluster's data volume, which outlives a restart, and k3s prunes what it created.
      */
     void applyBlockStorage(String containerId, Cluster cluster) {
-        boolean enabled = StorageConfig.blockStorageOn(cluster.getStorageConfig());
+        applyAutoModeManifest(containerId, cluster, StorageConfig.blockStorageOn(cluster.getStorageConfig()),
+                BLOCK_STORAGE_MANIFEST_FILE, BLOCK_STORAGE_MANIFEST_TAR_ENTRY, this::blockStorageManifest,
+                BLOCK_STORAGE_MANIFEST_REMOVED, "block storage provisioner");
+    }
+
+    /**
+     * Installs an EKS Auto Mode capability's manifest while it is {@code enabled}, or, if it was installed before,
+     * replaces it with {@code removed}, which holds no objects: the manifest lives on the cluster's data volume,
+     * which outlives a restart, and k3s prunes what it created.
+     */
+    private void applyAutoModeManifest(String containerId, Cluster cluster, boolean enabled, String fileName,
+                                       String tarEntry, Supplier<String> manifest, String removed, String what) {
         try {
-            if (!enabled && !Files.exists(localClusterFile(cluster, "auto-mode", BLOCK_STORAGE_MANIFEST_FILE))) {
+            if (!enabled && !Files.exists(localClusterFile(cluster, "auto-mode", fileName))) {
                 return;
             }
-            installManifest(containerId, cluster, "auto-mode", BLOCK_STORAGE_MANIFEST_FILE,
-                    BLOCK_STORAGE_MANIFEST_TAR_ENTRY, enabled ? blockStorageManifest() : BLOCK_STORAGE_MANIFEST_REMOVED);
+            installManifest(containerId, cluster, "auto-mode", fileName, tarEntry, enabled ? manifest.get() : removed);
             if (enabled) {
-                LOG.infov("Installed the EKS Auto Mode block storage provisioner for cluster {0}", cluster.getName());
+                LOG.infov("Installed the EKS Auto Mode {0} for cluster {1}", what, cluster.getName());
             }
         } catch (Exception e) {
-            LOG.warnv("EKS cluster {0} gets no Auto Mode block storage: could not install {1} into the k3s "
-                    + "container: {2}", cluster.getName(), BLOCK_STORAGE_MANIFEST_FILE, e.getMessage());
+            LOG.warnv("EKS cluster {0} gets no Auto Mode {1}: could not install {2} into the k3s container: {3}",
+                    cluster.getName(), what, fileName, e.getMessage());
+        }
+    }
+
+    /**
+     * Installs, while the cluster's EKS Auto Mode compute is on, the NodePool and NodeClass kinds, the {@code default}
+     * NodeClass and the built-in node pools its {@code computeConfig.nodePools} names, as Auto Mode does (measured), and
+     * removes what it no longer names; otherwise removes them all. Floci launches no nodes for them.
+     */
+    void applyCompute(String containerId, Cluster cluster) {
+        applyAutoModeManifest(containerId, cluster, computeOn(cluster), COMPUTE_MANIFEST_FILE, COMPUTE_MANIFEST_TAR_ENTRY,
+                () -> computeManifest(cluster), COMPUTE_MANIFEST_REMOVED, "node pools");
+    }
+
+    /**
+     * Gives the cluster's running node the label EKS Auto Mode's nodes carry while compute is on, and takes it off
+     * once compute is off. k3s's {@code --node-label} adds a label when the node starts but never removes one, and a
+     * node started before Floci set it has none until it restarts. A cluster that never had Auto Mode compute is left
+     * alone.
+     */
+    void applyComputeLabel(Cluster cluster, String containerId) {
+        if (cluster.getComputeConfig() == null || containerId == null) {
+            return;
+        }
+        String label = computeOn(cluster) ? AUTO_COMPUTE_LABEL : AUTO_COMPUTE_LABEL_KEY + "-";
+        try {
+            ContainerExec.Result result = execInContainerForResult(containerId, new String[]{"kubectl", "label",
+                    "node", deriveClusterNodePrivateDnsName(cluster), "--overwrite", label}, 15);
+            if (result.exitCode() != 0) {
+                LOG.warnv("Could not set the Auto Mode label of EKS cluster {0}''s node: {1}", cluster.getName(),
+                        result.summary());
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not set the Auto Mode label of EKS cluster {0}''s node: {1}", cluster.getName(),
+                    e.getMessage());
+        }
+    }
+
+    static boolean computeOn(Cluster cluster) {
+        return cluster != null && cluster.getComputeConfig() != null
+                && Boolean.TRUE.equals(cluster.getComputeConfig().enabled());
+    }
+
+    /**
+     * The kinds and the {@code default} NodeClass, with the node role's name, the cluster's subnets and its security
+     * group as Auto Mode sets them, then the pools the cluster names. Without a node role there are no pools, and no
+     * NodeClass is written.
+     */
+    String computeManifest(Cluster cluster) {
+        String manifest = resource(EksClusterManager.class.getResourceAsStream("/eks/auto-mode-compute.yaml"),
+                "/eks/auto-mode-compute.yaml");
+        String roleArn = cluster.getComputeConfig().nodeRoleArn();
+        if (roleArn == null || roleArn.isBlank()) {
+            return manifest.substring(0, manifest.indexOf(DEFAULT_NODE_CLASS_MARKER));
+        }
+        ResourcesVpcConfig vpc = cluster.getResourcesVpcConfig();
+        List<String> subnets = vpc == null || vpc.getSubnetIds() == null ? List.of() : vpc.getSubnetIds();
+        String securityGroup = vpc == null ? null : vpc.getClusterSecurityGroupId();
+        StringBuilder out = new StringBuilder(manifest
+                .replace("%ROLE%", roleArn.substring(roleArn.lastIndexOf('/') + 1))
+                .replace("%SUBNET_TERMS%", selectorTerms(subnets))
+                .replace("%SECURITY_GROUP_TERMS%", selectorTerms(securityGroup == null ? List.of() : List.of(securityGroup))));
+        List<String> pools = cluster.getComputeConfig().nodePools() == null ? List.of()
+                : cluster.getComputeConfig().nodePools();
+        if (pools.contains("general-purpose")) {
+            out.append(resource(EksClusterManager.class.getResourceAsStream("/eks/auto-mode-nodepool-general-purpose.yaml"),
+                    "/eks/auto-mode-nodepool-general-purpose.yaml"));
+        }
+        if (pools.contains("system")) {
+            out.append(resource(EksClusterManager.class.getResourceAsStream("/eks/auto-mode-nodepool-system.yaml"),
+                    "/eks/auto-mode-nodepool-system.yaml"));
+        }
+        return out.toString();
+    }
+
+    /** The rest of a selector terms key's line: {@code []} for none, else one {@code - id:} term a line. */
+    private static String selectorTerms(List<String> ids) {
+        if (ids.isEmpty()) {
+            return " []";
+        }
+        StringBuilder terms = new StringBuilder();
+        for (String id : ids) {
+            terms.append("\n  - id: ").append(id);
+        }
+        return terms.toString();
+    }
+
+    /** A packaged resource the caller opened with an inline literal, which the native image build finds. */
+    private static String resource(InputStream in, String path) {
+        try (in) {
+            if (in == null) {
+                throw new IllegalStateException("missing resource " + path);
+            }
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 

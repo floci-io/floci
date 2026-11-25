@@ -1339,6 +1339,14 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 && !config.services().eks().mock() && clusterManager != null && cluster.getContainerId() != null) {
             replaceNodeForServiceLb(requireClusterInRequestRegion(name));
         }
+        if (nextAutoMode != null && !config.services().eks().mock() && clusterManager != null) {
+            // The node pools the update names, or none once compute is off, as Auto Mode keeps them. A node replaced
+            // above got them as it started; this one, or the replacement, gets the same again.
+            Cluster updated = requireClusterInRequestRegion(name);
+            if (updated.getContainerId() != null) {
+                clusterManager.applyCompute(updated.getContainerId(), updated);
+            }
+        }
         if ((nextAutoMode != null && nextAutoMode.computeOn()) || requestedMode != null) {
             // Turning compute on, or moving off CONFIG_MAP while it is on, gives the node role its entry.
             ensureAutoModeNodeEntry(requireClusterInRequestRegion(name));
