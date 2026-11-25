@@ -558,6 +558,9 @@ NodePort: a backend Service without one (a `ClusterIP` Service) is left out, and
 `ip` (`IngressClassParams.targetType` or the `alb.ingress.kubernetes.io/target-type` annotation) gets no load
 balancer. Only HTTP on port 80 is served: HTTPS listeners, certificates and the other `IngressClassParams` fields
 are kept but not applied.
+Floci's load balancers share one address, so a TCP listener needs its local port to itself
+([Elastic Load Balancing](elb.md)): while a `LoadBalancer` Service of the cluster serves TCP port 80, an Ingress's
+ALB is made and its address written, but its listener serves no traffic until that Service's listener is gone.
 
 ## Node group inputs
 
