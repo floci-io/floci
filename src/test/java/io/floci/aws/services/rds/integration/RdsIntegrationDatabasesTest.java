@@ -231,6 +231,20 @@ class RdsIntegrationDatabasesTest {
     }
 
     @Test
+    void refusesRetryingAFailedLoadWhenCallerLacksPermission() {
+        integration.getDestinations().add(new Integration.Destination("orders_dw", "orders",
+                Integration.Destination.STATE_FAILED, null));
+        backend.existingDatabase = true;
+        backend.canRetryDatabase = false;
+
+        assertState("42501", () -> databases.create(statement("orders"), session("orders-dw"), backend));
+
+        assertThat(backend.statements, empty());
+        verify(integrations, never()).addDestination(any(), anyString(), anyString(), anyBoolean());
+        verify(loader, never()).submit(any(), anyString(), anyString(), any());
+    }
+
+    @Test
     void restoresPreviousFailedDestinationAndErrorsWhenRetryDatabaseCreationFails() {
         Integration.Destination failed = new Integration.Destination("orders_dw", "orders",
                 Integration.Destination.STATE_FAILED, null);
@@ -256,9 +270,13 @@ class RdsIntegrationDatabasesTest {
         private final List<String> statements = new ArrayList<>();
         private RuntimeException failure;
         private boolean existingDatabase;
+        private boolean canRetryDatabase = true;
 
         @Override
         public Optional<String> queryString(String sql) {
+            if (sql.contains("pg_catalog.pg_roles")) {
+                return canRetryDatabase ? Optional.of("1") : Optional.empty();
+            }
             return existingDatabase ? Optional.of("1") : Optional.empty();
         }
 
