@@ -26,6 +26,7 @@ final class IotDeviceIdentity {
 
     private static final char[] PASSWORD = "device".toCharArray();
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final String DEFAULT_ACCESS_KEY = "test";
 
     final String certificateId;
     final String certificateArn;
@@ -33,19 +34,22 @@ final class IotDeviceIdentity {
     final PrivateKey privateKey;
     /** The region every request about this device is signed for; null sends them unsigned, to the default region. */
     private final String region;
+    /** The access key every signed request about this device names; a 12-digit key signs as that account. */
+    private final String accessKeyId;
 
     private IotDeviceIdentity(String certificateId, String certificateArn, X509Certificate certificate, PrivateKey privateKey,
-                              String region) {
+                              String region, String accessKeyId) {
         this.certificateId = certificateId;
         this.certificateArn = certificateArn;
         this.certificate = certificate;
         this.privateKey = privateKey;
         this.region = region;
+        this.accessKeyId = accessKeyId;
     }
 
     /** Provisions a device over the REST API, as an onboarding flow does. */
     static IotDeviceIdentity provision(boolean active) {
-        return provisionIn(null, active);
+        return provisionIn(null, DEFAULT_ACCESS_KEY, active);
     }
 
     /**
@@ -53,13 +57,24 @@ final class IotDeviceIdentity {
      * {@code cleanup} deactivate and delete its certificate after the test.
      */
     static IotDeviceIdentity provision(String region, boolean active, PartitionCleanup cleanup) {
-        IotDeviceIdentity device = provisionIn(region, active);
+        IotDeviceIdentity device = provisionIn(region, DEFAULT_ACCESS_KEY, active);
         cleanup.register(device::delete);
         return device;
     }
 
-    private static IotDeviceIdentity provisionIn(String region, boolean active) {
-        JsonPath created = request(region)
+    /**
+     * Provisions a device in account {@code accountId} and {@code region}, every request about it
+     * signed as that account for that region, and has {@code cleanup} deactivate and delete its
+     * certificate after the test.
+     */
+    static IotDeviceIdentity provisionInAccount(String accountId, String region, boolean active, PartitionCleanup cleanup) {
+        IotDeviceIdentity device = provisionIn(region, accountId, active);
+        cleanup.register(device::delete);
+        return device;
+    }
+
+    private static IotDeviceIdentity provisionIn(String region, String accessKeyId, boolean active) {
+        JsonPath created = request(region, accessKeyId)
                 .queryParam("setAsActive", active)
                 .when().post("/keys-and-certificate")
                 .then().statusCode(200)
@@ -69,15 +84,15 @@ final class IotDeviceIdentity {
                 created.getString("certificateArn"),
                 Pem.parseCertificate(created.getString("certificatePem")),
                 Pem.parsePrivateKey(created.getString("keyPair.PrivateKey")),
-                region);
+                region, accessKeyId);
     }
 
-    private static RequestSpecification request(String region) {
-        return region == null ? given() : given().header("Authorization", auth("test", region, "iot"));
+    private static RequestSpecification request(String region, String accessKeyId) {
+        return region == null ? given() : given().header("Authorization", auth(accessKeyId, region, "iot"));
     }
 
     private RequestSpecification request() {
-        return request(region);
+        return request(region, accessKeyId);
     }
 
     /**
@@ -131,7 +146,8 @@ final class IotDeviceIdentity {
     static IotDeviceIdentity stranger(Path tlsDir) {
         CertificateGenerator.GeneratedCertificate issued = FlociCertificateAuthority.loadOrCreate(tlsDir).issueClientCertificate("stranger");
         return new IotDeviceIdentity("unregistered", "arn:aws:iot:us-east-1:000000000000:cert/unregistered",
-                Pem.parseCertificate(issued.certificatePem()), Pem.parsePrivateKey(issued.privateKeyPem()), null);
+                Pem.parseCertificate(issued.certificatePem()), Pem.parsePrivateKey(issued.privateKeyPem()), null,
+                DEFAULT_ACCESS_KEY);
     }
 
     /** Presents the device certificate and trusts only the Floci CA. */

@@ -1,11 +1,13 @@
 package io.floci.aws.services.iot;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.TlsCertificateManager;
 import io.floci.aws.testing.IotMqttTlsProfile;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
 import org.eclipse.paho.client.mqttv3.MqttCallback;
@@ -44,6 +46,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -245,6 +248,62 @@ class IotMqttTlsIntegrationTest {
     }
 
     @Test
+    void shadowEventsOfADeviceInAnotherAccountFireThatAccountsRules() throws Exception {
+        String account = "222222222222";
+        String region = "us-east-1";
+        long id = System.nanoTime();
+        String thing = "tlsAccountThing" + id;
+        String ownTarget = "tls/account/own/" + id;
+        String defaultTarget = "tls/account/default/" + id;
+        String acceptedTopic = "$aws/things/" + thing + "/shadow/update/accepted";
+        IotDeviceIdentity otherAccountDevice = IotDeviceIdentity.provisionInAccount(account, region, true, cleanup);
+        otherAccountDevice.attachNewPolicy(ALLOW_ALL_MQTT, cleanup);
+        otherAccountDevice.attachNewThing(thing, cleanup);
+        SSLContext otherAccountContext = otherAccountDevice.sslContext(TLS_DIR);
+        String ownRule = "tlsAccountOwnRule" + id;
+        String defaultRule = "tlsAccountDefaultRule" + id;
+        putRepublishRule(auth(account, region, "iot"), ownRule, acceptedTopic, ownTarget, account);
+        putRepublishRule(null, defaultRule, acceptedTopic, defaultTarget, "000000000000");
+
+        try (TlsClient ownSubscriber = TlsClient.connect("tls-account-own-" + id, otherAccountContext);
+             TlsClient defaultSubscriber = TlsClient.connect("tls-account-default-" + id, otherAccountContext)) {
+            ownSubscriber.subscribe(ownTarget, 0);
+            defaultSubscriber.subscribe(defaultTarget, 0);
+            try (TlsClient publisher = TlsClient.connect("tls-account-pub-" + id, otherAccountContext)) {
+                publisher.publish("$aws/things/" + thing + "/shadow/update",
+                        "{\"state\":{\"reported\":{\"color\":\"blue\"}}}".getBytes(StandardCharsets.UTF_8), 0);
+            }
+            String republished = new String(ownSubscriber.takePayload(), StandardCharsets.UTF_8);
+            assertEquals("blue", OBJECT_MAPPER.readTree(republished).path("state").path("reported").path("color").asText());
+            assertNull(defaultSubscriber.pollPayload(Duration.ofSeconds(2)),
+                    "a rule of the default account fired on a shadow event of account " + account);
+        }
+        cleanup.register(() -> given().header("Authorization", auth(account, region, "iotdata"))
+                .when().delete("/things/" + thing + "/shadow").then().statusCode(200));
+    }
+
+    /**
+     * Puts a rule republishing every message on {@code sourceTopic} to {@code targetTopic}, signed
+     * with {@code authorization} (unsigned when null), and has {@code cleanup} delete it after the test.
+     */
+    private void putRepublishRule(String authorization, String ruleName, String sourceTopic, String targetTopic,
+                                  String roleAccount) {
+        ObjectNode body = OBJECT_MAPPER.createObjectNode();
+        ObjectNode payload = body.putObject("topicRulePayload");
+        payload.put("sql", "SELECT * FROM '" + sourceTopic + "'");
+        payload.putArray("actions").addObject().putObject("republish")
+                .put("roleArn", "arn:aws:iam::" + roleAccount + ":role/iot-rule-role")
+                .put("topic", targetTopic);
+        ruleRequest(authorization).contentType("application/json").body(body.toString())
+                .when().put("/rules/" + ruleName).then().statusCode(200);
+        cleanup.register(() -> ruleRequest(authorization).when().delete("/rules/" + ruleName).then().statusCode(200));
+    }
+
+    private static RequestSpecification ruleRequest(String authorization) {
+        return authorization == null ? given() : given().header("Authorization", authorization);
+    }
+
+    @Test
     void publishOfTheAwsMaximumPayloadIsDeliveredOverTls() throws Exception {
         String topic = "tls/limit/" + System.nanoTime();
         byte[] payload = randomPayload(AWS_MAX_PAYLOAD);
@@ -361,6 +420,11 @@ class IotMqttTlsIntegrationTest {
 
         void publish(String topic, byte[] payload, int qos) throws MqttException {
             client.publish(topic, payload, qos, false);
+        }
+
+        /** The next payload received within {@code timeout}, or null when none arrives. */
+        byte[] pollPayload(Duration timeout) throws InterruptedException {
+            return payloads.poll(timeout.toMillis(), TimeUnit.MILLISECONDS);
         }
 
         byte[] takePayload() throws InterruptedException {

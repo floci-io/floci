@@ -14,6 +14,7 @@ import io.floci.aws.core.common.CertificateMaterialException;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.Pem;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
@@ -986,10 +987,10 @@ public class IotService {
             update = writeShadowUpdate(thingName, shadowName, request, accountId, region);
         }
         ReservedShadowTopic topics = new ReservedShadowTopic(thingName, shadowName, "update");
-        publishShadowEvent(topics.acceptedTopic(), update.accepted(), region, ruleRunner);
-        publishShadowEvent(topics.documentsTopic(), update.documents(), region, ruleRunner);
+        publishShadowEvent(topics.acceptedTopic(), update.accepted(), accountId, region, ruleRunner);
+        publishShadowEvent(topics.documentsTopic(), update.documents(), accountId, region, ruleRunner);
         if (update.delta() != null) {
-            publishShadowEvent(topics.deltaTopic(), update.delta(), region, ruleRunner);
+            publishShadowEvent(topics.deltaTopic(), update.delta(), accountId, region, ruleRunner);
         }
         return update.accepted();
     }
@@ -1010,8 +1011,8 @@ public class IotService {
         }
         accepted.put("timestamp", Instant.now().getEpochSecond());
         withClientToken(accepted, clientToken);
-        publishShadowEvent(new ReservedShadowTopic(thingName, shadowName, "delete").acceptedTopic(), accepted, region,
-                ruleRunner);
+        publishShadowEvent(new ReservedShadowTopic(thingName, shadowName, "delete").acceptedTopic(), accepted, accountId,
+                region, ruleRunner);
         return accepted;
     }
 
@@ -1176,12 +1177,16 @@ public class IotService {
 
     /**
      * Publishes one shadow response: fanned out to MQTT subscribers once, recorded once and
-     * evaluated once against the topic rules of the shadow's region, as a message with no MQTT client.
+     * evaluated once against the topic rules of the account and region that own the shadow, as a
+     * message with no MQTT client. The rules and their actions run as that account in that region,
+     * since a broker worker has no request of its own.
      */
-    private void publishShadowEvent(String topic, JsonNode payload, String region, Executor ruleRunner) {
+    private void publishShadowEvent(String topic, JsonNode payload, String accountId, String region,
+                                    Executor ruleRunner) {
         byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
         mqttBrokerService.publish(topic, bytes);
-        handlePublish(topic, bytes, true, region, null, ruleRunner);
+        handlePublish(topic, bytes, true, region, null,
+                rules -> ruleRunner.execute(() -> RequestScopes.runAs(accountId, region, rules)));
     }
 
     public List<String> listNamedShadowsForThing(String thingName, String region) {
@@ -1695,7 +1700,7 @@ public class IotService {
             request = objectMapper.readTree(payload == null || payload.length == 0 ? "{}".getBytes(StandardCharsets.UTF_8) : payload);
         } catch (IOException e) {
             LOG.debugv("IoT shadow request on {0} is not JSON: {1}", topic, e.getMessage());
-            publishShadowRejected(shadowTopic, 400, "Invalid JSON", null, region, ruleRunner);
+            publishShadowRejected(shadowTopic, 400, "Invalid JSON", null, accountId, region, ruleRunner);
             return;
         }
         String clientToken = request.path("clientToken").asText(null);
@@ -1706,28 +1711,30 @@ public class IotService {
                 case "get" -> publishShadowEvent(shadowTopic.acceptedTopic(),
                         withClientToken(getThingShadow(shadowTopic.thingName(), shadowTopic.shadowName(), accountId, region),
                                 clientToken),
-                        region, ruleRunner);
+                        accountId, region, ruleRunner);
                 case "delete" -> deleteThingShadow(shadowTopic.thingName(), shadowTopic.shadowName(), clientToken,
                         accountId, region, ruleRunner);
                 default -> publishShadowRejected(shadowTopic, 400,
-                        "Unsupported shadow operation: " + shadowTopic.operation(), clientToken, region, ruleRunner);
+                        "Unsupported shadow operation: " + shadowTopic.operation(), clientToken, accountId, region,
+                        ruleRunner);
             }
         } catch (AwsException e) {
-            publishShadowRejected(shadowTopic, e.getHttpStatus(), e.getMessage(), clientToken, region, ruleRunner);
+            publishShadowRejected(shadowTopic, e.getHttpStatus(), e.getMessage(), clientToken, accountId, region,
+                    ruleRunner);
         } catch (RuntimeException e) {
             LOG.warnv(e, "IoT shadow request on {0} failed", topic);
             publishShadowRejected(shadowTopic, 400, Objects.requireNonNullElse(e.getMessage(), e.getClass().getSimpleName()),
-                    clientToken, region, ruleRunner);
+                    clientToken, accountId, region, ruleRunner);
         }
     }
 
     private void publishShadowRejected(ReservedShadowTopic topic, int code, String message, String clientToken,
-                                       String region, Executor ruleRunner) {
+                                       String accountId, String region, Executor ruleRunner) {
         ObjectNode rejected = objectMapper.createObjectNode();
         rejected.put("code", code);
         rejected.put("message", message);
         withClientToken(rejected, clientToken);
-        publishShadowEvent(topic.rejectedTopic(), rejected, region, ruleRunner);
+        publishShadowEvent(topic.rejectedTopic(), rejected, accountId, region, ruleRunner);
     }
 
     private void validateThingName(String thingName) {
