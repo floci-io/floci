@@ -255,6 +255,45 @@ class EksAutoModeComputeTest {
     }
 
     /**
+     * A node that just registered carries {@code node.kubernetes.io/not-ready} until Kubernetes sees it Ready, as
+     * Floci's own Ready node does between its creation and its status: that doesn't take its room, as Karpenter
+     * counts it, so its pending pod waits for it rather than get another node. A taint of its own does.
+     */
+    @Test
+    void aStartingNodesNotReadyTaintDoesntTakeItsRoom() {
+        Instance joined = new Instance();
+        joined.setInstanceId("i-joined");
+        joined.setInstanceType("c7a.large");
+        joined.setLaunchTime(Instant.now());
+        joined.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(joined));
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenReturn(List.of(reservation));
+        when(clusterManager.deriveInstanceNodeName(any(), eq(REGION))).thenReturn("node-1");
+        CatalogInstanceType large = new CatalogInstanceType();
+        large.instanceType = "c7a.large";
+        large.vcpu = 2;
+        large.memoryMib = 4096;
+        large.supportedArchitectures = List.of("x86_64");
+        when(instanceTypes.find("c7a.large")).thenReturn(Optional.of(large));
+        Cluster cluster = cluster("prod");
+        String node = "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}, "
+                + "\"spec\": {\"taints\": [{\"key\": \"%s\", \"effect\": \"NoSchedule\"}]}}]}";
+
+        lists.put("nodes", node.formatted("node.kubernetes.io/not-ready"));
+        compute.reconcile(cluster, REGION);
+        verify(ec2, never()).runInstances(anyString(), anyString(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                anyString(), anyString(), anyList(), anyString(), anyString(), any(), any(), anyInt(), any(), any(),
+                any(), anyString(), anyBoolean(), any(), any(), any(), anyBoolean(), any(), any());
+
+        lists.put("nodes", node.formatted("maintenance"));
+        compute.reconcile(cluster, REGION);
+        verify(ec2).runInstances(anyString(), anyString(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                anyString(), anyString(), anyList(), anyString(), anyString(), any(), any(), anyInt(), any(), any(),
+                any(), anyString(), anyBoolean(), any(), any(), any(), anyBoolean(), any(), any());
+    }
+
+    /**
      * Turning compute off deletes each node before its instance is terminated: an instance whose node can't be
      * deleted is kept running, so the next pass, finding it still there, tries again.
      */

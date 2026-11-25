@@ -36,6 +36,12 @@ final class EksAutoModeNodes {
     private static final Pattern QUANTITY = Pattern.compile("^([0-9]*\\.?[0-9]+(?:[eE][+-]?[0-9]+)?)([a-zA-Z]*)$");
     static final String ZONE_LABEL = "topology.kubernetes.io/zone";
     /** The labels Floci gives its nodes: a pool requirement on any other label is left out. */
+    /**
+     * The taints a node carries while it starts, which Kubernetes or the cloud provider take off once it is ready:
+     * Karpenter counts a node's room without them, so a pod waits for a node that is starting rather than get another.
+     */
+    static final Set<String> STARTUP_TAINTS = Set.of("node.kubernetes.io/not-ready", "node.kubernetes.io/unreachable",
+            "node.cloudprovider.kubernetes.io/uninitialized", "karpenter.sh/unregistered");
     private static final Set<String> MODELLED_LABELS = Set.of("kubernetes.io/arch", "kubernetes.io/os",
             "node.kubernetes.io/instance-type", "karpenter.sh/capacity-type", NODEPOOL_LABEL, COMPUTE_TYPE_LABEL,
             ZONE_LABEL, LABEL_PREFIX + "category", LABEL_PREFIX + "generation", LABEL_PREFIX + "family",

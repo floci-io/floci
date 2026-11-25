@@ -180,8 +180,13 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             long[] used = requests.getOrDefault(nodeName, new long[3]);
             List<Taint> nodeTaints = new ArrayList<>();
             if (node != null) {
-                node.path("spec").path("taints").forEach(t -> nodeTaints.add(new Taint(t.path("key").asText(),
-                        t.path("value").asText(""), t.path("effect").asText())));
+                // A node just registered carries not-ready until its status says Ready; that doesn't take its room.
+                node.path("spec").path("taints").forEach(t -> {
+                    if (!EksAutoModeNodes.STARTUP_TAINTS.contains(t.path("key").asText())) {
+                        nodeTaints.add(new Taint(t.path("key").asText(), t.path("value").asText(""),
+                                t.path("effect").asText()));
+                    }
+                });
             }
             boolean schedulable = node == null || !node.path("spec").path("unschedulable").asBoolean(false);
             // A joined node offers what its kubelet says is allocatable, less what it reserves; one joining, its
