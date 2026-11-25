@@ -105,6 +105,11 @@ JSON and supports booleans, longs, strings, entity references, IP addresses, dec
 datetimes, durations, sets, records, entity parents, and entity tags. When duplicate entity
 identifiers are supplied in an entity list, the last definition wins.
 
+As in AVP, the action entities come from the policy store schema: each schema action is added to
+the request's entities with its `memberOf` action groups as parents, so a policy scoped with
+`action in NS::Action::"Group"` matches every member action. An action entity the caller supplies
+for the same identifier takes precedence over the schema-derived one.
+
 ## Identity sources and tokens
 
 Cognito identity sources derive the OIDC issuer from the user pool ARN, enforce same-Region user

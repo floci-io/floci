@@ -251,6 +251,44 @@ class VerifiedPermissionsIntegrationTest {
     }
 
     @Test
+    void isAuthorized_resolvesActionGroupsFromTheSchema() {
+        String store = createStore("OFF", "DISABLED");
+        String schema = "{\"Demo\":{\"entityTypes\":{\"User\":{},\"Document\":{}},\"actions\":{"
+                + "\"Read\":{\"appliesTo\":{\"principalTypes\":[],\"resourceTypes\":[]}},"
+                + "\"Write\":{\"appliesTo\":{\"principalTypes\":[],\"resourceTypes\":[]}},"
+                + "\"read\":{\"appliesTo\":{\"principalTypes\":[\"User\"],\"resourceTypes\":[\"Document\"]},\"memberOf\":[{\"id\":\"Read\"}]},"
+                + "\"write\":{\"appliesTo\":{\"principalTypes\":[\"User\"],\"resourceTypes\":[\"Document\"]},\"memberOf\":[{\"id\":\"Write\"}]}}}}";
+        givenAws("PutSchema", objectJson(Map.of("policyStoreId", store, "definition", Map.of("cedarJson", schema))))
+                .then().statusCode(200);
+
+        String templateId = givenAws("CreatePolicyTemplate", objectJson(Map.of("policyStoreId", store,
+                        "statement", "permit(principal == ?principal, action in [Demo::Action::\"Read\", Demo::Action::\"Write\"], resource in ?resource);")))
+                .then().statusCode(200).extract().path("policyTemplateId");
+        Map<String,Object> principal = Map.of("entityType", "Demo::User", "entityId", "alice");
+        Map<String,Object> resource = Map.of("entityType", "Demo::Document", "entityId", "doc1");
+        givenAws("CreatePolicy", objectJson(Map.of("policyStoreId", store, "definition", Map.of("templateLinked", Map.of(
+                        "policyTemplateId", templateId, "principal", principal, "resource", resource)))))
+                .then().statusCode(200);
+        givenAws("CreatePolicy", objectJson(Map.of("policyStoreId", store, "definition", Map.of("static", Map.of(
+                        "statement", "forbid(principal, action in Demo::Action::\"Write\", resource);")))))
+                .then().statusCode(200);
+
+        Map<String,Object> read = Map.of("actionType", "Demo::Action", "actionId", "read");
+        Map<String,Object> write = Map.of("actionType", "Demo::Action", "actionId", "write");
+        givenAws("IsAuthorized", objectJson(Map.of("policyStoreId", store, "principal", principal, "action", read,
+                        "resource", resource)))
+                .then().statusCode(200).body("decision", equalTo("ALLOW"));
+        givenAws("BatchIsAuthorized", objectJson(Map.of("policyStoreId", store,
+                        "requests", List.of(
+                                Map.of("principal", principal, "action", read, "resource", resource),
+                                Map.of("principal", principal, "action", write, "resource", resource)),
+                        "entities", Map.of("entityList", List.of(Map.of("identifier", principal))))))
+                .then().statusCode(200)
+                .body("results[0].decision", equalTo("ALLOW"))
+                .body("results[1].decision", equalTo("DENY"));
+    }
+
+    @Test
     void createOperationsHonorEightHourClientTokenContract() {
         String token = "token-123456";
         String body = objectJson(Map.of("clientToken", token, "validationSettings", Map.of("mode", "OFF")));
@@ -357,7 +395,7 @@ class VerifiedPermissionsIntegrationTest {
                         "static", Map.of("statement", "permit(principal, action, resource);")))))
                 .then().statusCode(200);
 
-        Map<String, Object> request = new LinkedHashMap<>();
+        Map<String,Object> request = new LinkedHashMap<>();
         request.put("policyStoreId", store);
         request.put("accessToken", accessToken);
         request.put("action", Map.of("actionType", "Action", "actionId", "view"));
@@ -365,7 +403,7 @@ class VerifiedPermissionsIntegrationTest {
         givenAws("IsAuthorizedWithToken", objectJson(request))
                 .then().statusCode(200).body("decision", equalTo("ALLOW"));
 
-        Map<String, Object> foreignRequest = new LinkedHashMap<>(request);
+        Map<String,Object> foreignRequest = new LinkedHashMap<>(request);
         foreignRequest.put("policyStoreId", foreign);
         givenAws("IsAuthorizedWithToken", objectJson(foreignRequest))
                 .then().statusCode(400).body("__type", containsString("ValidationException"))
