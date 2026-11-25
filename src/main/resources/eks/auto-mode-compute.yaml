@@ -71,7 +71,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: eks
 spec:
-  role: %ROLE%
+  role: "%ROLE%"
   subnetSelectorTerms:%SUBNET_TERMS%
   securityGroupSelectorTerms:%SECURITY_GROUP_TERMS%
   ephemeralStorage:

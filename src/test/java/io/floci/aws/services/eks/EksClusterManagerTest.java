@@ -1,7 +1,9 @@
 package io.floci.aws.services.eks;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
@@ -138,6 +140,7 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -4485,7 +4488,7 @@ class EksClusterManagerTest {
             assertTrue(manifest.contains("name: nodepools.karpenter.sh"));
             assertTrue(manifest.contains("name: nodeclasses.eks.amazonaws.com"));
             assertTrue(manifest.contains("""
-                      role: auto-node
+                      role: "auto-node"
                       subnetSelectorTerms:
                       - id: subnet-a
                       - id: subnet-b
@@ -4499,6 +4502,45 @@ class EksClusterManagerTest {
             manager.applyCompute("container-1", cluster);
 
             assertEquals(EksClusterManager.COMPUTE_MANIFEST_REMOVED, Files.readString(localCopy));
+        }
+
+        /** A role named like a YAML boolean or number stays a string. */
+        @ParameterizedTest
+        @ValueSource(strings = {"true", "123", "null"})
+        void theNodeClassRoleIsAStringWhateverItsName(String role) throws Exception {
+            Cluster cluster = cluster();
+            cluster.setComputeConfig(new ComputeConfig(true, List.of(), "arn:aws:iam::000000000000:role/" + role));
+
+            List<JsonNode> objects = new ObjectMapper(new YAMLFactory()).readerFor(JsonNode.class)
+                    .<JsonNode>readValues(manager.computeManifest(cluster)).readAll();
+
+            JsonNode spec = objects.stream().filter(o -> "NodeClass".equals(o.path("kind").asText())).findFirst()
+                    .orElseThrow().path("spec");
+            assertTrue(spec.path("role").isTextual());
+            assertEquals(role, spec.path("role").asText());
+        }
+
+        /** The running node gets the Auto Mode label while compute is on and loses it once it is off. */
+        @Test
+        void theRunningNodeIsLabelledAsComputeIsOnOrOff() {
+            EksClusterManager spyManager = Mockito.spy(manager);
+            doReturn(new ContainerExec.Result(0L, "", "", false)).when(spyManager)
+                    .execInContainerForResult(anyString(), any(), anyInt());
+            Cluster cluster = cluster();
+            String node = spyManager.deriveClusterNodePrivateDnsName(cluster);
+
+            spyManager.applyComputeLabel(cluster, "container-1");
+            cluster.setComputeConfig(new ComputeConfig(true, List.of(), null));
+            spyManager.applyComputeLabel(cluster, "container-1");
+            cluster.setComputeConfig(new ComputeConfig(false, List.of(), null));
+            spyManager.applyComputeLabel(cluster, "container-1");
+
+            InOrder order = Mockito.inOrder(spyManager);
+            order.verify(spyManager).execInContainerForResult("container-1", new String[]{"kubectl", "label", "node",
+                    node, "--overwrite", "eks.amazonaws.com/compute-type=auto"}, 15);
+            order.verify(spyManager).execInContainerForResult("container-1", new String[]{"kubectl", "label", "node",
+                    node, "--overwrite", "eks.amazonaws.com/compute-type-"}, 15);
+            verify(spyManager, times(2)).execInContainerForResult(anyString(), any(), anyInt());
         }
 
         /** With no subnets or security group known, the terms are empty lists on their keys' lines, which k3s parses. */

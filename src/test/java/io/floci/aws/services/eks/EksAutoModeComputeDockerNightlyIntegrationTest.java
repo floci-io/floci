@@ -34,9 +34,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  */
 @QuarkusTest
 @TestProfile(RdsMockProfile.class)
-class EksAutoModeComputeDockerIntegrationTest {
+class EksAutoModeComputeDockerNightlyIntegrationTest {
 
-    private static final Logger LOG = Logger.getLogger(EksAutoModeComputeDockerIntegrationTest.class);
+    private static final Logger LOG = Logger.getLogger(EksAutoModeComputeDockerNightlyIntegrationTest.class);
     private static final String ACCOUNT = "000000000000";
 
     @Inject
@@ -51,7 +51,7 @@ class EksAutoModeComputeDockerIntegrationTest {
     void requireDocker() {
         boolean dockerAvailable = DockerAvailability.answers(dockerClient);
         if (!dockerAvailable) {
-            LOG.warn("Docker daemon is not available; skipping EksAutoModeComputeDockerIntegrationTest");
+            LOG.warn("Docker daemon is not available; skipping EksAutoModeComputeDockerNightlyIntegrationTest");
         }
         Assumptions.assumeTrue(dockerAvailable, "Docker daemon must be available for the Auto Mode compute test");
     }

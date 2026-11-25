@@ -195,7 +195,8 @@ public class EksClusterManager
     /** The comment in the compute manifest that starts the {@code default} NodeClass. */
     private static final String DEFAULT_NODE_CLASS_MARKER = "# The default NodeClass";
     /** The label EKS Auto Mode's nodes carry, given to the cluster's node while compute is on. */
-    static final String AUTO_COMPUTE_LABEL = "eks.amazonaws.com/compute-type=auto"; // partition-literal: a label
+    static final String AUTO_COMPUTE_LABEL_KEY = "eks.amazonaws.com/compute-type"; // partition-literal: a label
+    static final String AUTO_COMPUTE_LABEL = AUTO_COMPUTE_LABEL_KEY + "=auto";
     private static final String ENDPOINT_MODE_NETWORK = "network";
     public static final String DEFAULT_POD_CIDR = "10.42.0.0/16";
 
@@ -1205,6 +1206,7 @@ public class EksClusterManager
                 () -> survivingNodeResolvesThroughFloci(info.containerId()));
         applyBlockStorage(info.containerId(), cluster);
         applyCompute(info.containerId(), cluster);
+        applyComputeLabel(cluster, info.containerId());
         activeClusters.put(clusterResourceName(cluster), cluster);
         attachClusterLogs(cluster, true, true, false);
 
@@ -1490,6 +1492,8 @@ public class EksClusterManager
             pruneLegacyClusterNodes(cluster, containerId);
 
             registerAllJoinedNodes(cluster, containerId);
+
+            applyComputeLabel(cluster, containerId);
 
             LOG.infov("Finalized EKS cluster {0} with CA data extracted", cluster.getName());
         } catch (Exception e) {
@@ -3132,6 +3136,30 @@ public class EksClusterManager
     void applyCompute(String containerId, Cluster cluster) {
         applyAutoModeManifest(containerId, cluster, computeOn(cluster), COMPUTE_MANIFEST_FILE, COMPUTE_MANIFEST_TAR_ENTRY,
                 () -> computeManifest(cluster), COMPUTE_MANIFEST_REMOVED, "node pools");
+    }
+
+    /**
+     * Gives the cluster's running node the label EKS Auto Mode's nodes carry while compute is on, and takes it off
+     * once compute is off. k3s's {@code --node-label} adds a label when the node starts but never removes one, and a
+     * node started before Floci set it has none until it restarts. A cluster that never had Auto Mode compute is left
+     * alone.
+     */
+    void applyComputeLabel(Cluster cluster, String containerId) {
+        if (cluster.getComputeConfig() == null || containerId == null) {
+            return;
+        }
+        String label = computeOn(cluster) ? AUTO_COMPUTE_LABEL : AUTO_COMPUTE_LABEL_KEY + "-";
+        try {
+            ContainerExec.Result result = execInContainerForResult(containerId, new String[]{"kubectl", "label",
+                    "node", deriveClusterNodePrivateDnsName(cluster), "--overwrite", label}, 15);
+            if (result.exitCode() != 0) {
+                LOG.warnv("Could not set the Auto Mode label of EKS cluster {0}''s node: {1}", cluster.getName(),
+                        result.summary());
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not set the Auto Mode label of EKS cluster {0}''s node: {1}", cluster.getName(),
+                    e.getMessage());
+        }
     }
 
     static boolean computeOn(Cluster cluster) {
