@@ -50,6 +50,8 @@ import static org.mockito.Mockito.when;
  */
 class AthenaServiceTest {
 
+    private static final String REGION = "us-east-1";
+
     private Vertx vertx;
     private FlociDuckClient duckClient;
     private GlueService glueService;
@@ -112,6 +114,43 @@ class AthenaServiceTest {
     }
 
     @Test
+    void aQueryExecutionIsAnsweredOnlyInTheRegionItWasStartedIn() {
+        when(regionResolver.getRegion()).thenReturn("eu-west-1");
+        String id = service.startQueryExecution("SELECT 1", "primary", null, null);
+
+        assertEquals(id, service.getQueryExecution("eu-west-1", id).getQueryExecutionId());
+        String notFound = "QueryExecution " + id + " was not found";
+        AwsException read = assertThrows(AwsException.class, () -> service.getQueryExecution("us-east-1", id));
+        assertEquals("InvalidRequestException", read.getErrorCode());
+        assertEquals(notFound, read.getMessage());
+        assertEquals(notFound, assertThrows(AwsException.class,
+                () -> service.getQueryResults("us-east-1", id)).getMessage());
+        assertEquals(notFound, assertThrows(AwsException.class,
+                () -> service.stopQueryExecution("us-east-1", id)).getMessage());
+        assertTrue(service.listQueryExecutionsPage("eu-west-1", "primary", null, null).items().stream()
+                .anyMatch(execution -> id.equals(execution.getQueryExecutionId())));
+        assertTrue(service.listQueryExecutionsPage("us-east-1", "primary", null, null).items().stream()
+                .noneMatch(execution -> id.equals(execution.getQueryExecutionId())));
+    }
+
+    @Test
+    void aQueryExecutionAthenaHoldsNoneOfIsNotFound() {
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.getQueryExecution(REGION, "not-a-real-id"));
+        assertEquals("InvalidRequestException", missing.getErrorCode());
+        assertEquals("QueryExecution not-a-real-id was not found", missing.getMessage());
+    }
+
+    @Test
+    void aQueryExecutionStoredBeforeItsRegionWasRecordedIsAnsweredInEveryRegion() {
+        when(regionResolver.getRegion()).thenReturn(null);
+        String id = service.startQueryExecution("SELECT 1", "primary", null, null);
+
+        assertEquals(id, service.getQueryExecution("us-east-1", id).getQueryExecutionId());
+        assertEquals(id, service.getQueryExecution("eu-west-1", id).getQueryExecutionId());
+    }
+
+    @Test
     void storedTagsReadTheWorkgroupOrTheDataCatalogTheArnNamesInItsAccountAndRegion() {
         CreateWorkGroupRequest request = new CreateWorkGroupRequest();
         request.setName("analytics");
@@ -145,12 +184,12 @@ class AthenaServiceTest {
         String id = service.startQueryExecution("SELECT 1", "primary", null, null);
         assertTrue(started.await(10, TimeUnit.SECONDS), "the worker never started");
 
-        service.stopQueryExecution(id);
-        assertEquals(QueryExecutionState.CANCELLED, service.getQueryExecution(id).getStatus().getState());
+        service.stopQueryExecution(REGION, id);
+        assertEquals(QueryExecutionState.CANCELLED, service.getQueryExecution(REGION, id).getStatus().getState());
 
         release.countDown();
         assertTrue(finished.await(10, TimeUnit.SECONDS), "the worker never finished");
-        assertEquals(QueryExecutionState.CANCELLED, service.getQueryExecution(id).getStatus().getState(),
+        assertEquals(QueryExecutionState.CANCELLED, service.getQueryExecution(REGION, id).getStatus().getState(),
                 "the worker must not overwrite a cancellation");
     }
 
@@ -169,10 +208,10 @@ class AthenaServiceTest {
         String id = service.startQueryExecution("SELECT 1", "primary", null, null);
         assertTrue(started.await(10, TimeUnit.SECONDS), "the worker never started");
 
-        service.stopQueryExecution(id);
+        service.stopQueryExecution(REGION, id);
         release.countDown();
         assertTrue(finished.await(10, TimeUnit.SECONDS), "the worker never finished");
-        assertEquals(QueryExecutionState.CANCELLED, service.getQueryExecution(id).getStatus().getState(),
+        assertEquals(QueryExecutionState.CANCELLED, service.getQueryExecution(REGION, id).getStatus().getState(),
                 "a worker failure must not overwrite a cancellation");
     }
 
@@ -181,9 +220,9 @@ class AthenaServiceTest {
         String id = service.startQueryExecution("SELECT 1", "primary", null, null);
 
         awaitState(id, QueryExecutionState.SUCCEEDED);
-        service.stopQueryExecution(id);
+        service.stopQueryExecution(REGION, id);
 
-        assertEquals(QueryExecutionState.SUCCEEDED, service.getQueryExecution(id).getStatus().getState(),
+        assertEquals(QueryExecutionState.SUCCEEDED, service.getQueryExecution(REGION, id).getStatus().getState(),
                 "a late stop must not cancel a finished query");
     }
 
@@ -196,9 +235,9 @@ class AthenaServiceTest {
         String id = service.startQueryExecution("SELECT 1", "primary", null, null);
 
         awaitState(id, QueryExecutionState.FAILED);
-        service.stopQueryExecution(id);
+        service.stopQueryExecution(REGION, id);
 
-        assertEquals(QueryExecutionState.FAILED, service.getQueryExecution(id).getStatus().getState(),
+        assertEquals(QueryExecutionState.FAILED, service.getQueryExecution(REGION, id).getStatus().getState(),
                 "a late stop must not cancel a failed query");
     }
 
@@ -307,7 +346,7 @@ class AthenaServiceTest {
                 new ResultConfiguration("s3://athena-results/"));
         awaitState(id, QueryExecutionState.SUCCEEDED);
 
-        assertEquals("SELECT 1 AS a -- done", service.getQueryExecution(id).getQuery());
+        assertEquals("SELECT 1 AS a -- done", service.getQueryExecution(REGION, id).getQuery());
         verify(duckClient).execute(eq("SELECT 1 AS a -- done\n"), any(), any(), any());
     }
 
@@ -317,7 +356,7 @@ class AthenaServiceTest {
                 new ResultConfiguration("s3://athena-results/"), List.of("'eu'", "10"));
         awaitState(id, QueryExecutionState.SUCCEEDED);
 
-        assertEquals("SELECT ? AS region, ? AS n", service.getQueryExecution(id).getQuery());
+        assertEquals("SELECT ? AS region, ? AS n", service.getQueryExecution(REGION, id).getQuery());
         verify(duckClient).execute(eq("SELECT 'eu' AS region, 10 AS n\n"), any(), any(), any());
     }
 
@@ -327,7 +366,7 @@ class AthenaServiceTest {
         awaitState(id, QueryExecutionState.FAILED);
 
         assertEquals("INVALID_PARAMETER_USAGE: line 1:1: Incorrect number of parameters: expected 2 but found 1",
-                service.getQueryExecution(id).getStatus().getStateChangeReason());
+                service.getQueryExecution(REGION, id).getStatus().getStateChangeReason());
         verifyNoInteractions(duckClient);
     }
 
@@ -353,7 +392,7 @@ class AthenaServiceTest {
         String unfiltered = service.startQueryExecution(query, "primary", context("analytics"),
                 new ResultConfiguration("s3://athena-results/"), List.of("tenant || ''"));
         awaitState(unfiltered, QueryExecutionState.FAILED);
-        assertTrue(service.getQueryExecution(unfiltered).getStatus().getStateChangeReason()
+        assertTrue(service.getQueryExecution(REGION, unfiltered).getStatus().getStateChangeReason()
                 .startsWith("CONSTRAINT_VIOLATION: For the injected projected partition column tenant"));
         verifyNoInteractions(duckClient);
 
@@ -397,23 +436,23 @@ class AthenaServiceTest {
         String id = service.startQueryExecution(query, "primary", null,
                 new ResultConfiguration("s3://athena-results/"));
         awaitState(id, QueryExecutionState.SUCCEEDED);
-        String outputLocation = service.getQueryExecution(id).getResultConfiguration().getOutputLocation();
+        String outputLocation = service.getQueryExecution(REGION, id).getResultConfiguration().getOutputLocation();
         String key = outputLocation.substring("s3://athena-results/".length());
         S3Object result = new S3Object("athena-results", key, csv.getBytes(StandardCharsets.UTF_8), "text/csv");
         when(s3Service.listObjects(eq("athena-results"), anyString(), any(), anyInt())).thenReturn(List.of(result));
         when(s3Service.getObject("athena-results", key)).thenReturn(result);
 
-        return service.getQueryResults(id);
+        return service.getQueryResults(REGION, id);
     }
 
     private void awaitState(String id, QueryExecutionState expected) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         while (System.nanoTime() < deadline) {
-            if (service.getQueryExecution(id).getStatus().getState() == expected) {
+            if (service.getQueryExecution(REGION, id).getStatus().getState() == expected) {
                 return;
             }
             Thread.sleep(10);
         }
-        assertEquals(expected, service.getQueryExecution(id).getStatus().getState());
+        assertEquals(expected, service.getQueryExecution(REGION, id).getStatus().getState());
     }
 }

@@ -296,7 +296,7 @@ class AthenaIcebergSidecarIntegrationTest {
         String id = RequestScopes.callAs(ACCOUNT, REGION, () -> athena.startQueryExecution(sql, "primary", context,
                 new ResultConfiguration("s3://" + bucket + "/results/"), parameters));
         return await().atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofMillis(100))
-                .until(() -> RequestScopes.callAs(ACCOUNT, REGION, () -> athena.getQueryExecution(id)),
+                .until(() -> RequestScopes.callAs(ACCOUNT, REGION, () -> athena.getQueryExecution(REGION, id)),
                         found -> found.getStatus().getState() != QueryExecutionState.RUNNING
                                 && found.getStatus().getState() != QueryExecutionState.QUEUED);
     }

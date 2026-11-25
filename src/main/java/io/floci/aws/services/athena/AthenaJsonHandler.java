@@ -100,12 +100,12 @@ public class AthenaJsonHandler {
             }
             case "GetQueryExecution" -> {
                 String id = request.get("QueryExecutionId").asText();
-                QueryExecution execution = athenaService.getQueryExecution(id);
+                QueryExecution execution = athenaService.getQueryExecution(region, id);
                 yield Response.ok(Map.of("QueryExecution", execution)).build();
             }
             case "GetQueryResults" -> {
                 String id = request.get("QueryExecutionId").asText();
-                ResultSet results = athenaService.getQueryResults(id);
+                ResultSet results = athenaService.getQueryResults(region, id);
                 yield Response.ok(Map.of("ResultSet", results)).build();
             }
             case "ListQueryExecutions" -> {
@@ -125,7 +125,7 @@ public class AthenaJsonHandler {
                 yield Response.ok(response).build();
             }
             case "StopQueryExecution" -> {
-                athenaService.stopQueryExecution(request.get("QueryExecutionId").asText());
+                athenaService.stopQueryExecution(region, request.get("QueryExecutionId").asText());
                 yield Response.ok(Map.of()).build();
             }
             case "GetWorkGroup" -> {

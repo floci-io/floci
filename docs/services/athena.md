@@ -97,6 +97,13 @@ Continuation tokens are scoped to the action, account, region, and workgroup;
 invalid sizes, malformed tokens, and tokens outside 1 to 1024 characters return
 `InvalidRequestException`.
 
+Query executions are kept per account and region, as AWS keeps them. A query
+execution is listed and answered only in the region it was started in:
+`GetQueryExecution`, `GetQueryResults` and `StopQueryExecution` naming one
+started in another region, or one Athena holds none of, return
+`InvalidRequestException` with `QueryExecution <id> was not found`. An execution
+stored before Floci recorded each execution's region is answered in every region.
+
 A workgroup reports what its request gave and AWS's defaults for the rest. With
 no `ResultConfiguration`, it reports none (`primary` reports an empty one, as on
 AWS); a query then names its own output location, and Floci writes results to
