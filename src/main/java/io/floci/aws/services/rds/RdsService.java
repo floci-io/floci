@@ -3098,9 +3098,7 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
             copiedTags.putAll(tags);
         }
         copy.setTags(copiedTags);
-        String sqlDump = snapshotData.get(clusterSnapshotDataKey(effectiveRegion, sourceId))
-                .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
-                        "DB cluster snapshot data for " + sourceId + " not found.", 404));
+        String sqlDump = requireClusterSnapshotData(effectiveRegion, sourceId);
         snapshotData.put(clusterSnapshotDataKey(effectiveRegion, targetSnapshotId), sqlDump);
         putClusterSnapshotForScope(accountId, effectiveRegion, targetSnapshotId, copy);
         LOG.infov("Copied DB cluster snapshot {0} to {1}", sourceId, targetSnapshotId);
@@ -3158,9 +3156,7 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
             throw new AwsException("InvalidParameterValue",
                     "The snapshot's engine is " + snapshot.getEngineIdentifier() + "; cannot restore it as " + engine + ".", 400);
         }
-        String sqlDump = snapshotData.get(clusterSnapshotDataKey(effectiveRegion, resolvedSnapshotId))
-                .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
-                        "DB cluster snapshot data for " + resolvedSnapshotId + " not found.", 404));
+        String sqlDump = requireClusterSnapshotData(effectiveRegion, resolvedSnapshotId);
 
         String restoredMode = engineMode != null && !engineMode.isBlank() ? engineMode : snapshot.getEngineMode();
         // Where its instances serve the port in its VPC, the API reference's default: "The same port as the original
@@ -3374,6 +3370,12 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
         return copy;
     }
 
+    private String requireClusterSnapshotData(String region, String snapshotId) {
+        return snapshotData.get(clusterSnapshotDataKey(region, snapshotId))
+                .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
+                        "DB cluster snapshot data for " + snapshotId + " not found.", 404));
+    }
+
     private DbClusterSnapshot requireClusterSnapshot(String accountId, String region, String snapshotId) {
         if (snapshotId == null || snapshotId.isBlank()) {
             throw new AwsException("InvalidParameterValue", "DBClusterSnapshotIdentifier is required.", 400);
@@ -3478,9 +3480,7 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
             }
             DbClusterSnapshot snapshot = requireClusterSnapshot(accountId, effectiveRegion, snapshotId);
             requireExportable(snapshot.getStatus(), snapshot.getEngine(), sourceArn);
-            String sqlDump = snapshotData.get(clusterSnapshotDataKey(effectiveRegion, snapshotId))
-                    .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
-                            "DB cluster snapshot data for " + snapshotId + " not found.", 404));
+            String sqlDump = requireClusterSnapshotData(effectiveRegion, snapshotId);
             return new SnapshotExportSource(snapshot.getDbClusterSnapshotArn(),
                     imageForEngine(snapshot.getEngine(), snapshot.getEngineVersion()),
                     snapshot.getMasterUsername(), snapshot.getMasterPassword(),
