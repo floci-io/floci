@@ -443,6 +443,10 @@ services:
     hostnames on the same engine-default port. The standard Docker Compose mapping also exposes
     only the `7001-7099` instance/cluster proxy range, not `1433`, `3306`, or `5432`. Use mock mode
     for DB proxy provisioning workflows until a dedicated endpoint-routing design is implemented.
+    RDS reserves the configured listener port of enabled, non-mock DSQL before allocating or
+    restoring a relay. A DB proxy whose preferred or persisted port belongs to DSQL uses the
+    RDS proxy range instead. This avoids startup-order collisions; it does not provide
+    engine-default-port routing for that fallback relay.
 
 !!! note "DB proxy control-plane settings"
 

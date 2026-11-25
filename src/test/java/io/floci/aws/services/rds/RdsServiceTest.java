@@ -14,12 +14,21 @@ import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.core.storage.WalStorage;
+import io.floci.aws.services.dsql.DsqlPrincipals;
+import io.floci.aws.services.dsql.dataplane.DsqlDatabases;
+import io.floci.aws.services.dsql.dataplane.DsqlEndpoint;
+import io.floci.aws.services.dsql.dataplane.DsqlTlsCertificates;
+import io.floci.aws.services.dsql.model.DsqlCluster;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.ec2.model.Vpc;
 import io.floci.aws.services.ec2.model.VpcIpv6CidrBlockAssociation;
 import io.floci.aws.services.eventbridge.EventBridgeService;
+import io.floci.aws.services.iam.IamPolicyEvaluator;
+import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.ResourcePolicyProvider;
+import io.floci.aws.services.iam.ScpProvider;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.kms.model.KmsKey;
 import io.floci.aws.services.rds.container.AutoPauseListener;
@@ -61,7 +70,9 @@ import io.floci.aws.services.rds.proxy.RdsSigV4Validator;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
 import io.floci.aws.testing.ParallelLocks;
+import io.floci.aws.testutil.FreePorts;
 import io.floci.aws.testutil.LogCapture;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -79,10 +90,12 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.lang.reflect.Field;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -239,6 +252,138 @@ class RdsServiceTest {
                         .map(securityGroups::get)
                         .filter(Objects::nonNull)
                         .toList());
+    }
+
+    private void configureDsqlPort(int port, boolean enabled, boolean mockMode) {
+        EmulatorConfig.DsqlServiceConfig dsql = mock(EmulatorConfig.DsqlServiceConfig.class);
+        when(config.services().dsql()).thenReturn(dsql);
+        when(dsql.enabled()).thenReturn(enabled);
+        when(dsql.mock()).thenReturn(mockMode);
+        when(dsql.port()).thenReturn(port);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rdsAndDsqlListenersCoexistInEitherStartupOrder(boolean dsqlFirst) throws Exception {
+        int[] ports = FreePorts.anyInterfacePorts(2);
+        int dsqlPort = Math.min(ports[0], ports[1]);
+        configureDsqlPort(dsqlPort, true, false);
+        when(rdsConfig.proxyBasePort()).thenReturn(dsqlPort);
+        when(rdsConfig.proxyMaxPort()).thenReturn(Math.max(ports[0], ports[1]));
+        when(rdsConfig.proxyMaxConnections()).thenReturn(10);
+        @SuppressWarnings("unchecked")
+        Instance<ScpProvider> scps = mock(Instance.class);
+        @SuppressWarnings("unchecked")
+        Instance<ResourcePolicyProvider> policies = mock(Instance.class);
+        DsqlEndpoint dsql = new DsqlEndpoint(mock(DsqlTlsCertificates.class), mock(IamService.class),
+                mock(IamPolicyEvaluator.class), scps, policies, mock(DsqlPrincipals.class),
+                dsqlEndpointConfig(dsqlPort), Clock.systemUTC());
+        RdsProxyManager manager = new RdsProxyManager(mock(RdsSigV4Validator.class),
+                mock(RdsProxyTlsCertificates.class), config, RdsBackendGate.OPEN, containerManager);
+        RdsService service = newService(containerManager, manager, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        DsqlCluster dsqlCluster = new DsqlCluster();
+        dsqlCluster.setEndpoint("test.dsql.localhost.floci.io");
+        int rdsPort = 0;
+        try {
+            if (dsqlFirst) {
+                dsql.register(dsqlCluster, new DsqlDatabases.Backend("localhost", 1, "app", "admin", "secret", null, null));
+            }
+            DbCluster cluster = service.createDbCluster("coexist", "aurora-postgresql", "16.3",
+                    "admin", "secret", "app", false, null);
+            rdsPort = cluster.getProxyPort();
+            if (!dsqlFirst) {
+                dsql.register(dsqlCluster, new DsqlDatabases.Backend("localhost", 1, "app", "admin", "secret", null, null));
+            }
+            assertNotEquals(dsqlPort, rdsPort);
+            assertEquals(rdsPort, cluster.getEndpoint().port());
+            assertEquals(dsqlPort, dsql.port());
+            dsql.unregister(dsqlCluster);
+            assertThrows(IOException.class, () -> {
+                try (ServerSocket unexpected = new ServerSocket(dsqlPort)) {
+                    fail("DSQL keeps its shared listener after cluster removal");
+                }
+            });
+            service.deleteDbCluster("coexist");
+            DbCluster replacement = service.createDbCluster("coexist-again", "aurora-postgresql", "16.3",
+                    "admin", "secret", "app", false, null);
+            assertEquals(rdsPort, replacement.getProxyPort());
+        } finally {
+            manager.stopAll();
+            dsql.stop();
+        }
+        int releasedRdsPort = rdsPort;
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            try (ServerSocket dsqlReleased = new ServerSocket();
+                    ServerSocket rdsReleased = new ServerSocket()) {
+                dsqlReleased.setReuseAddress(true);
+                rdsReleased.setReuseAddress(true);
+                dsqlReleased.bind(new InetSocketAddress(dsqlPort));
+                rdsReleased.bind(new InetSocketAddress(releasedRdsPort));
+                assertEquals(dsqlPort, dsqlReleased.getLocalPort());
+                assertEquals(releasedRdsPort, rdsReleased.getLocalPort());
+            }
+        });
+    }
+
+    private EmulatorConfig dsqlEndpointConfig(int port) {
+        EmulatorConfig endpointConfig = mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
+        when(endpointConfig.services().dsql().port()).thenReturn(port);
+        return endpointConfig;
+    }
+
+    @Test
+    void dbProxyReservesDsqlPortBeforeEitherListenerStartsAndAfterDeletion() {
+        configureDsqlPort(5432, true, false);
+        DbProxy proxy = proxyForEndpoints("first", "POSTGRESQL");
+        assertEquals(7000, proxy.getProxyPort());
+        assertEquals(proxy.getEndpointHost(), proxy.getEndpoint());
+        rdsService.deleteDbProxy("first");
+        DbProxy replacement = proxyForEndpoints("replacement", "POSTGRESQL");
+        assertEquals(7000, replacement.getProxyPort());
+        assertEquals(proxy.getEndpoint(), replacement.getEndpoint());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false,5432", "true,true,5432", "true,false,0", "true,false,15432"})
+    void dbProxyKeepsPreferredPortWhenDsqlDoesNotReserveIt(boolean enabled, boolean mockMode, int port) {
+        configureDsqlPort(port, enabled, mockMode);
+        assertEquals(5432, proxyForEndpoints("preferred", "POSTGRESQL").getProxyPort());
+    }
+
+    @Test
+    void dsqlPortIsExcludedFromTheRdsAllocationPool() {
+        configureDsqlPort(7000, true, false);
+        when(rdsConfig.mock()).thenReturn(true);
+        DbCluster cluster = rdsService.createDbCluster("pool", "aurora-postgresql", "16.3",
+                "admin", "secret", "app", false, null);
+        assertEquals(7001, cluster.getProxyPort());
+        assertEquals(7001, cluster.getEndpoint().port());
+    }
+
+    @Test
+    void explicitlyRequestedDsqlPortFailsBeforeInstancePublication() {
+        configureDsqlPort(7000, true, false);
+        when(rdsConfig.mock()).thenReturn(true);
+        AwsException failure = assertThrows(AwsException.class, () -> rdsService.createDbInstance("reserved",
+                "postgres", "16.3", "admin", "secret", "app", "db.r5.large", 20, false, null, null,
+                null, null, false, false, null, Map.of(), List.of(), null, null, true,
+                DbInstanceSettings.defaults(), false, 7000, false));
+        assertEquals("InvalidParameterValue", failure.getErrorCode());
+        assertThrows(AwsException.class, () -> rdsService.getDbInstance("reserved"));
+        verifyNoInteractions(containerManager, proxyManager);
+    }
+
+    @Test
+    void onlyDsqlPortInRdsPoolFailsWithoutPublishingAResource() {
+        configureDsqlPort(7000, true, false);
+        when(rdsConfig.proxyMaxPort()).thenReturn(7000);
+        when(rdsConfig.mock()).thenReturn(true);
+        AwsException failure = assertThrows(AwsException.class, () -> rdsService.createDbCluster(
+                "no-port", "aurora-postgresql", "16.3", "admin", "secret", "app", false, null));
+        assertEquals("InsufficientDBInstanceCapacity", failure.getErrorCode());
+        assertThrows(AwsException.class, () -> rdsService.getDbCluster("no-port"));
+        verifyNoInteractions(containerManager, proxyManager);
     }
 
     @Test
@@ -11174,8 +11319,9 @@ class RdsServiceTest {
         assertEquals("InvalidParameterValue", mismatch.getErrorCode());
     }
 
-    @Test
-    void restorePersistedRuntimeReArmsDbProxyRelayAcrossRestart() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void restorePersistedRuntimeReArmsDbProxyRelayAcrossRestart(boolean enableDsql) {
         StorageBackend<String, DbInstance> instances = new InMemoryStorage<>();
         StorageBackend<String, DbCluster> clusters = new InMemoryStorage<>();
         StorageBackend<String, DbParameterGroup> parameterGroups = new InMemoryStorage<>();
@@ -11197,6 +11343,10 @@ class RdsServiceTest {
                 PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
         initialService.registerDbProxyTargets("app-proxy", null, List.of("cluster1"), List.of(), 0, 0);
 
+        if (enableDsql) {
+            configureDsqlPort(5432, true, false);
+        }
+
         RdsContainerManager restoredContainerManager = mock(RdsContainerManager.class);
         RdsProxyManager restoredProxyManager = mock(RdsProxyManager.class);
         when(restoredContainerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
@@ -11210,6 +11360,10 @@ class RdsServiceTest {
         // The proxy survives the restart and its relay is re-armed against the restored backend.
         DbProxy restored = restoredService.getDbProxy("app-proxy");
         assertEquals("app-proxy", restored.getDbProxyName());
+        assertEquals(enableDsql ? 7001 : 5432, restored.getProxyPort());
+        assertEquals(restored.getEndpointHost(), restored.getEndpoint());
+        assertEquals(restored.getProxyPort(), proxies.get("us-east-1::app-proxy").orElseThrow().getProxyPort());
+
         verify(restoredProxyManager).startProxy(eq("db-proxy:" + restored.getDbProxyArn()),
                 eq("arn:aws:rds:us-east-1:123456789012:cluster:cluster1"),
                 eq(DatabaseEngine.POSTGRES), eq(false), anyInt(), eq("127.0.0.1"), eq(15432), any(),

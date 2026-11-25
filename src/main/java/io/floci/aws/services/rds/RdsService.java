@@ -9277,9 +9277,9 @@ public class RdsService implements Resettable, ResourceProvider {
         int base = config.services().rds().proxyBasePort();
         int max = config.services().rds().proxyMaxPort();
         if (requestedPort >= base && requestedPort <= max) {
-            if (!usedPorts.add(requestedPort)) {
+            if (!reserveAvailableProxyPort(requestedPort)) {
                 throw new AwsException("InvalidParameterValue",
-                        "Port " + requestedPort + " is already in use by another RDS resource.", 400);
+                        "Port " + requestedPort + " is already reserved by another database service resource.", 400);
             }
             return requestedPort;
         }
@@ -9290,12 +9290,20 @@ public class RdsService implements Resettable, ResourceProvider {
         int base = config.services().rds().proxyBasePort();
         int max = config.services().rds().proxyMaxPort();
         for (int port = base; port <= max; port++) {
-            if (usedPorts.add(port)) {
+            if (reserveAvailableProxyPort(port)) {
                 return port;
             }
         }
         throw new AwsException("InsufficientDBInstanceCapacity",
                 "No available proxy ports in range " + base + "-" + max, 503);
+    }
+
+    private boolean reserveAvailableProxyPort(int port) {
+        EmulatorConfig.DsqlServiceConfig dsql = config.services().dsql();
+        if (dsql != null && dsql.enabled() && !dsql.mock() && dsql.port() == port) {
+            return false;
+        }
+        return usedPorts.add(port);
     }
 
     private void releaseProxyPort(int port) {
@@ -11374,7 +11382,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     private void reservePersistedProxyPort(Map<Integer, String> owners, String ownerArn, int port) {
-        if (port > 0 && ownerArn != null && !owners.containsKey(port) && usedPorts.add(port)) {
+        if (port > 0 && ownerArn != null && !owners.containsKey(port) && reserveAvailableProxyPort(port)) {
             owners.put(port, ownerArn);
         }
     }
@@ -11387,7 +11395,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     private int reserveOrAllocateProxyPort(int persistedPort) {
-        if (persistedPort > 0 && usedPorts.add(persistedPort)) {
+        if (persistedPort > 0 && reserveAvailableProxyPort(persistedPort)) {
             return persistedPort;
         }
         return allocateProxyPort();
