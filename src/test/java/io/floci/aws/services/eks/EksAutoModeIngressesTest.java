@@ -9,6 +9,7 @@ import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ResourcesVpcConfig;
 import io.floci.aws.services.elbv2.ElbV2Service;
 import io.floci.aws.services.elbv2.model.Action;
+import io.floci.aws.services.elbv2.model.AvailabilityZone;
 import io.floci.aws.services.elbv2.model.Listener;
 import io.floci.aws.services.elbv2.model.LoadBalancer;
 import io.floci.aws.services.elbv2.model.Rule;
@@ -26,6 +27,8 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -129,10 +132,10 @@ class EksAutoModeIngressesTest {
 
         Map<String, String> lbTags = Map.of(EksAutoModeElb.CLUSTER_TAG, "prod",
                 EksAutoModeIngresses.STACK_TAG, "shop/front", EksAutoModeIngresses.RESOURCE_TAG, "LoadBalancer");
-        verify(elb).createLoadBalancer(eq(REGION), eq(EksAutoModeElb.resourceName(cluster, "shop/front", "")),
+        verify(elb).createLoadBalancer(eq(REGION), eq(EksAutoModeElb.resourceName(cluster, EksAutoModeIngresses.KIND, "shop/front", "")),
                 eq("internet-facing"), eq("application"), eq("ipv4"), eq(List.of("subnet-pub1", "subnet-pub2")),
                 eq(List.of()), eq(lbTags));
-        verify(elb).createTargetGroup(eq(REGION), eq(EksAutoModeElb.resourceName(cluster, "shop/front", "-30081")),
+        verify(elb).createTargetGroup(eq(REGION), eq(EksAutoModeElb.resourceName(cluster, EksAutoModeIngresses.KIND, "shop/front", "-30081")),
                 eq("HTTP"), isNull(), eq(30081), eq("vpc-1"), eq("instance"), eq("HTTP"), eq("traffic-port"), eq(true),
                 eq("/healthz"), eq(15), eq(5), isNull(), isNull(), isNull(), eq("ipv4"),
                 eq(Map.of(EksAutoModeElb.CLUSTER_TAG, "prod", EksAutoModeIngresses.STACK_TAG, "shop/front",
@@ -196,15 +199,92 @@ class EksAutoModeIngressesTest {
         Cluster cluster = cluster();
         objects(cluster, INGRESSES);
         holdElb();
-        when(elb.createLoadBalancer(anyString(), eq(EksAutoModeElb.resourceName(cluster, "shop/front", "")), anyString(),
+        when(elb.createLoadBalancer(anyString(), eq(EksAutoModeElb.resourceName(cluster, EksAutoModeIngresses.KIND, "shop/front", "")), anyString(),
                 anyString(), anyString(), anyList(), anyList(), any()))
                 .thenThrow(new AwsException("ValidationError", "At least two subnets in two different Availability "
                         + "Zones must be specified", 400));
 
         ingresses.reconcile(cluster, REGION, node());
 
-        verify(elb).createLoadBalancer(eq(REGION), eq(EksAutoModeElb.resourceName(cluster, "shop/plain", "")),
+        verify(elb).createLoadBalancer(eq(REGION), eq(EksAutoModeElb.resourceName(cluster, EksAutoModeIngresses.KIND, "shop/plain", "")),
                 anyString(), eq("application"), anyString(), anyList(), anyList(), any());
+    }
+
+    @Test
+    void aServiceAndAnIngressOfOneNameGetTwoNames() {
+        Cluster cluster = cluster();
+        assertNotEquals(EksAutoModeElb.resourceName(cluster, "shop/web", ""),
+                EksAutoModeElb.resourceName(cluster, EksAutoModeIngresses.KIND, "shop/web", ""));
+    }
+
+    /** As Kubernetes matches paths: Exact before Prefix, longer before shorter, whatever order they are listed in. */
+    @Test
+    void rulesFollowKubernetesPathPrecedence() throws Exception {
+        List<JsonNode> paths = List.of(json("{\"path\": \"/\", \"pathType\": \"Prefix\"}"),
+                json("{\"path\": \"/api\", \"pathType\": \"Prefix\"}"),
+                json("{\"path\": \"/api/health\", \"pathType\": \"Exact\"}"),
+                json("{\"path\": \"/static\", \"pathType\": \"Prefix\"}"));
+
+        assertEquals(List.of(2, 3, 1, 0), EksAutoModeIngresses.precedence(paths));
+    }
+
+    @Test
+    void aBackendPortServedOverUdpAndTcpTakesTheTcpNodePort() throws Exception {
+        String services = """
+                {"items": [{"metadata": {"namespace": "shop", "name": "dns"},
+                  "spec": {"type": "NodePort", "ports": [{"protocol": "UDP", "port": 53, "nodePort": 30053},
+                                                         {"protocol": "TCP", "port": 53, "nodePort": 31053}]}}]}""";
+        String ingress = """
+                {"items": [{"metadata": {"namespace": "shop", "name": "dns"},
+                  "spec": {"ingressClassName": "alb", "defaultBackend": {"service": {"name": "dns", "port": {"number": 53}}}}}]}""";
+
+        List<EksAutoModeIngresses.AlbIngress> found = EksAutoModeIngresses.albIngresses(json(ingress), json(CLASSES),
+                json(PARAMS), json(services));
+
+        assertEquals(31053, found.getFirst().defaultBackend().nodePort());
+    }
+
+    @Test
+    void changedSettingsReachTheLoadBalancerItsListenerAndTargetGroups() throws Exception {
+        Cluster cluster = cluster();
+        objects(cluster, INGRESSES);
+        holdElb();
+        ingresses.reconcile(cluster, REGION, node());
+        LoadBalancer plain = lbs.get(1);
+
+        // plain loses its default backend, front's health check path changes, and front turns internal.
+        objects(cluster, INGRESSES.replace(
+                "\"spec\": {\"defaultBackend\": {\"service\": {\"name\": \"web\", \"port\": {\"number\": 80}}}}}",
+                "\"spec\": {\"rules\": []}}")
+                .replace("/healthz", "/ready"));
+        when(clusterManager.execInContainerForResult(eq("k3s-prod"),
+                argThat(cmd -> cmd.length > 2 && "ingressclassparams".equals(cmd[2])), anyInt()))
+                .thenReturn(new ContainerExec.Result(0, PARAMS.replace("internet-facing", "internal"), "", false));
+        String frontLb = lbs.getFirst().getLoadBalancerArn();
+
+        ingresses.reconcile(cluster, REGION, node());
+
+        verify(elb).modifyListener(eq(REGION), eq("arn:listener-" + plain.getLoadBalancerArn()), isNull(), isNull(),
+                isNull(), isNull(), argThat(actions -> "fixed-response".equals(actions.getFirst().getType())), isNull());
+        // front's two target groups, api and web, both take the new health check path.
+        verify(elb, times(2)).modifyTargetGroup(eq(REGION), anyString(), isNull(), isNull(), isNull(), eq("/ready"), isNull(),
+                isNull(), isNull(), isNull(), isNull());
+        verify(elb).deleteLoadBalancer(REGION, frontLb);
+        verify(elb).createLoadBalancer(eq(REGION), eq(EksAutoModeElb.resourceName(cluster, EksAutoModeIngresses.KIND,
+                "shop/front", "")), eq("internal"), eq("application"), anyString(), anyList(), anyList(), any());
+    }
+
+    @Test
+    void aFailedParamsReadOtherThanAMissingKindStopsThePass() throws Exception {
+        Cluster cluster = cluster();
+        objects(cluster, INGRESSES);
+        holdElb();
+        when(clusterManager.execInContainerForResult(eq("k3s-prod"),
+                argThat(cmd -> cmd.length > 2 && "ingressclassparams".equals(cmd[2])), anyInt()))
+                .thenReturn(new ContainerExec.Result(1, "", "Unable to connect to the server", false));
+
+        assertThrows(IllegalStateException.class, () -> ingresses.reconcile(cluster, REGION, node()));
+        verify(elb, never()).createLoadBalancer(any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -250,6 +330,14 @@ class EksAutoModeIngressesTest {
                     lb.setLoadBalancerArn("arn:lb-" + (lbs.size() + 1));
                     lb.setLoadBalancerName(inv.getArgument(1));
                     lb.setType(inv.getArgument(3));
+                    lb.setScheme(inv.getArgument(2));
+                    List<AvailabilityZone> zones = new ArrayList<>();
+                    for (String subnet : inv.<List<String>>getArgument(5)) {
+                        AvailabilityZone zone = new AvailabilityZone();
+                        zone.setSubnetId(subnet);
+                        zones.add(zone);
+                    }
+                    lb.setAvailabilityZones(zones);
                     lb.setDnsName("lb-" + (lbs.size() + 1) + ".elb.test");
                     lbs.add(lb);
                     tags.put(lb.getLoadBalancerArn(), inv.getArgument(7));
@@ -261,6 +349,7 @@ class EksAutoModeIngressesTest {
                     group.setTargetGroupArn("arn:tg-" + (groups.size() + 1));
                     group.setTargetGroupName(inv.getArgument(1));
                     group.setPort(inv.getArgument(4));
+                    group.setHealthCheckPath(inv.getArgument(10));
                     group.setTargets(new ArrayList<TargetDescription>());
                     groups.add(group);
                     tags.put(group.getTargetGroupArn(), inv.getArgument(17));
@@ -272,6 +361,7 @@ class EksAutoModeIngressesTest {
                     Listener listener = new Listener();
                     listener.setListenerArn("arn:listener-" + inv.getArgument(1));
                     listener.setPort(inv.getArgument(3));
+                    listener.setDefaultActions(inv.getArgument(6));
                     listeners.computeIfAbsent(inv.getArgument(1), k -> new ArrayList<>()).add(listener);
                     return listener;
                 });

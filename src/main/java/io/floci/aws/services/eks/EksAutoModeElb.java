@@ -34,8 +34,12 @@ final class EksAutoModeElb {
         this.elb = elb;
     }
 
-    /** The load balancers of {@code type} made for {@code cluster}'s objects of {@code stackTag}, by object. */
-    Map<String, LoadBalancer> loadBalancersOf(Cluster cluster, String region, String stackTag, String type) {
+    /**
+     * The load balancers of {@code type} made for {@code cluster}'s objects of {@code stackTag} and {@code kind}, by
+     * object.
+     */
+    Map<String, LoadBalancer> loadBalancersOf(Cluster cluster, String region, String stackTag, String kind,
+                                              String type) {
         Map<String, LoadBalancer> found = new LinkedHashMap<>();
         List<LoadBalancer> all = elb.describeLoadBalancers(region, null, null, null, null);
         if (all.isEmpty()) {
@@ -45,7 +49,7 @@ final class EksAutoModeElb {
         for (LoadBalancer lb : all) {
             String stack = stackOf(cluster, tags.get(lb.getLoadBalancerArn()), stackTag);
             if (stack != null && type.equals(lb.getType())
-                    && resourceName(cluster, stack, "").equals(lb.getLoadBalancerName())) {
+                    && resourceName(cluster, kind, stack, "").equals(lb.getLoadBalancerName())) {
                 found.put(stack, lb);
             }
         }
@@ -53,7 +57,8 @@ final class EksAutoModeElb {
     }
 
     /** The target groups made for the object {@code stack} of {@code cluster}, by name, wherever they are attached. */
-    Map<String, TargetGroup> targetGroupsOf(Cluster cluster, String region, String stackTag, String stack) {
+    Map<String, TargetGroup> targetGroupsOf(Cluster cluster, String region, String stackTag, String kind,
+                                            String stack) {
         Map<String, TargetGroup> found = new HashMap<>();
         List<TargetGroup> all = elb.describeTargetGroups(region, null, null, null);
         if (all.isEmpty()) {
@@ -63,7 +68,7 @@ final class EksAutoModeElb {
         for (TargetGroup group : all) {
             Matcher port = PORT_SUFFIX.matcher(group.getTargetGroupName());
             if (stack.equals(stackOf(cluster, tags.get(group.getTargetGroupArn()), stackTag)) && port.find()
-                    && resourceName(cluster, stack, "-" + port.group(1)).equals(group.getTargetGroupName())) {
+                    && resourceName(cluster, kind, stack, "-" + port.group(1)).equals(group.getTargetGroupName())) {
                 found.put(group.getTargetGroupName(), group);
             }
         }
@@ -81,11 +86,11 @@ final class EksAutoModeElb {
     }
 
     /** Deletes {@code lb} with its listeners, and every target group made for its object, attached or not. */
-    void delete(Cluster cluster, String region, String stackTag, String stack, LoadBalancer lb) {
+    void delete(Cluster cluster, String region, String stackTag, String kind, String stack, LoadBalancer lb) {
         elb.describeListeners(region, lb.getLoadBalancerArn(), null)
                 .forEach(listener -> elb.deleteListener(region, listener.getListenerArn()));
         elb.deleteLoadBalancer(region, lb.getLoadBalancerArn());
-        targetGroupsOf(cluster, region, stackTag, stack).values()
+        targetGroupsOf(cluster, region, stackTag, kind, stack).values()
                 .forEach(group -> elb.deleteTargetGroup(region, group.getTargetGroupArn()));
     }
 
@@ -104,7 +109,15 @@ final class EksAutoModeElb {
      * cluster's ARN and the object, so two clusters' objects of one name don't collide.
      */
     static String resourceName(Cluster cluster, String stack, String suffix) {
-        String hash = Digests.sha256Hex(cluster.getArn() + "/" + stack + suffix).substring(0, 10);
+        return resourceName(cluster, "", stack, suffix);
+    }
+
+    /**
+     * {@link #resourceName(Cluster, String, String)} for an object of {@code kind}, which the hash names too, so a
+     * Service and an Ingress of one name get two names; a Service's kind is empty, which keeps its names as they were.
+     */
+    static String resourceName(Cluster cluster, String kind, String stack, String suffix) {
+        String hash = Digests.sha256Hex(cluster.getArn() + "/" + kind + stack + suffix).substring(0, 10);
         int slash = stack.indexOf('/');
         String base = ("k8s-" + cut(stack.substring(0, slash), 7) + "-" + cut(stack.substring(slash + 1), 7))
                 .replaceAll("[^A-Za-z0-9-]", "-");

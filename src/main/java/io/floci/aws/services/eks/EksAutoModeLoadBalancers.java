@@ -143,7 +143,7 @@ public class EksAutoModeLoadBalancers {
     void reconcile(Cluster cluster, String region) {
         List<NlbService> services = nlbServices(kubectl.list(cluster, "services"),
                 clusterManager.runsWithoutServiceLb(cluster));
-        Map<String, LoadBalancer> existing = resources.loadBalancersOf(cluster, region, STACK_TAG, "network");
+        Map<String, LoadBalancer> existing = resources.loadBalancersOf(cluster, region, STACK_TAG, "", "network");
         Instance node = clusterManager.getRegisteredClusterNodeInstance(cluster);
         for (NlbService service : services) {
             LoadBalancer lb = existing.remove(service.stack());
@@ -164,7 +164,7 @@ public class EksAutoModeLoadBalancers {
      * groups.
      */
     public void deleteLoadBalancers(Cluster cluster, String region) {
-        resources.loadBalancersOf(cluster, region, STACK_TAG, "network")
+        resources.loadBalancersOf(cluster, region, STACK_TAG, "", "network")
                 .forEach((stack, lb) -> delete(cluster, region, stack, lb));
         ingresses.deleteLoadBalancers(cluster, region);
     }
@@ -220,7 +220,7 @@ public class EksAutoModeLoadBalancers {
      * port can't change. Answers whether every port can serve: the node is registered.
      */
     private boolean ensurePorts(Cluster cluster, String region, NlbService service, LoadBalancer lb, Instance node) {
-        Map<String, TargetGroup> groups = resources.targetGroupsOf(cluster, region, STACK_TAG, service.stack());
+        Map<String, TargetGroup> groups = resources.targetGroupsOf(cluster, region, STACK_TAG, "", service.stack());
         Map<Integer, Listener> listeners = new HashMap<>();
         elb.describeListeners(region, lb.getLoadBalancerArn(), null).forEach(l -> listeners.put(l.getPort(), l));
         Set<String> wanted = new HashSet<>();
@@ -261,7 +261,7 @@ public class EksAutoModeLoadBalancers {
     }
 
     private void delete(Cluster cluster, String region, String stack, LoadBalancer lb) {
-        resources.delete(cluster, region, STACK_TAG, stack, lb);
+        resources.delete(cluster, region, STACK_TAG, "", stack, lb);
         LOG.infov("Deleted Network Load Balancer {0} of Service {1} of EKS cluster {2}", lb.getLoadBalancerName(),
                 stack, cluster.getName());
     }

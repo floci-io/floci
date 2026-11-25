@@ -6,6 +6,7 @@ import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.elbv2.ElbV2Service;
 import io.floci.aws.services.elbv2.model.Action;
+import io.floci.aws.services.elbv2.model.AvailabilityZone;
 import io.floci.aws.services.elbv2.model.Listener;
 import io.floci.aws.services.elbv2.model.LoadBalancer;
 import io.floci.aws.services.elbv2.model.Rule;
@@ -14,6 +15,7 @@ import io.floci.aws.services.elbv2.model.TargetGroup;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -58,6 +60,8 @@ final class EksAutoModeIngresses {
     static final String HEALTH_CHECK_PATH_ANNOTATION = "alb.ingress.kubernetes.io/healthcheck-path";
     private static final String PARAMS_GROUP = "eks.amazonaws.com"; // partition-literal: a Kubernetes API group
     private static final String DEFAULT_CLASS_ANNOTATION = "ingressclass.kubernetes.io/is-default-class";
+    /** What Ingress names hash besides the Ingress, so a Service of the same name gets another name. */
+    static final String KIND = "ingress/";
 
     private final ElbV2Service elb;
     private final EksAutoModeElb resources;
@@ -109,13 +113,20 @@ final class EksAutoModeIngresses {
         // Without an ALB class no Ingress gets a load balancer, so the other lists aren't read.
         List<AlbIngress> ingresses = !anyAlbClass ? List.of() : albIngresses(kubectl.list(cluster, "ingresses"),
                 classes, ingressClassParams(cluster), kubectl.list(cluster, "services"));
-        Map<String, LoadBalancer> existing = resources.loadBalancersOf(cluster, region, STACK_TAG, "application");
+        Map<String, LoadBalancer> existing = resources.loadBalancersOf(cluster, region, STACK_TAG, KIND, "application");
         for (AlbIngress ingress : ingresses) {
             LoadBalancer lb = existing.remove(ingress.stack());
             // One Ingress ELBv2 refuses, for its subnets say, leaves the others served.
             try {
+                if (lb != null && !ingress.scheme().equals(lb.getScheme())) {
+                    // A load balancer's scheme can't change, so another scheme takes another load balancer.
+                    delete(cluster, region, ingress.stack(), lb);
+                    lb = null;
+                }
                 if (lb == null) {
                     lb = createLoadBalancer(cluster, region, ingress);
+                } else {
+                    keepSubnets(cluster, region, ingress, lb);
                 }
                 if (ensureRouting(cluster, region, ingress, lb, node)) {
                     kubectl.writeHostname(cluster, "ingress", ingress.namespace(), ingress.name(), ingress.uid(),
@@ -129,18 +140,24 @@ final class EksAutoModeIngresses {
         existing.forEach((stack, lb) -> delete(cluster, region, stack, lb));
     }
 
-    /** The cluster's IngressClassParams; none on a node started before Floci installed the kind. */
+    /**
+     * The cluster's IngressClassParams; none on a node started before Floci installed the kind. Any other failed read
+     * stops the pass, so no load balancer is made without the settings a class gives it.
+     */
     private JsonNode ingressClassParams(Cluster cluster) {
         try {
             return kubectl.list(cluster, "ingressclassparams");
-        } catch (IllegalStateException noKind) {
-            return MissingNode.getInstance();
+        } catch (IllegalStateException e) {
+            if (e.getMessage() != null && e.getMessage().contains("doesn't have a resource type")) {
+                return MissingNode.getInstance();
+            }
+            throw e;
         }
     }
 
     /** Deletes every load balancer made for the cluster's Ingresses, with their listeners and target groups. */
     void deleteLoadBalancers(Cluster cluster, String region) {
-        resources.loadBalancersOf(cluster, region, STACK_TAG, "application")
+        resources.loadBalancersOf(cluster, region, STACK_TAG, KIND, "application")
                 .forEach((stack, lb) -> delete(cluster, region, stack, lb));
     }
 
@@ -189,13 +206,18 @@ final class EksAutoModeIngresses {
             List<String> subnets = new ArrayList<>();
             classParams.path("subnets").path("ids").forEach(id -> subnets.add(id.asText()));
             List<Route> routes = new ArrayList<>();
+            List<JsonNode> paths = new ArrayList<>();
+            List<String> hosts = new ArrayList<>();
             for (JsonNode rule : spec.path("rules")) {
-                String host = rule.path("host").asText(null);
                 for (JsonNode path : rule.path("http").path("paths")) {
-                    Backend backend = backend(path.path("backend"), namespace, servicesByStack);
-                    if (backend != null) {
-                        routes.add(new Route(host, pathPatterns(path), backend));
-                    }
+                    paths.add(path);
+                    hosts.add(rule.path("host").asText(null));
+                }
+            }
+            for (int i : precedence(paths)) {
+                Backend backend = backend(paths.get(i).path("backend"), namespace, servicesByStack);
+                if (backend != null) {
+                    routes.add(new Route(hosts.get(i), pathPatterns(paths.get(i)), backend));
                 }
             }
             found.add(new AlbIngress(namespace, metadata.path("name").asText(), metadata.path("uid").asText(""),
@@ -204,6 +226,21 @@ final class EksAutoModeIngresses {
                     List.copyOf(routes), backend(spec.path("defaultBackend"), namespace, servicesByStack)));
         }
         return found;
+    }
+
+    /**
+     * The paths' indexes in the order their rules are matched: as Kubernetes matches an Ingress's paths, an
+     * {@code Exact} path before a {@code Prefix} one, and a longer path before a shorter, the order given otherwise.
+     */
+    static List<Integer> precedence(List<JsonNode> paths) {
+        List<Integer> order = new ArrayList<>();
+        for (int i = 0; i < paths.size(); i++) {
+            order.add(i);
+        }
+        order.sort(Comparator
+                .comparingInt((Integer i) -> "Exact".equals(paths.get(i).path("pathType").asText()) ? 0 : 1)
+                .thenComparingInt(i -> -paths.get(i).path("path").asText("/").length()));
+        return order;
     }
 
     private static JsonNode paramsOf(JsonNode ingressClass, Map<String, JsonNode> paramsByName) {
@@ -226,8 +263,10 @@ final class EksAutoModeIngresses {
         }
         JsonNode wanted = service.path("port");
         for (JsonNode port : found.path("spec").path("ports")) {
-            boolean matches = wanted.has("number") ? wanted.path("number").asInt() == port.path("port").asInt()
-                    : wanted.path("name").asText().equals(port.path("name").asText());
+            boolean matches = (wanted.has("number") ? wanted.path("number").asInt() == port.path("port").asInt()
+                    : wanted.path("name").asText().equals(port.path("name").asText()))
+                    // A port number a Service also serves over UDP takes its TCP NodePort.
+                    && "TCP".equals(port.path("protocol").asText("TCP"));
             if (matches && port.path("nodePort").asInt() > 0) {
                 return new Backend(name, port.path("port").asInt(), port.path("nodePort").asInt());
             }
@@ -250,14 +289,28 @@ final class EksAutoModeIngresses {
     }
 
     private LoadBalancer createLoadBalancer(Cluster cluster, String region, AlbIngress ingress) {
-        List<String> subnets = !ingress.subnets().isEmpty() ? ingress.subnets()
-                : cluster.getResourcesVpcConfig() == null ? List.of() : cluster.getResourcesVpcConfig().getSubnetIds();
-        LoadBalancer lb = elb.createLoadBalancer(region, EksAutoModeElb.resourceName(cluster, ingress.stack(), ""),
+        List<String> subnets = subnets(cluster, ingress);
+        LoadBalancer lb = elb.createLoadBalancer(region, EksAutoModeElb.resourceName(cluster, KIND, ingress.stack(), ""),
                 ingress.scheme(), "application", "ipv4", subnets, List.of(),
                 tags(cluster, ingress, "LoadBalancer"));
         LOG.infov("Created Application Load Balancer {0} for Ingress {1} of EKS cluster {2}",
                 lb.getLoadBalancerName(), ingress.stack(), cluster.getName());
         return lb;
+    }
+
+    /** The load balancer moves to the subnets the Ingress's class names now, when they differ. */
+    private void keepSubnets(Cluster cluster, String region, AlbIngress ingress, LoadBalancer lb) {
+        List<String> wanted = subnets(cluster, ingress);
+        List<String> have = lb.getAvailabilityZones() == null ? List.of()
+                : lb.getAvailabilityZones().stream().map(AvailabilityZone::getSubnetId).toList();
+        if (!wanted.isEmpty() && !Set.copyOf(wanted).equals(Set.copyOf(have))) {
+            elb.setSubnets(region, lb.getLoadBalancerArn(), wanted);
+        }
+    }
+
+    private static List<String> subnets(Cluster cluster, AlbIngress ingress) {
+        return !ingress.subnets().isEmpty() ? ingress.subnets()
+                : cluster.getResourcesVpcConfig() == null ? List.of() : cluster.getResourcesVpcConfig().getSubnetIds();
     }
 
     /**
@@ -266,11 +319,11 @@ final class EksAutoModeIngresses {
      * whether the load balancer can serve: the node is registered.
      */
     private boolean ensureRouting(Cluster cluster, String region, AlbIngress ingress, LoadBalancer lb, Instance node) {
-        Map<String, TargetGroup> groups = resources.targetGroupsOf(cluster, region, STACK_TAG, ingress.stack());
+        Map<String, TargetGroup> groups = resources.targetGroupsOf(cluster, region, STACK_TAG, KIND, ingress.stack());
         Map<Backend, String> groupArns = new HashMap<>();
         Set<String> wanted = new LinkedHashSet<>();
         for (Backend backend : ingress.backends()) {
-            String name = EksAutoModeElb.resourceName(cluster, ingress.stack(), "-" + backend.nodePort());
+            String name = EksAutoModeElb.resourceName(cluster, KIND, ingress.stack(), "-" + backend.nodePort());
             wanted.add(name);
             TargetGroup group = groups.get(name);
             if (group == null) {
@@ -278,6 +331,9 @@ final class EksAutoModeIngresses {
                 group = elb.createTargetGroup(region, name, "HTTP", null, backend.nodePort(), vpcId, "instance", "HTTP",
                         "traffic-port", true, ingress.healthCheckPath(), 15, 5, null, null, null, "ipv4",
                         tags(cluster, ingress, backend.resource(ingress)));
+            } else if (!ingress.healthCheckPath().equals(group.getHealthCheckPath())) {
+                elb.modifyTargetGroup(region, group.getTargetGroupArn(), null, null, null, ingress.healthCheckPath(),
+                        null, null, null, null, null);
             }
             resources.registerNode(region, group, node);
             groupArns.put(backend, group.getTargetGroupArn());
@@ -287,6 +343,10 @@ final class EksAutoModeIngresses {
         Listener listener = listeners.stream().filter(l -> Integer.valueOf(80).equals(l.getPort())).findFirst()
                 .orElseGet(() -> elb.createListener(region, lb.getLoadBalancerArn(), "HTTP", 80, null, null,
                         List.of(defaultAction), null, tags(cluster, ingress, "LoadBalancer")));
+        if (!sameAction(listener.getDefaultActions(), defaultAction)) {
+            // A default backend added, changed or dropped since the listener was made.
+            elb.modifyListener(region, listener.getListenerArn(), null, null, null, null, List.of(defaultAction), null);
+        }
         setRules(region, listener, ingress, groupArns);
         groups.forEach((name, group) -> {
             if (!wanted.contains(name)) {
@@ -348,6 +408,16 @@ final class EksAutoModeIngresses {
         return condition;
     }
 
+    private static boolean sameAction(List<Action> actions, Action wanted) {
+        if (actions == null || actions.size() != 1) {
+            return false;
+        }
+        Action have = actions.getFirst();
+        return Objects.equals(have.getType(), wanted.getType())
+                && Objects.equals(have.getTargetGroupArn(), wanted.getTargetGroupArn())
+                && Objects.equals(have.getFixedResponseStatusCode(), wanted.getFixedResponseStatusCode());
+    }
+
     private static Action forward(String targetGroupArn) {
         Action action = new Action();
         action.setType("forward");
@@ -373,7 +443,7 @@ final class EksAutoModeIngresses {
     }
 
     private void delete(Cluster cluster, String region, String stack, LoadBalancer lb) {
-        resources.delete(cluster, region, STACK_TAG, stack, lb);
+        resources.delete(cluster, region, STACK_TAG, KIND, stack, lb);
         LOG.infov("Deleted Application Load Balancer {0} of Ingress {1} of EKS cluster {2}",
                 lb.getLoadBalancerName(), stack, cluster.getName());
     }
