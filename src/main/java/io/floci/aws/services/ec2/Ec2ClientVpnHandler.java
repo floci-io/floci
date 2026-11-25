@@ -74,9 +74,9 @@ class Ec2ClientVpnHandler {
     }
 
     Response describe(MultivaluedMap<String, String> p, String region) {
+        Ec2QueryHandler.checkDryRun(p);
         List<Map.Entry<String, List<String>>> filters = filters(p, ENDPOINT_FILTERS);
         List<ClientVpnEndpoint> endpoints = clientVpn.describeEndpoints(region, getList(p, "ClientVpnEndpointId"));
-        Ec2QueryHandler.checkDryRun(p);
         XmlBuilder xml = startResponse("DescribeClientVpnEndpoints").start("clientVpnEndpoint");
         for (ClientVpnEndpoint endpoint : endpoints) {
             List<Tag> tags = ec2.resourceTags(region, endpoint.getClientVpnEndpointId());
