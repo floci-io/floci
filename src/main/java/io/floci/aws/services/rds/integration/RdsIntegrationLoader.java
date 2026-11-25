@@ -117,14 +117,6 @@ public class RdsIntegrationLoader implements Resettable {
         this.retryDelay = retryDelay;
     }
 
-    /** Starts loading {@code sourceDatabase} of the integration into {@code databaseName} in the background. */
-    public void submit(Integration integration, String sourceDatabase, String databaseName) {
-        String loadId = integration.destinationFor(sourceDatabase)
-                .map(Integration.Destination::getLoadId)
-                .orElse(null);
-        submit(integration, sourceDatabase, databaseName, loadId);
-    }
-
     /**
      * Starts loading {@code sourceDatabase} of the integration into {@code databaseName} in the background
      * under the load identity {@code loadId}.

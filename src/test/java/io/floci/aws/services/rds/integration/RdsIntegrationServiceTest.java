@@ -365,24 +365,25 @@ class RdsIntegrationServiceTest {
         Integration integration = service.findById(created.integrationId()).orElseThrow();
 
         Integration syncing = service.addDestination(integration, "orders_dw", "orders", false);
+        String loadId = loadId(syncing, "orders");
         assertEquals(Integration.STATUS_SYNCING, syncing.getStatus());
         assertEquals(Integration.STATUS_SYNCING, describe(created).getStatus());
-        assertEquals(true, service.isLoading(integration, "orders", "orders_dw"));
+        assertTrue(service.isLoading(integration, "orders", "orders_dw", loadId));
         assertError("InvalidIntegrationStateFault", 400,
                 () -> service.modifyIntegration(created.getIntegrationArn(), null, null, "x", REGION));
 
-        service.finishDestination(integration, "orders", "orders_dw", null);
+        service.finishDestination(integration, "orders", "orders_dw", loadId, null);
         Integration active = describe(created);
         assertEquals(Integration.STATUS_ACTIVE, active.getStatus());
         assertEquals(Integration.Destination.STATE_SYNCED, active.destinationFor("orders").orElseThrow().getState());
-        assertEquals(false, service.isLoading(integration, "orders", "orders_dw"));
+        assertFalse(service.isLoading(integration, "orders", "orders_dw", loadId));
     }
 
     @Test
     void addDestination_refusesASecondDatabaseFromTheSameSourceDatabase() {
         Integration integration = service.findById(create("orders-zero-etl").integrationId()).orElseThrow();
-        service.addDestination(integration, "orders_dw", "orders", false);
-        service.finishDestination(integration, "orders", "orders_dw", null);
+        Integration syncing = service.addDestination(integration, "orders_dw", "orders", false);
+        service.finishDestination(integration, "orders", "orders_dw", loadId(syncing, "orders"), null);
 
         assertError("IntegrationAlreadyExistsFault", 400,
                 () -> service.addDestination(integration, "orders_dw2", "orders", false));
@@ -403,14 +404,14 @@ class RdsIntegrationServiceTest {
     void addDestination_replacesAFailedLoadOrADroppedDatabase() {
         Integration created = create("orders-zero-etl");
         Integration integration = service.findById(created.integrationId()).orElseThrow();
-        service.addDestination(integration, "orders_dw", "orders", false);
-        service.finishDestination(integration, "orders", "orders_dw", "source is down");
+        Integration first = service.addDestination(integration, "orders_dw", "orders", false);
+        service.finishDestination(integration, "orders", "orders_dw", loadId(first, "orders"), "source is down");
 
         Integration retried = service.addDestination(integration, "orders_dw", "orders", false);
         assertEquals(Integration.STATUS_SYNCING, retried.getStatus());
         assertEquals(1, retried.getDestinations().size());
 
-        service.finishDestination(integration, "orders", "orders_dw", null);
+        service.finishDestination(integration, "orders", "orders_dw", loadId(retried, "orders"), null);
         Integration reloaded = service.addDestination(integration, "orders_dw_v2", "orders", true);
         assertEquals("orders_dw_v2", reloaded.destinationFor("orders").orElseThrow().getDatabaseName());
     }
@@ -419,9 +420,9 @@ class RdsIntegrationServiceTest {
     void finishDestination_withAFailureMarksTheIntegrationFailed() {
         Integration created = create("orders-zero-etl");
         Integration integration = service.findById(created.integrationId()).orElseThrow();
-        service.addDestination(integration, "orders_dw", "orders", false);
+        Integration syncing = service.addDestination(integration, "orders_dw", "orders", false);
 
-        service.finishDestination(integration, "orders", "orders_dw", "source is down");
+        service.finishDestination(integration, "orders", "orders_dw", loadId(syncing, "orders"), "source is down");
 
         Integration failed = describe(created);
         assertEquals(Integration.STATUS_FAILED, failed.getStatus());
@@ -433,11 +434,11 @@ class RdsIntegrationServiceTest {
     void addDestination_preservesErrorsOfOtherFailedDestinations() {
         Integration created = create("orders-zero-etl");
         Integration integration = service.findById(created.integrationId()).orElseThrow();
-        service.addDestination(integration, "orders_dw", "orders", false);
-        service.finishDestination(integration, "orders", "orders_dw", "orders load failed");
+        Integration orders = service.addDestination(integration, "orders_dw", "orders", false);
+        service.finishDestination(integration, "orders", "orders_dw", loadId(orders, "orders"), "orders load failed");
 
-        service.addDestination(integration, "billing_dw", "billing", false);
-        service.finishDestination(integration, "billing", "billing_dw", null);
+        Integration billing = service.addDestination(integration, "billing_dw", "billing", false);
+        service.finishDestination(integration, "billing", "billing_dw", loadId(billing, "billing"), null);
 
         Integration described = describe(created);
         assertEquals(Integration.STATUS_FAILED, described.getStatus());
@@ -449,14 +450,14 @@ class RdsIntegrationServiceTest {
     void restoreDestination_restoresPreviousFailedDestinationAndErrors() {
         Integration created = create("orders-zero-etl");
         Integration integration = service.findById(created.integrationId()).orElseThrow();
-        service.addDestination(integration, "orders_dw", "orders", false);
-        service.finishDestination(integration, "orders", "orders_dw", "source is down");
+        Integration first = service.addDestination(integration, "orders_dw", "orders", false);
+        service.finishDestination(integration, "orders", "orders_dw", loadId(first, "orders"), "source is down");
         Integration failed = describe(created);
         Integration.Destination previous = failed.destinationFor("orders").orElseThrow();
         List<Integration.IntegrationError> previousErrors = List.copyOf(failed.getErrors());
 
-        service.addDestination(integration, "orders_dw_v2", "orders", false);
-        service.restoreDestination(integration, "orders", previous, previousErrors);
+        Integration replacement = service.addDestination(integration, "orders_dw_v2", "orders", false);
+        service.restoreDestination(integration, "orders", loadId(replacement, "orders"), previous, previousErrors);
 
         Integration restored = describe(created);
         assertEquals(Integration.STATUS_FAILED, restored.getStatus());
@@ -471,9 +472,9 @@ class RdsIntegrationServiceTest {
     void removeDestination_putsTheIntegrationBackToActive() {
         Integration created = create("orders-zero-etl");
         Integration integration = service.findById(created.integrationId()).orElseThrow();
-        service.addDestination(integration, "orders_dw", "orders", false);
+        Integration syncing = service.addDestination(integration, "orders_dw", "orders", false);
 
-        service.removeDestination(integration, "orders");
+        service.removeDestination(integration, "orders", loadId(syncing, "orders"));
 
         assertEquals(Integration.STATUS_ACTIVE, describe(created).getStatus());
         assertThat(describe(created).getDestinations(), empty());
@@ -483,10 +484,10 @@ class RdsIntegrationServiceTest {
     void finishDestination_ignoresADeletedIntegration() {
         Integration created = create("orders-zero-etl");
         Integration integration = service.findById(created.integrationId()).orElseThrow();
-        service.addDestination(integration, "orders_dw", "orders", false);
+        Integration syncing = service.addDestination(integration, "orders_dw", "orders", false);
         service.deleteIntegration(created.getIntegrationArn(), REGION);
 
-        service.finishDestination(integration, "orders", "orders_dw", null);
+        service.finishDestination(integration, "orders", "orders_dw", loadId(syncing, "orders"), null);
 
         assertThat(storage.scan(key -> true), empty());
     }
@@ -588,5 +589,9 @@ class RdsIntegrationServiceTest {
 
     private Integration describe(Integration integration) {
         return service.describeIntegrations(integration.getIntegrationArn(), Map.of(), REGION).get(0);
+    }
+
+    private static String loadId(Integration integration, String sourceDatabase) {
+        return integration.destinationFor(sourceDatabase).orElseThrow().getLoadId();
     }
 }

@@ -307,29 +307,18 @@ public class RdsIntegrationService implements Resettable {
         }
     }
 
-    /** Forgets a destination whose database could not be created, as if it had never been asked for. */
-    public void removeDestination(Integration integration, String sourceDatabase) {
-        restoreDestination(integration, sourceDatabase, null, null, List.of());
-    }
-
-    /** Forgets a destination owned by {@code expectedLoadId} whose database could not be created. */
+    /**
+     * Forgets a destination owned by {@code expectedLoadId} whose database could not be created, as if it had
+     * never been asked for.
+     */
     public void removeDestination(Integration integration, String sourceDatabase, String expectedLoadId) {
         restoreDestination(integration, sourceDatabase, expectedLoadId, null, List.of());
     }
 
     /**
-     * Reverts a destination registration when creating its database on the target failed, restoring any replaced
-     * destination and its errors rather than clearing a prior failure.
-     */
-    public void restoreDestination(Integration integration, String sourceDatabase,
-                                   Integration.Destination previousDestination,
-                                   List<Integration.IntegrationError> previousErrors) {
-        restoreDestination(integration, sourceDatabase, null, previousDestination, previousErrors);
-    }
-
-    /**
-     * Reverts a destination registration owned by {@code expectedLoadId} (when non-null) when creating its
-     * database on the target failed, leaving any other caller's registration untouched.
+     * Reverts a destination registration owned by {@code expectedLoadId} when creating its database on the target
+     * failed, restoring any replaced destination and its errors rather than clearing a prior failure. Another
+     * caller's registration is left untouched.
      */
     public void restoreDestination(Integration integration, String sourceDatabase, String expectedLoadId,
                                    Integration.Destination previousDestination,
@@ -337,8 +326,7 @@ public class RdsIntegrationService implements Resettable {
         synchronized (lock) {
             findCurrent(integration).ifPresent(current -> {
                 Optional<Integration.Destination> existing = current.destinationFor(sourceDatabase);
-                if (expectedLoadId != null && existing
-                        .filter(destination -> Objects.equals(expectedLoadId, destination.getLoadId()))
+                if (existing.filter(destination -> Objects.equals(expectedLoadId, destination.getLoadId()))
                         .isEmpty()) {
                     return;
                 }
@@ -365,15 +353,6 @@ public class RdsIntegrationService implements Resettable {
                 && error.getErrorMessage().startsWith("The initial load of source database " + sourceDatabase + " ");
     }
 
-    /** Whether the integration still exists and still loads {@code sourceDatabase} into {@code databaseName}. */
-    public boolean isLoading(Integration integration, String sourceDatabase, String databaseName) {
-        return findCurrent(integration)
-                .flatMap(current -> current.destinationFor(sourceDatabase))
-                .filter(destination -> databaseName.equals(destination.getDatabaseName()))
-                .filter(destination -> Integration.Destination.STATE_SYNCING.equals(destination.getState()))
-                .isPresent();
-    }
-
     /**
      * Whether the integration still exists and is still running the specific load identified by {@code loadId}
      * for {@code sourceDatabase} into {@code databaseName}.
@@ -388,33 +367,19 @@ public class RdsIntegrationService implements Resettable {
     }
 
     /**
-     * Ends the initial load of a destination: {@code Synced}, or {@code Failed} with {@code failure} as the
-     * integration's error. The integration is {@code active} again once no destination is syncing, or
-     * {@code failed} when a load failed. A destination no longer loading, because the integration was
-     * deleted meanwhile, is left alone.
-     */
-    public void finishDestination(Integration integration, String sourceDatabase, String databaseName,
-                                  String failure) {
-        finishDestinationInternal(integration, sourceDatabase, databaseName, null, false, failure);
-    }
-
-    /**
-     * Ends the initial load identified by {@code loadId}, ignoring stale completions whose load was replaced
-     * or already ended.
+     * Ends the initial load identified by {@code loadId}: {@code Synced}, or {@code Failed} with {@code failure}
+     * as the integration's error. The integration is {@code active} again once no destination is syncing, or
+     * {@code failed} when a load failed. A stale completion, whose load was replaced or already ended or whose
+     * integration was deleted meanwhile, is ignored.
      */
     public void finishDestination(Integration integration, String sourceDatabase, String databaseName,
                                   String loadId, String failure) {
-        finishDestinationInternal(integration, sourceDatabase, databaseName, loadId, true, failure);
-    }
-
-    private void finishDestinationInternal(Integration integration, String sourceDatabase, String databaseName,
-                                           String loadId, boolean checkLoadId, String failure) {
         synchronized (lock) {
             Optional<Integration> found = findCurrent(integration);
             Optional<Integration.Destination> destination = found
                     .flatMap(current -> current.destinationFor(sourceDatabase))
                     .filter(candidate -> databaseName.equals(candidate.getDatabaseName()))
-                    .filter(candidate -> !checkLoadId || Objects.equals(loadId, candidate.getLoadId()))
+                    .filter(candidate -> Objects.equals(loadId, candidate.getLoadId()))
                     .filter(candidate -> Integration.Destination.STATE_SYNCING.equals(candidate.getState()));
             if (destination.isEmpty()) {
                 return;

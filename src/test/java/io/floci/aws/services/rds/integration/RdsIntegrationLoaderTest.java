@@ -47,6 +47,7 @@ class RdsIntegrationLoaderTest {
 
     private static final String CLUSTER_ARN = "arn:aws:rds:us-east-1:000000000000:cluster:orders-src";
     private static final String TARGET_ARN = "arn:aws:redshift:us-east-1:000000000000:cluster:orders-dw";
+    private static final String LOAD_ID = "load-1";
 
     private RdsIntegrationService integrations;
     private RdsService rdsService;
@@ -66,7 +67,7 @@ class RdsIntegrationLoaderTest {
         cluster.setContainerId("container-1");
         cluster.setMasterUsername("postgres");
         when(rdsService.ensureClusterBackend("orders-src", "us-east-1")).thenReturn(cluster);
-        when(integrations.isLoading(any(), eq("orders"), eq("orders_dw"), any())).thenReturn(true);
+        when(integrations.isLoading(any(), eq("orders"), eq("orders_dw"), eq(LOAD_ID))).thenReturn(true);
         doAnswer(invocation -> {
             invocation.<OutputStream>getArgument(4).write("1,widget\n".getBytes(StandardCharsets.UTF_8));
             return null;
@@ -114,7 +115,7 @@ class RdsIntegrationLoaderTest {
                 column("public", "notes", "body", "text", "text", 0),
                 column("audit", "events", "id", "int4", "integer", 1));
 
-        loader(false).submit(integration, "orders", "orders_dw");
+        loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
 
         ArgumentCaptor<ReplicatedTable> table = ArgumentCaptor.forClass(ReplicatedTable.class);
         verify(writer, times(1)).loadTable(eq("000000000000"), eq(TARGET_ARN), eq("orders_dw"), table.capture(),
@@ -129,7 +130,7 @@ class RdsIntegrationLoaderTest {
                 any(OutputStream.class), anyInt());
         assertEquals("COPY (SELECT \"id\", \"name\"::text FROM \"public\".\"items\") TO STDOUT WITH (FORMAT csv)",
                 copy.getValue());
-        verify(integrations).finishDestination(integration, "orders", "orders_dw", null, null);
+        verify(integrations).finishDestination(integration, "orders", "orders_dw", LOAD_ID, null);
     }
 
     @Test
@@ -142,7 +143,7 @@ class RdsIntegrationLoaderTest {
         catalog(column("public", "lines", "line", "int4", "integer", 2),
                 column("public", "lines", "order_id", "int8", "bigint", 1));
 
-        loader(false).submit(integration, "orders", "orders_dw");
+        loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
 
         ArgumentCaptor<ReplicatedTable> table = ArgumentCaptor.forClass(ReplicatedTable.class);
         verify(writer).loadTable(anyString(), anyString(), anyString(), table.capture(), any());
@@ -154,10 +155,10 @@ class RdsIntegrationLoaderTest {
         catalog(column("public", "items", "id", "int4", "integer", 1),
                 column("public", "items", "price", "numeric", "numeric", 0));
 
-        loader(false).submit(integration, "orders", "orders_dw");
+        loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
 
         verify(writer, never()).loadTable(anyString(), anyString(), anyString(), any(), any());
-        verify(integrations).finishDestination(integration, "orders", "orders_dw", null, null);
+        verify(integrations).finishDestination(integration, "orders", "orders_dw", LOAD_ID, null);
     }
 
     @Test
@@ -167,11 +168,11 @@ class RdsIntegrationLoaderTest {
         doThrow(new IllegalStateException("value too long")).doReturn(1L).when(writer)
                 .loadTable(anyString(), anyString(), anyString(), any(), any());
 
-        loader(false).submit(integration, "orders", "orders_dw");
+        loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
 
         verify(writer, times(2)).loadTable(anyString(), anyString(), anyString(), any(), any());
         ArgumentCaptor<String> failure = ArgumentCaptor.forClass(String.class);
-        verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), isNull(),
+        verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), eq(LOAD_ID),
                 failure.capture());
         assertThat(failure.getValue(), containsString("public.broken"));
     }
@@ -183,10 +184,10 @@ class RdsIntegrationLoaderTest {
                 .doReturn(1L)
                 .when(writer).loadTable(anyString(), anyString(), anyString(), any(), any());
 
-        loader(false).submit(integration, "orders", "orders_dw");
+        loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
 
         verify(writer, times(2)).loadTable(anyString(), anyString(), anyString(), any(), any());
-        verify(integrations).finishDestination(integration, "orders", "orders_dw", null, null);
+        verify(integrations).finishDestination(integration, "orders", "orders_dw", LOAD_ID, null);
     }
 
     @Test
@@ -200,10 +201,10 @@ class RdsIntegrationLoaderTest {
                 .when(containers).queryPostgres(eq("container-1"), eq("postgres"), eq("orders"),
                         startsWith("COPY"), any(OutputStream.class), anyInt());
 
-        loader(false).submit(integration, "orders", "orders_dw");
+        loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
 
         verify(writer, times(1)).loadTable(anyString(), anyString(), anyString(), any(), any());
-        verify(integrations).finishDestination(integration, "orders", "orders_dw", null, null);
+        verify(integrations).finishDestination(integration, "orders", "orders_dw", LOAD_ID, null);
     }
 
     @Test
@@ -212,10 +213,10 @@ class RdsIntegrationLoaderTest {
                 .thenThrow(new IllegalStateException("container not running"))
                 .thenReturn(column("public", "items", "id", "int4", "integer", 1));
 
-        loader(false).submit(integration, "orders", "orders_dw");
+        loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
 
         verify(writer).loadTable(anyString(), anyString(), anyString(), any(), any());
-        verify(integrations).finishDestination(integration, "orders", "orders_dw", null, null);
+        verify(integrations).finishDestination(integration, "orders", "orders_dw", LOAD_ID, null);
     }
 
     @Test
@@ -223,20 +224,20 @@ class RdsIntegrationLoaderTest {
         when(containers.queryPostgres("container-1", "postgres", "orders", RdsIntegrationLoader.CATALOG_SQL))
                 .thenThrow(new IllegalStateException("psql failed: database \"orders\" does not exist"));
 
-        loader(false).submit(integration, "orders", "orders_dw");
+        loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
 
         ArgumentCaptor<String> failure = ArgumentCaptor.forClass(String.class);
-        verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), isNull(),
+        verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), eq(LOAD_ID),
                 failure.capture());
         assertThat(failure.getValue(), containsString("does not exist"));
     }
 
     @Test
     void stopsWhenTheIntegrationIsNoLongerLoading() {
-        when(integrations.isLoading(any(), eq("orders"), eq("orders_dw"), any())).thenReturn(false);
+        when(integrations.isLoading(any(), eq("orders"), eq("orders_dw"), eq(LOAD_ID))).thenReturn(false);
         catalog(column("public", "items", "id", "int4", "integer", 1));
 
-        loader(false).submit(integration, "orders", "orders_dw");
+        loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
 
         verify(writer, never()).loadTable(anyString(), anyString(), anyString(), any(), any());
         verify(integrations, never()).finishDestination(any(), anyString(), anyString(), any(), any());
@@ -256,10 +257,10 @@ class RdsIntegrationLoaderTest {
 
     @Test
     void inMockModeCopiesNothingAndSyncs() {
-        loader(true).submit(integration, "orders", "orders_dw");
+        loader(true).submit(integration, "orders", "orders_dw", LOAD_ID);
 
         verifyNoInteractions(containers, writer);
-        verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), isNull(), isNull());
+        verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), eq(LOAD_ID), isNull());
     }
 
     @Test
