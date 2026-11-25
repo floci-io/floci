@@ -85,7 +85,7 @@ class AthenaQueryScopeTest {
                     handedToDuck.get(10, TimeUnit.SECONDS));
             await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(50)).untilAsserted(() ->
                     assertEquals(QueryExecutionState.SUCCEEDED, RequestScopes.callAs(account, REGION,
-                            () -> athena.getQueryExecution(id).getStatus().getState())));
+                            () -> athena.getQueryExecution(REGION, id).getStatus().getState())));
         } finally {
             RequestScopes.runAs(account, REGION, () -> glueService.deleteDatabase(database));
         }
