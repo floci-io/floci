@@ -3,7 +3,10 @@ package io.floci.aws.services.iam;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.Base64Url;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.apigatewayv2.JwtSignatureVerifier;
+import io.floci.aws.services.iam.model.IamRole;
+import io.floci.aws.services.iam.model.OpenIDConnectProvider;
 import io.floci.aws.testing.SignedIamEnforcementProfile;
 import io.floci.aws.testing.SignedIamUsers;
 import io.quarkus.test.InjectMock;
@@ -34,6 +37,7 @@ import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -207,6 +211,35 @@ class StsRegisteredOidcProviderIntegrationTest {
         assertEquals(400, error.statusCode());
         assertEquals("Couldn't retrieve verification key from your identity provider, please reference "
                 + "AssumeRoleWithWebIdentity documentation for requirements", error.awsErrorDetails().errorMessage());
+    }
+
+    @Test
+    void roleInAnotherAccountIsVerifiedByThatAccountsProvider() throws Exception {
+        String otherAccount = "111122223333";
+        String host = issuer.substring("https://".length());
+        String otherRoleName = "web-registered-other-" + UUID.randomUUID().toString().substring(0, 8);
+        OpenIDConnectProvider otherProvider = RequestScopes.callAs(otherAccount, () -> iamService
+                .createOpenIDConnectProvider(issuer, List.of("sts.amazonaws.com"),
+                        List.of("0000000000000000000000000000000000000000"), Map.of()));
+        String trust = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Federated\":\""
+                + otherProvider.getArn() + "\"},\"Action\":\"sts:AssumeRoleWithWebIdentity\",\"Condition\":{\"StringEquals\":{\""
+                + host + ":sub\":\"" + SUBJECT + "\"}}}]}";
+        IamRole otherRole = RequestScopes.callAs(otherAccount, () -> iamService.createRole(otherRoleName, "/", trust,
+                null, 3600, Map.of()));
+        String token = token(issuer, "sts.amazonaws.com", privateKey);
+        try {
+            AssumeRoleWithWebIdentityResponse response = sts.assumeRoleWithWebIdentity(b -> b
+                    .roleArn(otherRole.getArn()).roleSessionName("registered").webIdentityToken(token));
+            iamService.unregisterSession(otherAccount, response.credentials().accessKeyId());
+
+            assertEquals(SUBJECT, response.subjectFromWebIdentityToken());
+        } finally {
+            RequestScopes.callAs(otherAccount, () -> {
+                iamService.deleteRole(otherRoleName);
+                iamService.deleteOpenIDConnectProvider(otherProvider.getArn());
+                return null;
+            });
+        }
     }
 
     private AssumeRoleWithWebIdentityResponse assume(String token) {

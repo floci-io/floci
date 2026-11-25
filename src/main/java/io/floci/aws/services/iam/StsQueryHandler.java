@@ -834,7 +834,7 @@ public class StsQueryHandler {
         // issuer names one.
         Optional<OpenIDConnectProvider> provider = key.isPresent() || !config.services().iam().enforcementEnabled()
                 || !issuer.get().startsWith("https://")
-                ? Optional.empty() : iamService.findOpenIDConnectProvider(oidcProviderArn);
+                ? Optional.empty() : iamService.findOpenIDConnectProvider(roleAccountId, oidcProviderArn);
         if (provider.isPresent()) {
             Optional<String> keyId = tokenVerifier.peekKeyId(token);
             if (keyId.isEmpty()) {
