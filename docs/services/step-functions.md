@@ -800,7 +800,7 @@ type comes from the Service Authorization Reference:
 
 | Resource | Action | Resource evaluated | Refused with |
 |---|---|---|---|
-| `arn:aws:states:::aws-sdk:scheduler:createSchedule`, `updateSchedule`, `deleteSchedule` | `scheduler:CreateSchedule` and so on | `schedule/<GroupName>/<Name>`, `default` for a group left out | `Scheduler.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:scheduler:createSchedule`, `updateSchedule`, `deleteSchedule` | `scheduler:CreateSchedule` and so on | As a direct request: `schedule/<GroupName>/<Name>`, Scheduler's `default` for a group left out | `Scheduler.AccessDeniedException` |
 | `arn:aws:states:::aws-sdk:cloudformation:<api>` | `cloudformation:<Action>` | See below | `CloudFormation.AccessDeniedException` |
 | `arn:aws:states:::http:invoke` | `states:InvokeHTTPEndpoint` | The state machine | `States.Http.AccessDeniedException` |
 | `arn:aws:states:::aws-sdk:ec2:describeRegions` | `ec2:DescribeRegions` | `*` | `Ec2.AccessDeniedException` |

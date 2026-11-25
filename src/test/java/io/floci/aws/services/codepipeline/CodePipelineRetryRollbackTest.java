@@ -638,7 +638,8 @@ class CodePipelineRetryRollbackTest {
         long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(10);
         while (System.currentTimeMillis() < deadline) {
             JsonNode execution = getExecution(pipelineName, executionId);
-            if (expected.equals(execution.path("status").asText())) {
+            if (expected.equals(execution.path("status").asText())
+                    && !service.activeRuns.contains(ACCOUNT + ":" + executionId)) {
                 return execution;
             }
             try {

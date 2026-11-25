@@ -367,4 +367,43 @@ class ExternalStatementParserTest {
                         + "TABLE PROPERTIES ('z'='1', 'a'='2', 'm'='3')").orElseThrow();
         assertThat(List.copyOf(table.properties().keySet()), equalTo(List.of("z", "a", "m")));
     }
+
+    @Test
+    void parsesCreateDatabaseFromIntegration() {
+        ExternalStatement.CreateIntegrationDatabase database = (ExternalStatement.CreateIntegrationDatabase) parser.parse(
+                "CREATE DATABASE Orders_DW FROM INTEGRATION 'a1b2c3d4-5678-90ab-cdef-EXAMPLE11111' DATABASE 'Orders';")
+                .orElseThrow();
+        assertThat(database.databaseName(), equalTo("orders_dw"));
+        assertThat(database.integrationId(), equalTo("a1b2c3d4-5678-90ab-cdef-EXAMPLE11111"));
+        assertThat(database.sourceDatabase(), equalTo("Orders"));
+    }
+
+    @Test
+    void parsesCreateDatabaseFromIntegrationWithBareSourceDatabaseAndOptions() {
+        ExternalStatement.CreateIntegrationDatabase database = (ExternalStatement.CreateIntegrationDatabase) parser.parse(
+                "create database \"Sales\" from integration 'abc' database SourceDb SET HISTORY_MODE = true")
+                .orElseThrow();
+        assertThat(database.databaseName(), equalTo("Sales"));
+        assertThat(database.sourceDatabase(), equalTo("sourcedb"));
+    }
+
+    @Test
+    void parsesCreateDatabaseFromIntegrationWithoutSourceDatabase() {
+        ExternalStatement.CreateIntegrationDatabase database = (ExternalStatement.CreateIntegrationDatabase) parser.parse(
+                "CREATE DATABASE dw FROM INTEGRATION 'abc' SET REFRESH_INTERVAL 7200").orElseThrow();
+        assertThat(database.sourceDatabase(), nullValue());
+    }
+
+    @Test
+    void rejectsTrailingStatementsAfterIntegrationDatabaseOptions() {
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class, () -> parser.parse(
+                "CREATE DATABASE dw FROM INTEGRATION 'abc' DATABASE 'orders' SET x = 1; SELECT 1"));
+        assertThat(error.sqlState(), equalTo("42601"));
+    }
+
+    @Test
+    void leavesPlainCreateDatabaseToTheBackend() {
+        assertThat(parser.parse("CREATE DATABASE dw").isPresent(), equalTo(false));
+        assertThat(parser.parse("CREATE DATABASE dw WITH OWNER admin").isPresent(), equalTo(false));
+    }
 }

@@ -1,5 +1,5 @@
 {
-  "_source": {"generator": "tools/aws/regen_rpcv2_cbor_shapes.py", "botocore": "botocore 1.44.9 (local/aws/botocore)", "ec2messages": "aws/amazon-ssm-agent agent/runcommand/mds/mdsservice.go blob f3e4d67147e5027ca2568d597077e56310921610"},
+  "_source": {"generator": "tools/aws/regen_rpcv2_cbor_shapes.py", "botocore": "botocore 1.44.9 (installed package)", "ec2messages": "aws/amazon-ssm-agent agent/runcommand/mds/mdsservice.go blob f3e4d67147e5027ca2568d597077e56310921610"},
   "aliases": {
     "ACM": "acm",
     "AWS Marketplace Entitlement Service": "marketplace-entitlement",
@@ -69,6 +69,7 @@
     "DynamoDBStreams_20120810": "dynamodbstreams",
     "DynamoDB_20120810": "dynamodb",
     "EC2 Instance Connect": "ec2-instance-connect",
+    "EC2WindowsMessageDeliveryService": "ec2messages",
     "ECR": "ecr",
     "ECS": "ecs",
     "EMR": "emr",

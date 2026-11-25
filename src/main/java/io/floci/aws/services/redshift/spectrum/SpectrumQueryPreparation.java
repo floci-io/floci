@@ -57,6 +57,7 @@ public class SpectrumQueryPreparation {
     private final ExternalCatalogLocks catalogLocks;
     /** The Region of an account's cluster, by its identifier; null when it isn't known. */
     private final BiFunction<String, String, String> clusterRegion;
+    private final IntegrationDatabaseCreator integrationDatabases;
     /** What to bind once the statement that created each schema has committed, by backend. */
     private final Map<BackendSql, List<Runnable>> pendingBindings = new ConcurrentHashMap<>();
 
@@ -79,10 +80,12 @@ public class SpectrumQueryPreparation {
                                     ExternalTableMaterializer materializer, ExternalStatementParser parser,
                                     GlueService glue, ExternalMetadataWriter metadata,
                                     ExternalCatalogLocks catalogLocks, KinesisStreamingViews views,
-                                    MskStreamingViews mskViews, Instance<RedshiftService> redshift) {
+                                    MskStreamingViews mskViews, Instance<RedshiftService> redshift,
+                                    Instance<IntegrationDatabaseCreator> integrationDatabases) {
         this(registry, kinesisSchemas, mskSchemas, functions, udfEvaluator, materializer, parser, glue, metadata,
                 catalogLocks, views, mskViews,
-                (accountId, clusterIdentifier) -> redshift.get().clusterRegion(accountId, clusterIdentifier).orElse(null));
+                (accountId, clusterIdentifier) -> redshift.get().clusterRegion(accountId, clusterIdentifier).orElse(null),
+                (statement, session, backend) -> integrationDatabases.get().create(statement, session, backend));
     }
 
     SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
@@ -152,6 +155,21 @@ public class SpectrumQueryPreparation {
                              GlueService glue, ExternalMetadataWriter metadata, ExternalCatalogLocks catalogLocks,
                              KinesisStreamingViews views, MskStreamingViews mskViews,
                              BiFunction<String, String, String> clusterRegion) {
+        this(registry, kinesisSchemas, mskSchemas, functions, udfEvaluator, materializer, parser, glue, metadata,
+                catalogLocks, views, mskViews, clusterRegion, (statement, session, backend) -> {
+                    throw new SpectrumSqlException("0A000", "CREATE DATABASE ... FROM INTEGRATION is not supported");
+                });
+    }
+
+    SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
+                             MskSchemaRegistry mskSchemas, ExternalFunctionRegistry functions,
+                             LambdaUdfEvaluator udfEvaluator,
+                             ExternalTableMaterializer materializer, ExternalStatementParser parser,
+                             GlueService glue, ExternalMetadataWriter metadata, ExternalCatalogLocks catalogLocks,
+                             KinesisStreamingViews views, MskStreamingViews mskViews,
+                             BiFunction<String, String, String> clusterRegion,
+                             IntegrationDatabaseCreator integrationDatabases) {
+        this.integrationDatabases = integrationDatabases;
         this.functions = functions;
         this.udfEvaluator = Objects.requireNonNull(udfEvaluator, "udfEvaluator must not be null");
         this.views = views;
@@ -270,6 +288,7 @@ public class SpectrumQueryPreparation {
             case ExternalStatement.CreateKinesisSchema ignored -> true;
             case ExternalStatement.CreateMskSchema ignored -> true;
             case ExternalStatement.CreateFunction ignored -> true;
+            case ExternalStatement.CreateIntegrationDatabase ignored -> true;
             case ExternalStatement.DropFunction function -> findFunctionToDrop(function, session, backend).isPresent();
             case ExternalStatement.CreateTable table -> session.inTransaction()
                     || bindingsOf(registry, session).containsKey(table.schemaName())
@@ -303,6 +322,7 @@ public class SpectrumQueryPreparation {
             case ExternalStatement.DropView ignored -> "DROP MATERIALIZED VIEW";
             case ExternalStatement.CreateFunction ignored -> "CREATE FUNCTION";
             case ExternalStatement.DropFunction ignored -> "DROP FUNCTION";
+            case ExternalStatement.CreateIntegrationDatabase ignored -> "CREATE DATABASE";
             case null, default -> "CREATE EXTERNAL";
         };
     }
@@ -324,6 +344,13 @@ public class SpectrumQueryPreparation {
         }
         if (statement.orElse(null) instanceof ExternalStatement.DropFunction function) {
             return dropFunction(function, session, backend);
+        }
+        if (statement.orElse(null) instanceof ExternalStatement.CreateIntegrationDatabase database) {
+            if (session.inTransaction()) {
+                throw new SpectrumSqlException("25001", "CREATE DATABASE cannot run inside a transaction block");
+            }
+            integrationDatabases.create(database, session, backend);
+            return true;
         }
         Map<String, KinesisSchemaBinding> kinesis = bindingsOf(kinesisSchemas, session);
         Map<String, MskSchemaBinding> msk = bindingsOf(mskSchemas, session);

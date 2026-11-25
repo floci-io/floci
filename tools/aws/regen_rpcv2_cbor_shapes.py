@@ -20,7 +20,7 @@ JSON_ONLY_PREFIXES = {"DynamoDB_20111205", "CloudWatchVersion20130116"}
 # Floci's JSON facades/short alias do not use the model's targetPrefix.
 MODEL_ALIASES = {"AmazonApiGatewayV2": "apigatewayv2", "CloudTrail_20131101": "cloudtrail",
                  "SNS_20100331": "sns"}
-AGENT_PREFIX = "AmazonSSMMessageDeliveryService"
+AGENT_PREFIXES = ("AmazonSSMMessageDeliveryService", "EC2WindowsMessageDeliveryService")
 # The agent facade has no pinned botocore model. MDS Message fields, including CreatedDate and Payload, are strings.
 # aws/amazon-ssm-agent agent/runcommand/mds/mdsservice.go, immutable blob:
 # https://api.github.com/repos/aws/amazon-ssm-agent/git/blobs/f3e4d67147e5027ca2568d597077e56310921610
@@ -105,7 +105,7 @@ def build(data: Path, catalog: Path, provenance: str) -> dict:
     aliases.update({prefix: name for prefix, name in MODEL_ALIASES.items() if prefix in prefixes})
     aliases["AWS Marketplace Entitlement Service"] = "marketplace-entitlement"
     services["ec2messages"] = {"timestampFormat": "unixTimestamp", "shapes": {}, "operations": {}}
-    aliases[AGENT_PREFIX] = "ec2messages"
+    aliases.update({prefix: "ec2messages" for prefix in AGENT_PREFIXES})
     missing = prefixes - aliases.keys()
     if missing:
         raise ValueError(f"No RPC v2 wire model for catalog prefixes: {sorted(missing)}")

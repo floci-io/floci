@@ -197,6 +197,13 @@ public class EksClusterManager
     /** The label EKS Auto Mode's nodes carry, given to the cluster's node while compute is on. */
     static final String AUTO_COMPUTE_LABEL_KEY = "eks.amazonaws.com/compute-type"; // partition-literal: a label
     static final String AUTO_COMPUTE_LABEL = AUTO_COMPUTE_LABEL_KEY + "=auto";
+    static final String LOAD_BALANCING_MANIFEST_FILE = "floci-eks-auto-mode-load-balancing.yaml";
+    static final String LOAD_BALANCING_MANIFEST_TAR_ENTRY = "server/manifests/" + LOAD_BALANCING_MANIFEST_FILE;
+    // The manifest once load balancing is off: no objects, so k3s deletes the IngressClassParams kind it held before.
+    static final String LOAD_BALANCING_MANIFEST_REMOVED = """
+            # EKS Auto Mode load balancing is off for this cluster.
+            # k3s deletes the IngressClassParams kind an earlier version of this file created.
+            """;
     private static final String ENDPOINT_MODE_NETWORK = "network";
     public static final String DEFAULT_POD_CIDR = "10.42.0.0/16";
 
@@ -1043,6 +1050,7 @@ public class EksClusterManager
         registerPodIdentityWebhook(containerId, cluster);
         applyBlockStorage(containerId, cluster);
         applyCompute(containerId, cluster);
+        applyLoadBalancing(containerId, cluster);
         if (signingKeyFiles != null) {
             copySigningKeysIntoContainer(containerId, signingKeyFiles, cluster.getName());
         }
@@ -1206,6 +1214,7 @@ public class EksClusterManager
                 () -> survivingNodeResolvesThroughFloci(info.containerId()));
         applyBlockStorage(info.containerId(), cluster);
         applyCompute(info.containerId(), cluster);
+        applyLoadBalancing(info.containerId(), cluster);
         applyComputeLabel(cluster, info.containerId());
         activeClusters.put(clusterResourceName(cluster), cluster);
         attachClusterLogs(cluster, true, true, false);
@@ -3126,6 +3135,25 @@ public class EksClusterManager
             LOG.warnv("EKS cluster {0} gets no Auto Mode {1}: could not install {2} into the k3s container: {3}",
                     cluster.getName(), what, fileName, e.getMessage());
         }
+    }
+
+    /**
+     * Installs the {@code IngressClassParams} kind while the cluster's EKS Auto Mode load balancing is on, as Auto
+     * Mode does, so the IngressClass an Application Load Balancer is configured through can name its parameters;
+     * otherwise removes it, as {@link #applyBlockStorage} removes the provisioner.
+     */
+    void applyLoadBalancing(String containerId, Cluster cluster) {
+        boolean enabled = cluster.getKubernetesNetworkConfig() != null
+                && ElasticLoadBalancing.loadBalancingOn(cluster.getKubernetesNetworkConfig().getElasticLoadBalancing());
+        applyAutoModeManifest(containerId, cluster, enabled, LOAD_BALANCING_MANIFEST_FILE,
+                LOAD_BALANCING_MANIFEST_TAR_ENTRY, this::loadBalancingManifest, LOAD_BALANCING_MANIFEST_REMOVED,
+                "IngressClassParams kind");
+    }
+
+    /** The IngressClassParams kind EKS Auto Mode load balancing installs. */
+    String loadBalancingManifest() {
+        return resource(EksClusterManager.class.getResourceAsStream("/eks/auto-mode-load-balancing.yaml"),
+                "/eks/auto-mode-load-balancing.yaml");
     }
 
     /**

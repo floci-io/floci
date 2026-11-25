@@ -77,7 +77,8 @@ starts ContainerHostNetworkDockerIntegrationTest ContainerBindDirectoryDockerInt
        EcsExecChannelDockerIntegrationTest EcsImagePullDockerIntegrationTest EcsLeftoverContainersDockerIntegrationTest \
        BatchDockerRunnerDockerIntegrationTest SageMakerDockerNightlyIntegrationTest DockerPoolSaturationNightlyIntegrationTest \
     && [ -n "$BUSYBOX_IMAGE" ] && pull "$BUSYBOX_IMAGE"
-# Bind-directory ownership uses the default OpenSearch image, whose cold pull can outlast a test.
+# Bind-directory ownership uses the default OpenSearch image, whose cold pull can outlast a test, and the nightly
+# OpenSearchDomainRestartNightlyIntegrationTest runs a domain on it.
 OPENSEARCH_VERSIONS="$(find src/main/java -name OpenSearchVersions.java -print -quit)"
 opensearch_default_image() {
     file="${OPENSEARCH_VERSIONS:-/dev/null}"
@@ -91,7 +92,8 @@ opensearch_default_image() {
     echo "$image"
 }
 OPENSEARCH_IMAGE="$(opensearch_default_image)"
-starts ContainerBindDirectoryDockerIntegrationTest && [ -n "$OPENSEARCH_IMAGE" ] && pull "$OPENSEARCH_IMAGE"
+starts ContainerBindDirectoryDockerIntegrationTest OpenSearchDomainRestartNightlyIntegrationTest \
+    && [ -n "$OPENSEARCH_IMAGE" ] && pull "$OPENSEARCH_IMAGE"
 # EcsImagePullDockerIntegrationTest runs its own registry to move a tag in; the /ecr/ line below
 # covers the shards that run the ECR tests.
 REGISTRY_IMAGE="$(test_image REGISTRY)"

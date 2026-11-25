@@ -17321,7 +17321,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("MissingParameter",
                     "The request must contain the parameter Ipv6Addresses or Ipv6AddressCount", 400);
         }
-        requireIpv6Source(named, count);
+        requireIpv6Source(named ? "Ipv6Addresses" : null, count);
         ensureDefaultResources(region);
         refuseClusterNodeInterfaceChange(region, networkInterfaceId);
         return withResourceLock(instanceGroupLocks, ipv6LockKey(region, networkInterfaceId),
@@ -17448,7 +17448,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private List<String> ipv6AddressesForNewInterface(String region, Subnet subnet, List<String> requested,
                                                       Integer count) {
         boolean named = requested != null && !requested.isEmpty();
-        requireIpv6Source(named, count);
+        requireIpv6Source(named ? "Ipv6Addresses" : null, count);
         int wanted = named ? requested.size() : count != null ? count : subnet.isAssignIpv6AddressOnCreation() ? 1 : 0;
         requireWithinIpv6Limit(wanted, maxIpv6AddressesPerInterface(null), "the new network interface");
         if (named) {
@@ -17457,13 +17457,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return allocateIpv6(region, subnet, wanted);
     }
 
-    private static void requireIpv6Source(boolean named, Integer count) {
+    static void requireIpv6Source(String namedParameter, Integer count) {
         if (count != null && count < 0) {
             throw new AwsException("InvalidParameterValue", "Ipv6AddressCount must not be negative", 400);
         }
-        if (named && count != null) {
+        if (namedParameter != null && count != null) {
             throw new AwsException("InvalidParameterCombination",
-                    "Specify either Ipv6Addresses or Ipv6AddressCount, not both", 400);
+                    "Specify either " + namedParameter + " or Ipv6AddressCount, not both", 400);
         }
     }
 

@@ -28,6 +28,11 @@ public class ExternalStatementParser {
     private static final Pattern DROP_FUNCTION = Pattern.compile(
             "(?is)^\\s*DROP\\s+FUNCTION\\s+(IF\\s+EXISTS\\s+)?" + NAME + "(?:\\s*\\.\\s*" + NAME + ")?\\s*\\((.*)\\)"
                     + "(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
+    private static final Pattern CREATE_INTEGRATION_DATABASE = Pattern.compile(
+            "(?is)^\\s*CREATE\\s+DATABASE\\s+" + NAME + "\\s+FROM\\s+INTEGRATION\\s+'((?:''|[^'])*)'"
+                    + "(?:\\s+DATABASE\\s+('(?:''|[^'])*'|" + NAME + "))?"
+                    + "(?:\\s+(?:SET|WITH|ACCEPTINVCHARS|QUERY_ALL_STATES|REFRESH_INTERVAL|TRUNCATECOLUMNS|HISTORY_MODE"
+                    + "|AUTO_REMEDIATION|OWNER|CONNECTION|COLLATE|ISOLATION)\\b.*?)?\\s*;?\\s*$");
     private static final Set<String> FUNCTION_CLAUSES = Set.of("VOLATILE", "STABLE", "IMMUTABLE", "LAMBDA",
             "IAM_ROLE", "RETRY_TIMEOUT", "MAX_BATCH_ROWS", "MAX_BATCH_SIZE");
     private static final long DEFAULT_RETRY_TIMEOUT_MILLIS = 20_000L;
@@ -82,6 +87,17 @@ public class ExternalStatementParser {
         Matcher dropFunction = DROP_FUNCTION.matcher(viewText);
         if (dropFunction.matches()) {
             return parseDropFunction(dropFunction);
+        }
+        Matcher integrationDatabase = CREATE_INTEGRATION_DATABASE.matcher(viewText);
+        if (integrationDatabase.matches()) {
+            if (hasStatementSeparator(viewText.replaceFirst("[\\s;]+$", ""))) {
+                throw new SpectrumSqlException("42601",
+                        "CREATE DATABASE ... FROM INTEGRATION must be a single statement");
+            }
+            String source = integrationDatabase.group(3);
+            return Optional.of(new ExternalStatement.CreateIntegrationDatabase(identifier(integrationDatabase.group(1)),
+                    integrationDatabase.group(2).replace("''", "'"),
+                    source == null ? null : source.startsWith("'") ? unquote(source) : identifier(source)));
         }
         Matcher createView = CREATE_VIEW.matcher(viewText);
         if (createView.matches()) {

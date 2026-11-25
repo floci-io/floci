@@ -454,7 +454,8 @@ Floci acts on the configuration as EKS does:
 - **Block storage.** While it is on, claims of a StorageClass naming `ebs.csi.eks.amazonaws.com` are provisioned
   (see [Storage classes](#storage-classes)).
 - **Load balancing.** While it is on, Services get Network Load Balancers (see
-  [Auto Mode load balancing for Services](#auto-mode-load-balancing-for-services)).
+  [Auto Mode load balancing for Services](#auto-mode-load-balancing-for-services)) and Ingresses Application Load
+  Balancers (see [Auto Mode load balancing for Ingresses](#auto-mode-load-balancing-for-ingresses)).
 
 Floci launches no nodes for the pools: workloads run on the cluster's k3s node.
 [#8914](https://github.com/floci-io/floci/issues/8914) plans the rest.
@@ -503,8 +504,64 @@ restart, as they do on AWS, where [turning it off](https://docs.aws.amazon.com/e
 terminates Auto Mode's instances. A restored node whose ServiceLB disagrees with the cluster is replaced the same way.
 On a node without ServiceLB, a Service of no class with only UDP ports gets no load balancer, as Floci's load
 balancers don't forward UDP. A Service of another class, such as the AWS Load Balancer Controller's
-`service.k8s.aws/nlb`, is left to its controller. Ingresses
-(`eks.amazonaws.com/alb`) don't get one yet.
+`service.k8s.aws/nlb`, is left to its controller.
+
+### Auto Mode load balancing for Ingresses
+
+While a cluster has the load balancing capability on, Floci installs the `IngressClassParams` kind
+(`eks.amazonaws.com/v1`), as Auto Mode does, and an Ingress whose IngressClass names the `eks.amazonaws.com/alb`
+controller, or that names no class while such a class is the default, gets an Application Load Balancer, as
+[on AWS](https://docs.aws.amazon.com/eks/latest/userguide/auto-configure-alb.html). Auto Mode creates no
+IngressClass; create one:
+
+```yaml
+apiVersion: eks.amazonaws.com/v1
+kind: IngressClassParams
+metadata:
+  name: alb
+spec:
+  scheme: internet-facing        # internal when left out
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: alb
+spec:
+  controller: eks.amazonaws.com/alb
+  parameters:
+    apiGroup: eks.amazonaws.com
+    kind: IngressClassParams
+    name: alb
+```
+
+- **Load balancer.** Named `k8s-<namespace>-<name>-<hash>`, with the scheme and subnets (`subnets.ids`) of the class's
+  `IngressClassParams`, else the `alb.ingress.kubernetes.io/scheme` annotation and the cluster's subnets. As in
+  ELBv2, it needs two subnets in two Availability Zones; an Ingress that can't have one is logged and the others are
+  served. An Ingress whose class names `IngressClassParams` that aren't there is logged and its load balancer left as
+  it is, as the Load Balancer Controller fails it: the annotations don't stand in for the class's settings.
+- **Listener and rules.** An HTTP listener on port 80, whose default answers a fixed 404 (`text/plain`), or forwards
+  to the Ingress's `defaultBackend`. Each path of each rule becomes a listener rule, in order: a `Prefix` path `/` is
+  the path pattern `/*`, as AWS makes it, another `Prefix` path `/p` is `/p` and `/p/*`, and an `Exact` path is itself;
+  a rule's `host` adds a host header condition. The rules are ordered as the AWS Load Balancer Controller orders them:
+  the Ingress's rules as listed, and within each, `Exact` paths first, then `Prefix` paths longest first, then
+  `ImplementationSpecific` ones as listed.
+- **Target groups.** One per backend Service port, on the Service's NodePort, with the cluster's node registered by
+  instance ID, and an HTTP health check on the traffic port at the `alb.ingress.kubernetes.io/healthcheck-path`
+  annotation's path (`/` by default), every 15 seconds with a 5 second timeout.
+- **Tags and status.** The tags Auto Mode sets: `eks:eks-cluster-name`, `ingress.eks.amazonaws.com/stack`
+  (`<namespace>/<name>`) and `ingress.eks.amazonaws.com/resource`. Once the node is registered, the load balancer's DNS
+  name is written to the Ingress's `status.loadBalancer.ingress[0].hostname`. Floci checks every 10 seconds, sets the
+  rules again when the Ingress changes, and deletes the load balancer with the Ingress, with the cluster, and when load
+  balancing is turned off.
+
+Floci's load balancers reach the cluster's node, not the pods inside it, so a backend is served through its Service's
+NodePort: a backend Service without one (a `ClusterIP` Service) is left out, and an Ingress whose target type is
+`ip` (`IngressClassParams.targetType` or the `alb.ingress.kubernetes.io/target-type` annotation) gets no load
+balancer. Only HTTP on port 80 is served: HTTPS listeners, certificates and the other `IngressClassParams` fields
+are kept but not applied.
+Floci's load balancers share one address, so a TCP listener needs its local port to itself
+([Elastic Load Balancing](elb.md)): while a `LoadBalancer` Service of the cluster serves TCP port 80, an Ingress's
+ALB is made and its address written, but its listener serves no traffic until that Service's listener is gone.
 
 ## Node group inputs
 

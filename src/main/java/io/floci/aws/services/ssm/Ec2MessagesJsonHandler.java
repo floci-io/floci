@@ -17,7 +17,7 @@ import java.util.Map;
 /**
  * Handles the ec2messages internal protocol used by the amazon-ssm-agent.
  *
- * Operations (X-Amz-Target: AmazonSSMMessageDeliveryService.*):
+ * Operations (X-Amz-Target: EC2WindowsMessageDeliveryService.* or AmazonSSMMessageDeliveryService.*):
  * - GetMessages        — agent polls for pending commands
  * - AcknowledgeMessage — agent confirms receipt
  * - SendReply          — agent sends command output

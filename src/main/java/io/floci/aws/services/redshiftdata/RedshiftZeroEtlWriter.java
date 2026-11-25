@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.services.redshift.RedshiftService;
 import io.floci.aws.services.redshift.RedshiftZeroEtlEndpoints;
 import io.floci.aws.services.redshift.model.Cluster;
@@ -12,7 +13,11 @@ import io.floci.aws.services.redshiftserverless.RedshiftServerlessService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
+import org.postgresql.PGConnection;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -289,15 +294,112 @@ public class RedshiftZeroEtlWriter {
         }
     }
 
+    /** The Redshift target could not be resolved or reached, so the caller may retry once it is back. */
+    public static final class TargetUnavailableException extends RuntimeException {
+        public TargetUnavailableException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    /** A table an RDS zero-ETL integration replicates: its columns' Redshift types and its primary key. */
+    public record ReplicatedTable(String schema, String table, List<Column> columns, List<String> primaryKey) {
+        public ReplicatedTable {
+            columns = List.copyOf(columns);
+            primaryKey = List.copyOf(primaryKey);
+        }
+
+        public record Column(String name, String type) {}
+
+        String qualifiedName() {
+            return PostgresWire.quoteIdentifier(schema) + "." + PostgresWire.quoteIdentifier(table);
+        }
+
+        String ddl() {
+            StringBuilder ddl = new StringBuilder("CREATE TABLE ").append(qualifiedName()).append(" (");
+            for (Column column : columns) {
+                ddl.append(PostgresWire.quoteIdentifier(column.name())).append(' ').append(column.type()).append(", ");
+            }
+            ddl.append("PRIMARY KEY (");
+            for (int i = 0; i < primaryKey.size(); i++) {
+                ddl.append(i > 0 ? ", " : "").append(PostgresWire.quoteIdentifier(primaryKey.get(i)));
+            }
+            return ddl.append("))").toString();
+        }
+    }
+
+    /**
+     * Replaces the table in {@code database} of the target with the rows of {@code csv}, in one transaction:
+     * its schema is created when missing, a table of that name is dropped and created again with the given
+     * columns, and the rows are copied in. Loading a table again so leaves the same rows.
+     *
+     * @return the number of rows loaded
+     */
+    public long loadTable(String accountId, String targetArn, String database, ReplicatedTable table,
+                          InputStream csv) {
+        RedshiftDataResourceResolver.DatabaseTarget resolved;
+        try {
+            resolved = target(accountId, targetArn, database);
+        } catch (RuntimeException e) {
+            throw new TargetUnavailableException("Could not resolve Redshift target " + targetArn
+                    + ": " + e.getMessage(), e);
+        }
+        Connection opened;
+        try {
+            opened = connectionFactory.open(resolved);
+        } catch (SQLException e) {
+            throw new TargetUnavailableException("Could not connect to Redshift database " + database
+                    + ": " + e.getMessage(), e);
+        }
+        try (Connection connection = opened) {
+            connection.setAutoCommit(false);
+            try (Statement statement = connection.createStatement()) {
+                statement.executeUpdate("CREATE SCHEMA IF NOT EXISTS " + PostgresWire.quoteIdentifier(table.schema()));
+                statement.executeUpdate("DROP TABLE IF EXISTS " + table.qualifiedName());
+                statement.executeUpdate(table.ddl());
+                long rows = connection.unwrap(PGConnection.class).getCopyAPI()
+                        .copyIn("COPY " + table.qualifiedName() + " FROM STDIN WITH (FORMAT csv)", csv);
+                connection.commit();
+                return rows;
+            } catch (SQLException | IOException | RuntimeException e) {
+                try {
+                    connection.rollback();
+                } catch (SQLException rollbackFailure) {
+                    e.addSuppressed(rollbackFailure);
+                }
+                throw e;
+            }
+        } catch (SQLException e) {
+            if (isConnectionFailure(e)) {
+                throw new TargetUnavailableException("Connection to Redshift database " + database
+                        + " failed while loading " + table.qualifiedName() + ": " + e.getMessage(), e);
+            }
+            LOG.warnv(e, "Could not load zero-ETL table {0} into database {1}", table.qualifiedName(), database);
+            throw new AwsException("InternalFailure", "Could not load table " + table.qualifiedName()
+                    + " into database " + database + ": " + e.getMessage(), 500);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not read the rows of table " + table.qualifiedName(), e);
+        }
+    }
+
+    private static boolean isConnectionFailure(SQLException e) {
+        String state = e.getSQLState();
+        return state != null && (state.startsWith("08") || state.startsWith("57P"));
+    }
+
+    private RedshiftDataResourceResolver.DatabaseTarget target(String accountId, String targetArn) {
+        return target(accountId, targetArn, null);
+    }
+
     /**
      * A namespace is written through its workgroup, into the namespace's database as its admin user, the
-     * same identity a cluster target is written with.
+     * same identity a cluster target is written with. A null {@code database} is the target's default one.
      */
-    private RedshiftDataResourceResolver.DatabaseTarget target(String accountId, String targetArn) {
+    private RedshiftDataResourceResolver.DatabaseTarget target(String accountId, String targetArn, String database) {
         if (RedshiftZeroEtlEndpoints.isNamespaceArn(targetArn)) {
             RedshiftServerlessService.WorkgroupTarget workgroup = endpoints.targetWorkgroup(accountId, targetArn);
             return new RedshiftDataResourceResolver.DatabaseTarget(workgroup.arn(), workgroup.host(),
-                    workgroup.port(), workgroup.database(), workgroup.masterUsername(), workgroup.masterPassword());
+                    workgroup.port(), database != null ? database : workgroup.database(),
+                    workgroup.masterUsername(), workgroup.masterPassword());
         }
         String clusterIdentifier = AwsArnUtils.parse(targetArn).resource().substring("cluster:".length());
         Cluster cluster;
@@ -315,7 +417,7 @@ public class RedshiftZeroEtlWriter {
                 "cluster:" + clusterIdentifier,
                 cluster.getContainerHost(),
                 cluster.getContainerPort(),
-                "dev",
+                database != null ? database : "dev",
                 cluster.getMasterUsername(),
                 cluster.getMasterPassword());
     }

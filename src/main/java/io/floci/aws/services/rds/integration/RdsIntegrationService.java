@@ -4,7 +4,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.rds.RdsService;
@@ -25,6 +27,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -36,10 +39,12 @@ import java.util.regex.Pattern;
  * Aurora PostgreSQL cluster or an RDS for PostgreSQL instance into a Redshift Serverless namespace
  * or a provisioned Redshift cluster.
  *
- * <p>The record, its validation and its lifecycle are kept here. Nothing is copied into the target
- * yet: a created integration reports {@code creating} and is {@code active} on the next read, and a
- * modified one reports {@code modifying} and is {@code active} again on the next read. Deviations
- * are documented in {@code docs/services/rds.md}.
+ * <p>The record, its validation and its lifecycle are kept here. A created integration reports
+ * {@code creating} and is {@code active} on the next read, and a modified one reports
+ * {@code modifying} and is {@code active} again on the next read. Each database created on the
+ * target with {@code CREATE DATABASE ... FROM INTEGRATION} is a destination of the integration,
+ * which is {@code syncing} while {@link RdsIntegrationLoader} copies its source database in.
+ * Deviations are documented in {@code docs/services/rds.md}.
  */
 @ApplicationScoped
 public class RdsIntegrationService implements Resettable {
@@ -47,6 +52,7 @@ public class RdsIntegrationService implements Resettable {
     private static final Logger LOG = Logger.getLogger(RdsIntegrationService.class);
 
     private static final String KEY_PREFIX = "integration::";
+    static final String INITIAL_LOAD_FAILED = "InitialLoadFailed";
     // The IntegrationName shape's modelled pattern and length.
     private static final Pattern NAME = Pattern.compile("[a-zA-Z](?:-?[a-zA-Z0-9]+)*");
     private static final int NAME_MAX_LENGTH = 63;
@@ -117,8 +123,8 @@ public class RdsIntegrationService implements Resettable {
         integration.setCreateTime(Instant.now(clock));
         integration.setRegion(effectiveRegion);
         integration.setAccountId(accountId);
-        // Nothing is copied yet, so there is no setup to wait for: the record is active, and only the
-        // create response reports the creating status AWS returns.
+        // There is no setup to wait for: the record is active, ready for a database to be created from
+        // it, and only the create response reports the creating status AWS returns.
         integration.setStatus(Integration.STATUS_ACTIVE);
 
         synchronized (lock) {
@@ -199,6 +205,281 @@ public class RdsIntegrationService implements Resettable {
             integrations.delete(key(effectiveRegion, integration.integrationId()));
             LOG.infov("Deleted RDS integration {0}", integration.getIntegrationArn());
             return withStatus(integration, Integration.STATUS_DELETING);
+        }
+    }
+
+    /** The caller's integration whose ARN ends in {@code integrationId}, in any Region. */
+    public Optional<Integration> findById(String integrationId) {
+        if (integrationId == null || integrationId.isBlank()) {
+            return Optional.empty();
+        }
+        return integrations.scan(key -> key.startsWith(KEY_PREFIX) && key.endsWith("::" + integrationId)).stream()
+                .filter(integration -> integrationId.equals(integration.integrationId()))
+                .findFirst()
+                .map(Integration::new);
+    }
+
+    /**
+     * Records that {@code databaseName} is being created on the target from {@code sourceDatabase}, which
+     * puts the integration in {@code syncing} until its initial load ends. An {@code active}, {@code syncing}
+     * or {@code failed} integration takes a new destination, one for each source database. The destination
+     * already recorded for that source database is replaced when its load failed, or when the caller found
+     * that its database no longer exists ({@code previousDatabaseGone}); otherwise it is refused.
+     *
+     * @return the integration as it now is
+     */
+    public Integration addDestination(Integration integration, String databaseName, String sourceDatabase,
+                                      boolean previousDatabaseGone) {
+        return registerDestination(integration, databaseName, sourceDatabase,
+                Integration.Destination.STATE_SYNCING, previousDatabaseGone, null, null);
+    }
+
+    /**
+     * Reserves a destination in {@code Creating} while {@code CREATE DATABASE} runs on the target, so a
+     * concurrent request for the same source database cannot treat the not-yet-created database as dropped and
+     * overwrite this registration.
+     */
+    public Integration reserveDestination(Integration integration, String databaseName, String sourceDatabase,
+                                          String droppedDatabaseName, String droppedLoadId) {
+        return registerDestination(integration, databaseName, sourceDatabase,
+                Integration.Destination.STATE_CREATING, droppedDatabaseName != null, droppedDatabaseName,
+                droppedLoadId);
+    }
+
+    /**
+     * Promotes a reserved destination from {@code Creating} to {@code Syncing} once its database exists on
+     * the target. No-op when the integration or reservation is no longer present under {@code loadId}.
+     */
+    public Integration startDestinationSync(Integration integration, String sourceDatabase, String loadId) {
+        synchronized (lock) {
+            Integration current = findCurrent(integration).orElseThrow(() -> new AwsException(
+                    "IntegrationNotFoundFault", "Integration " + integration.integrationId() + " not found.", 404));
+            Integration.Destination destination = current.destinationFor(sourceDatabase)
+                    .filter(candidate -> Objects.equals(loadId, candidate.getLoadId()))
+                    .orElseThrow(() -> new AwsException("InvalidIntegrationStateFault",
+                            "Destination for source database " + sourceDatabase + " of integration "
+                                    + current.integrationId() + " is no longer active.", 400));
+            destination.setState(Integration.Destination.STATE_SYNCING);
+            refreshStatus(current);
+            integrations.put(key(current.getRegion(), current.integrationId()), current);
+            return new Integration(current);
+        }
+    }
+
+    private Integration registerDestination(Integration integration, String databaseName, String sourceDatabase,
+                                            String initialState, boolean previousDatabaseGone,
+                                            String droppedDatabaseName, String droppedLoadId) {
+        synchronized (lock) {
+            Integration current = findCurrent(integration).orElseThrow(() -> new AwsException(
+                    "IntegrationNotFoundFault", "Integration " + integration.integrationId() + " not found.", 404));
+            if (!Set.of(Integration.STATUS_ACTIVE, Integration.STATUS_SYNCING, Integration.STATUS_FAILED)
+                    .contains(current.getStatus())) {
+                throw new AwsException("InvalidIntegrationStateFault", "Integration " + current.integrationId()
+                        + " can't take a database because its status is " + current.getStatus() + ".", 400);
+            }
+            Optional<Integration.Destination> previous = current.destinationFor(sourceDatabase);
+            if (previous.isPresent()) {
+                Integration.Destination existing = previous.get();
+                // A destination currently being created is never replaceable: its database does not exist yet.
+                boolean beingCreated = Integration.Destination.STATE_CREATING.equals(existing.getState());
+                boolean droppedMatches = previousDatabaseGone
+                        && (droppedDatabaseName == null
+                                || (droppedDatabaseName.equals(existing.getDatabaseName())
+                                        && Objects.equals(droppedLoadId, existing.getLoadId())));
+                boolean replaceable = !beingCreated
+                        && (droppedMatches || Integration.Destination.STATE_FAILED.equals(existing.getState()));
+                if (!replaceable) {
+                    throw new AwsException("IntegrationAlreadyExistsFault", "Database "
+                            + existing.getDatabaseName() + " was already created from source database "
+                            + sourceDatabase + " of integration " + current.integrationId() + ".", 400);
+                }
+                current.getDestinations().remove(existing);
+            }
+            String loadId = UUID.randomUUID().toString();
+            current.getDestinations().add(new Integration.Destination(databaseName, sourceDatabase,
+                    initialState, Instant.now(clock), loadId));
+            current.getErrors().removeIf(error -> isErrorForSourceDatabase(error, sourceDatabase));
+            refreshStatus(current);
+            integrations.put(key(current.getRegion(), current.integrationId()), current);
+            LOG.infov("Integration {0} syncs source database {1} into Redshift database {2}",
+                    current.getIntegrationArn(), sourceDatabase, databaseName);
+            return new Integration(current);
+        }
+    }
+
+    /**
+     * Forgets a destination owned by {@code expectedLoadId} whose database could not be created, as if it had
+     * never been asked for.
+     */
+    public void removeDestination(Integration integration, String sourceDatabase, String expectedLoadId) {
+        restoreDestination(integration, sourceDatabase, expectedLoadId, null, List.of());
+    }
+
+    /**
+     * Reverts a destination registration owned by {@code expectedLoadId} when creating its database on the target
+     * failed, restoring any replaced destination and its errors rather than clearing a prior failure. Another
+     * caller's registration is left untouched.
+     */
+    public void restoreDestination(Integration integration, String sourceDatabase, String expectedLoadId,
+                                   Integration.Destination previousDestination,
+                                   List<Integration.IntegrationError> previousErrors) {
+        synchronized (lock) {
+            findCurrent(integration).ifPresent(current -> {
+                Optional<Integration.Destination> existing = current.destinationFor(sourceDatabase);
+                if (existing.filter(destination -> Objects.equals(expectedLoadId, destination.getLoadId()))
+                        .isEmpty()) {
+                    return;
+                }
+                current.getDestinations().removeIf(
+                        destination -> sourceDatabase.equals(destination.getSourceDatabase()));
+                if (previousDestination != null) {
+                    current.getDestinations().add(new Integration.Destination(previousDestination));
+                }
+                if (previousErrors != null && !previousErrors.isEmpty()) {
+                    current.getErrors().removeIf(error -> isErrorForSourceDatabase(error, sourceDatabase));
+                    for (Integration.IntegrationError error : previousErrors) {
+                        current.getErrors().add(new Integration.IntegrationError(
+                                error.getErrorCode(), error.getErrorMessage()));
+                    }
+                }
+                refreshStatus(current);
+                integrations.put(key(current.getRegion(), current.integrationId()), current);
+            });
+        }
+    }
+
+    static boolean isErrorForSourceDatabase(Integration.IntegrationError error, String sourceDatabase) {
+        return error != null && error.getErrorMessage() != null
+                && error.getErrorMessage().startsWith("The initial load of source database " + sourceDatabase + " ");
+    }
+
+    /**
+     * Whether the integration still exists and is still running the specific load identified by {@code loadId}
+     * for {@code sourceDatabase} into {@code databaseName}.
+     */
+    public boolean isLoading(Integration integration, String sourceDatabase, String databaseName, String loadId) {
+        return findCurrent(integration)
+                .flatMap(current -> current.destinationFor(sourceDatabase))
+                .filter(destination -> databaseName.equals(destination.getDatabaseName()))
+                .filter(destination -> Objects.equals(loadId, destination.getLoadId()))
+                .filter(destination -> Integration.Destination.STATE_SYNCING.equals(destination.getState()))
+                .isPresent();
+    }
+
+    /**
+     * Ends the initial load identified by {@code loadId}: {@code Synced}, or {@code Failed} with {@code failure}
+     * as the integration's error. The integration is {@code active} again once no destination is syncing, or
+     * {@code failed} when a load failed. A stale completion, whose load was replaced or already ended or whose
+     * integration was deleted meanwhile, is ignored.
+     */
+    public void finishDestination(Integration integration, String sourceDatabase, String databaseName,
+                                  String loadId, String failure) {
+        synchronized (lock) {
+            Optional<Integration> found = findCurrent(integration);
+            Optional<Integration.Destination> destination = found
+                    .flatMap(current -> current.destinationFor(sourceDatabase))
+                    .filter(candidate -> databaseName.equals(candidate.getDatabaseName()))
+                    .filter(candidate -> Objects.equals(loadId, candidate.getLoadId()))
+                    .filter(candidate -> Integration.Destination.STATE_SYNCING.equals(candidate.getState()));
+            if (destination.isEmpty()) {
+                return;
+            }
+            Integration current = found.get();
+            destination.get().setState(failure == null
+                    ? Integration.Destination.STATE_SYNCED : Integration.Destination.STATE_FAILED);
+            if (failure != null) {
+                current.getErrors().add(new Integration.IntegrationError(INITIAL_LOAD_FAILED,
+                        "The initial load of source database " + sourceDatabase + " into " + databaseName
+                                + " failed: " + failure));
+            }
+            refreshStatus(current);
+            integrations.put(key(current.getRegion(), current.integrationId()), current);
+            LOG.infov("Integration {0} finished loading {1} into {2}: {3}", current.getIntegrationArn(),
+                    sourceDatabase, databaseName, destination.get().getState());
+        }
+    }
+
+    /**
+     * Marks any destination left in {@code Creating} by a restart as {@code Failed} so the integration is
+     * not stuck syncing and a subsequent {@code CREATE DATABASE ... FROM INTEGRATION} can retry or reuse
+     * the database if it was created before the restart.
+     */
+    public void reconcileInterruptedCreations() {
+        synchronized (lock) {
+            for (Integration integration : integrationsWithState(Integration.Destination.STATE_CREATING)) {
+                RequestScopes.runAs(integration.getAccountId(), integration.getRegion(), () ->
+                        findCurrent(integration).ifPresent(current -> {
+                            boolean changed = false;
+                            for (Integration.Destination destination : current.getDestinations()) {
+                                if (Integration.Destination.STATE_CREATING.equals(destination.getState())) {
+                                    destination.setState(Integration.Destination.STATE_FAILED);
+                                    current.getErrors().add(new Integration.IntegrationError(INITIAL_LOAD_FAILED,
+                                            "The initial load of source database " + destination.getSourceDatabase()
+                                                    + " into " + destination.getDatabaseName()
+                                                    + " failed: interrupted while creating the destination database."));
+                                    changed = true;
+                                }
+                            }
+                            if (changed) {
+                                refreshStatus(current);
+                                integrations.put(key(current.getRegion(), current.integrationId()), current);
+                                LOG.warnv("Marked interrupted Creating destination(s) of integration {0} as Failed",
+                                        current.getIntegrationArn());
+                            }
+                        }));
+            }
+        }
+    }
+
+    /**
+     * The integrations of every account with a destination still syncing, as a restart left them. Each
+     * carries its account id, since no request scope is active at startup.
+     */
+    public List<Integration> integrationsWithLoadsInProgress() {
+        return integrationsWithState(Integration.Destination.STATE_SYNCING);
+    }
+
+    private List<Integration> integrationsWithState(String state) {
+        if (!(integrations instanceof AccountAwareStorageBackend<Integration> accountIntegrations)) {
+            return integrations.scan(key -> key.startsWith(KEY_PREFIX)).stream()
+                    .filter(integration -> hasDestinationInState(integration, state))
+                    .map(Integration::new)
+                    .toList();
+        }
+        return accountIntegrations.scanAllAccountEntries(key -> key.startsWith(KEY_PREFIX)).stream()
+                .filter(entry -> hasDestinationInState(entry.value(), state))
+                .map(entry -> {
+                    Integration integration = new Integration(entry.value());
+                    integration.setAccountId(entry.accountId());
+                    return integration;
+                })
+                .toList();
+    }
+
+    private static boolean hasDestinationInState(Integration integration, String state) {
+        return integration.getDestinations().stream()
+                .anyMatch(destination -> state.equals(destination.getState()));
+    }
+
+    /** The stored copy of the integration, when it still exists under the same ARN. */
+    private Optional<Integration> findCurrent(Integration integration) {
+        return integrations.get(key(integration.getRegion(), integration.integrationId()))
+                .filter(current -> integration.getIntegrationArn().equals(current.getIntegrationArn()))
+                .map(Integration::new);
+    }
+
+    private static void refreshStatus(Integration integration) {
+        List<Integration.Destination> destinations = integration.getDestinations();
+        if (destinations.stream().anyMatch(destination ->
+                Integration.Destination.STATE_SYNCING.equals(destination.getState())
+                        || Integration.Destination.STATE_CREATING.equals(destination.getState()))) {
+            integration.setStatus(Integration.STATUS_SYNCING);
+        } else if (destinations.stream().anyMatch(destination ->
+                Integration.Destination.STATE_FAILED.equals(destination.getState()))) {
+            integration.setStatus(Integration.STATUS_FAILED);
+        } else {
+            integration.setStatus(Integration.STATUS_ACTIVE);
+            integration.setErrors(List.of());
         }
     }
 
