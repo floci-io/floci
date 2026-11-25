@@ -14,7 +14,6 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Clock;
-import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -29,7 +28,7 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class EventBridgeV2Webhooks {
 
-    /** What a request carries, once the HTTP layer has read it. */
+    /** {@code headers} are keyed by lower-case name. {@code body} is empty when {@code oversize} is set. */
     record Request(String method, String hostId, String path, Map<String, String> headers, byte[] body,
                    boolean oversize) {
     }
@@ -103,19 +102,24 @@ public class EventBridgeV2Webhooks {
         }
 
         Map<String, String> metadata = WebhookEvents.metadata(webhook.path("MetadataHttpHeaders"), request.headers());
-        String groupId;
-        if (WebhookEvents.CONTENT_BASED.equals(
-                webhook.path("DeduplicationConfiguration").path("DeduplicationType").asText())) {
-            groupId = WebhookEvents.contentHash(request.body(), metadata);
-            if (!sources.firstSeen(source, groupId)) {
-                return OK;
-            }
-        } else {
-            groupId = UUID.randomUUID().toString();
+        boolean contentBased = WebhookEvents.CONTENT_BASED.equals(
+                webhook.path("DeduplicationConfiguration").path("DeduplicationType").asText());
+        String groupId = contentBased ? WebhookEvents.contentHash(request.body(), metadata)
+                : UUID.randomUUID().toString();
+        if (contentBased && !sources.firstSeen(source, groupId)) {
+            return OK;
         }
-        RequestScopes.runAs(accountId, region, () -> service.publishWebhookEvent(source.getEventBusArn(), region,
-                sequenceNumber -> WebhookEvents.event(data.get(), request.body(), metadata, groupId, clock.instant(),
-                        UUID.randomUUID().toString(), sequenceNumber)));
+        try {
+            RequestScopes.runAs(accountId, region, () -> service.publishWebhookEvent(source.getEventBusArn(), region,
+                    sequenceNumber -> WebhookEvents.event(data.get(), request.body(), metadata, groupId,
+                            clock.instant(), UUID.randomUUID().toString(), sequenceNumber)));
+        } catch (RuntimeException e) {
+            if (contentBased) {
+                // The sender retries a request that failed, and the retry is not a repeat.
+                sources.forgetSeen(source, groupId);
+            }
+            throw e;
+        }
         return OK;
     }
 

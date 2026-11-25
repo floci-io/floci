@@ -3,7 +3,8 @@ package io.floci.aws.services.eventbridgev2;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -26,10 +27,29 @@ final class WebhookDeduplication {
     boolean firstSeen(String sourceArn, String hash) {
         Instant now = clock.instant();
         Instant oldest = now.minus(WINDOW);
-        Map<String, Instant> seen = seenBySource.computeIfAbsent(sourceArn, arn -> new HashMap<>());
+        Map<String, Instant> seen = seenBySource.computeIfAbsent(sourceArn, arn -> new LinkedHashMap<>());
         synchronized (seen) {
-            seen.values().removeIf(at -> !at.isAfter(oldest));
-            return seen.putIfAbsent(hash, now) == null;
+            // The hashes are in the order they were first seen, so the old ones are at the head.
+            Iterator<Instant> times = seen.values().iterator();
+            while (times.hasNext() && !times.next().isAfter(oldest)) {
+                times.remove();
+            }
+            Instant first = seen.get(hash);
+            if (first != null && first.isAfter(oldest)) {
+                return false;
+            }
+            seen.remove(hash);
+            seen.put(hash, now);
+            return true;
+        }
+    }
+
+    void forget(String sourceArn, String hash) {
+        Map<String, Instant> seen = seenBySource.get(sourceArn);
+        if (seen != null) {
+            synchronized (seen) {
+                seen.remove(hash);
+            }
         }
     }
 

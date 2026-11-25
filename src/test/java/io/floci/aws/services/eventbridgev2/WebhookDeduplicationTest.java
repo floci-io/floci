@@ -1,18 +1,16 @@
 package io.floci.aws.services.eventbridgev2;
 
+import io.floci.aws.testing.ManualClock;
 import org.junit.jupiter.api.Test;
 
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WebhookDeduplicationTest {
-    private final MutableClock clock = new MutableClock(Instant.parse("2026-11-25T06:00:00Z"));
+    private final ManualClock clock = new ManualClock(Instant.parse("2026-11-25T06:00:00Z"));
     private final WebhookDeduplication deduplication = new WebhookDeduplication(clock);
 
     @Test
@@ -59,30 +57,29 @@ class WebhookDeduplicationTest {
         assertTrue(deduplication.firstSeen("source-b", "h1"));
     }
 
-    private static final class MutableClock extends Clock {
-        private Instant now;
+    @Test
+    void forgettingOneHashLeavesTheOthersOfTheSource() {
+        deduplication.firstSeen("source-a", "h1");
+        deduplication.firstSeen("source-a", "h2");
 
-        MutableClock(Instant now) {
-            this.now = now;
-        }
+        deduplication.forget("source-a", "h1");
+        deduplication.forget("source-never-seen", "h1");
 
-        void advance(Duration duration) {
-            now = now.plus(duration);
-        }
+        assertTrue(deduplication.firstSeen("source-a", "h1"));
+        assertFalse(deduplication.firstSeen("source-a", "h2"));
+    }
 
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
+    @Test
+    void eachHashLeavesFiveMinutesAfterItWasFirstSeen() {
+        assertTrue(deduplication.firstSeen("source-a", "h1"));
+        clock.advance(Duration.ofMinutes(3));
+        assertTrue(deduplication.firstSeen("source-a", "h2"));
+        clock.advance(Duration.ofMinutes(2));
 
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return now;
-        }
+        assertTrue(deduplication.firstSeen("source-a", "h1"));
+        assertFalse(deduplication.firstSeen("source-a", "h2"));
+        clock.advance(Duration.ofMinutes(3));
+        assertTrue(deduplication.firstSeen("source-a", "h2"));
+        assertFalse(deduplication.firstSeen("source-a", "h1"));
     }
 }

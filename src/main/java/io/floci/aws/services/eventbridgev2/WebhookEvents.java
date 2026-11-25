@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -43,16 +44,19 @@ final class WebhookEvents {
 
     /**
      * The body as one JSON value of any type, or empty when it is not one. A duplicate key at any depth, a second
-     * value, text after the value and a byte order mark make it not one.
+     * value, text after the value, a byte order mark and text that is not UTF-8 make it not one.
      */
     static Optional<JsonNode> parseBody(byte[] body) {
         if (startsWithBom(body)) {
             return Optional.empty();
         }
         try {
-            JsonNode value = STRICT.readTree(body);
+            // Jackson reads UTF-16 and UTF-32 from bytes by itself, so it is given the text.
+            String text = StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(body)).toString();
+            JsonNode value = STRICT.readTree(text);
             return value == null || value.isMissingNode() ? Optional.empty() : Optional.of(value);
-        } catch (IOException e) {
+        } catch (IOException ignored) {
+            // Not UTF-8 or not one JSON value.
             return Optional.empty();
         }
     }
@@ -73,11 +77,12 @@ final class WebhookEvents {
     }
 
     /**
-     * The headers the source lists, in the order it lists them, under lower-case names. A header that is absent or
-     * empty, or whose value is longer than 1024 UTF-8 bytes, is left out.
+     * The headers the source lists, under lower-case names. A header that is absent or empty, or whose value is
+     * longer than 1024 UTF-8 bytes, is left out. AWS delivers them in the order of a hash map sized for the list,
+     * not in the order of the list.
      */
     static Map<String, String> metadata(JsonNode listed, Map<String, String> headers) {
-        Map<String, String> copied = new LinkedHashMap<>();
+        Map<String, String> copied = new HashMap<>(listed.size());
         for (JsonNode listedName : listed) {
             String name = listedName.asText().toLowerCase(Locale.ROOT);
             String value = headers.get(name);
@@ -112,9 +117,6 @@ final class WebhookEvents {
         out.writeBytes(bytes);
     }
 
-    /**
-     * The event. {@code groupId} is both the group and the deduplication id.
-     */
     static PublishedEvent event(JsonNode data, byte[] rawBody, Map<String, String> metadata, String groupId,
                                 Instant ingested, String eventId, String sequenceNumber) {
         ObjectNode copied = JsonNodeFactory.instance.objectNode();

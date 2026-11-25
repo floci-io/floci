@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -56,6 +57,17 @@ class WebhookEventsTest {
         assertTrue(WebhookEvents.parseBody(withBom).isEmpty());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"UTF-16", "UTF-16LE", "UTF-16BE", "UTF-32", "UTF-32LE", "UTF-32BE", "ISO-8859-1"})
+    void aBodyInAnotherEncodingThanUtf8IsRefused(String charset) {
+        assertTrue(WebhookEvents.parseBody("{\"a\":\"é\"}".getBytes(Charset.forName(charset))).isEmpty());
+    }
+
+    @Test
+    void anOverlongUtf8SequenceIsRefused() {
+        assertTrue(WebhookEvents.parseBody(new byte[] {'"', (byte) 0xC0, (byte) 0x80, '"'}).isEmpty());
+    }
+
     @Test
     void numbersAreWrittenAsJacksonWritesDoubles() throws Exception {
         String body = "{\"n\":1.0,\"e\":1e2,\"big\":12345678901234567890123,\"f\":0.1000,\"neg\":-0.0,\"exp\":1E-7,"
@@ -94,18 +106,29 @@ class WebhookEventsTest {
     }
 
     @Test
-    void metadataHoldsTheListedHeadersInTheListedOrderUnderLowerCaseNames() throws Exception {
-        Map<String, String> headers = new LinkedHashMap<>();
-        headers.put("x-b", "2");
-        headers.put("x-a", "1");
-        headers.put("x-unlisted", "3");
+    void metadataHoldsTheListedHeadersUnderLowerCaseNames() throws Exception {
+        Map<String, String> headers = Map.of("x-b", "2", "x-a", "1", "x-unlisted", "3");
 
         Map<String, String> metadata = WebhookEvents.metadata(MAPPER.readTree("[\"X-A\",\"X-B\",\"X-Missing\"]"),
                 headers);
 
-        assertEquals(List.of("x-a", "x-b"), List.copyOf(metadata.keySet()));
-        assertEquals("1", metadata.get("x-a"));
-        assertEquals("2", metadata.get("x-b"));
+        assertEquals(Map.of("x-a", "1", "x-b", "2"), metadata);
+    }
+
+    @Test
+    void metadataIsInTheOrderOfAHashMapSizedForTheListAndNotInTheOrderOfTheList() throws Exception {
+        JsonNode three = MAPPER.readTree("[\"X-Event-Type\",\"User-Agent\",\"Content-Type\"]");
+        JsonNode four = MAPPER.readTree("[\"webhook-id\",\"X-Multi\",\"X-Empty\",\"X-Long\"]");
+
+        assertEquals(List.of("x-event-type", "content-type", "user-agent"), List.copyOf(WebhookEvents.metadata(three,
+                Map.of("user-agent", "probe/1.0", "content-type", "application/json", "x-event-type", "order.created"))
+                .keySet()));
+        assertEquals(List.of("x-multi", "webhook-id"), List.copyOf(WebhookEvents.metadata(four,
+                Map.of("webhook-id", "same", "x-multi", "v1")).keySet()));
+        assertEquals(List.of("x-multi", "webhook-id", "x-long"), List.copyOf(WebhookEvents.metadata(four,
+                Map.of("webhook-id", "msg_l", "x-multi", "padded", "x-long", "L".repeat(1024))).keySet()));
+        assertEquals(List.of("x-meta", "x-two"), List.copyOf(WebhookEvents.metadata(
+                MAPPER.readTree("[\"X-Meta\",\"X-Two\"]"), Map.of("x-two", "t", "x-meta", "m1")).keySet()));
     }
 
     @Test

@@ -2,6 +2,7 @@ package io.floci.aws.services.eventbridgev2;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.eventbridgev2.EventBridgeV2Webhooks.Answer;
@@ -11,6 +12,7 @@ import io.floci.aws.services.eventbridgev2.model.SubscriberV2;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
 import io.floci.aws.services.secretsmanager.model.SecretVersion;
+import io.floci.aws.testing.ManualClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -19,21 +21,20 @@ import javax.crypto.spec.SecretKeySpec;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -56,7 +57,7 @@ class EventBridgeV2WebhooksTest {
     private EventBridgeV2EventSources sources;
     private EventBridgeV2Service service;
     private EventBridgeV2Webhooks webhooks;
-    private MutableClock clock;
+    private ManualClock clock;
     private String bus;
 
     @BeforeEach
@@ -82,7 +83,7 @@ class EventBridgeV2WebhooksTest {
             deliveredBodies.add(subscriber.getName() + "=" + EventBridgeV2Delivery.body(subscriber, event));
             return null;
         }).when(delivery).deliver(any(), any());
-        clock = new MutableClock(Instant.parse("2026-11-25T06:00:00.123Z"));
+        clock = new ManualClock(Instant.parse("2026-11-25T06:00:00.123Z"));
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
         sources = new EventBridgeV2EventSources(
                 AccountAwareStorageBackend.inMemory(ACCOUNT), secrets, regionResolver, clock, "http://floci.test:4566");
@@ -342,9 +343,9 @@ class EventBridgeV2WebhooksTest {
         assertEquals(2, delivered.size());
         answer("POST", target, target.path(), Map.of("x-tok", "s3cret", "x-meta", "m1"), "{\"dd\":2}");
         assertEquals(4, delivered.size());
-        answer("POST", target, target.path(), Map.of("x-tok", "s3cret", "x-meta", "m1", "x-two", "t"), "{\"dd\":2}");
+        answer("POST", target, target.path(), inOrder("x-tok", "s3cret", "x-meta", "m1", "x-two", "t"), "{\"dd\":2}");
         assertEquals(6, delivered.size());
-        answer("POST", target, target.path(), Map.of("x-two", "t", "x-tok", "s3cret", "x-meta", "m1"), "{\"dd\":2}");
+        answer("POST", target, target.path(), inOrder("x-two", "t", "x-meta", "m1", "x-tok", "s3cret"), "{\"dd\":2}");
         assertEquals(6, delivered.size());
         answer("POST", target, target.path(),
                 Map.of("x-tok", "s3cret", "x-meta", "m1", "x-two", "t", "x-other", "o"), "{\"dd\":2}");
@@ -378,6 +379,19 @@ class EventBridgeV2WebhooksTest {
 
         assertEquals(List.of("1", "1", "2", "2"), delivered.stream()
                 .map(event -> event.systemMetadata().get("aws:SequenceNumber").asText()).toList());
+    }
+
+    @Test
+    void aRequestWhosePublishFailsIsNotKeptAsSeen() {
+        Target target = source("hook", TOKEN_AUTH, DEDUP);
+        String body = "{\"dd\":1}";
+        service.clear();
+
+        assertThrows(AwsException.class,
+                () -> answer("POST", target, target.path(), Map.of("x-tok", "s3cret"), body));
+
+        assertTrue(sources.firstSeen(target.source(),
+                WebhookEvents.contentHash(body.getBytes(StandardCharsets.UTF_8), Map.of())));
     }
 
     @Test
@@ -416,6 +430,14 @@ class EventBridgeV2WebhooksTest {
                 body.getBytes(StandardCharsets.UTF_8), false));
     }
 
+    private static Map<String, String> inOrder(String... namesAndValues) {
+        Map<String, String> headers = new LinkedHashMap<>();
+        for (int i = 0; i < namesAndValues.length; i += 2) {
+            headers.put(namesAndValues[i], namesAndValues[i + 1]);
+        }
+        return headers;
+    }
+
     private String bodyOf(String subscriber) {
         return deliveredBodies.stream().filter(delivery -> delivery.startsWith(subscriber + "="))
                 .map(delivery -> delivery.substring(subscriber.length() + 1)).findFirst().orElseThrow();
@@ -426,33 +448,6 @@ class EventBridgeV2WebhooksTest {
             return MAPPER.readTree(value);
         } catch (Exception e) {
             throw new IllegalArgumentException(value, e);
-        }
-    }
-
-    private static final class MutableClock extends Clock {
-        private Instant now;
-
-        MutableClock(Instant now) {
-            this.now = now;
-        }
-
-        void advance(Duration duration) {
-            now = now.plus(duration);
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return now;
         }
     }
 }

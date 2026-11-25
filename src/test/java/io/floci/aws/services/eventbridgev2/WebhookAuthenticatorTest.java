@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -70,6 +71,17 @@ class WebhookAuthenticatorTest {
         assertFalse(allows(webhook, secret, Map.of("authorization", credentials)));
         assertFalse(allows(webhook, secret, Map.of("authorization", "Basic !!!notbase64")));
         assertFalse(allows(webhook, secret, Map.of("authorization", "Bearer " + credentials)));
+    }
+
+    @Test
+    void aBasicSecretWithoutAUsernameAndAPasswordAllowsNoRequest() {
+        JsonNode webhook = webhook("{\"BasicHttpAuthConfiguration\":{}}");
+        Map<String, String> emptyCredentials = Map.of("authorization", "Basic " + b64(":"));
+
+        for (String secret : List.of("{}", "{\"username\":\"\"}", "{\"Username\":\"\",\"Password\":\"\"}", "\"text\"",
+                "12345678", "null", "", "not json")) {
+            assertFalse(allows(webhook, secret, emptyCredentials), secret);
+        }
     }
 
     // ──────────────────────────── HMAC, body only ────────────────────────────
@@ -209,11 +221,14 @@ class WebhookAuthenticatorTest {
     }
 
     @Test
-    void withNoToleranceTheAgeOfTheTimestampIsNotChecked() {
+    void withNoToleranceTheWindowIs300Seconds() {
         JsonNode webhook = hmac(STRIPE.replace(",\"TimestampToleranceInSeconds\":300", ""));
 
-        assertTrue(allows(webhook, SECRET, stripe(NOW_SECONDS - 86_400)));
-        assertTrue(allows(webhook, SECRET, stripe(NOW_SECONDS + 86_400)));
+        assertTrue(allows(webhook, SECRET, stripe(NOW_SECONDS - 280)));
+        assertFalse(allows(webhook, SECRET, stripe(NOW_SECONDS - 301)));
+        assertTrue(allows(webhook, SECRET, stripe(NOW_SECONDS + 280)));
+        assertFalse(allows(webhook, SECRET, stripe(NOW_SECONDS + 320)));
+        assertFalse(allows(webhook, SECRET, stripeText(Long.toString(NOW.toEpochMilli()))));
         assertFalse(allows(webhook, SECRET, stripeText("abc")));
     }
 

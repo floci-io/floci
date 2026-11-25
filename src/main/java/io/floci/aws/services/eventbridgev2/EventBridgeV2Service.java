@@ -516,7 +516,6 @@ public class EventBridgeV2Service implements Resettable {
         return event;
     }
 
-    /** Gives the event the bus's next sequence number and collects the deliveries to the subscribers it matches. */
     private PublishedEvent accept(EventBusV2 bus, List<SubscriberV2> running,
                                   List<Map.Entry<SubscriberV2, PublishedEvent>> deliveries,
                                   Function<String, PublishedEvent> build) {

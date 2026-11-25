@@ -5,8 +5,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.RestAssured;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
+import io.vertx.core.Vertx;
+import io.vertx.core.http.HttpClient;
+import io.vertx.core.http.HttpClientOptions;
+import io.vertx.core.http.HttpMethod;
+import io.vertx.core.http.HttpVersion;
+import io.vertx.core.http.RequestOptions;
+import io.vertx.core.net.SocketAddress;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.eventbridgev2.EventBridgeV2Client;
@@ -22,6 +31,10 @@ import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.Socket;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -29,6 +42,7 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 import static io.restassured.RestAssured.given;
@@ -45,6 +59,9 @@ class EventBridgeV2WebhookIntegrationTest {
     private static final String ROLE = "arn:aws:iam::000000000000:role/WebhookRole";
     private static final String UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
     private static final String HMAC_SECRET = "0123456789abcdef-hmac-key";
+
+    @Inject
+    Vertx vertx;
 
     @Test
     void eachAuthenticationTypeDeliversItsEventToTheWithMetadataAndRawSubscribers() throws Exception {
@@ -164,6 +181,80 @@ class EventBridgeV2WebhookIntegrationTest {
         }
     }
 
+    @Test
+    void aBadRequestClosesTheConnection() throws Exception {
+        String suffix = suffix();
+        try (EventBridgeV2Client events = events(); SqsClient sqs = sqs()) {
+            Fixture fixture = fixture(events, sqs, suffix);
+            Endpoint endpoint = source(events, fixture.bus(), "close-" + suffix, webhook -> webhook
+                    .authConfiguration(staticToken("X-Token", "close-token")));
+
+            try (Socket socket = connect()) {
+                send(socket, "GET " + endpoint.path() + " HTTP/1.1\r\nHost: " + endpoint.host() + "\r\n\r\n");
+                // The read returns only once Floci closes the connection.
+                String answer = new String(socket.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+
+                assertTrue(answer.startsWith("HTTP/1.1 400 Bad Request\r\n"), answer);
+                assertTrue(answer.contains("\r\nConnection: close\r\n"), answer);
+                assertTrue(answer.endsWith("\r\n\r\nBad Request"), answer);
+            }
+            fixture.cleanUp(events, sqs, endpoint);
+        }
+    }
+
+    @Test
+    void aRequestThatExpectsContinueIsToldToSendItsBody() throws Exception {
+        String suffix = suffix();
+        try (EventBridgeV2Client events = events(); SqsClient sqs = sqs()) {
+            Fixture fixture = fixture(events, sqs, suffix);
+            Endpoint endpoint = source(events, fixture.bus(), "expect-" + suffix, webhook -> webhook
+                    .authConfiguration(staticToken("X-Token", "expect-token")));
+            String body = "{\"n\":1}";
+
+            try (Socket socket = connect()) {
+                send(socket, "POST " + endpoint.path() + " HTTP/1.1\r\nHost: " + endpoint.host()
+                        + "\r\nX-Token: expect-token\r\nContent-Length: " + body.length()
+                        + "\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n");
+                String interim = readHead(socket.getInputStream());
+                assertTrue(interim.startsWith("HTTP/1.1 100 Continue\r\n"), interim);
+                send(socket, body);
+                String answer = new String(socket.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+                assertTrue(answer.startsWith("HTTP/1.1 200 OK\r\n"), answer);
+            }
+            assertEquals(List.of(body), rawBodies(sqs, fixture.rawQueue(), 1));
+            fixture.cleanUp(events, sqs, endpoint);
+        }
+    }
+
+    @Test
+    void aHeadRequestOverHttp2IsAnsweredWithoutABody() throws Exception {
+        String suffix = suffix();
+        try (EventBridgeV2Client events = events(); SqsClient sqs = sqs()) {
+            Fixture fixture = fixture(events, sqs, suffix);
+            Endpoint endpoint = source(events, fixture.bus(), "head-" + suffix, webhook -> webhook
+                    .authConfiguration(staticToken("X-Token", "head-token")));
+            HttpClient client = vertx.createHttpClient(new HttpClientOptions()
+                    .setProtocolVersion(HttpVersion.HTTP_2).setHttp2ClearTextUpgrade(false));
+            try {
+                RequestOptions options = new RequestOptions()
+                        .setServer(SocketAddress.inetSocketAddress(RestAssured.port, "localhost"))
+                        .setHost(URI.create("http://" + endpoint.host()).getHost()).setPort(RestAssured.port)
+                        .setMethod(HttpMethod.HEAD).setURI(endpoint.path());
+                String answer = client.request(options)
+                        .compose(request -> request.send())
+                        .compose(response -> response.body().map(body -> response.version() + " "
+                                + response.statusCode() + " " + response.getHeader("Content-Length") + " "
+                                + body.length()))
+                        .toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
+
+                assertEquals("HTTP_2 400 11 0", answer);
+            } finally {
+                client.close();
+            }
+            fixture.cleanUp(events, sqs, endpoint);
+        }
+    }
+
     // ──────────────────────────── Fixtures ────────────────────────────
 
     private record Fixture(String bus, String metadataQueue, String rawQueue, String metadataSubscriber,
@@ -223,6 +314,31 @@ class EventBridgeV2WebhookIntegrationTest {
             specification = specification.header(headers[i], headers[i + 1]);
         }
         return specification.when().post(path);
+    }
+
+    private static Socket connect() throws IOException {
+        Socket socket = new Socket("localhost", RestAssured.port);
+        // A connection Floci leaves open fails the read instead of leaving it waiting.
+        socket.setSoTimeout(10_000);
+        return socket;
+    }
+
+    private static void send(Socket socket, String text) throws IOException {
+        OutputStream out = socket.getOutputStream();
+        out.write(text.getBytes(StandardCharsets.UTF_8));
+        out.flush();
+    }
+
+    private static String readHead(InputStream in) throws IOException {
+        StringBuilder head = new StringBuilder();
+        while (head.indexOf("\r\n\r\n") < 0) {
+            int next = in.read();
+            if (next < 0) {
+                throw new IOException("The connection closed inside a response head: " + head);
+            }
+            head.append((char) next);
+        }
+        return head.toString();
     }
 
     private static void expect(Response response, int status, String text) {

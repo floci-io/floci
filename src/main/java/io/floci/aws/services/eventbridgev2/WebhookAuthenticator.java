@@ -2,6 +2,8 @@ package io.floci.aws.services.eventbridgev2;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.MissingNode;
+import org.jboss.logging.Logger;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -15,7 +17,6 @@ import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
-import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
@@ -29,24 +30,19 @@ import java.util.regex.Pattern;
  * authentication type. Secrets and signatures are compared in constant time.
  */
 final class WebhookAuthenticator {
+    private static final Logger LOG = Logger.getLogger(WebhookAuthenticator.class);
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Pattern EPOCH_SECONDS = Pattern.compile("[0-9]+");
     private static final String BASIC_SCHEME = "Basic ";
     private static final String MESSAGE_ID_COMPOSITION = "MESSAGE_ID_DOT_TIMESTAMP_DOT_BODY";
     private static final String TIMESTAMP_COMPOSITION = "TIMESTAMP_DOT_BODY";
+    // AWS holds a timestamp to this window when the source sets no TimestampToleranceInSeconds.
+    private static final long DEFAULT_TOLERANCE_SECONDS = 300;
 
     private WebhookAuthenticator() {
     }
 
-    /**
-     * Whether the request is allowed in.
-     *
-     * @param webhook the stored {@code WebhookEventsConfiguration}
-     * @param secret  the current value of the source's secret
-     * @param headers the request's headers by lower-case name
-     * @param body    the request body as received
-     * @param now     the time a timestamp is held against
-     */
+    /** {@code headers} are keyed by lower-case name. */
     static boolean allows(JsonNode webhook, String secret, Map<String, String> headers, byte[] body, Instant now) {
         JsonNode auth = webhook.path("AuthConfiguration");
         if (auth.hasNonNull(WebhookEventsConfigurations.STATIC_TOKEN)) {
@@ -75,7 +71,8 @@ final class WebhookAuthenticator {
         try {
             credentials = new String(Base64.getDecoder().decode(value.substring(BASIC_SCHEME.length())),
                     StandardCharsets.UTF_8);
-        } catch (IllegalArgumentException e) {
+        } catch (IllegalArgumentException ignored) {
+            // Not Base64, so it holds no credential.
             return false;
         }
         int colon = credentials.indexOf(':');
@@ -85,11 +82,18 @@ final class WebhookAuthenticator {
         JsonNode stored;
         try {
             stored = JSON.readTree(secret);
-        } catch (IOException e) {
+        } catch (IOException ignored) {
+            // Refused below as a secret without the members. The message may quote the secret, so it is not logged.
+            stored = MissingNode.getInstance();
+        }
+        JsonNode storedUsername = stored.path("username");
+        JsonNode storedPassword = stored.path("password");
+        if (!storedUsername.isTextual() || !storedPassword.isTextual()) {
+            LOG.warn("The secret of a webhook event source with Basic authentication holds no username and password");
             return false;
         }
-        boolean user = equal(credentials.substring(0, colon), stored.path("username").asText());
-        boolean password = equal(credentials.substring(colon + 1), stored.path("password").asText());
+        boolean user = equal(credentials.substring(0, colon), storedUsername.textValue());
+        boolean password = equal(credentials.substring(colon + 1), storedPassword.textValue());
         return user & password;
     }
 
@@ -179,25 +183,28 @@ final class WebhookAuthenticator {
         if (sent == null) {
             return false;
         }
-        if (!configuration.hasNonNull("TimestampToleranceInSeconds")) {
-            return true;
-        }
+        long tolerance = configuration.hasNonNull("TimestampToleranceInSeconds")
+                ? configuration.get("TimestampToleranceInSeconds").asLong() : DEFAULT_TOLERANCE_SECONDS;
         try {
-            return Duration.between(sent, now).abs().compareTo(
-                    Duration.ofSeconds(configuration.get("TimestampToleranceInSeconds").asLong())) <= 0;
-        } catch (ArithmeticException e) {
+            return Duration.between(sent, now).abs().compareTo(Duration.ofSeconds(tolerance)) <= 0;
+        } catch (ArithmeticException ignored) {
+            // Too far from now to measure, so outside any tolerance.
             return false;
         }
     }
 
-    /** Epoch seconds or an ISO-8601 date and time with an offset. Milliseconds, fractions and words are not times. */
+    /**
+     * Epoch seconds or an ISO-8601 date and time with an offset. A count of milliseconds reads as seconds far ahead,
+     * which the tolerance refuses.
+     */
     private static Instant instantOf(String text) {
         try {
             if (EPOCH_SECONDS.matcher(text).matches()) {
                 return Instant.ofEpochSecond(Long.parseLong(text));
             }
             return OffsetDateTime.parse(text).toInstant();
-        } catch (DateTimeException | NumberFormatException e) {
+        } catch (DateTimeException | NumberFormatException ignored) {
+            // Neither form, so not a time.
             return null;
         }
     }
@@ -209,6 +216,8 @@ final class WebhookAuthenticator {
         try {
             return Base64.getDecoder().decode(secret);
         } catch (IllegalArgumentException e) {
+            LOG.warnv("The secret of a webhook event source with SecretEncoding BASE64 is not Base64: {0}",
+                    e.getMessage());
             return null;
         }
     }
@@ -220,6 +229,7 @@ final class WebhookAuthenticator {
             mac.init(new SecretKeySpec(key, name));
             return mac.doFinal(message);
         } catch (GeneralSecurityException | IllegalArgumentException e) {
+            LOG.warnv("The {0} of a webhook request could not be computed: {1}", name, e.getMessage());
             return null;
         }
     }
@@ -227,7 +237,8 @@ final class WebhookAuthenticator {
     private static byte[] decode(String signature, boolean base64) {
         try {
             return base64 ? Base64.getDecoder().decode(signature) : HexFormat.of().parseHex(signature);
-        } catch (IllegalArgumentException e) {
+        } catch (IllegalArgumentException ignored) {
+            // Not in the encoding of the source, so it matches nothing.
             return null;
         }
     }

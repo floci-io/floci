@@ -131,10 +131,11 @@ The request is answered in this order.
 5. A body that is not one JSON value is `400`.
 
 The answers are `OK`, `Forbidden`, `Bad Request` and `Not Found` as `text/plain`, with `x-amzn-RequestId`.
-A `400` also sends `Connection: close`.
+A `400` also sends `Connection: close` and closes the connection.
 
 - The body may be any JSON value. Floci refuses an empty body, a duplicate key at any depth, a second value,
-  trailing text, a byte order mark, `NaN`, single quotes, comments, trailing commas and a leading zero.
+  trailing text, a byte order mark, text that is not UTF-8, `NaN`, single quotes, comments, trailing commas and a
+  leading zero.
   Floats are written as doubles, so `1e2` becomes `100.0`. Integers keep their size. `Content-Type` is not checked.
 - `StaticTokenAuthConfiguration` compares the whole value of `TokenHttpHeader` with the secret.
   `BasicHttpAuthConfiguration` reads `Authorization` with the scheme `Basic` in any case and one space.
@@ -144,10 +145,11 @@ A `400` also sends `Connection: close`.
   `SignaturePrefix` is required when set. `Delimiter` splits a list of signatures and any one may match.
   When `SignatureHttpHeader` and `TimestampHttpHeader` are the same header, the elements may come in any order.
   A timestamp is epoch seconds or an ISO-8601 date and time with an offset. `TimestampToleranceInSeconds` applies
-  to past and future. A message id with a `.` is refused.
+  to past and future, and is 300 when the source does not set it. A message id with a `.` is refused.
 - The event is `Data`, `Metadata` and `SystemMetadata`. `Data` is the parsed body. `Metadata` holds the
   `MetadataHttpHeaders` of the source under lower-case names. Repeated headers are joined with `, `.
-  An empty value and a value over 1024 UTF-8 bytes are dropped.
+  An empty value and a value over 1024 UTF-8 bytes are dropped. The names come in the order AWS gives them,
+  which is that of a hash map and not that of the list.
 - `SystemMetadata` has `EventGroupId`, `DeduplicationId`, `ContentType`, `aws:IngestionTime`, `aws:EventId`,
   `aws:SequenceNumber` and `aws:DeliveryType`. It has no `aws:Source` or `aws:DetailType`.
 - A `WITH_METADATA` subscriber receives the three parts. A `RAW` subscriber receives the request body as sent.

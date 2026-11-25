@@ -48,7 +48,8 @@ final class WebhookTokens {
         byte[] decoded;
         try {
             decoded = Base64.getUrlDecoder().decode(token.substring(TOKEN_PREFIX.length()));
-        } catch (IllegalArgumentException e) {
+        } catch (IllegalArgumentException ignored) {
+            // Not Base64, so not a token.
             return false;
         }
         if (decoded.length != RANDOM_BYTES + CHECK_BYTES) {

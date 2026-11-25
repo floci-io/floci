@@ -256,7 +256,6 @@ public class EventBridgeV2EventSources implements Resettable {
                 + source.getWebhookToken() + "/";
     }
 
-    /** A source and the account that owns it, found from the host id of its URL. */
     record LocatedSource(String accountId, EventSourceV2 source) {
     }
 
@@ -271,6 +270,10 @@ public class EventBridgeV2EventSources implements Resettable {
     /** Records a request hash the source received and returns true, or false when it saw the hash lately. */
     boolean firstSeen(EventSourceV2 source, String hash) {
         return deduplication.firstSeen(source.getArn(), hash);
+    }
+
+    void forgetSeen(EventSourceV2 source, String hash) {
+        deduplication.forget(source.getArn(), hash);
     }
 
     @Override

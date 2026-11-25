@@ -4,8 +4,10 @@ import io.floci.aws.core.common.RequestHost;
 import io.floci.aws.core.common.ServiceConfigAccess;
 import io.floci.aws.services.eventbridgev2.EventBridgeV2Webhooks.Answer;
 import io.floci.aws.services.eventbridgev2.EventBridgeV2Webhooks.Request;
+import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
+import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
 import io.vertx.core.http.HttpVersion;
@@ -68,6 +70,9 @@ public class EventBridgeV2WebhookDataPlane {
             context.next();
             return;
         }
+        if ("100-continue".equalsIgnoreCase(request.getHeader("Expect"))) {
+            request.response().writeContinue();
+        }
         BoundedBody body = new BoundedBody();
         request.handler(body::add);
         request.exceptionHandler(e -> LOG.debugv(e, "A webhook request for {0} was cut short", hostId.get()));
@@ -90,10 +95,16 @@ public class EventBridgeV2WebhookDataPlane {
                 .putHeader("x-amzn-RequestId", UUID.randomUUID().toString())
                 .putHeader("Content-Type", "text/plain")
                 .putHeader("Content-Length", Integer.toString(text.length));
-        if (answer.closesConnection() && request.version() != HttpVersion.HTTP_2) {
+        boolean closes = answer.closesConnection() && request.version() != HttpVersion.HTTP_2;
+        if (closes) {
             response.putHeader("Connection", "close");
         }
-        response.end(Buffer.buffer(text));
+        // Vert.x leaves the body out of a HEAD answer on HTTP/1.x only.
+        Future<Void> ended = request.method() == HttpMethod.HEAD ? response.end() : response.end(Buffer.buffer(text));
+        if (closes) {
+            // Vert.x closes by the Connection header of the request, not of the response.
+            ended.onComplete(ignored -> request.connection().close());
+        }
     }
 
     /** The request body up to the size limit, then only whether it went past it. */
