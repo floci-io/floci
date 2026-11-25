@@ -117,15 +117,22 @@ class S3EncryptionIntegrationTest {
         String aesWithKey = SSE_KMS_XML.replace("aws:kms", "AES256");
         String keyWithLineBreak = SSE_KMS_XML.replace("key/abc", "key/a\nbc");
 
-        for (String body : new String[] {aesWithKey, keyWithLineBreak}) {
-            given()
-                .body(body)
-            .when()
-                .put("/" + BUCKET + "?encryption")
-            .then()
-                .statusCode(400)
-                .body(containsString("InvalidArgument"));
-        }
+        given()
+            .body(aesWithKey)
+        .when()
+            .put("/" + BUCKET + "?encryption")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidArgument"))
+            .body(containsString("a KMSMasterKeyID is not applicable if the default sse algorithm is not aws:kms "
+                    + "or aws:kms:dsse"));
+        given()
+            .body(keyWithLineBreak)
+        .when()
+            .put("/" + BUCKET + "?encryption")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidArgument"));
 
         given()
         .when()
