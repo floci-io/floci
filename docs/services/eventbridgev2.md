@@ -18,13 +18,18 @@ The AWS CLI calls it `aws eventsv2` and the SDKs `EventBridgeV2`.
 | --- | --- |
 | `CreateEventBus` | Create an event bus, with an optional description, KMS key, retention period, and tags |
 | `DescribeEventBus` | Return an event bus's name, description, configuration, state and times |
-| `DeleteEventBus` | Delete an event bus that has no subscribers |
+| `DeleteEventBus` | Delete an event bus that has no subscribers or event sources |
 | `ListEventBuses` | List the Region's event buses in name order, filtered by name prefix, a page at a time |
 | `CreateSubscriber` | Create a subscriber that delivers the events its filters match to an Amazon SQS queue |
 | `DescribeSubscriber` | Return a subscriber's target, filters, transformer, delivery settings, state and times |
 | `ListSubscribers` | List the Region's subscribers, or one event bus's, filtered by name prefix, a page at a time |
 | `UpdateSubscriber` | Change a subscriber's settings, keeping those the request leaves out |
 | `DeleteSubscriber` | Delete a subscriber |
+| `CreateEventSource` | Create a webhook event source on an event bus, with its URL and a managed secret |
+| `DescribeEventSource` | Return a webhook event source's configuration, URL, secret ARN, state and times |
+| `ListEventSources` | List the Region's event sources, or one event bus's, filtered by name prefix, a page at a time |
+| `UpdateEventSource` | Replace a webhook event source's configuration and description |
+| `DeleteEventSource` | Delete a webhook event source and schedule its secret for deletion |
 | `PutEvents` | Publish events in the EventBridge envelope to an event bus |
 <!-- floci:actions:end -->
 
@@ -38,7 +43,7 @@ Every other EventBridge V2 operation answers `UnsupportedOperation`.
   `ResourceAlreadyExistsException`.
 - A retried `CreateEventBus` or `CreateSubscriber` with the same `ClientToken` returns what the first
   call created. The same token with a different request fails with `IdempotentParameterMismatchException`.
-- `DeleteEventBus` fails with `ResourceInUseException` while the bus has subscribers.
+- `DeleteEventBus` fails with `ResourceInUseException` while the bus has subscribers or event sources.
 - `ListEventBuses` lists only your own buses. Floci does not share buses across accounts, so an
   `EventBusAccountId` naming another account lists none.
 - `EncryptionConfiguration.KmsKeyIdentifier` is stored and returned as given. AWS returns the key's ARN.
@@ -92,6 +97,26 @@ A matcher Floci does not evaluate, such as `cidr` or `anything-but` with `numeri
 the target parameters but has no `TargetArn`: a subscriber keeps its target. An update is checked as a whole, so a
 request with one invalid setting changes nothing. `ResumePosition` is accepted and has no effect, since events are
 not retained. `DescribeSubscriber` and `ListSubscribers` always report `Revoked` as `false`.
+
+## Webhook event sources
+
+Floci serves event sources of the `WebhookEventsConfiguration` kind. A request with an
+`AwsServiceEventsConfiguration` or `PartnerEventsConfiguration` is refused with `InvalidInputException`.
+
+- A source is `ACTIVE` at once. Its ARN is
+  `arn:aws:events:<region>:<account>:event-sourcev2/webhook/<name>/<id>`.
+- A source name is unique per account and Region, across event buses.
+- The webhook URL is `<scheme>://<host id>.c01.events-webhook.<region>.<authority>/<token>/`. The scheme and
+  authority are those of Floci's base URL. The URL does not accept requests yet.
+- Each source has a Secrets Manager secret named `events-webhook!<uuid>`, owned by `events-webhook`. It holds the
+  static token, the HMAC secret, or the Basic credential as `{"username":"...","password":"..."}`. A credential
+  the request leaves out is generated. The secret ARN is in `EventSourceDetails.WebhookDetails.SecretArn`.
+- `DescribeEventSource` returns `Configuration` as given, without `SecretValue`, `Username` and `Password`.
+- `UpdateEventSource` replaces the whole webhook configuration and keeps the URL, the secret and the
+  authentication type. It does not accept credentials.
+- `KmsKeyIdentifier` is stored and returned. It is not used for the secret.
+- `DeleteEventSource` schedules the secret for deletion at once.
+- `DescribeEventSource` and `ListEventSources` do not return `Revoked`.
 
 ## IAM
 

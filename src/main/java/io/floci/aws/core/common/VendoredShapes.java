@@ -43,20 +43,46 @@ final class VendoredShapes {
      */
     static List<String> stringViolations(JsonNode shape, Pattern pattern, String text, String path,
                                          SmithyValidationErrors.Violations messages) {
+        return stringViolations(shape, pattern, text, path, messages, false);
+    }
+
+    /** {@link #stringViolations} that reports the pattern before the length when {@code patternBeforeLength}. */
+    static List<String> stringViolations(JsonNode shape, Pattern pattern, String text, String path,
+                                         SmithyValidationErrors.Violations messages, boolean patternBeforeLength) {
         List<String> violations = new ArrayList<>();
+        if (patternBeforeLength) {
+            addPattern(violations, shape, pattern, text, path, messages);
+            addLength(violations, shape, text, path, messages);
+        } else {
+            addLength(violations, shape, text, path, messages);
+            addPattern(violations, shape, pattern, text, path, messages);
+        }
+        addEnum(violations, shape, text, path, messages);
+        return violations;
+    }
+
+    private static void addLength(List<String> violations, JsonNode shape, String text, String path,
+                                  SmithyValidationErrors.Violations messages) {
         String length = messages.lengthOutOfRange(path, text,
                 shape.path("min").asInt(0), shape.path("max").asInt(Integer.MAX_VALUE));
         if (length != null) {
             violations.add(length);
         }
+    }
+
+    private static void addPattern(List<String> violations, JsonNode shape, Pattern pattern, String text,
+                                   String path, SmithyValidationErrors.Violations messages) {
         if (pattern != null && !pattern.matcher(text).matches()) {
             violations.add(messages.pattern(path, text, VendoredPatterns.quoted(shape)));
         }
+    }
+
+    private static void addEnum(List<String> violations, JsonNode shape, String text, String path,
+                                SmithyValidationErrors.Violations messages) {
         List<String> allowed = enumValues(shape);
         if (!allowed.isEmpty() && !allowed.contains(text)) {
             violations.add(messages.notInEnum(text, path, allowed));
         }
-        return violations;
     }
 
     /** The values a shape's enum admits, in the model's order, or none for a shape without one. */

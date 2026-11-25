@@ -2,12 +2,15 @@ package io.floci.aws.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 
 import java.math.BigDecimal;
-import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -94,25 +97,83 @@ public final class RequestConstraintCheck {
         };
     }
 
+    /**
+     * The orders of a violation list that the vendored file cannot say. A service measures them on AWS.
+     *
+     * @param patternBeforeLength a string reports its pattern before its length
+     * @param mapsInHashOrder a map is quoted in the order of a {@link HashMap} sized for its entries, not in
+     *                        request order
+     */
+    public record ViolationOrder(boolean patternBeforeLength, boolean mapsInHashOrder) {
+        public static final ViolationOrder STANDARD = new ViolationOrder(false, false);
+    }
+
     private final JsonNode model;
     private final Map<String, Pattern> patterns;
     private final Messages messages;
+    private final ViolationOrder order;
     private final Set<String> wordable = ConcurrentHashMap.newKeySet();
 
-    private RequestConstraintCheck(JsonNode model, Messages messages) {
+    private RequestConstraintCheck(JsonNode model, Messages messages, ViolationOrder order) {
         this.model = model;
         this.messages = messages;
+        this.order = order;
         this.patterns = VendoredShapes.patterns(model.path("shapes"));
     }
 
     /** The vendored resource {@code name}; {@code description} names it in a failure. */
     public static RequestConstraintCheck load(String name, String description, Messages messages) {
+        return load(name, description, messages, ViolationOrder.STANDARD);
+    }
+
+    public static RequestConstraintCheck load(String name, String description, Messages messages,
+                                              ViolationOrder order) {
         return VendoredResources.read(name, description,
-                input -> new RequestConstraintCheck(MAPPER.readTree(input), messages));
+                input -> new RequestConstraintCheck(MAPPER.readTree(input), messages, order));
     }
 
     public static RequestConstraintCheck of(JsonNode model, Messages messages) {
-        return new RequestConstraintCheck(model, messages);
+        return of(model, messages, ViolationOrder.STANDARD);
+    }
+
+    public static RequestConstraintCheck of(JsonNode model, Messages messages, ViolationOrder order) {
+        return new RequestConstraintCheck(model, messages, order);
+    }
+
+    /**
+     * A copy of {@code value} that keeps only the members {@code shapeName} declares. Structures and lists are
+     * walked and a map is copied as given.
+     */
+    public JsonNode modeled(String shapeName, JsonNode value) {
+        JsonNode shape = model.path("shapes").path(shapeName);
+        switch (shape.path("type").asText()) {
+            case "structure" -> {
+                if (!value.isObject()) {
+                    return value.deepCopy();
+                }
+                ObjectNode copy = MAPPER.createObjectNode();
+                for (Map.Entry<String, JsonNode> field : value.properties()) {
+                    JsonNode member = shape.path("members").get(field.getKey());
+                    if (member != null) {
+                        copy.set(field.getKey(), modeled(member.asText(), field.getValue()));
+                    }
+                }
+                return copy;
+            }
+            case "list" -> {
+                if (!value.isArray()) {
+                    return value.deepCopy();
+                }
+                ArrayNode copy = MAPPER.createArrayNode();
+                for (JsonNode item : value) {
+                    copy.add(modeled(shape.path("member").asText(), item));
+                }
+                return copy;
+            }
+            default -> {
+                return value.deepCopy();
+            }
+        }
     }
 
     /** Whether the vendored model declares an input for {@code operation}. */
@@ -230,7 +291,8 @@ public final class RequestConstraintCheck {
 
     /**
      * Every constraint {@code request} breaks for {@code operation}, worded as a Smithy validation
-     * error and in the model's member order, to be thrown with
+     * error. Members come in the order the vendored shape lists them in, which a generator may set. A string's
+     * pattern and length, and the text a map is quoted as, follow the {@link ViolationOrder}. To be thrown with
      * {@link SmithyValidationErrors#exception(String, List)}. Paths join the member names with a dot,
      * each with its first letter lower-cased. A shape marked {@code sensitive} leaves its value out
      * of the wording. A value of the wrong JSON type is thrown at once through {@link Messages#type}.
@@ -339,7 +401,8 @@ public final class RequestConstraintCheck {
                 if (!value.isTextual()) {
                     throw messages.type(errorPath, type);
                 }
-                found.addAll(VendoredShapes.stringViolations(shape, patterns.get(name), value.textValue(), path, form));
+                found.addAll(VendoredShapes.stringViolations(shape, patterns.get(name), value.textValue(), path,
+                        form, order.patternBeforeLength()));
             }
             case "integer", "long" -> collectInteger(shape, type, value, path, errorPath, form, found);
             case "float", "double" -> {
@@ -366,16 +429,16 @@ public final class RequestConstraintCheck {
 
     private void collectInteger(JsonNode shape, String type, JsonNode value, String path, String errorPath,
                                 SmithyValidationErrors.Violations form, List<String> found) {
-        if (!value.isIntegralNumber()) {
+        boolean fits = "integer".equals(type) ? value.isIntegralNumber() && value.canConvertToInt()
+                : value.isIntegralNumber() && value.canConvertToLong();
+        if (!fits) {
             throw messages.type(errorPath, type);
         }
-        BigInteger number = value.bigIntegerValue();
-        if (shape.has("min") && number.compareTo(BigInteger.valueOf(shape.get("min").asLong())) < 0) {
+        long number = value.longValue();
+        if (shape.has("min") && number < shape.get("min").asLong()) {
             found.add(form.valueTooSmall(path, value.asText(), shape.get("min").asLong()));
-        } else if (shape.has("max") && number.compareTo(BigInteger.valueOf(shape.get("max").asLong())) > 0) {
+        } else if (shape.has("max") && number > shape.get("max").asLong()) {
             found.add(form.valueTooLarge(path, value.asText(), shape.get("max").asLong()));
-        } else if (!("integer".equals(type) ? value.canConvertToInt() : value.canConvertToLong())) {
-            throw messages.type(errorPath, type);
         }
     }
 
@@ -404,11 +467,7 @@ public final class RequestConstraintCheck {
         if (!value.isObject()) {
             throw messages.type(errorPath, "map");
         }
-        List<String> entries = new ArrayList<>();
-        for (Map.Entry<String, JsonNode> entry : value.properties()) {
-            entries.add(entry.getKey() + "=" + elementText(entry.getValue()));
-        }
-        String mapText = "{" + String.join(", ", entries) + "}";
+        String mapText = mapText(value);
         String size = sizeViolation(shape, value.size());
         if (size != null) {
             found.add(form.constraint(path, mapText, size));
@@ -484,6 +543,14 @@ public final class RequestConstraintCheck {
             return "Member must have length less than or equal to " + shape.get("max").asLong();
         }
         return null;
+    }
+
+    private String mapText(JsonNode map) {
+        Map<String, String> quoted = order.mapsInHashOrder() ? new HashMap<>(map.size()) : new LinkedHashMap<>();
+        for (Map.Entry<String, JsonNode> entry : map.properties()) {
+            quoted.put(entry.getKey(), elementText(entry.getValue()));
+        }
+        return quoted.toString();
     }
 
     private static String elementsText(JsonNode list) {

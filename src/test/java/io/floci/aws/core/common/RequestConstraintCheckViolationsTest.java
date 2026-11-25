@@ -48,7 +48,19 @@ class RequestConstraintCheckViolationsTest {
             """;
 
     private static final RequestConstraintCheck CHECK = RequestConstraintCheck.of(json(MODEL),
+            RequestConstraintCheck.standardMessages("InvalidInputException"),
+            new RequestConstraintCheck.ViolationOrder(true, true));
+
+    private static final RequestConstraintCheck STANDARD = RequestConstraintCheck.of(json(MODEL),
             RequestConstraintCheck.standardMessages("InvalidInputException"));
+
+    private static final RequestConstraintCheck PATTERN_FIRST = RequestConstraintCheck.of(json(MODEL),
+            RequestConstraintCheck.standardMessages("InvalidInputException"),
+            new RequestConstraintCheck.ViolationOrder(true, false));
+
+    private static final RequestConstraintCheck HASH_ORDER = RequestConstraintCheck.of(json(MODEL),
+            RequestConstraintCheck.standardMessages("InvalidInputException"),
+            new RequestConstraintCheck.ViolationOrder(false, true));
 
     private static final String REQUIRED_OK = "\"Name\": \"abc\", \"Inner\": {\"Leaf\": \"abc\"}";
 
@@ -82,14 +94,58 @@ class RequestConstraintCheckViolationsTest {
     }
 
     @Test
-    void stringReportsLengthThenPatternThenEnumEachIndependently() {
+    void stringReportsPatternThenLengthThenEnumEachIndependently() {
         assertEquals(List.of(
-                "Value 'A' at 'name' failed to satisfy constraint: Member must have length greater than or equal to 2",
-                "Value 'A' at 'name' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-z]+"),
+                "Value 'A' at 'name' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-z]+",
+                "Value 'A' at 'name' failed to satisfy constraint: Member must have length greater than or equal to 2"),
                 CHECK.violations("Put", json("{\"Name\": \"A\", \"Inner\": {\"Leaf\": \"abc\"}}")));
         assertEquals(List.of(
                 "Value 'abcdef' at 'name' failed to satisfy constraint: Member must have length less than or equal to 5"),
                 CHECK.violations("Put", json("{\"Name\": \"abcdef\", \"Inner\": {\"Leaf\": \"abc\"}}")));
+    }
+
+    @Test
+    void standardOrderReportsLengthBeforePattern() {
+        String request = "{\"Name\": \"A\", \"Inner\": {\"Leaf\": \"abc\"}}";
+        String length = "Value 'A' at 'name' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 2";
+        String pattern = "Value 'A' at 'name' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [a-z]+";
+
+        assertEquals(List.of(length, pattern), STANDARD.violations("Put", json(request)));
+        assertEquals(List.of(length, pattern), HASH_ORDER.violations("Put", json(request)));
+        assertEquals(List.of(pattern, length), PATTERN_FIRST.violations("Put", json(request)));
+        assertEquals(List.of(pattern, length), CHECK.violations("Put", json(request)));
+    }
+
+    @Test
+    void standardOrderQuotesAMapInRequestOrder() {
+        String request = "{" + REQUIRED_OK + ", \"Tags\": {\"b\": \"x\", \"a\": \"y\", \"c\": \"z\"}}";
+        String text = "Value '%s' at 'tags' failed to satisfy constraint: Member must have length less than or equal to 2";
+
+        assertEquals(List.of(String.format(text, "{b=x, a=y, c=z}")), STANDARD.violations("Put", json(request)));
+        assertEquals(List.of(String.format(text, "{b=x, a=y, c=z}")), PATTERN_FIRST.violations("Put", json(request)));
+        assertEquals(List.of(String.format(text, "{a=y, b=x, c=z}")), HASH_ORDER.violations("Put", json(request)));
+        assertEquals(List.of(String.format(text, "{a=y, b=x, c=z}")), CHECK.violations("Put", json(request)));
+    }
+
+    @Test
+    void modeledKeepsOnlyDeclaredMembersThroughStructuresAndListsOfStructures() {
+        JsonNode value = json("{\"Items\": [{\"Leaf\": \"a\", \"Extra\": 1}, {\"Other\": \"b\", \"x\": {}}],"
+                + " \"Unknown\": true}");
+
+        assertEquals(json("{\"Items\": [{\"Leaf\": \"a\"}, {\"Other\": \"b\"}]}"),
+                CHECK.modeled("ListyInput", value));
+    }
+
+    @Test
+    void modeledCopiesMapsAndScalarsAsTheyAre() {
+        JsonNode marks = json("{\"k\": {\"Leaf\": \"a\", \"Extra\": 1}}");
+
+        assertEquals(marks, CHECK.modeled("Marks", marks));
+        assertEquals(json("\"text\""), CHECK.modeled("Name", json("\"text\"")));
+        assertEquals(json("{\"Name\": \"a\", \"Self\": {\"Name\": \"b\"}}"),
+                CHECK.modeled("LoopInput", json("{\"Name\": \"a\", \"Self\": {\"Name\": \"b\", \"z\": 1}, \"y\": 2}")));
     }
 
     @Test
@@ -125,10 +181,16 @@ class RequestConstraintCheckViolationsTest {
     }
 
     @Test
-    void integerTooBigForLongIsStillARangeViolation() {
-        assertEquals(List.of("Value '99999999999999999999' at 'count' failed to satisfy constraint: "
-                + "Member must have value less than or equal to 900"),
-                CHECK.violations("Put", json("{" + REQUIRED_OK + ", \"Count\": 99999999999999999999}")));
+    void integerThatDoesNotFitTheTypeIsATypeErrorBeforeAnyBound() {
+        AwsException tooBig = assertThrows(AwsException.class,
+                () -> CHECK.violations("Put", json("{" + REQUIRED_OK + ", \"Count\": 99999999999999999999}")));
+        AwsException over32Bits = assertThrows(AwsException.class,
+                () -> CHECK.violations("Put", json("{" + REQUIRED_OK + ", \"Count\": 4294967297}")));
+
+        assertEquals("Invalid parameter at 'Count' failed to satisfy constraint: 'Member must be a integer'",
+                tooBig.getMessage());
+        assertEquals("Invalid parameter at 'Count' failed to satisfy constraint: 'Member must be a integer'",
+                over32Bits.getMessage());
     }
 
     @Test
@@ -220,10 +282,23 @@ class RequestConstraintCheckViolationsTest {
     }
 
     @Test
-    void mapSizeViolationQuotesTheWholeMapInRequestOrder() {
-        assertEquals(List.of("Value '{b=x, a=y, c=z}' at 'tags' failed to satisfy constraint: "
+    void mapSizeViolationQuotesTheWholeMapInTheOrderOfAHashMapSizedForIt() {
+        assertEquals(List.of("Value '{a=y, b=x, c=z}' at 'tags' failed to satisfy constraint: "
                 + "Member must have length less than or equal to 2"),
                 CHECK.violations("Put", json("{" + REQUIRED_OK + ", \"Tags\": {\"b\": \"x\", \"a\": \"y\", \"c\": \"z\"}}")));
+    }
+
+    @Test
+    void mapIsQuotedInTheOrderOfANewHashMapSizedForItsEntryCount() {
+        assertEquals(List.of("Value '{ok=v2,  lead=v}' at 'tags' failed to satisfy constraint: "
+                + "Map keys must satisfy constraint: [Member must have length less than or equal to 3, "
+                + "Member must have length greater than or equal to 1, "
+                + "Member must satisfy regular expression pattern: [a-z]+]",
+                "Value '{ok=v2,  lead=v}' at 'tags' failed to satisfy constraint: "
+                        + "Map value must satisfy constraint: [Member must have length less than or equal to 4, "
+                        + "Member must have length greater than or equal to 0, "
+                        + "Member must satisfy regular expression pattern: [a-z]*, Member must not be null]"),
+                CHECK.violations("Put", json("{" + REQUIRED_OK + ", \"Tags\": {\" lead\": \"v\", \"ok\": \"v2\"}}")));
     }
 
     @Test
@@ -265,8 +340,8 @@ class RequestConstraintCheckViolationsTest {
                 json("{\"Name\": \"A\", \"Kind\": \"C\", \"Count\": 0, \"Secret\": \"x\"}"));
 
         assertEquals(List.of(
-                "Value 'A' at 'name' failed to satisfy constraint: Member must have length greater than or equal to 2",
                 "Value 'A' at 'name' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-z]+",
+                "Value 'A' at 'name' failed to satisfy constraint: Member must have length greater than or equal to 2",
                 "Value null at 'inner' failed to satisfy constraint: Member must not be null",
                 "Value 'C' at 'kind' failed to satisfy constraint: Member must satisfy enum value set: [B, A]",
                 "Value '0' at 'count' failed to satisfy constraint: Member must have value greater than or equal to 1",

@@ -18,6 +18,7 @@ import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.eventbridgev2.model.EventBusV2;
+import io.floci.aws.services.eventbridgev2.model.EventSourceV2;
 import io.floci.aws.services.eventbridgev2.model.SubscriberV2;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -41,6 +42,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 /**
@@ -70,10 +72,10 @@ public class EventBridgeV2Service implements Resettable {
             "KinesisParameters", "StepFunctionsParameters", "HttpParameters", "UniversalTargetParameters",
             "EventBusV2Parameters");
     private static final String ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
-    private static final int ID_LENGTH = 25;
+    static final int ID_LENGTH = 25;
     private static final int MAX_TAGS = 200;
     private static final int MAX_ENTRIES = 100;
-    private static final int MAX_LIST_RESULTS = 100;
+    static final int MAX_LIST_RESULTS = 100;
     private static final List<String> UPDATABLE_SETTINGS = List.of("Description", "State", "FilterConfiguration",
             "BatchConfiguration", "Transformer", "RetryPolicy", "OnFailureConfiguration", "LogConfiguration");
     private static final String PUT_EVENTS_CONTENT_TYPE = "application/eventbridge+json";
@@ -82,6 +84,7 @@ public class EventBridgeV2Service implements Resettable {
     private final AccountAwareStorageBackend<SubscriberV2> subscribers;
     private final RegionResolver regionResolver;
     private final EventBridgeV2Delivery delivery;
+    private final EventBridgeV2EventSources eventSources;
     private final Clock clock;
     private final boolean enabled;
     private final SecureRandom random = new SecureRandom();
@@ -89,21 +92,24 @@ public class EventBridgeV2Service implements Resettable {
 
     @Inject
     public EventBridgeV2Service(StorageFactory storageFactory, RegionResolver regionResolver,
-                                EventBridgeV2Delivery delivery, EmulatorConfig config) {
+                                EventBridgeV2Delivery delivery, EventBridgeV2EventSources eventSources,
+                                EmulatorConfig config) {
         this(storageFactory.create("eventbridgev2", "eventbridgev2-buses.json",
                         new TypeReference<Map<String, EventBusV2>>() {}),
                 storageFactory.create("eventbridgev2", "eventbridgev2-subscribers.json",
                         new TypeReference<Map<String, SubscriberV2>>() {}),
-                regionResolver, delivery, Clock.systemUTC(), config.services().eventbridgev2().enabled());
+                regionResolver, delivery, eventSources, Clock.systemUTC(), config.services().eventbridgev2().enabled());
     }
 
     EventBridgeV2Service(AccountAwareStorageBackend<EventBusV2> buses,
                          AccountAwareStorageBackend<SubscriberV2> subscribers, RegionResolver regionResolver,
-                         EventBridgeV2Delivery delivery, Clock clock, boolean enabled) {
+                         EventBridgeV2Delivery delivery, EventBridgeV2EventSources eventSources, Clock clock,
+                         boolean enabled) {
         this.buses = buses;
         this.subscribers = subscribers;
         this.regionResolver = regionResolver;
         this.delivery = delivery;
+        this.eventSources = eventSources;
         this.clock = clock;
         this.enabled = enabled;
     }
@@ -128,16 +134,11 @@ public class EventBridgeV2Service implements Resettable {
         String clientToken = optionalClientToken(request);
         String createRequest = withoutClientToken(request);
 
-        if (clientToken != null) {
-            Optional<EventBusV2> retried = buses.scan(key -> key.startsWith(region + "::")).stream()
-                    .filter(bus -> clientToken.equals(bus.getClientToken()))
-                    .findFirst();
-            if (retried.isPresent()) {
-                if (!createRequest.equals(retried.get().getCreateRequest())) {
-                    throw idempotentMismatch(clientToken);
-                }
-                return retried.get();
-            }
+        Optional<EventBusV2> retried = retried(() -> buses.scan(key -> key.startsWith(region + "::")), clientToken,
+                createRequest, EventBusV2::getClientToken, EventBusV2::getCreateRequest,
+                () -> idempotentMismatch(clientToken));
+        if (retried.isPresent()) {
+            return retried.get();
         }
         String key = storageKey(region, name);
         if (buses.get(key).isPresent()) {
@@ -206,10 +207,16 @@ public class EventBridgeV2Service implements Resettable {
         deleteEventBus(requireText(request, "EventBusArn"), region);
     }
 
-    /** Deletes a bus, which must have no subscribers left. */
+    /** Deletes a bus, which must have no subscribers or event sources left. */
     public synchronized void deleteEventBus(String eventBusArn, String region) {
         EventBusV2 bus = requireEventBus(eventBusArn, region);
-        if (!subscribersOf(bus, region).isEmpty()) {
+        boolean hasSubscribers = !subscribersOf(bus, region).isEmpty();
+        if (eventSources.hasSourcesOn(bus.getArn(), region)) {
+            throw new AwsException("ResourceInUseException", "The event bus cannot be deleted because it has "
+                    + (hasSubscribers ? "subscribers and event sources" : "one or more event sources")
+                    + " that are not revoked. Delete or revoke them and retry.", 409);
+        }
+        if (hasSubscribers) {
             throw new AwsException("ResourceInUseException",
                     "Event bus " + bus.getName() + " still has subscribers; delete them first.", 409);
         }
@@ -251,16 +258,11 @@ public class EventBridgeV2Service implements Resettable {
         }
         String clientToken = optionalClientToken(request);
         String createRequest = withoutClientToken(request);
-        if (clientToken != null) {
-            Optional<SubscriberV2> retried = subscribers.scan(key -> key.startsWith(region + "::")).stream()
-                    .filter(subscriber -> clientToken.equals(subscriber.getClientToken()))
-                    .findFirst();
-            if (retried.isPresent()) {
-                if (!createRequest.equals(retried.get().getCreateRequest())) {
-                    throw idempotentMismatch(clientToken);
-                }
-                return retried.get();
-            }
+        Optional<SubscriberV2> retried = retried(() -> subscribers.scan(key -> key.startsWith(region + "::")),
+                clientToken, createRequest, SubscriberV2::getClientToken, SubscriberV2::getCreateRequest,
+                () -> idempotentMismatch(clientToken));
+        if (retried.isPresent()) {
+            return retried.get();
         }
         EventBusV2 bus = requireEventBus(eventBusArn, region);
         String key = subscriberKey(region, bus.getName(), name);
@@ -408,6 +410,36 @@ public class EventBridgeV2Service implements Resettable {
         return Optional.ofNullable(busName(eventBusArn))
                 .flatMap(name -> buses.get(storageKey(region, name)))
                 .filter(bus -> bus.getArn().equals(eventBusArn));
+    }
+
+    // ──────────────────────────── Event sources ────────────────────────────
+
+    public synchronized EventSourceV2 createEventSource(JsonNode request, String region) {
+        return eventSources.create(request, region, name -> buses.get(storageKey(region, name)));
+    }
+
+    public synchronized EventSourceV2 describeEventSource(JsonNode request, String region) {
+        return eventSources.describe(request, region);
+    }
+
+    public synchronized EventSourceV2 updateEventSource(JsonNode request, String region) {
+        return eventSources.update(request, region);
+    }
+
+    public synchronized void deleteEventSource(JsonNode request, String region) {
+        eventSources.delete(request, region);
+    }
+
+    /**
+     * One page of the Region's event sources, or those of the bus {@code EventBusArn} names, whose name starts
+     * with {@code NamePrefix}, in order of the ids in their ARNs.
+     */
+    public synchronized PaginatedResult<EventSourceV2> listEventSources(JsonNode request, String region) {
+        return eventSources.list(request, region, name -> buses.get(storageKey(region, name)));
+    }
+
+    public String webhookUrl(EventSourceV2 source) {
+        return eventSources.webhookUrl(source);
     }
 
     // ──────────────────────────── Events ────────────────────────────
@@ -754,6 +786,10 @@ public class EventBridgeV2Service implements Resettable {
     }
 
     private String newId() {
+        return newId(random);
+    }
+
+    static String newId(SecureRandom random) {
         StringBuilder id = new StringBuilder(ID_LENGTH);
         for (int i = 0; i < ID_LENGTH; i++) {
             id.append(ID_ALPHABET.charAt(random.nextInt(ID_ALPHABET.length())));
@@ -761,7 +797,25 @@ public class EventBridgeV2Service implements Resettable {
         return id.toString();
     }
 
-    private static String storageKey(String region, String name) {
+    /**
+     * The resource an earlier create made with the same {@code ClientToken}, empty when there is none. A request
+     * that differs from the earlier one fails with {@code mismatch}.
+     */
+    static <T> Optional<T> retried(Supplier<List<T>> candidates, String clientToken, String createRequest,
+                                   Function<T, String> tokenOf, Function<T, String> requestOf,
+                                   Supplier<AwsException> mismatch) {
+        if (clientToken == null) {
+            return Optional.empty();
+        }
+        Optional<T> found = candidates.get().stream().filter(candidate -> clientToken.equals(tokenOf.apply(candidate)))
+                .findFirst();
+        if (found.isPresent() && !createRequest.equals(requestOf.apply(found.get()))) {
+            throw mismatch.get();
+        }
+        return found;
+    }
+
+    static String storageKey(String region, String name) {
         return region + "::" + name;
     }
 
@@ -888,7 +942,7 @@ public class EventBridgeV2Service implements Resettable {
      * The request without its {@code ClientToken}, every object's fields in name order, so a retry that sends the same
      * values with its fields or tags in another order compares equal to the request it repeats.
      */
-    private static String withoutClientToken(JsonNode request) {
+    static String withoutClientToken(JsonNode request) {
         JsonNode copy = request.deepCopy();
         if (copy instanceof ObjectNode object) {
             object.remove("ClientToken");
@@ -935,7 +989,7 @@ public class EventBridgeV2Service implements Resettable {
                 "ClientToken " + clientToken + " was used with a different request.", 409);
     }
 
-    private static AwsException invalidInput(String message) {
+    static AwsException invalidInput(String message) {
         return new AwsException("InvalidInputException", message, 400);
     }
 }
