@@ -1,15 +1,19 @@
 package io.floci.aws.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -763,6 +767,59 @@ class S3PresignedPostIntegrationTest {
         assertStored(key, fileContent);
     }
 
+    @ParameterizedTest
+    @Order(98)
+    @CsvSource(delimiter = '|', value = {
+        "https://example.com/done&         | https://example.com/done&?",
+        "https://example.com/done?next=?   | https://example.com/done?next=?&",
+        "https://example.com/done?         | https://example.com/done?",
+        "https://example.com/done?from=a&  | https://example.com/done?from=a&"
+    })
+    void presignedPostRedirectSeparatorDependsOnTheQuery(String redirect, String expectedPrefix) {
+        String key = "uploads/redirect-separator.txt";
+        String fileContent = "redirect separator " + redirect;
+
+        given()
+            .redirects().follow(false)
+            .multiPart("key", key)
+            .multiPart("success_action_redirect", redirect)
+            .multiPart("file", "redirect-separator.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(303)
+            .header("Location", equalTo(expectedPrefix + "bucket=" + BUCKET
+                    + "&key=uploads%2Fredirect-separator.txt&etag=%22" + md5Hex(fileContent) + "%22"));
+
+        assertStored(key, fileContent);
+    }
+
+    @ParameterizedTest
+    @Order(98)
+    @CsvSource(delimiter = '|', value = {
+        "http://my_app:3000/done          | http://my_app:3000/done?",
+        "http://localhost:3000/cb?x=a b   | http://localhost:3000/cb?x=a%20b&",
+        "http://localhost:3000/cb?q={x}   | http://localhost:3000/cb?q=%7Bx%7D&"
+    })
+    void presignedPostRedirectsToUrlsABrowserWouldFollow(String redirect, String expectedPrefix) {
+        String key = "uploads/redirect-lenient.txt";
+        String fileContent = "redirect lenient " + redirect;
+
+        given()
+            .redirects().follow(false)
+            .multiPart("key", key)
+            .multiPart("success_action_redirect", redirect)
+            .multiPart("file", "redirect-lenient.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(303)
+            .header("Location", equalTo(expectedPrefix + "bucket=" + BUCKET
+                    + "&key=uploads%2Fredirect-lenient.txt&etag=%22" + md5Hex(fileContent) + "%22"));
+
+        assertStored(key, fileContent);
+    }
+
     @Test
     @Order(98)
     void presignedPostAcceptsLegacyRedirectField() {
@@ -829,11 +886,11 @@ class S3PresignedPostIntegrationTest {
     @Test
     @Order(98)
     void presignedPostReturnsPostResponseForStatus201() {
-        String key = "uploads/status-201.txt";
+        String key = "uploads/status 201/a#b?c.txt";
         String fileContent = "status 201";
         String etag = quotedMd5(fileContent);
 
-        String location = given()
+        Response response = given()
             .multiPart("key", key)
             .multiPart("success_action_status", "201")
             .multiPart("file", "status-201.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
@@ -843,15 +900,40 @@ class S3PresignedPostIntegrationTest {
             .statusCode(201)
             .contentType("application/xml")
             .header("ETag", equalTo(etag))
+            .header("Location", matchesRegex(
+                    "https?://[^/]+/" + BUCKET + "/uploads/status%20201/a%23b%3Fc\\.txt"))
             .body(hasXPath("/PostResponse/Bucket", equalTo(BUCKET)))
             .body(hasXPath("/PostResponse/Key", equalTo(key)))
             .body(hasXPath("/PostResponse/ETag", equalTo(etag)))
-            .body(hasXPath("/PostResponse/Location", allOf(
-                    matchesRegex("https?://.+"), endsWith("/" + BUCKET + "/" + key))))
+            .extract().response();
+
+        String location = response.header("Location");
+        assertThat(response.xmlPath().getString("PostResponse.Location"), equalTo(location));
+        assertReadableAt(URI.create(location), null, fileContent);
+    }
+
+    @Test
+    @Order(98)
+    void presignedPostReturnsVirtualHostedLocationForStatus201() {
+        String key = "uploads/virtual hosted.txt";
+        String fileContent = "virtual hosted 201";
+        String host = BUCKET + ".localhost";
+
+        String location = given()
+            .header("Host", host)
+            .multiPart("key", key)
+            .multiPart("success_action_status", "201")
+            .multiPart("file", "virtual-hosted.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(201)
+            .header("Location", matchesRegex("https?://" + host.replace(".", "\\.")
+                    + "(:\\d+)?/uploads/virtual%20hosted\\.txt"))
+            .body(hasXPath("/PostResponse/Bucket", equalTo(BUCKET)))
             .extract().header("Location");
 
-        assertThat(location, matchesRegex("https?://.+/" + BUCKET + "/" + key));
-        assertStored(key, fileContent);
+        assertReadableAt(URI.create(location), host, fileContent);
     }
 
     @Test
@@ -943,10 +1025,13 @@ class S3PresignedPostIntegrationTest {
         given().delete("/" + BUCKET + "/uploads/with-metadata.txt");
         given().delete("/" + BUCKET + "/uploads/redirect dir/file one.txt");
         given().delete("/" + BUCKET + "/uploads/redirect-query.txt");
+        given().delete("/" + BUCKET + "/uploads/redirect-separator.txt");
         given().delete("/" + BUCKET + "/uploads/legacy-redirect.txt");
         given().delete("/" + BUCKET + "/uploads/both-redirects.txt");
         given().delete("/" + BUCKET + "/uploads/relative-redirect.txt");
-        given().delete("/" + BUCKET + "/uploads/status-201.txt");
+        given().urlEncodingEnabled(false).delete("/" + BUCKET + "/uploads/status%20201/a%23b%3Fc.txt");
+        given().delete("/" + BUCKET + "/uploads/virtual hosted.txt");
+        given().delete("/" + BUCKET + "/uploads/redirect-lenient.txt");
         given().delete("/" + BUCKET + "/uploads/status-200.txt");
         given().delete("/" + BUCKET + "/uploads/status-default.txt");
         given().delete("/" + BUCKET + "/uploads/policy-redirect-ok.txt");
@@ -1010,6 +1095,19 @@ class S3PresignedPostIntegrationTest {
         given()
         .when()
             .get("/" + BUCKET + "/" + key)
+        .then()
+            .statusCode(200)
+            .body(equalTo(fileContent));
+    }
+
+    private void assertReadableAt(URI location, String host, String fileContent) {
+        RequestSpecification request = given().urlEncodingEnabled(false);
+        if (host != null) {
+            request.header("Host", host);
+        }
+        request
+        .when()
+            .get(location.getRawPath())
         .then()
             .statusCode(200)
             .body(equalTo(fileContent));

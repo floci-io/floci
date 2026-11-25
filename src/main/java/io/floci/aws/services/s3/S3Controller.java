@@ -1638,7 +1638,8 @@ public class S3Controller {
                 return handleDeleteObjects(bucket, body, httpHeaders, uriInfo);
             }
             if (contentType != null && contentType.startsWith("multipart/form-data")) {
-                return handlePresignedPost(bucket, contentType, body, uriInfo);
+                boolean virtualHosted = bucket.equalsIgnoreCase(resolveActualBucket(httpHeaders, uriInfo));
+                return handlePresignedPost(bucket, contentType, body, postObjectBaseUrl(uriInfo, bucket, virtualHosted));
             }
             if (hasQueryParam(uriInfo, "uploads") || hasQueryParam(uriInfo, "uploadId")) {
                 String actualBucket = resolveActualBucket(httpHeaders, uriInfo);
@@ -4121,9 +4122,9 @@ public class S3Controller {
         }
     }
 
-    private Response handlePresignedPost(String bucket, String contentType, byte[] body, UriInfo uriInfo) {
+    private Response handlePresignedPost(String bucket, String contentType, byte[] body, String objectBaseUrl) {
         try {
-            return doHandlePresignedPost(bucket, contentType, body, uriInfo);
+            return doHandlePresignedPost(bucket, contentType, body, objectBaseUrl);
         } catch (AwsException e) {
             // Presigned POST errors must be returned as XML (matching LocalStack/AWS),
             // not JSON which is what the global AwsExceptionMapper would produce.
@@ -4131,7 +4132,7 @@ public class S3Controller {
         }
     }
 
-    private Response doHandlePresignedPost(String bucket, String contentType, byte[] body, UriInfo uriInfo) {
+    private Response doHandlePresignedPost(String bucket, String contentType, byte[] body, String objectBaseUrl) {
         String boundary = MultipartFormParser.extractBoundary(contentType).orElseThrow(() ->
                 new AwsException("InvalidArgument",
                         "Could not determine multipart boundary from Content-Type.", 400));
@@ -4227,7 +4228,7 @@ public class S3Controller {
                 .withSseCustomerKeyMd5(lcFields.get("x-amz-server-side-encryption-customer-key-md5")));
         LOG.infov("Presigned POST upload: {0}/{1} ({2} bytes)", bucket, key, fileData.length);
 
-        Response.ResponseBuilder response = postObjectResponse(bucket, key, obj, lcFields, uriInfo)
+        Response.ResponseBuilder response = postObjectResponse(bucket, key, obj, lcFields, objectBaseUrl)
                 .header("ETag", obj.getETag());
         if (obj.getServerSideEncryption() != null) {
             response.header("x-amz-server-side-encryption", obj.getServerSideEncryption());
@@ -4250,7 +4251,7 @@ public class S3Controller {
      * {@code 200}, and anything else is {@code 204}.
      */
     private static Response.ResponseBuilder postObjectResponse(String bucket, String key, S3Object obj,
-                                                               Map<String, String> lcFields, UriInfo uriInfo) {
+                                                               Map<String, String> lcFields, String objectBaseUrl) {
         String redirect = lcFields.get("success_action_redirect");
         if (redirect == null || redirect.isEmpty()) {
             redirect = lcFields.get("redirect");
@@ -4263,11 +4264,7 @@ public class S3Controller {
 
         String status = lcFields.get("success_action_status");
         if ("201".equals(status)) {
-            String baseUrl = uriInfo.getBaseUri().toString();
-            if (baseUrl.endsWith("/")) {
-                baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
-            }
-            String location = baseUrl + "/" + bucket + "/" + key;
+            String location = objectBaseUrl + "/" + encodeKeyPath(key);
             String xml = new XmlBuilder()
                     .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                     .start("PostResponse")
@@ -4289,14 +4286,39 @@ public class S3Controller {
                 .header("Location", bucket + "/" + key);
     }
 
-    /** A redirect field S3 honors: an absolute URL with a host. Anything else S3 ignores, so this returns null. */
+    /**
+     * The URL an object is reachable at, without the key: the request's own host for a virtual-hosted
+     * request, whose host already names the bucket, and the bucket as the first path segment otherwise.
+     */
+    private static String postObjectBaseUrl(UriInfo uriInfo, String bucket, boolean virtualHosted) {
+        String baseUrl = uriInfo.getBaseUri().toString();
+        if (baseUrl.endsWith("/")) {
+            baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
+        }
+        return virtualHosted ? baseUrl : baseUrl + "/" + SigV4Canonicalization.uriEncode(bucket);
+    }
+
+    private static String encodeKeyPath(String key) {
+        StringJoiner path = new StringJoiner("/");
+        for (String segment : key.split("/", -1)) {
+            path.add(SigV4Canonicalization.uriEncode(segment));
+        }
+        return path.toString();
+    }
+
+    /**
+     * A redirect field S3 honors: an absolute URL with an authority. Characters a browser escapes before
+     * following a URL (a space, a brace) are escaped first, and the authority need not be a DNS name, so a
+     * Docker Compose service such as {@code my_app:3000} qualifies. Anything else S3 ignores, so this
+     * returns null.
+     */
     private static URI absoluteRedirectUri(String redirect) {
         if (redirect == null || redirect.isBlank()) {
             return null;
         }
         try {
-            URI uri = new URI(redirect.trim());
-            return uri.isAbsolute() && uri.getHost() != null ? uri : null;
+            URI uri = new URI(escapeIllegalUriCharacters(redirect.trim()));
+            return uri.isAbsolute() && uri.getRawAuthority() != null ? uri : null;
         } catch (URISyntaxException e) {
             LOG.debugv("Ignoring presigned POST redirect that is not a valid URL: {0}", redirect);
             return null;
@@ -4312,15 +4334,35 @@ public class S3Controller {
             target = target.substring(0, hash);
         }
 
-        String separator = redirectUri.getRawQuery() == null ? "?" : "&";
-        if (target.endsWith("?") || target.endsWith("&")) {
+        String query = redirectUri.getRawQuery();
+        String separator;
+        if (query == null) {
+            separator = "?";
+        } else if (query.isEmpty() || query.endsWith("&")) {
             separator = "";
+        } else {
+            separator = "&";
         }
         return target + separator
                 + "bucket=" + formEncode(bucket)
                 + "&key=" + formEncode(key)
                 + "&etag=" + formEncode(etag)
                 + fragment;
+    }
+
+    private static String escapeIllegalUriCharacters(String value) {
+        StringBuilder escaped = new StringBuilder(value.length());
+        for (byte raw : value.getBytes(StandardCharsets.UTF_8)) {
+            int b = raw & 0xFF;
+            if (b <= 0x20 || b >= 0x7F || "\"<>\\^`{|}".indexOf(b) >= 0) {
+                escaped.append('%')
+                        .append(Character.toUpperCase(Character.forDigit((b >> 4) & 0xF, 16)))
+                        .append(Character.toUpperCase(Character.forDigit(b & 0xF, 16)));
+            } else {
+                escaped.append((char) b);
+            }
+        }
+        return escaped.toString();
     }
 
     private static String formEncode(String value) {
