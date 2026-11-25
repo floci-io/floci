@@ -444,13 +444,19 @@ With IAM enforcement on, `CreateCluster` checks `iam:PassRole` on the cluster ro
 Floci acts on the configuration as EKS does:
 
 - **Compute.** Turning it on gives the node role its `EC2` access entry with `AmazonEKSAutoNodePolicy` (see
-  [Access-entry management](#access-entry-management)).
+  [Access-entry management](#access-entry-management)). While it is on, the cluster has the `NodePool`
+  (`karpenter.sh/v1`) and `NodeClass` (`eks.amazonaws.com/v1`) kinds, the `default` NodeClass (the node role's name,
+  the cluster's subnets and security group) and the built-in `general-purpose` and `system` NodePools
+  `computeConfig.nodePools` names, as Auto Mode makes them: on-demand c, m and r instances of generation 5 and later,
+  `amd64` (`system` also `arm64`, with a `CriticalAddonsOnly` `NoSchedule` taint), expiring after 336 hours. A pool
+  `UpdateClusterConfig` drops is removed. The cluster's node carries Auto Mode's `eks.amazonaws.com/compute-type: auto`
+  label, so workloads that select Auto Mode nodes run on it.
 - **Block storage.** While it is on, claims of a StorageClass naming `ebs.csi.eks.amazonaws.com` are provisioned
   (see [Storage classes](#storage-classes)).
 - **Load balancing.** While it is on, Services get Network Load Balancers (see
   [Auto Mode load balancing for Services](#auto-mode-load-balancing-for-services)).
 
-It doesn't install the built-in node pools or launch nodes for them: workloads run on the cluster's k3s node.
+Floci launches no nodes for the pools: workloads run on the cluster's k3s node.
 [#8914](https://github.com/floci-io/floci/issues/8914) plans the rest.
 
 ### Auto Mode load balancing for Services

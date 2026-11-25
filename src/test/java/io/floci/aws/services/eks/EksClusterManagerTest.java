@@ -60,6 +60,7 @@ import io.floci.aws.services.eks.model.CertificateAuthority;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
 import io.floci.aws.services.eks.model.ClusterOidcKey;
+import io.floci.aws.services.eks.model.ComputeConfig;
 import io.floci.aws.services.eks.model.ElasticLoadBalancing;
 import io.floci.aws.services.eks.model.KubernetesNetworkConfig;
 import io.floci.aws.services.eks.model.LogSetup;
@@ -613,6 +614,7 @@ class EksClusterManagerTest {
         KubernetesNetworkConfig network = new KubernetesNetworkConfig();
         network.setElasticLoadBalancing(new ElasticLoadBalancing(loadBalancing));
         cluster.setKubernetesNetworkConfig(network);
+        cluster.setComputeConfig(new ComputeConfig(loadBalancing, List.of(), null));
 
         manager.startCluster(cluster);
 
@@ -620,6 +622,8 @@ class EksClusterManagerTest {
         ArgumentCaptor<List<String>> cmd = ArgumentCaptor.forClass(List.class);
         verify(builder).withCmd(cmd.capture());
         assertEquals(loadBalancing, cmd.getValue().contains("--disable=servicelb"));
+        // Auto Mode's capabilities are on together, and its nodes carry the compute-type label.
+        assertEquals(loadBalancing, cmd.getValue().contains("--node-label=" + EksClusterManager.AUTO_COMPUTE_LABEL));
         @SuppressWarnings("unchecked")
         ArgumentCaptor<Map<String, String>> labels = ArgumentCaptor.forClass(Map.class);
         verify(builder).withLabels(labels.capture());
@@ -4461,6 +4465,63 @@ class EksClusterManagerTest {
 
             verify(dockerClient).copyArchiveToContainerCmd("container-1");
             assertEquals(manager.blockStorageManifest(), Files.readString(blockStorageCopy()));
+        }
+
+        @Test
+        void aClusterWithComputeGetsTheKindsTheDefaultNodeClassAndTheNamedPoolsAndLosesThemOnceItIsOff()
+                throws Exception {
+            Cluster cluster = cluster();
+            cluster.setComputeConfig(new ComputeConfig(true, List.of("system"), "arn:aws:iam::000000000000:role/eks/auto-node"));
+            ResourcesVpcConfig vpc = new ResourcesVpcConfig();
+            vpc.setSubnetIds(List.of("subnet-a", "subnet-b"));
+            vpc.setClusterSecurityGroupId("sg-cluster");
+            cluster.setResourcesVpcConfig(vpc);
+            Path localCopy = tempDir.resolve("auto-mode/000000000000/us-east-1/demo")
+                    .resolve(EksClusterManager.COMPUTE_MANIFEST_FILE);
+
+            manager.applyCompute("container-1", cluster);
+
+            String manifest = Files.readString(localCopy);
+            assertTrue(manifest.contains("name: nodepools.karpenter.sh"));
+            assertTrue(manifest.contains("name: nodeclasses.eks.amazonaws.com"));
+            assertTrue(manifest.contains("""
+                      role: auto-node
+                      subnetSelectorTerms:
+                      - id: subnet-a
+                      - id: subnet-b
+                      securityGroupSelectorTerms:
+                      - id: sg-cluster
+                    """));
+            assertTrue(manifest.contains("  name: system\n"));
+            assertFalse(manifest.contains("name: general-purpose"));
+
+            cluster.setComputeConfig(new ComputeConfig(false, List.of(), null));
+            manager.applyCompute("container-1", cluster);
+
+            assertEquals(EksClusterManager.COMPUTE_MANIFEST_REMOVED, Files.readString(localCopy));
+        }
+
+        /** With no subnets or security group known, the terms are empty lists on their keys' lines, which k3s parses. */
+        @Test
+        void aNodeClassWithoutSubnetsOrASecurityGroupHasEmptyTerms() {
+            Cluster cluster = cluster();
+            cluster.setComputeConfig(new ComputeConfig(true, List.of("general-purpose"), "arn:aws:iam::000000000000:role/node"));
+
+            String manifest = manager.computeManifest(cluster);
+
+            assertTrue(manifest.contains("  subnetSelectorTerms: []\n  securityGroupSelectorTerms: []\n"));
+        }
+
+        @Test
+        void computeWithoutANodeRoleGetsTheKindsAlone() {
+            Cluster cluster = cluster();
+            cluster.setComputeConfig(new ComputeConfig(true, List.of(), null));
+
+            String manifest = manager.computeManifest(cluster);
+
+            assertTrue(manifest.contains("name: nodeclasses.eks.amazonaws.com"));
+            assertFalse(manifest.contains("kind: NodeClass\nmetadata:\n  name: default"));
+            assertFalse(manifest.contains("kind: NodePool\nmetadata"));
         }
 
         private Path blockStorageCopy() {
