@@ -11,6 +11,12 @@ its botocore shape each comes from, are generated from the Service Reference and
 every interface is checked against its own keys and tags before any tag changes; another
 interface's VPC or tags cannot authorize it. Authorization reads do not create default resources.
 
+With IAM enforcement enabled, `CreateTags` and `DeleteTags` check every VPC endpoint ID
+against its endpoint ARN before changing any batch member. botocore gives no `vpce-` example,
+so the generated request resource table takes the prefix from the response examples of the
+EC2 API reference's `CreateVpcEndpoint` page, which `tools/aws/fetch_ec2_id_examples.py`
+copies, matched to botocore's output shapes.
+
 ## Instance IAM authorization
 
 With IAM enforcement enabled, modeled instance-list operations, including `StartInstances`, `StopInstances`, `TerminateInstances`, and `RebootInstances`, authorize each requested instance ARN before changing any instance state.

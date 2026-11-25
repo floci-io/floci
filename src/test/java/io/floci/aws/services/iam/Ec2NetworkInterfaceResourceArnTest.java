@@ -78,8 +78,8 @@ class Ec2NetworkInterfaceResourceArnTest {
     }
 
     @Test
-    void tagRequestsNameKnownInterfacesAndLeaveUncoveredEndpointIdsOnTheWildcard() {
-        assertResources(List.of(PREFIX + "network-interface/eni-11111111", "*"),
+    void tagRequestsNameKnownInterfacesAndEndpoints() {
+        assertResources(List.of(PREFIX + "network-interface/eni-11111111", PREFIX + "vpc-endpoint/vpce-11111111"),
                 resources("CreateTags", "ResourceId.1=eni-11111111&ResourceId.2=vpce-11111111"
                         + "&Tag.1.Key=Name&Tag.1.Value=web"));
     }

@@ -1181,6 +1181,56 @@ class IamRequestResourceEnforcementIntegrationTest {
                         + "user@host\"}").post("/").then();
     }
 
+    /**
+     * CreateTags and DeleteTags check each VPC endpoint their {@code ResourceId} list names on the endpoint's ARN, its
+     * {@code vpce-} prefix taken from the EC2 API reference, so a grant on one endpoint does not reach another in the
+     * batch, and a deny on it holds against a grant on {@code *} before any member of the batch is tagged.
+     */
+    @Test
+    void aVpcEndpointIsTaggedOnItsArn() {
+        String vpc = admin("ec2").formParam("Action", "CreateVpc").formParam("Version", "2016-11-15")
+                .formParam("CidrBlock", "10.71.0.0/16").post("/").then().statusCode(200).extract()
+                .path("CreateVpcResponse.vpc.vpcId");
+        cleanup.register(() -> admin("ec2").formParam("Action", "DeleteVpc").formParam("Version", "2016-11-15")
+                .formParam("VpcId", vpc).post("/"));
+        String endpoint = vpcEndpoint(vpc);
+        String other = vpcEndpoint(vpc);
+        String arn = "arn:aws:ec2:" + REGION + ":" + ACCOUNT + ":vpc-endpoint/" + endpoint;
+
+        User user = user("res-vpce");
+        user.policy(allowOn("ec2:CreateTags", arn) + "," + allowOn("ec2:DeleteTags", arn));
+        ec2Tags(user, "CreateTags", endpoint).statusCode(200);
+        ec2Tags(user, "DeleteTags", endpoint).statusCode(200);
+        refused(ec2Tags(user, "CreateTags", endpoint, other), "ec2:CreateTags");
+        refused(ec2Tags(user, "DeleteTags", other), "ec2:DeleteTags");
+
+        user.policy(allowOn("ec2:CreateTags", "*") + "," + denyOn("ec2:CreateTags", arn));
+        refused(ec2Tags(user, "CreateTags", other, endpoint), "ec2:CreateTags");
+        admin("ec2").formParam("Action", "DescribeTags").formParam("Version", "2016-11-15")
+                .formParam("Filter.1.Name", "resource-id").formParam("Filter.1.Value.1", other).post("/").then()
+                .statusCode(200).body(not(containsString("<key>team</key>")));
+        ec2Tags(user, "CreateTags", other).statusCode(200);
+    }
+
+    private String vpcEndpoint(String vpc) {
+        String id = admin("ec2").formParam("Action", "CreateVpcEndpoint").formParam("Version", "2016-11-15")
+                .formParam("VpcId", vpc).formParam("ServiceName", "com.amazonaws." + REGION + ".s3")
+                .formParam("VpcEndpointType", "Gateway").post("/").then().statusCode(200).extract()
+                .path("CreateVpcEndpointResponse.vpcEndpoint.vpcEndpointId");
+        cleanup.register(() -> admin("ec2").formParam("Action", "DeleteVpcEndpoints").formParam("Version", "2016-11-15")
+                .formParam("VpcEndpointId.1", id).post("/"));
+        return id;
+    }
+
+    private static ValidatableResponse ec2Tags(User user, String operation, String... ids) {
+        RequestSpecification request = user.query("ec2", operation).formParam("Version", "2016-11-15")
+                .formParam("Tag.1.Key", "team").formParam("Tag.1.Value", "data");
+        for (int i = 0; i < ids.length; i++) {
+            request.formParam("ResourceId." + (i + 1), ids[i]);
+        }
+        return request.post("/").then();
+    }
+
     @Test
     void aCloudMapNamespaceAndServiceAreCheckedOnTheArnsTheirIdsGive() {
         String namespaceId = cloudMapNamespace("res-ns-" + suffix());

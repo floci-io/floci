@@ -1,0 +1,108 @@
+{
+  "_source": {
+    "fetcher": "tools/aws/fetch_ec2_id_examples.py",
+    "retrieved": "2026-11-25",
+    "pages": [
+      "https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CreateVpcEndpoint.html"
+    ]
+  },
+  "namespace": "ec2",
+  "operations": {
+    "CreateVpcEndpoint": {
+      "page": "https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CreateVpcEndpoint.html",
+      "examples": [
+        {
+          "path": [
+            "vpcEndpoint",
+            "vpcId"
+          ],
+          "value": "vpc-1a2b3c4d"
+        },
+        {
+          "path": [
+            "vpcEndpoint",
+            "routeTableIdSet",
+            "item"
+          ],
+          "value": "rtb-11aa22bb"
+        },
+        {
+          "path": [
+            "vpcEndpoint",
+            "vpcEndpointId"
+          ],
+          "value": "vpce-abc12345"
+        },
+        {
+          "path": [
+            "vpcEndpoint",
+            "groupSet",
+            "item",
+            "groupId"
+          ],
+          "value": "sg-11aa22bb"
+        },
+        {
+          "path": [
+            "vpcEndpoint",
+            "vpcEndpointId"
+          ],
+          "value": "vpce-0324151a02f327ff5"
+        },
+        {
+          "path": [
+            "vpcEndpoint",
+            "subnetIdSet",
+            "item"
+          ],
+          "value": "subnet-1a2b3c4d"
+        },
+        {
+          "path": [
+            "vpcEndpoint",
+            "networkInterfaceIdSet",
+            "item"
+          ],
+          "value": "eni-cd1a3319"
+        },
+        {
+          "path": [
+            "vpcEndpoint",
+            "vpcId"
+          ],
+          "value": "vpc-1a2b3c4d"
+        },
+        {
+          "path": [
+            "vpcEndpoint",
+            "vpcEndpointId"
+          ],
+          "value": "vpce-bbbbbb2222222333"
+        },
+        {
+          "path": [
+            "vpcEndpoint",
+            "subnetIdSet",
+            "item"
+          ],
+          "value": "subnet-aaaa1111bbbb22233"
+        },
+        {
+          "path": [
+            "vpcEndpoint",
+            "networkInterfaceIdSet",
+            "item"
+          ],
+          "value": "eni-11111111222222aaa"
+        },
+        {
+          "path": [
+            "vpcEndpoint",
+            "vpcId"
+          ],
+          "value": "vpc-11122223333344445"
+        }
+      ]
+    }
+  }
+}
