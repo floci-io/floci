@@ -84,7 +84,6 @@ public class Ec2ContainerManager {
 
     private static final Logger LOG = Logger.getLogger(Ec2ContainerManager.class);
     // Guest-created /tmp mounts hide files copied through Docker's archive API.
-    private static final String USER_DATA_SCRIPT_PATH = UserDataPipeline.USER_DATA_SCRIPT_PATH;
     private static final List<String> ALLOWED_SSHD_PATHS = List.of("/usr/sbin/sshd", "/usr/local/sbin/sshd", "/sbin/sshd");
     // Inside containers, systemd's generators read PID 1's arguments instead of /proc/cmdline,
     // so these arguments apply runtime unit masks when container=docker is set.
@@ -2028,7 +2027,8 @@ public class Ec2ContainerManager {
 
         UserDataPipeline.executeUserData(
                 dockerClient, lifecycleManager.getStreamingDockerClient(), containerId, "EC2 instance " + instanceId,
-                userData, userDataExecutionTimeout, lineConsumer, activeUserDataCallbacks);
+                userData, userDataExecutionTimeout, lineConsumer, activeUserDataCallbacks,
+                UserDataPipeline.CLOUD_INIT_OUTPUT_LOG_PATH);
     }
 
     private void closeActiveUserDataCallbacks() {
@@ -2051,8 +2051,8 @@ public class Ec2ContainerManager {
         return UserDataPipeline.decodeUserDataPayload(userData);
     }
 
-    static String[] userDataExecutionCommand() {
-        return new String[]{USER_DATA_SCRIPT_PATH};
+    static String[] userDataExecutionCommand(String guestOutputLogPath) {
+        return UserDataPipeline.executionCommand(guestOutputLogPath);
     }
 
     /**
