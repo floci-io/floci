@@ -531,6 +531,7 @@ deferred_handlers:
   - { path: services/sns/SnsQueryHandler.java }  # multi-table doc
   - { path: services/ssm/Ec2MessagesJsonHandler.java }  # multi-table doc
   - { path: services/ssm/SsmJsonHandler.java }  # multi-table doc
+  - { path: services/ssm/SsmSessionJsonHandler.java }  # dispatch already counted from SsmJsonHandler
   - { path: services/textract/TextractJsonHandler.java }  # no standalone action table yet
   - { path: services/transcribe/TranscribeJsonHandler.java }  # no standalone action table yet
   - { path: services/transfer/TransferHandler.java }  # multi-table doc

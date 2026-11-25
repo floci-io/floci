@@ -1,6 +1,7 @@
 package io.floci.aws.services.ssmmessages;
 
 import io.floci.aws.core.common.Digests;
+import io.vertx.core.buffer.Buffer;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -116,6 +117,19 @@ public record AgentMessage(
 
     public String payloadAsString() {
         return payload == null ? "" : new String(payload, StandardCharsets.UTF_8);
+    }
+
+    /** Validates the frame bounds before relaying the original bytes to the other peer. */
+    static String gatewayMessageType(Buffer frame) {
+        if (frame.length() < PAYLOAD_OFFSET || frame.getInt(0) != HEADER_LENGTH
+                || frame.getInt(HEADER_LENGTH) != frame.length() - PAYLOAD_OFFSET) {
+            throw new IllegalArgumentException("Invalid agent message length");
+        }
+        String type = frame.getString(Integer.BYTES, Integer.BYTES + MESSAGE_TYPE_LENGTH).trim();
+        if (type.isEmpty()) {
+            throw new IllegalArgumentException("Missing agent message type");
+        }
+        return type;
     }
 
     private byte[] paddedMessageType() {

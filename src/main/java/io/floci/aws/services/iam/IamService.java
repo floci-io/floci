@@ -5658,6 +5658,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 session.getOriginAccountId(), session.getRoleArn(), session.getEc2RoleId(), session.getEc2InstanceId()));
     }
 
+    public record Ec2InstanceIdentity(String accountId, String instanceId) {}
+
+    /** Returns the instance bound to a live IMDS credential with the matching session token. */
+    public Optional<Ec2InstanceIdentity> findEc2InstanceIdentity(String accessKeyId, String sessionToken) {
+        if (sessionToken == null || sessionToken.isBlank()) {
+            return Optional.empty();
+        }
+        return currentSession(accessKeyId)
+                .filter(session -> session.getEc2InstanceId() != null && !session.getEc2InstanceId().isBlank())
+                .filter(session -> hasMatchingSessionToken(session, sessionToken))
+                .map(session -> new Ec2InstanceIdentity(session.getOriginAccountId(), session.getEc2InstanceId()));
+    }
+
     private Optional<SessionCredential> currentSession(String accessKeyId) {
         return findSessionAnyAccount(accessKeyId).filter(session -> !isExpired(session, clock.instant()));
     }
