@@ -46,6 +46,8 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
 import java.nio.charset.StandardCharsets;
+import java.security.Signature;
+import java.security.interfaces.RSAPublicKey;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -53,6 +55,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -413,6 +416,88 @@ class CognitoServiceTest {
         assertEquals(List.of(), restored.getAutoVerifiedAttributes(), "a setting the update added is cleared");
         assertEquals("OFF", restored.getMfaConfiguration());
         assertEquals(signingKeyId, restored.getSigningKeyId(), "the pool keeps the keys it signs with");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void signingKeyPairIsMadeOnFirstUseAndTheJwksVerifiesEveryLaterToken() throws Exception {
+        UserPool pool = createPoolAndUser();
+        long lastModified = pool.getLastModifiedDate();
+        assertNull(poolStore.get(pool.getId()).orElseThrow().getSigningPrivateKey(),
+                "CreateUserPool leaves the key pair to the first token or JWKS read");
+
+        RSAPublicKey jwksKey = service.getSigningPublicKey(service.describeUserPool(pool.getId()));
+        UserPoolClient client = openClient(service, pool.getId(), "lazy-key-client", false);
+        Map<String, Object> auth = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        String token = (String) ((Map<String, Object>) auth.get("AuthenticationResult")).get("IdToken");
+
+        UserPool described = service.describeUserPool(pool.getId());
+        assertEquals(jwksKey, service.getSigningPublicKey(described), "the JWKS is stable across fetches");
+        assertTrue(signatureVerifies(token, jwksKey), "the JWKS fetched before sign-in verifies the token");
+        assertEquals(lastModified, described.getLastModifiedDate(), "making the key pair is not a pool update");
+    }
+
+    @Test
+    void signingKeyPairSurvivesAPersistenceRoundTripAndAPersistedPoolWithoutOneGetsOne() throws Exception {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "persisted"), "us-east-1");
+        RSAPublicKey original = service.getSigningPublicKey(service.describeUserPool(pool.getId()));
+
+        UserPool reloaded = MAPPER.readValue(MAPPER.writeValueAsBytes(poolStore.get(pool.getId()).orElseThrow()),
+                UserPool.class);
+        poolStore.put(reloaded.getId(), reloaded);
+        assertEquals(original, service.getSigningPublicKey(service.describeUserPool(pool.getId())),
+                "a persisted pool keeps the key pair it already signs with");
+
+        reloaded.setSigningPublicKey(null);
+        reloaded.setSigningPrivateKey(null);
+        UserPool legacy = MAPPER.readValue(MAPPER.writeValueAsBytes(reloaded), UserPool.class);
+        poolStore.put(legacy.getId(), legacy);
+        RSAPublicKey generated = service.getSigningPublicKey(service.describeUserPool(pool.getId()));
+        assertNotNull(poolStore.get(pool.getId()).orElseThrow().getSigningPrivateKey(),
+                "a pool persisted without a key pair gets one stored on first use");
+        assertEquals(generated, service.getSigningPublicKey(service.describeUserPool(pool.getId())));
+    }
+
+    @Test
+    void concurrentFirstUsesOfAPoolAgreeOnOneSigningKeyPair() throws Exception {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "racing"), "us-east-1");
+        int threads = 8;
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            List<Future<RSAPublicKey>> keys = new ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                int index = i;
+                keys.add(executor.submit(() -> {
+                    start.await();
+                    if (index % 2 == 0) {
+                        service.updateUserPool(Map.of("UserPoolId", pool.getId(), "PoolName", "racing-" + index),
+                                "us-east-1");
+                    }
+                    UserPool copy = MAPPER.convertValue(service.describeUserPool(pool.getId()), UserPool.class);
+                    return service.getSigningPublicKey(copy);
+                }));
+            }
+            start.countDown();
+            Set<RSAPublicKey> distinct = new HashSet<>();
+            for (Future<RSAPublicKey> key : keys) {
+                distinct.add(key.get(30, TimeUnit.SECONDS));
+            }
+            assertEquals(1, distinct.size(), "every caller signs with the key pair the JWKS serves");
+            assertEquals(distinct.iterator().next(),
+                    service.getSigningPublicKey(service.describeUserPool(pool.getId())));
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private static boolean signatureVerifies(String jwt, RSAPublicKey key) throws Exception {
+        int lastDot = jwt.lastIndexOf('.');
+        Signature verifier = Signature.getInstance("SHA256withRSA");
+        verifier.initVerify(key);
+        verifier.update(jwt.substring(0, lastDot).getBytes(StandardCharsets.UTF_8));
+        return verifier.verify(Base64.getUrlDecoder().decode(jwt.substring(lastDot + 1)));
     }
 
     @Test
