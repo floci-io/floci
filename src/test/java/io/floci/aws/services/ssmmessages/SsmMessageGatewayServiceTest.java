@@ -428,9 +428,10 @@ class SsmMessageGatewayServiceTest {
         Map<String, String> headers = signedHeaders("POST", path, signer, encoded.getBytes(StandardCharsets.UTF_8));
         return result(client.request(HttpMethod.POST, port, "localhost", path).compose(req -> {
             headers.forEach(req::putHeader);
-            return req.send(encoded);
-        }).compose(response -> response.body()
-                        .map(payload -> new ChannelResponse(response.statusCode(), payload.toString()))));
+            Future<ChannelResponse> response = req.response().compose(reply -> reply.body()
+                    .map(payload -> new ChannelResponse(reply.statusCode(), payload.toString())));
+            return req.end(encoded).compose(ignored -> response);
+        }));
     }
 
     private String createGrant(String path) throws Exception {
@@ -441,7 +442,7 @@ class SsmMessageGatewayServiceTest {
         ChannelResponse response = createChannel(path, NODE, clientId);
         assertEquals(201, response.statusCode());
         String token = XmlParser.extractFirst(response.body(), "TokenValue", "");
-        assertFalse(token.isEmpty(), "A successful channel response must contain a token");
+        assertFalse(token.isEmpty(), () -> "A successful channel response must contain a token: " + response.body());
         return token;
     }
 
