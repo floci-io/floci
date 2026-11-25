@@ -10,11 +10,14 @@ import io.floci.aws.services.verifiedpermissions.model.Policy;
 import io.floci.aws.services.verifiedpermissions.model.PolicyTemplate;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * AVP request adapter for the Cedar sidecar.
@@ -25,6 +28,8 @@ import java.util.Map;
  */
 @ApplicationScoped
 public class CedarAuthorizationEvaluator {
+    private static final Logger LOG = Logger.getLogger(CedarAuthorizationEvaluator.class);
+
     private final ObjectMapper objectMapper;
     private final CedarSidecarClient cedarClient;
 
@@ -36,46 +41,130 @@ public class CedarAuthorizationEvaluator {
 
     public ObjectNode appendTokenPrincipal(JsonNode entitiesDefinition, EntityIdentifier principal,
                                            JsonNode identityClaims, List<EntityIdentifier> parents) {
-        ArrayNode cedarEntities;
-        try {
-            if (entitiesDefinition == null || entitiesDefinition.isNull()) {
-                cedarEntities = objectMapper.createArrayNode();
-            } else if (entitiesDefinition.has("cedarJson")) {
+        ArrayNode cedarEntities = requestCedarEntities(entitiesDefinition);
+        ObjectNode entity = objectMapper.createObjectNode();
+        entity.set("uid", cedarEntity(principal));
+        ObjectNode attrs = entity.putObject("attrs");
+        if (identityClaims != null && identityClaims.isObject()) {
+            identityClaims.fields().forEachRemaining(entry -> {
+                if (!isGroupClaim(entry.getKey()) && claimCanBeCedar(entry.getValue())) {
+                    attrs.set(entry.getKey(), entry.getValue().deepCopy());
+                }
+            });
+        }
+        ArrayNode parentArray = entity.putArray("parents");
+        parents.forEach(parent -> parentArray.add(cedarEntity(parent)));
+        cedarEntities.add(entity);
+        ObjectNode union = objectMapper.createObjectNode();
+        union.put("cedarJson", cedarEntities.toString());
+        return union;
+    }
+
+    public EvaluationResult evaluate(JsonNode request, String schema, List<Policy> storedPolicies,
+                                     Map<String, PolicyTemplate> templates) {
+        JsonNode withActions = withSchemaActions(request, schema);
+        CedarSidecarClient.EvaluationResult result = cedarClient.authorize(withActions, storedPolicies, templates);
+        return new EvaluationResult(result.decision(), result.determiningPolicyIds(), result.errors());
+    }
+
+    /**
+     * AVP builds the action entities, and their action-group parents, from the store's schema. The sidecar
+     * only sees the request, so without this `action in NS::Action::"Group"` never matches a member action.
+     * The schema's definition replaces a caller entity for the same action: AVP takes actions from the schema,
+     * and a token request may list an action with only its identifier, which would otherwise drop its groups.
+     */
+    JsonNode withSchemaActions(JsonNode request, String schema) {
+        ArrayNode actions = schemaActionEntities(schema);
+        if (actions.isEmpty()) {
+            return request;
+        }
+        Set<String> schemaUids = new HashSet<>();
+        actions.forEach(action -> schemaUids.add(uidKey(action.path("uid"))));
+        ArrayNode cedarEntities = objectMapper.createArrayNode();
+        requestCedarEntities(request.get("entities")).forEach(entity -> {
+            if (!schemaUids.contains(uidKey(entity.path("uid")))) {
+                cedarEntities.add(entity);
+            }
+        });
+        cedarEntities.addAll(actions);
+        ObjectNode out = request.deepCopy();
+        out.putObject("entities").put("cedarJson", cedarEntities.toString());
+        return out;
+    }
+
+    private ArrayNode requestCedarEntities(JsonNode entitiesDefinition) {
+        if (entitiesDefinition == null || entitiesDefinition.isNull()) {
+            return objectMapper.createArrayNode();
+        }
+        if (entitiesDefinition.has("cedarJson")) {
+            try {
                 JsonNode parsed = objectMapper.readTree(entitiesDefinition.path("cedarJson").asText());
                 if (!parsed.isArray()) {
                     throw VerifiedPermissionsService.validation("entities.cedarJson must encode an array.");
                 }
-                cedarEntities = (ArrayNode) parsed.deepCopy();
-            } else if (entitiesDefinition.has("entityList") && entitiesDefinition.get("entityList").isArray()) {
-                cedarEntities = toCedarEntities((ArrayNode) entitiesDefinition.get("entityList"));
-            } else {
-                throw VerifiedPermissionsService.validation("entities must contain cedarJson or entityList.");
+                return (ArrayNode) parsed.deepCopy();
+            } catch (JsonProcessingException e) {
+                throw VerifiedPermissionsService.validation("entities.cedarJson is invalid JSON.");
             }
-            ObjectNode entity = objectMapper.createObjectNode();
-            entity.set("uid", cedarEntity(principal));
-            ObjectNode attrs = entity.putObject("attrs");
-            if (identityClaims != null && identityClaims.isObject()) {
-                identityClaims.fields().forEachRemaining(entry -> {
-                    if (!isGroupClaim(entry.getKey()) && claimCanBeCedar(entry.getValue())) {
-                        attrs.set(entry.getKey(), entry.getValue().deepCopy());
-                    }
-                });
-            }
-            ArrayNode parentArray = entity.putArray("parents");
-            parents.forEach(parent -> parentArray.add(cedarEntity(parent)));
-            cedarEntities.add(entity);
-            ObjectNode union = objectMapper.createObjectNode();
-            union.put("cedarJson", cedarEntities.toString());
-            return union;
-        } catch (JsonProcessingException e) {
-            throw VerifiedPermissionsService.validation("entities.cedarJson is invalid JSON.");
         }
+        if (entitiesDefinition.has("entityList") && entitiesDefinition.get("entityList").isArray()) {
+            return toCedarEntities((ArrayNode) entitiesDefinition.get("entityList"));
+        }
+        throw VerifiedPermissionsService.validation("entities must contain cedarJson or entityList.");
     }
 
-    public EvaluationResult evaluate(JsonNode request, List<Policy> storedPolicies,
-                                     Map<String, PolicyTemplate> templates) {
-        CedarSidecarClient.EvaluationResult result = cedarClient.authorize(request, storedPolicies, templates);
-        return new EvaluationResult(result.decision(), result.determiningPolicyIds(), result.errors());
+    private ArrayNode schemaActionEntities(String schema) {
+        ArrayNode out = objectMapper.createArrayNode();
+        if (schema == null || schema.isBlank()) {
+            return out;
+        }
+        JsonNode parsed;
+        try {
+            parsed = objectMapper.readTree(schema);
+        } catch (JsonProcessingException e) {
+            LOG.warnv(e, "Stored policy store schema is not valid JSON; authorizing without schema-derived action entities");
+            return out;
+        }
+        if (parsed == null || !parsed.isObject()) {
+            return out;
+        }
+        parsed.fields().forEachRemaining(namespace -> {
+            JsonNode actions = namespace.getValue().path("actions");
+            if (!actions.isObject()) {
+                return;
+            }
+            String actionType = namespace.getKey().isEmpty() ? "Action" : namespace.getKey() + "::Action";
+            actions.fields().forEachRemaining(action -> {
+                ObjectNode entity = objectMapper.createObjectNode();
+                entity.set("uid", cedarEntity(new EntityIdentifier(actionType, action.getKey())));
+                entity.putObject("attrs");
+                ArrayNode parents = entity.putArray("parents");
+                JsonNode memberOf = action.getValue().path("memberOf");
+                if (memberOf.isArray()) {
+                    memberOf.forEach(parent -> {
+                        String parentType = parent.hasNonNull("type")
+                                ? qualifiedActionType(namespace.getKey(), parent.get("type").asText())
+                                : actionType;
+                        parents.add(cedarEntity(new EntityIdentifier(parentType, parent.path("id").asText())));
+                    });
+                }
+                out.add(entity);
+            });
+        });
+        return out;
+    }
+
+    /** A memberOf `type` names an action group in another namespace, e.g. "Other::Action"; a bare "Action" is this one. */
+    private static String qualifiedActionType(String namespace, String type) {
+        if (type.contains("::") || namespace.isEmpty()) {
+            return type;
+        }
+        return namespace + "::" + type;
+    }
+
+    private static String uidKey(JsonNode uid) {
+        JsonNode inner = uid.has("__entity") ? uid.get("__entity") : uid;
+        return inner.path("type").asText() + "\u0000" + inner.path("id").asText();
     }
 
     private static boolean isGroupClaim(String name) {
