@@ -3,6 +3,8 @@ package io.floci.aws.services.elbv2;
 import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.ElasticLoadBalancingV2Exception;
@@ -43,19 +45,26 @@ class ElbV2DisabledHealthIntegrationTest {
         }
     }
 
-    @Test
-    void networkDisableRejectsBeforeOtherUpdateFieldsChange() {
+    @ParameterizedTest
+    @ValueSource(strings = {"instance", "ip", "alb"})
+    void networkDisableRejectsBeforeOtherUpdateFieldsChange(String targetType) {
         try (ElasticLoadBalancingV2Client client = AwsTestClients.create(
                 ElasticLoadBalancingV2Client.builder(), "000000000000", Region.US_EAST_1)) {
             String name = "network-" + UUID.randomUUID().toString().substring(0, 8);
-            TargetGroup group = client.createTargetGroup(r -> r.name(name).targetType("ip")
+            ElasticLoadBalancingV2Exception createError = assertThrows(ElasticLoadBalancingV2Exception.class,
+                    () -> client.createTargetGroup(r -> r.name(name).targetType(targetType)
+                            .protocol("HTTP").port(80).vpcId("vpc-health").healthCheckEnabled(false)));
+            assertDisabledRefusal(createError, targetType);
+            assertTrue(client.describeTargetGroups().targetGroups().stream()
+                    .noneMatch(group -> name.equals(group.targetGroupName())));
+            TargetGroup group = client.createTargetGroup(r -> r.name(name).targetType(targetType)
                     .protocol("HTTP").port(80).vpcId("vpc-health")).targetGroups().getFirst();
             String arn = group.targetGroupArn();
             try {
                 ElasticLoadBalancingV2Exception error = assertThrows(ElasticLoadBalancingV2Exception.class,
                         () -> client.modifyTargetGroup(r -> r.targetGroupArn(arn).healthCheckEnabled(false)
                                 .healthCheckPath("/changed").healthCheckIntervalSeconds(60)));
-                assertEquals("ValidationError", error.awsErrorDetails().errorCode());
+                assertDisabledRefusal(error, targetType);
                 TargetGroup retained = client.describeTargetGroups(r -> r.targetGroupArns(arn))
                         .targetGroups().getFirst();
                 assertTrue(retained.healthCheckEnabled());
@@ -65,6 +74,13 @@ class ElbV2DisabledHealthIntegrationTest {
                 client.deleteTargetGroup(r -> r.targetGroupArn(arn));
             }
         }
+    }
+
+    private static void assertDisabledRefusal(ElasticLoadBalancingV2Exception error, String targetType) {
+        assertEquals("InvalidConfigurationRequest", error.awsErrorDetails().errorCode());
+        assertEquals("Health check enabled must be true for target groups with target type '" + targetType + "'",
+                error.awsErrorDetails().errorMessage());
+        assertEquals(400, error.statusCode());
     }
 
     private static void assertDisabled(ElasticLoadBalancingV2Client client, String arn) {

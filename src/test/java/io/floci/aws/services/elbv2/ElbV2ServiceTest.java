@@ -1580,7 +1580,10 @@ class ElbV2ServiceTest {
         AwsException error = assertThrows(AwsException.class, () -> service.createTargetGroup(
                 REGION, "network-disabled", "HTTP", "HTTP1", 80, "vpc-a", targetType,
                 "HTTP", "traffic-port", false, "/", 30, 5, 5, 2, "200", "ipv4", Map.of()));
-        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("InvalidConfigurationRequest", error.getErrorCode());
+        assertEquals("Health check enabled must be true for target groups with target type '"
+                + (targetType == null ? "instance" : targetType) + "'", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
         assertTrue(service.describeTargetGroups(REGION, null, null, null).isEmpty());
         verifyNoInteractions(healthChecker);
     }
@@ -1595,7 +1598,10 @@ class ElbV2ServiceTest {
         clearInvocations(healthChecker);
         AwsException error = assertThrows(AwsException.class, () -> service.modifyTargetGroup(
                 REGION, group.getTargetGroupArn(), "HTTPS", "443", false, "/changed", 60, 10, 3, 4, "204"));
-        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("InvalidConfigurationRequest", error.getErrorCode());
+        assertEquals("Health check enabled must be true for target groups with target type '"
+                + (targetType == null ? "instance" : targetType) + "'", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
         assertTrue(group.getHealthCheckEnabled());
         assertEquals("HTTP", group.getHealthCheckProtocol());
         assertEquals("traffic-port", group.getHealthCheckPort());

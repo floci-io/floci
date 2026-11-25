@@ -590,7 +590,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                 : defaultHealthCheckProtocol(groupProtocol, groupTargetType);
         validateLayer7Members(checkProtocol, healthCheckPath, matcher);
         boolean layer7Check = isHttpProtocol(checkProtocol);
-        validateHealthCheckEnabled(targetType, healthCheckEnabled);
+        validateHealthCheckEnabled(groupTargetType, healthCheckEnabled);
         Map<String, TargetGroup> regionTgs = targetGroups.computeIfAbsent(region, k -> new ConcurrentHashMap<>());
         boolean duplicate = regionTgs.values().stream()
                 .anyMatch(tg -> tg.getTargetGroupName().equals(name));
@@ -782,7 +782,8 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     private static void validateHealthCheckEnabled(String targetType, Boolean enabled) {
         if (Boolean.FALSE.equals(enabled) && !"lambda".equals(targetType)) {
-            throw new AwsException("ValidationError", "Health checks cannot be disabled for non-Lambda targets", 400);
+            throw new AwsException("InvalidConfigurationRequest",
+                    "Health check enabled must be true for target groups with target type '" + targetType + "'", 400);
         }
     }
 
