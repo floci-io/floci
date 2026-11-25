@@ -18,6 +18,7 @@ import jakarta.inject.Inject;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 /**
  * {@code CREATE DATABASE <name> FROM INTEGRATION '<id>' DATABASE <source>} on the Redshift cluster or
@@ -66,7 +67,10 @@ public class RdsIntegrationDatabases implements IntegrationDatabaseCreator {
                     + "\" is not included in the data filter of integration " + integrationId);
         }
         Optional<Integration.Destination> existing = integration.destinationFor(sourceDatabase);
-        boolean previousGone = previousDatabaseGone(integration, sourceDatabase, backend);
+        boolean previousGone = existing
+                .filter(destination -> !Integration.Destination.STATE_CREATING.equals(destination.getState()))
+                .map(destination -> previousDatabaseGone(destination, backend))
+                .orElse(false);
         boolean reuseFailedDatabase = existing.isPresent()
                 && Integration.Destination.STATE_FAILED.equals(existing.get().getState())
                 && statement.databaseName().equals(existing.get().getDatabaseName())
@@ -74,9 +78,41 @@ public class RdsIntegrationDatabases implements IntegrationDatabaseCreator {
         List<Integration.IntegrationError> previousErrors = integration.getErrors().stream()
                 .filter(error -> RdsIntegrationService.isErrorForSourceDatabase(error, sourceDatabase))
                 .toList();
-        Integration syncing;
+        if (reuseFailedDatabase) {
+            Integration syncing = runDestinationRegistration(
+                    () -> integrations.addDestination(integration, statement.databaseName(), sourceDatabase, false));
+            String loadId = syncing.destinationFor(sourceDatabase)
+                    .map(Integration.Destination::getLoadId)
+                    .orElse(null);
+            loader.submit(syncing, sourceDatabase, statement.databaseName(), loadId);
+            return;
+        }
+        String droppedDatabaseName = previousGone ? existing.get().getDatabaseName() : null;
+        String droppedLoadId = previousGone ? existing.get().getLoadId() : null;
+        Integration reserved = runDestinationRegistration(
+                () -> integrations.reserveDestination(integration, statement.databaseName(), sourceDatabase,
+                        droppedDatabaseName, droppedLoadId));
+        String loadId = reserved.destinationFor(sourceDatabase)
+                .map(Integration.Destination::getLoadId)
+                .orElse(null);
         try {
-            syncing = integrations.addDestination(integration, statement.databaseName(), sourceDatabase, previousGone);
+            backend.execute("CREATE DATABASE " + PostgresWire.quoteIdentifier(statement.databaseName()));
+        } catch (RuntimeException e) {
+            if (existing.isPresent()) {
+                integrations.restoreDestination(integration, sourceDatabase, loadId, existing.get(), previousErrors);
+            } else {
+                integrations.removeDestination(integration, sourceDatabase, loadId);
+            }
+            throw e;
+        }
+        Integration syncing = runDestinationRegistration(
+                () -> integrations.startDestinationSync(reserved, sourceDatabase, loadId));
+        loader.submit(syncing, sourceDatabase, statement.databaseName(), loadId);
+    }
+
+    private static Integration runDestinationRegistration(Supplier<Integration> action) {
+        try {
+            return action.get();
         } catch (AwsException e) {
             String state = switch (e.getErrorCode()) {
                 case "IntegrationAlreadyExistsFault" -> DUPLICATE_DATABASE;
@@ -85,30 +121,15 @@ public class RdsIntegrationDatabases implements IntegrationDatabaseCreator {
             };
             throw new SpectrumSqlException(state, e.getMessage());
         }
-        if (!reuseFailedDatabase) {
-            try {
-                backend.execute("CREATE DATABASE " + PostgresWire.quoteIdentifier(statement.databaseName()));
-            } catch (RuntimeException e) {
-                if (existing.isPresent()) {
-                    integrations.restoreDestination(integration, sourceDatabase, existing.get(), previousErrors);
-                } else {
-                    integrations.removeDestination(integration, sourceDatabase);
-                }
-                throw e;
-            }
-        }
-        loader.submit(syncing, sourceDatabase, statement.databaseName());
     }
 
     /**
      * Whether a database was created from {@code sourceDatabase} before and has since been dropped on the target,
      * so that it can be created and loaded again.
      */
-    private static boolean previousDatabaseGone(Integration integration, String sourceDatabase, BackendSql backend) {
-        return integration.destinationFor(sourceDatabase)
-                .map(destination -> backend.queryString("SELECT 1 FROM pg_catalog.pg_database WHERE datname = '"
-                        + destination.getDatabaseName().replace("'", "''") + "'").isEmpty())
-                .orElse(false);
+    private static boolean previousDatabaseGone(Integration.Destination destination, BackendSql backend) {
+        return backend.queryString("SELECT 1 FROM pg_catalog.pg_database WHERE datname = '"
+                + destination.getDatabaseName().replace("'", "''") + "'").isEmpty();
     }
 
     /** Whether the integration's target is the provisioned cluster or the workgroup the session runs on. */

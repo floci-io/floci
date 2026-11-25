@@ -26,6 +26,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -228,6 +229,45 @@ public class RdsIntegrationService implements Resettable {
      */
     public Integration addDestination(Integration integration, String databaseName, String sourceDatabase,
                                       boolean previousDatabaseGone) {
+        return registerDestination(integration, databaseName, sourceDatabase,
+                Integration.Destination.STATE_SYNCING, previousDatabaseGone, null, null);
+    }
+
+    /**
+     * Reserves a destination in {@code Creating} while {@code CREATE DATABASE} runs on the target, so a
+     * concurrent request for the same source database cannot treat the not-yet-created database as dropped and
+     * overwrite this registration.
+     */
+    public Integration reserveDestination(Integration integration, String databaseName, String sourceDatabase,
+                                          String droppedDatabaseName, String droppedLoadId) {
+        return registerDestination(integration, databaseName, sourceDatabase,
+                Integration.Destination.STATE_CREATING, droppedDatabaseName != null, droppedDatabaseName,
+                droppedLoadId);
+    }
+
+    /**
+     * Promotes a reserved destination from {@code Creating} to {@code Syncing} once its database exists on
+     * the target. No-op when the integration or reservation is no longer present under {@code loadId}.
+     */
+    public Integration startDestinationSync(Integration integration, String sourceDatabase, String loadId) {
+        synchronized (lock) {
+            Integration current = findCurrent(integration).orElseThrow(() -> new AwsException(
+                    "IntegrationNotFoundFault", "Integration " + integration.integrationId() + " not found.", 404));
+            Integration.Destination destination = current.destinationFor(sourceDatabase)
+                    .filter(candidate -> Objects.equals(loadId, candidate.getLoadId()))
+                    .orElseThrow(() -> new AwsException("InvalidIntegrationStateFault",
+                            "Destination for source database " + sourceDatabase + " of integration "
+                                    + current.integrationId() + " is no longer active.", 400));
+            destination.setState(Integration.Destination.STATE_SYNCING);
+            refreshStatus(current);
+            integrations.put(key(current.getRegion(), current.integrationId()), current);
+            return new Integration(current);
+        }
+    }
+
+    private Integration registerDestination(Integration integration, String databaseName, String sourceDatabase,
+                                            String initialState, boolean previousDatabaseGone,
+                                            String droppedDatabaseName, String droppedLoadId) {
         synchronized (lock) {
             Integration current = findCurrent(integration).orElseThrow(() -> new AwsException(
                     "IntegrationNotFoundFault", "Integration " + integration.integrationId() + " not found.", 404));
@@ -238,17 +278,25 @@ public class RdsIntegrationService implements Resettable {
             }
             Optional<Integration.Destination> previous = current.destinationFor(sourceDatabase);
             if (previous.isPresent()) {
-                boolean replaceable = previousDatabaseGone
-                        || Integration.Destination.STATE_FAILED.equals(previous.get().getState());
+                Integration.Destination existing = previous.get();
+                // A destination currently being created is never replaceable: its database does not exist yet.
+                boolean beingCreated = Integration.Destination.STATE_CREATING.equals(existing.getState());
+                boolean droppedMatches = previousDatabaseGone
+                        && (droppedDatabaseName == null
+                                || (droppedDatabaseName.equals(existing.getDatabaseName())
+                                        && Objects.equals(droppedLoadId, existing.getLoadId())));
+                boolean replaceable = !beingCreated
+                        && (droppedMatches || Integration.Destination.STATE_FAILED.equals(existing.getState()));
                 if (!replaceable) {
                     throw new AwsException("IntegrationAlreadyExistsFault", "Database "
-                            + previous.get().getDatabaseName() + " was already created from source database "
+                            + existing.getDatabaseName() + " was already created from source database "
                             + sourceDatabase + " of integration " + current.integrationId() + ".", 400);
                 }
-                current.getDestinations().remove(previous.get());
+                current.getDestinations().remove(existing);
             }
+            String loadId = UUID.randomUUID().toString();
             current.getDestinations().add(new Integration.Destination(databaseName, sourceDatabase,
-                    Integration.Destination.STATE_SYNCING, Instant.now(clock)));
+                    initialState, Instant.now(clock), loadId));
             current.getErrors().removeIf(error -> isErrorForSourceDatabase(error, sourceDatabase));
             refreshStatus(current);
             integrations.put(key(current.getRegion(), current.integrationId()), current);
@@ -260,7 +308,12 @@ public class RdsIntegrationService implements Resettable {
 
     /** Forgets a destination whose database could not be created, as if it had never been asked for. */
     public void removeDestination(Integration integration, String sourceDatabase) {
-        restoreDestination(integration, sourceDatabase, null, List.of());
+        restoreDestination(integration, sourceDatabase, null, null, List.of());
+    }
+
+    /** Forgets a destination owned by {@code expectedLoadId} whose database could not be created. */
+    public void removeDestination(Integration integration, String sourceDatabase, String expectedLoadId) {
+        restoreDestination(integration, sourceDatabase, expectedLoadId, null, List.of());
     }
 
     /**
@@ -270,8 +323,24 @@ public class RdsIntegrationService implements Resettable {
     public void restoreDestination(Integration integration, String sourceDatabase,
                                    Integration.Destination previousDestination,
                                    List<Integration.IntegrationError> previousErrors) {
+        restoreDestination(integration, sourceDatabase, null, previousDestination, previousErrors);
+    }
+
+    /**
+     * Reverts a destination registration owned by {@code expectedLoadId} (when non-null) when creating its
+     * database on the target failed, leaving any other caller's registration untouched.
+     */
+    public void restoreDestination(Integration integration, String sourceDatabase, String expectedLoadId,
+                                   Integration.Destination previousDestination,
+                                   List<Integration.IntegrationError> previousErrors) {
         synchronized (lock) {
             findCurrent(integration).ifPresent(current -> {
+                Optional<Integration.Destination> existing = current.destinationFor(sourceDatabase);
+                if (expectedLoadId != null && existing
+                        .filter(destination -> Objects.equals(expectedLoadId, destination.getLoadId()))
+                        .isEmpty()) {
+                    return;
+                }
                 current.getDestinations().removeIf(
                         destination -> sourceDatabase.equals(destination.getSourceDatabase()));
                 if (previousDestination != null) {
@@ -305,6 +374,19 @@ public class RdsIntegrationService implements Resettable {
     }
 
     /**
+     * Whether the integration still exists and is still running the specific load identified by {@code loadId}
+     * for {@code sourceDatabase} into {@code databaseName}.
+     */
+    public boolean isLoading(Integration integration, String sourceDatabase, String databaseName, String loadId) {
+        return findCurrent(integration)
+                .flatMap(current -> current.destinationFor(sourceDatabase))
+                .filter(destination -> databaseName.equals(destination.getDatabaseName()))
+                .filter(destination -> Objects.equals(loadId, destination.getLoadId()))
+                .filter(destination -> Integration.Destination.STATE_SYNCING.equals(destination.getState()))
+                .isPresent();
+    }
+
+    /**
      * Ends the initial load of a destination: {@code Synced}, or {@code Failed} with {@code failure} as the
      * integration's error. The integration is {@code active} again once no destination is syncing, or
      * {@code failed} when a load failed. A destination no longer loading, because the integration was
@@ -312,11 +394,27 @@ public class RdsIntegrationService implements Resettable {
      */
     public void finishDestination(Integration integration, String sourceDatabase, String databaseName,
                                   String failure) {
+        finishDestinationInternal(integration, sourceDatabase, databaseName, null, false, failure);
+    }
+
+    /**
+     * Ends the initial load identified by {@code loadId}, ignoring stale completions whose load was replaced
+     * or already ended.
+     */
+    public void finishDestination(Integration integration, String sourceDatabase, String databaseName,
+                                  String loadId, String failure) {
+        finishDestinationInternal(integration, sourceDatabase, databaseName, loadId, true, failure);
+    }
+
+    private void finishDestinationInternal(Integration integration, String sourceDatabase, String databaseName,
+                                           String loadId, boolean checkLoadId, String failure) {
         synchronized (lock) {
             Optional<Integration> found = findCurrent(integration);
             Optional<Integration.Destination> destination = found
                     .flatMap(current -> current.destinationFor(sourceDatabase))
-                    .filter(candidate -> databaseName.equals(candidate.getDatabaseName()));
+                    .filter(candidate -> databaseName.equals(candidate.getDatabaseName()))
+                    .filter(candidate -> !checkLoadId || Objects.equals(loadId, candidate.getLoadId()))
+                    .filter(candidate -> Integration.Destination.STATE_SYNCING.equals(candidate.getState()));
             if (destination.isEmpty()) {
                 return;
             }
@@ -371,7 +469,8 @@ public class RdsIntegrationService implements Resettable {
     private static void refreshStatus(Integration integration) {
         List<Integration.Destination> destinations = integration.getDestinations();
         if (destinations.stream().anyMatch(destination ->
-                Integration.Destination.STATE_SYNCING.equals(destination.getState()))) {
+                Integration.Destination.STATE_SYNCING.equals(destination.getState())
+                        || Integration.Destination.STATE_CREATING.equals(destination.getState()))) {
             integration.setStatus(Integration.STATUS_SYNCING);
         } else if (destinations.stream().anyMatch(destination ->
                 Integration.Destination.STATE_FAILED.equals(destination.getState()))) {

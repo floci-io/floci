@@ -72,8 +72,8 @@ class RdsZeroEtlInitialLoadIntegrationTest {
                             + "attrs jsonb, PRIMARY KEY (id, line))",
                     "INSERT INTO sales.orders VALUES (1, 1, 'first', 12.30, '{\"rush\": true}'), "
                             + "(1, 2, NULL, 0.50, NULL)",
-                    "CREATE TABLE customers (id serial PRIMARY KEY, name text)",
-                    "INSERT INTO customers (name) VALUES ('ada'), ('grace')",
+                    "CREATE TABLE customers (id serial, name text, payload text, PRIMARY KEY (id) INCLUDE (payload))",
+                    "INSERT INTO customers (name, payload) VALUES ('ada', 'vip'), ('grace', NULL)",
                     "CREATE TABLE no_key (id int)",
                     "CREATE TABLE left_out (id int PRIMARY KEY)");
 
@@ -122,8 +122,9 @@ class RdsZeroEtlInitialLoadIntegrationTest {
                             "SELECT string_agg(table_schema || '.' || table_name, ',' ORDER BY table_name) "
                                     + "FROM information_schema.tables WHERE table_schema IN ('public', 'sales')"),
                     contains("public.customers,sales.orders"));
-            assertThat(query(workgroupPort, "appdb_dw", "SELECT name FROM public.customers ORDER BY id"),
-                    contains("ada", "grace"));
+            assertThat(query(workgroupPort, "appdb_dw",
+                            "SELECT name || ':' || COALESCE(payload, '-') FROM public.customers ORDER BY id"),
+                    contains("ada:vip", "grace:-"));
             assertThat(query(workgroupPort, "appdb_dw",
                             "SELECT k.table_name || ':' || string_agg(k.column_name, ',' ORDER BY k.ordinal_position) "
                                     + "FROM information_schema.table_constraints c "

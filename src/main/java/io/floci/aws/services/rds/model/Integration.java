@@ -168,6 +168,7 @@ public class Integration {
     @RegisterForReflection
     public static class Destination {
 
+        public static final String STATE_CREATING = "Creating";
         public static final String STATE_SYNCING = "Syncing";
         public static final String STATE_SYNCED = "Synced";
         public static final String STATE_FAILED = "Failed";
@@ -184,17 +185,26 @@ public class Integration {
         @JsonProperty("CreateTime")
         private Instant createTime;
 
+        @JsonProperty("LoadId")
+        private String loadId;
+
         public Destination() {}
 
         public Destination(String databaseName, String sourceDatabase, String state, Instant createTime) {
+            this(databaseName, sourceDatabase, state, createTime, null);
+        }
+
+        public Destination(String databaseName, String sourceDatabase, String state, Instant createTime,
+                           String loadId) {
             this.databaseName = databaseName;
             this.sourceDatabase = sourceDatabase;
             this.state = state;
             this.createTime = createTime;
+            this.loadId = loadId;
         }
 
         public Destination(Destination other) {
-            this(other.databaseName, other.sourceDatabase, other.state, other.createTime);
+            this(other.databaseName, other.sourceDatabase, other.state, other.createTime, other.loadId);
         }
 
         public String getDatabaseName() { return databaseName; }
@@ -208,6 +218,9 @@ public class Integration {
 
         public Instant getCreateTime() { return createTime; }
         public void setCreateTime(Instant createTime) { this.createTime = createTime; }
+
+        public String getLoadId() { return loadId; }
+        public void setLoadId(String loadId) { this.loadId = loadId; }
     }
 
     /** One entry of an integration's {@code Errors}. */

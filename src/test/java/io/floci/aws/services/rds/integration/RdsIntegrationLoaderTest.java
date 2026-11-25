@@ -66,7 +66,7 @@ class RdsIntegrationLoaderTest {
         cluster.setContainerId("container-1");
         cluster.setMasterUsername("postgres");
         when(rdsService.ensureClusterBackend("orders-src", "us-east-1")).thenReturn(cluster);
-        when(integrations.isLoading(any(), eq("orders"), eq("orders_dw"))).thenReturn(true);
+        when(integrations.isLoading(any(), eq("orders"), eq("orders_dw"), any())).thenReturn(true);
         doAnswer(invocation -> {
             invocation.<OutputStream>getArgument(4).write("1,widget\n".getBytes(StandardCharsets.UTF_8));
             return null;
@@ -129,7 +129,12 @@ class RdsIntegrationLoaderTest {
                 any(OutputStream.class), anyInt());
         assertEquals("COPY (SELECT \"id\", \"name\"::text FROM \"public\".\"items\") TO STDOUT WITH (FORMAT csv)",
                 copy.getValue());
-        verify(integrations).finishDestination(integration, "orders", "orders_dw", null);
+        verify(integrations).finishDestination(integration, "orders", "orders_dw", null, null);
+    }
+
+    @Test
+    void catalogQueryRestrictsPrimaryKeysToKeyColumnsOnly() {
+        assertThat(RdsIntegrationLoader.CATALOG_SQL, containsString("k.n <= i.indnkeyatts"));
     }
 
     @Test
@@ -152,7 +157,7 @@ class RdsIntegrationLoaderTest {
         loader(false).submit(integration, "orders", "orders_dw");
 
         verify(writer, never()).loadTable(anyString(), anyString(), anyString(), any(), any());
-        verify(integrations).finishDestination(integration, "orders", "orders_dw", null);
+        verify(integrations).finishDestination(integration, "orders", "orders_dw", null, null);
     }
 
     @Test
@@ -166,7 +171,8 @@ class RdsIntegrationLoaderTest {
 
         verify(writer, times(2)).loadTable(anyString(), anyString(), anyString(), any(), any());
         ArgumentCaptor<String> failure = ArgumentCaptor.forClass(String.class);
-        verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), failure.capture());
+        verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), isNull(),
+                failure.capture());
         assertThat(failure.getValue(), containsString("public.broken"));
     }
 
@@ -180,7 +186,7 @@ class RdsIntegrationLoaderTest {
         loader(false).submit(integration, "orders", "orders_dw");
 
         verify(writer, times(2)).loadTable(anyString(), anyString(), anyString(), any(), any());
-        verify(integrations).finishDestination(integration, "orders", "orders_dw", null);
+        verify(integrations).finishDestination(integration, "orders", "orders_dw", null, null);
     }
 
     @Test
@@ -197,7 +203,7 @@ class RdsIntegrationLoaderTest {
         loader(false).submit(integration, "orders", "orders_dw");
 
         verify(writer, times(1)).loadTable(anyString(), anyString(), anyString(), any(), any());
-        verify(integrations).finishDestination(integration, "orders", "orders_dw", null);
+        verify(integrations).finishDestination(integration, "orders", "orders_dw", null, null);
     }
 
     @Test
@@ -209,7 +215,7 @@ class RdsIntegrationLoaderTest {
         loader(false).submit(integration, "orders", "orders_dw");
 
         verify(writer).loadTable(anyString(), anyString(), anyString(), any(), any());
-        verify(integrations).finishDestination(integration, "orders", "orders_dw", null);
+        verify(integrations).finishDestination(integration, "orders", "orders_dw", null, null);
     }
 
     @Test
@@ -220,18 +226,32 @@ class RdsIntegrationLoaderTest {
         loader(false).submit(integration, "orders", "orders_dw");
 
         ArgumentCaptor<String> failure = ArgumentCaptor.forClass(String.class);
-        verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), failure.capture());
+        verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), isNull(),
+                failure.capture());
         assertThat(failure.getValue(), containsString("does not exist"));
     }
 
     @Test
     void stopsWhenTheIntegrationIsNoLongerLoading() {
-        when(integrations.isLoading(any(), eq("orders"), eq("orders_dw"))).thenReturn(false);
+        when(integrations.isLoading(any(), eq("orders"), eq("orders_dw"), any())).thenReturn(false);
         catalog(column("public", "items", "id", "int4", "integer", 1));
 
         loader(false).submit(integration, "orders", "orders_dw");
 
         verify(writer, never()).loadTable(anyString(), anyString(), anyString(), any(), any());
+        verify(integrations, never()).finishDestination(any(), anyString(), anyString(), any(), any());
+    }
+
+    @Test
+    void stopsBeforeWritingWhenLoadIsSupersededDuringSourceExport() {
+        when(integrations.isLoading(any(), eq("orders"), eq("orders_dw"), eq("load-old")))
+                .thenReturn(true, false);
+        catalog(column("public", "items", "id", "int4", "integer", 1));
+
+        loader(false).submit(integration, "orders", "orders_dw", "load-old");
+
+        verify(writer, never()).loadTable(anyString(), anyString(), anyString(), any(), any());
+        verify(integrations, never()).finishDestination(any(), anyString(), anyString(), any(), any());
     }
 
     @Test
@@ -239,20 +259,20 @@ class RdsIntegrationLoaderTest {
         loader(true).submit(integration, "orders", "orders_dw");
 
         verifyNoInteractions(containers, writer);
-        verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), isNull());
+        verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), isNull(), isNull());
     }
 
     @Test
     void resumeInterruptedLoads_loadsTheSyncingDestinationsAgain() {
         integration.getDestinations().add(new Integration.Destination("orders_dw", "orders",
-                Integration.Destination.STATE_SYNCING, null));
+                Integration.Destination.STATE_SYNCING, null, "load-resumed"));
         integration.getDestinations().add(new Integration.Destination("done_dw", "done",
-                Integration.Destination.STATE_SYNCED, null));
+                Integration.Destination.STATE_SYNCED, null, "load-done"));
         when(integrations.integrationsWithLoadsInProgress()).thenReturn(List.of(integration));
 
         loader(true).resumeInterruptedLoads();
 
-        verify(integrations).finishDestination(any(), eq("orders"), eq("orders_dw"), isNull());
-        verify(integrations, never()).finishDestination(any(), eq("done"), anyString(), any());
+        verify(integrations).finishDestination(any(), eq("orders"), eq("orders_dw"), eq("load-resumed"), isNull());
+        verify(integrations, never()).finishDestination(any(), eq("done"), anyString(), any(), any());
     }
 }

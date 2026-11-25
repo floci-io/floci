@@ -24,6 +24,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -64,7 +66,21 @@ class RdsIntegrationDatabasesTest {
         integration.setRegion("us-east-1");
         when(integrations.findById(anyString())).thenReturn(Optional.empty());
         when(integrations.findById(INTEGRATION_ID)).thenReturn(Optional.of(integration));
-        when(integrations.addDestination(any(), anyString(), anyString(), anyBoolean())).thenReturn(integration);
+        when(integrations.addDestination(any(), anyString(), anyString(), anyBoolean())).thenAnswer(invocation -> {
+            Integration updated = new Integration(integration);
+            updated.getDestinations().removeIf(d -> invocation.getArgument(2).equals(d.getSourceDatabase()));
+            updated.getDestinations().add(new Integration.Destination(invocation.getArgument(1),
+                    invocation.getArgument(2), Integration.Destination.STATE_SYNCING, null, "load-1"));
+            return updated;
+        });
+        when(integrations.reserveDestination(any(), anyString(), anyString(), any(), any())).thenAnswer(invocation -> {
+            Integration updated = new Integration(integration);
+            updated.getDestinations().removeIf(d -> invocation.getArgument(2).equals(d.getSourceDatabase()));
+            updated.getDestinations().add(new Integration.Destination(invocation.getArgument(1),
+                    invocation.getArgument(2), Integration.Destination.STATE_CREATING, null, "load-1"));
+            return updated;
+        });
+        when(integrations.startDestinationSync(any(), anyString(), any())).thenReturn(integration);
         when(redshiftService.clusterRegion(ACCOUNT, "orders-dw")).thenReturn(Optional.of("us-east-1"));
     }
 
@@ -86,8 +102,9 @@ class RdsIntegrationDatabasesTest {
         databases.create(statement("orders"), session("orders-dw"), backend);
 
         assertThat(backend.statements, contains("CREATE DATABASE \"orders_dw\""));
-        verify(integrations).addDestination(integration, "orders_dw", "orders", false);
-        verify(loader).submit(integration, "orders", "orders_dw");
+        verify(integrations).reserveDestination(integration, "orders_dw", "orders", null, null);
+        verify(integrations).startDestinationSync(any(), eq("orders"), eq("load-1"));
+        verify(loader).submit(integration, "orders", "orders_dw", "load-1");
     }
 
     @Test
@@ -99,7 +116,7 @@ class RdsIntegrationDatabasesTest {
 
         databases.create(statement("orders"), session("serverless_us-east-1_orders-wg"), backend);
 
-        verify(loader).submit(integration, "orders", "orders_dw");
+        verify(loader).submit(integration, "orders", "orders_dw", "load-1");
     }
 
     @Test
@@ -117,27 +134,41 @@ class RdsIntegrationDatabasesTest {
     @Test
     void replacesTheDestinationOfADroppedDatabase() {
         integration.getDestinations().add(new Integration.Destination("orders_dw", "orders",
-                Integration.Destination.STATE_SYNCED, null));
+                Integration.Destination.STATE_SYNCED, null, "old-load"));
 
         databases.create(statement("orders"), session("orders-dw"), backend);
 
-        verify(integrations).addDestination(integration, "orders_dw", "orders", true);
+        verify(integrations).reserveDestination(integration, "orders_dw", "orders", "orders_dw", "old-load");
     }
 
     @Test
     void keepsTheDestinationOfADatabaseThatStillExists() {
         integration.getDestinations().add(new Integration.Destination("orders_dw", "orders",
-                Integration.Destination.STATE_SYNCED, null));
+                Integration.Destination.STATE_SYNCED, null, "old-load"));
         backend.existingDatabase = true;
 
         databases.create(statement("orders"), session("orders-dw"), backend);
 
-        verify(integrations).addDestination(integration, "orders_dw", "orders", false);
+        verify(integrations).reserveDestination(integration, "orders_dw", "orders", null, null);
+    }
+
+    @Test
+    void doesNotTreatACreatingDestinationAsDropped() {
+        integration.getDestinations().add(new Integration.Destination("orders_dw", "orders",
+                Integration.Destination.STATE_CREATING, null, "in-flight-load"));
+        when(integrations.reserveDestination(any(), anyString(), anyString(), isNull(), isNull())).thenThrow(
+                new AwsException("IntegrationAlreadyExistsFault", "already", 400));
+
+        assertState("42P04", () -> databases.create(
+                new ExternalStatement.CreateIntegrationDatabase("orders_dw2", INTEGRATION_ID, "orders"),
+                session("orders-dw"), backend));
+        verify(integrations).reserveDestination(integration, "orders_dw2", "orders", null, null);
+        assertThat(backend.statements, empty());
     }
 
     @Test
     void mapsAnIntegrationDeletedMeanwhileToUndefinedObject() {
-        when(integrations.addDestination(any(), anyString(), anyString(), anyBoolean())).thenThrow(
+        when(integrations.reserveDestination(any(), anyString(), anyString(), any(), any())).thenThrow(
                 new AwsException("IntegrationNotFoundFault", "gone", 404));
         assertState("42704", () -> databases.create(statement("orders"), session("orders-dw"), backend));
     }
@@ -169,7 +200,7 @@ class RdsIntegrationDatabasesTest {
 
     @Test
     void mapsADuplicateSourceDatabaseToDuplicateDatabase() {
-        when(integrations.addDestination(any(), anyString(), anyString(), anyBoolean())).thenThrow(
+        when(integrations.reserveDestination(any(), anyString(), anyString(), any(), any())).thenThrow(
                 new AwsException("IntegrationAlreadyExistsFault", "already", 400));
         assertState("42P04", () -> databases.create(statement("orders"), session("orders-dw"), backend));
         assertThat(backend.statements, empty());
@@ -182,8 +213,8 @@ class RdsIntegrationDatabasesTest {
 
         assertState("42P04", () -> databases.create(statement("orders"), session("orders-dw"), failing));
 
-        verify(integrations).removeDestination(integration, "orders");
-        verify(loader, never()).submit(any(), anyString(), anyString());
+        verify(integrations).removeDestination(integration, "orders", "load-1");
+        verify(loader, never()).submit(any(), anyString(), anyString(), any());
     }
 
     @Test
@@ -196,7 +227,7 @@ class RdsIntegrationDatabasesTest {
 
         assertThat(backend.statements, empty());
         verify(integrations).addDestination(integration, "orders_dw", "orders", false);
-        verify(loader).submit(integration, "orders", "orders_dw");
+        verify(loader).submit(any(), eq("orders"), eq("orders_dw"), eq("load-1"));
     }
 
     @Test
@@ -216,9 +247,9 @@ class RdsIntegrationDatabasesTest {
                 new ExternalStatement.CreateIntegrationDatabase("orders_dw_v2", INTEGRATION_ID, "orders"),
                 session("orders-dw"), failing));
 
-        verify(integrations).restoreDestination(integration, "orders", failed, List.of(error));
-        verify(integrations, never()).removeDestination(any(), anyString());
-        verify(loader, never()).submit(any(), anyString(), anyString());
+        verify(integrations).restoreDestination(integration, "orders", "load-1", failed, List.of(error));
+        verify(integrations, never()).removeDestination(any(), anyString(), any());
+        verify(loader, never()).submit(any(), anyString(), anyString(), any());
     }
 
     private static final class RecordingBackend implements BackendSql {

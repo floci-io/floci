@@ -29,7 +29,9 @@ import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -499,6 +501,61 @@ class RdsIntegrationServiceTest {
 
         assertEquals(1, pending.size());
         assertEquals(first.getIntegrationArn(), pending.get(0).getIntegrationArn());
+    }
+
+    @Test
+    void reserveDestination_blocksConcurrentReplacementWhileCreating() {
+        Integration created = create("orders-zero-etl");
+        Integration integration = service.findById(created.integrationId()).orElseThrow();
+        Integration reserved = service.reserveDestination(integration, "orders_dw", "orders", null, null);
+        String loadId = reserved.destinationFor("orders").orElseThrow().getLoadId();
+
+        assertEquals(Integration.STATUS_SYNCING, reserved.getStatus());
+        assertEquals(Integration.Destination.STATE_CREATING,
+                reserved.destinationFor("orders").orElseThrow().getState());
+        assertError("IntegrationAlreadyExistsFault", 400,
+                () -> service.reserveDestination(integration, "orders_dw2", "orders", "orders_dw", loadId));
+
+        Integration syncing = service.startDestinationSync(reserved, "orders", loadId);
+        assertEquals(Integration.Destination.STATE_SYNCING,
+                syncing.destinationFor("orders").orElseThrow().getState());
+        assertTrue(service.isLoading(integration, "orders", "orders_dw", loadId));
+    }
+
+    @Test
+    void restoreDestination_ignoresRollbackWhenLoadIdDoesNotMatch() {
+        Integration created = create("orders-zero-etl");
+        Integration integration = service.findById(created.integrationId()).orElseThrow();
+        Integration reserved = service.reserveDestination(integration, "orders_dw", "orders", null, null);
+        String activeLoadId = reserved.destinationFor("orders").orElseThrow().getLoadId();
+
+        service.removeDestination(integration, "orders", "stale-load-id");
+
+        Integration current = describe(created);
+        assertEquals("orders_dw", current.destinationFor("orders").orElseThrow().getDatabaseName());
+        assertEquals(activeLoadId, current.destinationFor("orders").orElseThrow().getLoadId());
+    }
+
+    @Test
+    void finishDestination_ignoresStaleLoadIdAfterSameNameReplacement() {
+        Integration created = create("orders-zero-etl");
+        Integration integration = service.findById(created.integrationId()).orElseThrow();
+        Integration first = service.addDestination(integration, "orders_dw", "orders", false);
+        String firstLoadId = first.destinationFor("orders").orElseThrow().getLoadId();
+
+        Integration replacement = service.addDestination(integration, "orders_dw", "orders", true);
+        String secondLoadId = replacement.destinationFor("orders").orElseThrow().getLoadId();
+
+        assertFalse(service.isLoading(integration, "orders", "orders_dw", firstLoadId));
+        assertTrue(service.isLoading(integration, "orders", "orders_dw", secondLoadId));
+
+        service.finishDestination(integration, "orders", "orders_dw", firstLoadId, null);
+
+        Integration stillSyncing = describe(created);
+        assertEquals(Integration.STATUS_SYNCING, stillSyncing.getStatus());
+        assertEquals(Integration.Destination.STATE_SYNCING,
+                stillSyncing.destinationFor("orders").orElseThrow().getState());
+        assertEquals(secondLoadId, stillSyncing.destinationFor("orders").orElseThrow().getLoadId());
     }
 
     @Test
