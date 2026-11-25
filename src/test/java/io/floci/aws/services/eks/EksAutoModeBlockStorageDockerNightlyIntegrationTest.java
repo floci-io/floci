@@ -16,6 +16,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.time.Duration;
 import java.util.UUID;
@@ -31,9 +32,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  */
 @QuarkusTest
 @TestProfile(RdsMockProfile.class)
-class EksAutoModeBlockStorageDockerIntegrationTest {
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
+class EksAutoModeBlockStorageDockerNightlyIntegrationTest {
 
-    private static final Logger LOG = Logger.getLogger(EksAutoModeBlockStorageDockerIntegrationTest.class);
+    private static final Logger LOG = Logger.getLogger(EksAutoModeBlockStorageDockerNightlyIntegrationTest.class);
     private static final String ACCOUNT = "000000000000";
     private static final String PROVISIONER = "floci-auto-mode-ebs-provisioner";
 
@@ -49,7 +51,7 @@ class EksAutoModeBlockStorageDockerIntegrationTest {
     void requireDocker() {
         boolean dockerAvailable = DockerAvailability.answers(dockerClient);
         if (!dockerAvailable) {
-            LOG.warn("Docker daemon is not available; skipping EksAutoModeBlockStorageDockerIntegrationTest");
+            LOG.warn("Docker daemon is not available; skipping EksAutoModeBlockStorageDockerNightlyIntegrationTest");
         }
         Assumptions.assumeTrue(dockerAvailable, "Docker daemon must be available for the Auto Mode block storage test");
     }
