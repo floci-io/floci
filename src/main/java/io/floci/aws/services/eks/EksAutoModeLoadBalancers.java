@@ -1,11 +1,8 @@
 package io.floci.aws.services.eks;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.RequestScopes;
-import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.eks.model.Cluster;
@@ -14,7 +11,6 @@ import io.floci.aws.services.elbv2.ElbV2Service;
 import io.floci.aws.services.elbv2.model.Action;
 import io.floci.aws.services.elbv2.model.Listener;
 import io.floci.aws.services.elbv2.model.LoadBalancer;
-import io.floci.aws.services.elbv2.model.TargetDescription;
 import io.floci.aws.services.elbv2.model.TargetGroup;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PostConstruct;
@@ -27,18 +23,16 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
- * EKS Auto Mode's load balancing capability for Services: while a cluster has it on, a Service of type
+ * EKS Auto Mode's load balancing capability, for Services here and for Ingresses through
+ * {@link EksAutoModeIngresses}: while a cluster has it on, a Service of type
  * LoadBalancer whose {@code loadBalancerClass} is {@code eks.amazonaws.com/nlb} gets a Network Load Balancer in the
  * cluster's subnets, as on AWS. Each of the Service's TCP ports gets a target group on its NodePort, with the
  * cluster's node registered by instance ID as node group target groups register it and a TCP health check, and a
@@ -65,16 +59,15 @@ public class EksAutoModeLoadBalancers {
     private static final Logger LOG = Logger.getLogger(EksAutoModeLoadBalancers.class);
     static final String NLB_CLASS = "eks.amazonaws.com/nlb"; // partition-literal: a Kubernetes class name, not a host
     /** The tag keys Auto Mode sets, the only ones {@code AmazonEKSLoadBalancingPolicy} lets it set on them. */
-    static final String CLUSTER_TAG = "eks:eks-cluster-name";
     static final String STACK_TAG = "service.eks.amazonaws.com/stack"; // partition-literal: a tag key, not a host
     static final String SCHEME_ANNOTATION = "service.beta.kubernetes.io/aws-load-balancer-scheme";
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-    /** A target group's name ends with the Service port it serves and the hash. */
-    private static final Pattern PORT_SUFFIX = Pattern.compile("-(\\d{1,5})-[0-9a-f]{10}$");
 
     private final EksService eksService;
     private final EksClusterManager clusterManager;
     private final ElbV2Service elb;
+    private final EksAutoModeElb resources;
+    private final EksAutoModeKubectl kubectl;
+    private final EksAutoModeIngresses ingresses;
     private final EmulatorConfig config;
     private final ScheduledExecutorService scheduler =
             Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "eks-auto-mode-load-balancers"));
@@ -85,6 +78,9 @@ public class EksAutoModeLoadBalancers {
         this.eksService = eksService;
         this.clusterManager = clusterManager;
         this.elb = elb;
+        this.resources = new EksAutoModeElb(elb);
+        this.kubectl = new EksAutoModeKubectl(clusterManager);
+        this.ingresses = new EksAutoModeIngresses(elb, resources, kubectl);
         this.config = config;
     }
 
@@ -145,8 +141,9 @@ public class EksAutoModeLoadBalancers {
      * Services that are gone.
      */
     void reconcile(Cluster cluster, String region) {
-        List<NlbService> services = nlbServices(readServices(cluster), clusterManager.runsWithoutServiceLb(cluster));
-        Map<String, LoadBalancer> existing = loadBalancersOf(cluster, region);
+        List<NlbService> services = nlbServices(kubectl.list(cluster, "services"),
+                clusterManager.runsWithoutServiceLb(cluster));
+        Map<String, LoadBalancer> existing = resources.loadBalancersOf(cluster, region, STACK_TAG, "network");
         Instance node = clusterManager.getRegisteredClusterNodeInstance(cluster);
         for (NlbService service : services) {
             LoadBalancer lb = existing.remove(service.stack());
@@ -154,15 +151,22 @@ public class EksAutoModeLoadBalancers {
                 lb = createLoadBalancer(cluster, region, service);
             }
             if (ensurePorts(cluster, region, service, lb, node)) {
-                writeStatus(cluster, service, lb.getDnsName());
+                kubectl.writeHostname(cluster, "service", service.namespace(), service.name(), service.uid(),
+                        lb.getDnsName());
             }
         }
         existing.forEach((stack, lb) -> delete(cluster, region, stack, lb));
+        ingresses.reconcile(cluster, region, node);
     }
 
-    /** Deletes every load balancer made for {@code cluster}'s Services, with their listeners and target groups. */
+    /**
+     * Deletes every load balancer made for {@code cluster}'s Services and Ingresses, with their listeners and target
+     * groups.
+     */
     public void deleteLoadBalancers(Cluster cluster, String region) {
-        loadBalancersOf(cluster, region).forEach((stack, lb) -> delete(cluster, region, stack, lb));
+        resources.loadBalancersOf(cluster, region, STACK_TAG, "network")
+                .forEach((stack, lb) -> delete(cluster, region, stack, lb));
+        ingresses.deleteLoadBalancers(cluster, region);
     }
 
     /**
@@ -195,75 +199,15 @@ public class EksAutoModeLoadBalancers {
         return services;
     }
 
-    private JsonNode readServices(Cluster cluster) {
-        ContainerExec.Result result = clusterManager.execInContainerForResult(cluster.getContainerId(),
-                new String[]{"kubectl", "get", "services", "-A", "-o", "json"}, 15);
-        if (result.exitCode() != 0) {
-            throw new IllegalStateException("kubectl get services failed: " + result.summary());
-        }
-        try {
-            return MAPPER.readTree(result.stdout());
-        } catch (Exception e) {
-            throw new IllegalStateException("kubectl get services returned no JSON: " + e.getMessage(), e);
-        }
-    }
-
-    /**
-     * The load balancers made for {@code cluster}'s Services, by the Service they were made for: network load
-     * balancers with the cluster's and a Service's tags, named as this names that Service's.
-     */
-    private Map<String, LoadBalancer> loadBalancersOf(Cluster cluster, String region) {
-        Map<String, LoadBalancer> found = new LinkedHashMap<>();
-        List<LoadBalancer> all = elb.describeLoadBalancers(region, null, null, null, null);
-        if (all.isEmpty()) {
-            return found;
-        }
-        Map<String, Map<String, String>> tags = elb.describeTags(all.stream().map(LoadBalancer::getLoadBalancerArn).toList());
-        for (LoadBalancer lb : all) {
-            String stack = stackOf(cluster, tags.get(lb.getLoadBalancerArn()));
-            if (stack != null && "network".equals(lb.getType())
-                    && resourceName(cluster, stack, "").equals(lb.getLoadBalancerName())) {
-                found.put(stack, lb);
-            }
-        }
-        return found;
-    }
-
-    /** The target groups made for the Service {@code stack} of {@code cluster}, by name, wherever they are attached. */
-    private Map<String, TargetGroup> targetGroupsOf(Cluster cluster, String region, String stack) {
-        Map<String, TargetGroup> found = new HashMap<>();
-        List<TargetGroup> all = elb.describeTargetGroups(region, null, null, null);
-        if (all.isEmpty()) {
-            return found;
-        }
-        Map<String, Map<String, String>> tags = elb.describeTags(all.stream().map(TargetGroup::getTargetGroupArn).toList());
-        for (TargetGroup group : all) {
-            Matcher port = PORT_SUFFIX.matcher(group.getTargetGroupName());
-            if (stack.equals(stackOf(cluster, tags.get(group.getTargetGroupArn()))) && port.find()
-                    && resourceName(cluster, stack, "-" + port.group(1)).equals(group.getTargetGroupName())) {
-                found.put(group.getTargetGroupName(), group);
-            }
-        }
-        return found;
-    }
-
-    /** The Service, {@code namespace/name}, a resource's tags name, if they name {@code cluster}. */
-    private static String stackOf(Cluster cluster, Map<String, String> tags) {
-        if (tags == null || !cluster.getName().equals(tags.get(CLUSTER_TAG))) {
-            return null;
-        }
-        String stack = tags.get(STACK_TAG);
-        return stack != null && stack.indexOf('/') > 0 ? stack : null;
-    }
-
     private static Map<String, String> tags(Cluster cluster, NlbService service) {
-        return Map.of(CLUSTER_TAG, cluster.getName(), STACK_TAG, service.stack());
+        return Map.of(EksAutoModeElb.CLUSTER_TAG, cluster.getName(), STACK_TAG, service.stack());
     }
 
     private LoadBalancer createLoadBalancer(Cluster cluster, String region, NlbService service) {
         List<String> subnets = cluster.getResourcesVpcConfig() == null ? List.of()
                 : cluster.getResourcesVpcConfig().getSubnetIds();
-        LoadBalancer lb = elb.createLoadBalancer(region, resourceName(cluster, service.stack(), ""), service.scheme(),
+        LoadBalancer lb = elb.createLoadBalancer(region, EksAutoModeElb.resourceName(cluster, service.stack(), ""),
+                service.scheme(),
                 "network", "ipv4", subnets, List.of(), tags(cluster, service));
         LOG.infov("Created Network Load Balancer {0} for Service {1} of EKS cluster {2}",
                 lb.getLoadBalancerName(), service.stack(), cluster.getName());
@@ -276,12 +220,12 @@ public class EksAutoModeLoadBalancers {
      * port can't change. Answers whether every port can serve: the node is registered.
      */
     private boolean ensurePorts(Cluster cluster, String region, NlbService service, LoadBalancer lb, Instance node) {
-        Map<String, TargetGroup> groups = targetGroupsOf(cluster, region, service.stack());
+        Map<String, TargetGroup> groups = resources.targetGroupsOf(cluster, region, STACK_TAG, service.stack());
         Map<Integer, Listener> listeners = new HashMap<>();
         elb.describeListeners(region, lb.getLoadBalancerArn(), null).forEach(l -> listeners.put(l.getPort(), l));
         Set<String> wanted = new HashSet<>();
         for (ServicePort port : service.ports()) {
-            String name = resourceName(cluster, service.stack(), "-" + port.port());
+            String name = EksAutoModeElb.resourceName(cluster, service.stack(), "-" + port.port());
             wanted.add(name);
             TargetGroup group = groups.get(name);
             Listener listener = listeners.remove(port.port());
@@ -298,12 +242,7 @@ public class EksAutoModeLoadBalancers {
                 group = elb.createTargetGroup(region, name, "TCP", null, port.nodePort(), vpcId, "instance", "TCP",
                         null, null, null, null, null, null, null, null, "ipv4", tags(cluster, service));
             }
-            if (node != null && (group.getTargets() == null
-                    || group.getTargets().stream().noneMatch(t -> node.getInstanceId().equals(t.getId())))) {
-                TargetDescription target = new TargetDescription();
-                target.setId(node.getInstanceId());
-                elb.registerTargets(region, group.getTargetGroupArn(), List.of(target));
-            }
+            resources.registerNode(region, group, node);
             if (listener == null) {
                 Action forward = new Action();
                 forward.setType("forward");
@@ -322,46 +261,8 @@ public class EksAutoModeLoadBalancers {
     }
 
     private void delete(Cluster cluster, String region, String stack, LoadBalancer lb) {
-        elb.describeListeners(region, lb.getLoadBalancerArn(), null)
-                .forEach(listener -> elb.deleteListener(region, listener.getListenerArn()));
-        elb.deleteLoadBalancer(region, lb.getLoadBalancerArn());
-        targetGroupsOf(cluster, region, stack).values()
-                .forEach(group -> elb.deleteTargetGroup(region, group.getTargetGroupArn()));
+        resources.delete(cluster, region, STACK_TAG, stack, lb);
         LOG.infov("Deleted Network Load Balancer {0} of Service {1} of EKS cluster {2}", lb.getLoadBalancerName(),
                 stack, cluster.getName());
-    }
-
-    /**
-     * Writes the load balancer's DNS name to the Service's status, as the controller on AWS does. The patch names
-     * the Service's UID, so a Service made again under the same name meanwhile refuses it.
-     */
-    private void writeStatus(Cluster cluster, NlbService service, String dnsName) {
-        String identity = service.uid().isEmpty() ? "" : "\"metadata\":{\"uid\":\"" + service.uid() + "\"},";
-        String patch = "{" + identity + "\"status\":{\"loadBalancer\":{\"ingress\":[{\"hostname\":\"" + dnsName
-                + "\"}]}}}";
-        ContainerExec.Result result = clusterManager.execInContainerForResult(cluster.getContainerId(),
-                new String[]{"kubectl", "patch", "service", service.name(), "-n", service.namespace(),
-                        "--subresource=status", "--type=merge", "-p", patch}, 15);
-        if (result.exitCode() != 0) {
-            LOG.warnv("Could not write the load balancer of Service {0} to its status: {1}",
-                    service.stack(), result.summary());
-        }
-    }
-
-    /**
-     * A load balancer or target group name: {@code k8s-<namespace>-<name><suffix>-<hash>}, within ELBv2's 32
-     * characters, the namespace and name cut so the suffix, a target group's Service port, stays whole. The hash
-     * names the cluster's ARN and the Service, so two clusters' Services of one name don't collide.
-     */
-    static String resourceName(Cluster cluster, String stack, String suffix) {
-        String hash = Digests.sha256Hex(cluster.getArn() + "/" + stack + suffix).substring(0, 10);
-        int slash = stack.indexOf('/');
-        String base = ("k8s-" + cut(stack.substring(0, slash), 7) + "-" + cut(stack.substring(slash + 1), 7))
-                .replaceAll("[^A-Za-z0-9-]", "-");
-        return (cut(base, 32 - 11 - suffix.length()) + suffix + "-" + hash).replaceAll("-+", "-");
-    }
-
-    private static String cut(String value, int max) {
-        return value.length() <= max ? value : value.substring(0, max);
     }
 }
