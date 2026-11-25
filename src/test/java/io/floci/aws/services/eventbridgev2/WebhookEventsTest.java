@@ -208,7 +208,7 @@ class WebhookEventsTest {
     }
 
     @Test
-    void theHashFollowsTheCopiedMetadataInTheSourcesOrder() {
+    void theHashFollowsTheCopiedMetadata() {
         byte[] body = "{\"dd\":2}".getBytes(StandardCharsets.UTF_8);
         Map<String, String> one = Map.of("x-meta", "m1");
         Map<String, String> two = new LinkedHashMap<>();
@@ -219,6 +219,19 @@ class WebhookEventsTest {
         assertNotEquals(WebhookEvents.contentHash(body, one), WebhookEvents.contentHash(body, two));
         assertEquals(WebhookEvents.contentHash(body, two), WebhookEvents.contentHash(body, new LinkedHashMap<>(two)));
         assertNotEquals(WebhookEvents.contentHash(body, Map.of("x-meta", "m2")), WebhookEvents.contentHash(body, one));
+    }
+
+    @Test
+    void theHashDoesNotFollowTheOrderTheHeadersAreCopiedIn() {
+        byte[] body = "{\"dd\":2}".getBytes(StandardCharsets.UTF_8);
+        Map<String, String> forward = new LinkedHashMap<>();
+        forward.put("c", "1");
+        forward.put("d", "2");
+        Map<String, String> backward = new LinkedHashMap<>();
+        backward.put("d", "2");
+        backward.put("c", "1");
+
+        assertEquals(WebhookEvents.contentHash(body, forward), WebhookEvents.contentHash(body, backward));
     }
 
     @Test

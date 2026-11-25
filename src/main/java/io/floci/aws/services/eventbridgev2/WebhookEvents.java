@@ -21,6 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 
 /**
  * The event a webhook request becomes: its body read as JSON, the headers copied into {@code Metadata}, the
@@ -99,13 +100,14 @@ final class WebhookEvents {
 
     /**
      * The hash of the body bytes and the copied metadata, each part with its length so no two requests share an
-     * encoding. It holds nothing of the source, so two sources give the same hash for the same request.
+     * encoding. The headers are hashed by name order, so the hash does not follow the order they are delivered in.
+     * It holds nothing of the source, so two sources give the same hash for the same request.
      */
     static String contentHash(byte[] body, Map<String, String> metadata) {
         ByteArrayOutputStream encoded = new ByteArrayOutputStream();
         field(encoded, body);
         encoded.writeBytes(ByteBuffer.allocate(Integer.BYTES).putInt(metadata.size()).array());
-        for (Map.Entry<String, String> header : metadata.entrySet()) {
+        for (Map.Entry<String, String> header : new TreeMap<>(metadata).entrySet()) {
             field(encoded, header.getKey().getBytes(StandardCharsets.UTF_8));
             field(encoded, header.getValue().getBytes(StandardCharsets.UTF_8));
         }
