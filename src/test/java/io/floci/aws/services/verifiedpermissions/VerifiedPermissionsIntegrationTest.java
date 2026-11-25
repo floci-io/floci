@@ -424,6 +424,51 @@ class VerifiedPermissionsIntegrationTest {
     }
 
     @Test
+    void isAuthorizedWithToken_identifierOnlyActionEntityKeepsTheSchemaGroups() throws Exception {
+        JsonNode pool = cognito("CreateUserPool", "{\"PoolName\":\"avp-action-group-pool\"}");
+        String poolId = pool.path("UserPool").path("Id").asText();
+        String clientId = cognito("CreateUserPoolClient", objectJson(Map.of(
+                "UserPoolId", poolId, "ClientName", "app",
+                "ExplicitAuthFlows", List.of("ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"))))
+                .path("UserPoolClient").path("ClientId").asText();
+        cognito("AdminCreateUser", objectJson(Map.of(
+                "UserPoolId", poolId, "Username", "bob", "MessageAction", "SUPPRESS")));
+        cognito("AdminSetUserPassword", objectJson(Map.of(
+                "UserPoolId", poolId, "Username", "bob", "Password", "Avp-Group-1!", "Permanent", true)));
+        String accessToken = cognito("AdminInitiateAuth", objectJson(Map.of(
+                "UserPoolId", poolId, "ClientId", clientId, "AuthFlow", "ADMIN_USER_PASSWORD_AUTH",
+                "AuthParameters", Map.of("USERNAME", "bob", "PASSWORD", "Avp-Group-1!"))))
+                .path("AuthenticationResult").path("AccessToken").asText();
+
+        String store = createStore("OFF", "DISABLED");
+        String schema = "{\"\":{\"entityTypes\":{\"User\":{},\"Photo\":{}},\"actions\":{"
+                + "\"All\":{},"
+                + "\"view\":{\"appliesTo\":{\"principalTypes\":[\"User\"],\"resourceTypes\":[\"Photo\"]},\"memberOf\":[{\"id\":\"All\"}]}}}}";
+        givenAws("PutSchema", objectJson(Map.of("policyStoreId", store, "definition", Map.of("cedarJson", schema))))
+                .then().statusCode(200);
+        givenAws("CreateIdentitySource", objectJson(Map.of(
+                        "policyStoreId", store, "principalEntityType", "User",
+                        "configuration", Map.of("cognitoUserPoolConfiguration", Map.of(
+                                "userPoolArn", pool.path("UserPool").path("Arn").asText(),
+                                "clientIds", List.of(clientId))))))
+                .then().statusCode(200);
+        givenAws("CreatePolicy", objectJson(Map.of("policyStoreId", store, "definition", Map.of(
+                        "static", Map.of("statement", "permit(principal, action in Action::\"All\", resource);")))))
+                .then().statusCode(200);
+
+        Map<String,Object> action = Map.of("actionType", "Action", "actionId", "view");
+        Map<String,Object> request = new LinkedHashMap<>();
+        request.put("policyStoreId", store);
+        request.put("accessToken", accessToken);
+        request.put("action", action);
+        request.put("resource", Map.of("entityType", "Photo", "entityId", "p1"));
+        request.put("entities", Map.of("entityList", List.of(Map.of(
+                "identifier", Map.of("entityType", "Action", "entityId", "view")))));
+        givenAws("IsAuthorizedWithToken", objectJson(request))
+                .then().statusCode(200).body("decision", equalTo("ALLOW"));
+    }
+
+    @Test
     void deletePolicyAndPolicyStore_areIdempotentForRetries() {
         String store = createStore("OFF", "DISABLED");
         String policy = givenAws("CreatePolicy", objectJson(Map.of(

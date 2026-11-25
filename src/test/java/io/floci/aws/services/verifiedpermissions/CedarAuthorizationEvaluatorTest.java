@@ -38,7 +38,7 @@ class CedarAuthorizationEvaluatorTest {
     }
 
     @Test
-    void anEntityTheCallerSentForTheSameActionIsKept() throws Exception {
+    void theSchemaDefinitionReplacesACallerEntityForTheSameAction() throws Exception {
         String callerEntities = "[{\"uid\":{\"type\":\"Demo::Action\",\"id\":\"read\"},\"attrs\":{},\"parents\":[]}]";
         JsonNode request = objectMapper.createObjectNode().set("entities",
                 objectMapper.createObjectNode().put("cedarJson", callerEntities));
@@ -46,7 +46,8 @@ class CedarAuthorizationEvaluatorTest {
         JsonNode entities = cedarEntities(evaluator.withSchemaActions(request, SCHEMA));
 
         assertThat(uids(entities), containsInAnyOrder("Demo::Action/read", "Demo::Action/Read"));
-        assertThat(entity(entities, "read").get("parents").size(), equalTo(0));
+        assertThat(uids(entity(entities, "read").get("parents")),
+                containsInAnyOrder("Demo::Action/Read", "Other::Action/Audit", "Demo::Action/All"));
     }
 
     @Test

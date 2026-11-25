@@ -107,8 +107,9 @@ identifiers are supplied in an entity list, the last definition wins.
 
 As in AVP, the action entities come from the policy store schema: each schema action is added to
 the request's entities with its `memberOf` action groups as parents, so a policy scoped with
-`action in NS::Action::"Group"` matches every member action. An action entity the caller supplies
-for the same identifier takes precedence over the schema-derived one.
+`action in NS::Action::"Group"` matches every member action. The schema's definition replaces an
+action entity the caller supplies for the same identifier, such as the identifier-only action entities
+that `IsAuthorizedWithToken` accepts.
 
 ## Identity sources and tokens
 
