@@ -573,14 +573,20 @@ See the [AWS receipt-rule resource reference](https://docs.aws.amazon.com/AWSClo
 
 ### IAM enforcement
 
-With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, every SES v2 operation is authorized as the `ses:`
+With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, every SES operation is authorized as the `ses:`
 action AWS's service reference lists for it, which is always `ses:<Operation>`, in the `ses` namespace
-v1 and v2 share. The v1 Query API resolves the same way from its `Action`. Both are evaluated with
-resource `*`, so a policy that limits `ses:` actions to an identity, configuration set or template ARN
-does not grant them yet. The other actions the service reference lists for some operations are not
-checked: `ses:TagResource` for the create operations, and `iam:PassRole` (with `iam:PassedToService`
-`ses.amazonaws.com`) for creating or updating an event destination. A v2 `SendEmail` is authorized as
-`ses:SendEmail` whatever its content: `ses:SendRawEmail` is a v1 action.
+v1 and v2 share: a v1 call by its `Action`, a v2 call by the route of the SES v2 model it matches. The
+v2 `ListConfigurationSets` and `ListEmailIdentities` are also served on the `GET` routes older SDKs use.
+Both APIs are checked on the resources their request names, in the ARN formats of the
+[Service Authorization Reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_sesv2.html),
+so a policy can limit an action to one identity, configuration set, template, contact list, custom
+verification email template, dedicated IP pool, export or import job, or tenant. A tenant's ARN ends in
+the id SES minted for it, which a request naming the tenant does not carry: it is checked on the ARN
+stored for it. An operation whose action has no resource type, or whose request names none, is checked
+on `*`. The other actions the service reference lists for some operations are checked too:
+`ses:TagResource` for a create that tags what it makes, and `iam:PassRole` (with `iam:PassedToService`
+`ses.amazonaws.com`) for creating or updating an event destination that delivers through a role. A
+v2 `SendEmail` is authorized as `ses:SendEmail` whatever its content: `ses:SendRawEmail` is a v1 action.
 
 SES publishes to an SNS topic as `ses.amazonaws.com`, so the topic's policy decides whether it may,
 whatever the sender's own SNS permissions: an event destination's events with the configuration set's

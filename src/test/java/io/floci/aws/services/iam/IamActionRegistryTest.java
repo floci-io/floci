@@ -477,8 +477,8 @@ class IamActionRegistryTest {
     }
 
     /**
-     * The table is generated from the SES v2 model and AWS's service reference, not from the rule
-     * table, so it checks the rules rather than restating them: each operation's path has to
+     * The table is generated from the SES v2 model and AWS's service reference, not from the
+     * vendored routes, so it checks them rather than restating them: each operation's path has to
      * resolve to the action AWS lists for it, and to no other operation's.
      */
     @ParameterizedTest(name = "{0}")

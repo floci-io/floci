@@ -371,8 +371,8 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "firehose", "fis", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "oam",
               "payment-cryptography", "quicksight", "ram", "rds", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "s3tables", "s3vectors", "servicediscovery",
-              "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
-              "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
+              "servicequotas", "ses", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer",
+              "xray", "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs", "cloudwatch",
               "comprehend", "config", "dms", "elasticache", "identitystore", "memorydb", "route53resolver",
               "sagemaker", "transcribe", "transfer", "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms",
@@ -611,6 +611,13 @@ ONE_VARIABLE_SEGMENT_RE = re.compile(r"\$\{(?P<variable>\w+)}")
 # The guide's variables for the partition, Region and account, which the Service Reference writes as its own.
 GUIDE_VARIABLES = {"partition": "Partition", "region": "Region", "account-id": "Account"}
 
+# SDK clients the Service Reference lists for a namespace read here that Floci does not serve, and why: an operation
+# is read for its other clients alone, as a client whose routes are not vendored could not tell where its request
+# carries a member.
+UNSERVED_CLIENTS: dict[str, str] = {
+    "pinpoint-email": "the Amazon Pinpoint Email API under /v1/email, which SES v2 replaced; Floci serves SES v2 alone",
+}
+
 _LATER ="not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
 _REST = ("REST: its requests name their resources in the path, which RequestResources reads from the route a request "
          "matched in the vendored REST routes (regen_rest_routes.MODELS), which do not have its model yet")
@@ -658,7 +665,6 @@ NOT_COVERED: dict[str, str] = {
                       "portfolio or product imported from another account keeps its owner's account in its ARN while "
                       "requests name it by its id alone; and AppRegistry's applications and attribute groups are "
                       "named in the path",
-    "ses": _LATER,
     "signin": _REST,
     "ssmmessages": "channel routes authorise agent and client resources directly rather than through generated request mappings",
     "sso-oauth": _REST,
@@ -806,7 +812,8 @@ def checked_actions(documents: list[dict]) -> dict[str, dict]:
             found[f"{namespace}:{name}"] = {
                 "action": f"{namespace}:{action['Name']}" if action else f"{namespace}:{action_name}",
                 "types": None if action is None else [resource["Name"] for resource in action.get("Resources") or []],
-                "clients": sorted({sdk["Name"] for sdk in operation.get("SDK", []) if sdk.get("Package") == "Boto3"}),
+                "clients": sorted({sdk["Name"] for sdk in operation.get("SDK", [])
+                                   if sdk.get("Package") == "Boto3" and sdk["Name"] not in UNSERVED_CLIENTS}),
             }
     return found
 

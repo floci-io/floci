@@ -102,6 +102,7 @@ MODELS: dict[str, str] = {
     "s3vectors": "s3vectors",
     "scheduler": "scheduler",
     "securityhub": "securityhub",
+    "sesv2": "ses",
     "signer": "signer",
     "xray": "xray",
 }

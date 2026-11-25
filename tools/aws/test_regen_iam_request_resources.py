@@ -1944,6 +1944,13 @@ def test_a_rest_models_operations_the_reference_lists_for_no_client_take_their_o
     assert "svc:Gone" not in found
 
 
+def test_an_operation_is_read_for_the_clients_floci_serves_alone(isolated):
+    isolated.setattr(r, "UNSERVED_CLIENTS", {"svc-old": "a predecessor Floci does not serve"})
+    document = reference("svc", {"GetThing": ["thing"]}, {"thing": FORMATS["thing"]})
+    document["Operations"][0]["SDK"].append({"Name": "svc-old", "Method": "GetThing", "Package": "Boto3"})
+    assert r.checked_actions([document])["svc:GetThing"]["clients"] == ["svc"]
+
+
 def test_a_namespace_reads_the_operations_of_the_rest_models_floci_routes_under_it(isolated, tmp_path):
     isolated.setattr(r, "REST_MODELS", {"svc-v2": "svc"})
     write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}),
