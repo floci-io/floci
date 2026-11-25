@@ -1,6 +1,7 @@
 package io.floci.aws.services.mwaa;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
@@ -11,6 +12,7 @@ import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.mwaa.model.CreateEnvironmentRequest;
 import io.floci.aws.services.mwaa.model.Environment;
+import io.floci.aws.services.mwaa.model.EnvironmentRuntime;
 import io.floci.aws.services.mwaa.model.EnvironmentStatus;
 import io.floci.aws.services.mwaa.model.NetworkConfiguration;
 import io.floci.aws.services.mwaa.model.UpdateEnvironmentRequest;
@@ -23,6 +25,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mockito;
 
 import java.lang.reflect.InvocationHandler;
@@ -31,10 +34,15 @@ import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -44,6 +52,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -61,6 +71,9 @@ class MwaaServiceTest {
             @Override
             public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
+                if (!"mwaa-environments.json".equals(fileName)) {
+                    return AccountAwareStorageBackend.inMemory("000000000000");
+                }
                 environmentStorage = AccountAwareStorageBackend.<Environment>inMemory("000000000000");
                 return (AccountAwareStorageBackend<V>) (AccountAwareStorageBackend<?>) environmentStorage;
             }
@@ -627,14 +640,26 @@ class MwaaServiceTest {
         private S3Service s3Service;
         private final List<Runnable> queuedInstalls = new ArrayList<>();
         private boolean keepRunningOnShutdown;
+        private String storageMode = "memory";
+        private AccountAwareStorageBackend<Environment> environmentStore;
+        private AccountAwareStorageBackend<EnvironmentRuntime> runtimeStore;
 
         @BeforeEach
+        @SuppressWarnings("unchecked")
         void setUpRealMode() {
             StorageFactory storageFactory = new StorageFactory(null, null) {
                 @Override
                 public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                         TypeReference<Map<String, V>> typeReference) {
-                    return AccountAwareStorageBackend.inMemory("000000000000");
+                    AccountAwareStorageBackend<V> store = AccountAwareStorageBackend.inMemory("000000000000");
+                    if ("mwaa-environments.json".equals(fileName)) {
+                        // A spy, so a test can tell a write to storage from a change to the instance it holds.
+                        store = Mockito.spy(store);
+                        environmentStore = (AccountAwareStorageBackend<Environment>) store;
+                    } else {
+                        runtimeStore = (AccountAwareStorageBackend<EnvironmentRuntime>) store;
+                    }
+                    return store;
                 }
             };
 
@@ -658,12 +683,15 @@ class MwaaServiceTest {
                     });
             EmulatorConfig.TlsConfig tlsConfig = proxy(EmulatorConfig.TlsConfig.class,
                     (proxy, method, args) -> defaultValue(method));
+            EmulatorConfig.StorageConfig storageConfig = proxy(EmulatorConfig.StorageConfig.class,
+                    (proxy, method, args) -> "mode".equals(method.getName()) ? storageMode : defaultValue(method));
             EmulatorConfig config = proxy(EmulatorConfig.class, (proxy, method, args) -> switch (method.getName()) {
                 case "services" -> servicesConfig;
                 case "tls" -> tlsConfig;
+                case "storage" -> storageConfig;
                 case "defaultRegion" -> "us-east-1";
                 case "defaultAccountId" -> "000000000000";
-                case "hostname" -> Optional.empty();
+                case "hostname" -> Optional.of("floci.test");
                 default -> defaultValue(method);
             });
 
@@ -673,6 +701,8 @@ class MwaaServiceTest {
             proxyManager = Mockito.mock(MwaaProxyManager.class);
             portAllocator = Mockito.mock(PortAllocator.class);
             when(portAllocator.allocateForInProcessListener(8700, 8799)).thenReturn(8701);
+            when(s3Service.listObjectsWithPrefixes(any(), any(), any(), anyInt(), any(), any()))
+                    .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
 
             realModeService = new MwaaService(storageFactory, config, regionResolver,
                     environmentManager, proxyManager, portAllocator, s3Service, queuedInstalls::add, Clock.systemUTC());
@@ -935,5 +965,716 @@ class MwaaServiceTest {
 
             assertEquals(EnvironmentStatus.DELETING, environment.getStatus());
         }
+
+        @Test
+        void createKeepsTheSecretsOfTheEnvironmentsDatabaseForARestartAndDeleteDropsThem() {
+            Mockito.doAnswer(invocation -> {
+                Environment started = invocation.getArgument(0, Environment.class);
+                started.setDbPassword("db-pw");
+                started.setFernetKey("fernet-key");
+                started.setAirflowAdminPassword("admin-pw");
+                return null;
+            }).when(environmentManager).startEnvironment(any(), any(), any(), any());
+
+            Environment environment = realModeService.createEnvironment("secret-env",
+                    createRequest("arn:aws:s3:::my-bucket", "dags"));
+
+            EnvironmentRuntime runtime = runtimeStore.getForAccount("000000000000", "us-east-1/secret-env")
+                    .orElseThrow();
+            assertEquals(environment.getCreatedAt(), runtime.getEnvironmentCreatedAt());
+            assertEquals("db-pw", runtime.getDbPassword());
+            assertEquals("fernet-key", runtime.getFernetKey());
+            assertEquals("admin-pw", runtime.getAirflowAdminPassword());
+
+            realModeService.deleteEnvironment("secret-env");
+
+            assertTrue(runtimeStore.getForAccount("000000000000", "us-east-1/secret-env").isEmpty());
+        }
+
+        @Test
+        void shutdownKeepsTheVolumesOfEnvironmentsStoredForTheNextStart() {
+            storageMode = "persistent";
+            Environment environment = realModeService.createEnvironment("persisted-env",
+                    createRequest("arn:aws:s3:::my-bucket", "dags"));
+
+            realModeService.shutdown();
+
+            InOrder inOrder = Mockito.inOrder(environmentManager);
+            inOrder.verify(environmentManager).markShuttingDown();
+            inOrder.verify(environmentManager).stopContainers(environment);
+            verify(environmentManager, Mockito.never()).stopEnvironment(any());
+            verify(proxyManager).stopProxy(realModeService.environmentIdentity(environment));
+        }
+
+        @Test
+        void shutdownRemovesTheVolumesOfEnvironmentsKeptInMemoryOnly() {
+            Environment environment = realModeService.createEnvironment("memory-env",
+                    createRequest("arn:aws:s3:::my-bucket", "dags"));
+
+            realModeService.shutdown();
+
+            verify(environmentManager).stopEnvironment(environment);
+            verify(environmentManager, Mockito.never()).stopContainers(any());
+        }
+
+        @Test
+        void shutdownStopsRestoresEvenWhenTheContainersAreKeptRunning() {
+            keepRunningOnShutdown = true;
+            storageMode = "persistent";
+            realModeService.createEnvironment("kept-running-env", createRequest("arn:aws:s3:::my-bucket", "dags"));
+
+            realModeService.shutdown();
+
+            verify(environmentManager).markShuttingDown();
+            verify(environmentManager, Mockito.never()).stopContainers(any());
+        }
+
+        @Test
+        void restoreStartsAnAvailableEnvironmentsContainersAgainWithTheSecretsItKept() {
+            Environment stored = storedEnvironment("kept-env", EnvironmentStatus.AVAILABLE);
+            storedSecrets(stored);
+            Mockito.doAnswer(invocation -> {
+                Environment environment = invocation.getArgument(0, Environment.class);
+                assertEquals("saved-db-pw", environment.getDbPassword());
+                assertEquals("saved-fernet-key", environment.getFernetKey());
+                return null;
+            }).when(environmentManager).restartEnvironment(any(), any(), any(), any());
+
+            realModeService.restorePersistedRuntime().join();
+
+            verify(environmentManager).restartEnvironment(any(), eq("2.10.5"), isNull(), isNull());
+            verify(environmentManager, Mockito.never()).startEnvironment(any(), any(), any(), any());
+            verify(environmentManager, Mockito.never()).recoverSecrets(any());
+            verify(environmentManager, Mockito.never()).giveNewSecrets(any());
+            verify(portAllocator).markReserved(8705);
+            ArgumentCaptor<MwaaWebProxy.AirflowAccount> account = ArgumentCaptor.forClass(MwaaWebProxy.AirflowAccount.class);
+            verify(proxyManager).startProxy(eq("000000000000/us-east-1/kept-env"), eq(8705), any(), anyInt(), any(),
+                    any(), any(), account.capture());
+            assertEquals(new MwaaWebProxy.AirflowAccount("admin", "saved-admin-pw"), account.getValue());
+            Environment restored = stored("kept-env");
+            assertEquals(EnvironmentStatus.MAINTENANCE, restored.getStatus());
+            assertEquals("http://floci.test:8705", restored.getWebserverUrl());
+            assertEquals("saved-db-pw", runtimeStore.getForAccount("000000000000", "us-east-1/kept-env")
+                    .orElseThrow().getDbPassword());
+        }
+
+        @Test
+        void restoreInstallsTheRequirementsInTheNewContainerAsCreateDoesAndTheFirstSyncDoesNotAgain() {
+            byte[] requirements = "boto3==1.35.0\n".getBytes(StandardCharsets.UTF_8);
+            when(s3Service.getObject("my-bucket", "requirements.txt"))
+                    .thenReturn(new S3Object("my-bucket", "requirements.txt", requirements, "text/plain"));
+            when(environmentManager.lastRequirementsInstallExitCode(any())).thenReturn(0);
+            Environment stored = storedEnvironment("req-restore-env", EnvironmentStatus.AVAILABLE);
+            stored.setRequirementsS3Path("requirements.txt");
+            storedSecrets(stored);
+
+            realModeService.restorePersistedRuntime().join();
+            stored.setStatus(EnvironmentStatus.AVAILABLE);
+            realModeService.syncDags(stored);
+
+            verify(environmentManager).restartEnvironment(any(), eq("2.10.5"), isNull(), eq(requirements));
+            assertTrue(queuedInstalls.isEmpty());
+        }
+
+        @Test
+        void theFirstSyncAfterARestoreRemovesDagsTheBucketNoLongerHasFromTheVolumeItKept() {
+            Environment stored = storedEnvironment("pruned-env", EnvironmentStatus.AVAILABLE);
+            storedSecrets(stored);
+            byte[] kept = "kept".getBytes(StandardCharsets.UTF_8);
+            S3Object keptDag = new S3Object("my-bucket", "dags/kept.py", kept, "text/x-python");
+            when(s3Service.listObjectsWithPrefixes("my-bucket", "dags/", null, 1000, null, null))
+                    .thenReturn(new S3Service.ListObjectsResult(List.of(keptDag), List.of(), false, null));
+            when(s3Service.getObject("my-bucket", "dags/kept.py")).thenReturn(keptDag);
+            when(environmentManager.listDagFiles(stored)).thenReturn(List.of("kept.py", "deleted.py"));
+            realModeService.restorePersistedRuntime().join();
+            stored.setStatus(EnvironmentStatus.AVAILABLE);
+
+            realModeService.syncDags(stored);
+            realModeService.syncDags(stored);
+
+            verify(environmentManager).removeDagFile(stored, "deleted.py");
+            verify(environmentManager).copyDagFile(stored, "kept.py", kept);
+            verify(environmentManager).listDagFiles(stored);
+        }
+
+        @Test
+        void aDagPastTheFirstPageOfTheBucketListingIsNotRemoved() {
+            Environment environment = realModeService.createEnvironment("paged-env",
+                    createRequest("arn:aws:s3:::my-bucket", "dags"));
+            environment.setStatus(EnvironmentStatus.AVAILABLE);
+            S3Object first = new S3Object("my-bucket", "dags/a.py", "a".getBytes(StandardCharsets.UTF_8), "text/plain");
+            S3Object second = new S3Object("my-bucket", "dags/b.py", "b".getBytes(StandardCharsets.UTF_8), "text/plain");
+            when(s3Service.listObjectsWithPrefixes("my-bucket", "dags/", null, 1000, null, null))
+                    .thenReturn(new S3Service.ListObjectsResult(List.of(first), List.of(), true, "dags/a.py"));
+            when(s3Service.listObjectsWithPrefixes("my-bucket", "dags/", null, 1000, "dags/a.py", null))
+                    .thenReturn(new S3Service.ListObjectsResult(List.of(second), List.of(), false, null));
+            when(s3Service.getObject("my-bucket", "dags/a.py")).thenReturn(first);
+            when(s3Service.getObject("my-bucket", "dags/b.py")).thenReturn(second);
+            when(environmentManager.listDagFiles(environment)).thenReturn(List.of("a.py", "b.py"));
+
+            realModeService.syncDags(environment);
+
+            verify(environmentManager, Mockito.never()).removeDagFile(any(), any());
+            verify(environmentManager).copyDagFile(environment, "b.py", second.getData());
+        }
+
+        @Test
+        void aRestoreForgetsTheDagsSyncedBeforeItSoItsFirstSyncReadsTheVolumeAgain() {
+            Environment environment = realModeService.createEnvironment("resynced-env",
+                    createRequest("arn:aws:s3:::my-bucket", "dags"));
+            environment.setStatus(EnvironmentStatus.AVAILABLE);
+            realModeService.syncDags(environment);
+
+            realModeService.restorePersistedRuntime().join();
+            environment.setStatus(EnvironmentStatus.AVAILABLE);
+            realModeService.syncDags(environment);
+
+            verify(environmentManager, Mockito.times(2)).listDagFiles(environment);
+        }
+
+        @Test
+        void anEnvironmentIsUnderMaintenanceAndLeftToItsRestoreUntilItsContainersAreBack() throws Exception {
+            Environment stored = storedEnvironment("maintained-env", EnvironmentStatus.AVAILABLE);
+            storedSecrets(stored);
+            CountDownLatch started = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            Mockito.doAnswer(invocation -> {
+                started.countDown();
+                assertTrue(release.await(10, TimeUnit.SECONDS));
+                return null;
+            }).when(environmentManager).restartEnvironment(any(), any(), any(), any());
+
+            CompletableFuture<Void> restore = realModeService.restorePersistedRuntime();
+            assertEquals(EnvironmentStatus.MAINTENANCE, stored("maintained-env").getStatus());
+            assertTrue(started.await(10, TimeUnit.SECONDS));
+            realModeService.checkReadiness(stored);
+            verify(environmentManager, Mockito.never()).isReady(any());
+            release.countDown();
+            restore.get(10, TimeUnit.SECONDS);
+
+            when(environmentManager.isReady(stored)).thenReturn(true);
+            realModeService.checkReadiness(stored);
+            assertEquals(EnvironmentStatus.AVAILABLE, stored("maintained-env").getStatus());
+        }
+
+        @Test
+        void checkReadinessMarksARestoredEnvironmentUnavailableWhenAContainerHasExited() {
+            Environment environment = realModeService.createEnvironment("restored-crash-env",
+                    createRequest("arn:aws:s3:::my-bucket", "dags"));
+            environment.setStatus(EnvironmentStatus.MAINTENANCE);
+            when(environmentManager.isReady(environment)).thenReturn(false);
+            when(environmentManager.hasAnyContainerExited(environment)).thenReturn(true);
+
+            realModeService.checkReadiness(environment);
+
+            assertEquals(EnvironmentStatus.UNAVAILABLE, environment.getStatus());
+        }
+
+        @Test
+        void restoreTakesOverContainersThatOutlivedFloci() {
+            Environment stored = storedEnvironment("survivor-env", EnvironmentStatus.AVAILABLE);
+            when(environmentManager.adoptRunningEnvironment(any())).thenAnswer(invocation -> {
+                invocation.getArgument(0, Environment.class).setAirflowAdminPassword("running-admin-pw");
+                return true;
+            });
+
+            realModeService.restorePersistedRuntime().join();
+
+            verify(environmentManager, Mockito.never()).restartEnvironment(any(), any(), any(), any());
+            verify(environmentManager, Mockito.never()).startEnvironment(any(), any(), any(), any());
+            Mockito.verifyNoInteractions(s3Service);
+            verify(proxyManager).startProxy(eq("000000000000/us-east-1/survivor-env"), eq(8705), any(), anyInt(),
+                    any(), any(), any(), eq(new MwaaWebProxy.AirflowAccount("admin", "running-admin-pw")));
+            assertEquals(EnvironmentStatus.MAINTENANCE, stored.getStatus());
+        }
+
+        @Test
+        void anEnvironmentStoredBeforeFlociKeptItsSecretsStartsAnewAndKeepsItsNewOnes() {
+            storedEnvironment("legacy-secrets-env", EnvironmentStatus.AVAILABLE);
+            Mockito.doAnswer(invocation -> {
+                Environment started = invocation.getArgument(0, Environment.class);
+                started.setDbPassword("new-db-pw");
+                started.setFernetKey("new-fernet-key");
+                started.setAirflowAdminPassword("new-admin-pw");
+                return null;
+            }).when(environmentManager).giveNewSecrets(any());
+
+            realModeService.restorePersistedRuntime().join();
+
+            InOrder inOrder = Mockito.inOrder(environmentManager);
+            inOrder.verify(environmentManager).giveNewSecrets(any());
+            inOrder.verify(environmentManager).restartEnvironment(any(), eq("2.10.5"), isNull(), isNull());
+            EnvironmentRuntime runtime = runtimeStore.getForAccount("000000000000", "us-east-1/legacy-secrets-env")
+                    .orElseThrow();
+            assertEquals("new-db-pw", runtime.getDbPassword());
+            assertEquals("new-fernet-key", runtime.getFernetKey());
+        }
+
+        @Test
+        void anEnvironmentStoredBeforeFlociKeptItsSecretsGetsThemBackFromAContainerLeftUnderItsName() {
+            storedEnvironment("recovered-env", EnvironmentStatus.AVAILABLE);
+            when(environmentManager.recoverSecrets(any())).thenAnswer(invocation -> {
+                Environment environment = invocation.getArgument(0, Environment.class);
+                environment.setDbPassword("left-db-pw");
+                environment.setFernetKey("left-fernet-key");
+                environment.setAirflowAdminPassword("left-admin-pw");
+                return true;
+            });
+
+            realModeService.restorePersistedRuntime().join();
+
+            verify(environmentManager).restartEnvironment(any(), eq("2.10.5"), isNull(), isNull());
+            verify(environmentManager, Mockito.never()).giveNewSecrets(any());
+            assertEquals("left-fernet-key", runtimeStore.getForAccount("000000000000", "us-east-1/recovered-env")
+                    .orElseThrow().getFernetKey());
+        }
+
+        @Test
+        void aDockerThatCannotSayWhatIsLeftLeavesTheEnvironmentUnavailableWithNothingRemoved() {
+            Environment stored = storedEnvironment("unanswered-env", EnvironmentStatus.AVAILABLE);
+            when(environmentManager.adoptRunningEnvironment(any()))
+                    .thenThrow(new IllegalStateException("daemon unreachable"));
+
+            assertThrows(CompletionException.class, () -> realModeService.restorePersistedRuntime().join());
+
+            assertEquals(EnvironmentStatus.UNAVAILABLE, stored("unanswered-env").getStatus());
+            verify(environmentManager, Mockito.never()).giveNewSecrets(any());
+            verify(environmentManager, Mockito.never()).restartEnvironment(any(), any(), any(), any());
+            verify(environmentManager, Mockito.never()).startEnvironment(any(), any(), any(), any());
+            verify(environmentManager, Mockito.never()).stopEnvironment(any());
+        }
+
+        @Test
+        void secretsFoundOrGivenAreKeptBeforeTheStartSoAStartThatFailsIsTriedAgainWithThem() {
+            storedEnvironment("retried-with-new-env", EnvironmentStatus.AVAILABLE);
+            Mockito.doAnswer(invocation -> {
+                Environment environment = invocation.getArgument(0, Environment.class);
+                environment.setDbPassword("new-db-pw");
+                environment.setFernetKey("new-fernet-key");
+                environment.setAirflowAdminPassword("new-admin-pw");
+                return null;
+            }).when(environmentManager).giveNewSecrets(any());
+            Mockito.doThrow(new IllegalStateException("Postgres did not start"))
+                    .when(environmentManager).restartEnvironment(any(), any(), any(), any());
+
+            assertThrows(CompletionException.class, () -> realModeService.restorePersistedRuntime().join());
+
+            assertEquals(EnvironmentStatus.UNAVAILABLE, stored("retried-with-new-env").getStatus());
+            assertEquals("new-db-pw", runtimeStore.getForAccount("000000000000", "us-east-1/retried-with-new-env")
+                    .orElseThrow().getDbPassword());
+        }
+
+        @Test
+        void secretsFoundForAnEnvironmentWhoseRecordWentMeanwhileAreNotKept() {
+            storedEnvironment("went-while-recovering-env", EnvironmentStatus.AVAILABLE);
+            when(environmentManager.recoverSecrets(any())).thenAnswer(invocation -> {
+                environmentStore.deleteForAccount("000000000000", "us-east-1/went-while-recovering-env");
+                invocation.getArgument(0, Environment.class).setDbPassword("left-db-pw");
+                return true;
+            });
+
+            realModeService.restorePersistedRuntime().join();
+
+            assertTrue(runtimeStore.getForAccount("000000000000", "us-east-1/went-while-recovering-env").isEmpty());
+        }
+
+        @Test
+        void theSecretsOfContainersTakenOverAreKeptEvenWhenTheRestoreThenFails() {
+            storedEnvironment("taken-over-env", EnvironmentStatus.AVAILABLE);
+            when(environmentManager.adoptRunningEnvironment(any())).thenAnswer(invocation -> {
+                Environment environment = invocation.getArgument(0, Environment.class);
+                environment.setDbPassword("running-db-pw");
+                environment.setFernetKey("running-fernet-key");
+                environment.setAirflowAdminPassword("running-admin-pw");
+                return true;
+            });
+            Mockito.doThrow(new RuntimeException("Address already in use"))
+                    .when(proxyManager).startProxy(any(), anyInt(), any(), anyInt(), any(), any(), any(), any());
+
+            assertThrows(CompletionException.class, () -> realModeService.restorePersistedRuntime().join());
+
+            assertEquals(EnvironmentStatus.UNAVAILABLE, stored("taken-over-env").getStatus());
+            assertEquals("running-fernet-key", runtimeStore.getForAccount("000000000000", "us-east-1/taken-over-env")
+                    .orElseThrow().getFernetKey());
+        }
+
+        @Test
+        void anEnvironmentGoneBeforeItsRestoreIsLeftAloneAndOneCreatedAfterIsTreatedAsAnyOther() throws Exception {
+            storedSecrets(storedEnvironment("gone-early-env", EnvironmentStatus.AVAILABLE));
+            CountDownLatch reached = new CountDownLatch(1);
+            CountDownLatch proceed = new CountDownLatch(1);
+            when(environmentManager.isShuttingDown()).thenAnswer(invocation -> {
+                reached.countDown();
+                assertTrue(proceed.await(10, TimeUnit.SECONDS));
+                return false;
+            });
+
+            CompletableFuture<Void> restore = realModeService.restorePersistedRuntime();
+            assertTrue(reached.await(10, TimeUnit.SECONDS));
+            environmentStore.deleteForAccount("000000000000", "us-east-1/gone-early-env");
+            proceed.countDown();
+            restore.get(10, TimeUnit.SECONDS);
+
+            verify(environmentManager, Mockito.never()).adoptRunningEnvironment(any());
+            verify(environmentManager, Mockito.never()).restartEnvironment(any(), any(), any(), any());
+            verify(portAllocator).release(8705);
+            Environment recreated = storedEnvironment("gone-early-env", EnvironmentStatus.CREATING);
+            recreated.setCreatedAt(Instant.parse("2026-11-20T00:00:00Z"));
+            realModeService.checkReadiness(recreated);
+            verify(environmentManager).isReady(recreated);
+        }
+
+        @Test
+        void anEnvironmentDeletedDuringARestoreThatFailsIsRemoved() throws Exception {
+            Environment stored = storedEnvironment("deleted-failing-env", EnvironmentStatus.AVAILABLE);
+            storedSecrets(stored);
+            CountDownLatch started = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            Mockito.doAnswer(invocation -> {
+                started.countDown();
+                assertTrue(release.await(10, TimeUnit.SECONDS));
+                throw new IllegalStateException("Airflow did not start");
+            }).when(environmentManager).restartEnvironment(any(), any(), any(), any());
+
+            CompletableFuture<Void> restore = realModeService.restorePersistedRuntime();
+            assertTrue(started.await(10, TimeUnit.SECONDS));
+            realModeService.deleteEnvironment("deleted-failing-env");
+            release.countDown();
+
+            assertThrows(CompletionException.class, restore::join);
+            verify(environmentManager).stopEnvironment(stored);
+            assertTrue(environmentStore.getForAccount("000000000000", "us-east-1/deleted-failing-env").isEmpty());
+            assertTrue(runtimeStore.getForAccount("000000000000", "us-east-1/deleted-failing-env").isEmpty());
+        }
+
+        @Test
+        void theSecretsOfAnEarlierEnvironmentOfTheSameNameAreNotUsed() {
+            Environment stored = storedEnvironment("renewed-env", EnvironmentStatus.AVAILABLE);
+            storedSecrets(stored);
+            runtimeStore.getForAccount("000000000000", "us-east-1/renewed-env").orElseThrow()
+                    .setEnvironmentCreatedAt(Instant.parse("2026-10-01T00:00:00Z"));
+
+            realModeService.restorePersistedRuntime().join();
+
+            verify(environmentManager).recoverSecrets(any());
+            verify(environmentManager).giveNewSecrets(any());
+        }
+
+        @Test
+        void anEnvironmentStoredUnderALegacyKeyIsRestoredUnderItsKey() {
+            Environment legacy = storedEnvironment("legacy-key-env", EnvironmentStatus.AVAILABLE);
+            environmentStore.deleteForAccount("000000000000", "us-east-1/legacy-key-env");
+            environmentStore.putForAccount("000000000000", "legacy-key-env", legacy);
+
+            realModeService.restorePersistedRuntime().join();
+
+            assertEquals(EnvironmentStatus.MAINTENANCE, stored("legacy-key-env").getStatus());
+            assertTrue(environmentStore.getForAccount("000000000000", "legacy-key-env").isEmpty());
+            verify(environmentManager).giveNewSecrets(any());
+        }
+
+        @Test
+        void anEnvironmentWhoseContainersDoNotStartIsUnavailableAndKeepsItsVolumes() {
+            Environment stored = storedEnvironment("unstartable-env", EnvironmentStatus.AVAILABLE);
+            storedSecrets(stored);
+            Mockito.doThrow(new IllegalStateException("Postgres did not start"))
+                    .when(environmentManager).restartEnvironment(any(), any(), any(), any());
+
+            CompletionException failure = assertThrows(CompletionException.class,
+                    () -> realModeService.restorePersistedRuntime().join());
+
+            assertTrue(failure.getCause().getMessage().contains("unstartable-env"), failure.getCause().getMessage());
+            assertEquals(EnvironmentStatus.UNAVAILABLE, stored("unstartable-env").getStatus());
+            verify(environmentManager).stopOwnContainers(stored);
+            verify(environmentManager, Mockito.never()).stopEnvironment(any());
+            verify(proxyManager, Mockito.never()).startProxy(any(), anyInt(), any(), anyInt(), any(), any(), any(),
+                    any());
+        }
+
+        @Test
+        void everyEnvironmentIsTriedAndTheFailuresAreReportedTogether() {
+            storedSecrets(storedEnvironment("first-failing-env", EnvironmentStatus.AVAILABLE));
+            storedSecrets(storedEnvironment("second-failing-env", EnvironmentStatus.AVAILABLE));
+            Mockito.doThrow(new IllegalStateException("no Docker"))
+                    .when(environmentManager).restartEnvironment(any(), any(), any(), any());
+
+            CompletionException failure = assertThrows(CompletionException.class,
+                    () -> realModeService.restorePersistedRuntime().join());
+
+            verify(environmentManager, Mockito.times(2)).restartEnvironment(any(), any(), any(), any());
+            assertEquals(1, failure.getCause().getSuppressed().length);
+        }
+
+        @Test
+        void anUnavailableEnvironmentIsTriedAgain() {
+            storedSecrets(storedEnvironment("retried-env", EnvironmentStatus.UNAVAILABLE));
+
+            realModeService.restorePersistedRuntime().join();
+
+            verify(environmentManager).restartEnvironment(any(), any(), any(), any());
+            assertEquals(EnvironmentStatus.MAINTENANCE, stored("retried-env").getStatus());
+        }
+
+        @Test
+        void anEnvironmentStillBeingCreatedStaysCreatingAndFailsAsACreate() {
+            storedSecrets(storedEnvironment("creating-env", EnvironmentStatus.CREATING));
+            CountDownLatch started = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            Mockito.doAnswer(invocation -> {
+                started.countDown();
+                assertTrue(release.await(10, TimeUnit.SECONDS));
+                throw new IllegalStateException("Airflow did not start");
+            }).when(environmentManager).restartEnvironment(any(), any(), any(), any());
+
+            CompletableFuture<Void> restore = realModeService.restorePersistedRuntime();
+            assertEquals(EnvironmentStatus.CREATING, stored("creating-env").getStatus());
+            release.countDown();
+
+            assertThrows(CompletionException.class, restore::join);
+            assertEquals(EnvironmentStatus.CREATE_FAILED, stored("creating-env").getStatus());
+        }
+
+        @Test
+        void anEnvironmentThatFailedToCreateIsLeftAsItIs() {
+            storedSecrets(storedEnvironment("create-failed-env", EnvironmentStatus.CREATE_FAILED));
+
+            realModeService.restorePersistedRuntime().join();
+
+            verify(environmentManager, Mockito.never()).adoptRunningEnvironment(any());
+            verify(environmentManager, Mockito.never()).restartEnvironment(any(), any(), any(), any());
+            verify(portAllocator, Mockito.never()).markReserved(anyInt());
+            assertEquals(EnvironmentStatus.CREATE_FAILED, stored("create-failed-env").getStatus());
+        }
+
+        @Test
+        void anEnvironmentStillDeletingAtStartIsRemoved() {
+            Environment stored = storedEnvironment("still-deleting-env", EnvironmentStatus.DELETING);
+            storedSecrets(stored);
+
+            realModeService.restorePersistedRuntime().join();
+
+            verify(environmentManager).stopEnvironment(stored);
+            verify(environmentManager, Mockito.never()).adoptRunningEnvironment(any());
+            verify(environmentManager, Mockito.never()).restartEnvironment(any(), any(), any(), any());
+            assertTrue(environmentStore.getForAccount("000000000000", "us-east-1/still-deleting-env").isEmpty());
+            assertTrue(runtimeStore.getForAccount("000000000000", "us-east-1/still-deleting-env").isEmpty());
+        }
+
+        @Test
+        void anEnvironmentDeletedDuringItsRestoreIsDeletingUntilItsContainersHaveStartedAndBeenRemoved()
+                throws Exception {
+            Environment stored = storedEnvironment("deleted-mid-restore-env", EnvironmentStatus.AVAILABLE);
+            storedSecrets(stored);
+            CountDownLatch started = new CountDownLatch(1);
+            CountDownLatch release = blockRestart(started);
+
+            CompletableFuture<Void> restore = realModeService.restorePersistedRuntime();
+            assertTrue(started.await(10, TimeUnit.SECONDS));
+            long writesBefore = writesOf("deleted-mid-restore-env");
+            Environment deleting = realModeService.deleteEnvironment("deleted-mid-restore-env");
+
+            assertEquals(writesBefore + 1, writesOf("deleted-mid-restore-env"));
+            assertEquals(EnvironmentStatus.DELETING, deleting.getStatus());
+            assertEquals(EnvironmentStatus.DELETING, stored("deleted-mid-restore-env").getStatus());
+            verify(environmentManager, Mockito.never()).stopEnvironment(any());
+            release.countDown();
+            restore.get(10, TimeUnit.SECONDS);
+
+            verify(environmentManager).stopEnvironment(stored);
+            verify(proxyManager, Mockito.never()).startProxy(any(), anyInt(), any(), anyInt(), any(), any(), any(),
+                    any());
+            assertTrue(environmentStore.getForAccount("000000000000", "us-east-1/deleted-mid-restore-env").isEmpty());
+            assertTrue(runtimeStore.getForAccount("000000000000", "us-east-1/deleted-mid-restore-env").isEmpty());
+        }
+
+        @Test
+        void aDeleteBeforeTheRestoreReachesTheEnvironmentIsFinishedWithoutStartingIt() throws Exception {
+            Environment stored = storedEnvironment("deleted-early-env", EnvironmentStatus.AVAILABLE);
+            storedSecrets(stored);
+            CountDownLatch reached = new CountDownLatch(1);
+            CountDownLatch proceed = new CountDownLatch(1);
+            when(environmentManager.isShuttingDown()).thenAnswer(invocation -> {
+                reached.countDown();
+                assertTrue(proceed.await(10, TimeUnit.SECONDS));
+                return false;
+            });
+
+            CompletableFuture<Void> restore = realModeService.restorePersistedRuntime();
+            assertTrue(reached.await(10, TimeUnit.SECONDS));
+            realModeService.deleteEnvironment("deleted-early-env");
+            proceed.countDown();
+            restore.get(10, TimeUnit.SECONDS);
+
+            verify(environmentManager, Mockito.never()).adoptRunningEnvironment(any());
+            verify(environmentManager, Mockito.never()).restartEnvironment(any(), any(), any(), any());
+            verify(environmentManager).stopEnvironment(stored);
+            assertTrue(environmentStore.getForAccount("000000000000", "us-east-1/deleted-early-env").isEmpty());
+        }
+
+        @Test
+        void aDeleteAfterTheRestoreRemovesTheEnvironmentAtOnce() {
+            storedSecrets(storedEnvironment("deleted-after-restore-env", EnvironmentStatus.AVAILABLE));
+            realModeService.restorePersistedRuntime().join();
+
+            realModeService.deleteEnvironment("deleted-after-restore-env");
+
+            verify(environmentManager).stopEnvironment(any());
+            assertTrue(environmentStore.getForAccount("000000000000", "us-east-1/deleted-after-restore-env")
+                    .isEmpty());
+        }
+
+        @Test
+        void anEnvironmentWhoseRecordWentDuringItsRestoreIsNotBroughtBack() throws Exception {
+            Environment stored = storedEnvironment("wiped-env", EnvironmentStatus.AVAILABLE);
+            storedSecrets(stored);
+            CountDownLatch started = new CountDownLatch(1);
+            CountDownLatch release = blockRestart(started);
+
+            CompletableFuture<Void> restore = realModeService.restorePersistedRuntime();
+            assertTrue(started.await(10, TimeUnit.SECONDS));
+            environmentStore.deleteForAccount("000000000000", "us-east-1/wiped-env");
+            release.countDown();
+            restore.get(10, TimeUnit.SECONDS);
+
+            assertTrue(environmentStore.getForAccount("000000000000", "us-east-1/wiped-env").isEmpty());
+            verify(environmentManager).stopOwnContainers(stored);
+            verify(environmentManager, Mockito.never()).stopEnvironment(any());
+            verify(portAllocator).release(8705);
+            verify(proxyManager, Mockito.never()).startProxy(any(), anyInt(), any(), anyInt(), any(), any(), any(),
+                    any());
+        }
+
+        @Test
+        void anEnvironmentCreatedAgainDuringTheRestoreKeepsItsOwnRecord() throws Exception {
+            Environment stored = storedEnvironment("renamed-env", EnvironmentStatus.AVAILABLE);
+            storedSecrets(stored);
+            CountDownLatch started = new CountDownLatch(1);
+            CountDownLatch release = blockRestart(started);
+
+            CompletableFuture<Void> restore = realModeService.restorePersistedRuntime();
+            assertTrue(started.await(10, TimeUnit.SECONDS));
+            Environment recreated = storedEnvironment("renamed-env", EnvironmentStatus.CREATING);
+            recreated.setCreatedAt(Instant.parse("2026-11-20T00:00:00Z"));
+            release.countDown();
+            restore.get(10, TimeUnit.SECONDS);
+
+            assertEquals(EnvironmentStatus.CREATING, stored("renamed-env").getStatus());
+            assertEquals(Instant.parse("2026-11-20T00:00:00Z"), stored("renamed-env").getCreatedAt());
+            verify(environmentManager).stopOwnContainers(stored);
+            verify(environmentManager, Mockito.never()).stopEnvironment(any());
+        }
+
+        @Test
+        void aShutdownDuringTheRestoreLeavesTheRemainingEnvironmentsForTheNextStart() {
+            storedSecrets(storedEnvironment("overtaken-env", EnvironmentStatus.AVAILABLE));
+            storedSecrets(storedEnvironment("not-reached-env", EnvironmentStatus.AVAILABLE));
+            when(environmentManager.isShuttingDown()).thenReturn(false, true);
+            Mockito.doThrow(new MwaaEnvironmentManager.ShuttingDownException("Floci is shutting down"))
+                    .when(environmentManager).restartEnvironment(any(), any(), any(), any());
+
+            realModeService.restorePersistedRuntime().join();
+
+            verify(environmentManager).restartEnvironment(any(), any(), any(), any());
+            assertEquals(EnvironmentStatus.MAINTENANCE, stored("overtaken-env").getStatus());
+            assertEquals(EnvironmentStatus.MAINTENANCE, stored("not-reached-env").getStatus());
+            verify(environmentManager, Mockito.never()).stopOwnContainers(any());
+        }
+
+        @Test
+        void aRestoredEnvironmentWhosePortIsTakenGetsANewWebserverUrl() {
+            storedSecrets(storedEnvironment("moved-env", EnvironmentStatus.AVAILABLE));
+            Mockito.doThrow(new RuntimeException("Address already in use"))
+                    .when(proxyManager).startProxy(any(), eq(8705), any(), anyInt(), any(), any(), any(), any());
+
+            realModeService.restorePersistedRuntime().join();
+
+            verify(portAllocator).release(8705);
+            verify(proxyManager).startProxy(any(), eq(8701), any(), anyInt(), any(), any(), any(), any());
+            assertEquals("http://floci.test:8701", stored("moved-env").getWebserverUrl());
+        }
+
+        @Test
+        void aRestoredEnvironmentWithNoProxyIsUnavailable() {
+            Environment stored = storedEnvironment("no-proxy-env", EnvironmentStatus.AVAILABLE);
+            storedSecrets(stored);
+            Mockito.doThrow(new RuntimeException("Address already in use"))
+                    .when(proxyManager).startProxy(any(), anyInt(), any(), anyInt(), any(), any(), any(), any());
+
+            assertThrows(CompletionException.class, () -> realModeService.restorePersistedRuntime().join());
+
+            verify(portAllocator).release(8701);
+            assertEquals(EnvironmentStatus.UNAVAILABLE, stored("no-proxy-env").getStatus());
+            verify(environmentManager).stopOwnContainers(stored);
+        }
+
+        /** Holds the restore's restart, once it has begun, until the returned latch is released. */
+        private CountDownLatch blockRestart(CountDownLatch started) {
+            CountDownLatch release = new CountDownLatch(1);
+            Mockito.doAnswer(invocation -> {
+                started.countDown();
+                assertTrue(release.await(10, TimeUnit.SECONDS));
+                return null;
+            }).when(environmentManager).restartEnvironment(any(), any(), any(), any());
+            return release;
+        }
+
+        /** An environment as Floci reads it back after a restart: what storage keeps, none of what it holds in memory. */
+        private Environment storedEnvironment(String name, EnvironmentStatus status) {
+            Environment environment = new Environment();
+            environment.setName(name);
+            environment.setArn("arn:aws:airflow:us-east-1:000000000000:environment/" + name);
+            environment.setCreatedAt(Instant.parse("2026-11-01T00:00:00Z"));
+            environment.setStatus(status);
+            environment.setAirflowVersion("2.10.5");
+            environment.setSourceBucketArn("arn:aws:s3:::my-bucket");
+            environment.setDagS3Path("dags");
+            environment.setWebserverUrl("http://floci.test:8705");
+            environmentStore.putForAccount("000000000000", "us-east-1/" + name, environment);
+            return environment;
+        }
+
+        private void storedSecrets(Environment environment) {
+            EnvironmentRuntime runtime = new EnvironmentRuntime();
+            runtime.setEnvironmentCreatedAt(environment.getCreatedAt());
+            runtime.setDbPassword("saved-db-pw");
+            runtime.setFernetKey("saved-fernet-key");
+            runtime.setAirflowAdminPassword("saved-admin-pw");
+            runtimeStore.putForAccount("000000000000", "us-east-1/" + environment.getName(), runtime);
+        }
+
+        /** How many times the environment's record has been written to storage. */
+        private long writesOf(String name) {
+            return Mockito.mockingDetails(environmentStore).getInvocations().stream()
+                    .filter(invocation -> "putForAccount".equals(invocation.getMethod().getName())
+                            && ("us-east-1/" + name).equals(invocation.getArgument(1)))
+                    .count();
+        }
+
+        private Environment stored(String name) {
+            return environmentStore.getForAccount("000000000000", "us-east-1/" + name).orElseThrow();
+        }
+    }
+
+    @Test
+    void restoreLeavesMockEnvironmentsAlone() {
+        mwaaService.createEnvironment("mock-env", createRequest("arn:aws:s3:::my-bucket", "dags"));
+
+        assertTrue(mwaaService.restorePersistedRuntime().isDone());
+        assertEquals(EnvironmentStatus.AVAILABLE, mwaaService.getEnvironment("mock-env").getStatus());
+    }
+
+    @Test
+    void theSecretsAnEnvironmentRunsWithAreNeverInTheEnvironmentAsReturned() throws Exception {
+        Environment environment = new Environment();
+        environment.setName("secret-env");
+        environment.setDbPassword("db-secret");
+        environment.setFernetKey("fernet-secret");
+        environment.setAirflowAdminPassword("admin-secret");
+
+        String json = new ObjectMapper().writeValueAsString(environment);
+
+        assertFalse(json.contains("db-secret"), json);
+        assertFalse(json.contains("fernet-secret"), json);
+        assertFalse(json.contains("admin-secret"), json);
     }
 }
