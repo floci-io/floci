@@ -861,9 +861,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             RuleRef ref = parseRuleResource(resource);
             return EventBridgeErrors.ruleNotFound(ref.ruleName(), ref.busName());
         }
-        if (resource.startsWith("archive/")) {
-            return EventBridgeErrors.archiveNotFound(resource.substring("archive/".length()));
-        }
+        // Only rules and event buses take tags in AWS; no answer is recorded for any other kind.
         return new AwsException("ResourceNotFoundException", "Resource not found: " + resourceArn, 400);
     }
 

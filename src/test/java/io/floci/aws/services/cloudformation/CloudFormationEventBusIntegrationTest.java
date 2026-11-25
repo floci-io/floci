@@ -24,7 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * <p>Previously the type had no provisioner case, so it fell through to the generic stub: the resource
  * reported CREATE_COMPLETE with a physical id but the bus was never registered with the EventBridge
  * service. Any {@code AWS::Events::Rule} referencing it via {@code {"Ref": bus}} then failed
- * "EventBus not found", rolling the whole stack back. Per the AWS spec {@code Ref} returns the bus
+ * "Event bus ... does not exist.", rolling the whole stack back. Per the AWS spec {@code Ref} returns the bus
  * <em>name</em> and {@code Fn::GetAtt "Arn"} the ARN.
  *
  * <p>All resources are metadata-only (no container), so the test is Docker-free.
@@ -266,7 +266,7 @@ class CloudFormationEventBusIntegrationTest {
         String busName = "domain-events-" + suffix;
         String stackName = "eventbus-stack-" + suffix;
 
-        // The stub-only behaviour failed the Rule with "EventBus not found" -> ROLLBACK.
+        // The stub-only behaviour failed the Rule with "Event bus ... does not exist." -> ROLLBACK.
         createStack(stackName, eventBusAndRuleTemplate(busName));
         assertStackStatus(stackName, "CREATE_COMPLETE");
 

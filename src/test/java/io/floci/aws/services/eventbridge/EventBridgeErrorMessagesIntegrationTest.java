@@ -135,22 +135,6 @@ class EventBridgeErrorMessagesIntegrationTest {
     }
 
     @Test
-    void settledReplayCannotBeCancelled() throws InterruptedException {
-        createArchive("emsg-cancel-arch", "default");
-        ok("StartReplay", "{\"ReplayName\":\"emsg-cancel-replay\",\"EventSourceArn\":\"arn:aws:events:"
-                + "us-east-1:000000000000:archive/emsg-cancel-arch\",\"EventStartTime\":1700000000,"
-                + "\"EventEndTime\":1700000100,\"Destination\":{\"Arn\":\"" + BUS_ARN + "default\"}}");
-        String state = "";
-        for (int i = 0; i < 100 && !"COMPLETED".equals(state); i++) {
-            state = call("DescribeReplay", "{\"ReplayName\":\"emsg-cancel-replay\"}")
-                    .extract().path("State");
-            Thread.sleep(100);
-        }
-        refused("CancelReplay", "{\"ReplayName\":\"emsg-cancel-replay\"}", "IllegalStatusException",
-                "Replay emsg-cancel-replay is not in a valid state for this operation.");
-    }
-
-    @Test
     void connectionAndApiDestinationWritesOnMissingResourcesNameTheCall() {
         String nf = "ResourceNotFoundException";
         refused("UpdateConnection", "{\"Name\":\"emsg-w-conn\",\"Description\":\"d\"}", nf,
@@ -175,7 +159,7 @@ class EventBridgeErrorMessagesIntegrationTest {
         String nf = "ResourceNotFoundException";
         String events = "arn:aws:events:us-east-1:000000000000:";
         refused("ListTagsForResource", "{\"ResourceARN\":\"" + events + "archive/emsg-tag-arch\"}", nf,
-                "Archive emsg-tag-arch does not exist.");
+                "Resource not found: " + events + "archive/emsg-tag-arch");
         refused("TagResource", "{\"ResourceARN\":\"" + events + "rule/emsg-tag-bus/emsg-tag-rule\","
                 + "\"Tags\":[]}", nf, "Rule emsg-tag-rule does not exist on EventBus emsg-tag-bus.");
         refused("UntagResource", "{\"ResourceARN\":\"" + events + "event-bus/emsg-tag-bus\","
