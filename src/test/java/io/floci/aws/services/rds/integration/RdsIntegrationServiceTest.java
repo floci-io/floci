@@ -431,6 +431,55 @@ class RdsIntegrationServiceTest {
     }
 
     @Test
+    void isReplicating_onlyForALoadedDestinationOfAnIntegrationThatStillExists() {
+        Integration created = create("orders-zero-etl");
+        Integration integration = service.findById(created.integrationId()).orElseThrow();
+        Integration syncing = service.addDestination(integration, "orders_dw", "orders", false);
+        assertEquals(false, service.isReplicating(integration, "orders", "orders_dw"));
+
+        service.finishDestination(integration, "orders", "orders_dw", loadId(syncing, "orders"), null);
+        assertEquals(true, service.isReplicating(integration, "orders", "orders_dw"));
+        assertEquals(false, service.isReplicating(integration, "orders", "other_dw"));
+        assertThat(service.integrationsWithLoadedDestinations().stream().map(Integration::getIntegrationArn).toList(),
+                contains(created.getIntegrationArn()));
+
+        service.deleteIntegration(created.getIntegrationArn(), REGION);
+        assertEquals(false, service.isReplicating(integration, "orders", "orders_dw"));
+        assertEquals(false, service.exists(integration));
+    }
+
+    @Test
+    void failReplication_failsTheDestinationUntilItsDatabaseIsCreatedAgain() {
+        Integration created = create("orders-zero-etl");
+        Integration integration = service.findById(created.integrationId()).orElseThrow();
+        Integration syncing = service.addDestination(integration, "orders_dw", "orders", false);
+        service.finishDestination(integration, "orders", "orders_dw", loadId(syncing, "orders"), null);
+
+        service.failReplication(integration, "orders", "orders_dw", "relation does not exist");
+
+        Integration failed = describe(created);
+        assertEquals(Integration.STATUS_FAILED, failed.getStatus());
+        assertEquals(Integration.Destination.STATE_FAILED, failed.destinationFor("orders").orElseThrow().getState());
+        assertEquals(RdsIntegrationService.REPLICATION_FAILED, failed.getErrors().get(0).getErrorCode());
+        assertThat(failed.getErrors().get(0).getErrorMessage(), containsString("relation does not exist"));
+
+        Integration retried = service.addDestination(integration, "orders_dw", "orders", false);
+        assertEquals(Integration.STATUS_SYNCING, retried.getStatus());
+        assertThat(retried.getErrors(), empty());
+    }
+
+    @Test
+    void failReplication_leavesADestinationThatIsLoadingAgainAlone() {
+        Integration created = create("orders-zero-etl");
+        Integration integration = service.findById(created.integrationId()).orElseThrow();
+        service.addDestination(integration, "orders_dw", "orders", false);
+
+        service.failReplication(integration, "orders", "orders_dw", "late failure");
+
+        assertEquals(Integration.STATUS_SYNCING, describe(created).getStatus());
+    }
+
+    @Test
     void addDestination_preservesErrorsOfOtherFailedDestinations() {
         Integration created = create("orders-zero-etl");
         Integration integration = service.findById(created.integrationId()).orElseThrow();

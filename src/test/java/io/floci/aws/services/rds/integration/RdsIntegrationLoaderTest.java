@@ -10,6 +10,7 @@ import io.floci.aws.services.redshiftdata.RedshiftZeroEtlWriter.ReplicatedTable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -32,6 +33,7 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -53,6 +55,7 @@ class RdsIntegrationLoaderTest {
     private RdsService rdsService;
     private RdsContainerManager containers;
     private RedshiftZeroEtlWriter writer;
+    private RdsIntegrationReplicator replicator;
     private List<String> loadedRows;
     private Integration integration;
 
@@ -62,12 +65,14 @@ class RdsIntegrationLoaderTest {
         rdsService = mock(RdsService.class);
         containers = mock(RdsContainerManager.class);
         writer = mock(RedshiftZeroEtlWriter.class);
+        replicator = mock(RdsIntegrationReplicator.class);
         loadedRows = new ArrayList<>();
         DbCluster cluster = new DbCluster();
         cluster.setContainerId("container-1");
         cluster.setMasterUsername("postgres");
         when(rdsService.ensureClusterBackend("orders-src", "us-east-1")).thenReturn(cluster);
         when(integrations.isLoading(any(), eq("orders"), eq("orders_dw"), eq(LOAD_ID))).thenReturn(true);
+        walLevel("replica");
         doAnswer(invocation -> {
             invocation.<OutputStream>getArgument(4).write("1,widget\n".getBytes(StandardCharsets.UTF_8));
             return null;
@@ -91,9 +96,13 @@ class RdsIntegrationLoaderTest {
     }
 
     private RdsIntegrationLoader loader(boolean mock) {
-        RdsIntegrationSource sources = new RdsIntegrationSource(rdsService, containers, new ObjectMapper());
-        return new RdsIntegrationLoader(integrations, sources, writer, mock,
-                Runnable::run, 2, Duration.ZERO);
+        return new RdsIntegrationLoader(integrations, new RdsIntegrationSource(rdsService, containers,
+                new ObjectMapper()), replicator, writer, mock, Runnable::run, 2, Duration.ZERO);
+    }
+
+    private void walLevel(String level) {
+        when(containers.queryPostgres("container-1", "postgres", "orders", "SHOW wal_level"))
+                .thenReturn(level + "\n");
     }
 
     private void catalog(String... rows) {
@@ -277,5 +286,69 @@ class RdsIntegrationLoaderTest {
         verify(integrations).reconcileInterruptedCreations();
         verify(integrations).finishDestination(any(), eq("orders"), eq("orders_dw"), eq("load-resumed"), isNull());
         verify(integrations, never()).finishDestination(any(), eq("done"), anyString(), any(), any());
+    }
+
+    @Test
+    void withLogicalReplication_publishesTheCopiedTablesAndCreatesTheSlotBeforeCopying() {
+        walLevel("logical");
+        catalog(column("public", "items", "id", "int4", "integer", 1),
+                column("public", "notes", "body", "text", "text", 0));
+        when(integrations.isReplicating(any(), eq("orders"), eq("orders_dw"))).thenReturn(true);
+        String name = RdsIntegrationSource.replicationName(integration, "orders");
+
+        loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
+
+        InOrder order = inOrder(containers);
+        order.verify(containers).queryPostgres("container-1", "postgres", "orders",
+                "CREATE PUBLICATION " + name + " FOR TABLE \"public\".\"items\" "
+                        + "WITH (publish_via_partition_root = true)");
+        order.verify(containers).queryPostgres("container-1", "postgres", "orders",
+                "SELECT pg_create_logical_replication_slot('" + name + "', 'pgoutput')");
+        order.verify(containers).queryPostgres(eq("container-1"), eq("postgres"), eq("orders"), startsWith("COPY"),
+                any(OutputStream.class), anyInt());
+        verify(integrations).finishDestination(integration, "orders", "orders_dw", LOAD_ID, null);
+        verify(replicator).start(integration, "orders", "orders_dw");
+    }
+
+    @Test
+    void withoutLogicalReplication_copiesOnceAndDoesNotReplicate() {
+        catalog(column("public", "items", "id", "int4", "integer", 1));
+
+        loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
+
+        verify(containers, never()).queryPostgres(anyString(), anyString(), anyString(),
+                startsWith("CREATE PUBLICATION"));
+        verify(integrations).finishDestination(integration, "orders", "orders_dw", LOAD_ID, null);
+        verifyNoInteractions(replicator);
+    }
+
+    @Test
+    void aFailedLoadDropsTheReplicationItSetUp() {
+        walLevel("logical");
+        catalog(column("public", "items", "id", "int4", "integer", 1));
+        doThrow(new IllegalStateException("value too long")).when(writer)
+                .loadTable(anyString(), anyString(), anyString(), any(), any());
+
+        loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
+
+        verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), eq(LOAD_ID),
+                anyString());
+        verify(containers, times(2)).queryPostgres(anyString(), anyString(), anyString(),
+                startsWith("SELECT pg_drop_replication_slot"));
+        verifyNoInteractions(replicator);
+    }
+
+    @Test
+    void aLoadStoppedByTheIntegrationsDeletionDropsTheReplicationItSetUp() {
+        walLevel("logical");
+        catalog(column("public", "items", "id", "int4", "integer", 1));
+        when(integrations.isLoading(any(), eq("orders"), eq("orders_dw"), eq(LOAD_ID))).thenReturn(true, false);
+
+        loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
+
+        verify(writer, never()).loadTable(anyString(), anyString(), anyString(), any(), any());
+        verify(containers, times(2)).queryPostgres(anyString(), anyString(), anyString(),
+                startsWith("SELECT pg_drop_replication_slot"));
+        verifyNoInteractions(replicator);
     }
 }
