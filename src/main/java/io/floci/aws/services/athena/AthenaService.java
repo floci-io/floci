@@ -748,8 +748,9 @@ public class AthenaService {
     public ResultSet getQueryResults(String region, String id) {
         QueryExecution execution = getQueryExecution(region, id);
 
-        if (execution.getStatus().getState() != QueryExecutionState.SUCCEEDED) {
-            throw new AwsException("InvalidRequestException", "Query has not succeeded yet", 400);
+        QueryExecutionState state = execution.getStatus().getState();
+        if (state != QueryExecutionState.SUCCEEDED) {
+            throw new AwsException("InvalidRequestException", unreadResults(state), 400);
         }
 
         // DDL rows (SHOW PARTITIONS) come from the Glue catalog, not the query engine, so mock mode keeps them.
@@ -761,6 +762,19 @@ public class AthenaService {
 
         List<String> columnTypes = resultColumnTypeStore.get(id).orElse(List.of());
         return readResultsFromS3(execution.getResultConfiguration().getOutputLocation(), id, columnTypes);
+    }
+
+    /**
+     * Why Athena refuses the results of a query in the state, which is not {@code SUCCEEDED}, as AWS words it: one still
+     * queued or running has not finished, a failed one did not finish successfully, and a cancelled one has none.
+     */
+    private static String unreadResults(QueryExecutionState state) {
+        return switch (state) {
+            case QUEUED, RUNNING -> "Query has not yet finished. Current state: " + state.name();
+            case FAILED -> "Query did not finish successfully. Final query state: " + state.name();
+            case CANCELLED -> "Could not find results";
+            case SUCCEEDED -> throw new IllegalStateException("a succeeded query's results are read, not refused");
+        };
     }
 
     // ── private helpers ───────────────────────────────────────────────────────
