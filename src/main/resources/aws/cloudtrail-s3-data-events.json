@@ -1,0 +1,148 @@
+{
+  "_source": {
+    "botocore": "botocore 1.44.9 (installed package)",
+    "page": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/cloudtrail-logging-s3-info.html",
+    "reference": "https://servicereference.us-east-1.amazonaws.com/v1/s3/s3.json",
+    "generator": "tools/aws/regen_cloudtrail_s3_data_events.py",
+    "note": "Each S3 operation CloudTrail records as a data event on an AWS::S3::Object, with the event name it is recorded under and whether it is recorded read-only. `unmodeled` lists the APIs the guide names that botocore models no operation for."
+  },
+  "dataEvents": {
+    "AbortMultipartUpload": {
+      "eventName": "AbortMultipartUpload",
+      "readOnly": false
+    },
+    "CompleteMultipartUpload": {
+      "eventName": "CompleteMultipartUpload",
+      "readOnly": false
+    },
+    "CopyObject": {
+      "eventName": "CopyObject",
+      "readOnly": false
+    },
+    "CreateMultipartUpload": {
+      "eventName": "CreateMultipartUpload",
+      "readOnly": false
+    },
+    "DeleteObject": {
+      "eventName": "DeleteObject",
+      "readOnly": false
+    },
+    "DeleteObjectAnnotation": {
+      "eventName": "DeleteObjectAnnotation",
+      "readOnly": false
+    },
+    "DeleteObjectTagging": {
+      "eventName": "DeleteObjectTagging",
+      "readOnly": false
+    },
+    "DeleteObjects": {
+      "eventName": "DeleteObjects",
+      "readOnly": false
+    },
+    "GetObject": {
+      "eventName": "GetObject",
+      "readOnly": true
+    },
+    "GetObjectAcl": {
+      "eventName": "GetObjectAcl",
+      "readOnly": true
+    },
+    "GetObjectAnnotation": {
+      "eventName": "GetObjectAnnotation",
+      "readOnly": true
+    },
+    "GetObjectAttributes": {
+      "eventName": "GetObjectAttributes",
+      "readOnly": true
+    },
+    "GetObjectLegalHold": {
+      "eventName": "GetObjectLegalHold",
+      "readOnly": true
+    },
+    "GetObjectRetention": {
+      "eventName": "GetObjectRetention",
+      "readOnly": true
+    },
+    "GetObjectTagging": {
+      "eventName": "GetObjectTagging",
+      "readOnly": true
+    },
+    "GetObjectTorrent": {
+      "eventName": "GetObjectTorrent",
+      "readOnly": true
+    },
+    "HeadBucket": {
+      "eventName": "HeadBucket",
+      "readOnly": true
+    },
+    "HeadObject": {
+      "eventName": "HeadObject",
+      "readOnly": true
+    },
+    "ListObjectAnnotations": {
+      "eventName": "ListObjectAnnotations",
+      "readOnly": true
+    },
+    "ListObjectVersions": {
+      "eventName": "ListObjectVersions",
+      "readOnly": true
+    },
+    "ListObjects": {
+      "eventName": "ListObjects",
+      "readOnly": true
+    },
+    "ListObjectsV2": {
+      "eventName": "ListObjects",
+      "readOnly": true
+    },
+    "ListParts": {
+      "eventName": "ListParts",
+      "readOnly": true
+    },
+    "PutObject": {
+      "eventName": "PutObject",
+      "readOnly": false
+    },
+    "PutObjectAcl": {
+      "eventName": "PutObjectAcl",
+      "readOnly": false
+    },
+    "PutObjectAnnotation": {
+      "eventName": "PutObjectAnnotation",
+      "readOnly": false
+    },
+    "PutObjectLegalHold": {
+      "eventName": "PutObjectLegalHold",
+      "readOnly": false
+    },
+    "PutObjectRetention": {
+      "eventName": "PutObjectLockRetention",
+      "readOnly": false
+    },
+    "PutObjectTagging": {
+      "eventName": "PutObjectTagging",
+      "readOnly": false
+    },
+    "RestoreObject": {
+      "eventName": "RestoreObject",
+      "readOnly": false
+    },
+    "SelectObjectContent": {
+      "eventName": "SelectObjectContent",
+      "readOnly": true
+    },
+    "UpdateObjectEncryption": {
+      "eventName": "UpdateObjectEncryption",
+      "readOnly": false
+    },
+    "UploadPart": {
+      "eventName": "UploadPart",
+      "readOnly": false
+    },
+    "UploadPartCopy": {
+      "eventName": "UploadPartCopy",
+      "readOnly": false
+    }
+  },
+  "unmodeled": []
+}
