@@ -7285,7 +7285,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private boolean blocksSseCustomerEncryptionByDefault(Bucket bucket) {
         String region = bucket.getRegion() != null ? bucket.getRegion()
                 : regionResolver != null ? regionResolver.getDefaultRegion() : null;
-        return !"me-south-1".equals(region) && !"me-central-1".equals(region);
+        return !"me-south-1".equals(region) && !"me-central-1".equals(region); // partition-literal: S3 exempts Bahrain and UAE from default SSE-C blocking
     }
 
     private boolean blocksSseCustomerEncryption(Bucket bucket) {
