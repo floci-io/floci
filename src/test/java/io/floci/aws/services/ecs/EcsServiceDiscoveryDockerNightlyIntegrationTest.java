@@ -175,7 +175,8 @@ class EcsServiceDiscoveryDockerNightlyIntegrationTest {
         ContainerDefinition app = new ContainerDefinition();
         app.setName(CONTAINER_NAME);
         app.setImage(BUSYBOX_IMAGE);
-        app.setCommand(List.of("sleep", "120"));
+        // PID 1 must handle TERM so discovery cleanup does not wait out the stop timeout.
+        app.setCommand(List.of("sh", "-c", "trap 'exit 0' TERM; sleep 120 & wait"));
         return ecsService.registerTaskDefinition(family, List.of(app), NetworkMode.awsvpc,
                 null, null, null, null, null, REGION);
     }
