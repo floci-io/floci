@@ -19,6 +19,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -47,10 +48,11 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
-@TestProfile(SsmSessionManagerIntegrationTest.Profile.class)
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
+@TestProfile(SsmSessionManagerDockerNightlyIntegrationTest.Profile.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @Timeout(120)
-class SsmSessionManagerIntegrationTest {
+class SsmSessionManagerDockerNightlyIntegrationTest {
     public static class Profile extends SelfSignedTlsProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
