@@ -12,10 +12,12 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
+import java.util.HexFormat;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -717,6 +719,215 @@ class S3PresignedPostIntegrationTest {
     }
 
     @Test
+    @Order(98)
+    void presignedPostRedirectsToSuccessActionRedirect() {
+        String key = "uploads/redirect dir/file one.txt";
+        String fileContent = "redirect me";
+
+        given()
+            .redirects().follow(false)
+            .multiPart("key", key)
+            .multiPart("success_action_redirect", "http://localhost:8000/done")
+            .multiPart("file", "file one.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(303)
+            .header("ETag", equalTo(quotedMd5(fileContent)))
+            .body(emptyString())
+            .header("Location", equalTo("http://localhost:8000/done?bucket=" + BUCKET
+                + "&key=uploads%2Fredirect%20dir%2Ffile%20one.txt"
+                + "&etag=%22" + md5Hex(fileContent) + "%22"));
+
+        assertStored(key, fileContent);
+    }
+
+    @Test
+    @Order(98)
+    void presignedPostRedirectAppendsToAnExistingQueryString() {
+        String key = "uploads/redirect-query.txt";
+        String fileContent = "redirect with query";
+
+        given()
+            .redirects().follow(false)
+            .multiPart("key", key)
+            .multiPart("success_action_redirect", "https://example.com/done?from=upload")
+            .multiPart("file", "redirect-query.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(303)
+            .header("Location", equalTo("https://example.com/done?from=upload&bucket=" + BUCKET
+                    + "&key=uploads%2Fredirect-query.txt&etag=%22" + md5Hex(fileContent) + "%22"));
+
+        assertStored(key, fileContent);
+    }
+
+    @Test
+    @Order(98)
+    void presignedPostAcceptsLegacyRedirectField() {
+        String key = "uploads/legacy-redirect.txt";
+        String fileContent = "legacy redirect";
+
+        given()
+            .redirects().follow(false)
+            .multiPart("key", key)
+            .multiPart("redirect", "http://localhost:8000/legacy")
+            .multiPart("file", "legacy-redirect.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(303)
+            .header("Location", startsWith("http://localhost:8000/legacy?bucket=" + BUCKET + "&key="));
+
+        assertStored(key, fileContent);
+    }
+
+    @Test
+    @Order(98)
+    void presignedPostPrefersSuccessActionRedirectOverLegacyRedirect() {
+        String key = "uploads/both-redirects.txt";
+        String fileContent = "both redirects";
+
+        given()
+            .redirects().follow(false)
+            .multiPart("key", key)
+            .multiPart("redirect", "http://localhost:8000/legacy")
+            .multiPart("Success_Action_Redirect", "http://localhost:8000/preferred")
+            .multiPart("success_action_status", "201")
+            .multiPart("file", "both-redirects.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(303)
+            .header("Location", startsWith("http://localhost:8000/preferred?bucket="));
+
+        assertStored(key, fileContent);
+    }
+
+    @Test
+    @Order(98)
+    void presignedPostIgnoresARedirectThatIsNotAnAbsoluteUrl() {
+        String key = "uploads/relative-redirect.txt";
+        String fileContent = "relative redirect";
+
+        given()
+            .redirects().follow(false)
+            .multiPart("key", key)
+            .multiPart("success_action_redirect", "/done")
+            .multiPart("success_action_status", "200")
+            .multiPart("file", "relative-redirect.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(200)
+            .body(emptyString());
+
+        assertStored(key, fileContent);
+    }
+
+    @Test
+    @Order(98)
+    void presignedPostReturnsPostResponseForStatus201() {
+        String key = "uploads/status-201.txt";
+        String fileContent = "status 201";
+        String etag = quotedMd5(fileContent);
+
+        String location = given()
+            .multiPart("key", key)
+            .multiPart("success_action_status", "201")
+            .multiPart("file", "status-201.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(201)
+            .contentType("application/xml")
+            .header("ETag", equalTo(etag))
+            .body(hasXPath("/PostResponse/Bucket", equalTo(BUCKET)))
+            .body(hasXPath("/PostResponse/Key", equalTo(key)))
+            .body(hasXPath("/PostResponse/ETag", equalTo(etag)))
+            .body(hasXPath("/PostResponse/Location", allOf(
+                    matchesRegex("https?://.+"), endsWith("/" + BUCKET + "/" + key))))
+            .extract().header("Location");
+
+        assertThat(location, matchesRegex("https?://.+/" + BUCKET + "/" + key));
+        assertStored(key, fileContent);
+    }
+
+    @Test
+    @Order(98)
+    void presignedPostReturnsEmpty200ForStatus200() {
+        String key = "uploads/status-200.txt";
+        String fileContent = "status 200";
+
+        given()
+            .multiPart("key", key)
+            .multiPart("success_action_status", "200")
+            .multiPart("file", "status-200.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(200)
+            .header("ETag", equalTo(quotedMd5(fileContent)))
+            .body(emptyString());
+
+        assertStored(key, fileContent);
+    }
+
+    @ParameterizedTest
+    @Order(98)
+    @ValueSource(strings = {"", "204", "202", "not-a-status"})
+    void presignedPostKeeps204ForOtherStatusValues(String status) {
+        String key = "uploads/status-default.txt";
+        String fileContent = "status default " + status;
+
+        given()
+            .multiPart("key", key)
+            .multiPart("success_action_status", status)
+            .multiPart("file", "status-default.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(204)
+            .header("ETag", equalTo(quotedMd5(fileContent)));
+
+        assertStored(key, fileContent);
+    }
+
+    @Test
+    @Order(99)
+    void presignedPostAcceptsRedirectMatchingStartsWithCondition() {
+        String key = "uploads/policy-redirect-ok.txt";
+        String fileContent = "policy redirect ok";
+
+        postWithRedirectPolicy(key, "http://localhost:8000/", "http://localhost:8000/done", fileContent)
+            .statusCode(303)
+            .header("Location", startsWith("http://localhost:8000/done?bucket="));
+
+        assertStored(key, fileContent);
+    }
+
+    @Test
+    @Order(99)
+    void presignedPostRejectsRedirectNotMatchingStartsWithCondition() {
+        String key = "uploads/policy-redirect-bad.txt";
+
+        postWithRedirectPolicy(key, "http://localhost:8000/", "https://evil.example.com/done", "policy redirect bad")
+            .statusCode(403)
+            .contentType("application/xml")
+            .body(hasXPath("/Error/Code", equalTo("AccessDenied")))
+            .body(hasXPath("/Error/Message", equalTo(
+                    "Invalid according to Policy: Policy Condition failed: "
+                            + "[\"starts-with\", \"$success_action_redirect\", \"http://localhost:8000/\"]")));
+
+        given()
+        .when()
+            .head("/" + BUCKET + "/" + key)
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
     @Order(100)
     void cleanupBucket() {
         // Delete all objects
@@ -730,6 +941,15 @@ class S3PresignedPostIntegrationTest {
         given().delete("/" + BUCKET + "/uploads/prefix-test.txt");
         given().delete("/" + BUCKET + "/uploads/capital-p-ok.txt");
         given().delete("/" + BUCKET + "/uploads/with-metadata.txt");
+        given().delete("/" + BUCKET + "/uploads/redirect dir/file one.txt");
+        given().delete("/" + BUCKET + "/uploads/redirect-query.txt");
+        given().delete("/" + BUCKET + "/uploads/legacy-redirect.txt");
+        given().delete("/" + BUCKET + "/uploads/both-redirects.txt");
+        given().delete("/" + BUCKET + "/uploads/relative-redirect.txt");
+        given().delete("/" + BUCKET + "/uploads/status-201.txt");
+        given().delete("/" + BUCKET + "/uploads/status-200.txt");
+        given().delete("/" + BUCKET + "/uploads/status-default.txt");
+        given().delete("/" + BUCKET + "/uploads/policy-redirect-ok.txt");
 
         given()
         .when()
@@ -752,6 +972,60 @@ class S3PresignedPostIntegrationTest {
         .when()
             .post("/" + BUCKET)
         .then();
+    }
+
+    private ValidatableResponse postWithRedirectPolicy(String key, String redirectPrefix, String redirect,
+                                                       String fileContent) {
+        String expiration = Instant.now().plusSeconds(3600)
+                .atZone(ZoneOffset.UTC)
+                .format(DateTimeFormatter.ISO_INSTANT);
+        String policy = """
+                {
+                  "expiration": "%s",
+                  "conditions": [
+                    {"bucket": "%s"},
+                    {"key": "%s"},
+                    ["starts-with", "$success_action_redirect", "%s"]
+                  ]
+                }
+                """.formatted(expiration, BUCKET, key, redirectPrefix);
+        String fileName = key.substring(key.lastIndexOf('/') + 1);
+
+        return given()
+            .redirects().follow(false)
+            .multiPart("key", key)
+            .multiPart("success_action_redirect", redirect)
+            .multiPart("policy", Base64.getEncoder().encodeToString(policy.getBytes(StandardCharsets.UTF_8)))
+            .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
+            .multiPart("x-amz-credential", "AKIAIOSFODNN7EXAMPLE/20260330/us-east-1/s3/aws4_request")
+            .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
+            .multiPart("x-amz-signature", "dummysignature")
+            .multiPart("file", fileName, fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then();
+    }
+
+    private void assertStored(String key, String fileContent) {
+        given()
+        .when()
+            .get("/" + BUCKET + "/" + key)
+        .then()
+            .statusCode(200)
+            .body(equalTo(fileContent));
+    }
+
+    private static String quotedMd5(String content) {
+        return "\"" + md5Hex(content) + "\"";
+    }
+
+    private static String md5Hex(String content) {
+        try {
+            byte[] digest = MessageDigest.getInstance("MD5").digest(content.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private String buildPolicy(String bucket, String key, String contentType, long minSize, long maxSize) {

@@ -73,7 +73,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.math.BigInteger;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
@@ -1635,7 +1638,7 @@ public class S3Controller {
                 return handleDeleteObjects(bucket, body, httpHeaders, uriInfo);
             }
             if (contentType != null && contentType.startsWith("multipart/form-data")) {
-                return handlePresignedPost(bucket, contentType, body);
+                return handlePresignedPost(bucket, contentType, body, uriInfo);
             }
             if (hasQueryParam(uriInfo, "uploads") || hasQueryParam(uriInfo, "uploadId")) {
                 String actualBucket = resolveActualBucket(httpHeaders, uriInfo);
@@ -4118,9 +4121,9 @@ public class S3Controller {
         }
     }
 
-    private Response handlePresignedPost(String bucket, String contentType, byte[] body) {
+    private Response handlePresignedPost(String bucket, String contentType, byte[] body, UriInfo uriInfo) {
         try {
-            return doHandlePresignedPost(bucket, contentType, body);
+            return doHandlePresignedPost(bucket, contentType, body, uriInfo);
         } catch (AwsException e) {
             // Presigned POST errors must be returned as XML (matching LocalStack/AWS),
             // not JSON which is what the global AwsExceptionMapper would produce.
@@ -4128,7 +4131,7 @@ public class S3Controller {
         }
     }
 
-    private Response doHandlePresignedPost(String bucket, String contentType, byte[] body) {
+    private Response doHandlePresignedPost(String bucket, String contentType, byte[] body, UriInfo uriInfo) {
         String boundary = MultipartFormParser.extractBoundary(contentType).orElseThrow(() ->
                 new AwsException("InvalidArgument",
                         "Could not determine multipart boundary from Content-Type.", 400));
@@ -4224,18 +4227,8 @@ public class S3Controller {
                 .withSseCustomerKeyMd5(lcFields.get("x-amz-server-side-encryption-customer-key-md5")));
         LOG.infov("Presigned POST upload: {0}/{1} ({2} bytes)", bucket, key, fileData.length);
 
-        String xml = new XmlBuilder()
-                .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
-                .start("PostResponse")
-                .elem("Location", bucket + "/" + key)
-                .elem("Bucket", bucket)
-                .elem("Key", key)
-                .elem("ETag", obj.getETag())
-                .end("PostResponse")
-                .build();
-        var response = Response.status(204)
-                .header("ETag", obj.getETag())
-                .header("Location", bucket + "/" + key);
+        Response.ResponseBuilder response = postObjectResponse(bucket, key, obj, lcFields, uriInfo)
+                .header("ETag", obj.getETag());
         if (obj.getServerSideEncryption() != null) {
             response.header("x-amz-server-side-encryption", obj.getServerSideEncryption());
         }
@@ -4246,6 +4239,92 @@ public class S3Controller {
             response.header("x-amz-version-id", obj.getVersionId());
         }
         return response.build();
+    }
+
+    /**
+     * The status and body of a successful POST Object, as the
+     * <a href="https://docs.aws.amazon.com/AmazonS3/latest/API/RESTObjectPOST.html">POST Object reference</a>
+     * describes them: a valid {@code success_action_redirect} (or its legacy alias {@code redirect}) answers
+     * {@code 303} to that URL with {@code bucket}, {@code key} and {@code etag} appended; otherwise
+     * {@code success_action_status} picks {@code 201} with a {@code PostResponse} document or an empty
+     * {@code 200}, and anything else is {@code 204}.
+     */
+    private static Response.ResponseBuilder postObjectResponse(String bucket, String key, S3Object obj,
+                                                               Map<String, String> lcFields, UriInfo uriInfo) {
+        String redirect = lcFields.get("success_action_redirect");
+        if (redirect == null || redirect.isEmpty()) {
+            redirect = lcFields.get("redirect");
+        }
+        URI redirectUri = absoluteRedirectUri(redirect);
+        if (redirectUri != null) {
+            return Response.status(303)
+                    .header("Location", postRedirectLocation(redirectUri, bucket, key, obj.getETag()));
+        }
+
+        String status = lcFields.get("success_action_status");
+        if ("201".equals(status)) {
+            String baseUrl = uriInfo.getBaseUri().toString();
+            if (baseUrl.endsWith("/")) {
+                baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
+            }
+            String location = baseUrl + "/" + bucket + "/" + key;
+            String xml = new XmlBuilder()
+                    .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                    .start("PostResponse")
+                    .elem("Location", location)
+                    .elem("Bucket", bucket)
+                    .elem("Key", key)
+                    .elem("ETag", obj.getETag())
+                    .end("PostResponse")
+                    .build();
+            return Response.status(201)
+                    .type(MediaType.APPLICATION_XML)
+                    .entity(xml)
+                    .header("Location", location);
+        }
+        if ("200".equals(status)) {
+            return Response.ok();
+        }
+        return Response.status(204)
+                .header("Location", bucket + "/" + key);
+    }
+
+    /** A redirect field S3 honors: an absolute URL with a host. Anything else S3 ignores, so this returns null. */
+    private static URI absoluteRedirectUri(String redirect) {
+        if (redirect == null || redirect.isBlank()) {
+            return null;
+        }
+        try {
+            URI uri = new URI(redirect.trim());
+            return uri.isAbsolute() && uri.getHost() != null ? uri : null;
+        } catch (URISyntaxException e) {
+            LOG.debugv("Ignoring presigned POST redirect that is not a valid URL: {0}", redirect);
+            return null;
+        }
+    }
+
+    private static String postRedirectLocation(URI redirectUri, String bucket, String key, String etag) {
+        String target = redirectUri.toString();
+        String fragment = "";
+        int hash = target.indexOf('#');
+        if (hash >= 0) {
+            fragment = target.substring(hash);
+            target = target.substring(0, hash);
+        }
+
+        String separator = redirectUri.getRawQuery() == null ? "?" : "&";
+        if (target.endsWith("?") || target.endsWith("&")) {
+            separator = "";
+        }
+        return target + separator
+                + "bucket=" + formEncode(bucket)
+                + "&key=" + formEncode(key)
+                + "&etag=" + formEncode(etag)
+                + fragment;
+    }
+
+    private static String formEncode(String value) {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
     }
 
     /**
