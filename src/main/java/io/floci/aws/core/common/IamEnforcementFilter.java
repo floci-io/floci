@@ -1266,7 +1266,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                             credentialScope, operationAction, resource, region, accountId, targetContext);
                 }
                 taggedContext = IamConditionContextResolver.withResourceTags(taggedContext,
-                        conditionContextResolver.resourceTags(resource));
+                        conditionContextResolver.resourceTags(action, resource));
                 taggedContext = IamConditionContextResolver.withResourceTags(taggedContext,
                         conditionContextResolver.resourceKeys(action, resource));
                 Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
