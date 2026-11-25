@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import io.vertx.core.Context;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
@@ -55,6 +56,7 @@ public class SsmMessageGateway implements Resettable {
     public record SessionRequest(String sessionId, String sessionArn, String ownerArn, Node node,
                                  String documentName, JsonNode documentContent, Map<String, Object> parameters) { }
 
+    @RegisterForReflection
     public enum SessionState { CONNECTED, DISCONNECTED, TERMINATED, FAILED }
 
     record SessionTarget(String sessionArn, Node node) { }
