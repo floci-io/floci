@@ -3764,6 +3764,57 @@ class IamRequestResourceEnforcementIntegrationTest {
                 "{\"ServerId\":\"s-0123456789abcdef1\"}"), "transfer:DescribeServer");
     }
 
+    /**
+     * An Athena query execution is checked on its workgroup in the Region it was started in, whichever Region the
+     * request is sent to: a grant on another Region's workgroup of the same name does not reach it, a deny on its own
+     * workgroup is not passed by through another Region, and a grant on its own workgroup lets the caller read it.
+     */
+    @Test
+    void anAthenaQueryExecutionIsCheckedOnItsWorkgroupInTheRegionItRunsIn() {
+        String id = adminJson("athena", "AmazonAthena.StartQueryExecution")
+                .body("{\"QueryString\":\"DROP TABLE IF EXISTS no_such_table\",\"WorkGroup\":\"primary\"}")
+                .post("/").then().statusCode(200).extract().path("QueryExecutionId");
+        String other = "eu-west-1";
+        String primary = ":" + ACCOUNT + ":workgroup/primary";
+        String body = "{\"QueryExecutionId\":\"" + id + "\"}";
+        User user = user("res-athena-execution");
+        user.policy(allowOn("athena:GetQueryExecution", "arn:aws:athena:" + other + primary));
+        refusedJson(getQueryExecutionIn(user, other, body), "athena:GetQueryExecution");
+        user.policy(allowOn("athena:GetQueryExecution", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"athena:GetQueryExecution\",\"Resource\":\"arn:aws:athena:" + REGION + primary + "\"}");
+        refusedJson(getQueryExecutionIn(user, other, body), "athena:GetQueryExecution");
+        user.policy(allowOn("athena:GetQueryExecution", "arn:aws:athena:" + REGION + primary));
+        send(user, "athena", "AmazonAthena.GetQueryExecution", "1.1", body).statusCode(200);
+    }
+
+    private static ValidatableResponse getQueryExecutionIn(User user, String region, String body) {
+        return given().header("Authorization", auth(user.accessKeyId(), region, "athena"))
+                .header("X-Amz-Target", "AmazonAthena.GetQueryExecution").contentType("application/x-amz-json-1.1")
+                .body(body).post("/").then();
+    }
+
+    /**
+     * An Athena named query is checked on the workgroup it runs in, which its request names only by the query's id, so a
+     * grant on that workgroup lets the caller read it and a grant on another does not.
+     */
+    @Test
+    void anAthenaNamedQueryIsCheckedOnTheWorkgroupItRunsIn() {
+        String id = adminJson("athena", "AmazonAthena.CreateNamedQuery")
+                .body("{\"Name\":\"res-" + suffix() + "\",\"Database\":\"db\",\"QueryString\":\"select 1\","
+                        + "\"WorkGroup\":\"primary\"}")
+                .post("/").then().statusCode(200).extract().path("NamedQueryId");
+        cleanup.register(() -> adminJson("athena", "AmazonAthena.DeleteNamedQuery")
+                .body("{\"NamedQueryId\":\"" + id + "\"}").post("/"));
+        String workgroups = "arn:aws:athena:" + REGION + ":" + ACCOUNT + ":workgroup/";
+        User user = user("res-athena");
+        user.policy(allowOn("athena:GetNamedQuery", workgroups + "primary"));
+        send(user, "athena", "AmazonAthena.GetNamedQuery", "1.1", "{\"NamedQueryId\":\"" + id + "\"}")
+                .statusCode(200);
+        user.policy(allowOn("athena:GetNamedQuery", workgroups + "reports"));
+        refusedJson(send(user, "athena", "AmazonAthena.GetNamedQuery", "1.1", "{\"NamedQueryId\":\"" + id + "\"}"),
+                "athena:GetNamedQuery");
+    }
+
     private static ValidatableResponse glue(String operation, String body) {
         return adminJson("glue", "AWSGlue." + operation).body(body).post("/").then();
     }

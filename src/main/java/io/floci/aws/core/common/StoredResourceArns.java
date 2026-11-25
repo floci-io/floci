@@ -42,9 +42,10 @@ import java.util.Optional;
  * execution of a callback, and the tags of a function, an event source mapping, a web function, a MicroVM image or a
  * network connector; Glue, for the tags of a resource it tags; Step Functions, for the tags of a state machine, its
  * versions and executions, and an activity; CodeBuild, for the project a build belongs to and the tags of a project or
- * a report group; Athena, for the workgroup and the data catalog a request naming none uses and the tags of a
- * workgroup or a data catalog; Redshift Serverless, for the tags of a namespace, a workgroup or a snapshot; DynamoDB,
- * for the tags of a table and its indexes; ECR, for the tags of a repository; Redshift, for the key a snapshot records
+ * a report group; Athena, for the workgroup and the data catalog a request naming none uses, the workgroup a query
+ * execution or a named query runs in, and the tags of a workgroup or a data catalog; Redshift Serverless, for the
+ * tags of a namespace, a workgroup or a snapshot; DynamoDB, for the tags of a table and its indexes; ECR, for the
+ * tags of a repository; Redshift, for the key a snapshot records
  * and the tags of a cluster, a snapshot, a parameter group, a subnet group, a snapshot copy grant, a snapshot
  * schedule, an event subscription or an integration; SSM, for the parameter a legacy ARN names, the document of
  * another account an association runs and the tags of a parameter, a document or an association; CloudFront, for the
