@@ -53,6 +53,7 @@ public class EventBridgeV2EventSources implements Resettable {
     private final Clock clock;
     private final URI baseUrl;
     private final SecureRandom random = new SecureRandom();
+    private final WebhookDeduplication deduplication;
 
     @Inject
     public EventBridgeV2EventSources(StorageFactory storageFactory, SecretsManagerService secrets,
@@ -69,6 +70,7 @@ public class EventBridgeV2EventSources implements Resettable {
         this.regionResolver = regionResolver;
         this.clock = clock;
         this.baseUrl = URI.create(baseUrl);
+        this.deduplication = new WebhookDeduplication(clock);
     }
 
     /**
@@ -201,6 +203,7 @@ public class EventBridgeV2EventSources implements Resettable {
             LOG.warnv("The secret {0} of event source {1} is already gone", source.getSecretArn(), source.getArn());
         }
         sources.delete(EventBridgeV2Service.storageKey(region, source.getName()));
+        deduplication.forget(source.getArn());
     }
 
     /**
@@ -253,9 +256,30 @@ public class EventBridgeV2EventSources implements Resettable {
                 + source.getWebhookToken() + "/";
     }
 
+    record LocatedSource(String accountId, EventSourceV2 source) {
+    }
+
+    /** The source whose URL has this host id, in whichever account holds it. */
+    Optional<LocatedSource> locate(String hostId) {
+        return sources.scanAllAccountEntries(key -> true).stream()
+                .filter(entry -> hostId.equals(entry.value().getWebhookHostId()))
+                .map(entry -> new LocatedSource(entry.accountId(), entry.value()))
+                .findFirst();
+    }
+
+    /** Records a request hash the source received and returns true, or false when it saw the hash lately. */
+    boolean firstSeen(EventSourceV2 source, String hash) {
+        return deduplication.firstSeen(source.getArn(), hash);
+    }
+
+    void forgetSeen(EventSourceV2 source, String hash) {
+        deduplication.forget(source.getArn(), hash);
+    }
+
     @Override
     public void clear() {
         sources.clear();
+        deduplication.clear();
     }
 
     private String createSecret(JsonNode webhook, String region) {

@@ -64,6 +64,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
             "execute-api",      // ApiGatewayExecuteApiHostFilter: <api-id>.execute-api[.<region>].<host>
             "lambda-url",       // LambdaUrlRoutingFilter: <url-id>.lambda-url.<region>.<host>
             "lambda-web",       // LambdaWebDataPlane: <id>.<shard>.lambda-web.<region>.<host>, <id>.lambda-web.global.<host>
+            "events-webhook",   // EventBridgeV2WebhookDataPlane: <id>.c01.events-webhook.<region>.<host>
             "emr-serverless",   // emr-serverless.<host>, an EMR Serverless endpoint, never a bucket
             "cloudfront");      // CloudFrontDistributionFilter: <dist-id>.cloudfront.net
 
