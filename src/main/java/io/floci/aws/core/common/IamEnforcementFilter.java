@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RequestOperationResolver.ResolvedOperation;
 import io.floci.aws.services.cloudtrail.CloudTrailService;
+import io.floci.aws.services.cloudtrail.S3DataEvents;
 import io.floci.aws.services.cloudwatch.metrics.OtlpMetricsController;
 import io.floci.aws.services.iam.AccessDeniedMessages;
 import io.floci.aws.services.iam.AccessDeniedMessages.PolicyType;
@@ -118,6 +119,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     /** AWS's wording for a signature that does not follow its format. */
     private static final String INCOMPLETE_SIGNATURE = "The request signature does not conform to AWS standards.";
+    // The operation the request was matched to ("s3:ListObjectsV2"), which names the CloudTrail event of a denial.
+    static final String RESOLVED_OPERATION_PROPERTY = "floci.iam.resolvedOperation";
 
     /** The IAM User Guide's "Troubleshoot SigV4" wording for an empty header. */
     private static final String EMPTY_AUTHORIZATION = "Authorization header cannot be empty.";
@@ -405,6 +408,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // alias would resolve to no action and be allowed through without any policy check.
         String claimedScope = catalog.canonicalCredentialScope(rawScope);
         ResolvedOperation resolvedOperation = operationResolver.resolve(auth, claimedScope, ctx, resourceInfo);
+        ctx.setProperty(RESOLVED_OPERATION_PROPERTY, resolvedOperation.operation());
         String credentialScope = resolvedOperation.credentialScope();
         String action = resolvedOperation.action();
         if (IamActionRegistry.takenByDocumentedRoute(credentialScope, ctx)) {
@@ -1283,8 +1287,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                         ? refusalMessage(caller, caller.principalArn(), akid, accountId, resourceOwnerAccountId, action,
                                 resource, resourcePolicyDecision, effectiveContext)
                         : null;
-                emitS3DenialIfApplicable(akid, operationAction, resource, ctx, region,
-                        s3Message != null ? s3Message : accessDeniedMessage(action));
+                if (s3Request) {
+                    emitS3DenialIfApplicable(akid, resource, ctx, region, s3Message);
+                }
                 abortIamAware(ctx, s3Message != null
                                 ? s3XmlAccessDenied(s3Message, formatS3ResourcePath(resource))
                                 : accessDeniedForRequest(action, credentialScope, ctx, resource),
@@ -1730,25 +1735,24 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /**
      * Best-effort CloudTrail emission for S3 access denials. Without this hook,
      * denied requests get aborted before {@code S3Controller}'s try/catch sees
-     * them, so denials would never appear in CloudTrail logs — leaving a major
-     * gap vs. real AWS for downstream audit ingestion. Failures here never
-     * propagate (the deny response is the load-bearing behavior).
+     * them, so denials would never appear in CloudTrail logs, leaving a major
+     * gap vs. real AWS for downstream audit ingestion. A denial is recorded under the data event the
+     * request's matched operation is recorded as ({@link S3DataEvents}), and not at all for an operation
+     * CloudTrail records no data event for. Failures here never propagate (the deny response is the
+     * load-bearing behavior).
      */
-    private void emitS3DenialIfApplicable(String akid, String action, String resource,
-                                          ContainerRequestContext ctx, String region,
+    private void emitS3DenialIfApplicable(String akid, String resource, ContainerRequestContext ctx, String region,
                                           String denyMessage) {
+        String operation = ctx.getProperty(RESOLVED_OPERATION_PROPERTY) instanceof String resolved ? resolved : null;
         try {
-            if (action == null || !action.startsWith("s3:")) {
+            if (operation == null || !operation.startsWith("s3:")) {
                 return;
             }
-            String eventName = mapS3ActionToEventName(action, ctx.getMethod(),
-                    ctx.getUriInfo().getQueryParameters().keySet());
-            if (eventName != null) {
-                emitS3Denial(akid, eventName, resource, region, denyMessage);
-            }
+            S3DataEvents.forOperation(operation.substring("s3:".length()))
+                    .ifPresent(event -> emitS3Denial(akid, event.name(), resource, region, denyMessage));
         } catch (RuntimeException e) {
             // The request is refused either way; a record that could not be written is logged, not raised.
-            LOG.warnv(e, "CloudTrail denial emission failed for {0} on {1}", action, resource);
+            LOG.warnv(e, "CloudTrail denial emission failed for {0} on {1}", operation, resource);
         }
     }
 
@@ -1812,56 +1816,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         } catch (RuntimeException e) {
             LOG.warnv(e, "CloudTrail denial emission failed for {0} on {1}", eventName, resource);
         }
-    }
-
-    // Package-private for unit testing.
-    static String mapS3ActionToEventName(String action, String httpMethod, Set<String> queryParameters) {
-        if (action == null) return null;
-        // Action set sourced from IamActionRegistry — see that file for any
-        // additions. HEAD on an object is bucketed under s3:GetObject by the
-        // registry, so we distinguish via httpMethod. The GetObjectAttributes actions
-        // are the operation its own check refuses.
-        if ("POST".equalsIgnoreCase(httpMethod)) {
-            return postObjectEventName(action, queryParameters);
-        }
-        return switch (action) {
-            case "s3:GetObject", "s3:GetObjectVersion" ->
-                    "HEAD".equalsIgnoreCase(httpMethod) ? "HeadObject" : "GetObject";
-            case "s3:PutObject" -> "PutObject";
-            case "s3:PutObjectRetention" -> "PutObjectRetention";
-            case "s3:GetObjectAttributes", "s3:GetObjectVersionAttributes" -> "GetObjectAttributes";
-            case "s3:DeleteObject", "s3:DeleteObjectVersion" -> "DeleteObject";
-            case "s3:ListBucket" -> "ListObjects";
-            case "s3:ListAllMyBuckets" -> "ListBuckets";
-            case "s3:GetObjectAcl", "s3:GetObjectVersionAcl" -> "GetObjectAcl";
-            case "s3:PutObjectAcl", "s3:PutObjectVersionAcl" -> "PutObjectAcl";
-            case "s3:GetObjectTagging", "s3:GetObjectVersionTagging" -> "GetObjectTagging";
-            case "s3:PutObjectTagging", "s3:PutObjectVersionTagging" -> "PutObjectTagging";
-            case "s3:DeleteObjectTagging", "s3:DeleteObjectVersionTagging" -> "DeleteObjectTagging";
-            default -> null;
-        };
-    }
-
-    /**
-     * The operation a denied POST on an object names. Its action alone is not enough: CreateMultipartUpload
-     * and CompleteMultipartUpload are both checked as {@code s3:PutObject}, and SelectObjectContent as
-     * {@code s3:GetObject}. The sub-resource that chose the action in {@code IamActionRegistry} names the
-     * operation, and {@code ?uploads}, which S3Controller runs ahead of an {@code uploadId}, makes a
-     * request naming both a create. A POST naming none gets no name rather than a wrong one.
-     */
-    private static String postObjectEventName(String action, Set<String> queryParameters) {
-        return switch (action) {
-            case "s3:PutObject" -> {
-                if (queryParameters.contains("uploads")) {
-                    yield "CreateMultipartUpload";
-                }
-                yield queryParameters.contains("uploadId") ? "CompleteMultipartUpload" : null;
-            }
-            case "s3:RestoreObject" -> queryParameters.contains("restore") ? "RestoreObject" : null;
-            case "s3:GetObject", "s3:GetObjectVersion" ->
-                    queryParameters.contains("select") ? "SelectObjectContent" : null;
-            default -> null;
-        };
     }
 
     /**
