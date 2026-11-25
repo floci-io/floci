@@ -4605,6 +4605,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             // since the unlocked check above.
                             validateHostPlacement(getRequiredAvailableHost(region, hostId), az, effectiveInstanceType, tenancy);
                         }
+                        List<String> launchIpv6 = allocateLaunchIpv6(region, finalSubnetId, suppliedEni, admitted);
                         List<String> privateIps = allocateLaunchAddresses(region, finalSubnetId, suppliedEni,
                                 privateIpAddress, admitted);
                         for (int i = 0; i < admitted; i++) {
@@ -4672,13 +4673,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             eni.setVpcId(vpcId);
                             eni.setOwnerId(callerAccountId());
                             eni.setDescription(suppliedEni != null ? suppliedEni.getDescription() : null);
-                            eni.setMacAddress(suppliedEni != null ? suppliedEni.getMacAddress() : null);
+                            eni.setMacAddress(suppliedEni != null ? suppliedEni.getMacAddress() : randomMac());
                             eni.setPrivateIpAddress(privateIp);
                             eni.setPrivateDnsName(inst.getPrivateDnsName());
                             eni.setGroups(new ArrayList<>(sgIdentifiers));
                             if (suppliedEni != null) {
                                 eni.setIpv6Addresses(new ArrayList<>(suppliedEni.getIpv6Addresses()));
+                            } else if (!launchIpv6.isEmpty()) {
+                                eni.setIpv6Addresses(new ArrayList<>(List.of(launchIpv6.get(i))));
                             }
+                            carrySubnetIpv6Blocks(region, finalSubnetId, eni);
                             eni.setAttachmentId("eni-attach-" + randomHex(17));
                             eni.setDeviceIndex(suppliedEni != null ? networkInterfaceDeviceIndex : 0);
                             if (inst.getLaunchTime() != null) {
@@ -15839,6 +15843,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 // every interface instead and the filter would read as doing nothing.
                 case "interface-type" -> matchesValue(values, ni.getInterfaceType());
                 case "requester-managed" -> matchesValue(values, String.valueOf(ni.isRequesterManaged()));
+                case "ipv6-addresses.ipv6-address" -> ni.getIpv6Addresses().stream()
+                        .anyMatch(address -> matchesValue(values, address));
                 case "attachment.instance-id" -> ni.getAttachment() != null
                         && matchesValue(values, ni.getAttachment().getInstanceId());
                 case "association.ip-owner-id" -> ni.getPrivateIpAddresses().stream()
@@ -17516,6 +17522,31 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /** Plans all implicit interfaces' IPv6 addresses before the launch claims IPv4 leases or stores resources. */
+    private List<String> allocateLaunchIpv6(String region, String subnetId, NetworkInterface suppliedEni, int count) {
+        Subnet subnet = subnetId == null ? null : subnets.get(key(region, subnetId)).orElse(null);
+        if (suppliedEni != null || subnet == null || !subnet.isAssignIpv6AddressOnCreation()
+                || associatedIpv6Blocks(subnet).isEmpty()) {
+            return List.of();
+        }
+        return allocateIpv6(region, subnet, count);
+    }
+
+    private void carrySubnetIpv6Blocks(String region, String subnetId, InstanceNetworkInterface eni) {
+        Subnet subnet = subnetId == null ? null : subnets.get(key(region, subnetId)).orElse(null);
+        if (subnet == null) {
+            return;
+        }
+        eni.setSubnetIpv6CidrBlocks(new ArrayList<>(associatedIpv6Blocks(subnet)));
+        Vpc vpc = vpcs.get(key(region, subnet.getVpcId())).orElse(null);
+        if (vpc != null) {
+            eni.setVpcIpv6CidrBlocks(new ArrayList<>(vpc.getIpv6CidrBlockAssociationSet().stream()
+                    .filter(assoc -> "associated".equalsIgnoreCase(assoc.getIpv6CidrBlockState()))
+                    .map(VpcIpv6CidrBlockAssociation::getIpv6CidrBlock)
+                    .toList()));
+        }
+    }
+
     private static List<String> associatedIpv6Blocks(Subnet subnet) {
         if (subnet.getIpv6CidrBlockAssociationSet() == null) {
             return List.of();
@@ -17777,6 +17808,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         attached.setPrivateDnsName(ni.getPrivateDnsName());
         attached.setGroups(new ArrayList<>(ni.getGroups()));
         attached.setIpv6Addresses(new ArrayList<>(ni.getIpv6Addresses()));
+        carrySubnetIpv6Blocks(region, ni.getSubnetId(), attached);
         attached.setAttachmentId(attachment.getAttachmentId());
         attached.setDeviceIndex(deviceIndex);
         attached.setAttachTime(attachment.getAttachTime());

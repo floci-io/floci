@@ -1,11 +1,13 @@
 package io.floci.aws.services.ec2;
 
 import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.ec2.model.InstanceNetworkInterface;
 import io.floci.aws.services.ec2.model.Placement;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.ec2instanceconnect.InstanceConnectKeys;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
@@ -114,6 +116,37 @@ class Ec2MetadataServerTest {
         assertEquals(
                 currentInstance,
                 server.registeredContainer("192.168.215.7").orElseThrow());
+    }
+
+    @Test
+    void ipv6KeysAnswerTheInterfaceByMacAndNothingForAnIpv4OnlyInterface() {
+        InstanceNetworkInterface primary = new InstanceNetworkInterface();
+        primary.setMacAddress("02:aa:bb:cc:dd:ee");
+        primary.setIpv6Addresses(List.of("2600:1f18:abcd:ef01::1234"));
+        primary.setSubnetIpv6CidrBlocks(List.of("2600:1f18:abcd:ef01::/64"));
+        primary.setVpcIpv6CidrBlocks(List.of("2600:1f18:abcd:ef00::/56"));
+        InstanceNetworkInterface ipv4Only = new InstanceNetworkInterface();
+        ipv4Only.setMacAddress("02:11:22:33:44:55");
+        ipv4Only.setDeviceIndex(1);
+        Instance instance = new Instance();
+        instance.setNetworkInterfaces(new ArrayList<>(List.of(primary, ipv4Only)));
+
+        assertEquals("2600:1f18:abcd:ef01::1234", Ec2MetadataServer.primaryIpv6(instance));
+        assertEquals("02:aa:bb:cc:dd:ee/\n02:11:22:33:44:55/", Ec2MetadataServer.macListing(instance));
+        assertEquals("2600:1f18:abcd:ef01::1234", Ec2MetadataServer.interfaceValues(
+                instance, "02:AA:BB:CC:DD:EE", InstanceNetworkInterface::getIpv6Addresses).orElseThrow());
+        assertEquals("2600:1f18:abcd:ef01::/64", Ec2MetadataServer.interfaceValues(
+                instance, "02:aa:bb:cc:dd:ee", InstanceNetworkInterface::getSubnetIpv6CidrBlocks).orElseThrow());
+        assertEquals("2600:1f18:abcd:ef00::/56", Ec2MetadataServer.interfaceValues(
+                instance, "02:aa:bb:cc:dd:ee", InstanceNetworkInterface::getVpcIpv6CidrBlocks).orElseThrow());
+        assertTrue(Ec2MetadataServer.interfaceValues(
+                instance, "02:11:22:33:44:55", InstanceNetworkInterface::getIpv6Addresses).isEmpty());
+        assertTrue(Ec2MetadataServer.interfaceValues(
+                instance, "02:00:00:00:00:00", InstanceNetworkInterface::getIpv6Addresses).isEmpty());
+
+        Instance noIpv6 = new Instance();
+        noIpv6.setNetworkInterfaces(new ArrayList<>(List.of(ipv4Only)));
+        assertEquals(null, Ec2MetadataServer.primaryIpv6(noIpv6));
     }
 
     @Test

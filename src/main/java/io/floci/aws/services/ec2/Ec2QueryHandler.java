@@ -5604,6 +5604,14 @@ public class Ec2QueryHandler {
             ipv6Addresses.add(p.getFirst("Ipv6Addresses." + i + ".Ipv6Address"));
         }
         Integer ipv6AddressCount = parseOptionalInt(p.getFirst("Ipv6AddressCount"), "Ipv6AddressCount");
+        if (ipv6AddressCount != null) {
+            for (String other : List.of("Ipv6Addresses.1.Ipv6Address", "Ipv6Prefix.1.Ipv6Prefix", "Ipv6PrefixCount")) {
+                if (p.getFirst(other) != null) {
+                    throw new AwsException("InvalidParameterCombination",
+                            "Ipv6AddressCount cannot be combined with " + other.split("\\.", 2)[0] + ".", 400);
+                }
+            }
+        }
 
         NetworkInterface ni = service.createNetworkInterface(region, subnetId, description,
                 privateIpAddress, privateIpAddresses, ipv6Addresses, ipv6AddressCount, securityGroupIds, tagList,
@@ -5860,6 +5868,12 @@ public class Ec2QueryHandler {
                     .end("item");
         }
         xml.end("networkInterfaceSet");
+        for (InstanceNetworkInterface eni : inst.getNetworkInterfaces()) {
+            if (eni.getDeviceIndex() == 0 && !eni.getIpv6Addresses().isEmpty()) {
+                xml.elem("ipv6Address", eni.getIpv6Addresses().get(0));
+                break;
+            }
+        }
         xml.elem("clientToken", inst.getClientToken());
         if (inst.getStateReasonCode() != null || inst.getStateReasonMessage() != null) {
             xml.start("stateReason")
