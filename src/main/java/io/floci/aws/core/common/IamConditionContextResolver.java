@@ -1057,9 +1057,8 @@ public class IamConditionContextResolver {
     }
 
     /**
-     * The stored tags and the generated resource keys of one generated EC2 ARN (see {@link #putResourceKeys}), never
-     * borrowed from another target in the same request. Tags follow the ARN's account and Region, using the
-     * caller's values when either is absent. Generated record keys retain their caller-scoped lookup.
+     * The generated record keys of one EC2 ARN (see {@link #putResourceKeys}), retaining their caller-scoped
+     * lookup. Clear earlier generated tag keys before the shared {@link #resourceTags} path reads this ARN.
      */
     public Map<String, List<String>> withEc2ResourceContext(String scope, String action, String resource,
                                                            String region, String accountId,
@@ -1080,11 +1079,6 @@ public class IamConditionContextResolver {
         }
         List<String> prefixes = RequestResourceMembers.table().resourceTagKeys()
                 .getOrDefault("ec2", Map.of()).getOrDefault(parts[0], List.of());
-        boolean originalScope = region.equals(arn.region()) && accountId.equals(arn.accountId());
-        if (!originalScope && !Set.of("vpc-endpoint", "network-interface", "subnet", "security-group", "vpc",
-                "route-table", "image", "snapshot", "instance", "volume").contains(parts[0])) {
-            return context;
-        }
         boolean callerResource = region.equals(resourceRegion) && accountId.equals(resourceAccount);
         Map<String, RequestResourceMembers.ResourceKey> keys = callerResource ? ec2ResourceKeys(parts[0]) : Map.of();
         if (prefixes.isEmpty() && keys.isEmpty()) {
@@ -1092,15 +1086,6 @@ public class IamConditionContextResolver {
         }
         Map<String, List<String>> result = context == null ? new LinkedHashMap<>() : new LinkedHashMap<>(context);
         result.keySet().removeIf(key -> prefixes.stream().anyMatch(key::startsWith) || keys.containsKey(key));
-        if (callerResource) {
-            putStoredTags(result, resourceRegion, parts[1], prefixes);
-        } else {
-            for (Tag tag : ec2Service.get().resourceTags(resourceAccount, resourceRegion, parts[1])) {
-                for (String prefix : prefixes) {
-                    result.put(prefix + tag.getKey(), List.of(tag.getValue() == null ? "" : tag.getValue()));
-                }
-            }
-        }
         if (!keys.isEmpty()) {
             putResourceKeys(result, region, parts[0],
                     ec2Service.get().heldResources(region, parts[0], List.of(parts[1])).get(parts[1]));

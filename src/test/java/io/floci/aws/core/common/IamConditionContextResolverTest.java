@@ -3,14 +3,22 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
 import io.floci.aws.services.dynamodb.DynamoDbService;
 import io.floci.aws.services.dynamodb.backend.NativeDynamoDbBackend;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
+import io.floci.aws.services.ec2.AmiImageResolver;
+import io.floci.aws.services.ec2.Ec2ContainerManager;
+import io.floci.aws.services.ec2.Ec2ImageCatalog;
+import io.floci.aws.services.ec2.Ec2InstanceTypeCatalog;
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.Ec2StoredResourceArns;
 import io.floci.aws.services.ec2.model.NetworkInterface;
 import io.floci.aws.services.ec2.model.Tag;
+import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.services.iam.IamPolicyEvaluator;
 import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
 import io.floci.aws.services.iam.IamService;
@@ -857,9 +865,9 @@ class IamConditionContextResolverTest {
 
     @Test
     void ec2MainPortAccountlessImageReadsCallerTags() {
-        when(ec2Service.resourceTags("us-east-1", "ami-0123456789"))
+        when(ec2Service.resourceTags("123456789012", "us-east-1", "ami-0123456789"))
                 .thenReturn(List.of(new Tag("Team", "payments")));
-        Map<String, List<String>> context = resolver.withEc2ResourceContext("ec2", "ec2:ModifyImageAttribute",
+        Map<String, List<String>> context = ec2ResourceContext(resolver, "ec2", "ec2:ModifyImageAttribute",
                 "arn:aws:ec2:us-east-1::image/ami-0123456789", "us-east-1", "123456789012", Map.of());
         assertEquals(List.of("payments"), context.get("aws:ResourceTag/Team"));
     }
@@ -867,11 +875,11 @@ class IamConditionContextResolverTest {
     @Test
     void ec2MainPortAccountlessImageRetainsGeneratedResourceKeys() {
         String image = "ami-0123456789";
-        when(ec2Service.resourceTags("us-east-1", image))
+        when(ec2Service.resourceTags("123456789012", "us-east-1", image))
                 .thenReturn(List.of(new Tag("Team", "payments")));
         when(ec2Service.heldResources("us-east-1", "image", List.of(image))).thenReturn(Map.of(image,
                 Map.of("ImageId", image, "OwnerId", "123456789012", "Public", false)));
-        Map<String, List<String>> context = resolver.withEc2ResourceContext("ec2", "ec2:ModifyImageAttribute",
+        Map<String, List<String>> context = ec2ResourceContext(resolver, "ec2", "ec2:ModifyImageAttribute",
                 "arn:aws:ec2:us-east-1::image/" + image, "us-east-1", "123456789012",
                 Map.of("ec2:Owner", List.of("stale"), "ec2:Public", List.of("true"),
                         "aws:ResourceTag/Team", List.of("stale")));
@@ -883,7 +891,7 @@ class IamConditionContextResolverTest {
 
     @Test
     void ec2MainPortForeignArnCannotRetainCallerResourceTags() {
-        Map<String, List<String>> context = resolver.withEc2ResourceContext("ec2", "ec2:ModifyVpcEndpoint",
+        Map<String, List<String>> context = ec2ResourceContext(resolver, "ec2", "ec2:ModifyVpcEndpoint",
                 "arn:aws:ec2:eu-west-1:111111111111:vpc-endpoint/vpce-0123456789", "us-east-1",
                 "123456789012", Map.of("aws:ResourceTag/OpenSearchManaged", List.of("true")));
         assertFalse(context.containsKey("aws:ResourceTag/OpenSearchManaged"));
@@ -893,7 +901,7 @@ class IamConditionContextResolverTest {
     void ec2MainPortForeignArnReadsItsAccountAndRegion() {
         when(ec2Service.resourceTags("111111111111", "eu-west-1", "vpce-0123456789"))
                 .thenReturn(List.of(new Tag("OpenSearchManaged", "true")));
-        Map<String, List<String>> context = resolver.withEc2ResourceContext("ec2", "ec2:ModifyVpcEndpoint",
+        Map<String, List<String>> context = ec2ResourceContext(resolver, "ec2", "ec2:ModifyVpcEndpoint",
                 "arn:aws:ec2:eu-west-1:111111111111:vpc-endpoint/vpce-0123456789", "us-east-1",
                 "123456789012", Map.of("aws:ResourceTag/OpenSearchManaged", List.of("false")));
         assertEquals(List.of("true"), context.get("aws:ResourceTag/OpenSearchManaged"));
@@ -901,27 +909,109 @@ class IamConditionContextResolverTest {
         verify(ec2Service, never()).resourceTags(anyString(), anyString());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"111111111111", "123456789012"})
+    void ec2ArnReadsRealStoredTagsAcrossAccountsAndRegions(String targetAccount) {
+        AccountAwareStorageBackend<List<Tag>> tags = AccountAwareStorageBackend.inMemory("123456789012");
+        tags.putForAccount("123456789012", "us-east-1::vpce-0123456789", List.of(new Tag("Team", "caller-east")));
+        tags.putForAccount("123456789012", "eu-west-1::vpce-0123456789", List.of(new Tag("Team", "caller-west")));
+        tags.putForAccount("111111111111", "us-east-1::vpce-0123456789", List.of(new Tag("Team", "foreign-east")));
+        tags.putForAccount("111111111111", "eu-west-1::vpce-0123456789", List.of(new Tag("Team", "foreign-west")));
+        IamConditionContextResolver stored = resolverWithStoredEc2Tags(tags);
+        String prefix = targetAccount.equals("123456789012") ? "caller" : "foreign";
+        for (String region : List.of("us-east-1", "eu-west-1")) {
+            Map<String, List<String>> context = ec2ResourceContext(stored, "ec2", "ec2:ModifyVpcEndpoint",
+                    "arn:aws:ec2:" + region + ":" + targetAccount + ":vpc-endpoint/vpce-0123456789",
+                    "us-east-1", "123456789012", Map.of("aws:ResourceTag/Team", List.of("stale")));
+            assertEquals(List.of(prefix + (region.equals("us-east-1") ? "-east" : "-west")),
+                    context.get("aws:ResourceTag/Team"));
+        }
+    }
+
+    @Test
+    void ec2UntaggedForeignArnDoesNotBorrowRealCallerTags() {
+        AccountAwareStorageBackend<List<Tag>> tags = AccountAwareStorageBackend.inMemory("123456789012");
+        tags.putForAccount("123456789012", "eu-west-1::vpce-0123456789", List.of(new Tag("Team", "caller-west")));
+        tags.putForAccount("111111111111", "us-east-1::vpce-0123456789", List.of(new Tag("Team", "foreign-east")));
+        Map<String, List<String>> context = ec2ResourceContext(resolverWithStoredEc2Tags(tags),
+                "ec2", "ec2:ModifyVpcEndpoint", "arn:aws:ec2:eu-west-1:111111111111:vpc-endpoint/vpce-0123456789",
+                "us-east-1", "123456789012", Map.of("aws:ResourceTag/Team", List.of("stale")));
+        assertFalse(context.containsKey("aws:ResourceTag/Team"));
+        assertEquals("caller-west", tags.getForAccount("123456789012",
+                "eu-west-1::vpce-0123456789").orElseThrow().getFirst().getValue());
+    }
+
+    @SuppressWarnings("unchecked")
+    private IamConditionContextResolver resolverWithStoredEc2Tags(AccountAwareStorageBackend<List<Tag>> tags) {
+        StorageFactory storage = mock(StorageFactory.class);
+        when(storage.create(anyString(), anyString(), any())).thenAnswer(call ->
+                call.getArgument(1).equals("ec2-tags.json") ? tags
+                        : AccountAwareStorageBackend.inMemory("123456789012"));
+        when(config.defaultAccountId()).thenReturn("123456789012");
+        EmulatorConfig.ServicesConfig serviceConfig = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.Ec2ServiceConfig ec2Config = mock(EmulatorConfig.Ec2ServiceConfig.class);
+        when(config.services()).thenReturn(serviceConfig);
+        when(serviceConfig.ec2()).thenReturn(ec2Config);
+        when(ec2Config.mock()).thenReturn(true);
+        when(ec2Config.mockPublicAddresses()).thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.DOCUMENTATION);
+        when(ec2Config.mockPublicAddress()).thenReturn(Optional.empty());
+        Ec2Service service = new Ec2Service(config, mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), storage);
+        Instance<Ec2Service> services = mock(Instance.class);
+        when(services.isResolvable()).thenReturn(true);
+        when(services.get()).thenReturn(service);
+        Instance<StoredResourceArns> readers = mock(Instance.class);
+        when(readers.iterator()).thenAnswer(call -> List.<StoredResourceArns>of(new Ec2StoredResourceArns(service,
+                new RegionResolver("us-east-1", "123456789012"))).iterator());
+        return new IamConditionContextResolver(dynamoDbFacadeInstance, services, mock(Instance.class),
+                mock(Instance.class), mock(Instance.class), spellings(new ShapeNamingSpelling()),
+                readers, requestContext, new RegionResolver("us-east-1", "123456789012"),
+                config, null, serviceCatalog);
+    }
+
     @Test
     void ec2MainPortOwnUntaggedArnClearsEarlierResourceTags() {
-        Map<String, List<String>> context = resolver.withEc2ResourceContext("ec2", "ec2:ModifyVpcEndpoint",
+        Map<String, List<String>> context = ec2ResourceContext(resolver, "ec2", "ec2:ModifyVpcEndpoint",
                 "arn:aws:ec2:us-east-1:123456789012:vpc-endpoint/vpce-0123456789", "us-east-1",
                 "123456789012", Map.of("aws:ResourceTag/OpenSearchManaged", List.of("true")));
         assertFalse(context.containsKey("aws:ResourceTag/OpenSearchManaged"));
     }
 
     @Test
-    void ec2MainPortNameBasedForeignArnRetainsItsExistingContext() {
-        Map<String, List<String>> original = Map.of("aws:ResourceTag/Team", List.of("payments"));
-        assertSame(original, resolver.withEc2ResourceContext("ec2", "ec2:ModifyInstancePlacement",
-                "arn:aws:ec2:eu-west-1:111111111111:placement-group/web", "us-east-1", "123456789012", original));
-        verify(ec2Service, never()).resourceTags(anyString(), anyString(), anyString());
+    void ec2NameBasedForeignArnUsesSharedStoredTags() {
+        when(ec2Service.resourceTags("111111111111", "eu-west-1", "web"))
+                .thenReturn(List.of(new Tag("Team", "foreign")));
+        Map<String, List<String>> context = ec2ResourceContext(resolver, "ec2", "ec2:ModifyInstancePlacement",
+                "arn:aws:ec2:eu-west-1:111111111111:placement-group/web", "us-east-1", "123456789012", Map.of());
+        assertEquals(List.of("foreign"), context.get("aws:ResourceTag/Team"));
     }
 
     @Test
     void ec2MainPortWildcardRetainsTheExistingContext() {
         Map<String, List<String>> original = Map.of("aws:ResourceTag/Team", List.of("payments"));
-        assertSame(original, resolver.withEc2ResourceContext("ec2", "ec2:ModifyVpcEndpoint",
+        assertSame(original, ec2ResourceContext(resolver, "ec2", "ec2:ModifyVpcEndpoint",
                 "arn:aws:ec2:us-east-1:123456789012:vpc-endpoint/*", "us-east-1", "123456789012", original));
+    }
+
+    private Map<String, List<String>> ec2ResourceContext(IamConditionContextResolver reading, String scope,
+            String action, String resource, String region, String account, Map<String, List<String>> context) {
+        Map<String, List<String>> record = reading.withEc2ResourceContext(scope, action, resource, region, account, context);
+        IamConditionContextResolver tags = reading == resolver
+                ? resolverReading(new Ec2StoredResourceArns(ec2Service, new RegionResolver(region, account))) : reading;
+        return IamConditionContextResolver.withResourceTags(record, tags.resourceTags(resource));
+    }
+
+    @Test
+    void otherServiceReadsEc2TagsThroughGeneratedSharedPath() {
+        AccountAwareStorageBackend<List<Tag>> tags = AccountAwareStorageBackend.inMemory("123456789012");
+        tags.putForAccount("111111111111", "eu-west-1::i-0123456789", List.of(new Tag("Team", "foreign")));
+        IamConditionContextResolver reading = resolverWithStoredEc2Tags(tags);
+        String arn = "arn:aws:ec2:eu-west-1:111111111111:instance/i-0123456789";
+        Map<String, List<String>> context = ec2ResourceContext(reading, "ec2-instance-connect", "ec2-instance-connect:SendSSHPublicKey",
+                arn, "us-east-1", "123456789012", Map.of("aws:RequestTag/Team", List.of("requested")));
+        assertEquals(List.of("foreign"), context.get("aws:ResourceTag/Team"));
+        assertEquals(List.of("requested"), context.get("aws:RequestTag/Team"));
     }
 
     @Test

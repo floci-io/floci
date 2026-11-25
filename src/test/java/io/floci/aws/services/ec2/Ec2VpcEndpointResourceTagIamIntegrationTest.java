@@ -1,6 +1,7 @@
 package io.floci.aws.services.ec2;
 
 import io.floci.aws.testing.PartitionCleanup;
+import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.SignedIamEnforcementProfile;
 import io.floci.aws.testing.SignedIamUsers;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -21,6 +22,8 @@ import software.amazon.awssdk.services.ec2.model.VpcEndpointType;
 import java.net.URI;
 import java.util.Map;
 
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -82,6 +85,44 @@ class Ec2VpcEndpointResourceTagIamIntegrationTest {
 
         service.modifyVpcEndpoint(request -> request.vpcEndpointId(managed).resetPolicy(true));
         denied(() -> service.modifyVpcEndpoint(request -> request.vpcEndpointId(untagged).resetPolicy(true)));
+    }
+
+    @Test
+    void instanceConnectUsesTheEc2InstancesStoredTags() throws Exception {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+        Ec2Client admin = client(SignedIamUsers.createUser(endpoint, "connect-admin-", "admin", ADMIN));
+        String instance = admin.runInstances(request -> request.imageId("ami-0abcdef1234567890")
+                .instanceType("t3.micro").minCount(1).maxCount(1)
+                .tagSpecifications(spec -> spec.resourceType(ResourceType.INSTANCE)
+                        .tags(tag -> tag.key("Team").value("operations"))))
+                .instances().getFirst().instanceId();
+        cleanup.register(() -> admin.terminateInstances(request -> request.instanceIds(instance)));
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                 "Action":"ec2-instance-connect:SendSerialConsoleSSHPublicKey",
+                 "Resource":"arn:aws:ec2:us-east-1:000000000000:instance/*",
+                 "Condition":{"StringEquals":{"aws:ResourceTag/Team":"operations"}}}]}
+                """;
+        try (SignedIamUsers.User caller = SignedIamUsers.createUser(endpoint, "connect-tags-", "tags", policy)) {
+            sendSerialKey(caller, instance, 400, "SerialConsoleSessionUnsupportedException");
+            admin.deleteTags(request -> request.resources(instance).tags(tag -> tag.key("Team")));
+            sendSerialKey(caller, instance, 400, "AccessDeniedException");
+            admin.createTags(request -> request.resources(instance).tags(tag -> tag.key("Team").value("other")));
+            sendSerialKey(caller, instance, 400, "AccessDeniedException");
+            admin.createTags(request -> request.resources(instance).tags(tag -> tag.key("Team").value("operations")));
+            sendSerialKey(caller, instance, 400, "SerialConsoleSessionUnsupportedException");
+        }
+    }
+
+    private void sendSerialKey(SignedIamUsers.User caller, String instance, int status, String code) {
+        String body = """
+                {"InstanceId":"%s","SerialPort":0,
+                 "SSHPublicKey":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl user@host"}
+                """.formatted(instance);
+        given().filter(caller.signer("ec2-instance-connect"))
+                .header("X-Amz-Target", "AWSEC2InstanceConnectService.SendSerialConsoleSSHPublicKey")
+                .contentType("application/x-amz-json-1.1").body(body).post(endpoint)
+                .then().statusCode(status).body("__type", equalTo(code));
     }
 
     /**
