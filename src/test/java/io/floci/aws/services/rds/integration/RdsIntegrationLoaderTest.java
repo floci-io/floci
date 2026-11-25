@@ -91,12 +91,13 @@ class RdsIntegrationLoaderTest {
     }
 
     private RdsIntegrationLoader loader(boolean mock) {
-        return new RdsIntegrationLoader(integrations, rdsService, containers, writer, new ObjectMapper(), mock,
+        RdsIntegrationSource sources = new RdsIntegrationSource(rdsService, containers, new ObjectMapper());
+        return new RdsIntegrationLoader(integrations, sources, writer, mock,
                 Runnable::run, 2, Duration.ZERO);
     }
 
     private void catalog(String... rows) {
-        when(containers.queryPostgres("container-1", "postgres", "orders", RdsIntegrationLoader.CATALOG_SQL))
+        when(containers.queryPostgres("container-1", "postgres", "orders", RdsIntegrationSource.CATALOG_SQL))
                 .thenReturn(String.join("\n", rows));
     }
 
@@ -135,7 +136,7 @@ class RdsIntegrationLoaderTest {
 
     @Test
     void catalogQueryRestrictsPrimaryKeysToKeyColumnsOnly() {
-        assertThat(RdsIntegrationLoader.CATALOG_SQL, containsString("k.n <= i.indnkeyatts"));
+        assertThat(RdsIntegrationSource.CATALOG_SQL, containsString("k.n <= i.indnkeyatts"));
     }
 
     @Test
@@ -209,7 +210,7 @@ class RdsIntegrationLoaderTest {
 
     @Test
     void triesAgainWhenTheSourceIsNotBackYet() {
-        when(containers.queryPostgres("container-1", "postgres", "orders", RdsIntegrationLoader.CATALOG_SQL))
+        when(containers.queryPostgres("container-1", "postgres", "orders", RdsIntegrationSource.CATALOG_SQL))
                 .thenThrow(new IllegalStateException("container not running"))
                 .thenReturn(column("public", "items", "id", "int4", "integer", 1));
 
@@ -221,7 +222,7 @@ class RdsIntegrationLoaderTest {
 
     @Test
     void failsTheDestinationWhenTheSourceCannotBeRead() {
-        when(containers.queryPostgres("container-1", "postgres", "orders", RdsIntegrationLoader.CATALOG_SQL))
+        when(containers.queryPostgres("container-1", "postgres", "orders", RdsIntegrationSource.CATALOG_SQL))
                 .thenThrow(new IllegalStateException("psql failed: database \"orders\" does not exist"));
 
         loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
