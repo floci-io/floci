@@ -5658,14 +5658,10 @@ public class Ec2QueryHandler {
             ipv6Addresses.add(p.getFirst("Ipv6Addresses." + i + ".Ipv6Address"));
         }
         Integer ipv6AddressCount = parseOptionalInt(p.getFirst("Ipv6AddressCount"), "Ipv6AddressCount");
-        if (ipv6AddressCount != null) {
-            for (String other : List.of("Ipv6Addresses.1.Ipv6Address", "Ipv6Prefix.1.Ipv6Prefix", "Ipv6PrefixCount")) {
-                if (p.getFirst(other) != null) {
-                    throw new AwsException("InvalidParameterCombination",
-                            "Ipv6AddressCount cannot be combined with " + other.split("\\.", 2)[0] + ".", 400);
-                }
-            }
-        }
+        String ipv6Source = !ipv6Addresses.isEmpty() ? "Ipv6Addresses"
+                : p.getFirst("Ipv6Prefix.1.Ipv6Prefix") != null ? "Ipv6Prefix"
+                : p.getFirst("Ipv6PrefixCount") != null ? "Ipv6PrefixCount" : null;
+        Ec2Service.requireIpv6Source(ipv6Source, ipv6AddressCount);
 
         NetworkInterface ni = service.createNetworkInterface(region, subnetId, description,
                 privateIpAddress, privateIpAddresses, ipv6Addresses, ipv6AddressCount, securityGroupIds, tagList,
