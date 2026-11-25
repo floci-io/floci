@@ -1852,3 +1852,9 @@ Under `none` the rule still runs, but a mock instance has only the Elastic IP, i
 Otherwise a mock instance's address appears whether DescribeInstances or DescribeInstanceStatus
 observes the launch first. A terminated mock instance has no public address, and stopping it does not bring it
 back.
+
+### IPv6 launch metadata and interface creation
+
+An implicit primary interface launched into a subnet with `AssignIpv6AddressOnCreation` and an associated IPv6 block receives one address through the shared collision-aware allocator. `DescribeInstances` and IMDS report the primary address and per-interface IPv6 addresses, subnet blocks and VPC blocks. These metadata changes do not enable guest IPv6 routing.
+
+`CreateNetworkInterface` rejects `Ipv6AddressCount` combined with explicit IPv6 addresses or prefixes. `DescribeNetworkInterfaces` supports the `ipv6-addresses.ipv6-address` filter. Attached and supplied primary interfaces retain their subnet and VPC IPv6 metadata.

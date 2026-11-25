@@ -4678,6 +4678,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             eni.setGroups(new ArrayList<>(sgIdentifiers));
                             if (suppliedEni != null) {
                                 eni.setIpv6Addresses(new ArrayList<>(suppliedEni.getIpv6Addresses()));
+                                carrySubnetIpv6Blocks(region, finalSubnetId, eni);
+                            } else {
+                                assignLaunchIpv6(region, finalSubnetId, eni);
                             }
                             eni.setAttachmentId("eni-attach-" + randomHex(17));
                             eni.setDeviceIndex(suppliedEni != null ? networkInterfaceDeviceIndex : 0);
@@ -15839,6 +15842,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 // every interface instead and the filter would read as doing nothing.
                 case "interface-type" -> matchesValue(values, ni.getInterfaceType());
                 case "requester-managed" -> matchesValue(values, String.valueOf(ni.isRequesterManaged()));
+                case "ipv6-addresses.ipv6-address" -> ni.getIpv6Addresses().stream()
+                        .anyMatch(address -> matchesValue(values, address));
                 case "attachment.instance-id" -> ni.getAttachment() != null
                         && matchesValue(values, ni.getAttachment().getInstanceId());
                 case "association.ip-owner-id" -> ni.getPrivateIpAddresses().stream()
@@ -17516,6 +17521,31 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /** Assigns one address using the shared allocator when an implicit primary interface's subnet opts in. */
+    private void assignLaunchIpv6(String region, String subnetId, InstanceNetworkInterface eni) {
+        Subnet subnet = subnetId == null ? null : subnets.get(key(region, subnetId)).orElse(null);
+        if (subnet == null || !subnet.isAssignIpv6AddressOnCreation() || associatedIpv6Blocks(subnet).isEmpty()) {
+            return;
+        }
+        eni.setIpv6Addresses(new ArrayList<>(allocateIpv6(region, subnet, 1)));
+        carrySubnetIpv6Blocks(region, subnetId, eni);
+    }
+
+    private void carrySubnetIpv6Blocks(String region, String subnetId, InstanceNetworkInterface eni) {
+        Subnet subnet = subnetId == null ? null : subnets.get(key(region, subnetId)).orElse(null);
+        if (subnet == null) {
+            return;
+        }
+        eni.setSubnetIpv6CidrBlocks(new ArrayList<>(associatedIpv6Blocks(subnet)));
+        Vpc vpc = vpcs.get(key(region, subnet.getVpcId())).orElse(null);
+        if (vpc != null) {
+            eni.setVpcIpv6CidrBlocks(new ArrayList<>(vpc.getIpv6CidrBlockAssociationSet().stream()
+                    .filter(assoc -> "associated".equalsIgnoreCase(assoc.getIpv6CidrBlockState()))
+                    .map(VpcIpv6CidrBlockAssociation::getIpv6CidrBlock)
+                    .toList()));
+        }
+    }
+
     private static List<String> associatedIpv6Blocks(Subnet subnet) {
         if (subnet.getIpv6CidrBlockAssociationSet() == null) {
             return List.of();
@@ -17777,6 +17807,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         attached.setPrivateDnsName(ni.getPrivateDnsName());
         attached.setGroups(new ArrayList<>(ni.getGroups()));
         attached.setIpv6Addresses(new ArrayList<>(ni.getIpv6Addresses()));
+        carrySubnetIpv6Blocks(region, ni.getSubnetId(), attached);
         attached.setAttachmentId(attachment.getAttachmentId());
         attached.setDeviceIndex(deviceIndex);
         attached.setAttachTime(attachment.getAttachTime());
