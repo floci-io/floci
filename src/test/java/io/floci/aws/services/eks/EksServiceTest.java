@@ -534,6 +534,30 @@ class EksServiceTest {
     }
 
     @Test
+    void aCreateWhoseEntryCleanupFailsTooKeepsTheCreatesError() {
+        EksAccessEntryService accessEntries = mock(EksAccessEntryService.class);
+        doThrow(new IllegalStateException("entry write failed")).when(accessEntries).ensureAutoModeNodeEntry(any(), any());
+        doThrow(new IllegalStateException("entry cleanup failed")).when(accessEntries).deleteClusterEntries(any());
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, ec2Service,
+                new EksOidcService(storageFactory, new ObjectMapper()), accessEntries,
+                mock(EksPodIdentityAssociationService.class));
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName("auto-failing-twice");
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        request.setAccessConfig(new AccessConfig("API", false));
+        request.setComputeConfig(new ComputeConfig(true, List.of("general-purpose"), "arn:aws:iam::000000000000:role/node"));
+        request.setStorageConfig(new StorageConfig(new BlockStorage(true)));
+        KubernetesNetworkConfig loadBalancing = new KubernetesNetworkConfig();
+        loadBalancing.setElasticLoadBalancing(new ElasticLoadBalancing(true));
+        request.setKubernetesNetworkConfig(loadBalancing);
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class, () -> service.createCluster(request));
+
+        assertEquals("entry write failed", failure.getMessage());
+        assertThrows(AwsException.class, () -> service.describeCluster("auto-failing-twice"));
+    }
+
+    @Test
     void aDeleteWhoseEntryCleanupFailsKeepsTheClusterForARetry() {
         Cluster cluster = activeCluster();
         EksAccessEntryService accessEntries = mock(EksAccessEntryService.class);

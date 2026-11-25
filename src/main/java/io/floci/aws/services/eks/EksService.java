@@ -1055,7 +1055,13 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         } catch (RuntimeException e) {
             if (madeNodeEntry) {
                 // A create that failed once it began making the node's entry leaves none behind; the cluster is new.
-                accessEntries.deleteClusterEntries(cluster);
+                // A cleanup that fails too is logged, so the security group still goes and the create's error stays.
+                try {
+                    accessEntries.deleteClusterEntries(cluster);
+                } catch (RuntimeException cleanupEx) {
+                    LOG.warnv("Failed to clean up the access entries of cluster {0} after its creation failed: {1}",
+                            name, cleanupEx.getMessage());
+                }
             }
             if (clusterSg != null) {
                 try {
