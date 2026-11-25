@@ -32,6 +32,8 @@ IMAGE_PINS='^(src/(main|test)/resources/application\.yml|src/main/java/io/floci/
 CONSUMERS=(
     # Redshift Spectrum and UNLOAD to Parquet run their SQL on floci-duck (services/floci/duck).
     'floci:/services/redshift/(RedshiftSpectrum|RedshiftUnloadParquet)DockerNightlyIntegrationTest$'
+    # These CUR checks write their report's Parquet through floci-duck under the report owner's account.
+    'floci:/services/cur/Cur(DailyEmissionAccountIsolation|NonDefaultAccountEmission)DockerNightlyIntegrationTest$'
     # Redshift Serverless and the Redshift Data API, which Step Functions' redshiftdata tasks call, run on Redshift's
     # engine.
     'redshift:/services/(redshiftserverless/|stepfunctions/StepFunctionsRedshiftData)'
@@ -88,7 +90,7 @@ if [ -n "${PR:-}" ]; then
                 | sed 's|.*/||; s|\.java$||' | LC_ALL=C sort -u | while read -r helper; do
                     xargs grep -lw "$helper" < "$work/e2e-sources.txt" | sed 's|^src/test/java/||; s|\.java$||' || true
                 done
-        } | LC_ALL=C sort -u | comm -12 "$work/all.txt" - > "$work/selected.txt"
+        } | LC_ALL=C sort -u | LC_ALL=C comm -12 "$work/all.txt" - > "$work/selected.txt"
     fi
 else
     cp "$work/all.txt" "$work/selected.txt"

@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 
 PATH = Path(__file__).with_name('select-nightly-checks.sh').resolve()
 MAIN = 'src/main/java/io/floci/aws'
@@ -80,7 +81,9 @@ class SelectNightlyChecksTest(unittest.TestCase):
                          self.e2e({MAIN + '/services/rds/RdsService.java': '+x'}))
 
     def test_flociDuckSelectsTheChecksThatImportItAndItsConsumers(self):
-        self.assertEqual(['io/floci/aws/services/cur/CurEmissionDockerNightlyIntegrationTest',
+        self.assertEqual(['io/floci/aws/services/cur/CurDailyEmissionAccountIsolationDockerNightlyIntegrationTest',
+                          'io/floci/aws/services/cur/CurEmissionDockerNightlyIntegrationTest',
+                          'io/floci/aws/services/cur/CurNonDefaultAccountEmissionDockerNightlyIntegrationTest',
                           'io/floci/aws/services/rds/export/RdsSnapshotExportDockerNightlyIntegrationTest',
                           'io/floci/aws/services/redshift/RedshiftSpectrumDockerNightlyIntegrationTest'],
                          self.e2e({MAIN + '/services/floci/duck/FlociDuckManager.java': '+x'}))
@@ -125,6 +128,13 @@ class SelectNightlyChecksTest(unittest.TestCase):
     def test_aChangedNightlyCheckRunsInItsGroup(self):
         self.assertEqual({'standard': ['io/floci/aws/services/eks/EksEcrMirrorNightlyIntegrationTest']},
                          self.select({TEST + '/services/eks/EksEcrMirrorNightlyIntegrationTest.java': '+x'}))
+
+    def test_theSelectionDoesNotDependOnTheCallersLocale(self):
+        # The lists are sorted bytewise; comm would refuse or misjoin them under a locale that collates otherwise.
+        with unittest.mock.patch.dict(os.environ, LC_ALL='en_US.UTF-8', LANG='en_US.UTF-8'):
+            self.assertEqual(['io/floci/aws/services/rds/RdsMysqlDockerNightlyIntegrationTest',
+                              'io/floci/aws/services/rds/export/RdsSnapshotExportDockerNightlyIntegrationTest'],
+                             self.e2e({MAIN + '/services/rds/RdsService.java': '+x'}))
 
     def test_aServiceWithoutContainerChecksSelectsNothing(self):
         self.assertEqual({}, self.select({MAIN + '/services/sqs/SqsService.java': '+x'}))
