@@ -272,6 +272,7 @@ class RdsIntegrationLoaderTest {
 
         loader(true).resumeInterruptedLoads();
 
+        verify(integrations).reconcileInterruptedCreations();
         verify(integrations).finishDestination(any(), eq("orders"), eq("orders_dw"), eq("load-resumed"), isNull());
         verify(integrations, never()).finishDestination(any(), eq("done"), anyString(), any(), any());
     }

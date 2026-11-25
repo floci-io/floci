@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
@@ -434,18 +435,54 @@ public class RdsIntegrationService implements Resettable {
     }
 
     /**
+     * Marks any destination left in {@code Creating} by a restart as {@code Failed} so the integration is
+     * not stuck syncing and a subsequent {@code CREATE DATABASE ... FROM INTEGRATION} can retry or reuse
+     * the database if it was created before the restart.
+     */
+    public void reconcileInterruptedCreations() {
+        synchronized (lock) {
+            for (Integration integration : integrationsWithState(Integration.Destination.STATE_CREATING)) {
+                RequestScopes.runAs(integration.getAccountId(), integration.getRegion(), () ->
+                        findCurrent(integration).ifPresent(current -> {
+                            boolean changed = false;
+                            for (Integration.Destination destination : current.getDestinations()) {
+                                if (Integration.Destination.STATE_CREATING.equals(destination.getState())) {
+                                    destination.setState(Integration.Destination.STATE_FAILED);
+                                    current.getErrors().add(new Integration.IntegrationError(INITIAL_LOAD_FAILED,
+                                            "The initial load of source database " + destination.getSourceDatabase()
+                                                    + " into " + destination.getDatabaseName()
+                                                    + " failed: interrupted while creating the destination database."));
+                                    changed = true;
+                                }
+                            }
+                            if (changed) {
+                                refreshStatus(current);
+                                integrations.put(key(current.getRegion(), current.integrationId()), current);
+                                LOG.warnv("Marked interrupted Creating destination(s) of integration {0} as Failed",
+                                        current.getIntegrationArn());
+                            }
+                        }));
+            }
+        }
+    }
+
+    /**
      * The integrations of every account with a destination still syncing, as a restart left them. Each
      * carries its account id, since no request scope is active at startup.
      */
     public List<Integration> integrationsWithLoadsInProgress() {
+        return integrationsWithState(Integration.Destination.STATE_SYNCING);
+    }
+
+    private List<Integration> integrationsWithState(String state) {
         if (!(integrations instanceof AccountAwareStorageBackend<Integration> accountIntegrations)) {
             return integrations.scan(key -> key.startsWith(KEY_PREFIX)).stream()
-                    .filter(RdsIntegrationService::hasLoadInProgress)
+                    .filter(integration -> hasDestinationInState(integration, state))
                     .map(Integration::new)
                     .toList();
         }
         return accountIntegrations.scanAllAccountEntries(key -> key.startsWith(KEY_PREFIX)).stream()
-                .filter(entry -> hasLoadInProgress(entry.value()))
+                .filter(entry -> hasDestinationInState(entry.value(), state))
                 .map(entry -> {
                     Integration integration = new Integration(entry.value());
                     integration.setAccountId(entry.accountId());
@@ -454,9 +491,9 @@ public class RdsIntegrationService implements Resettable {
                 .toList();
     }
 
-    private static boolean hasLoadInProgress(Integration integration) {
+    private static boolean hasDestinationInState(Integration integration, String state) {
         return integration.getDestinations().stream()
-                .anyMatch(destination -> Integration.Destination.STATE_SYNCING.equals(destination.getState()));
+                .anyMatch(destination -> state.equals(destination.getState()));
     }
 
     /** The stored copy of the integration, when it still exists under the same ARN. */

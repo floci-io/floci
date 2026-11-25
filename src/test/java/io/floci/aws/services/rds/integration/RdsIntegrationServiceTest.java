@@ -559,6 +559,28 @@ class RdsIntegrationServiceTest {
     }
 
     @Test
+    void reconcileInterruptedCreations_marksCreatingDestinationsFailedSoTheyCanBeRetried() {
+        Integration created = create("orders-zero-etl");
+        Integration integration = service.findById(created.integrationId()).orElseThrow();
+        service.reserveDestination(integration, "orders_dw", "orders", null, null);
+        assertEquals(Integration.STATUS_SYNCING, describe(created).getStatus());
+
+        service.reconcileInterruptedCreations();
+
+        Integration reconciled = describe(created);
+        assertEquals(Integration.STATUS_FAILED, reconciled.getStatus());
+        assertEquals(Integration.Destination.STATE_FAILED,
+                reconciled.destinationFor("orders").orElseThrow().getState());
+        assertEquals(1, reconciled.getErrors().size());
+        assertEquals(RdsIntegrationService.INITIAL_LOAD_FAILED, reconciled.getErrors().get(0).getErrorCode());
+
+        Integration retried = service.reserveDestination(reconciled, "orders_dw", "orders", null, null);
+        assertEquals(Integration.Destination.STATE_CREATING,
+                retried.destinationFor("orders").orElseThrow().getState());
+        assertThat(retried.getErrors(), empty());
+    }
+
+    @Test
     void findById_returnsNothingForAnUnknownId() {
         create("orders-zero-etl");
         assertEquals(Optional.empty(), service.findById("4b2f2f9c-0000-0000-0000-000000000000"));

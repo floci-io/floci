@@ -136,8 +136,9 @@ public class RdsIntegrationLoader implements Resettable {
                 () -> load(integration, sourceDatabase, databaseName, loadId, startedIn)));
     }
 
-    /** Starts again the loads a restart interrupted. */
+    /** Starts again the loads a restart interrupted, and reconciles creations left mid-flight. */
     public void resumeInterruptedLoads() {
+        integrations.reconcileInterruptedCreations();
         for (Integration integration : integrations.integrationsWithLoadsInProgress()) {
             for (Integration.Destination destination : integration.getDestinations()) {
                 if (Integration.Destination.STATE_SYNCING.equals(destination.getState())) {
