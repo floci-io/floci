@@ -79,18 +79,32 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
 
     @Test
     @Order(11)
-    void create_unverifiedFromAddress_returnsFromEmailAddressNotVerifiedOnV1() {
-        // An unverified FromEmailAddress is FromEmailAddressNotVerified / 400 on v1 (verified against
-        // AWS), not the v2 NotFoundException / 404.
-        SesV1Requests.query("CreateCustomVerificationEmailTemplate")
-                .formParam("TemplateName", "cvet-v1-unverified-from")
-                .formParam("FromEmailAddress", "cvet-v1-not-verified@floci.test")
+    void create_checksTheUrlsBeforeTheSender_inTheV1Wording() {
+        // Probed: the v1 sentences end with a full stop and carry no angle brackets, and an invalid
+        // redirection URL is reported before an unverified sender, the success one first.
+        String unverified = "cvet-v1-not-verified@floci.test";
+        createWith(unverified, "https://example.com/ok", "https://example.com/fail")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>FromEmailAddressNotVerified</Code>"))
+                .body(containsString(
+                        "<Message>The from email address " + unverified + " is not verified.</Message>"));
+        createWith(unverified, "https://example.com/ok", "not-a-url")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"))
+                .body(containsString("<Message>The failure redirection URL is invalid.</Message>"));
+        createWith(unverified, "not-a-url", "not-a-url")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Message>The success redirection URL is invalid.</Message>"));
+    }
+
+    private static RequestSpecification createWith(String from, String successUrl, String failureUrl) {
+        return SesV1Requests.query("CreateCustomVerificationEmailTemplate")
+                .formParam("TemplateName", "cvet-v1-refused")
+                .formParam("FromEmailAddress", from)
                 .formParam("TemplateSubject", "Verify your email")
                 .formParam("TemplateContent", "<html><body>verify</body></html>")
-                .formParam("SuccessRedirectionURL", "https://example.com/ok")
-                .formParam("FailureRedirectionURL", "https://example.com/fail")
-        .when().post("/").then().statusCode(400)
-                .body(containsString("<Code>FromEmailAddressNotVerified</Code>"));
+                .formParam("SuccessRedirectionURL", successUrl)
+                .formParam("FailureRedirectionURL", failureUrl);
     }
 
     @Test

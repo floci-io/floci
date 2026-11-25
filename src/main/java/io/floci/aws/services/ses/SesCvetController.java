@@ -28,6 +28,7 @@ import static io.floci.aws.services.ses.SesV2Json.cvetNotFound;
 import static io.floci.aws.services.ses.SesV2Json.parseTagsArray;
 import static io.floci.aws.services.ses.SesV2Json.readOptionBody;
 import static io.floci.aws.services.ses.SesV2Json.remapCvetException;
+import static io.floci.aws.services.ses.SesV2Json.remapCvetWriteException;
 import static io.floci.aws.services.ses.SesV2Json.remapV1Exception;
 
 /**
@@ -63,17 +64,17 @@ public class SesCvetController {
     @Path("/custom-verification-email-templates")
     public Response createCustomVerificationEmailTemplate(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
+        CustomVerificationEmailTemplate t;
         try {
             JsonNode request = readOptionBody(objectMapper, body);
-            CustomVerificationEmailTemplate t = parseCvet(request);
+            t = parseCvet(request);
             // Tags exist only on the create request; UpdateCustomVerificationEmailTemplate has no
             // Tags member and preserves the stored ones.
             t.setTags(parseTagsArray(request.path("Tags")));
-            sesService.createCustomVerificationEmailTemplate(t, region);
-            return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
         }
+        return writeCvet(t, () -> sesService.createCustomVerificationEmailTemplate(t, region));
     }
 
     @GET
@@ -113,13 +114,22 @@ public class SesCvetController {
     public Response updateCustomVerificationEmailTemplate(@Context HttpHeaders headers,
                                                           @PathParam("templateName") String templateName, String body) {
         String region = regionResolver.resolveRegion(headers);
+        CustomVerificationEmailTemplate t;
         try {
-            CustomVerificationEmailTemplate t = parseCvet(readOptionBody(objectMapper, body));
-            t.setTemplateName(templateName);
-            sesService.replaceCustomVerificationEmailTemplate(t, region);
+            t = parseCvet(readOptionBody(objectMapper, body));
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+        t.setTemplateName(templateName);
+        return writeCvet(t, () -> sesService.replaceCustomVerificationEmailTemplate(t, region));
+    }
+
+    private Response writeCvet(CustomVerificationEmailTemplate template, Runnable write) {
+        try {
+            write.run();
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
-            throw remapCvetException(e, templateName);
+            throw remapCvetWriteException(e, template);
         }
     }
 

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.ses.model.CustomVerificationEmailTemplate;
 import io.floci.aws.services.ses.model.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -95,6 +96,38 @@ class SesV2JsonTest {
                 new AwsException("InvalidParameterValue", "m", 400), "welcome");
         assertEquals("BadRequestException", other.getErrorCode());
         assertEquals("m", other.getMessage());
+    }
+
+    @Test
+    void remapCvetWriteException_restatesTheSenderAndUrlSentencesAndRemapsTheRest() {
+        CustomVerificationEmailTemplate template = new CustomVerificationEmailTemplate();
+        template.setTemplateName("welcome");
+        template.setFromEmailAddress("alice@example.com");
+
+        AwsException sender = SesV2Json.remapCvetWriteException(
+                new AwsException("FromEmailAddressNotVerified", "v1 sentence", 400), template);
+        assertEquals("NotFoundException", sender.getErrorCode());
+        assertEquals(404, sender.getHttpStatus());
+        assertEquals("The from email address <alice@example.com> is not verified", sender.getMessage());
+
+        AwsException success = SesV2Json.remapCvetWriteException(
+                new AwsException("InvalidParameterValue", SesService.CVET_SUCCESS_URL_INVALID, 400), template);
+        assertEquals("BadRequestException", success.getErrorCode());
+        assertEquals("The success redirection URL is invalid", success.getMessage());
+
+        AwsException failure = SesV2Json.remapCvetWriteException(
+                new AwsException("InvalidParameterValue", SesService.CVET_FAILURE_URL_INVALID, 400), template);
+        assertEquals("BadRequestException", failure.getErrorCode());
+        assertEquals("The failure redirection URL is invalid", failure.getMessage());
+
+        AwsException missing = SesV2Json.remapCvetWriteException(new AwsException(
+                "CustomVerificationEmailTemplateDoesNotExist", "v1 sentence", 400), template);
+        assertEquals("Custom verification email template <welcome> does not exist", missing.getMessage());
+
+        AwsException other = SesV2Json.remapCvetWriteException(
+                new AwsException("InvalidParameterValue", "TemplateSubject is required.", 400), template);
+        assertEquals("BadRequestException", other.getErrorCode());
+        assertEquals("TemplateSubject is required.", other.getMessage());
     }
 
     @Test
