@@ -78,7 +78,8 @@ class SesIdentityRoute53ScanTest {
     void recommendationsReadNoZonesWithoutAVerifiedDomain() {
         identities.save(new Identity("alice@example.com", "EmailAddress"), REGION);
         SesAccountService accounts =
-                new SesAccountService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+                new SesAccountService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                        new InMemoryStorage<>());
         accounts.putAccountVdmAttributes(REGION, new AccountVdmAttributes(true, false, false));
         SesRecommendationService recommendations = new SesRecommendationService(identities, accounts,
                 new RegionResolver(REGION, "000000000000"), new MutableClock());

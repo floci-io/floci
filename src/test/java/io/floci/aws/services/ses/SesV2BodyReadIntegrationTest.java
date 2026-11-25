@@ -35,6 +35,7 @@ class SesV2BodyReadIntegrationTest {
             Arguments.of("POST", "/v2/email/contact-lists"),
             Arguments.of("POST", "/v2/email/contact-lists/body-read-ghost/contacts/list"),
             Arguments.of("POST", "/v2/email/account/details"),
+            Arguments.of("POST", "/v2/email/account/delivery"),
             Arguments.of("PUT", IDENTITY + "/dkim/signing"),
             Arguments.of("PUT", IDENTITY + "/configuration-set"),
             Arguments.of("PUT", IDENTITY + "/mail-from"),
