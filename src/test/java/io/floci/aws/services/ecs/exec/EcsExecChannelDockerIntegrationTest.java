@@ -7,6 +7,7 @@ import io.floci.aws.services.ecs.container.EcsTaskHandle;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.TaskDefinition;
+import io.floci.aws.services.ssmmessages.AgentMessage;
 import io.floci.aws.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;

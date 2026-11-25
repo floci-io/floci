@@ -27,7 +27,6 @@ import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.container.EcsLinuxParameters;
 import io.floci.aws.services.ecs.container.EcsTaskHandle;
 import io.floci.aws.services.ecs.container.EcsTaskLaunchException;
-import io.floci.aws.services.ecs.exec.EcsExecChannelHandler;
 import io.floci.aws.services.ecs.exec.EcsExecSessionRegistry;
 import io.floci.aws.services.ecs.exec.ExecSession;
 import io.floci.aws.services.ecs.model.Attribute;
@@ -78,6 +77,7 @@ import io.floci.aws.services.ecs.model.TaskStatus;
 import io.floci.aws.services.ecs.model.UpdateServiceRequest;
 import io.floci.aws.services.ecs.model.Volume;
 import io.floci.aws.services.iam.PassedRoleLookup;
+import io.floci.aws.services.ssmmessages.DataChannelRouter;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -2751,7 +2751,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         URI endpoint = requestBaseUri != null ? requestBaseUri : URI.create(baseUrl);
         return UriBuilder.fromUri(endpoint)
                 .scheme("https".equalsIgnoreCase(endpoint.getScheme()) ? "wss" : "ws")
-                .path(EcsExecChannelHandler.CHANNEL_PATH_PREFIX)
+                .path(DataChannelRouter.CHANNEL_PATH_PREFIX)
                 .path(session.sessionId())
                 .build().toString();
     }
