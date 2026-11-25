@@ -17,12 +17,10 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.Closeable;
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.net.Socket;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.HashSet;
@@ -106,7 +104,8 @@ class RdsPgBouncerDockerNightlyIntegrationTest {
             pooler = lifecycle.createAndStart(spec);
             poolerLogs = logs.attachConsoleOnly(pooler.containerId(), "pgbouncer:" + suffix);
             EndpointInfo endpoint = pooler.getEndpoint(5432);
-            await().atMost(Duration.ofSeconds(10)).until(() -> listening(endpoint));
+            // Docker publishes the port before PgBouncer listens, so only a completed login means it is ready.
+            await().atMost(Duration.ofSeconds(30)).until(() -> acceptsLogin(endpoint));
 
             // server_lifetime=0 closes a pooled server after each client; distinct backend PIDs
             // prove that every iteration authenticates again rather than reusing a warm session.
@@ -145,11 +144,13 @@ class RdsPgBouncerDockerNightlyIntegrationTest {
         return "jdbc:postgresql://" + host + ":" + port + "/appdb";
     }
 
-    private static boolean listening(EndpointInfo endpoint) {
-        try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress(endpoint.host(), endpoint.port()), 200);
-            return true;
-        } catch (IOException e) {
+    private static boolean acceptsLogin(EndpointInfo endpoint) {
+        try (Connection connection = DriverManager.getConnection(jdbcUrl(endpoint.host(), endpoint.port()),
+                credentials("app_user", "Application123!"));
+             Statement statement = connection.createStatement()) {
+            return statement.execute("SELECT 1");
+        } catch (SQLException expected) {
+            // Refused or reset while PgBouncer starts, or a login it cannot pass on yet: poll again.
             return false;
         }
     }
