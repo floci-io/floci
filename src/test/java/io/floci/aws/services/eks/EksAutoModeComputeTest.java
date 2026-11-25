@@ -462,7 +462,7 @@ class EksAutoModeComputeTest {
         Instance joined = new Instance();
         joined.setInstanceId("i-joined");
         joined.setInstanceType("c7a.large");
-        joined.setLaunchTime(Instant.now());
+        joined.setLaunchTime(clock.instant());
         joined.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
         Reservation reservation = new Reservation();
         reservation.setInstances(List.of(joined));
@@ -502,7 +502,7 @@ class EksAutoModeComputeTest {
         Instance joined = new Instance();
         joined.setInstanceId("i-joined");
         joined.setInstanceType("c7a.large");
-        joined.setLaunchTime(Instant.now());
+        joined.setLaunchTime(clock.instant());
         joined.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
         Reservation reservation = new Reservation();
         reservation.setInstances(List.of(joined));
@@ -525,7 +525,7 @@ class EksAutoModeComputeTest {
                 any(), anyString(), anyBoolean(), any(), any(), any(), anyBoolean(), any(), any());
 
         // Still not ready once the registration wait is over, it has no room.
-        joined.setLaunchTime(Instant.now().minus(EksAutoModeCompute.REGISTRATION_WAIT).minusSeconds(1));
+        joined.setLaunchTime(clock.instant().minus(EksAutoModeCompute.REGISTRATION_WAIT).minusSeconds(1));
         compute.reconcile(cluster, REGION);
         verify(ec2).runInstances(anyString(), anyString(), anyString(), anyInt(), anyInt(), any(), anyList(),
                 anyString(), anyString(), anyList(), anyString(), anyString(), any(), any(), anyInt(), any(), any(),
