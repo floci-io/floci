@@ -178,6 +178,14 @@ class Ec2NetworkInterfaceIpv6AddressCountIntegrationTest {
             Response refused = create(subnet[0], "Ipv6AddressCount", "1", combined[0], combined[1]);
             assertEquals(400, refused.statusCode(), combined[0] + ": " + refused.asString());
             assertEquals("InvalidParameterCombination", refused.path("Response.Errors.Error.Code"), combined[0]);
+            String source = combined[0].split("\\.", 2)[0];
+            assertEquals("Specify either " + source + " or Ipv6AddressCount, not both",
+                    refused.path("Response.Errors.Error.Message"), combined[0]);
+            Response negativeCombined = create(subnet[0], "Ipv6AddressCount", "-1", combined[0], combined[1]);
+            assertEquals(400, negativeCombined.statusCode());
+            assertEquals("InvalidParameterValue", negativeCombined.path("Response.Errors.Error.Code"));
+            assertEquals("Ipv6AddressCount must not be negative",
+                    negativeCombined.path("Response.Errors.Error.Message"));
         }
     }
 

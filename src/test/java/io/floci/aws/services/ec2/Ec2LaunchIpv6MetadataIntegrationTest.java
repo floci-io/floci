@@ -105,6 +105,32 @@ class Ec2LaunchIpv6MetadataIntegrationTest {
         assertEquals("InsufficientFreeAddressesInSubnet", exhausted.awsErrorDetails().errorCode());
     }
 
+    @Test
+    void createCountConflictsUseSharedValidationBeforeAnyMutation() {
+        Fixture fixture = fixture("555566668105", false, 64);
+        int available = availableIpv4(fixture);
+        Ec2Exception addresses = assertThrows(Ec2Exception.class, () -> fixture.client().createNetworkInterface(
+                request -> request.subnetId(fixture.subnet()).ipv6AddressCount(1)
+                        .ipv6Addresses(address -> address.ipv6Address("2001:db8::10"))));
+        assertIpv6SourceConflict(addresses, "Ipv6Addresses");
+        Ec2Exception prefixes = assertThrows(Ec2Exception.class, () -> fixture.client().createNetworkInterface(
+                request -> request.subnetId(fixture.subnet()).ipv6AddressCount(1)
+                        .ipv6Prefixes(prefix -> prefix.ipv6Prefix("2001:db8::/80"))));
+        assertIpv6SourceConflict(prefixes, "Ipv6Prefix");
+        Ec2Exception prefixCount = assertThrows(Ec2Exception.class, () -> fixture.client().createNetworkInterface(
+                request -> request.subnetId(fixture.subnet()).ipv6AddressCount(1).ipv6PrefixCount(1)));
+        assertIpv6SourceConflict(prefixCount, "Ipv6PrefixCount");
+        assertTrue(fixture.client().describeNetworkInterfaces().networkInterfaces().isEmpty());
+        assertEquals(available, availableIpv4(fixture));
+    }
+
+    private static void assertIpv6SourceConflict(Ec2Exception failure, String source) {
+        assertEquals(400, failure.statusCode());
+        assertEquals("InvalidParameterCombination", failure.awsErrorDetails().errorCode());
+        assertEquals("Specify either " + source + " or Ipv6AddressCount, not both",
+                failure.awsErrorDetails().errorMessage());
+    }
+
     private void assertMetadata(Fixture fixture, Instance instance, String mac) throws Exception {
         assertEquals(Ec2MetadataServer.primaryIpv6(instance), Ec2MetadataServer.interfaceValues(
                 instance, mac, InstanceNetworkInterface::getIpv6Addresses).orElseThrow());
