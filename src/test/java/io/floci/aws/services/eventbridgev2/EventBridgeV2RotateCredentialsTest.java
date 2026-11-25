@@ -11,6 +11,7 @@ import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.eventbridgev2.EventBridgeV2Webhooks.Answer;
 import io.floci.aws.services.eventbridgev2.EventBridgeV2Webhooks.Request;
 import io.floci.aws.services.eventbridgev2.model.EventSourceV2;
+import io.floci.aws.services.eventbridgev2.model.RotationRequest;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
 import io.floci.aws.testing.ManualClock;
@@ -28,6 +29,7 @@ import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -493,20 +495,97 @@ class EventBridgeV2RotateCredentialsTest {
     }
 
     @Test
-    void theNewestHundredTokensAreRemembered() {
+    void aTokenIsRememberedForJustUnderEightHours() {
         EventSourceV2 source = source("hook", STATIC_AUTH);
-        for (int i = 0; i < 101; i++) {
-            rotate(source, "t-" + i, "{\"StaticTokenSecretValue\":\"token-value-" + i + "\"}");
-        }
+        rotate(source, "t-1", "{\"StaticTokenSecretValue\":\"second-token\"}");
+        clock.advance(Duration.ofHours(8).minusSeconds(1));
 
-        EventSourceV2 stored = service.describeEventSource(json("{\"EventSourceArn\":\"" + source.getArn() + "\"}"),
-                REGION);
-        assertEquals(100, stored.getRotationRequests().size());
-        assertEquals("t-1", stored.getRotationRequests().keySet().iterator().next());
-        assertThrows(AwsException.class, () -> rotate(source, "t-1", "{\"StaticTokenSecretValue\":\"other-token\"}"));
+        assertEquals(source.getSecretArn(), rotate(source, "t-1", "{\"StaticTokenSecretValue\":\"second-token\"}"));
+        AwsException e = assertThrows(AwsException.class,
+                () -> rotate(source, "t-1", "{\"StaticTokenSecretValue\":\"other-token\"}"));
 
-        rotate(source, "t-0", "{\"StaticTokenSecretValue\":\"other-token\"}");
+        assertEquals("IdempotentParameterMismatchException", e.getErrorCode());
+        assertEquals("second-token", valueOf(source, "AWSCURRENT"));
+    }
+
+    @Test
+    void aTokenIsForgottenAtExactlyEightHoursAndTheSameRequestRotatesAgain() {
+        EventSourceV2 source = source("hook", STATIC_AUTH);
+        rotate(source, "t-1", null);
+        String first = versionOf(source, "AWSCURRENT");
+        clock.advance(Duration.ofHours(8));
+
+        rotate(source, "t-1", null);
+
+        assertNotEquals(first, versionOf(source, "AWSCURRENT"));
+        assertEquals(first, versionOf(source, "AWSPREVIOUS"));
+        assertEquals(clock.instant(), storedRotations(source).get("t-1").rotatedAt());
+    }
+
+    @Test
+    void aForgottenTokenRotatesAgainWithADifferentRequest() {
+        EventSourceV2 source = source("hook", STATIC_AUTH);
+        rotate(source, "t-1", "{\"StaticTokenSecretValue\":\"second-token\"}");
+        clock.advance(Duration.ofHours(8));
+
+        rotate(source, "t-1", "{\"StaticTokenSecretValue\":\"other-token\"}");
+
         assertEquals("other-token", valueOf(source, "AWSCURRENT"));
+        assertEquals("second-token", valueOf(source, "AWSPREVIOUS"));
+    }
+
+    @Test
+    void aRotationDropsTheTokensItForgot() {
+        EventSourceV2 source = source("hook", STATIC_AUTH);
+        rotate(source, "t-old", "{\"StaticTokenSecretValue\":\"second-token\"}");
+        clock.advance(Duration.ofHours(4));
+        rotate(source, "t-mid", "{\"StaticTokenSecretValue\":\"third-token\"}");
+        clock.advance(Duration.ofHours(4));
+
+        rotate(source, "t-new", "{\"StaticTokenSecretValue\":\"fourth-token\"}");
+
+        assertEquals(Set.of("t-mid", "t-new"), storedRotations(source).keySet());
+    }
+
+    // ──────────────────────────── Secret state ────────────────────────────
+
+    private static final String SECRET_GONE_MESSAGE =
+            "The secret of the EventSource is scheduled for deletion or has been deleted";
+
+    @Test
+    void aSecretScheduledForDeletionAnswersInvalidState() {
+        EventSourceV2 source = source("hook", STATIC_AUTH);
+        secrets.deleteSecret(source.getSecretArn(), null, false, REGION);
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> rotate(source, "{\"StaticTokenSecretValue\":\"second-token\"}"));
+
+        assertEquals("InvalidStateException", e.getErrorCode());
+        assertEquals(409, e.getHttpStatus());
+        assertEquals(SECRET_GONE_MESSAGE, e.getMessage());
+        assertEquals(0, storedRotations(source).size());
+    }
+
+    @Test
+    void aDeletedSecretAnswersInvalidState() {
+        EventSourceV2 source = source("hook", STATIC_AUTH);
+        secrets.deleteSecret(source.getSecretArn(), null, true, REGION);
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> rotate(source, "{\"StaticTokenSecretValue\":\"second-token\"}"));
+
+        assertEquals("InvalidStateException", e.getErrorCode());
+        assertEquals(409, e.getHttpStatus());
+        assertEquals(SECRET_GONE_MESSAGE, e.getMessage());
+    }
+
+    @Test
+    void aRememberedTokenStillReplaysWhenTheSecretIsScheduledForDeletion() {
+        EventSourceV2 source = source("hook", STATIC_AUTH);
+        rotate(source, "t-1", "{\"StaticTokenSecretValue\":\"second-token\"}");
+        secrets.deleteSecret(source.getSecretArn(), null, false, REGION);
+
+        assertEquals(source.getSecretArn(), rotate(source, "t-1", "{\"StaticTokenSecretValue\":\"second-token\"}"));
     }
 
     // ──────────────────────────── Credentials the rotation replaced ────────────────────────────
@@ -594,6 +673,11 @@ class EventBridgeV2RotateCredentialsTest {
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
+
+    private Map<String, RotationRequest> storedRotations(EventSourceV2 source) {
+        return service.describeEventSource(json("{\"EventSourceArn\":\"" + source.getArn() + "\"}"), REGION)
+                .getRotationRequests();
+    }
 
     private record Target(EventSourceV2 source, String hostId, String path) {
     }

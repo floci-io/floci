@@ -120,7 +120,8 @@ Floci serves event sources of the `WebhookEventsConfiguration` kind. A request w
   keeps accepting the credential the last rotation replaced for 15 minutes. An earlier one is refused at once.
   `Credential` must set the member of the source's authentication type, or be left out to generate a value.
   Basic keeps its username. A repeat of a `ClientToken` of the source with the same request changes nothing.
-  Floci remembers the newest 100 tokens of each source.
+  Floci forgets a token 8 hours after its rotation. A rotation answers `InvalidStateException` (409) when the
+  secret is scheduled for deletion or deleted.
 - `KmsKeyIdentifier` is stored and returned. It is not used for the secret.
 - `DeleteEventSource` schedules the secret for deletion at once.
 - `DescribeEventSource` and `ListEventSources` do not return `Revoked`.

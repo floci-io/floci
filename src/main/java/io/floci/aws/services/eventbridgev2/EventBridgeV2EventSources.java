@@ -18,6 +18,7 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.eventbridgev2.model.EventBusV2;
 import io.floci.aws.services.eventbridgev2.model.EventSourceV2;
+import io.floci.aws.services.eventbridgev2.model.RotationRequest;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -27,9 +28,9 @@ import org.jboss.logging.Logger;
 import java.net.URI;
 import java.security.SecureRandom;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,7 +50,7 @@ public class EventBridgeV2EventSources implements Resettable {
     private static final Logger LOG = Logger.getLogger(EventBridgeV2EventSources.class);
     private static final int GENERATED_SECRET_BYTES = 32;
     private static final String TOKEN_NAMESPACE = "event-sourcev2";
-    private static final int REMEMBERED_ROTATION_TOKENS = 100;
+    private static final Duration ROTATION_TOKEN_MEMORY = Duration.ofHours(8);
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Map<String, String> ROTATION_MEMBERS = Map.of(
             WebhookEventsConfigurations.STATIC_TOKEN, "StaticTokenSecretValue",
@@ -179,8 +180,8 @@ public class EventBridgeV2EventSources implements Resettable {
     /**
      * Replaces the credential in the source's secret, with the one the request gives or a generated one, and
      * returns the secret's ARN. The URL and the secret stay, and so does the time the source was modified. A
-     * retry with a {@code ClientToken} of the source returns the ARN and changes nothing when it repeats the
-     * request, and fails when it changes it.
+     * retry within 8 hours with a {@code ClientToken} of the source returns the ARN and changes nothing when it
+     * repeats the request, and fails when it changes it.
      */
     String rotateCredentials(JsonNode request, String region) {
         EventBridgeV2RequestShapes.check("RotateWebhookCredentials", request);
@@ -207,14 +208,16 @@ public class EventBridgeV2EventSources implements Resettable {
         }
 
         String requestHash = Digests.sha256Hex(EventBridgeV2Service.withoutClientToken(request));
-        String seen = source.getRotationRequests().get(clientToken);
-        if (seen != null) {
-            if (!seen.equals(requestHash)) {
+        Instant now = clock.instant();
+        RotationRequest seen = source.getRotationRequests().get(clientToken);
+        if (seen != null && remembered(seen, now)) {
+            if (!seen.requestHash().equals(requestHash)) {
                 throw new AwsException("IdempotentParameterMismatchException",
                         "ClientToken was used by a previous request with different parameters", 409);
             }
             return source.getSecretArn();
         }
+        requireSecretUsable(source, region);
 
         String current = secrets.getSecretValue(source.getSecretArn(), null, null, region).getSecretString();
         String replacement = WebhookEventsConfigurations.BASIC.equals(authType)
@@ -225,14 +228,30 @@ public class EventBridgeV2EventSources implements Resettable {
                     () -> { });
         }
         EventSourceV2 changed = copyOf(source);
-        changed.getRotationRequests().put(clientToken, requestHash);
-        Iterator<String> oldest = changed.getRotationRequests().keySet().iterator();
-        while (changed.getRotationRequests().size() > REMEMBERED_ROTATION_TOKENS) {
-            oldest.next();
-            oldest.remove();
-        }
+        changed.getRotationRequests().values().removeIf(entry -> !remembered(entry, now));
+        changed.getRotationRequests().put(clientToken, new RotationRequest(requestHash, now));
         sources.put(EventBridgeV2Service.storageKey(region, source.getName()), changed);
         return changed.getSecretArn();
+    }
+
+    private static boolean remembered(RotationRequest request, Instant now) {
+        return now.isBefore(request.rotatedAt().plus(ROTATION_TOKEN_MEMORY));
+    }
+
+    private void requireSecretUsable(EventSourceV2 source, String region) {
+        boolean unusable;
+        try {
+            unusable = secrets.describeSecret(source.getSecretArn(), region).getDeletedDate() != null;
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            unusable = true;
+        }
+        if (unusable) {
+            throw new AwsException("InvalidStateException",
+                    "The secret of the EventSource is scheduled for deletion or has been deleted", 409);
+        }
     }
 
     /** The one member of {@code Credential} that is set, or an error when the request sets none or several. */
