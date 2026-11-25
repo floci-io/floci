@@ -483,24 +483,60 @@ public class EventBridgeV2Service implements Resettable {
                     results.add(new PutEventsResult(null, null, "MalformedDetail", "Detail is malformed."));
                     continue;
                 }
-                bus.setSequenceNumber(bus.getSequenceNumber() + 1);
-                String sequenceNumber = Long.toString(bus.getSequenceNumber());
-                PublishedEvent event = envelope(bus, entry, times.get(i), detail, sequenceNumber);
-                results.add(new PutEventsResult(event.systemMetadata().get("aws:EventId").asText(), sequenceNumber,
-                        null, null));
-                for (SubscriberV2 subscriber : running) {
-                    if (SubscriberFilters.matches(subscriber.getFilterConfiguration(), event)) {
-                        deliveries.add(Map.entry(subscriber, event));
-                    }
-                }
+                Instant time = times.get(i);
+                PublishedEvent event = accept(bus, running, deliveries,
+                        sequenceNumber -> envelope(bus, entry, time, detail, sequenceNumber));
+                results.add(new PutEventsResult(event.systemMetadata().get("aws:EventId").asText(),
+                        event.systemMetadata().get("aws:SequenceNumber").asText(), null, null));
             }
-            buses.put(storageKey(region, bus.getName()), bus);
-            ordered = deliveriesByBus.computeIfAbsent(bus.getArn(),
-                    arn -> new OrderedDeliveries(new ConcurrentLinkedQueue<>(), new ReentrantLock()));
-            ordered.pending().addAll(deliveries);
+            ordered = enqueue(bus, region, deliveries);
         }
         send(ordered);
         return results;
+    }
+
+    /**
+     * Accepts an event a webhook event source received on the bus and delivers it to every running subscriber whose
+     * filters it matches, as {@code PutEvents} does. {@code build} makes the event from the sequence number the bus
+     * gives it.
+     */
+    PublishedEvent publishWebhookEvent(String eventBusArn, String region, Function<String, PublishedEvent> build) {
+        List<Map.Entry<SubscriberV2, PublishedEvent>> deliveries = new ArrayList<>();
+        PublishedEvent event;
+        OrderedDeliveries ordered;
+        synchronized (this) {
+            EventBusV2 bus = requireEventBus(eventBusArn, region);
+            List<SubscriberV2> running = subscribersOf(bus, region).stream()
+                    .filter(subscriber -> RUNNING.equals(subscriber.getState()))
+                    .toList();
+            event = accept(bus, running, deliveries, build);
+            ordered = enqueue(bus, region, deliveries);
+        }
+        send(ordered);
+        return event;
+    }
+
+    /** Gives the event the bus's next sequence number and collects the deliveries to the subscribers it matches. */
+    private PublishedEvent accept(EventBusV2 bus, List<SubscriberV2> running,
+                                  List<Map.Entry<SubscriberV2, PublishedEvent>> deliveries,
+                                  Function<String, PublishedEvent> build) {
+        bus.setSequenceNumber(bus.getSequenceNumber() + 1);
+        PublishedEvent event = build.apply(Long.toString(bus.getSequenceNumber()));
+        for (SubscriberV2 subscriber : running) {
+            if (SubscriberFilters.matches(subscriber.getFilterConfiguration(), event)) {
+                deliveries.add(Map.entry(subscriber, event));
+            }
+        }
+        return event;
+    }
+
+    private OrderedDeliveries enqueue(EventBusV2 bus, String region,
+                                      List<Map.Entry<SubscriberV2, PublishedEvent>> deliveries) {
+        buses.put(storageKey(region, bus.getName()), bus);
+        OrderedDeliveries ordered = deliveriesByBus.computeIfAbsent(bus.getArn(),
+                arn -> new OrderedDeliveries(new ConcurrentLinkedQueue<>(), new ReentrantLock()));
+        ordered.pending().addAll(deliveries);
+        return ordered;
     }
 
     /**

@@ -61,6 +61,9 @@ public class EventBridgeV2Delivery {
         if ("WITH_METADATA".equals(type)) {
             return event.withMetadata().toString();
         }
+        if (event.rawData() != null) {
+            return event.rawData();
+        }
         JsonNode data = event.data();
         return data.isTextual() ? data.textValue() : data.toString();
     }

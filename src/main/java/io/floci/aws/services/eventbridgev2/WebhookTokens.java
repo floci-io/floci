@@ -4,8 +4,10 @@ import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.Digests;
 
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Arrays;
+import java.util.Base64;
 
 /**
  * The host id and the path token of a webhook URL. The token holds 32 random bytes and the first 16 bytes of the
@@ -36,6 +38,24 @@ final class WebhookTokens {
         byte[] token = Arrays.copyOf(payload, RANDOM_BYTES + CHECK_BYTES);
         System.arraycopy(check(hostId, payload), 0, token, RANDOM_BYTES, CHECK_BYTES);
         return TOKEN_PREFIX + Base64Url.encode(token);
+    }
+
+    /** Whether {@code token} is one {@link #newToken} built for {@code hostId}. */
+    static boolean isValid(String hostId, String token) {
+        if (!token.startsWith(TOKEN_PREFIX)) {
+            return false;
+        }
+        byte[] decoded;
+        try {
+            decoded = Base64.getUrlDecoder().decode(token.substring(TOKEN_PREFIX.length()));
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+        if (decoded.length != RANDOM_BYTES + CHECK_BYTES) {
+            return false;
+        }
+        byte[] expected = check(hostId, Arrays.copyOf(decoded, RANDOM_BYTES));
+        return MessageDigest.isEqual(expected, Arrays.copyOfRange(decoded, RANDOM_BYTES, decoded.length));
     }
 
     private static byte[] check(String hostId, byte[] payload) {
