@@ -881,7 +881,7 @@ public class RedshiftInterceptingBridge {
         }
         try {
             backend.setSoTimeout(EXCHANGE_READ_TIMEOUT_MS);
-            boolean failed = coordinator.isDiscardingUntilSync();
+            boolean failed = coordinator.extendedCycleFailed();
             try {
                 copyBackend.finish(failed);
             } catch (S3TransferException e) {
