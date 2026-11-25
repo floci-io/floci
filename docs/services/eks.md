@@ -493,6 +493,13 @@ launches nodes on AWS. Floci checks every 10 seconds.
   honours those flags too. The labels are: `karpenter.sh/nodepool`,
   `eks.amazonaws.com/compute-type: auto`, `node.kubernetes.io/instance-type`, `karpenter.sh/capacity-type`, and the
   `eks.amazonaws.com/instance-*` category, generation, family, size, CPU and memory labels.
+- **Empty nodes.** A node that runs no workload (DaemonSet and static pods aside) and that no pending pod is counting
+  on is removed once it has been empty for its pool's `disruption.consolidateAfter`, as Auto Mode's consolidation
+  removes it: it is cordoned, its instance terminated and its node taken out. AWS removed an empty node within 90
+  seconds. A pool whose `consolidateAfter` is `Never` keeps its nodes. Each pass removes no more of a pool's nodes
+  than its disruption budgets allow (a percentage rounded up, 10% without a budget); a budget with a `schedule` is
+  left out, as Floci doesn't model its window. How long a node has been empty is kept in memory, so a restart starts
+  the wait again.
 - **Removal.** Turning compute off terminates the cluster's Auto Mode instances and takes their nodes out of it.
   Deleting the cluster terminates them, waits up to a minute for them to finish terminating, as they hold the
   cluster security group deleted next (one that doesn't fails the delete, which can be retried), and deletes the
@@ -500,7 +507,7 @@ launches nodes on AWS. Floci checks every 10 seconds.
 
 On AWS, a node is named after its instance ID and is a managed instance a plain `DescribeInstances` doesn't list.
 In Floci it is named as other joined instances are, after its private DNS name, and `DescribeInstances` lists it.
-Floci makes no `NodeClaim` objects, and doesn't yet remove empty nodes.
+Floci makes no `NodeClaim` objects, and doesn't replace underutilized nodes with smaller ones.
 
 ### Auto Mode load balancing for Services
 
