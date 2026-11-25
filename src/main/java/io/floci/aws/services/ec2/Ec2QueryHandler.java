@@ -1700,6 +1700,9 @@ public class Ec2QueryHandler {
                         .end("item");
             }
             xml.end("groupSet");
+        } else if ("blockDeviceMapping".equals(attribute)) {
+            instanceBlockDeviceMappingXml(xml, service.instanceVolumeAttachments(List.of(inst))
+                    .getOrDefault(instanceId, List.of()));
         }
         xml.end("DescribeInstanceAttributeResponse");
         return xmlResponse(xml.build());
@@ -1732,9 +1735,57 @@ public class Ec2QueryHandler {
             }
             groupIds.add(groupId);
         }
-        if (dryRun(p)) {
+        List<Ec2Service.InstanceBlockDeviceMappingChange> blockDeviceMappings = new ArrayList<>();
+        SortedSet<Integer> mappingIndices = new TreeSet<>();
+        for (String key : p.keySet()) {
+            if (!key.startsWith("BlockDeviceMapping.")) {
+                continue;
+            }
+            String[] parts = key.split("\\.", 3);
+            if (parts.length != 3) {
+                throw new AwsException("InvalidParameterValue", "Invalid block device mapping parameter: " + key,
+                        400);
+            }
+            int index;
+            try {
+                index = Integer.parseInt(parts[1]);
+            } catch (NumberFormatException exception) {
+                throw new AwsException("InvalidParameterValue", "Invalid block device mapping index.", 400);
+            }
+            if (index < 1 || !Set.of("DeviceName", "Ebs.VolumeId",
+                    "Ebs.DeleteOnTermination").contains(parts[2])) {
+                throw new AwsException("InvalidParameterValue", "Unsupported block device mapping parameter: " + key,
+                        400);
+            }
+            mappingIndices.add(index);
+        }
+        for (int i : mappingIndices) {
+            String prefix = "BlockDeviceMapping." + i;
+            String deviceName = p.getFirst(prefix + ".DeviceName");
+            String volumeId = p.getFirst(prefix + ".Ebs.VolumeId");
+            String deleteOnTermination = p.getFirst(prefix + ".Ebs.DeleteOnTermination");
+            if ((deviceName != null && deviceName.isBlank()) || (volumeId != null && volumeId.isBlank())
+                    || (deviceName == null && volumeId == null)) {
+                throw new AwsException("InvalidParameterValue",
+                        prefix + " must identify an attached device or volume.", 400);
+            }
+            Boolean value = parseOptionalBoolean(deleteOnTermination, prefix + ".Ebs.DeleteOnTermination");
+            blockDeviceMappings.add(new Ec2Service.InstanceBlockDeviceMappingChange(
+                    deviceName, volumeId, value == null || value));
+        }
+        if (!blockDeviceMappings.isEmpty() && (userDataEncoded != null || attrName != null || !groupIds.isEmpty())) {
+            throw new AwsException("InvalidParameterCombination", "You can specify only one attribute at a time.",
+                    400);
+        }
+        boolean dryRun = dryRun(p);
+        if (dryRun || !blockDeviceMappings.isEmpty()) {
             service.checkInstanceAttributeChange(region, instanceId, userDataEncoded != null, attrName, groupIds);
-            throw Ec2Service.dryRunOperation();
+            if (!blockDeviceMappings.isEmpty()) {
+                service.checkInstanceBlockDeviceMappings(region, instanceId, blockDeviceMappings);
+            }
+            if (dryRun) {
+                throw Ec2Service.dryRunOperation();
+            }
         }
         if (userDataEncoded != null) {
             service.modifyInstanceUserData(region, instanceId, userData, userDataEncoded);
@@ -1744,6 +1795,9 @@ public class Ec2QueryHandler {
         }
         if (!groupIds.isEmpty()) {
             service.modifyInstanceGroups(region, instanceId, groupIds);
+        }
+        if (!blockDeviceMappings.isEmpty()) {
+            service.modifyInstanceBlockDeviceMappings(region, instanceId, blockDeviceMappings);
         }
         return booleanResponse("ModifyInstanceAttribute");
     }

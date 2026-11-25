@@ -206,6 +206,105 @@ class Ec2LaunchBlockDeviceMappingsIntegrationTest {
     }
 
     @Test
+    void modifyInstanceAttributeChangesAnAttachedVolumesDeleteOnTermination() {
+        String account = account();
+        String instance = launch(account, "ami-0abcdef1234567890");
+        String zone = ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getString(INSTANCE + ".placement.availabilityZone");
+        String attached = ec2(account, "CreateVolume", "Size", "4", "AvailabilityZone", zone)
+                .getString("CreateVolumeResponse.volumeId");
+        ec2(account, "AttachVolume", "VolumeId", attached, "InstanceId", instance, "Device", "/dev/sdj");
+
+        assertEquals("false", ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getString(INSTANCE + ".blockDeviceMapping.item[1].ebs.deleteOnTermination"));
+
+        String rootVolume = deviceVolume(account, instance, "/dev/xvda");
+        request(account, "ModifyInstanceAttribute", "InstanceId", instance,
+                "BlockDeviceMapping.", "bad")
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+        request(account, "ModifyInstanceAttribute", "InstanceId", instance,
+                "BlockDeviceMapping.1.DeviceName", "/dev/sdj",
+                "BlockDeviceMapping.1.Ebs.VolumeId", rootVolume,
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "true")
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+        assertEquals("t3.micro", ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getString(INSTANCE + ".instanceType"));
+
+        request(account, "ModifyInstanceAttribute", "InstanceId", instance,
+                "InstanceType.Value", "t3.small",
+                "BlockDeviceMapping.1.DeviceName", "/dev/sdj",
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "true")
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
+        assertEquals("t3.micro", ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getString(INSTANCE + ".instanceType"));
+
+        for (String unsupported : List.of("NoDevice", "VirtualName", "Ebs.VolumeSize")) {
+            request(account, "ModifyInstanceAttribute", "InstanceId", instance,
+                    "BlockDeviceMapping.1.DeviceName", "/dev/sdj",
+                    "BlockDeviceMapping.1." + unsupported, "ephemeral0")
+                    .post("/").then().statusCode(400)
+                    .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+        }
+        assertEquals("false", ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getString(INSTANCE + ".blockDeviceMapping.item[1].ebs.deleteOnTermination"));
+
+        request(account, "ModifyInstanceAttribute", "InstanceId", instance,
+                "BlockDeviceMapping.1.DeviceName", "/dev/sdj",
+                "BlockDeviceMapping.1.Ebs.VolumeId", attached,
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "true", "DryRun", "true")
+                .post("/").then().statusCode(412)
+                .body("Response.Errors.Error.Code", equalTo("DryRunOperation"));
+        assertEquals("false", ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getString(INSTANCE + ".blockDeviceMapping.item[1].ebs.deleteOnTermination"));
+
+        ec2(account, "ModifyInstanceAttribute", "InstanceId", instance,
+                "BlockDeviceMapping.1.DeviceName", "/dev/sdj",
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "true");
+
+        assertEquals("true", ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getString(INSTANCE + ".blockDeviceMapping.item[1].ebs.deleteOnTermination"));
+        assertEquals("true", ec2(account, "DescribeInstanceAttribute", "InstanceId", instance,
+                "Attribute", "blockDeviceMapping")
+                .getString("DescribeInstanceAttributeResponse.blockDeviceMapping.item[1].ebs.deleteOnTermination"));
+
+        ec2(account, "ModifyInstanceAttribute", "InstanceId", instance,
+                "BlockDeviceMapping.1.DeviceName", "/dev/sdj",
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "false");
+        assertEquals("false", ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getString(INSTANCE + ".blockDeviceMapping.item[1].ebs.deleteOnTermination"));
+        ec2(account, "ModifyInstanceAttribute", "InstanceId", instance,
+                "BlockDeviceMapping.1.DeviceName", "/dev/sdj");
+        assertEquals("true", ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getString(INSTANCE + ".blockDeviceMapping.item[1].ebs.deleteOnTermination"));
+
+        ec2(account, "TerminateInstances", "InstanceId.1", instance);
+        assertTrue(volumeIds(account).isEmpty());
+    }
+
+    @Test
+    void modifyInstanceAttributeAcceptsVolumeIdAloneAndCanKeepTheRootVolume() {
+        String account = account();
+        String instance = launch(account, "ami-0abcdef1234567890");
+        String rootVolume = deviceVolume(account, instance, "/dev/xvda");
+
+        assertEquals("true", ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getString(INSTANCE + ".blockDeviceMapping.item[0].ebs.deleteOnTermination"));
+
+        ec2(account, "ModifyInstanceAttribute", "InstanceId", instance,
+                "BlockDeviceMapping.1.Ebs.VolumeId", rootVolume,
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "false");
+
+        volume(account, rootVolume)
+                .body("DescribeVolumesResponse.volumeSet.item.attachmentSet.item.deleteOnTermination",
+                        equalTo("false"));
+        ec2(account, "TerminateInstances", "InstanceId.1", instance);
+        assertEquals(List.of(rootVolume), volumeIds(account));
+    }
+
+    @Test
     void anAmiEntryWithoutAnEbsBlockCreatesNoVolume() {
         String account = account();
         String image = ec2(account, "RegisterImage", "Name", "instance-store-" + account,

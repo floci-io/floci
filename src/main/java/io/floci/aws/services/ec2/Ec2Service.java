@@ -6432,6 +6432,59 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         storeInstance(region, inst);
     }
 
+    public record InstanceBlockDeviceMappingChange(String deviceName, String volumeId, boolean deleteOnTermination) {}
+
+    public void checkInstanceBlockDeviceMappings(String region, String instanceId,
+                                                 List<InstanceBlockDeviceMappingChange> changes) {
+        resolveInstanceBlockDeviceMappings(region, instanceId, changes);
+    }
+
+    public void modifyInstanceBlockDeviceMappings(String region, String instanceId,
+                                                  List<InstanceBlockDeviceMappingChange> changes) {
+        Map<String, InstanceBlockDeviceMappingChange> byVolume =
+                resolveInstanceBlockDeviceMappings(region, instanceId, changes);
+        for (Map.Entry<String, InstanceBlockDeviceMappingChange> entry : byVolume.entrySet()) {
+            String volumeId = entry.getKey();
+            InstanceBlockDeviceMappingChange change = entry.getValue();
+            withVolumeLock(volumeId, () -> {
+                Volume volume = getRequiredVolume(region, volumeId);
+                VolumeAttachment attachment = volume.getAttachments().stream()
+                        .filter(candidate -> instanceId.equals(candidate.getInstanceId())
+                                && (change.deviceName() == null
+                                    || isSameDevice(change.deviceName(), candidate.getDevice())))
+                        .findFirst()
+                        .orElseThrow(() -> new AwsException("InvalidParameterValue",
+                                "The volume '" + volumeId + "' is not attached to instance '"
+                                        + instanceId + "'.", 400));
+                attachment.setDeleteOnTermination(change.deleteOnTermination());
+                volumes.put(key(region, volumeId), volume);
+            });
+        }
+    }
+
+    private Map<String, InstanceBlockDeviceMappingChange> resolveInstanceBlockDeviceMappings(
+            String region, String instanceId, List<InstanceBlockDeviceMappingChange> changes) {
+        ensureDefaultResources(region);
+        Instance inst = requireEc2ManagedInstance(region, instanceId, "modified");
+        List<VolumeAttachment> attachments = instanceVolumeAttachments(List.of(inst))
+                .getOrDefault(instanceId, List.of());
+        Map<String, InstanceBlockDeviceMappingChange> byVolume = new LinkedHashMap<>();
+        for (InstanceBlockDeviceMappingChange change : changes) {
+            VolumeAttachment attachment = attachments.stream()
+                    .filter(candidate -> (change.deviceName() == null
+                                || isSameDevice(change.deviceName(), candidate.getDevice()))
+                            && (change.volumeId() == null || change.volumeId().equals(candidate.getVolumeId())))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("InvalidParameterValue",
+                            "The block device mapping is not attached to instance '" + instanceId + "'.", 400));
+            if (byVolume.putIfAbsent(attachment.getVolumeId(), change) != null) {
+                throw new AwsException("InvalidParameterValue",
+                        "The volume '" + attachment.getVolumeId() + "' is specified more than once.", 400);
+            }
+        }
+        return byVolume;
+    }
+
     /**
      * Replaces the security groups attached to an instance (ModifyInstanceAttribute with
      * {@code GroupId.N}). Validates each group, updates the instance and its network interfaces,
