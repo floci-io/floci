@@ -305,6 +305,34 @@ class EksAutoModeComputeTest {
      * The nodes of a NodePool that was deleted, or that UpdateClusterConfig dropped, go as Karpenter removes them:
      * tainted as disrupted and drained, whatever they run, then deleted and terminated.
      */
+    /**
+     * An Auto Mode node whose instance is gone, one that registered while a pass terminated its instance, or whose
+     * deletion failed after it, is deleted by the next pass; one whose instance runs, and the nodes Auto Mode didn't
+     * launch, stay.
+     */
+    @Test
+    void anAutoModeNodeWhoseInstanceIsGoneIsDeleted() {
+        joinedNode("i-node", "node-1");
+        lists.put("pods", "{\"items\": []}");
+        String autoLabels = "{\"karpenter.sh/nodepool\": \"general-purpose\", "
+                + "\"eks.amazonaws.com/compute-type\": \"auto\"}";
+        lists.put("nodes", "{\"items\": ["
+                + "{\"metadata\": {\"name\": \"node-1\", \"labels\": " + autoLabels + "}},"
+                + "{\"metadata\": {\"name\": \"stray\", \"labels\": " + autoLabels + "}},"
+                + "{\"metadata\": {\"name\": \"cluster-node\", "
+                + "\"labels\": {\"eks.amazonaws.com/compute-type\": \"auto\"}}}]}");
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node", "stray",
+                "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
+                "node-1", "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
+                "cluster-node", "--ignore-not-found=true", "--wait=false"}, 15);
+    }
+
     @Test
     void aDeletedPoolsNodeIsDrainedAndRemoved() {
         Instance node = joinedNode("i-node", "node-1");

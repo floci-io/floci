@@ -172,15 +172,16 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         if (launched.isEmpty()) {
             emptySince.remove(cluster.getArn());
         }
+        Map<String, JsonNode> nodesByName = new HashMap<>();
+        for (JsonNode node : read(cluster, "nodes").path("items")) {
+            nodesByName.put(node.path("metadata").path("name").asText(), node);
+        }
+        removeStrayNodes(cluster, region, nodesByName);
         if (launched.isEmpty() && pods.isEmpty()) {
             return;
         }
         Map<String, NodePool> pools = new HashMap<>();
         EksAutoModeNodes.nodePools(read(cluster, "nodepools")).forEach(pool -> pools.put(pool.name(), pool));
-        Map<String, JsonNode> nodesByName = new HashMap<>();
-        for (JsonNode node : read(cluster, "nodes").path("items")) {
-            nodesByName.put(node.path("metadata").path("name").asText(), node);
-        }
         Map<String, long[]> requests = EksAutoModeNodes.requestsByNode(podList);
         Map<String, List<EksAutoModeNodes.BoundPod>> boundPods = EksAutoModeNodes.boundPodsByNode(podList);
         Set<String> busy = EksAutoModeNodes.nodesWithWorkloads(podList);
@@ -461,6 +462,40 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             if (!taints.contains(spec)) {
                 exec(cluster, List.of("kubectl", "taint", "node", nodeName, spec, "--overwrite"),
                         "taint node " + nodeName);
+            }
+        }
+    }
+
+    /**
+     * Deletes the Auto Mode nodes, those labelled with a pool and {@code eks.amazonaws.com/compute-type: auto},
+     * whose instance is gone: one that registered after a pass read the nodes, while that pass terminated its
+     * instance, or whose deletion failed after it. A pass retries until it is gone.
+     */
+    private void removeStrayNodes(Cluster cluster, String region, Map<String, JsonNode> nodesByName) {
+        List<String> stray = new ArrayList<>();
+        nodesByName.forEach((name, node) -> {
+            JsonNode labels = node.path("metadata").path("labels");
+            if (labels.hasNonNull(EksAutoModeNodes.NODEPOOL_LABEL)
+                    && "auto".equals(labels.path(EksAutoModeNodes.COMPUTE_TYPE_LABEL).asText())) {
+                stray.add(name);
+            }
+        });
+        if (stray.isEmpty()) {
+            return;
+        }
+        for (Instance instance : instancesOf(cluster, region, "pending", "running", "stopping", "stopped")) {
+            stray.remove(clusterManager.deriveInstanceNodeName(instance, region));
+        }
+        for (String name : stray) {
+            try {
+                exec(cluster, List.of("kubectl", "delete", "node", name, "--ignore-not-found=true", "--wait=false"),
+                        "delete node " + name);
+                nodesByName.remove(name);
+                LOG.infov("EKS Auto Mode deleted node {0} of cluster {1}, whose instance is gone", name,
+                        cluster.getName());
+            } catch (RuntimeException e) {
+                LOG.warnv("EKS Auto Mode node {0} of cluster {1}, whose instance is gone, wasn''t deleted: {2}", name,
+                        cluster.getName(), e.getMessage());
             }
         }
     }

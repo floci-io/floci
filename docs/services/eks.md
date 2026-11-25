@@ -505,6 +505,8 @@ launches nodes on AWS. Floci checks every 10 seconds.
   the wait again.
 - **Deleted pools.** The nodes of a NodePool that is deleted, or that `UpdateClusterConfig` drops, are tainted,
   drained and removed the same way, whatever they run, as Karpenter removes them.
+  An Auto Mode node whose instance is gone (one that registered while its instance was being terminated, say) is
+  deleted by the next pass.
 - **Removal.** Turning compute off terminates the cluster's Auto Mode instances and takes their nodes out of it.
   Deleting the cluster terminates them, waits up to a minute for them to finish terminating, as they hold the
   cluster security group deleted next (one that doesn't fails the delete, which can be retried), and deletes the
