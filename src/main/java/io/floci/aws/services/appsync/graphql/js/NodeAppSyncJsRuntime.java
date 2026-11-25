@@ -167,7 +167,11 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime, ContainerTeardown
                     .withCmd(List.of(startCommand()))
                     .withLabel(SCRIPT_LABEL, scriptDigest())
                     .withDockerNetwork(jsRuntimeConfig().dockerNetwork())
-                    .withLogRotation();
+                    .withLogRotation()
+                    // The server script installs no SIGTERM handler, and node exec'd as PID 1
+                    // ignores the stop request, so every reset and shutdown would wait out the
+                    // whole stop timeout before Docker sends SIGKILL.
+                    .withInit();
             int configuredPort = jsRuntimeConfig().port();
             if (configuredPort > 0) {
                 specBuilder.withPortBinding(CONTAINER_INTERNAL_PORT, configuredPort);

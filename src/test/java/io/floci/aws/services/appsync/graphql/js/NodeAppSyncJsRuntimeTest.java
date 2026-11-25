@@ -198,6 +198,7 @@ class NodeAppSyncJsRuntimeTest {
         verify(lifecycleManager).stopAndRemove("old-script", null);
         verify(lifecycleManager, never()).adopt(anyString(), any(), any());
         verify(lifecycleManager).createAndStart(any());
+        verify(builder).withInit();
     }
 
 
