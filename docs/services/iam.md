@@ -3494,6 +3494,10 @@ current stored tags under `aws:ResourceTag/` and `ec2:ResourceTag/`. Tags are re
 resolved ARN independently; request tags do not replace ownership tags on an existing VPC.
 The prefixes come from the generated `resourceTagKeys` table in `iam-request-resources.json`,
 derived from the Service Reference; new keys belong in the generator rather than Java branches.
+For an EC2 ARN naming a concrete resource ID, stored tags are read in the account and Region the ARN names, with
+caller values for omitted fields. This includes account-less image ARNs. The tag lookup does
+not grant cross-account access or change the operation's resource-ownership requirements.
+
 
 EC2 tagging targets come from `regen_iam_request_resources.py`, with EC2 among its namespaces.
 The Service Reference supplies the resource types and ARN formats, botocore supplies the
