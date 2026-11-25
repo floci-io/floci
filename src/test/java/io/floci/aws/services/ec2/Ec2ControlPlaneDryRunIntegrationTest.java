@@ -48,6 +48,7 @@ class Ec2ControlPlaneDryRunIntegrationTest {
             "DescribeCapacityReservations|CapacityReservationId.1=cr-0123456789abcdef0",
             "DescribeNetworkInterfaces|NetworkInterfaceId.1=eni-0123456789abcdef0",
             "DescribeClientVpnEndpoints|",
+            "DescribeClientVpnEndpoints|ClientVpnEndpointId.1=" + CLIENT_VPN,
             "DescribeInstanceTypes|",
             "DescribePrefixLists|",
             "DescribeManagedPrefixLists|",
@@ -166,12 +167,7 @@ class Ec2ControlPlaneDryRunIntegrationTest {
         String gateway = ec2("CreateTransitGateway", "Options.DefaultRouteTableAssociation", "disable",
                 "Options.DefaultRouteTablePropagation", "disable")
                 .getString("CreateTransitGatewayResponse.transitGateway.transitGatewayId");
-        String vpc = ec2("CreateVpc", "CidrBlock", "10.40.0.0/16").getString("CreateVpcResponse.vpc.vpcId");
-        String subnet = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.40.1.0/24", "AvailabilityZone",
-                "us-east-1a").getString("CreateSubnetResponse.subnet.subnetId");
-        String attachment = ec2("CreateTransitGatewayVpcAttachment", "TransitGatewayId", gateway, "VpcId", vpc,
-                "SubnetIds.1", subnet).getString("CreateTransitGatewayVpcAttachmentResponse"
-                + ".transitGatewayVpcAttachment.transitGatewayAttachmentId");
+        String attachment = vpcAttachment(gateway, "10.40");
         String routeTable = ec2("CreateTransitGatewayRouteTable", "TransitGatewayId", gateway)
                 .getString("CreateTransitGatewayRouteTableResponse.transitGatewayRouteTable"
                         + ".transitGatewayRouteTableId");
