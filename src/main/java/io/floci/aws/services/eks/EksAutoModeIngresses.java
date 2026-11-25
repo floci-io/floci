@@ -206,18 +206,16 @@ final class EksAutoModeIngresses {
             List<String> subnets = new ArrayList<>();
             classParams.path("subnets").path("ids").forEach(id -> subnets.add(id.asText()));
             List<Route> routes = new ArrayList<>();
-            List<JsonNode> paths = new ArrayList<>();
-            List<String> hosts = new ArrayList<>();
+            // As the Load Balancer Controller builds them: the rules in the order the Ingress lists them, and each
+            // rule's paths in their precedence.
             for (JsonNode rule : spec.path("rules")) {
-                for (JsonNode path : rule.path("http").path("paths")) {
-                    paths.add(path);
-                    hosts.add(rule.path("host").asText(null));
-                }
-            }
-            for (int i : precedence(paths)) {
-                Backend backend = backend(paths.get(i).path("backend"), namespace, servicesByStack);
-                if (backend != null) {
-                    routes.add(new Route(hosts.get(i), pathPatterns(paths.get(i)), backend));
+                List<JsonNode> paths = new ArrayList<>();
+                rule.path("http").path("paths").forEach(paths::add);
+                for (int i : precedence(paths)) {
+                    Backend backend = backend(paths.get(i).path("backend"), namespace, servicesByStack);
+                    if (backend != null) {
+                        routes.add(new Route(rule.path("host").asText(null), pathPatterns(paths.get(i)), backend));
+                    }
                 }
             }
             found.add(new AlbIngress(namespace, metadata.path("name").asText(), metadata.path("uid").asText(""),
@@ -229,9 +227,9 @@ final class EksAutoModeIngresses {
     }
 
     /**
-     * The paths' indexes in the order their rules are matched, as the AWS Load Balancer Controller orders them:
-     * {@code Exact} paths first, then {@code Prefix} paths longest first, then {@code ImplementationSpecific} ones,
-     * each in the order the Ingress lists them otherwise.
+     * One Ingress rule's paths' indexes in the order they are matched, as the AWS Load Balancer Controller orders
+     * them: {@code Exact} paths first, then {@code Prefix} paths longest first, then {@code ImplementationSpecific}
+     * ones, each in the order the rule lists them otherwise.
      */
     static List<Integer> precedence(List<JsonNode> paths) {
         List<Integer> order = new ArrayList<>();

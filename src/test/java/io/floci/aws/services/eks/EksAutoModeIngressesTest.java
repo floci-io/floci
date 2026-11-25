@@ -230,6 +230,25 @@ class EksAutoModeIngressesTest {
         assertEquals(List.of(4, 5, 2, 1, 0, 3), EksAutoModeIngresses.precedence(paths));
     }
 
+    /** Paths are ordered within each rule; the rules keep the order the Ingress lists them in. */
+    @Test
+    void eachRulesPathsAreOrderedAndTheRulesKeepTheirOrder() throws Exception {
+        String ingress = """
+                {"items": [{"metadata": {"namespace": "shop", "name": "store"},
+                  "spec": {"ingressClassName": "alb", "rules": [
+                    {"http": {"paths": [
+                      {"path": "/", "pathType": "Prefix", "backend": {"service": {"name": "web", "port": {"number": 80}}}}]}},
+                    {"host": "x.com", "http": {"paths": [
+                      {"path": "/", "pathType": "Prefix", "backend": {"service": {"name": "web", "port": {"number": 80}}}},
+                      {"path": "/api", "pathType": "Prefix", "backend": {"service": {"name": "api", "port": {"number": 8080}}}}]}}]}}]}""";
+
+        List<EksAutoModeIngresses.Route> routes = EksAutoModeIngresses.albIngresses(json(ingress), json(CLASSES),
+                json(PARAMS), json(SERVICES)).getFirst().routes();
+
+        assertEquals(List.of("null /* 30080", "x.com /api,/api/* 30081", "x.com /* 30080"), routes.stream()
+                .map(r -> r.host() + " " + String.join(",", r.paths()) + " " + r.backend().nodePort()).toList());
+    }
+
     @Test
     void aBackendPortServedOverUdpAndTcpTakesTheTcpNodePort() throws Exception {
         String services = """
