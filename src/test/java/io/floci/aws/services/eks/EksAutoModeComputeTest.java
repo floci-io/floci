@@ -306,21 +306,38 @@ class EksAutoModeComputeTest {
      * tainted as disrupted and drained, whatever they run, then deleted and terminated.
      */
     /**
-     * An Auto Mode node whose instance is gone, one that registered while a pass terminated its instance, or whose
-     * deletion failed after it, is deleted by the next pass; one whose instance runs, and the nodes Auto Mode didn't
-     * launch, stay.
+     * The node of an Auto Mode instance that is terminated, one that registered while a pass terminated its
+     * instance, or whose deletion failed after it, is deleted by the next pass. A node no Auto Mode instance is
+     * named for stays, though it carries a pool's label and the Auto Mode compute label, as the cluster's own node
+     * can; so does one whose name a live instance's node has again.
      */
     @Test
-    void anAutoModeNodeWhoseInstanceIsGoneIsDeleted() {
-        joinedNode("i-node", "node-1");
+    void theNodeOfATerminatedAutoModeInstanceIsDeleted() {
+        Instance live = joinedNode("i-node", "node-1");
+        Instance dead = new Instance();
+        dead.setInstanceId("i-dead");
+        Instance reused = new Instance();
+        reused.setInstanceId("i-old");
+        when(clusterManager.deriveInstanceNodeName(dead, REGION)).thenReturn("stray");
+        when(clusterManager.deriveInstanceNodeName(reused, REGION)).thenReturn("node-1");
+        Reservation liveReservation = new Reservation();
+        liveReservation.setInstances(List.of(live));
+        Reservation deadReservation = new Reservation();
+        deadReservation.setInstances(List.of(dead, reused));
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenAnswer(inv -> {
+            Map<String, List<String>> filters = inv.getArgument(2);
+            return filters.get("instance-state-name").contains("terminated") ? List.of(deadReservation)
+                    : List.of(liveReservation);
+        });
         lists.put("pods", "{\"items\": []}");
         String autoLabels = "{\"karpenter.sh/nodepool\": \"general-purpose\", "
                 + "\"eks.amazonaws.com/compute-type\": \"auto\"}";
         lists.put("nodes", "{\"items\": ["
                 + "{\"metadata\": {\"name\": \"node-1\", \"labels\": " + autoLabels + "}},"
                 + "{\"metadata\": {\"name\": \"stray\", \"labels\": " + autoLabels + "}},"
-                + "{\"metadata\": {\"name\": \"cluster-node\", "
-                + "\"labels\": {\"eks.amazonaws.com/compute-type\": \"auto\"}}}]}");
+                + "{\"metadata\": {\"name\": \"cluster-node\", \"labels\": " + autoLabels + "}}]}");
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"Never\"}, \"template\""));
         Cluster cluster = cluster("prod");
 
         compute.reconcile(cluster, REGION);

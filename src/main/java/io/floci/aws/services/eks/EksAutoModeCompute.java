@@ -467,19 +467,23 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
     }
 
     /**
-     * Deletes the Auto Mode nodes, those labelled with a pool and {@code eks.amazonaws.com/compute-type: auto},
-     * whose instance is gone: one that registered after a pass read the nodes, while that pass terminated its
-     * instance, or whose deletion failed after it. A pass retries until it is gone.
+     * Deletes the nodes of the cluster's Auto Mode instances that are shutting down or terminated: one that
+     * registered after a pass read the nodes, while that pass terminated its instance, or whose deletion failed
+     * after it. Only nodes named after those instances are touched, and not one a live Auto Mode instance's node
+     * shares the name of, so the cluster's own node and node group nodes stay whatever their labels. A pass retries
+     * while EC2 keeps the terminated instance, an hour as on AWS.
      */
     private void removeStrayNodes(Cluster cluster, String region, Map<String, JsonNode> nodesByName) {
-        List<String> stray = new ArrayList<>();
-        nodesByName.forEach((name, node) -> {
-            JsonNode labels = node.path("metadata").path("labels");
-            if (labels.hasNonNull(EksAutoModeNodes.NODEPOOL_LABEL)
-                    && "auto".equals(labels.path(EksAutoModeNodes.COMPUTE_TYPE_LABEL).asText())) {
+        if (nodesByName.isEmpty()) {
+            return;
+        }
+        Set<String> stray = new LinkedHashSet<>();
+        for (Instance instance : instancesOf(cluster, region, "shutting-down", "terminated")) {
+            String name = clusterManager.deriveInstanceNodeName(instance, region);
+            if (nodesByName.containsKey(name)) {
                 stray.add(name);
             }
-        });
+        }
         if (stray.isEmpty()) {
             return;
         }
