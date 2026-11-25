@@ -150,17 +150,33 @@ class EksAutoModeNodesTest {
         PendingPod small = pod("small", "100m", "64Mi");
 
         List<PendingPod> cordoned = EksAutoModeNodes.withoutRoom(List.of(small), List.of(
-                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 0, 0, false, List.of())));
+                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 0, 0, 110, false, List.of())));
         List<PendingPod> tainted = EksAutoModeNodes.withoutRoom(List.of(small), List.of(
-                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 0, 0, true,
+                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 0, 0, 110, true,
                         List.of(new EksAutoModeNodes.Taint("maintenance", "", "NoSchedule")))));
         List<PendingPod> preferOnly = EksAutoModeNodes.withoutRoom(List.of(small), List.of(
-                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 0, 0, true,
+                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 0, 0, 110, true,
                         List.of(new EksAutoModeNodes.Taint("busy", "", "PreferNoSchedule")))));
 
         assertEquals(List.of(small), cordoned);
         assertEquals(List.of(small), tainted);
         assertEquals(List.of(), preferOnly);
+    }
+
+    /** A node whose pod slots are all taken has no room, however much CPU and memory it has left. */
+    @Test
+    void aNodeWithNoPodSlotLeftHasNoRoom() throws Exception {
+        NodePool general = pools().getFirst();
+        PendingPod first = pod("first", "100m", "64Mi");
+        PendingPod second = pod("second", "100m", "64Mi");
+
+        List<PendingPod> full = EksAutoModeNodes.withoutRoom(List.of(first), List.of(
+                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 0, 0, 0, true, List.of())));
+        List<PendingPod> oneSlot = EksAutoModeNodes.withoutRoom(List.of(first, second), List.of(
+                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 0, 0, 1, true, List.of())));
+
+        assertEquals(List.of(first), full);
+        assertEquals(List.of(second), oneSlot);
     }
 
     @Test
@@ -181,6 +197,7 @@ class EksAutoModeNodesTest {
         assertEquals(List.of("n1"), List.copyOf(byNode.keySet()));
         assertEquals(500, byNode.get("n1")[0]);
         assertEquals(64L << 20, byNode.get("n1")[1]);
+        assertEquals(2, byNode.get("n1")[2]);
     }
 
     /** A pod constrained to a zone gets a node in it, and the node carries the zone's label. */

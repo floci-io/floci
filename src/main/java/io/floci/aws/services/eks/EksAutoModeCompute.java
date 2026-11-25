@@ -177,15 +177,17 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                             + "yet: {2}", nodeName, cluster.getName(), e.getMessage());
                 }
             }
-            long[] used = requests.getOrDefault(nodeName, new long[2]);
+            long[] used = requests.getOrDefault(nodeName, new long[3]);
             List<Taint> nodeTaints = new ArrayList<>();
             if (node != null) {
                 node.path("spec").path("taints").forEach(t -> nodeTaints.add(new Taint(t.path("key").asText(),
                         t.path("value").asText(""), t.path("effect").asText())));
             }
             boolean schedulable = node == null || !node.path("spec").path("unschedulable").asBoolean(false);
+            int podSlots = node == null ? EksAutoModeNodes.MAX_PODS
+                    : node.path("status").path("allocatable").path("pods").asInt(EksAutoModeNodes.MAX_PODS);
             poolNodes.add(new EksAutoModeNodes.PoolNode(pool, type.get(), zone(instance), used[0], used[1],
-                    schedulable, List.copyOf(nodeTaints)));
+                    (int) Math.max(0, podSlots - used[2]), schedulable, List.copyOf(nodeTaints)));
         }
         if (!neverRegistered.isEmpty()) {
             // A node that never joins would hold its pods' room for good; it goes, and they get another.
@@ -314,18 +316,27 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         return key + (value == null || value.isEmpty() ? "" : "=" + value) + ":" + effect;
     }
 
-    /** Terminates the cluster's Auto Mode instances and takes their nodes out of it, as turning compute off does. */
+    /**
+     * Takes the cluster's Auto Mode nodes out of it and terminates their instances, as turning compute off does. An
+     * instance whose node can't be deleted is kept, so the next pass tries it again.
+     */
     synchronized void removeNodes(Cluster cluster, String region) {
         List<Instance> launched = instancesOf(cluster, region, "pending", "running", "stopping", "stopped");
-        if (launched.isEmpty()) {
+        List<String> removed = new ArrayList<>();
+        for (Instance instance : launched) {
+            try {
+                clusterManager.removeJoinedNode(cluster, instance);
+                removed.add(instance.getInstanceId());
+            } catch (RuntimeException e) {
+                LOG.warnv("EKS Auto Mode node of instance {0} of cluster {1} wasn''t deleted: {2}",
+                        instance.getInstanceId(), cluster.getName(), e.getMessage());
+            }
+        }
+        if (removed.isEmpty()) {
             return;
         }
-        ec2.terminateInstances(region, launched.stream().map(Instance::getInstanceId).toList());
-        for (Instance instance : launched) {
-            clusterManager.removeJoinedNode(cluster, instance);
-        }
-        LOG.infov("EKS Auto Mode compute of cluster {0} is off: terminated {1}", cluster.getName(),
-                launched.stream().map(Instance::getInstanceId).toList());
+        ec2.terminateInstances(region, removed);
+        LOG.infov("EKS Auto Mode compute of cluster {0} is off: terminated {1}", cluster.getName(), removed);
     }
 
     /** The cluster's Auto Mode instances and the instance profiles made for it go with it, as on AWS. */

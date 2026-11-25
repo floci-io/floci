@@ -1827,20 +1827,31 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
 
     /**
      * What the cluster's EKS Auto Mode capabilities made outside it go with it, as on AWS: the load balancers, and
-     * the compute capability's instances and instance profiles.
+     * the compute capability's instances and instance profiles. Each cleanup runs even when another fails; a
+     * failure is then thrown, so the cluster record stays and a retried delete finishes the cleanup, as a cluster
+     * security group that can't be deleted keeps it.
      */
     private void deleteAutoModeResources(Cluster cluster) {
         if (autoModeCleanups == null) {
             return;
         }
         String region = clusterRegion(cluster);
+        RuntimeException failure = null;
         for (EksAutoModeCleanup cleanup : autoModeCleanups) {
             try {
                 RequestScopes.runAs(cluster.getAccountId(), region, () -> cleanup.clusterDeleted(cluster, region));
             } catch (RuntimeException e) {
                 LOG.warnv("EKS Auto Mode resources of cluster {0} were not all deleted: {1}", cluster.getName(),
                         e.getMessage());
+                if (failure == null) {
+                    failure = e;
+                } else {
+                    failure.addSuppressed(e);
+                }
             }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 

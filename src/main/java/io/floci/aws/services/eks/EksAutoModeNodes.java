@@ -29,6 +29,8 @@ final class EksAutoModeNodes {
     static final String LABEL_PREFIX = "eks.amazonaws.com/instance-"; // partition-literal: a label prefix
     /** The smallest instance Floci picks, as AWS picked a 2-vCPU instance for a pod of 100m CPU (measured). */
     static final int MIN_VCPUS = 2;
+    /** The pods a node takes when it doesn't say: the kubelet's default, which Floci's own Ready node advertises. */
+    static final int MAX_PODS = 110;
     /** Instance family names: category letters, generation digits, then attribute letters, as in {@code c7gd}. */
     private static final Pattern FAMILY = Pattern.compile("^([a-z]+)(\\d+)([a-z-]*)$");
     private static final Pattern QUANTITY = Pattern.compile("^([0-9]*\\.?[0-9]+(?:[eE][+-]?[0-9]+)?)([a-zA-Z]*)$");
@@ -127,11 +129,11 @@ final class EksAutoModeNodes {
      * pending pod it has room for is left to the scheduler rather than given another node.
      */
     record PoolNode(NodePool pool, CatalogInstanceType instanceType, String zone, long usedCpuMillis,
-                    long usedMemoryBytes, boolean schedulable, List<Taint> nodeTaints) {
+                    long usedMemoryBytes, int freePods, boolean schedulable, List<Taint> nodeTaints) {
 
-        /** A node still joining: schedulable, with no taints but its pool's. */
+        /** A node still joining: schedulable, with all its pod slots free and no taints but its pool's. */
         PoolNode(NodePool pool, CatalogInstanceType instanceType, String zone, long usedCpuMillis, long usedMemoryBytes) {
-            this(pool, instanceType, zone, usedCpuMillis, usedMemoryBytes, true, List.of());
+            this(pool, instanceType, zone, usedCpuMillis, usedMemoryBytes, MAX_PODS, true, List.of());
         }
 
         /** The taints a pod must tolerate there: the pool's and any the node carries besides. */
@@ -245,27 +247,32 @@ final class EksAutoModeNodes {
 
     /**
      * The pods none of the pools' nodes has room for: each pod takes room on the first schedulable node whose
-     * labels and taints, the pool's and the node's own, it accepts and whose free CPU and memory fit its requests,
+     * labels and taints, the pool's and the node's own, it accepts, that has a pod slot left and whose free CPU and
+     * memory fit its requests,
      * as Karpenter counts its nodes, those still joining among them, before it launches another. A cordoned node
      * has no room.
      */
     static List<PendingPod> withoutRoom(List<PendingPod> pods, List<PoolNode> nodes) {
         long[] freeCpu = new long[nodes.size()];
         long[] freeMemory = new long[nodes.size()];
+        int[] freePods = new int[nodes.size()];
         for (int i = 0; i < nodes.size(); i++) {
             PoolNode node = nodes.get(i);
             freeCpu[i] = node.instanceType().vcpu * 1000L - node.usedCpuMillis();
             freeMemory[i] = node.instanceType().memoryMib * 1024L * 1024L - node.usedMemoryBytes();
+            freePods[i] = node.freePods();
         }
         List<PendingPod> left = new ArrayList<>();
         for (PendingPod pod : pods) {
             boolean placed = false;
             for (int i = 0; i < nodes.size() && !placed; i++) {
                 PoolNode node = nodes.get(i);
-                if (node.schedulable() && freeCpu[i] >= pod.cpuMillis() && freeMemory[i] >= pod.memoryBytes()
+                if (node.schedulable() && freePods[i] > 0 && freeCpu[i] >= pod.cpuMillis()
+                        && freeMemory[i] >= pod.memoryBytes()
                         && pod.fits(labels(node.instanceType(), node.pool(), node.zone()), node.taints())) {
                     freeCpu[i] -= pod.cpuMillis();
                     freeMemory[i] -= pod.memoryBytes();
+                    freePods[i]--;
                     placed = true;
                 }
             }
@@ -371,7 +378,7 @@ final class EksAutoModeNodes {
 
     /**
      * The CPU (millicores) and memory (bytes) the pods of {@code kubectl get pods -A -o json} bound to each node
-     * request, those that finished left out.
+     * request, and how many they are, those that finished left out.
      */
     static Map<String, long[]> requestsByNode(JsonNode list) {
         Map<String, long[]> byNode = new LinkedHashMap<>();
@@ -382,9 +389,10 @@ final class EksAutoModeNodes {
                 continue;
             }
             long[] requests = requests(item.path("spec"));
-            long[] total = byNode.computeIfAbsent(node, k -> new long[2]);
+            long[] total = byNode.computeIfAbsent(node, k -> new long[3]);
             total[0] += requests[0];
             total[1] += requests[1];
+            total[2]++;
         }
         return byNode;
     }

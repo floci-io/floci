@@ -36,6 +36,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -212,6 +213,34 @@ class EksAutoModeComputeTest {
         verify(ec2).terminateInstances(REGION, List.of("i-node"));
         verify(iam).removeRoleFromInstanceProfile("eks-us-east-1-prod-1", "auto-node");
         verify(iam).deleteInstanceProfile("eks-us-east-1-prod-1");
+    }
+
+    /**
+     * Turning compute off deletes each node before its instance is terminated: an instance whose node can't be
+     * deleted is kept running, so the next pass, finding it still there, tries again.
+     */
+    @Test
+    void aNodeThatCantBeDeletedKeepsItsInstanceForTheNextPass() {
+        Cluster cluster = cluster("prod");
+        Instance stuck = new Instance();
+        stuck.setInstanceId("i-stuck");
+        Instance gone = new Instance();
+        gone.setInstanceId("i-gone");
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(stuck, gone));
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenReturn(List.of(reservation));
+        doThrow(new IllegalStateException("kubectl delete node failed")).doNothing()
+                .when(clusterManager).removeJoinedNode(cluster, stuck);
+
+        compute.removeNodes(cluster, REGION);
+
+        verify(ec2).terminateInstances(REGION, List.of("i-gone"));
+        verify(ec2, never()).terminateInstances(REGION, List.of("i-stuck", "i-gone"));
+
+        reservation.setInstances(List.of(stuck));
+        compute.removeNodes(cluster, REGION);
+
+        verify(ec2).terminateInstances(REGION, List.of("i-stuck"));
     }
 
     private static Subnet subnet(String id, String zone) {

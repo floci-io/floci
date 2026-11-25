@@ -4301,19 +4301,24 @@ public class EksClusterManager
     }
 
     /**
-     * Takes a joined instance out of the cluster once it is terminated: its node is deleted and it is no longer
-     * joined. The cluster's record of it is pruned by the next restore, which finds it terminated.
+     * Takes a joined instance out of the cluster before it is terminated: its node is deleted and it is no longer
+     * joined. The cluster's record of it is pruned by the next restore, which finds it terminated. A node that
+     * can't be deleted throws and leaves the instance joined, so the caller keeps it and can try again.
      */
     void removeJoinedNode(Cluster cluster, Instance instance) {
-        Map<String, Instance> joined = joinedClusterInstances.get(clusterResourceName(cluster));
-        if (joined != null) {
-            joined.remove(instance.getInstanceId());
-        }
         String region = instance.getRegion() != null ? instance.getRegion() : clusterRegion(cluster);
         String containerId = cluster.getContainerId();
         if (containerId != null && !containerId.isBlank()) {
-            execInContainerForResult(containerId, new String[]{"kubectl", "delete", "node",
-                    deriveInstanceNodeName(instance, region), "--ignore-not-found=true", "--wait=false"}, 15);
+            String nodeName = deriveInstanceNodeName(instance, region);
+            ContainerExec.Result result = execInContainerForResult(containerId, new String[]{"kubectl", "delete",
+                    "node", nodeName, "--ignore-not-found=true", "--wait=false"}, 15);
+            if (result.exitCode() != 0) {
+                throw new IllegalStateException("kubectl delete node " + nodeName + " failed: " + result.summary());
+            }
+        }
+        Map<String, Instance> joined = joinedClusterInstances.get(clusterResourceName(cluster));
+        if (joined != null) {
+            joined.remove(instance.getInstanceId());
         }
     }
 
