@@ -687,7 +687,7 @@ public class SesQueryHandler {
     }
 
     private Response handleUpdateCustomVerificationEmailTemplate(MultivaluedMap<String, String> params, String region) {
-        sesService.updateCustomVerificationEmailTemplate(readCvetParams(params), region);
+        sesService.patchCustomVerificationEmailTemplate(readCvetParams(params), region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "UpdateCustomVerificationEmailTemplate", AwsNamespaces.SES)).build();
     }

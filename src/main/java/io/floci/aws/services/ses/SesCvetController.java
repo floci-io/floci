@@ -116,7 +116,7 @@ public class SesCvetController {
         try {
             CustomVerificationEmailTemplate t = parseCvet(readOptionBody(objectMapper, body));
             t.setTemplateName(templateName);
-            sesService.updateCustomVerificationEmailTemplate(t, region);
+            sesService.replaceCustomVerificationEmailTemplate(t, region);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapCvetException(e, templateName);
@@ -150,8 +150,11 @@ public class SesCvetController {
         ObjectNode o = objectMapper.createObjectNode();
         o.put("TemplateName", t.getTemplateName());
         o.put("FromEmailAddress", t.getFromEmailAddress());
-        o.put("TemplateSubject", t.getTemplateSubject());
-        if (includeContent) {
+        // A v1 update can clear the subject or the content; a cleared member is left out.
+        if (t.getTemplateSubject() != null) {
+            o.put("TemplateSubject", t.getTemplateSubject());
+        }
+        if (includeContent && t.getTemplateContent() != null) {
             o.put("TemplateContent", t.getTemplateContent());
         }
         o.put("SuccessRedirectionURL", t.getSuccessRedirectionURL());

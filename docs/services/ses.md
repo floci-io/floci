@@ -28,7 +28,7 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 | `CreateCustomVerificationEmailTemplate` | Create a custom verification email template               |
 | `GetCustomVerificationEmailTemplate`    | Return a custom verification email template               |
 | `ListCustomVerificationEmailTemplates`  | List custom verification email templates (no content)     |
-| `UpdateCustomVerificationEmailTemplate` | Replace a custom verification email template              |
+| `UpdateCustomVerificationEmailTemplate` | Update a custom verification email template               |
 | `DeleteCustomVerificationEmailTemplate` | Delete a custom verification email template               |
 | `SendCustomVerificationEmail`           | Send a custom verification email and register the recipient as a pending identity |
 | `GetSendQuota`                      | Return local send quota counters                          |
