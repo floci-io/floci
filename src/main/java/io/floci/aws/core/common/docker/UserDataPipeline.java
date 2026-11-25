@@ -61,8 +61,11 @@ public final class UserDataPipeline {
      * With one, the script still runs as a command (never as {@code sh script}), while a POSIX shell
      * merges its stdout and stderr, copies them to the guest log through {@code tee}, and reports the
      * script's own exit status rather than {@code tee}'s. The fallback covers guests without
-     * {@code tee} or without a writable {@code /var/log}: user data keeps running exactly as it did
-     * before, and the warning goes to the exec stream that Floci already logs.
+     * {@code tee}, without a writable {@code /var/log}, or without a writable status file: user data
+     * keeps running exactly as it did before, and the warning goes to the exec stream that Floci
+     * already logs. The writability probes run in subshells: a redirection failure on {@code :} is
+     * fatal to a non-interactive POSIX shell, which would otherwise end the wrapper before the
+     * fallback runs.
      */
     public static String[] executionCommand(String guestOutputLogPath) {
         if (guestOutputLogPath == null) {
@@ -70,13 +73,16 @@ public final class UserDataPipeline {
         }
         String wrapper = """
                 log=%1$s
-                if mkdir -p /var/log 2>/dev/null && : >> "$log" 2>/dev/null && command -v tee >/dev/null 2>&1; then
-                  status=/tmp/.floci-user-data.$$.exit
+                status=/var/lib/.floci-user-data.$$.exit
+                if ( mkdir -p /var/log 2>/dev/null && : >> "$log" ) 2>/dev/null &&
+                   command -v tee >/dev/null 2>&1 &&
+                   ( : > "$status" ) 2>/dev/null; then
                   { %2$s 2>&1; echo $? > "$status"; } | tee -a "$log"
                   code=$(cat "$status")
                   rm -f "$status"
                   exit "${code:-1}"
                 fi
+                rm -f "$status" 2>/dev/null
                 echo "floci: cannot write $log; running user data without the guest log" >&2
                 exec %2$s
                 """.formatted(guestOutputLogPath, USER_DATA_SCRIPT_PATH);

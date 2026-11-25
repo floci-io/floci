@@ -223,13 +223,16 @@ class UserDataPipelineTest {
     void cloudInitOutputCommandTeesMergedOutputAndKeepsTheScriptExitStatus() {
         String expected = """
                 log=/var/log/cloud-init-output.log
-                if mkdir -p /var/log 2>/dev/null && : >> "$log" 2>/dev/null && command -v tee >/dev/null 2>&1; then
-                  status=/tmp/.floci-user-data.$$.exit
+                status=/var/lib/.floci-user-data.$$.exit
+                if ( mkdir -p /var/log 2>/dev/null && : >> "$log" ) 2>/dev/null &&
+                   command -v tee >/dev/null 2>&1 &&
+                   ( : > "$status" ) 2>/dev/null; then
                   { /var/lib/user-data.sh 2>&1; echo $? > "$status"; } | tee -a "$log"
                   code=$(cat "$status")
                   rm -f "$status"
                   exit "${code:-1}"
                 fi
+                rm -f "$status" 2>/dev/null
                 echo "floci: cannot write $log; running user data without the guest log" >&2
                 exec /var/lib/user-data.sh
                 """;
