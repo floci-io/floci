@@ -83,6 +83,41 @@ public record IntegrationDataFilter(List<Rule> rules) {
         return databases;
     }
 
+    /** Whether some {@code include:} entry can match a table of {@code database}. */
+    public boolean includesDatabase(String database) {
+        return rules.stream().anyMatch(rule -> rule.include() && matches(rule.database(), database));
+    }
+
+    /**
+     * Whether the filter replicates the table. As on RDS, the entries are applied in order and the
+     * last one that matches decides; a table no entry matches is not replicated, since a filter
+     * switches the default from {@code include: *.*.*} to {@code exclude: *.*.*}.
+     */
+    public boolean includes(String database, String schema, String table) {
+        boolean included = false;
+        for (Rule rule : rules) {
+            List<String> parts = rule.parts();
+            if (matches(parts.get(0), database) && matches(parts.get(1), schema) && matches(parts.get(2), table)) {
+                included = rule.include();
+            }
+        }
+        return included;
+    }
+
+    /** A {@code *}, a {@code /regex/} matching the whole name, or a name, which may be double-quoted. */
+    private static boolean matches(String part, String name) {
+        if (Rule.isWildcard(part)) {
+            return true;
+        }
+        if (Rule.isRegex(part)) {
+            return Pattern.compile(part.substring(1, part.length() - 1)).matcher(name).matches();
+        }
+        if (part.length() >= 2 && part.startsWith("\"") && part.endsWith("\"")) {
+            return part.substring(1, part.length() - 1).replace("\"\"", "\"").equals(name);
+        }
+        return part.equals(name);
+    }
+
     private static Rule parseRule(String entry, String dataFilter) {
         int colon = entry.indexOf(':');
         if (colon < 0) {

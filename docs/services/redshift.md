@@ -646,8 +646,10 @@ data-type, pause and resume, serverless restore and modification events do not o
 is best effort. It is skipped when the EventBridge service is disabled, a refused or failed
 delivery is logged, and neither changes the outcome of the Redshift operation.
 
-`CREATE DATABASE ... FROM INTEGRATION`, history mode and `SVV_INTEGRATION*` views are not
-supported, and a provisioned cluster's namespace ARN (`arn:aws:redshift:<region>:<account>:namespace:<id>`)
+`CREATE DATABASE ... FROM INTEGRATION` is supported for RDS and Aurora PostgreSQL integrations only;
+see [Zero-ETL integrations with Amazon Redshift](rds.md#zero-etl-integrations-with-amazon-redshift).
+For a DynamoDB integration it fails with SQLSTATE `0A000`. History mode and `SVV_INTEGRATION*` views
+are not supported, and a provisioned cluster's namespace ARN (`arn:aws:redshift:<region>:<account>:namespace:<id>`)
 is not accepted as a target.
 
 ## CloudFormation

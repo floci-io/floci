@@ -43,6 +43,7 @@ import io.floci.aws.services.opensearch.OpenSearchService;
 import io.floci.aws.services.pipes.PipesService;
 import io.floci.aws.services.rds.RdsService;
 import io.floci.aws.services.rds.container.RdsContainerManager;
+import io.floci.aws.services.rds.integration.RdsIntegrationLoader;
 import io.floci.aws.services.rds.proxy.RdsProxyManager;
 import io.floci.aws.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
 import io.floci.aws.services.sagemaker.SageMakerService;
@@ -155,6 +156,7 @@ class EmulatorLifecycleTest {
     @Mock private Instance<ContainerTeardown> containerTeardowns;
     @Mock private DynamoDbRuntime dynamoDbRuntime;
     @Mock private RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer;
+    @Mock private RdsIntegrationLoader rdsIntegrationLoader;
 
     private EmulatorLifecycle emulatorLifecycle;
 
@@ -212,7 +214,7 @@ class EmulatorLifecycleTest {
                 schemaCreationWorker, stepFunctionsService, durableExecutionService, containerTeardowns,
                 persistentPathValidator,
                 dynamoDbRuntime, redshiftZeroEtlConsumer, eksService, codeArtifactService,
-                cloudWatchMetricsService);
+                cloudWatchMetricsService, rdsIntegrationLoader);
         Mockito.lenient().when(containerTeardowns.iterator())
                 .thenReturn(Collections.emptyIterator());
     }
