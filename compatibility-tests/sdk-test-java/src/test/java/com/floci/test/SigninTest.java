@@ -3,7 +3,6 @@ package com.floci.test;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.signin.SigninClient;
-import software.amazon.awssdk.services.signin.model.OAuth2ErrorCode;
 import software.amazon.awssdk.services.signin.model.ValidationException;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -25,7 +24,10 @@ class SigninTest {
                     .isInstanceOfSatisfying(ValidationException.class, exception -> {
                         assertThat(exception.statusCode()).isEqualTo(400);
                         assertThat(exception.awsErrorDetails().errorCode()).isEqualTo("ValidationException");
-                        assertThat(exception.error()).isEqualTo(OAuth2ErrorCode.INVALID_REQUEST);
+                        // AWS sends "INVALID_REQUEST" (probed in us-west-2, 2026-11-26), while SDK 2.59.7
+                        // maps OAuth2ErrorCode.INVALID_REQUEST to "invalid_request", so error() reads it as
+                        // UNKNOWN_TO_SDK_VERSION against AWS too. Assert the wire value.
+                        assertThat(exception.errorAsString()).isEqualTo("INVALID_REQUEST");
                     });
         }
     }
