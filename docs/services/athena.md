@@ -104,6 +104,12 @@ started in another region, or one Athena holds none of, return
 `InvalidRequestException` with `QueryExecution <id> was not found`. An execution
 stored before Floci recorded each execution's region is answered in every region.
 
+`GetQueryResults` on a query that has not succeeded returns
+`InvalidRequestException` worded by its state, as AWS words it: `Query has not
+yet finished. Current state: <state>` for one still queued or running, `Query did
+not finish successfully. Final query state: FAILED` for a failed one, and `Could
+not find results` for a cancelled one.
+
 A workgroup reports what its request gave and AWS's defaults for the rest. With
 no `ResultConfiguration`, it reports none (`primary` reports an empty one, as on
 AWS); a query then names its own output location, and Floci writes results to

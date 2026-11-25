@@ -242,6 +242,37 @@ class AthenaServiceTest {
     }
 
     @Test
+    void getQueryResultsRefusesAnUnsucceededQueryAsAthenaWordsIt() throws Exception {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            started.countDown();
+            release.await(10, TimeUnit.SECONDS);
+            return null;
+        }).when(duckClient).execute(anyString(), any(), any(), any());
+        String id = service.startQueryExecution("SELECT 1", "primary", null, null);
+        assertTrue(started.await(10, TimeUnit.SECONDS), "the worker never started");
+
+        assertEquals("Query has not yet finished. Current state: RUNNING", resultsRefusal(id));
+        service.stopQueryExecution(REGION, id);
+        release.countDown();
+        assertEquals("Could not find results", resultsRefusal(id));
+
+        doAnswer(invocation -> {
+            throw new IllegalStateException("duck failed");
+        }).when(duckClient).execute(anyString(), any(), any(), any());
+        String failed = service.startQueryExecution("SELECT 1", "primary", null, null);
+        awaitState(failed, QueryExecutionState.FAILED);
+        assertEquals("Query did not finish successfully. Final query state: FAILED", resultsRefusal(failed));
+    }
+
+    private String resultsRefusal(String id) {
+        AwsException refused = assertThrows(AwsException.class, () -> service.getQueryResults(REGION, id));
+        assertEquals("InvalidRequestException", refused.getErrorCode());
+        return refused.getMessage();
+    }
+
+    @Test
     void getQueryResultsReportsTheSqlTypeOfEachColumn() throws Exception {
         String query = "SELECT CAST(1 AS BIGINT) AS n, CAST(1.5 AS DOUBLE) AS d, true AS b, "
                 + "DATE '2026-01-01' AS dt, CAST(2.50 AS DECIMAL(10,2)) AS p, 'x' AS s";

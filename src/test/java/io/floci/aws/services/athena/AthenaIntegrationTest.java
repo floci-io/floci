@@ -517,6 +517,17 @@ class AthenaIntegrationTest {
             .body("QueryExecution.Status.StateChangeReason", equalTo("Invalid database properties"))
             .body("QueryExecution.StatementType", equalTo("DDL"))
             .body("QueryExecution.ResultConfiguration", nullValue());
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.GetQueryResults")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"QueryExecutionId\": \"" + id + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"))
+            .body("message", equalTo("Query did not finish successfully. Final query state: FAILED"));
     }
 
     @Test
