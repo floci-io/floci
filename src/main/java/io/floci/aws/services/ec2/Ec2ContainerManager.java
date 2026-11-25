@@ -889,12 +889,19 @@ public class Ec2ContainerManager {
                 return;
             }
         }
-        if (lifecycleManager.isContainerRunning(containerId)) {
+        // Only a container Docker reports stopped; one running again after a reboot, or one a failed
+        // inspect leaves unknown, is not a shutdown.
+        if (lifecycleManager.probeContainer(containerId) != ContainerLiveness.NOT_RUNNING) {
             return;
         }
         LOG.infov("EC2 instance {0} shut down from its guest (container exit code {1})",
                 instance.getInstanceId(), String.valueOf(exitCode));
-        guestShutdownHandler.accept(instance);
+        try {
+            guestShutdownHandler.accept(instance);
+        } catch (Exception e) {
+            LOG.warnv("Could not apply the shutdown behavior of EC2 instance {0}: {1}",
+                    instance.getInstanceId(), e.getMessage());
+        }
     }
 
     /** Called when an instance's guest shuts itself down, so its shutdown behavior can be applied. */

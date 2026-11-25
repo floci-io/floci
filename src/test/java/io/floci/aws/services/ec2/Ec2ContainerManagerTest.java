@@ -37,6 +37,7 @@ import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerExecStubs;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
+import io.floci.aws.core.common.docker.ContainerLiveness;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.core.common.docker.ContainerSpec;
@@ -1713,7 +1714,7 @@ class Ec2ContainerManagerTest {
         harness.manager.setGuestShutdownHandler(shutDown::add);
         Instance instance = launchRunningInstance(harness, "i-guesthalt", exitWatches);
 
-        when(harness.lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(false);
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
         exitWatches.getLast().onNext(exitStatus(130));
 
         assertEquals(List.of(instance), shutDown);
@@ -1733,7 +1734,7 @@ class Ec2ContainerManagerTest {
 
         harness.manager.start(instance);
         awaitUntil(() -> exitWatches.size() == 2, Duration.ofSeconds(5));
-        when(harness.lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(false);
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
         exitWatches.getLast().onNext(exitStatus(130));
 
         assertEquals(List.of(instance), shutDown);
@@ -1750,15 +1751,15 @@ class Ec2ContainerManagerTest {
         when(harness.dockerClient.restartContainerCmd(TEST_CONTAINER_ID)).thenReturn(restart);
         ResultCallback<WaitResponse> beforeReboot = exitWatches.getLast();
         when(restart.exec()).thenAnswer(invocation -> {
-            when(harness.lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(false);
+            when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
             beforeReboot.onNext(exitStatus(0));
-            when(harness.lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
+            when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.RUNNING);
             return null;
         });
 
         harness.manager.reboot(instance);
         awaitUntil(() -> exitWatches.size() == 2, Duration.ofSeconds(5));
-        when(harness.lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(false);
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
         exitWatches.getLast().onNext(exitStatus(130));
 
         assertEquals(1, shutDown.size(), "only the exit after the reboot is the guest's");
@@ -1774,7 +1775,7 @@ class Ec2ContainerManagerTest {
         Instance instance = launchRunningInstance(harness, "i-apistop", exitWatches);
 
         harness.manager.stop(instance);
-        when(harness.lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(false);
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
         exitWatches.getLast().onNext(exitStatus(0));
 
         assertEquals(List.of(), shutDown);
@@ -1790,7 +1791,7 @@ class Ec2ContainerManagerTest {
         Instance instance = launchRunningInstance(harness, "i-flocistop", exitWatches);
 
         harness.manager.stopForShutdown(instance);
-        when(harness.lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(false);
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
         exitWatches.getLast().onNext(exitStatus(0));
 
         assertEquals(List.of(), shutDown);

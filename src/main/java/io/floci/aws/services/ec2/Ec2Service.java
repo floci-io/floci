@@ -6477,7 +6477,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     void applyGuestShutdown(Instance instance) {
         String region = instance.getRegion();
         List<String> ids = List.of(instance.getInstanceId());
-        RequestScopes.runAs(instance.getOwnerId(), region, () -> {
+        String owner = instance.getOwnerId() != null ? instance.getOwnerId() : defaultAccountId;
+        RequestScopes.runAs(owner, region, () -> {
             Instance stored = instances.get(key(region, instance.getInstanceId())).orElse(instance);
             if ("terminate".equals(stored.getInstanceInitiatedShutdownBehavior())) {
                 terminateInstances(region, ids);
