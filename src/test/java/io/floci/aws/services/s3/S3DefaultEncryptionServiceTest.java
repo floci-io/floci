@@ -74,6 +74,18 @@ class S3DefaultEncryptionServiceTest {
     }
 
     @Test
+    void aPlainEncryptionRulePreservesSseCustomerBlocking() throws Exception {
+        s3Service.putBucketEncryption(BUCKET, configuration("AES256", null));
+
+        assertTrue(s3Service.getBucketEncryption(BUCKET).contains(
+                "<BlockedEncryptionTypes><EncryptionType>SSE-C</EncryptionType></BlockedEncryptionTypes>"));
+        AwsException denied = assertThrows(AwsException.class,
+                () -> put("still-blocked.txt", customerKey(new PutObjectOptions())));
+        assertEquals("AccessDenied", denied.getErrorCode());
+        assertEquals(403, denied.getHttpStatus());
+    }
+
+    @Test
     void bahrainAndUaeBucketsDoNotBlockSseCustomerEncryptionByDefault() throws Exception {
         for (String region : List.of("me-south-1", "me-central-1")) {
             String bucket = "sse-c-" + region;
@@ -140,7 +152,7 @@ class S3DefaultEncryptionServiceTest {
 
     @Test
     void anSseCustomerKeyUploadGetsNoDefault() throws Exception {
-        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY, "NONE"));
 
         S3Object put = put("sse-c.txt", customerKey(new PutObjectOptions()));
 
@@ -274,7 +286,7 @@ class S3DefaultEncryptionServiceTest {
 
     @Test
     void anSseCustomerKeyMultipartUploadGetsNoDefault() throws Exception {
-        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY, "NONE"));
         PutObjectOptions sseC = customerKey(new PutObjectOptions());
         MultipartUpload upload = s3Service.initiateMultipartUpload(BUCKET, "multipart-sse-c.bin",
                 "application/octet-stream", Map.of(), null, sseC);
@@ -344,7 +356,7 @@ class S3DefaultEncryptionServiceTest {
 
     @Test
     void anUploadThatSendsItsOwnEncryptionRecordsNoDefault() throws Exception {
-        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY, "NONE"));
 
         MultipartUpload explicit = s3Service.initiateMultipartUpload(BUCKET, "explicit.bin",
                 "application/octet-stream", Map.of(), null, new PutObjectOptions().withServerSideEncryption("AES256"));
@@ -458,7 +470,7 @@ class S3DefaultEncryptionServiceTest {
 
     @Test
     void aCopyEncryptedWithACustomerKeyGetsNoDefault() throws Exception {
-        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY, "NONE"));
         put("source.txt", new PutObjectOptions());
         PutObjectOptions sseC = customerKey(new PutObjectOptions());
 
@@ -477,10 +489,17 @@ class S3DefaultEncryptionServiceTest {
     }
 
     private static String configuration(String algorithm, String kmsKeyId) {
+        return configuration(algorithm, kmsKeyId, null);
+    }
+
+    private static String configuration(String algorithm, String kmsKeyId, String blockedType) {
         return "<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Rule>"
                 + "<ApplyServerSideEncryptionByDefault><SSEAlgorithm>" + algorithm + "</SSEAlgorithm>"
                 + (kmsKeyId == null ? "" : "<KMSMasterKeyID>" + kmsKeyId + "</KMSMasterKeyID>")
-                + "</ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+                + "</ApplyServerSideEncryptionByDefault>"
+                + (blockedType == null ? "" : "<BlockedEncryptionTypes><EncryptionType>" + blockedType
+                        + "</EncryptionType></BlockedEncryptionTypes>")
+                + "</Rule></ServerSideEncryptionConfiguration>";
     }
 
     private static String blockedEncryption(String type) {

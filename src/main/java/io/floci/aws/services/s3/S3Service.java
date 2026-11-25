@@ -50,12 +50,22 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import org.jboss.logging.Logger;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
 
+import javax.xml.XMLConstants;
+import javax.xml.transform.OutputKeys;
+import javax.xml.transform.Transformer;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.StringWriter;
 import java.io.UncheckedIOException;
 import java.net.URLEncoder;
 import java.nio.channels.Channels;
@@ -6545,7 +6555,43 @@ public class S3Service implements Resettable, ResourceProvider {
             }
             return response.end("Rule").end("ServerSideEncryptionConfiguration").build();
         }
-        return bucket.getEncryptionConfiguration();
+        String configuration = bucket.getEncryptionConfiguration();
+        XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(configuration);
+        XmlParser.XmlElement rule = root == null ? null : root.child("Rule");
+        if (!blocksSseCustomerEncryptionByDefault(bucket) || rule == null
+                || rule.child("BlockedEncryptionTypes") != null) {
+            return configuration;
+        }
+        try {
+            Document document = XmlParser.parseDocument(configuration);
+            Element ruleElement = null;
+            for (Node child = document.getDocumentElement().getFirstChild(); child != null;
+                    child = child.getNextSibling()) {
+                if (child instanceof Element element && "Rule".equals(element.getLocalName())) {
+                    ruleElement = element;
+                    break;
+                }
+            }
+            if (ruleElement == null) {
+                throw new IllegalStateException("Stored bucket encryption rule is missing");
+            }
+            Element blocked = document.createElementNS(ruleElement.getNamespaceURI(), "BlockedEncryptionTypes");
+            Element type = document.createElementNS(ruleElement.getNamespaceURI(), "EncryptionType");
+            type.setTextContent("SSE-C");
+            blocked.appendChild(type);
+            ruleElement.appendChild(blocked);
+            TransformerFactory factory = TransformerFactory.newInstance();
+            factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+            factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+            factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
+            Transformer transformer = factory.newTransformer();
+            transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "yes");
+            StringWriter result = new StringWriter();
+            transformer.transform(new DOMSource(document), new StreamResult(result));
+            return result.toString();
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not render default SSE-C block for bucket " + bucketName, e);
+        }
     }
 
     public void putBucketEncryption(String bucketName, String encryptionXml) {
@@ -7295,8 +7341,12 @@ public class S3Service implements Resettable, ResourceProvider {
         XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(bucket.getEncryptionConfiguration());
         XmlParser.XmlElement rule = root == null ? null : root.child("Rule");
         XmlParser.XmlElement blocked = rule == null ? null : rule.child("BlockedEncryptionTypes");
-        return blocked != null && blocked.children().stream()
-                .anyMatch(type -> "EncryptionType".equals(type.name()) && "SSE-C".equals(type.text()));
+        if (blocked == null) {
+            return blocksSseCustomerEncryptionByDefault(bucket);
+        }
+        return blocked.children().size() != 1
+                || !"EncryptionType".equals(blocked.children().getFirst().name())
+                || !"NONE".equals(blocked.children().getFirst().text());
     }
 
     /**

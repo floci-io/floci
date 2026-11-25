@@ -1965,6 +1965,73 @@ class S3IntegrationTest {
 
     @Test
     @Order(76)
+    void anEncryptionRuleWithoutBlockedTypesKeepsSseCustomerBlocking() {
+        given()
+            .put("/sse-policy-bucket")
+        .then()
+            .statusCode(200);
+
+        given()
+            .body("<ServerSideEncryptionConfiguration><Rule>"
+                    + "<ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm>"
+                    + "</ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>")
+        .when()
+            .put("/sse-policy-bucket?encryption")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/sse-policy-bucket?encryption")
+        .then()
+            .statusCode(200)
+            .body(containsString("<BlockedEncryptionTypes><EncryptionType>SSE-C</EncryptionType>"));
+
+        given()
+            .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-server-side-encryption-customer-key", SSE_CUSTOMER_KEY)
+            .header("x-amz-server-side-encryption-customer-key-MD5", SSE_CUSTOMER_KEY_MD5)
+            .body("blocked")
+        .when()
+            .put("/sse-policy-bucket/blocked.txt")
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        given()
+            .body("<ServerSideEncryptionConfiguration><Rule>"
+                    + "<ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm>"
+                    + "</ApplyServerSideEncryptionByDefault><BlockedEncryptionTypes>"
+                    + "<EncryptionType>NONE</EncryptionType></BlockedEncryptionTypes></Rule>"
+                    + "</ServerSideEncryptionConfiguration>")
+        .when()
+            .put("/sse-policy-bucket?encryption")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/sse-policy-bucket?encryption")
+        .then()
+            .statusCode(200)
+            .body(containsString("<EncryptionType>NONE</EncryptionType>"));
+
+        given()
+            .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-server-side-encryption-customer-key", SSE_CUSTOMER_KEY)
+            .header("x-amz-server-side-encryption-customer-key-MD5", SSE_CUSTOMER_KEY_MD5)
+            .body("allowed")
+        .when()
+            .put("/sse-policy-bucket/allowed.txt")
+        .then()
+            .statusCode(200);
+
+        given().delete("/sse-policy-bucket/allowed.txt");
+        given().delete("/sse-policy-bucket");
+    }
+
+    @Test
+    @Order(76)
     void createSseBucketAndPutObject() {
         given()
             .put("/sse-bucket")
