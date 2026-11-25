@@ -2152,6 +2152,22 @@ class ResourceArnBuilderTest {
                 "us-east-1", ACCOUNT, "aws"));
     }
 
+    // ── Transfer Family ─────────────────────────────────────────────────────────
+
+    /**
+     * A Transfer Family request is checked on the server its ServerId names, and on the user its ServerId and UserName
+     * name, as {@code server/<id>} and {@code user/<server-id>/<name>}, the ARNs Floci's Transfer Family mints.
+     */
+    @Test
+    void transferChecksTheServerAndTheUserARequestNames() {
+        setJsonBody("{\"ServerId\":\"s-0123456789abcdef0\"}");
+        assertEquals(List.of("arn:aws:transfer:us-east-1:000000000000:server/s-0123456789abcdef0"),
+                builder.buildResources("transfer", "transfer:DescribeServer", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ServerId\":\"s-0123456789abcdef0\",\"UserName\":\"alice\"}");
+        assertEquals(List.of("arn:aws:transfer:us-east-1:000000000000:user/s-0123456789abcdef0/alice"),
+                builder.buildResources("transfer", "transfer:DescribeUser", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
     // ── S3 and S3 Control ───────────────────────────────────────────────────────
 
     /** The resources an S3 or S3 Control request names, read from the generated table on the route it matches. */

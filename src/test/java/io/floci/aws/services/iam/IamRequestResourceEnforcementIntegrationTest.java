@@ -3749,6 +3749,21 @@ class IamRequestResourceEnforcementIntegrationTest {
                 "{\"TranscriptionJobName\":\"" + job + "-other\"}"), "transcribe:GetTranscriptionJob");
     }
 
+    /**
+     * A Transfer Family server is checked on the ARN its id gives, {@code server/<id>}, so a grant on one lets the
+     * request reach the service, which answers that the server does not exist, and refuses another.
+     */
+    @Test
+    void aTransferServerIsCheckedOnTheArnItsIdGives() {
+        String server = "s-0123456789abcdef0";
+        User user = user("res-transfer");
+        user.policy(allowOn("transfer:DescribeServer", "arn:aws:transfer:" + REGION + ":" + ACCOUNT + ":server/" + server));
+        send(user, "transfer", "TransferService.DescribeServer", "1.1", "{\"ServerId\":\"" + server + "\"}")
+                .body(containsString("ResourceNotFoundException"));
+        refusedJson(send(user, "transfer", "TransferService.DescribeServer", "1.1",
+                "{\"ServerId\":\"s-0123456789abcdef1\"}"), "transfer:DescribeServer");
+    }
+
     private static ValidatableResponse glue(String operation, String body) {
         return adminJson("glue", "AWSGlue." + operation).body(body).post("/").then();
     }

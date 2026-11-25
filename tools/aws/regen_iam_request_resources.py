@@ -363,8 +363,8 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs", "cloudwatch",
               "comprehend", "config", "dms", "elasticache", "identitystore", "memorydb", "route53resolver",
-              "sagemaker", "transcribe", "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms", "dynamodb",
-              "iam")
+              "sagemaker", "transcribe", "transfer", "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms",
+              "dynamodb", "iam")
 
 # ---------------------------------------------------------------------------------------------------------------------
 # MEASURED: what AWS was measured to check where neither botocore nor the Service Reference says it.
@@ -646,7 +646,6 @@ NOT_COVERED: dict[str, str] = {
     "swf": "not read yet: the Service Reference gives a domain's ARN no Region, `swf::<account>:/domain/<name>`, "
            "while the SWF Developer Guide gives it as arn:aws:swf:Region:AccountID:/domain/DomainName, as Floci mints "
            "it; reading it needs that format corrected",
-    "transfer": _LATER,
     "verifiedpermissions": "not read yet: a policyStoreId may name its store by an alias, `policy-store-alias/<name>`, "
                            "which AWS authorizes as the action on the store the alias points to and "
                            "GetPolicyStoreAlias on the alias, and an aliasName carries the `policy-store-alias/` its "
@@ -2471,7 +2470,9 @@ def makes_for(operation: str, types: list[str], formats: dict[str, str], members
     itself stays checked on `*`. So is the resource a create whose request carries tags makes when its action acts
     on other types alone and the request names it in full, a field of a top-level structure included (`ConnectionInput.Name`
     for the connection Glue's `CreateConnection` makes, whose action acts on its connection type and catalog), the
-    create itself staying checked on those."""
+    create itself staying checked on those. A variable the create's response answers and its request carries no
+    member of that name is one the service mints, so it stays open whatever member a rule would fill it from: Transfer
+    Family's `ImportCertificate` answers the `CertificateId` of the certificate its `Certificate` holds."""
     name = operation.split(":", 1)[1]
     if not CREATING_RE.match(name):
         return []
@@ -2481,11 +2482,27 @@ def makes_for(operation: str, types: list[str], formats: dict[str, str], members
     if len(kinds) != 1:
         return []
     if types:
-        return made_by_a_create_of_other_types(operation, types, formats, kinds[0], members, arn_members, labels,
+        made = made_by_a_create_of_other_types(operation, types, formats, kinds[0], members, arn_members, labels,
                                                aliased, models)
-    return [resource for resource in resources_for(operation, kinds, formats, members, arn_members, labels,
-                                                   aliased=aliased)
-            if resource.get("type") == kinds[0]][:1]
+    else:
+        made = [resource for resource in resources_for(operation, kinds, formats, members, arn_members, labels,
+                                                       aliased=aliased)
+                if resource.get("type") == kinds[0]][:1]
+    minted = minted_by_the_create(models, name)
+    return [{**resource, "fill": {variable: member for variable, member in resource["fill"].items()
+                                  if variable not in minted}}
+            if minted & set(resource.get("fill", {})) else resource for resource in made]
+
+
+def minted_by_the_create(models: dict[str, dict] | None, operation: str) -> set[str]:
+    """The top-level members a create's response answers that its request carries none of, across its clients: the
+    ids its service mints (`ImportHostKey` answers a `HostKeyId`, its request carrying the key's `HostKeyBody`)."""
+    answered: set[str] = set()
+    for model in (models or {}).values():
+        spec = model["operations"].get(operation)
+        if spec is not None and "output" in spec:
+            answered |= set(model["shapes"][spec["output"]["shape"]].get("members", {}))
+    return answered - set(member_shapes(models or {}, operation))
 
 
 def made_by_a_create_of_other_types(operation: str, types: list[str], formats: dict[str, str], kind: str,

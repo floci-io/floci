@@ -162,6 +162,34 @@ def test_a_create_joining_a_related_type_by_a_member_of_its_own_makes_the_type_n
                        models=models) == []
 
 
+def test_a_create_leaves_open_the_id_its_response_answers_and_its_request_carries_none_of(tmp_path):
+    # Transfer Family's ImportCertificate carries the certificate's body in `Certificate` and answers the
+    # `CertificateId` it mints, so the certificate it makes has that id open; ImportHostKey's host key keeps the
+    # `ServerId` its request carries and answers, and leaves its `HostKeyId` open.
+    service = model({"ImportCertificate": {"Certificate": "String"},
+                     "ImportHostKey": {"ServerId": "String", "HostKeyBody": "HostKey", "Tags": "Strings"},
+                     "CreateUser": {"ServerId": "String", "UserName": "String"}})
+    for name, answered in (("ImportCertificate", ["CertificateId"]), ("ImportHostKey", ["ServerId", "HostKeyId"]),
+                           ("CreateUser", ["ServerId", "UserName"])):
+        service["shapes"][name + "Out"] = {"type": "structure",
+                                           "members": {member: {"shape": "String"} for member in answered}}
+        service["operations"][name]["output"] = {"shape": name + "Out"}
+    service["shapes"]["HostKey"] = {"type": "string"}
+    write_models(tmp_path, {"svc": service})
+    models = r.load_models(tmp_path, {"svc"})
+    formats = {"certificate": "arn:${Partition}:svc:${Region}:${Account}:certificate/${CertificateId}",
+               "host-key": "arn:${Partition}:svc:${Region}:${Account}:host-key/${ServerId}/${HostKeyId}",
+               "user": "arn:${Partition}:svc:${Region}:${Account}:user/${ServerId}/${UserName}",
+               "server": "arn:${Partition}:svc:${Region}:${Account}:server/${ServerId}"}
+    assert r.minted_by_the_create(models, "ImportCertificate") == {"CertificateId"}
+    assert r.makes_for("svc:ImportCertificate", [], formats, members("Certificate"), models=models) == [
+        {"type": "certificate", "fill": {}}]
+    assert r.makes_for("svc:ImportHostKey", ["server"], formats, members("ServerId", "HostKeyBody", "Tags"),
+                       models=models) == [{"type": "host-key", "fill": {"ServerId": "ServerId"}}]
+    # A create whose request carries what its response answers keeps it filled.
+    assert r.minted_by_the_create(models, "CreateUser") == set()
+
+
 def test_a_built_document_with_what_a_create_makes_a_default_and_a_maps_ids_validates(isolated, tmp_path):
     service = model({"CreateThing": {"ThingName": "String"}, "ListThings": {"ThingArn": "String"}, "ApplySteps": {}})
     service["shapes"]["Step"] = {"type": "structure", "members": {"poolId": {"shape": "String"},
@@ -1458,6 +1486,13 @@ def test_the_vendored_file_is_well_formed():
     # An SQS request names its queue by URL, which SQS finds as its handlers do; a create names it by name.
     assert operations["sqs:SendMessage"]["resources"] == [{"type": "queue", "fill": {}, "find": ["QueueUrl"]}]
     assert operations["sqs:CreateQueue"]["resources"] == [{"type": "queue", "fill": {"QueueName": "QueueName"}}]
+    # Transfer Family is read whole: a server by its id, a user by its server and name.
+    assert "transfer" in document["namespaces"] and "transfer" not in document["notCovered"]
+    assert operations["transfer:DescribeUser"]["resources"] == [
+        {"type": "user", "fill": {"ServerId": "ServerId", "UserName": "UserName"}}]
+    # An import makes a resource whose id Transfer Family mints, open, not filled from the body it imports.
+    assert operations["transfer:ImportCertificate"]["makes"] == [{"type": "certificate", "fill": {}}]
+    assert operations["transfer:ImportHostKey"]["makes"] == [{"type": "host-key", "fill": {"ServerId": "ServerId"}}]
     # CloudWatch is read whole: each alarm a list names, and a dashboard by its name, its ARN with no Region.
     assert "cloudwatch" in document["namespaces"] and "cloudwatch" not in document["notCovered"]
     assert operations["cloudwatch:DeleteAlarms"]["resources"] == [
