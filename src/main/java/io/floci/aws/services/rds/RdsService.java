@@ -890,12 +890,18 @@ public class RdsService implements Resettable, ResourceProvider {
                         resolvedClusterStorageResourceId(cluster));
             }
             instanceStorageResourceId = resolvedClusterStorageResourceId(cluster);
-            if (!isBlank(availabilityZone)
-                    && !cluster.getSubnetAvailabilityZones().containsValue(availabilityZone)) {
-                releaseProxyPort(proxyPort);
-                throw new AwsException("InvalidVPCNetworkStateFault",
-                        "Availability Zone " + availabilityZone
-                                + " is not valid for DB subnet group " + cluster.getDbSubnetGroupName() + ".", 400);
+            if (!isBlank(availabilityZone)) {
+                try {
+                    if (!getDbSubnetGroup(cluster.getDbSubnetGroupName(), effectiveRegion)
+                            .getSubnetAvailabilityZones().containsValue(availabilityZone)) {
+                        throw new AwsException("InvalidVPCNetworkStateFault",
+                                "Availability Zone " + availabilityZone + " is not valid for DB subnet group "
+                                        + cluster.getDbSubnetGroupName() + ".", 400);
+                    }
+                } catch (RuntimeException | Error failure) {
+                    releaseProxyPort(proxyPort);
+                    throw failure;
+                }
             }
             placement = PlacementResolution.fromCluster(cluster, availabilityZone);
         } else {

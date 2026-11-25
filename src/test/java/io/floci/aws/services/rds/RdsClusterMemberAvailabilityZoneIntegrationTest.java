@@ -12,7 +12,9 @@ import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.DbClusterNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbInstanceNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbSubnetGroupNotFoundException;
+import software.amazon.awssdk.services.rds.model.Subnet;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
@@ -39,15 +41,18 @@ class RdsClusterMemberAvailabilityZoneIntegrationTest {
                 try {
                     rds.deleteDBInstance(request -> request.dbInstanceIdentifier(member).skipFinalSnapshot(true));
                 } catch (DbInstanceNotFoundException ignored) {
+                    // the test never created this member, or it was refused
                 }
             }
             try {
                 rds.deleteDBCluster(request -> request.dbClusterIdentifier(CLUSTER).skipFinalSnapshot(true));
             } catch (DbClusterNotFoundException ignored) {
+                // the test failed before it created the cluster
             }
             try {
                 rds.deleteDBSubnetGroup(request -> request.dbSubnetGroupName(CLUSTER));
             } catch (DbSubnetGroupNotFoundException ignored) {
+                // the test failed before it created the subnet group
             }
         }
     }
@@ -78,8 +83,25 @@ class RdsClusterMemberAvailabilityZoneIntegrationTest {
         }
     }
 
-    /** The cluster on a DB subnet group over one subnet in us-east-1a and one in us-east-1b. */
-    private static void cluster(Ec2Client ec2, RdsClient rds) {
+    @Test
+    void aZoneAddedToTheSubnetGroupAfterTheClusterIsAccepted() {
+        try (Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), ACCOUNT, Region.US_EAST_1);
+             RdsClient rds = rdsClient("us-east-1", ACCOUNT)) {
+            String vpcId = cluster(ec2, rds);
+            List<String> subnetIds = new ArrayList<>(rds.describeDBSubnetGroups(request -> request
+                    .dbSubnetGroupName(CLUSTER)).dbSubnetGroups().getFirst().subnets().stream()
+                    .map(Subnet::subnetIdentifier).toList());
+            subnetIds.add(subnet(ec2, vpcId, "10.61.3.0/24", "us-east-1c"));
+            rds.modifyDBSubnetGroup(request -> request.dbSubnetGroupName(CLUSTER).subnetIds(subnetIds));
+
+            member(rds, "member-az-c", "us-east-1c");
+
+            assertEquals("us-east-1c", zone(rds, "member-az-c"));
+        }
+    }
+
+    /** The cluster on a DB subnet group over one subnet in us-east-1a and one in us-east-1b; returns its VPC. */
+    private static String cluster(Ec2Client ec2, RdsClient rds) {
         String vpcId = ec2.createVpc(request -> request.cidrBlock("10.61.0.0/16")).vpc().vpcId();
         List<String> subnetIds = List.of(subnet(ec2, vpcId, "10.61.1.0/24", "us-east-1a"),
                 subnet(ec2, vpcId, "10.61.2.0/24", "us-east-1b"));
@@ -87,6 +109,7 @@ class RdsClusterMemberAvailabilityZoneIntegrationTest {
                 .subnetIds(subnetIds));
         rds.createDBCluster(request -> request.dbClusterIdentifier(CLUSTER).engine("aurora-postgresql")
                 .masterUsername("dbadmin").masterUserPassword("password123").dbSubnetGroupName(CLUSTER));
+        return vpcId;
     }
 
     private static String subnet(Ec2Client ec2, String vpcId, String cidr, String zone) {
