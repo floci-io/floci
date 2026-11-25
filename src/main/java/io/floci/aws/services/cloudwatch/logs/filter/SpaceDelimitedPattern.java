@@ -21,73 +21,106 @@ import java.util.Set;
 final class SpaceDelimitedPattern extends FilterPattern {
 
     /** The bound fields of one event, by name and by position. */
-    record Fields(List<String> values, Map<String, String> byName) {}
+    record Fields(List<String> values, Map<String, String> byName) {
+        String value(String reference) {
+            String key = extractReferenceKey(reference);
+            if (key == null) {
+                return null;
+            }
+            Integer position = parseOneBasedPosition(key);
+            if (position != null) {
+                return position >= 1 && position <= values.size() ? values.get(position - 1) : null;
+            }
+            return byName.get(key);
+        }
+    }
 
     private record Entry(String name, Condition<Fields> condition) {}
+
+    private static final class ParseState {
+        private final List<Entry> before = new ArrayList<>();
+        private final List<Entry> after = new ArrayList<>();
+        private final Set<String> declared = new HashSet<>();
+        private final Set<String> referenced = new HashSet<>();
+        private final int[] regexes = {0};
+        private boolean ellipsis;
+
+        private List<Entry> activeEntries() {
+            return ellipsis ? after : before;
+        }
+    }
 
     private final List<Entry> before;
     private final List<Entry> after;
     private final boolean ellipsis;
     private final Set<String> names;
-    private final int regexes;
 
     private SpaceDelimitedPattern(List<Entry> before, List<Entry> after, boolean ellipsis, Set<String> names,
                                   int regexes) {
+        super(regexes);
         this.before = before;
         this.after = after;
         this.ellipsis = ellipsis;
         this.names = names;
-        this.regexes = regexes;
     }
 
     static SpaceDelimitedPattern of(String text) {
         PatternCursor cursor = new PatternCursor(text);
         cursor.expect('[');
-        List<Entry> before = new ArrayList<>();
-        List<Entry> after = new ArrayList<>();
-        boolean ellipsis = false;
-        Set<String> declared = new HashSet<>();
-        Set<String> referenced = new HashSet<>();
-        int[] regexes = {0};
+        ParseState state = new ParseState();
         cursor.skipWhitespace();
-        if (cursor.peek() != ']') {
-            while (true) {
-                cursor.skipWhitespace();
-                if (cursor.lookingAt("...")) {
-                    cursor.consume("...");
-                    if (ellipsis) {
-                        throw cursor.error("only one '...' is allowed");
-                    }
-                    ellipsis = true;
-                } else if (cursor.peek() == ',' || cursor.peek() == ']') {
-                    (ellipsis ? after : before).add(new Entry(null, null));
-                } else {
-                    Entry entry = readEntry(cursor, referenced, regexes);
-                    if (!declared.add(entry.name())) {
-                        throw cursor.error("field '" + entry.name() + "' is declared twice");
-                    }
-                    (ellipsis ? after : before).add(entry);
-                }
-                cursor.skipWhitespace();
-                if (cursor.consume("]")) {
-                    break;
-                }
-                cursor.expect(',');
-            }
-        } else {
+        if (cursor.peek() == ']') {
             cursor.next();
-            ellipsis = true;
+            state.ellipsis = true;
+        } else {
+            parseEntries(cursor, state);
         }
         cursor.expectEnd();
-        referenced.removeAll(declared);
-        if (!referenced.isEmpty()) {
-            throw cursor.error("condition refers to an undeclared field " + referenced.iterator().next());
+        validateReferencedFields(cursor, state);
+        if (!state.ellipsis && state.before.isEmpty()) {
+            state.ellipsis = true;
         }
-        if (!ellipsis && before.isEmpty()) {
-            ellipsis = true;
+        return new SpaceDelimitedPattern(List.copyOf(state.before), List.copyOf(state.after), state.ellipsis,
+                Set.copyOf(state.declared), state.regexes[0]);
+    }
+
+    private static void parseEntries(PatternCursor cursor, ParseState state) {
+        while (true) {
+            cursor.skipWhitespace();
+            parseSingleEntry(cursor, state);
+            cursor.skipWhitespace();
+            if (cursor.consume("]")) {
+                break;
+            }
+            cursor.expect(',');
         }
-        return new SpaceDelimitedPattern(List.copyOf(before), List.copyOf(after), ellipsis, Set.copyOf(declared),
-                regexes[0]);
+    }
+
+    private static void parseSingleEntry(PatternCursor cursor, ParseState state) {
+        if (cursor.lookingAt("...")) {
+            cursor.consume("...");
+            if (state.ellipsis) {
+                throw cursor.error("only one '...' is allowed");
+            }
+            state.ellipsis = true;
+            return;
+        }
+        if (cursor.peek() == ',' || cursor.peek() == ']') {
+            state.activeEntries().add(new Entry(null, null));
+            return;
+        }
+        Entry entry = readEntry(cursor, state.referenced, state.regexes);
+        if (!state.declared.add(entry.name())) {
+            throw cursor.error("field '" + entry.name() + "' is declared twice");
+        }
+        state.activeEntries().add(entry);
+    }
+
+    private static void validateReferencedFields(PatternCursor cursor, ParseState state) {
+        state.referenced.removeAll(state.declared);
+        if (!state.referenced.isEmpty()) {
+            throw cursor.error("condition refers to an undeclared field " + state.referenced.iterator().next());
+        }
     }
 
     /** Reads one entry; the first field name in it is the field the entry declares. */
@@ -127,19 +160,27 @@ final class SpaceDelimitedPattern extends FilterPattern {
     @Override
     public FilterMatch match(String message) {
         List<String> values = split(message == null ? "" : message, ellipsis ? -1 : before.size());
-        int fixed = before.size() + after.size();
-        if (values.size() < fixed || (!ellipsis && values.size() != fixed)) {
+        if (!hasCompatibleFieldCount(values.size())) {
             return FilterMatch.NONE;
         }
-        Map<String, String> byName = new HashMap<>();
         Map<String, String> extracted = new LinkedHashMap<>();
-        for (int position = 0; position < values.size(); position++) {
-            Entry entry = null;
-            if (position < before.size()) {
-                entry = before.get(position);
-            } else if (position >= values.size() - after.size()) {
-                entry = after.get(position - (values.size() - after.size()));
-            }
+        Fields fields = bindFields(values, extracted);
+        if (!matchesAllConditions(fields)) {
+            return FilterMatch.NONE;
+        }
+        return FilterMatch.of(extracted, fields::value);
+    }
+
+    private boolean hasCompatibleFieldCount(int valueCount) {
+        int fixedEntryCount = before.size() + after.size();
+        return valueCount >= fixedEntryCount && (ellipsis || valueCount == fixedEntryCount);
+    }
+
+    private Fields bindFields(List<String> values, Map<String, String> extracted) {
+        Map<String, String> byName = new HashMap<>();
+        int totalValues = values.size();
+        for (int position = 0; position < totalValues; position++) {
+            Entry entry = entryAt(position, totalValues);
             String value = values.get(position);
             if (entry != null && entry.name() != null) {
                 byName.put(entry.name(), value);
@@ -148,36 +189,49 @@ final class SpaceDelimitedPattern extends FilterPattern {
                 extracted.put("$" + (position + 1), value);
             }
         }
-        Fields fields = new Fields(values, byName);
-        for (List<Entry> entries : List.of(before, after)) {
-            for (Entry entry : entries) {
-                if (entry.condition() != null && !entry.condition().test(fields)) {
-                    return FilterMatch.NONE;
-                }
-            }
-        }
-        return FilterMatch.of(extracted, reference -> value(fields, reference));
+        return new Fields(values, byName);
     }
 
-    private static String value(Fields fields, String reference) {
+    private Entry entryAt(int position, int totalValues) {
+        if (position < before.size()) {
+            return before.get(position);
+        }
+        int afterStartPosition = totalValues - after.size();
+        if (position >= afterStartPosition) {
+            return after.get(position - afterStartPosition);
+        }
+        return null;
+    }
+
+    private boolean matchesAllConditions(Fields fields) {
+        for (Entry entry : before) {
+            if (entry.condition() != null && !entry.condition().test(fields)) {
+                return false;
+            }
+        }
+        for (Entry entry : after) {
+            if (entry.condition() != null && !entry.condition().test(fields)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static String extractReferenceKey(String reference) {
         if (reference == null || reference.length() < 2 || reference.charAt(0) != '$') {
             return null;
         }
-        String key = reference.substring(1);
-        Integer position = position(key);
-        if (position != null) {
-            return position >= 1 && position <= fields.values().size() ? fields.values().get(position - 1) : null;
-        }
-        return fields.byName().get(key);
+        return reference.substring(1);
     }
 
-    private static Integer position(String key) {
+    private static Integer parseOneBasedPosition(String key) {
         if (key.isEmpty() || !key.chars().allMatch(Character::isDigit)) {
             return null;
         }
         try {
             return Integer.parseInt(key);
-        } catch (NumberFormatException e) {
+        } catch (NumberFormatException expected) {
+            // Digits exceed Integer.MAX_VALUE; treat as an invalid positional reference.
             return null;
         }
     }
@@ -188,50 +242,16 @@ final class SpaceDelimitedPattern extends FilterPattern {
      * position takes the rest of the line as written.
      */
     static List<String> split(String message, int limit) {
-        List<String> fields = new ArrayList<>();
-        int i = 0;
-        int length = message.length();
-        while (i < length) {
-            while (i < length && Character.isWhitespace(message.charAt(i))) {
-                i++;
-            }
-            if (i >= length) {
-                break;
-            }
-            char c = message.charAt(i);
-            char closing = c == '"' ? '"' : c == '[' ? ']' : '\0';
-            int end = closing == '\0' ? -1 : message.indexOf(closing, i + 1);
-            boolean quoted = end >= 0;
-            if (quoted) {
-                end++;
-            } else {
-                end = i;
-                while (end < length && !Character.isWhitespace(message.charAt(end))) {
-                    end++;
-                }
-            }
-            if (limit > 0 && fields.size() == limit - 1 && !message.substring(end).isBlank()) {
-                fields.add(message.substring(i));
-                break;
-            }
-            fields.add(quoted ? message.substring(i + 1, end - 1) : message.substring(i, end));
-            i = end;
-        }
-        return fields;
+        return SpaceDelimitedTokenizer.split(message, limit);
     }
 
     @Override
     public boolean declaresField(String reference) {
-        if (reference == null || reference.length() < 2 || reference.charAt(0) != '$') {
+        String key = extractReferenceKey(reference);
+        if (key == null) {
             return false;
         }
-        String key = reference.substring(1);
-        Integer position = position(key);
+        Integer position = parseOneBasedPosition(key);
         return position != null ? position >= 1 : names.contains(key);
-    }
-
-    @Override
-    public int regexCount() {
-        return regexes;
     }
 }

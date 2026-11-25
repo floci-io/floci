@@ -26,11 +26,10 @@ final class JsonPattern extends FilterPattern {
     private static final int MAX_WILDCARDS = 3;
 
     private final Condition<JsonNode> condition;
-    private final int regexes;
 
     private JsonPattern(Condition<JsonNode> condition, int regexes) {
+        super(regexes);
         this.condition = condition;
-        this.regexes = regexes;
     }
 
     static JsonPattern of(String text) {
@@ -132,10 +131,5 @@ final class JsonPattern extends FilterPattern {
     public boolean declaresSingleValueField(String reference) {
         JsonSelector selector = JsonSelector.parse(reference);
         return selector != null && selector.wildcards() == 0;
-    }
-
-    @Override
-    public int regexCount() {
-        return regexes;
     }
 }
