@@ -940,8 +940,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                 }
                 for (String assigned : existing.getConfig().getAliases()) {
                     if (requested.equalsIgnoreCase(assigned)) {
-                        throw new AwsException("CNAMEAlreadyExists",
-                                "The CNAME you provided is already associated with a different resource.", 409);
+                        throw domainTaken();
                     }
                 }
             }
@@ -1299,7 +1298,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
      */
     public DistributionTenant getDistributionTenant(String identifier) {
         if (identifier == null || identifier.isBlank()) {
-            throw tenantNotFound(identifier);
+            throw tenantNotFound();
         }
         if (AwsArnUtils.looksLikeArn(identifier)) {
             for (DistributionTenant tenant : tenantStore.scan(k -> true)) {
@@ -1307,7 +1306,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                     return tenant;
                 }
             }
-            throw tenantNotFound(identifier);
+            throw tenantNotFound();
         }
         DistributionTenant tenant = tenantStore.get(identifier).orElse(null);
         if (tenant != null) {
@@ -1318,7 +1317,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                 return candidate;
             }
         }
-        throw tenantNotFound(identifier);
+        throw tenantNotFound();
     }
 
     public DistributionTenant getDistributionTenantByDomain(String domain) {
@@ -1329,8 +1328,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                 }
             }
         }
-        throw new AwsException("EntityNotFound",
-                "No distribution tenant was found for domain " + domain + ".", 404);
+        throw tenantNotFound();
     }
 
     /**
@@ -1391,11 +1389,12 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         DistributionTenant tenant = requireDistributionTenant(id);
         if (!tenant.getEtag().equals(ifMatch)) {
             throw new AwsException("PreconditionFailed",
-                    "The specified If-Match didn't match the ETag header.", 412);
+                    "Your request is missing requirements for this operation. Update your request and try again.",
+                    412);
         }
         if (Boolean.TRUE.equals(tenant.getEnabled())) {
             throw new AwsException("ResourceNotDisabled",
-                    "The distribution tenant has not been disabled.", 409);
+                    "You must disable the distribution tenant before you can delete it.", 409);
         }
         tenantStore.delete(id);
         tagStore.delete(tenant.getArn());
@@ -1439,14 +1438,13 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private DistributionTenant requireDistributionTenant(String id) {
         DistributionTenant tenant = id == null ? null : tenantStore.get(id).orElse(null);
         if (tenant == null) {
-            throw tenantNotFound(id);
+            throw tenantNotFound();
         }
         return tenant;
     }
 
-    private static AwsException tenantNotFound(String identifier) {
-        return new AwsException("EntityNotFound",
-                "The distribution tenant " + identifier + " does not exist.", 404);
+    private static AwsException tenantNotFound() {
+        return new AwsException("EntityNotFound", "The specified distribution tenant doesn't exist.", 404);
     }
 
     /**
@@ -1458,8 +1456,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         Distribution dist = distributionId == null || distributionId.isBlank() ? null
                 : distStore.get(distributionId).orElse(null);
         if (dist == null) {
-            throw new AwsException("EntityNotFound",
-                    "The distribution " + distributionId + " does not exist.", 404);
+            throw new AwsException("EntityNotFound", "The specified distribution does not exist.", 404);
         }
         if (!"tenant-only".equals(effectiveConnectionMode(dist))) {
             throw new AwsException("InvalidArgument",
@@ -1527,7 +1524,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     private static AwsException domainTaken() {
         return new AwsException("CNAMEAlreadyExists",
-                "The CNAME you provided is already associated with a different resource.", 409);
+                "One or more of the CNAMEs you provided are already associated with a different resource.", 409);
     }
 
     private static boolean containsIgnoreCase(List<String> values, String candidate) {

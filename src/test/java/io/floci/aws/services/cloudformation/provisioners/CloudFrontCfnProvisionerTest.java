@@ -1572,7 +1572,7 @@ class CloudFrontCfnProvisionerTest {
         verify(cloudFront).deleteDistributionTenant(ID, ETAG);
 
         when(cloudFront.getDistributionTenant(ID)).thenThrow(
-                new AwsException("EntityNotFound", "The distribution tenant " + ID + " does not exist.", 404));
+                new AwsException("EntityNotFound", "The specified distribution tenant doesn't exist.", 404));
         provisioner.delete(TENANT_TYPE, ID, REGION);
         verify(cloudFront, Mockito.times(1)).deleteDistributionTenant(any(), any());
 

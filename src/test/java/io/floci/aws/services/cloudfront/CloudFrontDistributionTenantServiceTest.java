@@ -92,6 +92,10 @@ class CloudFrontDistributionTenantServiceTest {
         return assertThrows(AwsException.class, call::run).getErrorCode();
     }
 
+    private static String errorMessage(Runnable call) {
+        return assertThrows(AwsException.class, call::run).getMessage();
+    }
+
     @Test
     void aTenantStartsEnabledOnTheDefaultConnectionGroupWithItsDomainsActive() {
         CloudFrontService service = service();
@@ -438,5 +442,31 @@ class CloudFrontDistributionTenantServiceTest {
 
     private static List<String> names(List<DistributionTenant> tenants) {
         return tenants.stream().map(DistributionTenant::getName).toList();
+    }
+
+    @Test
+    void tenantErrorsUseTheSentencesAwsReturns() {
+        CloudFrontService service = service();
+        String distributionId = tenantOnly(service);
+        service.createDistribution(distribution("direct", "www.taken.example.com"), Map.of());
+        DistributionTenant tenant = create(service, distributionId, "acme", "acme.example.com");
+        String id = tenant.getId();
+        String missingTenant = "The specified distribution tenant doesn't exist.";
+        String taken = "One or more of the CNAMEs you provided are already associated with a different resource.";
+
+        assertEquals(missingTenant, errorMessage(() -> service.getDistributionTenant("dt_missing")));
+        assertEquals(missingTenant, errorMessage(() -> service.getDistributionTenantByDomain("ghost.example.com")));
+        assertEquals("The specified distribution does not exist.",
+                errorMessage(() -> create(service, "EMISSING", "beta", "beta.example.com")));
+        assertEquals("You must disable the distribution tenant before you can delete it.",
+                errorMessage(() -> service.deleteDistributionTenant(id, tenant.getEtag())));
+        assertEquals("Your request is missing requirements for this operation. Update your request and try again.",
+                errorMessage(() -> service.deleteDistributionTenant(id, "stale")));
+        assertEquals(taken, errorMessage(() -> create(service, distributionId, "beta", "ACME.example.com")));
+        assertEquals(taken, errorMessage(() -> create(service, distributionId, "gamma", "www.taken.example.com")));
+        assertEquals(taken, errorMessage(() -> service.createDistribution(
+                distribution("direct", "WWW.taken.example.com"), Map.of())));
+        assertEquals(taken, errorMessage(() -> service.createDistribution(
+                distribution("direct", "acme.example.com"), Map.of())));
     }
 }
