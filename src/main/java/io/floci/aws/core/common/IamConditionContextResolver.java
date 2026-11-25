@@ -1057,8 +1057,8 @@ public class IamConditionContextResolver {
     }
 
     /**
-     * The stored tags and the generated resource keys of one generated EC2 ARN (see {@link #putResourceKeys}), never
-     * borrowed from another target in the same request.
+     * The generated record keys of one EC2 ARN (see {@link #putResourceKeys}), retaining their caller-scoped
+     * lookup. Clear earlier generated tag keys before the shared {@link #resourceTags} path reads this ARN.
      */
     public Map<String, List<String>> withEc2ResourceContext(String scope, String action, String resource,
                                                            String region, String accountId,
@@ -1068,25 +1068,24 @@ public class IamConditionContextResolver {
             return context;
         }
         AwsArnUtils.Arn arn = AwsArnUtils.parse(resource);
-        // A snapshot's and an image's ARN carries no account (arn:aws:ec2:<region>::snapshot/<id>), which is not a
-        // foreign one: EC2 reads the id in the caller's account, as it reads every other one.
-        if (!"ec2".equals(arn.service()) || !region.equals(arn.region())
-                || AwsArnUtils.isForeignAccount(arn, accountId)) {
+        if (!"ec2".equals(arn.service())) {
             return context;
         }
+        String resourceRegion = arn.region().isEmpty() ? region : arn.region();
+        String resourceAccount = arn.accountId().isEmpty() ? accountId : arn.accountId();
         String[] parts = arn.resource().split("/", 2);
         if (parts.length != 2 || parts[1].contains("*") || parts[1].contains("?")) {
             return context;
         }
         List<String> prefixes = RequestResourceMembers.table().resourceTagKeys()
                 .getOrDefault("ec2", Map.of()).getOrDefault(parts[0], List.of());
-        Map<String, RequestResourceMembers.ResourceKey> keys = ec2ResourceKeys(parts[0]);
+        boolean callerResource = region.equals(resourceRegion) && accountId.equals(resourceAccount);
+        Map<String, RequestResourceMembers.ResourceKey> keys = callerResource ? ec2ResourceKeys(parts[0]) : Map.of();
         if (prefixes.isEmpty() && keys.isEmpty()) {
             return context;
         }
         Map<String, List<String>> result = context == null ? new LinkedHashMap<>() : new LinkedHashMap<>(context);
         result.keySet().removeIf(key -> prefixes.stream().anyMatch(key::startsWith) || keys.containsKey(key));
-        putStoredTags(result, region, parts[1], prefixes);
         if (!keys.isEmpty()) {
             putResourceKeys(result, region, parts[0],
                     ec2Service.get().heldResources(region, parts[0], List.of(parts[1])).get(parts[1]));

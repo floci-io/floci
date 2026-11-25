@@ -690,7 +690,7 @@ class Ec2ServiceTest {
         attachment.setInstanceId("i-11111111");
         eni.setAttachment(attachment);
         interfaces.putForAccount(owner, region + "::" + eni.getNetworkInterfaceId(), eni);
-        Ec2StoredResourceArns stored = new Ec2StoredResourceArns(service);
+        Ec2StoredResourceArns stored = new Ec2StoredResourceArns(service, new RegionResolver("us-east-1", "000000000000"));
 
         assertEquals(attachmentArns(region, owner, "i-11111111", "eni-11111111"),
                 service.networkInterfaceAttachmentArns(region, attachment.getAttachmentId()));
