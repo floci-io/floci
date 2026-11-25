@@ -160,8 +160,9 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             Optional<Ec2InstanceTypeCatalog.CatalogInstanceType> type = instanceTypes.find(instance.getInstanceType());
             String nodeName = clusterManager.deriveInstanceNodeName(instance, region);
             JsonNode node = nodesByName.get(nodeName);
-            boolean joining = node == null && (instance.getLaunchTime() == null
-                    || instance.getLaunchTime().plus(REGISTRATION_WAIT).isAfter(Instant.now()));
+            boolean starting = instance.getLaunchTime() == null
+                    || instance.getLaunchTime().plus(REGISTRATION_WAIT).isAfter(Instant.now());
+            boolean joining = node == null && starting;
             if (node == null && !joining) {
                 neverRegistered.add(instance);
                 continue;
@@ -180,9 +181,10 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             long[] used = requests.getOrDefault(nodeName, new long[3]);
             List<Taint> nodeTaints = new ArrayList<>();
             if (node != null) {
-                // A node just registered carries not-ready until its status says Ready; that doesn't take its room.
+                // A node just registered carries not-ready until its status says Ready; while it starts, within the
+                // registration wait, that doesn't take its room. One still not ready after it has none.
                 node.path("spec").path("taints").forEach(t -> {
-                    if (!EksAutoModeNodes.STARTUP_TAINTS.contains(t.path("key").asText())) {
+                    if (!starting || !EksAutoModeNodes.STARTUP_TAINTS.contains(t.path("key").asText())) {
                         nodeTaints.add(new Taint(t.path("key").asText(), t.path("value").asText(""),
                                 t.path("effect").asText()));
                     }

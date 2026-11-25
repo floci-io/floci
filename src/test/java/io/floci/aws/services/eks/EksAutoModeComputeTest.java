@@ -256,8 +256,9 @@ class EksAutoModeComputeTest {
 
     /**
      * A node that just registered carries {@code node.kubernetes.io/not-ready} until Kubernetes sees it Ready, as
-     * Floci's own Ready node does between its creation and its status: that doesn't take its room, as Karpenter
-     * counts it, so its pending pod waits for it rather than get another node. A taint of its own does.
+     * Floci's own Ready node does between its creation and its status: while it starts, that doesn't take its room,
+     * as Karpenter counts it, so its pending pod waits for it rather than get another node. A node still not ready
+     * after the registration wait has no room, so an unhealthy node doesn't hold pods for good.
      */
     @Test
     void aStartingNodesNotReadyTaintDoesntTakeItsRoom() {
@@ -286,7 +287,8 @@ class EksAutoModeComputeTest {
                 anyString(), anyString(), anyList(), anyString(), anyString(), any(), any(), anyInt(), any(), any(),
                 any(), anyString(), anyBoolean(), any(), any(), any(), anyBoolean(), any(), any());
 
-        lists.put("nodes", node.formatted("maintenance"));
+        // Still not ready once the registration wait is over, it has no room.
+        joined.setLaunchTime(Instant.now().minus(EksAutoModeCompute.REGISTRATION_WAIT).minusSeconds(1));
         compute.reconcile(cluster, REGION);
         verify(ec2).runInstances(anyString(), anyString(), anyString(), anyInt(), anyInt(), any(), anyList(),
                 anyString(), anyString(), anyList(), anyString(), anyString(), any(), any(), anyInt(), any(), any(),

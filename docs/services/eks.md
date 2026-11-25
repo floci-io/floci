@@ -471,7 +471,7 @@ launches nodes on AWS. Floci checks every 10 seconds.
   node's room is its `status.allocatable` CPU, memory and pods less its pods' requests (sidecars included); one still
   joining has its instance type's whole size and 110 pods. A cordoned node, or one with a taint of its own the pod
   doesn't tolerate, has none; the taints a node carries while it starts (`node.kubernetes.io/not-ready` and the
-  like) don't count, as Karpenter counts them.
+  like) don't count in the 3 minutes after its launch, as Karpenter counts a starting node.
 - **Instance.** One node a pool and pass, of the smallest type in the instance type catalog with at least 2 vCPUs
   that fits all of the pool's waiting pods, or else the largest of them. AWS picked a 2-vCPU `c6a.large` for a pod of
   100m CPU. It is launched in a subnet of the pool's NodeClass, in the zone the pods ask for if they do, with its

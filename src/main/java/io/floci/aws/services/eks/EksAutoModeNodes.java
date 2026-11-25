@@ -38,7 +38,9 @@ final class EksAutoModeNodes {
     /** The labels Floci gives its nodes: a pool requirement on any other label is left out. */
     /**
      * The taints a node carries while it starts, which Kubernetes or the cloud provider take off once it is ready:
-     * Karpenter counts a node's room without them, so a pod waits for a node that is starting rather than get another.
+     * Karpenter counts a starting node's room without them, so a pod waits for it rather than get another. Floci
+     * leaves them out within the registration wait of the node's launch only, so a node that stays unhealthy after
+     * it has no room.
      */
     static final Set<String> STARTUP_TAINTS = Set.of("node.kubernetes.io/not-ready", "node.kubernetes.io/unreachable",
             "node.cloudprovider.kubernetes.io/uninitialized", "karpenter.sh/unregistered");
