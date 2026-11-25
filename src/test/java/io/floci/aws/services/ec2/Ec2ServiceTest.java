@@ -660,6 +660,30 @@ class Ec2ServiceTest {
         verify(devices).deleteVolume(dataId);
     }
 
+    @Test
+    void launchAttachesTheVolumesItCreatesOnceTheInstanceRuns() {
+        Ec2VolumeBlockDeviceManager devices = mock(Ec2VolumeBlockDeviceManager.class);
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        doAnswer(invocation -> {
+            invocation.<Runnable>getArgument(7).run();
+            return null;
+        }).when(containerManager).launch(any(Instance.class), any(ResolvedAmiImage.class), any(), anyString(),
+                any(), anyList(), anyMap(), any(Runnable.class));
+        AmiImageResolver resolver = mock(AmiImageResolver.class);
+        when(resolver.resolveImage("ami-test")).thenReturn(ResolvedAmiImage.minimal("guest:latest"));
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager,
+                mock(Ec2PortForwardManager.class), resolver, mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(), null, null, devices);
+
+        Reservation launch = launchKeepingADataVolume(service);
+
+        Instance instance = launch.getInstances().getFirst();
+        String dataId = launch.getLaunchVolumeIds().stream()
+                .filter(id -> !id.equals(instance.getRootVolumeId())).findFirst().orElseThrow();
+        verify(devices).attachVolume(argThat(volume -> dataId.equals(volume.getVolumeId())), eq(instance),
+                eq("/dev/sdf"));
+    }
+
     private static Reservation launchKeepingADataVolume(Ec2Service service) {
         LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
         ebs.setVolumeSize(5);

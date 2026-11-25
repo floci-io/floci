@@ -484,6 +484,12 @@ public class Ec2ContainerManager {
     public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region,
                        Ec2PortForwardManager.DesiredPorts appPorts, List<SecurityGroup> groups,
                        Map<String, List<String>> prefixLists) {
+        launch(instance, image, publicKey, region, appPorts, groups, prefixLists, null);
+    }
+
+    public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region,
+                       Ec2PortForwardManager.DesiredPorts appPorts, List<SecurityGroup> groups,
+                       Map<String, List<String>> prefixLists, Runnable afterRunning) {
         instance.setState(InstanceState.pending());
 
         // An instance record is metadata: id, addresses, tags and lifecycle state are all
@@ -605,6 +611,15 @@ public class Ec2ContainerManager {
                     return;
                 }
                 persist(instance);
+                // Before UserData, which may wait for the volumes the launch attached.
+                if (afterRunning != null) {
+                    try {
+                        afterRunning.run();
+                    } catch (Exception e) {
+                        LOG.warnv("Error in after-running hook for instance {0}: {1}",
+                                instanceId, e.getMessage());
+                    }
+                }
 
                 LOG.infov("EC2 instance {0} running in container {1} (SSH host port {2})",
                         instanceId, containerId, String.valueOf(sshHostPort));

@@ -113,6 +113,7 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
@@ -1674,6 +1675,31 @@ class Ec2ContainerManagerTest {
         // The script's output holds its connection for as long as it runs, so it uses the streaming pool.
         verify(harness.streamingDockerClient).execStartCmd("userdata-exec");
         verify(harness.dockerClient, never()).execStartCmd("userdata-exec");
+    }
+
+    @Test
+    void launchRunsItsAfterRunningHookOnceRunningAndBeforeUserData() throws Exception {
+        LaunchHarness harness = launchHarness();
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse response = inspectResponse("192.168.215.42");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(response);
+        Instance instance = instance("i-afterrunning");
+        instance.setUserData("""
+                #!/bin/bash
+                test -b /dev/sdf
+                """);
+        List<String> events = new CopyOnWriteArrayList<>();
+
+        harness.manager.launch(instance, ResolvedAmiImage.minimal("ubuntu:24.04"), null, "us-west-2",
+                Ec2PortForwardManager.DesiredPorts.NONE, List.of(), Map.of(), () -> events.add(
+                        "hook while " + instance.getState().getName() + ", user data started: "
+                                + mockingDetails(harness.streamingDockerClient).getInvocations().stream()
+                                .anyMatch(call -> call.getMethod().getName().equals("execStartCmd"))));
+
+        verify(harness.streamingDockerClient, timeout(2000)).execStartCmd("userdata-exec");
+        assertEquals(List.of("hook while running, user data started: false"), events);
     }
 
     @Test

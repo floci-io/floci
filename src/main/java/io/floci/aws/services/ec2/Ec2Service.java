@@ -4775,7 +4775,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                 .orElseThrow(() -> new IllegalStateException("Missing security group " + group.getGroupId())))
                         .toList();
                 containerManager.launch(inst, dockerImage, publicKey, region, desiredPublishedPorts(region, inst),
-                        policyGroups, policyPrefixLists(region, policyGroups));
+                        policyGroups, policyPrefixLists(region, policyGroups),
+                        () -> restoreAttachedVolumesForInstance(region, inst));
             }
         }
 

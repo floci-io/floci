@@ -10,6 +10,7 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.InstanceState;
+import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import io.floci.aws.services.ec2.model.Placement;
 import io.floci.aws.services.ec2.model.Volume;
 import io.floci.aws.services.ec2.model.VolumeAttachment;
@@ -381,6 +382,27 @@ class Ec2VolumeBlockDeviceDockerNightlyIntegrationTest {
 
         ContainerExec.Result checkDev = execIn(containerId, "test -b /dev/xvdf || test -L /dev/xvdf");
         assertEquals(0, checkDev.exitCode(), "Block device should exist inside cluster node container: " + checkDev.summary());
+    }
+
+    @Test
+    void volumeALaunchCreatesIsABlockDeviceOnceTheInstanceRuns() {
+        LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
+        ebs.setVolumeSize(1);
+        ebs.setDeleteOnTermination(true);
+        LaunchTemplateData.BlockDeviceMapping data = new LaunchTemplateData.BlockDeviceMapping();
+        data.setDeviceName("/dev/sdf");
+        data.setEbs(ebs);
+        Instance instance = ec2Service.runInstances("us-east-1", "ami-alpine", "t3.micro", 1, 1, null, List.of(),
+                null, null, List.of(), null, null, null, null, 0, null, null, null, null, false, null, null,
+                List.of(data), false, null, null).getInstances().getFirst();
+        try {
+            ec2Service.awaitContainerLaunch(instance);
+
+            await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(500)).until(() ->
+                    execIn(instance.getDockerContainerId(), "test -b /dev/sdf || test -L /dev/sdf").exitCode() == 0);
+        } finally {
+            ec2Service.terminateInstances("us-east-1", List.of(instance.getInstanceId()));
+        }
     }
 
     @Test
