@@ -39,6 +39,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
+import static io.floci.aws.services.ses.SesV2Json.namesRawContent;
 import static io.floci.aws.services.ses.SesV2Json.readOptionBody;
 import static io.floci.aws.services.ses.SesV2Json.remapCvetException;
 import static io.floci.aws.services.ses.SesV2Json.remapV1Exception;
@@ -82,9 +83,8 @@ public class SesSendController {
     public Response sendEmail(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            if (!accountService.isAccountSendingEnabled(region)) {
-                throw new AwsException("SendingPausedException",
-                        "Account sending is disabled.", 400);
+            if (!accountService.isAccountSendingEnabled(region) && !namesRawContent(objectMapper, body)) {
+                throw SesAccountService.sendingPaused();
             }
 
             JsonNode request = readOptionBody(objectMapper, body);
@@ -221,11 +221,6 @@ public class SesSendController {
     public Response sendBulkEmail(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            if (!accountService.isAccountSendingEnabled(region)) {
-                throw new AwsException("SendingPausedException",
-                        "Account sending is disabled.", 400);
-            }
-
             JsonNode request = readOptionBody(objectMapper, body);
             SesV2RequestShapes.check("SendBulkEmail", request);
             validateTrackingOverrides(request);
@@ -362,10 +357,7 @@ public class SesSendController {
         String region = regionResolver.resolveRegion(headers);
         String templateName = null;
         try {
-            if (!accountService.isAccountSendingEnabled(region)) {
-                throw new AwsException("SendingPausedException",
-                        "Account sending is disabled.", 400);
-            }
+            accountService.requireAccountSendingEnabled(region);
             JsonNode request = readOptionBody(objectMapper, body);
             SesV2RequestShapes.check("SendCustomVerificationEmail", request);
             templateName = request.path("TemplateName").asText(null);

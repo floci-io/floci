@@ -63,6 +63,8 @@ class SesV2JsonTest {
                 "CustomVerificationEmailTemplateAlreadyExists", "m", 400)).getErrorCode());
         assertEquals("SendingPausedException", SesV2Json.remapV1Exception(new AwsException(
                 "ConfigurationSetSendingPausedException", "m", 400)).getErrorCode());
+        assertEquals("SendingPausedException", SesV2Json.remapV1Exception(new AwsException(
+                "AccountSendingPausedException", "m", 400)).getErrorCode());
 
         AwsException restatedByCallers = new AwsException(
                 "CustomVerificationEmailTemplateDoesNotExist", "v1 sentence", 400);
@@ -70,6 +72,15 @@ class SesV2JsonTest {
 
         AwsException untouched = new AwsException("NotFoundException", "already v2", 404);
         assertSame(untouched, SesV2Json.remapV1Exception(untouched));
+    }
+
+    @Test
+    void namesRawContent_readsTheContentMember() {
+        assertTrue(SesV2Json.namesRawContent(MAPPER, "{\"Content\": {\"Raw\": {\"Data\": \"x\"}}}"));
+        assertFalse(SesV2Json.namesRawContent(MAPPER, "{\"Content\": {\"Simple\": {}}}"));
+        assertFalse(SesV2Json.namesRawContent(MAPPER, ""));
+        assertFalse(SesV2Json.namesRawContent(MAPPER, "{not json"));
+        assertFalse(SesV2Json.namesRawContent(MAPPER, "[]"));
     }
 
     @Test

@@ -136,6 +136,7 @@ public class SesService {
     // S/MIME certificate associations live in SesIdentityCertificateService, which the v2 controller
     // calls directly; the facade only reaches it for the identity delete-guard.
     private final SesIdentityCertificateService certificateService;
+    private final SesAccountService accountService;
     private final SmtpRelay smtpRelay;
     private final SesEventPublisher eventPublisher;
     private final String defaultAccountId;
@@ -154,8 +155,8 @@ public class SesService {
                        SesSuppressionService suppressionService, SesDedicatedIpService dedicatedIpService,
                        SesTemplateService templateService, SesSentEmailService sentEmailService,
                        SesTenantService tenantService, SesConfigurationSetService configSetService,
-                       SesIdentityCertificateService certificateService, SmtpRelay smtpRelay,
-                       SesEventPublisher eventPublisher, EmulatorConfig config,
+                       SesIdentityCertificateService certificateService, SesAccountService accountService,
+                       SmtpRelay smtpRelay, SesEventPublisher eventPublisher, EmulatorConfig config,
                        RegionResolver regionResolver) {
         this.identityService = identityService;
         this.sentEmailService = sentEmailService;
@@ -168,6 +169,7 @@ public class SesService {
         this.cvetService = cvetService;
         this.tenantService = tenantService;
         this.certificateService = certificateService;
+        this.accountService = accountService;
         this.smtpRelay = smtpRelay;
         this.eventPublisher = eventPublisher;
         this.defaultAccountId = config.defaultAccountId();
@@ -187,6 +189,7 @@ public class SesService {
                SesCvetService cvetService,
                SesTenantService tenantService,
                SesIdentityCertificateService certificateService,
+               SesAccountService accountService,
                SmtpRelay smtpRelay) {
         this.identityService = identityService;
         this.sentEmailService = sentEmailService;
@@ -199,6 +202,7 @@ public class SesService {
         this.cvetService = cvetService;
         this.tenantService = tenantService;
         this.certificateService = certificateService;
+        this.accountService = accountService;
         this.smtpRelay = smtpRelay;
         this.eventPublisher = null;
         this.defaultAccountId = "000000000000";
@@ -590,6 +594,9 @@ public class SesService {
         SesAddressLength.requireRaw(request, raw, parsed.message());
         if (requireVerifiedSender) {
             requireVerifiedSenders(rawSendingAddresses(request, raw, headers), region);
+            // v2 refuses a paused account only here, after the sender check; v1 SendRawEmail has
+            // already refused it ahead of every check (probe-confirmed).
+            accountService.requireAccountSendingEnabled(region);
         }
         requireTenantAssociations(tenant, effectiveSource, effectiveConfigSet, null, region);
         // Resolve suppression before recording the message so a bad ListManagementOptions (e.g. an
@@ -1723,8 +1730,10 @@ public class SesService {
         }
 
         // When no entry names a recipient, SES answers every entry the same, whatever its lists hold
-        // (probe-confirmed for null elements, empty lists and an empty Destination).
+        // (probe-confirmed for null elements, empty lists and an empty Destination). No sender is
+        // checked then, so a paused account is still refused (unprobed).
         if (!anyBulkRecipient(request.entries())) {
+            accountService.requireAccountSendingEnabled(request.region());
             return request.entries().stream()
                     .map(entry -> BulkEmailEntryResult.failure(BulkEmailEntryResult.Status.INVALID_PARAMETER,
                             "Destination cannot be empty"))
@@ -1734,10 +1743,13 @@ public class SesService {
             SesTemplateService.requireSendTemplateName(request.templateName());
         }
         // The sender and return path are checked once for the whole call, then a stored template is
-        // looked up, then the tenant associations, as on a single send (probe-confirmed).
+        // looked up, then the tenant associations, as on a single send (probe-confirmed). A paused
+        // account is refused after the sender check (probe-confirmed); placing it ahead of the
+        // template lookup is a choice.
         requireVerifiedSenders(List.of(
                 new SendingAddress(request.source(), request.sourceArn()),
                 new SendingAddress(request.returnPath(), request.returnPathArn())), request.region());
+        accountService.requireAccountSendingEnabled(request.region());
         EmailContent.InlineTemplate template = switch (request.defaultContent()) {
             case EmailContent.Template stored -> templateService.inline(stored, request.region());
             case EmailContent.InlineTemplate inline -> inline;

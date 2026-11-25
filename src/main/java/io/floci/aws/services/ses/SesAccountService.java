@@ -60,6 +60,16 @@ public class SesAccountService {
         return accountSettingsStore.get("sending::" + region).orElse(true);
     }
 
+    public void requireAccountSendingEnabled(String region) {
+        if (!isAccountSendingEnabled(region)) {
+            throw sendingPaused();
+        }
+    }
+
+    static AwsException sendingPaused() {
+        return new AwsException("AccountSendingPausedException", "Sending is paused for this account.", 400);
+    }
+
     public void setAccountSendingEnabled(String region, boolean enabled) {
         accountSettingsStore.put("sending::" + region, enabled);
         LOG.infov("Updated account sending enabled for region {0}: {1}", region, enabled);

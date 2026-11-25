@@ -51,7 +51,7 @@ final class SesV2Json {
             case "AlreadyExists", "ConfigurationSetAlreadyExists",
                  "CustomVerificationEmailTemplateAlreadyExists" ->
                     new AwsException("AlreadyExistsException", e.getMessage(), 400);
-            case "ConfigurationSetSendingPausedException" ->
+            case "ConfigurationSetSendingPausedException", "AccountSendingPausedException" ->
                     new AwsException("SendingPausedException", e.getMessage(), 400);
             default -> e;
         };
@@ -144,6 +144,19 @@ final class SesV2Json {
         }
         requireJsonObject(request);
         return request;
+    }
+
+    /**
+     * Whether a SendEmail body names Raw content, which a paused account refuses only after the
+     * sender check. A body that does not parse names none.
+     */
+    static boolean namesRawContent(ObjectMapper objectMapper, String body) {
+        try {
+            return readOptionBody(objectMapper, body).path("Content").has("Raw");
+        } catch (AwsException ignored) {
+            // A body that does not parse is not a raw send, so a paused account still answers first.
+            return false;
+        }
     }
 
     /** Read an optional string member, rejecting a non-string value the way the AWS deserialization layer does. */

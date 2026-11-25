@@ -1,10 +1,12 @@
 package io.floci.aws.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import static io.floci.aws.services.ses.SesV1Requests.query;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 
@@ -51,7 +53,8 @@ class SesV1AccountSendingPausedTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body(containsString("<Code>AccountSendingPausedException</Code>"));
+            .body(containsString("<Code>AccountSendingPausedException</Code>"))
+            .body(containsString("<Message>Sending is paused for this account.</Message>"));
     }
 
     @Test
@@ -67,7 +70,8 @@ class SesV1AccountSendingPausedTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body(containsString("<Code>AccountSendingPausedException</Code>"));
+            .body(containsString("<Code>AccountSendingPausedException</Code>"))
+            .body(containsString("<Message>Sending is paused for this account.</Message>"));
     }
 
     @Test
@@ -84,6 +88,42 @@ class SesV1AccountSendingPausedTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body(containsString("<Code>AccountSendingPausedException</Code>"));
+            .body(containsString("<Code>AccountSendingPausedException</Code>"))
+            .body(containsString("<Message>Sending is paused for this account.</Message>"));
+    }
+
+    @Test
+    void sendBulkTemplatedEmail_pausedUnverifiedSender_isRejectedBeforeThePause() {
+        sendBulkTemplatedEmail("paused-v1-unverified@floci.test")
+            .statusCode(400)
+            .body(containsString("<Code>MessageRejected</Code>"))
+            .body(containsString("Email address is not verified."));
+    }
+
+    @Test
+    void sendBulkTemplatedEmail_pausedVerifiedSender_returnsAccountSendingPausedException() {
+        String sender = "paused-v1-verified@floci.test";
+        query("VerifyEmailIdentity")
+            .formParam("EmailAddress", sender)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        sendBulkTemplatedEmail(sender)
+            .statusCode(400)
+            .body(containsString("<Code>AccountSendingPausedException</Code>"))
+            .body(containsString("<Message>Sending is paused for this account.</Message>"));
+    }
+
+    private static ValidatableResponse sendBulkTemplatedEmail(String sender) {
+        return query("SendBulkTemplatedEmail")
+            .formParam("Source", sender)
+            .formParam("Template", "any-template")
+            .formParam("DefaultTemplateData", "{}")
+            .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "recipient@example.com")
+        .when()
+            .post("/")
+        .then();
     }
 }
