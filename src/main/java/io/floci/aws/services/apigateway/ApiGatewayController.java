@@ -660,14 +660,10 @@ public class ApiGatewayController {
 
     @GET
     @Path("/restapis/{apiId}/deployments")
-    public Response getDeployments(@Context HttpHeaders headers,
-                                   @PathParam("apiId") String apiId) {
+    public Response getDeployments(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                   @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        List<io.floci.aws.services.apigateway.model.Deployment> deployments = service.getDeployments(region, apiId);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("item");
-        deployments.forEach(d -> items.add(toDeploymentNode(d)));
-        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+        return pageResponse(service.getDeploymentsPage(region, apiId, limit, position), this::toDeploymentNode);
     }
 
     @GET
