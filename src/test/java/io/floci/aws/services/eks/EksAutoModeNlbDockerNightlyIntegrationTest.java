@@ -22,6 +22,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.time.Duration;
 import java.util.List;
@@ -41,9 +42,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  */
 @QuarkusTest
 @TestProfile(RdsMockProfile.class)
-class EksAutoModeNlbDockerIntegrationTest {
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
+class EksAutoModeNlbDockerNightlyIntegrationTest {
 
-    private static final Logger LOG = Logger.getLogger(EksAutoModeNlbDockerIntegrationTest.class);
+    private static final Logger LOG = Logger.getLogger(EksAutoModeNlbDockerNightlyIntegrationTest.class);
     private static final String ACCOUNT = "000000000000";
     private static final String REGION = "us-east-1";
 
@@ -68,7 +70,7 @@ class EksAutoModeNlbDockerIntegrationTest {
     void requireDocker() {
         boolean dockerAvailable = DockerAvailability.answers(dockerClient);
         if (!dockerAvailable) {
-            LOG.warn("Docker daemon is not available; skipping EksAutoModeNlbDockerIntegrationTest");
+            LOG.warn("Docker daemon is not available; skipping EksAutoModeNlbDockerNightlyIntegrationTest");
         }
         Assumptions.assumeTrue(dockerAvailable, "Docker daemon must be available for the Auto Mode NLB test");
     }
