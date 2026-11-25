@@ -31,6 +31,7 @@ import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1981,6 +1982,29 @@ class SqsServiceTest {
 
         sqsService.setQueueAttributes(source.getQueueUrl(),
                 Map.of("RedrivePolicy", redrivePolicy(dlqArn, 1)), "us-east-1");
+
+        assertEquals(0, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+        assertEquals(List.of("m"), bodies(sqsService.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void receiveMessage_staleCachedPolicyWrittenBackAfterChange_isNotUsed() throws Exception {
+        Queue dlq = sqsService.createQueue("stale-dlq", null, "us-east-1");
+        String dlqArn = queueArn("stale-dlq");
+        Queue source = sqsService.createQueue("stale-source",
+                Map.of("RedrivePolicy", redrivePolicy(dlqArn, 5)), "us-east-1");
+        sqsService.sendMessage(source.getQueueUrl(), "m", 0, null, null, "us-east-1");
+        assertEquals(1, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+        Field cacheField = SqsService.class.getDeclaredField("redrivePolicyCache");
+        cacheField.setAccessible(true);
+        Map<String, Object> cache = (Map<String, Object>) cacheField.get(sqsService);
+        Map<String, Object> parsedFromOldPolicy = new HashMap<>(cache);
+
+        sqsService.setQueueAttributes(source.getQueueUrl(),
+                Map.of("RedrivePolicy", redrivePolicy(dlqArn, 1)), "us-east-1");
+        // A receive that read the old policy text before the change writes its parse back late.
+        cache.putAll(parsedFromOldPolicy);
 
         assertEquals(0, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
         assertEquals(List.of("m"), bodies(sqsService.peekMessages(dlq.getQueueUrl(), "us-east-1")));
