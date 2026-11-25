@@ -251,6 +251,8 @@ class S3DefaultEncryptionServiceTest {
                     () -> s3Service.putBucketEncryption(BUCKET, configuration(algorithm, KMS_KEY)), algorithm);
             assertEquals("InvalidArgument", refused.getErrorCode());
             assertEquals(400, refused.getHttpStatus());
+            assertEquals("a KMSMasterKeyID is not applicable if the default sse algorithm is not aws:kms or aws:kms:dsse",
+                    refused.getMessage());
         }
 
         assertFalse(s3Service.getBucketEncryption(BUCKET).contains("KMSMasterKeyID"));
