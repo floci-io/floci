@@ -53,6 +53,8 @@ import static org.mockito.Mockito.when;
 class EksAutoModeComputeTest {
 
     private static final String REGION = "us-east-1";
+    private static final String[] DRAIN_NODE_1 = {"kubectl", "drain", "node-1", "--ignore-daemonsets",
+        "--delete-emptydir-data", "--force", "--timeout=10s"};
     private static final String PENDING_POD = """
             {"items": [{"metadata": {"namespace": "default", "name": "web"},
               "spec": {"nodeSelector": {"karpenter.sh/nodepool": "general-purpose"},
@@ -236,10 +238,11 @@ class EksAutoModeComputeTest {
         clock.advance(Duration.ofSeconds(11));
         compute.reconcile(cluster, REGION);
 
-        // Tainted as disrupted, then its node goes before its instance does.
+        // Tainted as disrupted and drained, then its node goes before its instance does.
         InOrder order = inOrder(clusterManager, ec2);
         order.verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "taint", "node",
                 "node-1", "karpenter.sh/disrupted:NoSchedule", "--overwrite"}, 15);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", DRAIN_NODE_1, 15);
         order.verify(clusterManager).removeJoinedNode(cluster, node);
         order.verify(ec2).terminateInstances(REGION, List.of("i-node"));
     }
@@ -281,17 +284,44 @@ class EksAutoModeComputeTest {
         lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"node-1\"}, "
                 + "\"status\": {\"phase\": \"Running\"}}]}");
         lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}, \"spec\": "
-                + "{\"taints\": [{\"key\": \"karpenter.sh/disrupted\", \"effect\": \"NoSchedule\"}]}}]}");
+                + "{\"unschedulable\": true, "
+                + "\"taints\": [{\"key\": \"karpenter.sh/disrupted\", \"effect\": \"NoSchedule\"}]}}]}");
         lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
                 "\"spec\": {\"disruption\": {\"consolidateAfter\": \"0s\"}, \"template\""));
         Cluster cluster = cluster("prod");
 
         compute.reconcile(cluster, REGION);
 
-        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "taint", "node", "node-1",
-                "karpenter.sh/disrupted:NoSchedule-"}, 15);
+        // A drain that failed left it cordoned too: that is undone first, and the taint last.
+        InOrder order = inOrder(clusterManager);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "uncordon", "node-1"}, 15);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "taint", "node",
+                "node-1", "karpenter.sh/disrupted:NoSchedule-"}, 15);
         verify(clusterManager, never()).removeJoinedNode(cluster, node);
         verify(ec2, never()).terminateInstances(anyString(), anyList());
+    }
+
+    /**
+     * The nodes of a NodePool that was deleted, or that UpdateClusterConfig dropped, go as Karpenter removes them:
+     * tainted as disrupted and drained, whatever they run, then deleted and terminated.
+     */
+    @Test
+    void aDeletedPoolsNodeIsDrainedAndRemoved() {
+        Instance node = joinedNode("i-node", "node-1");
+        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"node-1\"}, "
+                + "\"status\": {\"phase\": \"Running\"}}]}");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}}]}");
+        lists.put("nodepools", "{\"items\": []}");
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
+        InOrder order = inOrder(clusterManager, ec2);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "taint", "node",
+                "node-1", "karpenter.sh/disrupted:NoSchedule", "--overwrite"}, 15);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", DRAIN_NODE_1, 15);
+        order.verify(clusterManager).removeJoinedNode(cluster, node);
+        order.verify(ec2).terminateInstances(REGION, List.of("i-node"));
     }
 
     @Test

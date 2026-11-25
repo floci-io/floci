@@ -187,6 +187,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         List<EksAutoModeNodes.PoolNode> poolNodes = new ArrayList<>();
         Map<String, Instance> idle = new HashMap<>();
         List<Instance> neverRegistered = new ArrayList<>();
+        List<Instance> poolGone = new ArrayList<>();
         for (Instance instance : launched) {
             NodePool pool = pools.get(tag(instance, POOL_TAG));
             Optional<Ec2InstanceTypeCatalog.CatalogInstanceType> type = instanceTypes.find(instance.getInstanceType());
@@ -199,7 +200,12 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                 neverRegistered.add(instance);
                 continue;
             }
-            if (pool == null || type.isEmpty()) {
+            if (pool == null) {
+                // Karpenter removes the nodes of a NodePool that was deleted, or that UpdateClusterConfig dropped.
+                poolGone.add(instance);
+                continue;
+            }
+            if (type.isEmpty()) {
                 continue;
             }
             if (node != null) {
@@ -246,7 +252,23 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                     REGISTRATION_WAIT);
         }
         EksAutoModeNodes.Room room = EksAutoModeNodes.withoutRoom(pods, poolNodes);
-        removeEmptyNodes(cluster, region, launched, nodesByName, idle, room.counted(), pools);
+        removeEmptyNodes(cluster, region, launched, nodesByName, idle, room.counted(), pools, poolGone);
+        for (Instance instance : poolGone) {
+            String nodeName = clusterManager.deriveInstanceNodeName(instance, region);
+            boolean joined = nodesByName.containsKey(nodeName);
+            try {
+                if (joined) {
+                    exec(cluster, List.of("kubectl", "taint", "node", nodeName, DISRUPTED_TAINT, "--overwrite"),
+                            "taint node " + nodeName);
+                }
+                retire(cluster, region, instance, nodeName, joined);
+                LOG.infov("EKS Auto Mode removed node {0} ({1}) of cluster {2}, whose pool {3} is gone", nodeName,
+                        instance.getInstanceId(), cluster.getName(), tag(instance, POOL_TAG));
+            } catch (RuntimeException e) {
+                LOG.warnv("EKS Auto Mode node {0} of cluster {1}, whose pool is gone, wasn''t removed: {2}", nodeName,
+                        cluster.getName(), e.getMessage());
+            }
+        }
         List<EksAutoModeNodes.PendingPod> withoutRoom = room.left();
         if (withoutRoom.isEmpty()) {
             return;
@@ -283,7 +305,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
      */
     private void removeEmptyNodes(Cluster cluster, String region, List<Instance> launched,
                                   Map<String, JsonNode> nodesByName, Map<String, Instance> empty, Set<String> counted,
-                                  Map<String, NodePool> pools) {
+                                  Map<String, NodePool> pools, List<Instance> poolGone) {
         Instant now = clock.instant();
         Map<String, Instant> since = emptySince.computeIfAbsent(cluster.getArn(), arn -> new HashMap<>());
         // A node that runs a workload again, or that a pending pod counts on, waits from the start next time.
@@ -311,8 +333,13 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         for (Instance instance : launched) {
             String nodeName = clusterManager.deriveInstanceNodeName(instance, region);
             JsonNode node = nodesByName.get(nodeName);
-            if (node != null && !due.contains(instance) && disrupted(node)) {
+            if (node != null && !due.contains(instance) && !poolGone.contains(instance) && disrupted(node)) {
                 try {
+                    // A drain that failed left it cordoned too; the taint comes off last, so it marks the node
+                    // until both are undone.
+                    if (node.path("spec").path("unschedulable").asBoolean(false)) {
+                        exec(cluster, List.of("kubectl", "uncordon", nodeName), "uncordon node " + nodeName);
+                    }
                     exec(cluster, List.of("kubectl", "taint", "node", nodeName, DISRUPTED_TAINT + "-"),
                             "untaint node " + nodeName);
                 } catch (RuntimeException e) {
@@ -327,7 +354,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                 exec(cluster, List.of("kubectl", "taint", "node", nodeName, DISRUPTED_TAINT, "--overwrite"),
                         "taint node " + nodeName);
                 // The scheduler may have bound a pod there since the pass read the pods; tainted, the node gets no
-                // more, so one look now settles it. One there keeps the node, and the next pass takes the taint off.
+                // more but those tolerating every taint, which the drain evicts. A workload there keeps the node.
                 JsonNode bound = readJson(cluster, List.of("kubectl", "get", "pods", "-A", "--field-selector",
                         "spec.nodeName=" + nodeName, "-o", "json"), "get pods of node " + nodeName);
                 if (EksAutoModeNodes.nodesWithWorkloads(bound).contains(nodeName)) {
@@ -336,8 +363,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                             "untaint node " + nodeName);
                     continue;
                 }
-                clusterManager.removeJoinedNode(cluster, instance);
-                ec2.terminateInstances(region, List.of(instance.getInstanceId()));
+                retire(cluster, region, instance, nodeName, true);
                 since.remove(instance.getInstanceId());
                 LOG.infov("EKS Auto Mode removed empty node {0} ({1}) of pool {2} of cluster {3}", nodeName,
                         instance.getInstanceId(), tag(instance, POOL_TAG), cluster.getName());
@@ -437,6 +463,20 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                         "taint node " + nodeName);
             }
         }
+    }
+
+    /**
+     * Takes a node already tainted as disrupted out as Karpenter's termination does: drained (its pods evicted, so
+     * one that tolerates the taint and arrived late goes elsewhere, its disruption budget kept, DaemonSet pods
+     * left), then deleted, and its instance terminated. A drain that fails leaves the node for the next pass.
+     */
+    private void retire(Cluster cluster, String region, Instance instance, String nodeName, boolean joined) {
+        if (joined) {
+            exec(cluster, List.of("kubectl", "drain", nodeName, "--ignore-daemonsets", "--delete-emptydir-data",
+                    "--force", "--timeout=10s"), "drain node " + nodeName);
+            clusterManager.removeJoinedNode(cluster, instance);
+        }
+        ec2.terminateInstances(region, List.of(instance.getInstanceId()));
     }
 
     private static boolean disrupted(JsonNode node) {

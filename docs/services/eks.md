@@ -496,12 +496,15 @@ launches nodes on AWS. Floci checks every 10 seconds.
 - **Empty nodes.** A node that runs no workload (DaemonSet and static pods aside) and that no pending pod is counting
   on is removed once it has been empty for its pool's `disruption.consolidateAfter`, as Auto Mode's consolidation
   removes it: it is tainted `karpenter.sh/disrupted:NoSchedule`, as Karpenter marks a node it removes, and unless
-  the scheduler bound a pod to it meanwhile, its node is taken out and its instance terminated. A node a removal
+  the scheduler bound a pod to it meanwhile, it is drained (`kubectl drain`, so a pod that tolerates the taint and
+  arrived late is evicted, its disruption budget kept), its node is taken out and its instance terminated. A node a removal
   that was called off or failed left with the taint, and that isn't being removed, has it taken off by the next pass. AWS removed an empty node within 90
   seconds. A pool whose `consolidateAfter` is `Never` keeps its nodes. Each pass removes no more of a pool's nodes
   than its disruption budgets allow (a percentage rounded up, 10% without a budget); a budget with a `schedule` is
   left out, as Floci doesn't model its window. How long a node has been empty is kept in memory, so a restart starts
   the wait again.
+- **Deleted pools.** The nodes of a NodePool that is deleted, or that `UpdateClusterConfig` drops, are tainted,
+  drained and removed the same way, whatever they run, as Karpenter removes them.
 - **Removal.** Turning compute off terminates the cluster's Auto Mode instances and takes their nodes out of it.
   Deleting the cluster terminates them, waits up to a minute for them to finish terminating, as they hold the
   cluster security group deleted next (one that doesn't fails the delete, which can be retried), and deletes the
