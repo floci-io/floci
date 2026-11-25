@@ -50,22 +50,12 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import org.jboss.logging.Logger;
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.w3c.dom.Node;
 
-import javax.xml.XMLConstants;
-import javax.xml.transform.OutputKeys;
-import javax.xml.transform.Transformer;
-import javax.xml.transform.TransformerFactory;
-import javax.xml.transform.dom.DOMSource;
-import javax.xml.transform.stream.StreamResult;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.StringWriter;
 import java.io.UncheckedIOException;
 import java.net.URLEncoder;
 import java.nio.channels.Channels;
@@ -6562,36 +6552,35 @@ public class S3Service implements Resettable, ResourceProvider {
                 || rule.child("BlockedEncryptionTypes") != null) {
             return configuration;
         }
-        try {
-            Document document = XmlParser.parseDocument(configuration);
-            Element ruleElement = null;
-            for (Node child = document.getDocumentElement().getFirstChild(); child != null;
-                    child = child.getNextSibling()) {
-                if (child instanceof Element element && "Rule".equals(element.getLocalName())) {
-                    ruleElement = element;
-                    break;
+        XmlBuilder response = new XmlBuilder(configuration.length() + 100)
+                .start("ServerSideEncryptionConfiguration", AwsNamespaces.S3);
+        for (XmlParser.XmlElement child : root.children()) {
+            if (child == rule) {
+                response.start("Rule");
+                for (XmlParser.XmlElement field : rule.children()) {
+                    appendBucketEncryptionElement(response, field);
                 }
+                response.start("BlockedEncryptionTypes")
+                        .elem("EncryptionType", "SSE-C")
+                        .end("BlockedEncryptionTypes")
+                        .end("Rule");
+            } else {
+                appendBucketEncryptionElement(response, child);
             }
-            if (ruleElement == null) {
-                throw new IllegalStateException("Stored bucket encryption rule is missing");
-            }
-            Element blocked = document.createElementNS(ruleElement.getNamespaceURI(), "BlockedEncryptionTypes");
-            Element type = document.createElementNS(ruleElement.getNamespaceURI(), "EncryptionType");
-            type.setTextContent("SSE-C");
-            blocked.appendChild(type);
-            ruleElement.appendChild(blocked);
-            TransformerFactory factory = TransformerFactory.newInstance();
-            factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
-            factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
-            factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
-            Transformer transformer = factory.newTransformer();
-            transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "yes");
-            StringWriter result = new StringWriter();
-            transformer.transform(new DOMSource(document), new StreamResult(result));
-            return result.toString();
-        } catch (Exception e) {
-            throw new IllegalStateException("Could not render default SSE-C block for bucket " + bucketName, e);
         }
+        return response.end("ServerSideEncryptionConfiguration").build();
+    }
+
+    private static void appendBucketEncryptionElement(XmlBuilder response, XmlParser.XmlElement element) {
+        if (element.children().isEmpty()) {
+            response.elem(element.name(), element.rawText());
+            return;
+        }
+        response.start(element.name());
+        for (XmlParser.XmlElement child : element.children()) {
+            appendBucketEncryptionElement(response, child);
+        }
+        response.end(element.name());
     }
 
     public void putBucketEncryption(String bucketName, String encryptionXml) {

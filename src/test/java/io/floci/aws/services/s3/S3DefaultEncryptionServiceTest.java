@@ -86,6 +86,21 @@ class S3DefaultEncryptionServiceTest {
     }
 
     @Test
+    void configuredEncryptionReadbackPreservesOtherRuleFields() {
+        s3Service.putBucketEncryption(BUCKET, "<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+                + "<Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm>"
+                + "<KMSMasterKeyID>alias/R&amp;D</KMSMasterKeyID></ApplyServerSideEncryptionByDefault>"
+                + "<BucketKeyEnabled>true</BucketKeyEnabled></Rule></ServerSideEncryptionConfiguration>");
+
+        String readback = s3Service.getBucketEncryption(BUCKET);
+        assertTrue(readback.startsWith("<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"));
+        assertTrue(readback.contains("<SSEAlgorithm>aws:kms</SSEAlgorithm>"));
+        assertTrue(readback.contains("<KMSMasterKeyID>alias/R&amp;D</KMSMasterKeyID>"));
+        assertTrue(readback.contains("<BucketKeyEnabled>true</BucketKeyEnabled>"));
+        assertTrue(readback.contains("<BlockedEncryptionTypes><EncryptionType>SSE-C</EncryptionType></BlockedEncryptionTypes>"));
+    }
+
+    @Test
     void bahrainAndUaeBucketsDoNotBlockSseCustomerEncryptionByDefault() throws Exception {
         for (String region : List.of("me-south-1", "me-central-1")) {
             String bucket = "sse-c-" + region;
