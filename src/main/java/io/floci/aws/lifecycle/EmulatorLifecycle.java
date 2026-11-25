@@ -43,6 +43,7 @@ import io.floci.aws.services.pipes.PipesService;
 import io.floci.aws.services.rds.RdsService;
 import io.floci.aws.services.rds.container.RdsContainerManager;
 import io.floci.aws.services.rds.integration.RdsIntegrationLoader;
+import io.floci.aws.services.rds.integration.RdsIntegrationReplicator;
 import io.floci.aws.services.rds.proxy.RdsProxyManager;
 import io.floci.aws.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
 import io.floci.aws.services.sagemaker.SageMakerService;
@@ -133,6 +134,7 @@ public class EmulatorLifecycle {
     private final DynamoDbRuntime dynamoDbRuntime;
     private final RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer;
     private final RdsIntegrationLoader rdsIntegrationLoader;
+    private final RdsIntegrationReplicator rdsIntegrationReplicator;
     // Set on the boot thread, read by the async HttpServerStart observer.
     private volatile CompletableFuture<Void> metadataServerStarted = CompletableFuture.completedFuture(null);
 
@@ -182,7 +184,8 @@ public class EmulatorLifecycle {
                              EksService eksService,
                              CodeArtifactService codeArtifactService,
                              CloudWatchMetricsService cloudWatchMetricsService,
-                             RdsIntegrationLoader rdsIntegrationLoader) {
+                             RdsIntegrationLoader rdsIntegrationLoader,
+                             RdsIntegrationReplicator rdsIntegrationReplicator) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -230,6 +233,7 @@ public class EmulatorLifecycle {
         this.dynamoDbRuntime = dynamoDbRuntime;
         this.redshiftZeroEtlConsumer = redshiftZeroEtlConsumer;
         this.rdsIntegrationLoader = rdsIntegrationLoader;
+        this.rdsIntegrationReplicator = rdsIntegrationReplicator;
     }
 
     void onStart(@Observes StartupEvent ignored) {
@@ -288,6 +292,7 @@ public class EmulatorLifecycle {
         redshiftZeroEtlConsumer.startPersistedIntegrations();
         rdsService.restorePersistedRuntime();
         rdsIntegrationLoader.resumeInterruptedLoads();
+        rdsIntegrationReplicator.resumeReplication();
         if (config.services().memorydb().enabled()) {
             memoryDbService.restorePersistedRuntime().exceptionally(ex -> {
                 LOG.warnv(ex, "MemoryDB runtime restoration failed");

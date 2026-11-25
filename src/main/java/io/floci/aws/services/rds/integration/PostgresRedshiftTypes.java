@@ -4,6 +4,7 @@ import io.floci.aws.core.common.PostgresWire;
 
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -23,8 +24,26 @@ final class PostgresRedshiftTypes {
                         String elementTypeName, String elementTypeType, boolean elementBuiltin,
                         String formattedType) {}
 
-    /** A column of the replicated table: its Redshift type and how the source column is read out. */
-    record MappedColumn(String name, String redshiftType, String selectExpression) {}
+    /**
+     * A column of the replicated table: its Redshift type, its type on the source, and how a value of the source
+     * type is read out, as an expression over an operand of that type.
+     */
+    record MappedColumn(String name, String redshiftType, String sourceType, UnaryOperator<String> reader) {
+
+        /** The expression that reads the column out of the source table. */
+        String selectExpression() {
+            return reader.apply(PostgresWire.quoteIdentifier(name));
+        }
+
+        /**
+         * The expression that turns one bound parameter, the source's text output of a value, into the value the
+         * Redshift column takes: the same conversion {@link #selectExpression()} gives the initial load, whose CSV
+         * also carries each value as its text.
+         */
+        String valueExpression() {
+            return "CAST(CAST(" + reader.apply("CAST(? AS " + sourceType + ")") + " AS text) AS " + redshiftType + ")";
+        }
+    }
 
     private static final String SUPER = "pg_catalog.super";
     private static final String VARBYTE = "pg_catalog.varbyte";
@@ -79,17 +98,16 @@ final class PostgresRedshiftTypes {
     private PostgresRedshiftTypes() {}
 
     static Optional<MappedColumn> map(SourceColumn column) {
-        String quoted = PostgresWire.quoteIdentifier(column.name());
         if (!column.builtin()) {
             return Optional.empty();
         }
         String typeName = column.typeName();
         switch (typeName) {
             case "int2vector" -> {
-                return mapped(column, SUPER, "to_jsonb(" + quoted + "::int2[])");
+                return mapped(column, SUPER, value -> "to_jsonb(" + value + "::int2[])");
             }
             case "oidvector" -> {
-                return mapped(column, SUPER, "to_jsonb(" + quoted + "::oid[])");
+                return mapped(column, SUPER, value -> "to_jsonb(" + value + "::oid[])");
             }
             default -> { }
         }
@@ -99,31 +117,31 @@ final class PostgresRedshiftTypes {
                     column.elementTypeType(), "", column.elementBuiltin(), null, null, false,
                     formatted.endsWith("[]") ? formatted.substring(0, formatted.length() - 2) : formatted);
             return column.elementTypeName() != null && map(element).isPresent()
-                    ? mapped(column, SUPER, "to_jsonb(" + quoted + ")") : Optional.empty();
+                    ? mapped(column, SUPER, value -> "to_jsonb(" + value + ")") : Optional.empty();
         }
         if (!"b".equals(column.typeType())) {
             return Optional.empty();
         }
         String asIs = AS_IS.get(typeName);
         if (asIs != null) {
-            return mapped(column, asIs, quoted);
+            return mapped(column, asIs, value -> value);
         }
         String asText = AS_TEXT.get(typeName);
         if (asText != null) {
-            return mapped(column, asText, quoted + "::text");
+            return mapped(column, asText, value -> value + "::text");
         }
         return switch (typeName) {
-            case "json", "jsonb" -> mapped(column, SUPER, quoted + "::jsonb");
-            case "money" -> mapped(column, "DECIMAL(20,3)", quoted + "::numeric");
-            case "oid", "xid", "cid" -> mapped(column, "BIGINT", quoted + "::text::bigint");
-            case "xid8" -> mapped(column, "DECIMAL(20,0)", quoted + "::text::numeric");
-            case "numeric" -> numeric(column, quoted);
-            case "bpchar" -> character(column, quoted);
+            case "json", "jsonb" -> mapped(column, SUPER, value -> value + "::jsonb");
+            case "money" -> mapped(column, "DECIMAL(20,3)", value -> value + "::numeric");
+            case "oid", "xid", "cid" -> mapped(column, "BIGINT", value -> value + "::text::bigint");
+            case "xid8" -> mapped(column, "DECIMAL(20,0)", value -> value + "::text::numeric");
+            case "numeric" -> numeric(column);
+            case "bpchar" -> character(column);
             default -> Optional.empty();
         };
     }
 
-    private static Optional<MappedColumn> numeric(SourceColumn column, String quoted) {
+    private static Optional<MappedColumn> numeric(SourceColumn column) {
         Matcher matcher = NUMERIC.matcher(column.formattedType());
         if (!matcher.matches()) {
             return Optional.empty();
@@ -133,23 +151,24 @@ final class PostgresRedshiftTypes {
         if (precision > MAX_DECIMAL_PRECISION || scale < 0 || scale > precision) {
             return Optional.empty();
         }
-        return mapped(column, "DECIMAL(" + precision + "," + scale + ")", quoted);
+        return mapped(column, "DECIMAL(" + precision + "," + scale + ")", value -> value);
     }
 
-    private static Optional<MappedColumn> character(SourceColumn column, String quoted) {
+    private static Optional<MappedColumn> character(SourceColumn column) {
         Matcher matcher = CHARACTER.matcher(column.formattedType());
         if (!matcher.matches()) {
             // A bpchar without a length takes any length, so it is read as text.
-            return mapped(column, LONG_VARCHAR, quoted + "::text");
+            return mapped(column, LONG_VARCHAR, value -> value + "::text");
         }
         int length = Integer.parseInt(matcher.group(1));
         if (length > MAX_CHAR_LENGTH) {
             return Optional.empty();
         }
-        return mapped(column, "CHAR(" + length + ")", quoted);
+        return mapped(column, "CHAR(" + length + ")", value -> value);
     }
 
-    private static Optional<MappedColumn> mapped(SourceColumn column, String redshiftType, String expression) {
-        return Optional.of(new MappedColumn(column.name(), redshiftType, expression));
+    private static Optional<MappedColumn> mapped(SourceColumn column, String redshiftType,
+                                                 UnaryOperator<String> reader) {
+        return Optional.of(new MappedColumn(column.name(), redshiftType, column.formattedType(), reader));
     }
 }

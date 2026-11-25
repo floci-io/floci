@@ -56,6 +56,8 @@ class PostgresRedshiftTypesTest {
         MappedColumn array = mapped(new SourceColumn("tags", "_text", "b", "A", true, "text", "b", true, "text[]"));
         assertEquals("pg_catalog.super", array.redshiftType());
         assertEquals("to_jsonb(\"tags\")", array.selectExpression());
+        assertEquals("CAST(CAST(to_jsonb(CAST(? AS text[])) AS text) AS pg_catalog.super)",
+                array.valueExpression());
         assertEquals("DECIMAL(20,3)", mapped(base("money", "money")).redshiftType());
         assertEquals("pg_catalog.varbyte", mapped(base("bytea", "bytea")).redshiftType());
     }

@@ -1218,9 +1218,38 @@ tables still load, and the integration finishes `failed` with `InitialLoadFailed
 or the target cannot be reached, Floci tries the load again a few times, then leaves the integration
 `failed`, with the cause under `Errors` (`InitialLoadFailed`).
 
+### Replicating ongoing changes
+
+As on RDS, the source needs logical replication: set `rds.logical_replication` to `1` in its DB
+parameter group (its DB cluster parameter group for Aurora) before the instance or writer starts, or
+reboot it after the change. Floci then replicates each loaded database: rows inserted, updated or
+deleted on the source, and tables truncated, reach the destination database about a second later.
+An update that changes a row's primary key moves the row.
+
+Floci replicates through PostgreSQL logical replication, as RDS does. Before copying a source
+database it creates, in that database, a publication of the tables it copies and a `pgoutput`
+replication slot, both named `zetl_<integration-id>_<digest>`. Changes are applied to the target in
+whole transactions before the slot moves past them, so after a Floci restart replication carries on
+from the first change not yet applied, without copying the tables again. `DeleteIntegration` stops
+replication and drops the slot and the publication from the source.
+
+When the target refuses a change, for example because the destination table was dropped, or a value
+is longer than its column, the integration goes to `failed` with `ReplicationFailed` under `Errors`
+and its slot is dropped. Creating the database again loads it afresh. While the source or the
+target cannot be reached, Floci keeps trying.
+
 What differs from RDS:
 
-- Only the initial load is copied. Changes made to the source after it are not replicated.
+- A source without logical replication is copied once, and Floci logs a warning instead of
+  replicating its changes. RDS requires logical replication on every zero-ETL source.
+- Only the tables copied by the initial load are replicated. A table created on the source later,
+  a change to the integration's `DataFilter`, and schema changes (`ALTER TABLE`, `DROP TABLE`) are
+  not replicated; create the database again to pick them up. A generated column keeps the value the
+  initial load copied.
+- Floci does not check `rds.replica_identity_full`, `max_replication_slots` or the other parameters
+  RDS asks a zero-ETL source to set.
+- An integration deleted while Floci is stopped leaves its slot on the source; drop it with
+  `pg_drop_replication_slot`.
 - A table without a primary key, or with a column type AWS does not replicate (an enum, a domain, a
   range, a type from an extension, `numeric` without a precision), is skipped and logged as a
   warning. Floci also skips `bit` and `bit varying` columns. The table states of
