@@ -1337,11 +1337,11 @@ so they go when it is deleted. `DeleteNetworkInterfacePermission` is not served.
 
 #### Interface and VPC endpoint IAM resources
 
-Resource-tag conditions use each concrete ID-bearing resource ARN's stored tags. The lookup follows the
-ARN's account and Region; an omitted account, as on an image ARN, uses the caller's account.
+Resource-tag conditions use every concrete EC2 resource ARN's stored tags, including when a request
+from another service names an EC2 ARN. The lookup follows the ARN's account and Region; an omitted
+account, as on an image ARN, uses the caller's account.
 An untagged resource does not inherit another resource's tags. Wildcard resources retain their
-existing request context. Name-based resources retain their existing lookup path. Generated tag
-prefixes and per-target checks remain in effect.
+existing request context. Generated tag prefixes and per-target checks remain in effect.
 
 
 With IAM enforcement enabled, the generated request-resource catalog checks interface and VPC
