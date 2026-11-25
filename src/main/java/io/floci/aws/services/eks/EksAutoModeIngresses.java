@@ -229,18 +229,31 @@ final class EksAutoModeIngresses {
     }
 
     /**
-     * The paths' indexes in the order their rules are matched: as Kubernetes matches an Ingress's paths, an
-     * {@code Exact} path before a {@code Prefix} one, and a longer path before a shorter, the order given otherwise.
+     * The paths' indexes in the order their rules are matched, as the AWS Load Balancer Controller orders them:
+     * {@code Exact} paths first, then {@code Prefix} paths longest first, then {@code ImplementationSpecific} ones,
+     * each in the order the Ingress lists them otherwise.
      */
     static List<Integer> precedence(List<JsonNode> paths) {
         List<Integer> order = new ArrayList<>();
         for (int i = 0; i < paths.size(); i++) {
             order.add(i);
         }
-        order.sort(Comparator
-                .comparingInt((Integer i) -> "Exact".equals(paths.get(i).path("pathType").asText()) ? 0 : 1)
-                .thenComparingInt(i -> -paths.get(i).path("path").asText("/").length()));
+        order.sort(Comparator.comparingInt((Integer i) -> pathRank(paths.get(i)))
+                .thenComparingInt(i -> "Prefix".equals(pathType(paths.get(i)))
+                        ? -paths.get(i).path("path").asText("/").length() : 0));
         return order;
+    }
+
+    private static int pathRank(JsonNode path) {
+        return switch (pathType(path)) {
+            case "Exact" -> 0;
+            case "Prefix" -> 1;
+            default -> 2;
+        };
+    }
+
+    private static String pathType(JsonNode path) {
+        return path.path("pathType").asText("ImplementationSpecific");
     }
 
     private static JsonNode paramsOf(JsonNode ingressClass, Map<String, JsonNode> paramsByName) {

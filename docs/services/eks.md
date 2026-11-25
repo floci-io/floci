@@ -541,7 +541,8 @@ spec:
 - **Listener and rules.** An HTTP listener on port 80, whose default answers a fixed 404 (`text/plain`), or forwards
   to the Ingress's `defaultBackend`. Each path of each rule becomes a listener rule, in order: a `Prefix` path `/` is
   the path pattern `/*`, as AWS makes it, another `Prefix` path `/p` is `/p` and `/p/*`, and an `Exact` path is itself;
-  a rule's `host` adds a host header condition.
+  a rule's `host` adds a host header condition. The rules are ordered as the AWS Load Balancer Controller orders them:
+  `Exact` paths first, then `Prefix` paths longest first, then `ImplementationSpecific` ones as listed.
 - **Target groups.** One per backend Service port, on the Service's NodePort, with the cluster's node registered by
   instance ID, and an HTTP health check on the traffic port at the `alb.ingress.kubernetes.io/healthcheck-path`
   annotation's path (`/` by default), every 15 seconds with a 5 second timeout.

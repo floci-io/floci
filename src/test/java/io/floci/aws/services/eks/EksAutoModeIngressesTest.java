@@ -217,15 +217,17 @@ class EksAutoModeIngressesTest {
                 EksAutoModeElb.resourceName(cluster, EksAutoModeIngresses.KIND, "shop/web", ""));
     }
 
-    /** As Kubernetes matches paths: Exact before Prefix, longer before shorter, whatever order they are listed in. */
+    /** As the Load Balancer Controller orders paths: Exact, then Prefix longest first, then ImplementationSpecific. */
     @Test
-    void rulesFollowKubernetesPathPrecedence() throws Exception {
-        List<JsonNode> paths = List.of(json("{\"path\": \"/\", \"pathType\": \"Prefix\"}"),
+    void rulesFollowTheLoadBalancerControllersPathOrder() throws Exception {
+        List<JsonNode> paths = List.of(json("{\"path\": \"/long/implementation\", \"pathType\": \"ImplementationSpecific\"}"),
+                json("{\"path\": \"/\", \"pathType\": \"Prefix\"}"),
                 json("{\"path\": \"/api\", \"pathType\": \"Prefix\"}"),
+                json("{\"path\": \"/x\", \"pathType\": \"ImplementationSpecific\"}"),
                 json("{\"path\": \"/api/health\", \"pathType\": \"Exact\"}"),
                 json("{\"path\": \"/static\", \"pathType\": \"Prefix\"}"));
 
-        assertEquals(List.of(2, 3, 1, 0), EksAutoModeIngresses.precedence(paths));
+        assertEquals(List.of(4, 5, 2, 1, 0, 3), EksAutoModeIngresses.precedence(paths));
     }
 
     @Test
