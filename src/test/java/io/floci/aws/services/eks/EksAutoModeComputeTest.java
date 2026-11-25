@@ -208,8 +208,8 @@ class EksAutoModeComputeTest {
     }
 
     /**
-     * As Auto Mode consolidates: a node that runs no workload for its pool's consolidateAfter is cordoned, its
-     * instance terminated and its node taken out; a pod running on it again starts the wait over.
+     * As Auto Mode consolidates: a node that runs no workload for its pool's consolidateAfter is tainted as
+     * disrupted, its node taken out and its instance terminated; a pod running on it again starts the wait over.
      */
     @Test
     void aNodeEmptyForItsPoolsConsolidateAfterIsRemoved() {
@@ -236,19 +236,20 @@ class EksAutoModeComputeTest {
         clock.advance(Duration.ofSeconds(11));
         compute.reconcile(cluster, REGION);
 
-        // Cordoned, then its node goes before its instance does.
+        // Tainted as disrupted, then its node goes before its instance does.
         InOrder order = inOrder(clusterManager, ec2);
-        order.verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "cordon", "node-1"}, 15);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "taint", "node",
+                "node-1", "karpenter.sh/disrupted:NoSchedule", "--overwrite"}, 15);
         order.verify(clusterManager).removeJoinedNode(cluster, node);
         order.verify(ec2).terminateInstances(REGION, List.of("i-node"));
     }
 
     /**
-     * A pod the scheduler bound to the node after the pass read the pods, but before it was cordoned, keeps it:
-     * the pass looks again once the node is cordoned, and uncordons it.
+     * A pod the scheduler bound to the node after the pass read the pods, but before it was tainted, keeps it: the
+     * pass looks again once the node is tainted, and takes the taint off.
      */
     @Test
-    void aPodBoundJustBeforeTheCordonKeepsTheNode() {
+    void aPodBoundJustBeforeTheTaintKeepsTheNode() {
         Instance node = joinedNode("i-node", "node-1");
         lists.put("pods", "{\"items\": []}");
         lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}}]}");
@@ -262,8 +263,33 @@ class EksAutoModeComputeTest {
 
         compute.reconcile(cluster, REGION);
 
-        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "cordon", "node-1"}, 15);
-        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "uncordon", "node-1"}, 15);
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "taint", "node", "node-1",
+                "karpenter.sh/disrupted:NoSchedule", "--overwrite"}, 15);
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "taint", "node", "node-1",
+                "karpenter.sh/disrupted:NoSchedule-"}, 15);
+        verify(clusterManager, never()).removeJoinedNode(cluster, node);
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
+    }
+
+    /**
+     * A node a removal left tainted as disrupted, because it was called off and taking the taint off failed or the
+     * pass failed after the taint, has it taken off by the next pass once it runs a workload again.
+     */
+    @Test
+    void aBusyNodeLeftTaintedAsDisruptedHasTheTaintTakenOff() {
+        Instance node = joinedNode("i-node", "node-1");
+        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"node-1\"}, "
+                + "\"status\": {\"phase\": \"Running\"}}]}");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}, \"spec\": "
+                + "{\"taints\": [{\"key\": \"karpenter.sh/disrupted\", \"effect\": \"NoSchedule\"}]}}]}");
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"0s\"}, \"template\""));
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "taint", "node", "node-1",
+                "karpenter.sh/disrupted:NoSchedule-"}, 15);
         verify(clusterManager, never()).removeJoinedNode(cluster, node);
         verify(ec2, never()).terminateInstances(anyString(), anyList());
     }

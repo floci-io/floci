@@ -77,6 +77,9 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
     /** The tags Auto Mode gives its instances (measured). */
     static final String CLUSTER_TAG = "eks:eks-cluster-name";
     static final String POOL_TAG = "eks:kubernetes-node-pool-name";
+    /** The taint Karpenter puts on a node it is removing, so nothing more is scheduled there. */
+    static final String DISRUPTED_KEY = "karpenter.sh/disrupted";
+    static final String DISRUPTED_TAINT = DISRUPTED_KEY + ":NoSchedule";
     static final String NODE_CLASS_TAG = "eks:kubernetes-node-class-name";
     static final String MANAGED_LAUNCH_TAG = "aws:ec2:managed-launch";
     static final String MANAGED_LAUNCH = "eks-auto";
@@ -243,7 +246,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                     REGISTRATION_WAIT);
         }
         EksAutoModeNodes.Room room = EksAutoModeNodes.withoutRoom(pods, poolNodes);
-        removeEmptyNodes(cluster, region, launched, idle, room.counted(), pools);
+        removeEmptyNodes(cluster, region, launched, nodesByName, idle, room.counted(), pools);
         List<EksAutoModeNodes.PendingPod> withoutRoom = room.left();
         if (withoutRoom.isEmpty()) {
             return;
@@ -273,11 +276,14 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
     /**
      * Removes the pools' nodes that have been empty, running no workload and counted on by no pending pod, for
      * their pool's {@code consolidateAfter}, as Auto Mode's consolidation does, within each pool's disruption
-     * budget: each is cordoned, its instance terminated and its node taken out of the cluster. A pool whose
-     * {@code consolidateAfter} is {@code Never} keeps its nodes.
+     * budget: each is tainted {@code karpenter.sh/disrupted:NoSchedule}, as Karpenter marks a node it is removing,
+     * its node taken out of the cluster and its instance terminated. A pool whose {@code consolidateAfter} is
+     * {@code Never} keeps its nodes. A node left with the taint by a removal that was called off or failed, and that
+     * isn't being removed now, has it taken off again.
      */
     private void removeEmptyNodes(Cluster cluster, String region, List<Instance> launched,
-                                  Map<String, Instance> empty, Set<String> counted, Map<String, NodePool> pools) {
+                                  Map<String, JsonNode> nodesByName, Map<String, Instance> empty, Set<String> counted,
+                                  Map<String, NodePool> pools) {
         Instant now = clock.instant();
         Map<String, Instant> since = emptySince.computeIfAbsent(cluster.getArn(), arn -> new HashMap<>());
         // A node that runs a workload again, or that a pending pod counts on, waits from the start next time.
@@ -302,17 +308,32 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                         due.add(instance);
                     }
                 });
+        for (Instance instance : launched) {
+            String nodeName = clusterManager.deriveInstanceNodeName(instance, region);
+            JsonNode node = nodesByName.get(nodeName);
+            if (node != null && !due.contains(instance) && disrupted(node)) {
+                try {
+                    exec(cluster, List.of("kubectl", "taint", "node", nodeName, DISRUPTED_TAINT + "-"),
+                            "untaint node " + nodeName);
+                } catch (RuntimeException e) {
+                    LOG.warnv("EKS Auto Mode node {0} of cluster {1} keeps its disrupted taint until the next "
+                            + "pass: {2}", nodeName, cluster.getName(), e.getMessage());
+                }
+            }
+        }
         for (Instance instance : due) {
             String nodeName = clusterManager.deriveInstanceNodeName(instance, region);
             try {
-                exec(cluster, List.of("kubectl", "cordon", nodeName), "cordon node " + nodeName);
-                // The scheduler may have bound a pod there since the pass read the pods; cordoned, the node gets no
-                // more, so one look now settles it.
+                exec(cluster, List.of("kubectl", "taint", "node", nodeName, DISRUPTED_TAINT, "--overwrite"),
+                        "taint node " + nodeName);
+                // The scheduler may have bound a pod there since the pass read the pods; tainted, the node gets no
+                // more, so one look now settles it. One there keeps the node, and the next pass takes the taint off.
                 JsonNode bound = readJson(cluster, List.of("kubectl", "get", "pods", "-A", "--field-selector",
                         "spec.nodeName=" + nodeName, "-o", "json"), "get pods of node " + nodeName);
                 if (EksAutoModeNodes.nodesWithWorkloads(bound).contains(nodeName)) {
-                    exec(cluster, List.of("kubectl", "uncordon", nodeName), "uncordon node " + nodeName);
                     since.remove(instance.getInstanceId());
+                    exec(cluster, List.of("kubectl", "taint", "node", nodeName, DISRUPTED_TAINT + "-"),
+                            "untaint node " + nodeName);
                     continue;
                 }
                 clusterManager.removeJoinedNode(cluster, instance);
@@ -416,6 +437,15 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                         "taint node " + nodeName);
             }
         }
+    }
+
+    private static boolean disrupted(JsonNode node) {
+        for (JsonNode taint : node.path("spec").path("taints")) {
+            if (DISRUPTED_KEY.equals(taint.path("key").asText()) && "NoSchedule".equals(taint.path("effect").asText())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String taint(String key, String value, String effect) {
