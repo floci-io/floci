@@ -558,6 +558,10 @@ public class StsQueryHandler {
         if (!requestedTransitiveKeys.isEmpty()) {
             trustContext.put("sts:TransitiveTagKeys", requestedTransitiveKeys);
         }
+        // A trust policy reads the tags of its own role as aws:ResourceTag: "you can allow the principal
+        // to pass session tags only if the role they assume includes the specified tags".
+        trustContext = IamConditionContextResolver.withResourceTags(trustContext,
+                IamConditionContextResolver.resourceTagKeys(roleArn, role.getTags()));
         if (!trustPolicyEvaluator.allows(role.getAssumeRolePolicyDocument(), caller, callerAccount,
                 trustContext)) {
             return AwsQueryResponse.error("AccessDenied",

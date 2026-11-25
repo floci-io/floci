@@ -8,6 +8,7 @@ import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
@@ -25,7 +26,9 @@ import static org.hamcrest.Matchers.not;
  * With {@code iam.enforcement-enabled=true}, {@code sts:AssumeRole} is authorized against the role it
  * names, in the account its ARN names, so an identity policy can allow assuming one role and not another
  * (IAM User Guide, "Granting a user permissions to switch roles": the policy's Resource is the role's ARN),
- * and {@code sts:GetFederationToken} against the federated user its name names.
+ * and {@code sts:GetFederationToken} against the federated user its name names. The role's tags are its
+ * {@code aws:ResourceTag} and {@code iam:ResourceTag} keys, in the caller's policy and in the role's own trust
+ * policy.
  */
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -33,6 +36,9 @@ class StsAssumeRoleResourceEnforcementIntegrationTest {
 
     private static final String ACCOUNT = "111111111111";
     private static final String OTHER_ACCOUNT = "222222222222";
+    private static final String LIST_USERS = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"iam:ListUsers","Resource":"*"}]}""";
 
     @TestHTTPResource
     URI baseUri;
@@ -140,6 +146,66 @@ class StsAssumeRoleResourceEnforcementIntegrationTest {
                         + URLEncoder.encode(deniedArn, StandardCharsets.UTF_8) + "%ZZ")
                 .when().post("/")
                 .then().statusCode(not(200)).body(not(containsString("AccessKeyId")));
+    }
+
+    @Test
+    void aPolicyKeyedOnARolesTagAllowsAssumingOnlyARoleCarryingIt() {
+        // IAM User Guide, "IAM: Assume roles that have a specific tag": a user may assume any role whose
+        // iam:ResourceTag/Project is ExampleCorpABC.
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String taggedArn = createRole("tagged-" + suffix);
+        tagRole("tagged-" + suffix, "Project", "ExampleCorpABC");
+        String untaggedArn = createRole("untagged-" + suffix);
+        String user = "tag-caller-" + suffix;
+        String iamAuth = auth(ACCOUNT, "iam");
+        UserCredentials caller = EnforcementFixtures.createUser(cleanup, baseUri.getPort(), iamAuth, user);
+        EnforcementFixtures.putUserPolicy(baseUri.getPort(), iamAuth, user, "assume", """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole","Resource":"*",
+                  "Condition":{"StringEquals":{"iam:ResourceTag/Project":"ExampleCorpABC"}}}]}""");
+
+        assumeRole(caller, taggedArn).then().statusCode(200);
+        assumeRole(caller, untaggedArn).then().statusCode(403);
+    }
+
+    @Test
+    void aTrustPolicyKeyedOnItsRolesTagAllowsAssumingOnlyARoleCarryingIt() {
+        // A trust policy reads the tags of its own role as aws:ResourceTag.
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String trust = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                  "Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"sts:AssumeRole",
+                  "Condition":{"StringEquals":{"aws:ResourceTag/Team":"Blue"}}}]}""".formatted(ACCOUNT);
+        String blueArn = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/", "blue-" + suffix,
+                trust, LIST_USERS);
+        tagRole("blue-" + suffix, "Team", "Blue");
+        String redArn = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/", "red-" + suffix,
+                trust, LIST_USERS);
+        tagRole("red-" + suffix, "Team", "Red");
+        String user = "trust-tag-caller-" + suffix;
+        String iamAuth = auth(ACCOUNT, "iam");
+        UserCredentials caller = EnforcementFixtures.createUser(cleanup, baseUri.getPort(), iamAuth, user);
+        EnforcementFixtures.putUserPolicy(baseUri.getPort(), iamAuth, user, "assume", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"sts:AssumeRole","Resource":"*"}]}""");
+
+        assumeRole(caller, blueArn).then().statusCode(200);
+        assumeRole(caller, redArn).then().statusCode(403);
+    }
+
+    private void tagRole(String role, String key, String value) {
+        iamCall(auth(ACCOUNT, "iam"), "TagRole", "RoleName", role, "Tags.member.1.Key", key,
+                "Tags.member.1.Value", value).then().statusCode(200);
+    }
+
+    private Response iamCall(String authorization, String action, String... parameters) {
+        RequestSpecification request = given().port(baseUri.getPort())
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", authorization)
+                .formParam("Action", action);
+        for (int index = 0; index < parameters.length; index += 2) {
+            request = request.formParam(parameters[index], parameters[index + 1]);
+        }
+        return request.when().post("/");
     }
 
     private String createRole(String role) {

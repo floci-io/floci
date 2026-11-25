@@ -99,6 +99,26 @@ class IamPassRoleEnforcementIntegrationTest {
     }
 
     @Test
+    void aPassRoleGrantKeyedOnTheRolesTagIsNotSatisfiedByTheTag() {
+        // The IAM guide warns that ResourceTag conditions with PassRole "do not have reliable results", so the
+        // generated condition-key table reads no resource tag for it: a role carrying the tag does not pass.
+        String role = role("fn-tagged");
+        String roleName = role.substring(role.lastIndexOf('/') + 1);
+        admin("iam").formParam("Action", "TagRole").formParam("RoleName", roleName)
+                .formParam("Tags.member.1.Key", "Project").formParam("Tags.member.1.Value", "Alpha")
+                .post("/").then().statusCode(200);
+        User user = user("passrole-tagged");
+        String name = "passrole-tagged-fn-" + suffix();
+        String body = """
+                {"FunctionName":"%s","Runtime":"nodejs20.x","Handler":"index.handler","Role":"%s"}"""
+                .formatted(name, role);
+
+        user.policy(allow("lambda:CreateFunction", "*") + ",{\"Effect\":\"Allow\",\"Action\":\"iam:PassRole\","
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"iam:ResourceTag/Project\":\"Alpha\"}}}");
+        denied(user.lambda().body(body).post("/2015-03-31/functions").then());
+    }
+
+    @Test
     void updatingAFunctionNeedsPassRoleOnlyWhenItSetsTheRole() {
         String first = role("fn-first");
         String second = role("fn-second");
