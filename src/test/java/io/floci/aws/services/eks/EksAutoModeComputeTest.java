@@ -129,7 +129,12 @@ class EksAutoModeComputeTest {
                     name: prod
                     apiServerEndpoint: https://prod.example
                     certificateAuthority: Q0E=
+                  kubelet:
+                    flags:
+                    - --node-labels=kubernetes.io/arch=amd64,kubernetes.io/os=linux,node.kubernetes.io/instance-type=c7a.large,karpenter.sh/capacity-type=on-demand,eks.amazonaws.com/instance-category=c,eks.amazonaws.com/instance-generation=7,eks.amazonaws.com/instance-family=c7a,eks.amazonaws.com/instance-size=large,eks.amazonaws.com/instance-cpu=2,eks.amazonaws.com/instance-memory=4096,karpenter.sh/nodepool=general-purpose,eks.amazonaws.com/compute-type=auto,topology.kubernetes.io/zone=us-east-1a
                 """, userData.getValue());
+        // The node registers with those labels, as a kubelet given the flag does.
+        assertEquals("general-purpose", EksBootstrapUserData.nodeLabels(userData.getValue()).get("karpenter.sh/nodepool"));
         assertEquals("prod", EksBootstrapUserData.extractClusterName(userData.getValue()).orElseThrow());
         ArgumentCaptor<String> profileName = ArgumentCaptor.forClass(String.class);
         verify(iam).createInstanceProfile(profileName.capture(), eq("/eks/us-east-1/prod/"));

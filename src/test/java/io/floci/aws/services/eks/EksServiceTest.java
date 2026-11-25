@@ -824,6 +824,27 @@ class EksServiceTest {
         verify(compute).clusterDeleted(cluster, service.clusterRegion(cluster));
     }
 
+    /** Auto Mode's instances hold the cluster security group, so they go before EC2 is asked to delete it. */
+    @Test
+    void aDeletedClustersAutoModeInstancesGoBeforeItsSecurityGroup() {
+        Cluster cluster = activeCluster();
+        ResourcesVpcConfig vpc = new ResourcesVpcConfig();
+        vpc.setClusterSecurityGroupId("sg-cluster");
+        cluster.setResourcesVpcConfig(vpc);
+        EksAutoModeCleanup compute = mock(EksAutoModeCleanup.class);
+        @SuppressWarnings("unchecked")
+        jakarta.enterprise.inject.Instance<EksAutoModeCleanup> lookup = mock(jakarta.enterprise.inject.Instance.class);
+        when(lookup.iterator()).thenAnswer(inv -> List.of(compute).iterator());
+        Ec2Service ec2 = mock(Ec2Service.class);
+        EksService service = serviceWithCluster(cluster, mock(EksClusterManager.class), false, lookup, ec2);
+
+        service.deleteCluster("running-cluster");
+
+        InOrder order = inOrder(compute, ec2);
+        order.verify(compute).clusterDeleted(cluster, service.clusterRegion(cluster));
+        order.verify(ec2).deleteSecurityGroup(service.clusterRegion(cluster), "sg-cluster");
+    }
+
     @Test
     void aDeleteOverlappingOneStillInProgressIsRejectedAndCannotReviveTheCluster() {
         Cluster cluster = activeCluster();
@@ -921,12 +942,18 @@ class EksServiceTest {
     private EksService serviceWithCluster(Cluster cluster, EksClusterManager clusterManager,
             boolean keepRunningOnShutdown,
             jakarta.enterprise.inject.Instance<EksAutoModeCleanup> autoModeCleanups) {
+        return serviceWithCluster(cluster, clusterManager, keepRunningOnShutdown, autoModeCleanups, null);
+    }
+
+    private EksService serviceWithCluster(Cluster cluster, EksClusterManager clusterManager,
+            boolean keepRunningOnShutdown,
+            jakarta.enterprise.inject.Instance<EksAutoModeCleanup> autoModeCleanups, Ec2Service ec2) {
         AccountAwareStorageBackend<Cluster> clusterStore =
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
         clusterStore.putForAccount("000000000000", EksService.clusterKey(
                 AwsArnUtils.regionOrDefault(cluster.getArn(), "us-east-1"), cluster.getName()), cluster);
         return new EksService(fixedStorageFactory(clusterStore), testConfig(false, keepRunningOnShutdown),
-                new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
+                new RegionResolver("us-east-1", "000000000000"), clusterManager, ec2,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
                         new ObjectMapper()), mock(EksAccessEntryService.class), null, null, null,
                 autoModeCleanups);

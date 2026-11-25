@@ -38,6 +38,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -177,7 +178,14 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                 }
             }
             long[] used = requests.getOrDefault(nodeName, new long[2]);
-            poolNodes.add(new EksAutoModeNodes.PoolNode(pool, type.get(), zone(instance), used[0], used[1]));
+            List<Taint> nodeTaints = new ArrayList<>();
+            if (node != null) {
+                node.path("spec").path("taints").forEach(t -> nodeTaints.add(new Taint(t.path("key").asText(),
+                        t.path("value").asText(""), t.path("effect").asText())));
+            }
+            boolean schedulable = node == null || !node.path("spec").path("unschedulable").asBoolean(false);
+            poolNodes.add(new EksAutoModeNodes.PoolNode(pool, type.get(), zone(instance), used[0], used[1],
+                    schedulable, List.copyOf(nodeTaints)));
         }
         if (!neverRegistered.isEmpty()) {
             // A node that never joins would hold its pods' room for good; it goes, and they get another.
@@ -197,8 +205,12 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             subnetIds.addAll(ids(nodeClass.path("spec").path("subnetSelectorTerms")));
         }
         Map<String, String> subnetZones = subnetZones(region, subnetIds);
+        // Each pool places its nodes in the zones of its own NodeClass's subnets.
+        Map<String, List<String>> zonesByNodeClass = new HashMap<>();
+        nodeClasses.forEach((name, spec) -> zonesByNodeClass.put(name, ids(spec.path("subnetSelectorTerms")).stream()
+                .map(subnetZones::get).filter(Objects::nonNull).distinct().toList()));
         for (Launch launch : EksAutoModeNodes.plan(List.copyOf(pools.values()), withoutRoom,
-                instanceTypes.instanceTypes(), List.copyOf(new LinkedHashSet<>(subnetZones.values())))) {
+                instanceTypes.instanceTypes(), zonesByNodeClass)) {
             try {
                 launch(cluster, region, launch, nodeClasses.get(launch.pool().nodeClass()), subnetZones);
             } catch (RuntimeException e) {
@@ -232,7 +244,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             return;
         }
         String profileArn = instanceProfile(cluster, region, launch.pool().nodeClass(), role).getArn();
-        String userData = nodeConfig(cluster);
+        String userData = nodeConfig(cluster, launch);
         Reservation reservation = ec2.runInstances(region, imageId, launch.instanceType().instanceType, 1, 1, null,
                 ids(nodeClass.path("securityGroupSelectorTerms")), subnet, UUID.randomUUID().toString(),
                 tags(cluster, launch.pool()), userData, profileArn, null, null, 0, null, null, null,
@@ -372,8 +384,11 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                 new Tag(MANAGED_LAUNCH_TAG, MANAGED_LAUNCH));
     }
 
-    /** nodeadm's {@code NodeConfig} for the cluster, the user data an instance joins it with. */
-    static String nodeConfig(Cluster cluster) {
+    /**
+     * nodeadm's {@code NodeConfig} for the cluster, the user data an instance joins it with, its kubelet registering
+     * the node with its pool's labels and taints, so a pod the pool's taints keep off never lands there first.
+     */
+    static String nodeConfig(Cluster cluster, Launch launch) {
         StringBuilder yaml = new StringBuilder("""
                 apiVersion: node.eks.aws/v1alpha1
                 kind: NodeConfig
@@ -389,6 +404,13 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         }
         if (cluster.getKubernetesNetworkConfig() != null && cluster.getKubernetesNetworkConfig().getServiceIpv4Cidr() != null) {
             yaml.append("    cidr: ").append(cluster.getKubernetesNetworkConfig().getServiceIpv4Cidr()).append('\n');
+        }
+        yaml.append("  kubelet:\n    flags:\n");
+        yaml.append("    - --node-labels=").append(String.join(",", launch.labels().entrySet().stream()
+                .map(e -> e.getKey() + "=" + e.getValue()).toList())).append('\n');
+        if (!launch.pool().taints().isEmpty()) {
+            yaml.append("    - --register-with-taints=").append(String.join(",", launch.pool().taints().stream()
+                    .map(t -> taint(t.key(), t.value(), t.effect())).toList())).append('\n');
         }
         return yaml.toString();
     }

@@ -467,10 +467,12 @@ launches nodes on AWS. Floci checks every 10 seconds.
 - **Pool.** The pod goes to the first NodePool, by `weight` then name, with an instance type the pool's requirements
   allow, whose node the pod's `nodeSelector`, required node affinity and tolerations accept, and that fits its CPU and
   memory requests. A requirement on a label Floci doesn't give its nodes (a GPU count, say) is left out. A pod one of
-  the pool's nodes has room for, joined or still joining, waits for the scheduler instead.
+  the pool's schedulable nodes has room for, joined or still joining, waits for the scheduler instead; a cordoned
+  node, or one with a taint of its own the pod doesn't tolerate, has none.
 - **Instance.** One node a pool and pass, of the smallest type in the instance type catalog with at least 2 vCPUs
   that fits all of the pool's waiting pods, or else the largest of them. AWS picked a 2-vCPU `c6a.large` for a pod of
-  100m CPU. It is launched in the first subnet of the pool's NodeClass, with its security groups, the instance
+  100m CPU. It is launched in a subnet of the pool's NodeClass, in the zone the pods ask for if they do, with its
+  security groups, the instance
   profile `eks-<region>-<cluster>-<number>` (path `/eks/<region>/<cluster>/`) holding the NodeClass's role, and the
   tags Auto Mode sets: `eks:eks-cluster-name`, `eks:kubernetes-node-pool-name`, `eks:kubernetes-node-class-name`,
   `kubernetes.io/cluster/<cluster>: owned` and `aws:ec2:managed-launch: eks-auto`.
@@ -480,7 +482,9 @@ launches nodes on AWS. Floci checks every 10 seconds.
   really run on the node. Otherwise the instance joins with the Ready node Floci registers for every joined
   instance, and pods are scheduled to it but don't start.
 - **Node.** The instance joins the cluster through its EKS bootstrap user data (a nodeadm `NodeConfig`), as any
-  instance does, and then carries its pool's labels and taints: `karpenter.sh/nodepool`,
+  instance does. Its kubelet flags (`--node-labels`, `--register-with-taints`) register the node with its pool's
+  labels and taints, so no pod the taints keep off lands there first; Floci's own Ready node for a joined instance
+  honours those flags too. The labels are: `karpenter.sh/nodepool`,
   `eks.amazonaws.com/compute-type: auto`, `node.kubernetes.io/instance-type`, `karpenter.sh/capacity-type`, and the
   `eks.amazonaws.com/instance-*` category, generation, family, size, CPU and memory labels.
 - **Removal.** Turning compute off terminates the cluster's Auto Mode instances and takes their nodes out of it.

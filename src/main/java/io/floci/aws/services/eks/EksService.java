@@ -1798,9 +1798,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 }
             }
             endClusterNodeInstance(cluster);
+            // Auto Mode's instances hold the cluster security group, so they go before it does.
+            deleteAutoModeResources(cluster);
             deleteClusterSecurityGroup(cluster);
             deleteNodeGroupAutoScalingGroups(cluster.getAccountId(), cluster);
-            deleteAutoModeResources(cluster);
             if (podIdentityAssociations != null) {
                 podIdentityAssociations.deleteClusterAssociations(cluster);
             }

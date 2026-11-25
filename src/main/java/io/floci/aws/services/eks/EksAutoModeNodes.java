@@ -127,7 +127,19 @@ final class EksAutoModeNodes {
      * pending pod it has room for is left to the scheduler rather than given another node.
      */
     record PoolNode(NodePool pool, CatalogInstanceType instanceType, String zone, long usedCpuMillis,
-                    long usedMemoryBytes) {
+                    long usedMemoryBytes, boolean schedulable, List<Taint> nodeTaints) {
+
+        /** A node still joining: schedulable, with no taints but its pool's. */
+        PoolNode(NodePool pool, CatalogInstanceType instanceType, String zone, long usedCpuMillis, long usedMemoryBytes) {
+            this(pool, instanceType, zone, usedCpuMillis, usedMemoryBytes, true, List.of());
+        }
+
+        /** The taints a pod must tolerate there: the pool's and any the node carries besides. */
+        List<Taint> taints() {
+            List<Taint> all = new ArrayList<>(pool.taints());
+            nodeTaints.stream().filter(t -> !all.contains(t)).forEach(all::add);
+            return all;
+        }
     }
 
     /** A node to launch: its pool, instance type, zone (null when no subnet's zone is known) and labels, and its pods. */
@@ -186,14 +198,13 @@ final class EksAutoModeNodes {
 
     /**
      * The nodes to launch for {@code pods}: each pod goes to the first pool, by weight then name, that has an
-     * instance type in one of {@code zones} its requirements allow, the pod's constraints accept and its requests
-     * fit. Each pool gets one node, of the smallest such type that fits all of its pods, or else the largest pod;
-     * those left over get one on a later pass. Pods no pool can take are left out. With no zone known, nodes carry
-     * no zone label.
+     * instance type, in a zone of its NodeClass's subnets ({@code zonesByNodeClass}), that its requirements allow,
+     * the pod's constraints accept and its requests fit. Each pool gets one node, of the smallest such type that
+     * fits all of its pods, or else the largest pod; those left over get one on a later pass. Pods no pool can take
+     * are left out. A pool whose NodeClass's zones aren't known launches nodes with no zone label.
      */
     static List<Launch> plan(List<NodePool> pools, List<PendingPod> pods, List<CatalogInstanceType> types,
-                             List<String> zones) {
-        List<String> placesIn = zones.isEmpty() ? Collections.singletonList(null) : zones;
+                             Map<String, List<String>> zonesByNodeClass) {
         List<NodePool> ordered = pools.stream()
                 .sorted(Comparator.comparingInt(NodePool::weight).reversed().thenComparing(NodePool::name))
                 .toList();
@@ -205,7 +216,8 @@ final class EksAutoModeNodes {
         Map<String, List<PendingPod>> byPool = new LinkedHashMap<>();
         for (PendingPod pod : pods) {
             for (NodePool pool : ordered) {
-                if (candidate(pool, sized, placesIn, pod, pod.cpuMillis(), pod.memoryBytes()).isPresent()) {
+                if (candidate(pool, sized, zonesOf(pool, zonesByNodeClass), pod, pod.cpuMillis(), pod.memoryBytes())
+                        .isPresent()) {
                     byPool.computeIfAbsent(pool.name(), k -> new ArrayList<>()).add(pod);
                     break;
                 }
@@ -221,6 +233,7 @@ final class EksAutoModeNodes {
             long memory = group.stream().mapToLong(PendingPod::memoryBytes).sum();
             PendingPod largest = group.stream().max(Comparator.comparingLong(PendingPod::cpuMillis)
                     .thenComparingLong(PendingPod::memoryBytes)).orElseThrow();
+            List<String> placesIn = zonesOf(pool, zonesByNodeClass);
             Optional<Placement> placement = candidate(pool, sized, placesIn, largest, cpu, memory)
                     .filter(p -> group.stream().allMatch(pod -> pod.fits(labels(p.type(), pool, p.zone()), pool.taints())))
                     .or(() -> candidate(pool, sized, placesIn, largest, largest.cpuMillis(), largest.memoryBytes()));
@@ -231,9 +244,10 @@ final class EksAutoModeNodes {
     }
 
     /**
-     * The pods none of the pools' nodes has room for: each pod takes room on the first node whose labels and
-     * taints it accepts and whose free CPU and memory fit its requests, as Karpenter counts its nodes, those still
-     * joining among them, before it launches another.
+     * The pods none of the pools' nodes has room for: each pod takes room on the first schedulable node whose
+     * labels and taints, the pool's and the node's own, it accepts and whose free CPU and memory fit its requests,
+     * as Karpenter counts its nodes, those still joining among them, before it launches another. A cordoned node
+     * has no room.
      */
     static List<PendingPod> withoutRoom(List<PendingPod> pods, List<PoolNode> nodes) {
         long[] freeCpu = new long[nodes.size()];
@@ -248,8 +262,8 @@ final class EksAutoModeNodes {
             boolean placed = false;
             for (int i = 0; i < nodes.size() && !placed; i++) {
                 PoolNode node = nodes.get(i);
-                if (freeCpu[i] >= pod.cpuMillis() && freeMemory[i] >= pod.memoryBytes()
-                        && pod.fits(labels(node.instanceType(), node.pool(), node.zone()), node.pool().taints())) {
+                if (node.schedulable() && freeCpu[i] >= pod.cpuMillis() && freeMemory[i] >= pod.memoryBytes()
+                        && pod.fits(labels(node.instanceType(), node.pool(), node.zone()), node.taints())) {
                     freeCpu[i] -= pod.cpuMillis();
                     freeMemory[i] -= pod.memoryBytes();
                     placed = true;
@@ -260,6 +274,11 @@ final class EksAutoModeNodes {
             }
         }
         return left;
+    }
+
+    private static List<String> zonesOf(NodePool pool, Map<String, List<String>> zonesByNodeClass) {
+        List<String> zones = zonesByNodeClass.getOrDefault(pool.nodeClass(), List.of());
+        return zones.isEmpty() ? Collections.singletonList(null) : zones;
     }
 
     private static Optional<Placement> candidate(NodePool pool, List<CatalogInstanceType> sized, List<String> zones,

@@ -52,7 +52,7 @@ class EksAutoModeNodesTest {
 
     @Test
     void aSmallPodGetsTheSmallestTwoVcpuTypeOfTheGeneralPurposePool() throws Exception {
-        List<Launch> launches = EksAutoModeNodes.plan(pools(), List.of(pod("web", "100m", "64Mi")), TYPES, List.of());
+        List<Launch> launches = EksAutoModeNodes.plan(pools(), List.of(pod("web", "100m", "64Mi")), TYPES, Map.of());
 
         assertEquals(1, launches.size());
         assertEquals("general-purpose", launches.getFirst().pool().name());
@@ -71,7 +71,7 @@ class EksAutoModeNodesTest {
     @Test
     void podsOfOnePoolShareANodeSizedForAllOfThem() throws Exception {
         List<Launch> launches = EksAutoModeNodes.plan(pools(),
-                List.of(pod("a", "1500m", "1Gi"), pod("b", "1", "1Gi")), TYPES, List.of());
+                List.of(pod("a", "1500m", "1Gi"), pod("b", "1", "1Gi")), TYPES, Map.of());
 
         assertEquals(1, launches.size());
         assertEquals("c7a.xlarge", launches.getFirst().instanceType().instanceType);
@@ -81,7 +81,7 @@ class EksAutoModeNodesTest {
     @Test
     void podsThatDontFitOneNodeTogetherGetANodeForTheLargestNow() throws Exception {
         List<Launch> launches = EksAutoModeNodes.plan(pools(),
-                List.of(pod("a", "3", "1Gi"), pod("b", "3", "1Gi")), TYPES, List.of());
+                List.of(pod("a", "3", "1Gi"), pod("b", "3", "1Gi")), TYPES, Map.of());
 
         assertEquals("c7a.xlarge", launches.getFirst().instanceType().instanceType);
     }
@@ -94,7 +94,7 @@ class EksAutoModeNodesTest {
         PendingPod plain = new PendingPod("default", "plain", 100, 64L << 20,
                 Map.of("karpenter.sh/nodepool", "system"), List.of(), List.of());
 
-        List<Launch> launches = EksAutoModeNodes.plan(pools(), List.of(critical, plain), TYPES, List.of());
+        List<Launch> launches = EksAutoModeNodes.plan(pools(), List.of(critical, plain), TYPES, Map.of());
 
         assertEquals(1, launches.size());
         assertEquals("system", launches.getFirst().pool().name());
@@ -110,7 +110,7 @@ class EksAutoModeNodesTest {
                 List.of(new Toleration("", "Exists", "", "")));
 
         List<Launch> launches = EksAutoModeNodes.plan(EksAutoModeNodes.nodePools(json(weighted)),
-                List.of(tolerant), TYPES, List.of());
+                List.of(tolerant), TYPES, Map.of());
 
         assertEquals("system", launches.getFirst().pool().name());
     }
@@ -121,7 +121,7 @@ class EksAutoModeNodesTest {
         PendingPod gpu = new PendingPod("default", "gpu", 100, 0, Map.of("eks.amazonaws.com/instance-gpu-count", "1"),
                 List.of(), List.of());
 
-        assertEquals(List.of(), EksAutoModeNodes.plan(pools(), List.of(huge, gpu), TYPES, List.of()));
+        assertEquals(List.of(), EksAutoModeNodes.plan(pools(), List.of(huge, gpu), TYPES, Map.of()));
     }
 
     /** As Karpenter counts its nodes: a pod a pool's node has room for gets no other node. */
@@ -141,6 +141,26 @@ class EksAutoModeNodesTest {
 
         assertEquals(List.of(big), left);
         assertEquals(List.of(small), untolerated);
+    }
+
+    /** A cordoned node, or one with a taint of its own the pod doesn't tolerate, has no room for it. */
+    @Test
+    void aCordonedOrForeignTaintedNodeHasNoRoom() throws Exception {
+        NodePool general = pools().getFirst();
+        PendingPod small = pod("small", "100m", "64Mi");
+
+        List<PendingPod> cordoned = EksAutoModeNodes.withoutRoom(List.of(small), List.of(
+                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 0, 0, false, List.of())));
+        List<PendingPod> tainted = EksAutoModeNodes.withoutRoom(List.of(small), List.of(
+                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 0, 0, true,
+                        List.of(new EksAutoModeNodes.Taint("maintenance", "", "NoSchedule")))));
+        List<PendingPod> preferOnly = EksAutoModeNodes.withoutRoom(List.of(small), List.of(
+                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 0, 0, true,
+                        List.of(new EksAutoModeNodes.Taint("busy", "", "PreferNoSchedule")))));
+
+        assertEquals(List.of(small), cordoned);
+        assertEquals(List.of(small), tainted);
+        assertEquals(List.of(), preferOnly);
     }
 
     @Test
@@ -170,8 +190,11 @@ class EksAutoModeNodesTest {
                 Map.of("karpenter.sh/nodepool", "general-purpose", "topology.kubernetes.io/zone", "us-east-1b"),
                 List.of(), List.of());
 
-        List<Launch> launches = EksAutoModeNodes.plan(pools(), List.of(zonal), TYPES, List.of("us-east-1a", "us-east-1b"));
-        List<Launch> none = EksAutoModeNodes.plan(pools(), List.of(zonal), TYPES, List.of("us-east-1a"));
+        List<Launch> launches = EksAutoModeNodes.plan(pools(), List.of(zonal), TYPES,
+                Map.of("default", List.of("us-east-1a", "us-east-1b")));
+        // Another NodeClass's zone is no use to this pool, whose NodeClass has a subnet in us-east-1a only.
+        List<Launch> none = EksAutoModeNodes.plan(pools(), List.of(zonal), TYPES,
+                Map.of("default", List.of("us-east-1a"), "other", List.of("us-east-1b")));
 
         assertEquals("us-east-1b", launches.getFirst().zone());
         assertEquals("us-east-1b", launches.getFirst().labels().get("topology.kubernetes.io/zone"));
@@ -187,7 +210,7 @@ class EksAutoModeNodesTest {
                         + "{\"key\": \"eks.amazonaws.com/instance-cpu-manufacturer\", \"operator\": \"In\", \"values\": [\"amd\"]}");
 
         List<Launch> launches = EksAutoModeNodes.plan(EksAutoModeNodes.nodePools(json(strict)),
-                List.of(pod("web", "100m", "64Mi")), TYPES, List.of());
+                List.of(pod("web", "100m", "64Mi")), TYPES, Map.of());
 
         assertEquals("c7a.large", launches.getFirst().instanceType().instanceType);
     }

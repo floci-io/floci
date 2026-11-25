@@ -1,6 +1,7 @@
 package io.floci.aws.services.eks;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
@@ -131,6 +132,7 @@ public class EksClusterManager
         DnsRecordSource, DnsForwardingRuleSource {
 
     private static final Logger LOG = Logger.getLogger(EksClusterManager.class);
+    private static final ObjectMapper NODE_MAPPER = new ObjectMapper();
     private static final int K3S_API_SERVER_PORT = 6443;
     static final String DEFAULT_NODE_INSTANCE_TYPE = "m5.large";
     /** The tag naming the cluster, on the cluster's node and on its node groups' Auto Scaling groups. */
@@ -4398,12 +4400,22 @@ public class EksClusterManager
             String k8sArch = (rawArch != null && (rawArch.toLowerCase(Locale.ROOT).contains("arm64")
                     || rawArch.toLowerCase(Locale.ROOT).contains("aarch64"))) ? "arm64" : "amd64";
 
-            String nodeJson = String.format(Locale.ROOT,
-                    "{\"apiVersion\":\"v1\",\"kind\":\"Node\",\"metadata\":{\"name\":\"%s\","
-                    + "\"labels\":{\"topology.kubernetes.io/zone\":\"%s\",\"topology.kubernetes.io/region\":\"%s\","
-                    + "\"node.kubernetes.io/instance-type\":\"%s\",\"kubernetes.io/hostname\":\"%s\","
-                    + "\"kubernetes.io/os\":\"linux\",\"kubernetes.io/arch\":\"%s\"}},\"spec\":{\"providerID\":\"%s\"}}",
-                    nodeName, az, region, instanceType, nodeName, k8sArch, providerId);
+            // As a kubelet registers: the labels and taints its NodeConfig's flags name, under the node's own labels.
+            Map<String, String> labels = new LinkedHashMap<>(EksBootstrapUserData.nodeLabels(instance.getUserData()));
+            labels.put("topology.kubernetes.io/zone", az);
+            labels.put("topology.kubernetes.io/region", region);
+            labels.put("node.kubernetes.io/instance-type", instanceType);
+            labels.put("kubernetes.io/hostname", nodeName);
+            labels.put("kubernetes.io/os", "linux");
+            labels.put("kubernetes.io/arch", k8sArch);
+            Map<String, Object> spec = new LinkedHashMap<>();
+            spec.put("providerID", providerId);
+            List<Map<String, String>> taints = EksBootstrapUserData.registerWithTaints(instance.getUserData());
+            if (!taints.isEmpty()) {
+                spec.put("taints", taints);
+            }
+            String nodeJson = NODE_MAPPER.writeValueAsString(Map.of("apiVersion", "v1", "kind", "Node",
+                    "metadata", Map.of("name", nodeName, "labels", labels), "spec", spec));
 
             ContainerExec.Result applyRes = execInContainerForResult(containerId,
                     new String[]{"sh", "-c", "echo '" + nodeJson.replace("'", "'\\''") + "' | kubectl apply -f -"}, 15);
