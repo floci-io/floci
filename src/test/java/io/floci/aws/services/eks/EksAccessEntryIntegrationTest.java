@@ -223,10 +223,13 @@ class EksAccessEntryIntegrationTest {
         }
     }
 
-    /** EKS makes the node role's EC2 entry with AmazonEKSAutoNodePolicy when Auto Mode compute is on (measured). */
+    /**
+     * EKS makes the node role's EC2 entry with AmazonEKSAutoNodePolicy when Auto Mode compute is on (measured): at
+     * create, when an update turns compute on, and when a cluster with compute on leaves CONFIG_MAP.
+     */
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    void anAutoModeClustersNodeRoleGetsItsEc2EntryWithTheAutoNodePolicy(boolean atCreate) {
+    @ValueSource(strings = {"create", "update", "authentication"})
+    void anAutoModeClustersNodeRoleGetsItsEc2EntryWithTheAutoNodePolicy(String when) {
         String account = "357913579135";
         String name = "auto-node-" + UUID.randomUUID().toString().substring(0, 8);
         String role = "node-" + name;
@@ -237,14 +240,20 @@ class EksAccessEntryIntegrationTest {
                 "kubernetesNetworkConfig":{"elasticLoadBalancing":{"enabled":true}}""".formatted(principal);
         createRole(account, role, "/");
         try {
+            String mode = "authentication".equals(when) ? "CONFIG_MAP" : "API";
             eks(account, REGION).body("""
-                    {"name":"%s","roleArn":"arn:aws:iam::%s:role/cluster","accessConfig":{"authenticationMode":"API"}%s}"""
-                    .formatted(name, account, atCreate ? "," + autoMode : "")).post("/clusters").then().statusCode(200);
-            if (!atCreate) {
+                    {"name":"%s","roleArn":"arn:aws:iam::%s:role/cluster","accessConfig":{"authenticationMode":"%s"}%s}"""
+                    .formatted(name, account, mode, "update".equals(when) ? "" : "," + autoMode))
+                    .post("/clusters").then().statusCode(200);
+            if ("update".equals(when)) {
                 eks(account, REGION).get("/clusters/" + name + "/access-entries").then().statusCode(200)
                         .body("accessEntries", empty());
                 eks(account, REGION).body("{" + autoMode + "}").post("/clusters/" + name + "/update-config").then()
                         .statusCode(200);
+            }
+            if ("authentication".equals(when)) {
+                eks(account, REGION).body("{\"accessConfig\":{\"authenticationMode\":\"API_AND_CONFIG_MAP\"}}")
+                        .post("/clusters/" + name + "/update-config").then().statusCode(200);
             }
             String entryPath = "/clusters/" + name + "/access-entries/" + URLEncoder.encode(principal, StandardCharsets.UTF_8);
 
