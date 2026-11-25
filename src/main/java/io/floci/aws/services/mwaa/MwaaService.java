@@ -161,9 +161,6 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
         if (!config.services().mwaa().mock()) {
             startReadinessPoller();
             startDagSyncPoller();
-            for (Environment environment : allEnvironments()) {
-                environmentManager.reclaimVpcAddress(environment);
-            }
         }
     }
 
@@ -260,9 +257,10 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
         if (config.services().mwaa().mock() || !(storage instanceof AccountAwareStorageBackend<Environment> aware)) {
             return CompletableFuture.completedFuture(null);
         }
+        Set<String> unreclaimed = reclaimVpcAddresses();
         List<RestoringEnvironment> pending = new ArrayList<>();
         for (StoredEnvironment stored : storedEnvironments(aware)) {
-            RestoringEnvironment restoring = prepareRestore(stored);
+            RestoringEnvironment restoring = prepareRestore(stored, unreclaimed);
             if (restoring != null) {
                 pending.add(restoring);
             }
@@ -298,6 +296,26 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
         });
     }
 
+    /**
+     * Gives the containers that outlived Floci back the VPC addresses they hold, before startup goes on, so EC2 hands
+     * none of them to an instance: their leases were in memory. Each environment on its own, so one Docker cannot
+     * answer for stops neither startup nor any other; it is returned, by its restoring key, for its restore to try
+     * again before taking its containers over.
+     */
+    private Set<String> reclaimVpcAddresses() {
+        Set<String> failures = new HashSet<>();
+        for (Environment environment : allEnvironments()) {
+            try {
+                environmentManager.reclaimVpcAddress(environment);
+            } catch (RuntimeException e) {
+                LOG.warnv("Could not re-claim the VPC address of MWAA environment {0}''s Airflow container: {1}",
+                        environment.getName(), e.getMessage());
+                failures.add(restoringKey(environment));
+            }
+        }
+        return failures;
+    }
+
     /** Every stored environment once, by the account, Region and name it belongs to, legacy keys included. */
     private Set<StoredEnvironment> storedEnvironments(AccountAwareStorageBackend<Environment> aware) {
         Set<StoredEnvironment> stored = new LinkedHashSet<>();
@@ -312,7 +330,7 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
      * Marks an environment the restore brings back, under its lock, and holds its proxy port for it; null for one it
      * leaves as it is.
      */
-    private RestoringEnvironment prepareRestore(StoredEnvironment stored) {
+    private RestoringEnvironment prepareRestore(StoredEnvironment stored, Set<String> unreclaimed) {
         String key = environmentKey(stored.region(), stored.name());
         synchronized (storedEnvironmentLock(stored.accountId(), key)) {
             // Read as DescribeEnvironment reads it, which moves a record stored under a legacy key onto its key.
@@ -328,7 +346,8 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
             }
             environment.setAccountId(stored.accountId());
             RestoringEnvironment restoring = new RestoringEnvironment(stored.accountId(), key, stored.region(),
-                    environment, status == EnvironmentStatus.CREATING);
+                    environment, status == EnvironmentStatus.CREATING,
+                    unreclaimed.contains(restoringKey(stored.accountId(), key)));
             restoringEnvironments.add(restoring.lockKey());
             // One still DELETING was deleted during a restore Floci did not live to finish, or during its shutdown:
             // the delete stands.
@@ -433,6 +452,11 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
      */
     private void startContainers(RestoringEnvironment restoring) {
         Environment environment = restoring.environment();
+        if (restoring.unreclaimed()) {
+            // Once more: a restore that cannot re-claim it either fails, rather than taking a container over with an
+            // address EC2 may hand out.
+            environmentManager.reclaimVpcAddress(environment);
+        }
         if (environmentManager.adoptRunningEnvironment(environment)) {
             keepSecrets(restoring);
             return;
@@ -572,11 +596,11 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
     }
 
     /**
-     * An environment the restore brings back, with the account, storage key and Region it is stored under, and
-     * whether it was still being created.
+     * An environment the restore brings back, with the account, storage key and Region it is stored under, whether it
+     * was still being created, and whether the VPC address its kept container holds could not be re-claimed at startup.
      */
     private record RestoringEnvironment(String accountId, String key, String region, Environment environment,
-                                        boolean creating) {
+                                        boolean creating, boolean unreclaimed) {
         String lockKey() {
             return restoringKey(accountId, key);
         }
