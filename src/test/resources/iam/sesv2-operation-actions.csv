@@ -4,8 +4,11 @@
 # ListConfigurationSets and ListEmailIdentities also keep the GET routes earlier models gave them.
 # SendEmail has no entry there; the Service Authorization Reference's SES v2 page defines
 # ses:SendEmail as v2's only send action (ses:SendRawEmail belongs to v1).
+# PutAccountDeliveryAttributes came later, in botocore 1.44.6; its action is from the same
+# service reference, read 2026-11-25.
 GetAccount,GET,/v2/email/account,ses:GetAccount
 PutAccountDedicatedIpWarmupAttributes,PUT,/v2/email/account/dedicated-ips/warmup,ses:PutAccountDedicatedIpWarmupAttributes
+PutAccountDeliveryAttributes,POST,/v2/email/account/delivery,ses:PutAccountDeliveryAttributes
 PutAccountDetails,POST,/v2/email/account/details,ses:PutAccountDetails
 PutAccountPricingAttributes,PUT,/v2/email/account/pricing-attributes,ses:PutAccountPricingAttributes
 PutAccountSendingAttributes,PUT,/v2/email/account/sending,ses:PutAccountSendingAttributes

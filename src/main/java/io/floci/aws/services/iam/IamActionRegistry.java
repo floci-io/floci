@@ -381,6 +381,7 @@ public class IamActionRegistry {
         // the model moved them to, since older SDKs, and Floci's own routes, still use them.
         rule("ses", "GET",   "^/v2/email/account/?$",                                                "ses:GetAccount"),
         rule("ses", "PUT",   "^/v2/email/account/dedicated-ips/warmup/?$",                           "ses:PutAccountDedicatedIpWarmupAttributes"),
+        rule("ses", "POST",  "^/v2/email/account/delivery/?$",                                       "ses:PutAccountDeliveryAttributes"),
         rule("ses", "POST",  "^/v2/email/account/details/?$",                                        "ses:PutAccountDetails"),
         rule("ses", "PUT",   "^/v2/email/account/pricing-attributes/?$",                             "ses:PutAccountPricingAttributes"),
         rule("ses", "PUT",   "^/v2/email/account/sending/?$",                                        "ses:PutAccountSendingAttributes"),

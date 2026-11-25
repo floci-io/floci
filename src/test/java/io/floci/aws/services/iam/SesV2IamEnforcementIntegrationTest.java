@@ -64,6 +64,22 @@ class SesV2IamEnforcementIntegrationTest {
     }
 
     @Test
+    void aDeniedAccountDeliveryWriteLeavesTheModeUnchanged() {
+        String accessKeyId = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"*","Resource":"*"},
+                  {"Effect":"Deny","Action":"ses:PutAccountDeliveryAttributes","Resource":"*"}]}""");
+
+        assertAccessDenied(given()
+            .contentType("application/json")
+            .header("Authorization", auth(accessKeyId, "ses"))
+            .body("{\"SharedPoolDeliveryMode\":\"REGIONAL\"}")
+        .when().post("/v2/email/account/delivery"));
+        getAccount(accessKeyId).then().statusCode(200)
+                .body("DeliveryAttributes.SharedPoolDeliveryMode", equalTo("GLOBAL"));
+    }
+
+    @Test
     void aTargetHeaderDoesNotChangeTheActionARestCallIsCheckedAs() {
         String accessKeyId = userWithPolicy("""
                 {"Version":"2012-10-17","Statement":[
