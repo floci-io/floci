@@ -159,6 +159,18 @@ class TagOnCreateTest {
                 form("Action=CreateQueue&QueueName=q&Tag.1.Key=team&Tag.1.Value=blue")).orElseThrow());
     }
 
+    @Test
+    void capacityReservationDateChangeQuoteChecksTagsOnItsOwnAction() {
+        Tagging tagging = TagOnCreate.of("ec2:CreateCapacityReservationDateChangeQuote",
+                form("Action=CreateCapacityReservationDateChangeQuote"
+                        + "&TagSpecification.1.ResourceType=capacity-reservation-modification-quote"
+                        + "&TagSpecification.1.Tag.1.Key=team&TagSpecification.1.Tag.1.Value=blue")).orElseThrow();
+        assertTrue(tagging.requestTags());
+        assertEquals(List.of(Map.of("aws:RequestTag/team", List.of("blue"), "aws:TagKeys", List.of("team"))),
+                TagOnCreate.requestTagContexts(tagging));
+        assertEquals("ec2:CreateTags", tagging.action());
+    }
+
     /**
      * Each resource type an EC2 request names gets its own specifications' tags, as {@code Ec2QueryHandler}
      * applies them, so one type's tags cannot stand in for another's.
