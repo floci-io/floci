@@ -219,7 +219,7 @@ public class DockerExitEvents {
         }
     }
 
-    /** One container's check; an inspect that fails is tried again with a doubling delay, as LambdaExitWatcher does. */
+    /** One container's check; an inspect that fails is tried again with a doubling delay, as ContainerExitWatcher does. */
     private void sweep(Registration registration, int attempt) {
         if (shutdown || registration.reported().get() || registered.get(registration.containerId()) != registration) {
             return;
