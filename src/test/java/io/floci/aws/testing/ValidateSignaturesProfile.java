@@ -17,7 +17,7 @@ import java.util.Map;
  *   <li>{@code floci.services.ecs.mock=false} runs ECS tasks as real containers, and
  *   {@code floci.network.security-group-enforcement.enabled=false} puts security groups back to
  *   their shipped default of off, since the enforcement helper needs rootful Docker.
- *   {@code EcsServiceDiscoveryDockerIntegrationTest} and {@code EcsLeftoverContainersDockerIntegrationTest}
+ *   {@code EcsServiceDiscoveryDockerNightlyIntegrationTest} and {@code EcsLeftoverContainersDockerIntegrationTest}
  *   rely on them.</li>
  * </ul>
  *

@@ -31,7 +31,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * Runs Timestream for InfluxDB on real InfluxDB containers, published on host ports 18186 to 18285.
  * The settings come from {@link CloudFormationSettingsProfile}, which this class shares with
- * {@code EksImdsDockerIntegrationTest}.
+ * {@code EksImdsDockerNightlyIntegrationTest}.
  */
 @Tag("docker")
 @QuarkusTest

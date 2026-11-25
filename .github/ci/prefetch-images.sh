@@ -66,16 +66,16 @@ test_image() {
 
 # Every Docker-backed test that needs a shell uses the one busybox TestImages pins, so one pull
 # serves all of them. It is also the base of the image
-# EcsContainerManagerVolumesFromDockerIntegrationTest builds, and a build resolves its base against
+# EcsContainerManagerVolumesFromDockerNightlyIntegrationTest builds, and a build resolves its base against
 # the registry rather than through ImageCacheService, so it is prefetched for the cache hit rather
 # than for the second it saves. ContainerPlatformDockerIntegrationTest is not listed: it pulls the
 # other architecture, which a prefetch of the host image cannot serve.
 BUSYBOX_IMAGE="$(test_image BUSYBOX)"
-starts ContainerHostNetworkDockerIntegrationTest ContainerBindDirectoryDockerIntegrationTest EcsServiceDiscoveryDockerIntegrationTest \
-       EcsContainerManagerEfsIsolationDockerIntegrationTest EcsContainerManagerFirelensDockerIntegrationTest \
-       EcsContainerManagerStatsDockerIntegrationTest EcsContainerManagerVolumesFromDockerIntegrationTest \
+starts ContainerHostNetworkDockerIntegrationTest ContainerBindDirectoryDockerIntegrationTest EcsServiceDiscoveryDockerNightlyIntegrationTest \
+       EcsContainerManagerEfsIsolationDockerIntegrationTest EcsContainerManagerFirelensDockerNightlyIntegrationTest \
+       EcsContainerManagerStatsDockerIntegrationTest EcsContainerManagerVolumesFromDockerNightlyIntegrationTest \
        EcsExecChannelDockerIntegrationTest EcsImagePullDockerIntegrationTest EcsLeftoverContainersDockerIntegrationTest \
-       BatchDockerRunnerDockerIntegrationTest SageMakerDockerIntegrationTest DockerPoolSaturationNightlyIntegrationTest \
+       BatchDockerRunnerDockerIntegrationTest SageMakerDockerNightlyIntegrationTest DockerPoolSaturationNightlyIntegrationTest \
     && [ -n "$BUSYBOX_IMAGE" ] && pull "$BUSYBOX_IMAGE"
 # Bind-directory ownership uses the default OpenSearch image, whose cold pull can outlast a test.
 OPENSEARCH_VERSIONS="$(find src/main/java -name OpenSearchVersions.java -print -quit)"
@@ -97,13 +97,13 @@ starts ContainerBindDirectoryDockerIntegrationTest && [ -n "$OPENSEARCH_IMAGE" ]
 REGISTRY_IMAGE="$(test_image REGISTRY)"
 starts EcsImagePullDockerIntegrationTest && [ -n "$REGISTRY_IMAGE" ] && pull "$REGISTRY_IMAGE"
 PYTHON_ALPINE_IMAGE="$(test_image PYTHON_ALPINE)"
-starts ContainerCaBundleDockerIntegrationTest EcsCredentialsProxyDockerIntegrationTest SageMakerDockerIntegrationTest \
+starts ContainerCaBundleDockerIntegrationTest EcsCredentialsProxyDockerNightlyIntegrationTest SageMakerDockerNightlyIntegrationTest \
     && [ -n "$PYTHON_ALPINE_IMAGE" ] && pull "$PYTHON_ALPINE_IMAGE"
 CORRETTO_8_IMAGE="$(test_image CORRETTO_8)"
 starts ContainerCaBundleDockerIntegrationTest && [ -n "$CORRETTO_8_IMAGE" ] && pull "$CORRETTO_8_IMAGE"
 # The Firelens test names the log router image itself rather than taking it from config.
 FLUENT_BIT_IMAGE="$(test_image FLUENT_BIT)"
-starts EcsContainerManagerFirelensDockerIntegrationTest && [ -n "$FLUENT_BIT_IMAGE" ] && pull "$FLUENT_BIT_IMAGE"
+starts EcsContainerManagerFirelensDockerNightlyIntegrationTest && [ -n "$FLUENT_BIT_IMAGE" ] && pull "$FLUENT_BIT_IMAGE"
 # ECR Public images, in queue order: the Lambda runtimes by size, then EMR's. They are the only images
 # left on ECR Public; everything Docker Hub also carries is pulled from there (see TestImages).
 # Lambda runtimes, measured from a full four-shard run by pairing each ImageCacheService
@@ -127,12 +127,12 @@ starts EmrDockerRunnerNightlyIntegrationTest EmrHiveStepsNightlyIntegrationTest 
     EmrFlociContainerNightlyIntegrationTest EmrPigStepsNightlyIntegrationTest EmrNotebookExecutionNightlyIntegrationTest \
     EmrAppUiNightlyIntegrationTest EmrClusterShrinkNightlyIntegrationTest EmrTrinoNightlyIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest
-# EmrServerlessHiveDockerIntegrationTest runs EMR Serverless Hive job runs, and EmrHiveStepsNightlyIntegrationTest EMR
+# EmrServerlessHiveDockerNightlyIntegrationTest runs EMR Serverless Hive job runs, and EmrHiveStepsNightlyIntegrationTest EMR
 # Hive steps, in the emr-7.5.0 Hive image the runner's default Hive template names, 2.7 GB; every EMR cluster runs its
 # HDFS in it, EmrDockerRunnerNightlyIntegrationTest's and the nightly EmrFlociContainerNightlyIntegrationTest's,
 # EmrPigStepsNightlyIntegrationTest's and EmrSessionServerNightlyIntegrationTest's included (an emr-spark-* cluster's
 # Hadoop comes from it too).
-starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsNightlyIntegrationTest EmrDockerRunnerNightlyIntegrationTest \
+starts EmrServerlessHiveDockerNightlyIntegrationTest EmrHiveStepsNightlyIntegrationTest EmrDockerRunnerNightlyIntegrationTest \
     EmrFlociContainerNightlyIntegrationTest EmrPigStepsNightlyIntegrationTest EmrSessionServerNightlyIntegrationTest \
     EmrNotebookExecutionNightlyIntegrationTest EmrAppUiNightlyIntegrationTest EmrClusterShrinkNightlyIntegrationTest \
     EmrTrinoNightlyIntegrationTest \
@@ -186,11 +186,11 @@ grep -qE '/appsync/|AppSyncCfnIntegrationTest' "$SHARD_FILE" && [ -n "$GRAPHQL_I
 # Matched on the one class that starts it rather than on /appsync/, since every other test in that
 # package is a unit test: a path match would have every shard pull an image one of them uses.
 JS_RUNTIME_IMAGE="$(grep -oE 'image: *"node:[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
-grep -q 'AppSyncJsResolverDockerIntegrationTest' "$SHARD_FILE" && [ -n "$JS_RUNTIME_IMAGE" ] && pull "$JS_RUNTIME_IMAGE"
-# RdsAwsIntegrationTest is the one class that starts SQL Server (about 1.5 GB); the pin lives in
+grep -q 'AppSyncJsResolverDockerNightlyIntegrationTest' "$SHARD_FILE" && [ -n "$JS_RUNTIME_IMAGE" ] && pull "$JS_RUNTIME_IMAGE"
+# RdsAwsDockerNightlyIntegrationTest is the one class that starts SQL Server (about 1.5 GB); the pin lives in
 # application.yml. The other services/rds classes mock the container layer.
 SQLSERVER_IMAGE="$(grep -oE 'default-sql-server-image: *"[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
-grep -q 'RdsAwsIntegrationTest' "$SHARD_FILE" && [ -n "$SQLSERVER_IMAGE" ] && pull "$SQLSERVER_IMAGE"
+grep -q 'RdsAwsDockerNightlyIntegrationTest' "$SHARD_FILE" && [ -n "$SQLSERVER_IMAGE" ] && pull "$SQLSERVER_IMAGE"
 # Postgres is the most-pulled image in CI: Redshift pins it in application.yml, RDS adapts
 # postgres:<version>-alpine to the engine version its tests request (16.3), and the CloudFormation
 # provisioner tests reach it through Redshift. It was pulled inline in every shard.
@@ -199,11 +199,11 @@ grep -qE '/redshift/|/cloudformation/' "$SHARD_FILE" && [ -n "$REDSHIFT_PG_IMAGE
 grep -qE '/rds/|/rdsdata/' "$SHARD_FILE" && pull postgres:16.3-alpine
 # The template-database restore fixture selects its own PostgreSQL image.
 # Read that override so its first CreateDBInstance does not also have to pull PostGIS.
-POSTGIS_TEST="$(find src/test/java -name RdsTemplateDatabaseRestoreIntegrationTest.java -print -quit)"
+POSTGIS_TEST="$(find src/test/java -name RdsTemplateDatabaseRestoreDockerNightlyIntegrationTest.java -print -quit)"
 POSTGIS_IMAGE="$(awk -F'"' '$2 == "floci.services.rds.default-postgres-image" { print $4 }' "${POSTGIS_TEST:-/dev/null}")"
 [ -n "$POSTGIS_IMAGE" ] \
-    || echo "$(date -u +%H:%M:%S) prefetch skipped: RdsTemplateDatabaseRestoreIntegrationTest default-postgres-image not readable" >> "$PREFETCH_LOG"
-starts RdsTemplateDatabaseRestoreIntegrationTest \
+    || echo "$(date -u +%H:%M:%S) prefetch skipped: RdsTemplateDatabaseRestoreDockerNightlyIntegrationTest default-postgres-image not readable" >> "$PREFETCH_LOG"
+starts RdsTemplateDatabaseRestoreDockerNightlyIntegrationTest \
     && [ -n "$POSTGIS_IMAGE" ] && pull "$POSTGIS_IMAGE"
 # These DSQL fixtures start the configured PostgreSQL sidecar; unit-only shards do not.
 DSQL_IMAGE="$(awk '/^    dsql:/ { in_dsql=1; next } in_dsql && /^    [a-z]/ { exit } in_dsql && /^      image:/ { gsub(/"/, "", $2); print $2; exit }' src/main/resources/application.yml)"
@@ -213,19 +213,19 @@ starts DsqlDataPlaneIntegrationTest DsqlClusterPolicyIntegrationTest DsqlTransac
 # Keep unrelated unit-test shards from pulling registries they do not use.
 starts CodeArtifactMavenDockerIntegrationTest CodeArtifactMavenExternalConnectionDockerIntegrationTest \
     && configured_image codeartifact maven-image
-starts CodeArtifactNpmDockerIntegrationTest CodeArtifactNpmExternalConnectionDockerIntegrationTest \
+starts CodeArtifactNpmDockerNightlyIntegrationTest CodeArtifactNpmExternalConnectionDockerIntegrationTest \
     && configured_image codeartifact npm-image
-starts CodeArtifactNuGetDockerIntegrationTest CodeArtifactNuGetExternalConnectionDockerIntegrationTest \
+starts CodeArtifactNuGetDockerNightlyIntegrationTest CodeArtifactNuGetExternalConnectionDockerIntegrationTest \
     && configured_image codeartifact nuget-image
-starts CodeArtifactPypiDockerIntegrationTest && configured_image codeartifact pypi-image
-starts CodeArtifactCargoDockerIntegrationTest CodeArtifactCargoExternalConnectionDockerIntegrationTest \
-    CodeArtifactCargoUpstreamRepositoryDockerIntegrationTest && configured_image codeartifact cargo-image
+starts CodeArtifactPypiDockerNightlyIntegrationTest && configured_image codeartifact pypi-image
+starts CodeArtifactCargoDockerNightlyIntegrationTest CodeArtifactCargoExternalConnectionDockerNightlyIntegrationTest \
+    CodeArtifactCargoUpstreamRepositoryDockerNightlyIntegrationTest && configured_image codeartifact cargo-image
 # RDS's engine fixture starts MySQL at the default and explicitly requested versions.
 # Read both sources rather than duplicating their version pins here.
-if starts RdsParameterGroupEngineIntegrationTest; then
+if starts RdsParameterGroupEngineDockerNightlyIntegrationTest; then
     MYSQL_DEFAULT="$(grep -oE 'DEFAULT_MYSQL_IMAGE *= *"[^"]+"' src/main/java/io/floci/aws/config/EmulatorConfig.java | grep -oE '"[^"]+"' | tr -d '"')"
     [ -n "$MYSQL_DEFAULT" ] && pull "$MYSQL_DEFAULT"
-    MYSQL_TEST="$(find src/test/java -name RdsParameterGroupEngineIntegrationTest.java -print -quit)"
+    MYSQL_TEST="$(find src/test/java -name RdsParameterGroupEngineDockerNightlyIntegrationTest.java -print -quit)"
     MYSQL_VERSIONS="$(awk -F'"' '$2 == "EngineVersion" { print $4 }' "${MYSQL_TEST:-/dev/null}" | sort -u)"
     for version in $MYSQL_VERSIONS; do
         [ -n "$MYSQL_DEFAULT" ] && pull "${MYSQL_DEFAULT%:*}:$version"

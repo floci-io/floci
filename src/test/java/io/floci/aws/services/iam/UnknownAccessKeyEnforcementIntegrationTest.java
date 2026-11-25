@@ -171,7 +171,7 @@ class UnknownAccessKeyEnforcementIntegrationTest {
     @Test
     void aQueryManagementCallSignedWithTheRootStandInIsAllowed() {
         // What a test fixture does when it sets up IAM state under enforcement, and what
-        // EksIrsaDockerIntegrationTest relies on now that an unsigned CreateRole is refused.
+        // EksIrsaDockerNightlyIntegrationTest relies on now that an unsigned CreateRole is refused.
         given()
                 .contentType("application/x-www-form-urlencoded")
                 .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/iam/aws4_request, "
