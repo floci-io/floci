@@ -29,6 +29,7 @@ public class EventSourceV2 {
     private String webhookHost;
     private String webhookToken;
     private String secretArn;
+    private Map<String, String> rotationRequests = new LinkedHashMap<>();
 
     public EventSourceV2() {
     }
@@ -143,5 +144,14 @@ public class EventSourceV2 {
 
     public void setSecretArn(String secretArn) {
         this.secretArn = secretArn;
+    }
+
+    /** The ClientToken of each rotation, oldest first, with a hash of the request it came with. */
+    public Map<String, String> getRotationRequests() {
+        return rotationRequests;
+    }
+
+    public void setRotationRequests(Map<String, String> rotationRequests) {
+        this.rotationRequests = rotationRequests == null ? new LinkedHashMap<>() : rotationRequests;
     }
 }
