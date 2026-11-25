@@ -20,8 +20,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -68,8 +71,9 @@ class EksAutoModeComputeTest {
     private final IamService iam = mock(IamService.class);
     private final Ec2InstanceTypeCatalog instanceTypes = mock(Ec2InstanceTypeCatalog.class);
     private final EksService eksService = mock(EksService.class);
+    private final MutableClock clock = new MutableClock(Instant.parse("2026-11-25T12:00:00Z"));
     private final EksAutoModeCompute compute = new EksAutoModeCompute(eksService, clusterManager, ec2,
-            iam, instanceTypes, mock(EmulatorConfig.class));
+            iam, instanceTypes, mock(EmulatorConfig.class), clock);
     private final Map<String, String> lists = new HashMap<>(Map.of("pods", PENDING_POD,
             "nodepools", POOLS, "nodeclasses", NODE_CLASSES, "nodes", "{\"items\": []}"));
 
@@ -80,6 +84,8 @@ class EksAutoModeComputeTest {
                     String[] cmd = inv.getArgument(1);
                     return new ContainerExec.Result(0, lists.get(cmd[2]), "", false);
                 });
+        when(clusterManager.execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length > 1 && !"get".equals(cmd[1])),
+                anyInt())).thenReturn(new ContainerExec.Result(0, "", "", false));
         when(clusterManager.imageCatalog()).thenReturn(new Ec2ImageCatalog());
         when(ec2.describeInstances(eq(REGION), anyList(), any())).thenReturn(List.of());
         when(eksService.runningClusters()).thenReturn(List.of(new AccountAwareStorageBackend.AccountEntry<>(
@@ -184,7 +190,7 @@ class EksAutoModeComputeTest {
         Instance stuck = new Instance();
         stuck.setInstanceId("i-stuck");
         stuck.setInstanceType("c7a.large");
-        stuck.setLaunchTime(Instant.now().minus(EksAutoModeCompute.REGISTRATION_WAIT).minusSeconds(1));
+        stuck.setLaunchTime(clock.instant().minus(EksAutoModeCompute.REGISTRATION_WAIT).minusSeconds(1));
         stuck.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
         Reservation reservation = new Reservation();
         reservation.setInstances(List.of(stuck));
@@ -197,6 +203,103 @@ class EksAutoModeComputeTest {
         verify(ec2).runInstances(anyString(), anyString(), anyString(), anyInt(), anyInt(), any(), anyList(),
                 anyString(), anyString(), anyList(), anyString(), anyString(), any(), any(), anyInt(), any(), any(),
                 any(), anyString(), anyBoolean(), any(), any(), any(), anyBoolean(), any(), any());
+    }
+
+    /**
+     * As Auto Mode consolidates: a node that runs no workload for its pool's consolidateAfter is cordoned, its
+     * instance terminated and its node taken out; a pod running on it again starts the wait over.
+     */
+    @Test
+    void aNodeEmptyForItsPoolsConsolidateAfterIsRemoved() {
+        Instance node = joinedNode("i-node", "node-1");
+        lists.put("pods", "{\"items\": []}");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}}]}");
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"30s\"}, \"template\""));
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+        clock.advance(Duration.ofSeconds(20));
+        // A pod runs there for a while, which starts the wait over.
+        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"node-1\"}, "
+                + "\"status\": {\"phase\": \"Running\"}}]}");
+        compute.reconcile(cluster, REGION);
+        lists.put("pods", "{\"items\": []}");
+        clock.advance(Duration.ofSeconds(20));
+        compute.reconcile(cluster, REGION);
+        clock.advance(Duration.ofSeconds(20));
+        compute.reconcile(cluster, REGION);
+        verify(ec2, never()).terminateInstances(REGION, List.of("i-node"));
+
+        clock.advance(Duration.ofSeconds(11));
+        compute.reconcile(cluster, REGION);
+
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "cordon", "node-1"}, 15);
+        verify(ec2).terminateInstances(REGION, List.of("i-node"));
+        verify(clusterManager).removeJoinedNode(cluster, node);
+    }
+
+    @Test
+    void aPoolThatNeverConsolidatesKeepsItsEmptyNode() {
+        joinedNode("i-node", "node-1");
+        lists.put("pods", "{\"items\": []}");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}}]}");
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"Never\"}, \"template\""));
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+        clock.advance(Duration.ofHours(1));
+        compute.reconcile(cluster, REGION);
+
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
+    }
+
+    private Instance joinedNode(String id, String nodeName) {
+        Instance node = new Instance();
+        node.setInstanceId(id);
+        node.setInstanceType("c7a.large");
+        node.setLaunchTime(clock.instant());
+        node.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(node));
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenReturn(List.of(reservation));
+        when(clusterManager.deriveInstanceNodeName(node, REGION)).thenReturn(nodeName);
+        CatalogInstanceType large = new CatalogInstanceType();
+        large.instanceType = "c7a.large";
+        large.vcpu = 2;
+        large.memoryMib = 4096;
+        large.supportedArchitectures = List.of("x86_64");
+        when(instanceTypes.find("c7a.large")).thenReturn(Optional.of(large));
+        return node;
+    }
+
+    /** A clock the test moves on. */
+    private static final class MutableClock extends Clock {
+        private Instant now;
+
+        MutableClock(Instant now) {
+            this.now = now;
+        }
+
+        void advance(Duration by) {
+            now = now.plus(by);
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
     }
 
     @Test

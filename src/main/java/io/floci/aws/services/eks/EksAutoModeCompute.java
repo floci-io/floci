@@ -28,10 +28,12 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -90,18 +92,31 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
     private final Ec2InstanceTypeCatalog instanceTypes;
     private final EmulatorConfig config;
     private Duration terminationWait = TERMINATION_WAIT;
+    private final Clock clock;
+    /**
+     * By cluster ARN, then instance ID: since when each Auto Mode node has run no workload and been counted on by
+     * no pending pod. Kept in memory, so a restart starts each node's wait again.
+     */
+    private final Map<String, Map<String, Instant>> emptySince = new HashMap<>();
     private final ScheduledExecutorService scheduler =
             Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "eks-auto-mode-compute"));
 
     @Inject
     public EksAutoModeCompute(EksService eksService, EksClusterManager clusterManager, Ec2Service ec2,
                               IamService iam, Ec2InstanceTypeCatalog instanceTypes, EmulatorConfig config) {
+        this(eksService, clusterManager, ec2, iam, instanceTypes, config, Clock.systemUTC());
+    }
+
+    /** As above; with the {@code clock} empty nodes are timed by. */
+    EksAutoModeCompute(EksService eksService, EksClusterManager clusterManager, Ec2Service ec2, IamService iam,
+                       Ec2InstanceTypeCatalog instanceTypes, EmulatorConfig config, Clock clock) {
         this.eksService = eksService;
         this.clusterManager = clusterManager;
         this.ec2 = ec2;
         this.iam = iam;
         this.instanceTypes = instanceTypes;
         this.config = config;
+        this.clock = clock;
     }
 
     /** For tests: how long a deleted cluster waits for its instances to terminate. */
@@ -151,6 +166,9 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         List<Instance> launched = instancesOf(cluster, region, "pending", "running");
         JsonNode podList = read(cluster, "pods");
         List<EksAutoModeNodes.PendingPod> pods = EksAutoModeNodes.unschedulablePods(podList);
+        if (launched.isEmpty()) {
+            emptySince.remove(cluster.getArn());
+        }
         if (launched.isEmpty() && pods.isEmpty()) {
             return;
         }
@@ -162,7 +180,9 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         }
         Map<String, long[]> requests = EksAutoModeNodes.requestsByNode(podList);
         Map<String, List<EksAutoModeNodes.BoundPod>> boundPods = EksAutoModeNodes.boundPodsByNode(podList);
+        Set<String> busy = EksAutoModeNodes.nodesWithWorkloads(podList);
         List<EksAutoModeNodes.PoolNode> poolNodes = new ArrayList<>();
+        Map<String, Instance> idle = new HashMap<>();
         List<Instance> neverRegistered = new ArrayList<>();
         for (Instance instance : launched) {
             NodePool pool = pools.get(tag(instance, POOL_TAG));
@@ -170,7 +190,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             String nodeName = clusterManager.deriveInstanceNodeName(instance, region);
             JsonNode node = nodesByName.get(nodeName);
             boolean starting = instance.getLaunchTime() == null
-                    || instance.getLaunchTime().plus(REGISTRATION_WAIT).isAfter(Instant.now());
+                    || instance.getLaunchTime().plus(REGISTRATION_WAIT).isAfter(clock.instant());
             boolean joining = node == null && starting;
             if (node == null && !joining) {
                 neverRegistered.add(instance);
@@ -208,9 +228,12 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             long memory = allocatable.hasNonNull("memory") ? EksAutoModeNodes.bytes(allocatable.path("memory").asText())
                     : type.get().memoryMib * 1024L * 1024L;
             int podSlots = allocatable.path("pods").asInt(EksAutoModeNodes.MAX_PODS);
-            poolNodes.add(new EksAutoModeNodes.PoolNode(pool, type.get(), zone(instance), cpu - used[0],
-                    memory - used[1], (int) Math.max(0, podSlots - used[2]), schedulable, List.copyOf(nodeTaints),
-                    boundPods.getOrDefault(nodeName, List.of())));
+            poolNodes.add(new EksAutoModeNodes.PoolNode(instance.getInstanceId(), pool, type.get(), zone(instance),
+                    cpu - used[0], memory - used[1], (int) Math.max(0, podSlots - used[2]), schedulable,
+                    List.copyOf(nodeTaints), boundPods.getOrDefault(nodeName, List.of())));
+            if (node != null && !busy.contains(nodeName)) {
+                idle.put(instance.getInstanceId(), instance);
+            }
         }
         if (!neverRegistered.isEmpty()) {
             // A node that never joins would hold its pods' room for good; it goes, and they get another.
@@ -219,7 +242,9 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                     neverRegistered.stream().map(Instance::getInstanceId).toList(), cluster.getName(),
                     REGISTRATION_WAIT);
         }
-        List<EksAutoModeNodes.PendingPod> withoutRoom = EksAutoModeNodes.withoutRoom(pods, poolNodes);
+        EksAutoModeNodes.Room room = EksAutoModeNodes.withoutRoom(pods, poolNodes);
+        removeEmptyNodes(cluster, region, launched, idle, room.counted(), pools);
+        List<EksAutoModeNodes.PendingPod> withoutRoom = room.left();
         if (withoutRoom.isEmpty()) {
             return;
         }
@@ -241,6 +266,54 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             } catch (RuntimeException e) {
                 LOG.warnv("EKS Auto Mode pool {0} of cluster {1} launched no node for {2}: {3}",
                         launch.pool().name(), cluster.getName(), podNames(launch), e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Removes the pools' nodes that have been empty, running no workload and counted on by no pending pod, for
+     * their pool's {@code consolidateAfter}, as Auto Mode's consolidation does, within each pool's disruption
+     * budget: each is cordoned, its instance terminated and its node taken out of the cluster. A pool whose
+     * {@code consolidateAfter} is {@code Never} keeps its nodes.
+     */
+    private void removeEmptyNodes(Cluster cluster, String region, List<Instance> launched,
+                                  Map<String, Instance> empty, Set<String> counted, Map<String, NodePool> pools) {
+        Instant now = clock.instant();
+        Map<String, Instant> since = emptySince.computeIfAbsent(cluster.getArn(), arn -> new HashMap<>());
+        // A node that runs a workload again, or that a pending pod counts on, waits from the start next time.
+        since.keySet().removeIf(id -> !empty.containsKey(id) || counted.contains(id));
+        Map<String, Integer> poolSizes = new HashMap<>();
+        launched.forEach(instance -> poolSizes.merge(String.valueOf(tag(instance, POOL_TAG)), 1, Integer::sum));
+        Map<String, Integer> removed = new HashMap<>();
+        List<Instance> due = new ArrayList<>();
+        empty.values().stream()
+                .filter(instance -> !counted.contains(instance.getInstanceId()))
+                .sorted(Comparator.comparing(instance -> since.getOrDefault(instance.getInstanceId(), now)))
+                .forEach(instance -> {
+                    Instant emptyAt = since.computeIfAbsent(instance.getInstanceId(), id -> now);
+                    NodePool pool = pools.get(tag(instance, POOL_TAG));
+                    if (pool == null || pool.consolidateAfter() == null
+                            || emptyAt.plus(pool.consolidateAfter()).isAfter(now)) {
+                        return;
+                    }
+                    int done = removed.getOrDefault(pool.name(), 0);
+                    if (done < pool.disruptable(poolSizes.getOrDefault(pool.name(), 0))) {
+                        removed.put(pool.name(), done + 1);
+                        due.add(instance);
+                    }
+                });
+        for (Instance instance : due) {
+            String nodeName = clusterManager.deriveInstanceNodeName(instance, region);
+            try {
+                exec(cluster, List.of("kubectl", "cordon", nodeName), "cordon node " + nodeName);
+                ec2.terminateInstances(region, List.of(instance.getInstanceId()));
+                clusterManager.removeJoinedNode(cluster, instance);
+                since.remove(instance.getInstanceId());
+                LOG.infov("EKS Auto Mode removed empty node {0} ({1}) of pool {2} of cluster {3}", nodeName,
+                        instance.getInstanceId(), tag(instance, POOL_TAG), cluster.getName());
+            } catch (RuntimeException e) {
+                LOG.warnv("EKS Auto Mode empty node {0} of cluster {1} wasn''t removed: {2}", nodeName,
+                        cluster.getName(), e.getMessage());
             }
         }
     }
@@ -345,6 +418,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
      * instance whose node can't be deleted is kept, so the next pass tries it again.
      */
     synchronized void removeNodes(Cluster cluster, String region) {
+        emptySince.remove(cluster.getArn());
         List<Instance> launched = instancesOf(cluster, region, "pending", "running", "stopping", "stopped");
         List<String> removed = new ArrayList<>();
         for (Instance instance : launched) {
@@ -366,6 +440,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
     /** The cluster's Auto Mode instances and the instance profiles made for it go with it, as on AWS. */
     @Override
     public synchronized void clusterDeleted(Cluster cluster, String region) {
+        emptySince.remove(cluster.getArn());
         removeAll(cluster, region);
         // EC2 ends an instance after TerminateInstances answers, and one shutting down still holds the cluster
         // security group, which EKS deletes next: wait until none is. One that doesn't end in time fails the

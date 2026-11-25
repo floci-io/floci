@@ -5,12 +5,14 @@ import io.floci.aws.services.ec2.Ec2InstanceTypeCatalog.CatalogInstanceType;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -104,9 +106,32 @@ final class EksAutoModeNodes {
         }
     }
 
-    /** A NodePool: its NodeClass, its requirements, the taints and labels its nodes get, and its weight. */
+    /**
+     * A NodePool: its NodeClass, its requirements, the taints and labels its nodes get, its weight, how long a node
+     * stays empty before it goes (null for {@code Never}), and its disruption budgets' {@code nodes} values.
+     */
     record NodePool(String name, String nodeClass, List<Requirement> requirements, List<Taint> taints,
-                    Map<String, String> labels, int weight) {
+                    Map<String, String> labels, int weight, Duration consolidateAfter, List<String> budgets) {
+
+        /**
+         * How many of the pool's {@code nodes} may be disrupted at once: the least its budgets allow, a percentage
+         * of them rounded up, as Karpenter counts it (AWS removed the only node of a pool budgeted at 10%). Without
+         * a budget Karpenter allows 10%.
+         */
+        int disruptable(int nodes) {
+            List<String> values = budgets.isEmpty() ? List.of("10%") : budgets;
+            int allowed = Integer.MAX_VALUE;
+            for (String value : values) {
+                try {
+                    allowed = Math.min(allowed, value.endsWith("%")
+                            ? (int) Math.ceil(nodes * Integer.parseInt(value.substring(0, value.length() - 1)) / 100.0)
+                            : Integer.parseInt(value));
+                } catch (NumberFormatException e) {
+                    allowed = 0;
+                }
+            }
+            return Math.max(0, allowed);
+        }
     }
 
     /** A pod the scheduler couldn't place, with what it asks of a node and the resources it requests. */
@@ -179,22 +204,24 @@ final class EksAutoModeNodes {
      * A node Auto Mode launched for a pool, joined or still joining, with the CPU and memory its pods request: a
      * pending pod it has room for is left to the scheduler rather than given another node.
      */
-    record PoolNode(NodePool pool, CatalogInstanceType instanceType, String zone, long freeCpuMillis,
-                    long freeMemoryBytes, int freePods, boolean schedulable, List<Taint> nodeTaints,
-                    List<BoundPod> pods) {
+    record PoolNode(String instanceId, NodePool pool, CatalogInstanceType instanceType, String zone,
+                    long freeCpuMillis, long freeMemoryBytes, int freePods, boolean schedulable,
+                    List<Taint> nodeTaints, List<BoundPod> pods) {
 
         /** A node whose pods carry no labels and no anti-affinity that could keep a pending pod off it. */
-        PoolNode(NodePool pool, CatalogInstanceType instanceType, String zone, long freeCpuMillis, long freeMemoryBytes,
-                 int freePods, boolean schedulable, List<Taint> nodeTaints) {
-            this(pool, instanceType, zone, freeCpuMillis, freeMemoryBytes, freePods, schedulable, nodeTaints, List.of());
+        PoolNode(String instanceId, NodePool pool, CatalogInstanceType instanceType, String zone, long freeCpuMillis,
+                 long freeMemoryBytes, int freePods, boolean schedulable, List<Taint> nodeTaints) {
+            this(instanceId, pool, instanceType, zone, freeCpuMillis, freeMemoryBytes, freePods, schedulable,
+                    nodeTaints, List.of());
         }
 
         /**
          * A node still joining, with its pods' requests: it has its instance type's whole CPU and memory, as no
          * kubelet has said what it reserves yet, all its pod slots, and no taints but its pool's.
          */
-        PoolNode(NodePool pool, CatalogInstanceType instanceType, String zone, long usedCpuMillis, long usedMemoryBytes) {
-            this(pool, instanceType, zone, instanceType.vcpu * 1000L - usedCpuMillis,
+        PoolNode(String instanceId, NodePool pool, CatalogInstanceType instanceType, String zone, long usedCpuMillis,
+                 long usedMemoryBytes) {
+            this(instanceId, pool, instanceType, zone, instanceType.vcpu * 1000L - usedCpuMillis,
                     instanceType.memoryMib * 1024L * 1024L - usedMemoryBytes, MAX_PODS, true, List.of());
         }
 
@@ -204,6 +231,10 @@ final class EksAutoModeNodes {
             nodeTaints.stream().filter(t -> !all.contains(t)).forEach(all::add);
             return all;
         }
+    }
+
+    /** The pending pods no pool node has room for, and the nodes whose room the others are counting on. */
+    record Room(List<PendingPod> left, Set<String> counted) {
     }
 
     /** A node to launch: its pool, instance type, zone (null when no subnet's zone is known) and labels, and its pods. */
@@ -315,7 +346,7 @@ final class EksAutoModeNodes {
      * as Karpenter counts its nodes, those still joining among them, before it launches another. A cordoned node
      * has no room.
      */
-    static List<PendingPod> withoutRoom(List<PendingPod> pods, List<PoolNode> nodes) {
+    static Room withoutRoom(List<PendingPod> pods, List<PoolNode> nodes) {
         long[] freeCpu = new long[nodes.size()];
         long[] freeMemory = new long[nodes.size()];
         int[] freePods = new int[nodes.size()];
@@ -328,6 +359,7 @@ final class EksAutoModeNodes {
             freePods[i] = node.freePods();
         }
         List<PendingPod> left = new ArrayList<>();
+        Set<String> counted = new HashSet<>();
         for (PendingPod pod : pods) {
             boolean placed = false;
             for (int i = 0; i < nodes.size() && !placed; i++) {
@@ -340,6 +372,7 @@ final class EksAutoModeNodes {
                     freeMemory[i] -= pod.memoryBytes();
                     freePods[i]--;
                     onNode.get(i).add(pod.bound());
+                    counted.add(node.instanceId());
                     placed = true;
                 }
             }
@@ -347,7 +380,7 @@ final class EksAutoModeNodes {
                 left.add(pod);
             }
         }
-        return left;
+        return new Room(left, counted);
     }
 
     private static List<String> zonesOf(NodePool pool, Map<String, List<String>> zonesByNodeClass) {
@@ -382,10 +415,19 @@ final class EksAutoModeNodes {
             List<Taint> taints = new ArrayList<>();
             template.path("spec").path("taints").forEach(t -> taints.add(new Taint(t.path("key").asText(),
                     t.path("value").asText(""), t.path("effect").asText())));
+            JsonNode disruption = item.path("spec").path("disruption");
+            List<String> budgets = new ArrayList<>();
+            // A budget with a schedule applies only in its window, which Floci doesn't model; the others always do.
+            disruption.path("budgets").forEach(b -> {
+                if (b.path("schedule").asText("").isEmpty() && !b.path("nodes").asText("").isEmpty()) {
+                    budgets.add(b.path("nodes").asText());
+                }
+            });
             pools.add(new NodePool(item.path("metadata").path("name").asText(),
                     template.path("spec").path("nodeClassRef").path("name").asText("default"),
                     requirements(template.path("spec").path("requirements")), List.copyOf(taints), labels,
-                    item.path("spec").path("weight").asInt(0)));
+                    item.path("spec").path("weight").asInt(0), duration(disruption.path("consolidateAfter").asText("0s")),
+                    List.copyOf(budgets)));
         }
         return pools;
     }
@@ -490,6 +532,29 @@ final class EksAutoModeNodes {
             terms.add(new PodTerm(matchLabels, requirements(selector.path("matchExpressions")), namespaces));
         }
         return List.copyOf(terms);
+    }
+
+    /**
+     * The nodes of {@code kubectl get pods -A -o json} that run a workload: a pod bound to them that hasn't finished
+     * and that isn't a DaemonSet's or a static pod's mirror, which Karpenter doesn't count either.
+     */
+    static Set<String> nodesWithWorkloads(JsonNode list) {
+        Set<String> nodes = new HashSet<>();
+        for (JsonNode item : list.path("items")) {
+            String node = item.path("spec").path("nodeName").asText("");
+            String phase = item.path("status").path("phase").asText();
+            if (node.isEmpty() || "Succeeded".equals(phase) || "Failed".equals(phase)) {
+                continue;
+            }
+            boolean daemon = false;
+            for (JsonNode owner : item.path("metadata").path("ownerReferences")) {
+                daemon |= "DaemonSet".equals(owner.path("kind").asText()) || "Node".equals(owner.path("kind").asText());
+            }
+            if (!daemon) {
+                nodes.add(node);
+            }
+        }
+        return nodes;
     }
 
     /**
@@ -602,5 +667,17 @@ final class EksAutoModeNodes {
             default -> BigDecimal.ZERO;
         };
         return value.setScale(0, RoundingMode.CEILING).longValue();
+    }
+
+    /** A Kubernetes duration such as {@code 30s}, {@code 5m} or {@code 1h30m}; null for {@code Never}. */
+    static Duration duration(String value) {
+        if ("Never".equals(value)) {
+            return null;
+        }
+        try {
+            return Duration.parse("PT" + value.toUpperCase(Locale.ROOT));
+        } catch (RuntimeException e) {
+            return Duration.ofSeconds(30);
+        }
     }
 }
