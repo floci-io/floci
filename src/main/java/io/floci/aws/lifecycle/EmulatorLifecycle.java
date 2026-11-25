@@ -40,6 +40,7 @@ import io.floci.aws.services.memorydb.container.MemoryDbContainerManager;
 import io.floci.aws.services.memorydb.proxy.MemoryDbProxyManager;
 import io.floci.aws.services.neptune.container.NeptuneContainerManager;
 import io.floci.aws.services.neptune.proxy.NeptuneProxyManager;
+import io.floci.aws.services.opensearch.OpenSearchService;
 import io.floci.aws.services.pipes.PipesService;
 import io.floci.aws.services.rds.RdsService;
 import io.floci.aws.services.rds.container.RdsContainerManager;
@@ -107,6 +108,7 @@ public class EmulatorLifecycle {
     private final AmazonMqService amazonMqService;
     private final FlinkContainerManager flinkContainerManager;
     private final KinesisAnalyticsV2Service kinesisAnalyticsService;
+    private final OpenSearchService openSearchService;
     private final SageMakerService sageMakerService;
     private final RdsService rdsService;
     private final TimestreamInfluxDbService timestreamInfluxDbService;
@@ -157,6 +159,7 @@ public class EmulatorLifecycle {
                              AmazonMqService amazonMqService,
                              FlinkContainerManager flinkContainerManager,
                              KinesisAnalyticsV2Service kinesisAnalyticsService,
+                             OpenSearchService openSearchService,
                              SageMakerService sageMakerService,
                              RdsService rdsService,
                              TimestreamInfluxDbService timestreamInfluxDbService,
@@ -204,6 +207,7 @@ public class EmulatorLifecycle {
         this.amazonMqService = amazonMqService;
         this.flinkContainerManager = flinkContainerManager;
         this.kinesisAnalyticsService = kinesisAnalyticsService;
+        this.openSearchService = openSearchService;
         this.sageMakerService = sageMakerService;
         this.rdsService = rdsService;
         this.timestreamInfluxDbService = timestreamInfluxDbService;
@@ -325,6 +329,13 @@ public class EmulatorLifecycle {
             // Starts the applications' Flink clusters in the background, failing the future with the ones it could not.
             kinesisAnalyticsService.restorePersistedRuntime().exceptionally(ex -> {
                 LOG.error("Failed to restore persisted Kinesis Analytics V2 applications at startup", ex);
+                return null;
+            });
+        }
+        if (config.services().opensearch().enabled()) {
+            // Starts the domains' containers in the background, failing the future with the ones it could not.
+            openSearchService.restorePersistedRuntime().exceptionally(ex -> {
+                LOG.error("Failed to restore persisted OpenSearch domains at startup", ex);
                 return null;
             });
         }

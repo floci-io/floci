@@ -110,6 +110,14 @@ public class Domain {
     @JsonProperty("VolumeOwnership")
     private VolumeOwnership volumeOwnership;
 
+    /**
+     * The host directory the domain's data is bind-mounted from, when
+     * {@code floci.services.opensearch.data-volume} named one at creation; null otherwise, and on records written
+     * before this field existed. A domain started again keeps it, whatever the setting says then.
+     */
+    @JsonProperty("DataDirectory")
+    private String dataDirectory;
+
     @JsonProperty("CreatedAt")
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)
     private Instant createdAt;
@@ -322,6 +330,14 @@ public class Domain {
 
     public void setVolumeOwnership(VolumeOwnership volumeOwnership) {
         this.volumeOwnership = volumeOwnership;
+    }
+
+    public String getDataDirectory() {
+        return dataDirectory;
+    }
+
+    public void setDataDirectory(String dataDirectory) {
+        this.dataDirectory = dataDirectory;
     }
 
     public Instant getCreatedAt() {
