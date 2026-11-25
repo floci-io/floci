@@ -12795,14 +12795,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * (the AWS provider's own update path) never asks for that, so nothing here re-checks it.
      */
     public CapacityReservation modifyCapacityReservation(String region, String capacityReservationId,
-            Integer instanceCount, java.time.Instant endDate, String endDateType, String instanceMatchCriteria) {
+            Integer instanceCount, Instant endDate, String endDateType, String instanceMatchCriteria) {
         return modifyCapacityReservation(region, capacityReservationId, instanceCount, endDate, endDateType,
                 instanceMatchCriteria, false);
     }
 
     /** As above; with {@code dryRun} the checks are made and the reservation is left as it is. */
     public CapacityReservation modifyCapacityReservation(String region, String capacityReservationId,
-            Integer instanceCount, java.time.Instant endDate, String endDateType, String instanceMatchCriteria,
+            Integer instanceCount, Instant endDate, String endDateType, String instanceMatchCriteria,
             boolean dryRun) {
         synchronized (capacityReservationLock) {
             ensureDefaultResources(region);
