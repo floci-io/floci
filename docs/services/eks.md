@@ -495,7 +495,8 @@ launches nodes on AWS. Floci checks every 10 seconds.
   `eks.amazonaws.com/instance-*` category, generation, family, size, CPU and memory labels.
 - **Empty nodes.** A node that runs no workload (DaemonSet and static pods aside) and that no pending pod is counting
   on is removed once it has been empty for its pool's `disruption.consolidateAfter`, as Auto Mode's consolidation
-  removes it: it is cordoned, its instance terminated and its node taken out. AWS removed an empty node within 90
+  removes it: it is cordoned and, unless the scheduler bound a pod to it meanwhile, its node is taken out and its
+  instance terminated. AWS removed an empty node within 90
   seconds. A pool whose `consolidateAfter` is `Never` keeps its nodes. Each pass removes no more of a pool's nodes
   than its disruption budgets allow (a percentage rounded up, 10% without a budget); a budget with a `schedule` is
   left out, as Floci doesn't model its window. How long a node has been empty is kept in memory, so a restart starts

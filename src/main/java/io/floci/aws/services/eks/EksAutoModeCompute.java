@@ -306,8 +306,17 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             String nodeName = clusterManager.deriveInstanceNodeName(instance, region);
             try {
                 exec(cluster, List.of("kubectl", "cordon", nodeName), "cordon node " + nodeName);
-                ec2.terminateInstances(region, List.of(instance.getInstanceId()));
+                // The scheduler may have bound a pod there since the pass read the pods; cordoned, the node gets no
+                // more, so one look now settles it.
+                JsonNode bound = readJson(cluster, List.of("kubectl", "get", "pods", "-A", "--field-selector",
+                        "spec.nodeName=" + nodeName, "-o", "json"), "get pods of node " + nodeName);
+                if (EksAutoModeNodes.nodesWithWorkloads(bound).contains(nodeName)) {
+                    exec(cluster, List.of("kubectl", "uncordon", nodeName), "uncordon node " + nodeName);
+                    since.remove(instance.getInstanceId());
+                    continue;
+                }
                 clusterManager.removeJoinedNode(cluster, instance);
+                ec2.terminateInstances(region, List.of(instance.getInstanceId()));
                 since.remove(instance.getInstanceId());
                 LOG.infov("EKS Auto Mode removed empty node {0} ({1}) of pool {2} of cluster {3}", nodeName,
                         instance.getInstanceId(), tag(instance, POOL_TAG), cluster.getName());
@@ -569,11 +578,15 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
     private JsonNode read(Cluster cluster, String kind) {
         List<String> command = "nodes".equals(kind) || "nodepools".equals(kind) || "nodeclasses".equals(kind)
                 ? List.of("kubectl", "get", kind, "-o", "json") : List.of("kubectl", "get", kind, "-A", "-o", "json");
-        ContainerExec.Result result = exec(cluster, command, "get " + kind);
+        return readJson(cluster, command, "get " + kind);
+    }
+
+    private JsonNode readJson(Cluster cluster, List<String> command, String what) {
+        ContainerExec.Result result = exec(cluster, command, what);
         try {
             return MAPPER.readTree(result.stdout());
         } catch (Exception e) {
-            throw new IllegalStateException("kubectl get " + kind + " returned no JSON: " + e.getMessage(), e);
+            throw new IllegalStateException("kubectl " + what + " returned no JSON: " + e.getMessage(), e);
         }
     }
 

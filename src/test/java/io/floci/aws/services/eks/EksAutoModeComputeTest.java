@@ -19,6 +19,7 @@ import io.floci.aws.services.iam.model.InstanceProfile;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -43,6 +44,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -234,9 +236,36 @@ class EksAutoModeComputeTest {
         clock.advance(Duration.ofSeconds(11));
         compute.reconcile(cluster, REGION);
 
+        // Cordoned, then its node goes before its instance does.
+        InOrder order = inOrder(clusterManager, ec2);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "cordon", "node-1"}, 15);
+        order.verify(clusterManager).removeJoinedNode(cluster, node);
+        order.verify(ec2).terminateInstances(REGION, List.of("i-node"));
+    }
+
+    /**
+     * A pod the scheduler bound to the node after the pass read the pods, but before it was cordoned, keeps it:
+     * the pass looks again once the node is cordoned, and uncordons it.
+     */
+    @Test
+    void aPodBoundJustBeforeTheCordonKeepsTheNode() {
+        Instance node = joinedNode("i-node", "node-1");
+        lists.put("pods", "{\"items\": []}");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}}]}");
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"0s\"}, \"template\""));
+        when(clusterManager.execInContainerForResult(eq("k3s-1"),
+                argThat(cmd -> List.of(cmd).contains("--field-selector")), anyInt()))
+                .thenReturn(new ContainerExec.Result(0, "{\"items\": [{\"metadata\": {}, "
+                        + "\"spec\": {\"nodeName\": \"node-1\"}, \"status\": {\"phase\": \"Pending\"}}]}", "", false));
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
         verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "cordon", "node-1"}, 15);
-        verify(ec2).terminateInstances(REGION, List.of("i-node"));
-        verify(clusterManager).removeJoinedNode(cluster, node);
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "uncordon", "node-1"}, 15);
+        verify(clusterManager, never()).removeJoinedNode(cluster, node);
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
     }
 
     @Test
