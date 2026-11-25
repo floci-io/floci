@@ -181,8 +181,8 @@ aws --endpoint-url "$FLOCI_ENDPOINT" --region us-east-1 ssm start-session \
 	--target "$INSTANCE_ID"
 ```
 
-IAM enforcement for Session Manager is incomplete: `StartSession` does not yet check the target
-or implicit default-document grant. Session Manager policies need `ssm:StartSession` on both resources.
+With IAM enforcement on, `ssm:StartSession` requires permission on both the target EC2 instance
+and the session document. `ssm:GetConnectionStatus` requires permission on the target EC2 instance.
 If the caller omits `DocumentName`, grant access to `document/SSM-SessionManagerRunShell` in the
 caller's account and request region, even when the document has yet to be created. Grant the other
 Session Manager actions the caller uses. For a client that signs its stream upgrade, grant

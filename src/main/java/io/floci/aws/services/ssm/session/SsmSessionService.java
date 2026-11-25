@@ -35,11 +35,13 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Predicate;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class SsmSessionService implements Resettable {
     private static final int MAX_RESULTS = 200;
     private static final Duration HISTORY_RETENTION = Duration.ofDays(30);
+    private static final Pattern EC2_TARGET = Pattern.compile("i-(?:[0-9a-f]{8}|[0-9a-f]{17})");
 
     private final AccountAwareStorageBackend<SsmSession> sessions;
     private final SsmMessageGateway gateway;
@@ -86,7 +88,7 @@ public class SsmSessionService implements Resettable {
     public synchronized SessionConnection start(String region, String target, String documentName, String reason,
                                                 Map<String, List<String>> parameters, URI requestBaseUri) {
         Node node = node(region, target);
-        if (resetting || !gateway.isConnected(node)) {
+        if (!isEc2Target(target) || resetting || !gateway.isConnected(node)) {
             throw new AwsException("TargetNotConnected", target + " is not connected.", 400);
         }
         String owner = ownerArn(node.accountId());
@@ -124,7 +126,11 @@ public class SsmSessionService implements Resettable {
     }
 
     public synchronized boolean isConnected(String region, String target) {
-        return !resetting && gateway.isConnected(node(region, target));
+        return isEc2Target(target) && !resetting && gateway.isConnected(node(region, target));
+    }
+
+    public static boolean isEc2Target(String target) {
+        return EC2_TARGET.matcher(target).matches();
     }
 
     public synchronized PaginatedResult<SsmSession> describe(String region, String state, List<SessionFilter> filters,

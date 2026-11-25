@@ -1,6 +1,7 @@
 package io.floci.aws.services.ssm;
 
 import io.floci.aws.core.common.AwsArnUtils.Arn;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.ssmmessages.SsmMessageGateway;
 import io.floci.aws.services.ssmmessages.SsmMessageGateway.Node;
 import io.floci.aws.services.ssmmessages.SsmMessageGateway.SessionRequest;
@@ -13,6 +14,7 @@ import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -59,6 +61,8 @@ class SsmSessionApiIntegrationTest {
     private static final Node CONNECTED_NODE = new Node("000000000000", "us-east-1", CONNECTED_TARGET);
 
     @InjectMock SsmMessageGateway gateway;
+
+    @Inject SsmService documents;
 
     @TestHTTPResource("/")
     URI endpoint;
@@ -110,6 +114,52 @@ class SsmSessionApiIntegrationTest {
     @Test
     void missingTargetIsNotConnected() {
         assertEquals("notconnected", ssm.getConnectionStatus(r -> r.target(MISSING_TARGET)).statusAsString());
+    }
+
+    @Test
+    void connectionStatusRequiresPermissionOnTheRequestedInstance() throws Exception {
+        when(gateway.isConnected(CONNECTED_NODE)).thenReturn(true);
+        String arn = Arn.of("ec2", "us-east-1", "000000000000", "instance/" + CONNECTED_TARGET).toString();
+        String policy = """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"ssm:GetConnectionStatus","Resource":"%s"}
+                ]}
+                """.formatted(arn);
+        try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "ssm-status-", "status", policy);
+                SsmClient caller = AwsTestClients.create(SsmClient.builder(), user.accessKeyId(),
+                        user.secretAccessKey(), Region.US_EAST_1, endpoint)) {
+            assertEquals("connected", caller.getConnectionStatus(r -> r.target(CONNECTED_TARGET)).statusAsString());
+            SsmException denied = assertThrows(SsmException.class,
+                    () -> caller.getConnectionStatus(r -> r.target(MISSING_TARGET)));
+            assertEquals("AccessDeniedException", denied.awsErrorDetails().errorCode());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"mi-0123456789abcdef0", "ecs:cluster_container_runtime"})
+    void unsupportedTargetCannotStartASession(String target) {
+        when(gateway.isConnected(new Node("000000000000", "us-east-1", target))).thenReturn(true);
+        SsmException error = assertThrows(SsmException.class, () -> ssm.startSession(r -> r.target(target)));
+        assertEquals("TargetNotConnected", error.awsErrorDetails().errorCode());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"i-01234567", "i-0123456789abcdef0"})
+    void iamResolvesTheTargetInTheRequestAccountAndPartition(String target) {
+        RequestScopes.runAs("111122223333", "us-gov-west-1", () -> assertEquals(
+                List.of("arn:aws-us-gov:ec2:us-gov-west-1:111122223333:instance/" + target),
+                documents.through("Target", target, "us-gov-west-1")));
+    }
+
+    @Test
+    void iamResolvesTheImplicitDocumentWithoutStorage() {
+        String region = "cn-north-1";
+        String name = "SSM-SessionManagerRunShell";
+        RequestScopes.runAs("111122223333", region, () -> {
+            assertTrue(documents.findDocument(name, region).isEmpty());
+            assertEquals(Optional.of("arn:aws-cn:ssm:cn-north-1:111122223333:document/" + name),
+                    documents.findDefault("document", region));
+        });
     }
 
     @Test

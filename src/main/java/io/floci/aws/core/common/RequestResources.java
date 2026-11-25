@@ -966,7 +966,7 @@ public final class RequestResources {
             // elements each name their own (above), so a list of none names nothing (a PutEvents of no entries).
             boolean perElement = resource.fill().values().stream().anyMatch(RequestResourceMembers.Member::eachElement);
             if (stored != null && account.equals(accountId) && !perElement) {
-                stored.findDefault(resource.types().getFirst(), region).ifPresent(arns::add);
+                stored.findImplicitDefault(resource.types().getFirst(), region).ifPresent(arns::add);
             }
             return;
         }

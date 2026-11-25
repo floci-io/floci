@@ -37,6 +37,8 @@ import io.floci.aws.services.ssm.model.PatchBaselineIdentity;
 import io.floci.aws.services.ssm.model.ServiceSetting;
 import io.floci.aws.services.ssm.model.SsmAssociation;
 import io.floci.aws.services.ssm.model.SsmDocument;
+import io.floci.aws.services.ssm.session.SessionDocumentResolver;
+import io.floci.aws.services.ssm.session.SsmSessionService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -2227,5 +2229,27 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
         String arn = withLegacyParameterSlash(name, regionResolver.partitionForRegion(region), region,
                 regionResolver.getAccountId());
         return arn == null || arn.equals(name) ? Optional.empty() : Optional.of(arn);
+    }
+
+    @Override
+    public Optional<String> findDefault(String type, String region) {
+        return "document".equals(type)
+                ? Optional.of(regionResolver.buildArn("ssm", region,
+                        DOCUMENT_PREFIX + SessionDocumentResolver.DEFAULT_DOCUMENT_NAME))
+                : Optional.empty();
+    }
+
+    @Override
+    public Optional<String> findImplicitDefault(String type, String region) {
+        // Only a request with a declared default can select the shell document by omitting its name.
+        return Optional.empty();
+    }
+
+    @Override
+    public List<String> through(String member, String value, String region) {
+        if (!"Target".equals(member) || !SsmSessionService.isEc2Target(value)) {
+            return List.of();
+        }
+        return List.of(regionResolver.buildArn("ec2", region, "instance/" + value));
     }
 }

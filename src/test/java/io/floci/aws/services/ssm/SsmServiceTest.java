@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
@@ -19,6 +20,8 @@ import io.floci.aws.services.ssm.model.SsmAssociation;
 import io.floci.aws.services.ssm.model.SsmDocument;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -78,6 +81,22 @@ class SsmServiceTest {
                 new InMemoryStorage<>(),
                 5
         );
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"mi-0123456789abcdef0", "ecs:cluster_container_runtime", "i-*",
+            "i-0123456789abcdef0/suffix", "arn:aws:ec2:us-east-1:111122223333:instance/i-0123456789abcdef0"})
+    void resolvesNoSessionResourceForAnUnsupportedTarget(String target) {
+        assertEquals(List.of(), ssmService.through("Target", target, "us-east-1"));
+    }
+
+    @Test
+    void updateAssociationWithoutANameDoesNotSelectTheSessionDocument() throws Exception {
+        String id = "d50f951e-8dff-4640-9a67-143a0e039b30";
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:association/" + id),
+                RequestResources.ofBody("ssm:UpdateAssociation",
+                        MAPPER.readTree("{\"AssociationId\":\"" + id + "\"}"),
+                        "aws", "us-east-1", "000000000000", ssmService));
     }
 
     @Test
