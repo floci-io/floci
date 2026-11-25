@@ -34,6 +34,8 @@ import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -61,6 +63,7 @@ public class MwaaEnvironmentManager {
 
     private static final int POSTGRES_PORT = 5432;
     private static final int AIRFLOW_WEBSERVER_PORT = 8080;
+    private static final String SQL_ALCHEMY_CONN_PREFIX = "postgresql+psycopg2://airflow:";
     private static final String DAGS_MOUNT = "/opt/airflow/dags";
     private static final String LOGS_MOUNT = "/opt/airflow/logs";
     /** The OS user the stock apache/airflow image runs its process as (uid 50000) — distinct from
@@ -100,6 +103,15 @@ public class MwaaEnvironmentManager {
     private final Ec2Service ec2Service;
     /** The VPC address each Airflow container holds, returned once the container is gone. */
     private final VpcContainerLeases vpcLeases;
+    /** Set once Floci starts shutting down: nothing starts or is taken over after it; a start it overtakes stops. */
+    private boolean shuttingDown;
+
+    /** A start or a takeover overtaken by Floci shutting down; whatever the start had started is removed. */
+    public static final class ShuttingDownException extends IllegalStateException {
+        public ShuttingDownException(String message) {
+            super(message);
+        }
+    }
 
     @Inject
     public MwaaEnvironmentManager(ContainerBuilder containerBuilder,
@@ -121,10 +133,12 @@ public class MwaaEnvironmentManager {
     }
 
     /**
-     * Starts the Postgres metadata database, waits for it to accept connections, then starts the
-     * Airflow container (LocalExecutor) wired to it. Updates {@code environment} with the resolved
-     * container ids and the Airflow container's Floci-reachable host/port. Throws on failure; the
-     * caller (MwaaService) is responsible for catching and marking the environment CREATE_FAILED.
+     * Starts a new environment: the Postgres metadata database, once it accepts connections the Airflow container
+     * (LocalExecutor) wired to it, both on empty volumes and with secrets of their own, which are kept on
+     * {@code environment} with the containers' IDs and the Airflow container's Floci-reachable host and port. Whatever
+     * an earlier environment of this name left behind is removed first: a database set up with other secrets would
+     * refuse this one's. Throws on failure; the caller (MwaaService) is responsible for catching and marking the
+     * environment CREATE_FAILED.
      *
      * @param startupScriptContent the {@code StartupScriptS3Path} object's bytes (already fetched
      *                              from S3 by the caller), or {@code null}/empty if the environment
@@ -134,13 +148,68 @@ public class MwaaEnvironmentManager {
      */
     public void startEnvironment(Environment environment, String airflowVersion, byte[] startupScriptContent,
                                  byte[] requirementsContent) {
-        String name = environment.getName();
-        String dbPassword = generateSecret(24);
-        environment.setDbPassword(dbPassword);
+        requireNotShuttingDown(environment);
+        newSecrets(environment);
+        removeSurvivingContainers(environment);
+        for (String volume : allVolumeNames(environment)) {
+            lifecycleManager.removeVolumeStrict(volume);
+        }
+        launch(environment, currentVolumes(environment), airflowVersion, startupScriptContent, requirementsContent);
+    }
 
+    /**
+     * Gives an environment stored before Floci kept its secrets new ones, for its database to be set up with when its
+     * containers start again: with no container left to read them back from, its volumes went with its containers at
+     * the shutdown then, and it starts on empty ones. One whose volumes are still there is refused, as they hold a
+     * database set up with secrets Floci does not have, which new ones would not open; so is one Docker cannot list
+     * the volumes of.
+     */
+    public void giveNewSecrets(Environment environment) {
+        Set<String> existing = existingVolumes();
+        List<String> kept = allVolumeNames(environment).stream().filter(existing::contains).toList();
+        if (!kept.isEmpty()) {
+            throw new IllegalStateException("MWAA environment " + environment.getName() + " is left as it is: "
+                    + kept + " hold its metadata database, whose secrets Floci does not have");
+        }
+        newSecrets(environment);
+    }
+
+    private static void newSecrets(Environment environment) {
+        environment.setDbPassword(generateSecret(24));
+        environment.setFernetKey(generateFernetKey());
+        environment.setAirflowAdminPassword(generateSecret(24));
+    }
+
+    /**
+     * Starts an environment's containers again after Floci restarts, as {@link #startEnvironment} does, but on the
+     * volumes they kept, under either naming scheme, and with the secrets {@code environment} carries, those its
+     * database was set up with: Airflow finds its metadata as it left it, and decrypts the connections and variables it
+     * holds. Containers left under its names go first, so none holds the volumes. A Docker that cannot say which
+     * containers or volumes are left fails the start, with nothing removed.
+     */
+    public void restartEnvironment(Environment environment, String airflowVersion, byte[] startupScriptContent,
+                                   byte[] requirementsContent) {
+        if (!hasSecrets(environment)) {
+            throw new IllegalStateException("MWAA environment " + environment.getName()
+                    + " has no saved secrets to start its metadata database with");
+        }
+        requireNotShuttingDown(environment);
+        removeSurvivingContainers(environment);
+        launch(environment, keptVolumes(environment), airflowVersion, startupScriptContent, requirementsContent);
+    }
+
+    /** Whether the environment carries the secrets its metadata database was set up with. */
+    static boolean hasSecrets(Environment environment) {
+        return environment.getDbPassword() != null && environment.getFernetKey() != null
+                && environment.getAirflowAdminPassword() != null;
+    }
+
+    private void launch(Environment environment, Volumes volumes, String airflowVersion, byte[] startupScriptContent,
+                        byte[] requirementsContent) {
+        String name = environment.getName();
+        String dbPassword = environment.getDbPassword();
         String dbContainerName = dbContainerName(environment);
-        String dbVolume = dbContainerName;
-        lifecycleManager.removeIfExists(dbContainerName);
+        String dbVolume = volumes.db();
         lifecycleManager.ensureVolume(dbVolume);
 
         ContainerSpec dbSpec = containerBuilder.newContainer(config.services().mwaa().defaultPostgresImage())
@@ -158,8 +227,9 @@ public class MwaaEnvironmentManager {
                 .build();
 
         String dbContainerId = lifecycleManager.create(dbSpec);
-        lifecycleManager.startCreated(dbContainerId, dbSpec);
         environment.setDbContainerId(dbContainerId);
+        lifecycleManager.startCreated(dbContainerId, dbSpec);
+        stopIfOvertaken(environment);
         waitForPostgresReady(dbContainerId);
         String dbIp = resolveContainerIp(dbContainerId, dbSpec.networkMode());
 
@@ -167,7 +237,145 @@ public class MwaaEnvironmentManager {
                 dbContainerId, name, dbIp, String.valueOf(POSTGRES_PORT));
 
         startAirflowContainer(environment, airflowVersion, dbIp, dbPassword, startupScriptContent,
-                requirementsContent);
+                requirementsContent, volumes);
+        stopIfOvertaken(environment);
+    }
+
+    /**
+     * Takes over the environment's containers when both outlived Floci running, under either naming scheme: kept by
+     * {@code keep-running-on-shutdown}, or left by a Floci that was killed. The secrets are read back from the Airflow
+     * container, which was started with them, so an environment stored before Floci kept them is taken over too.
+     * False, with nothing taken over, when either container is not running or the Airflow container does not name
+     * them; a Docker that cannot say throws, rather than reading as nothing being left.
+     */
+    public boolean adoptRunningEnvironment(Environment environment) {
+        requireNotShuttingDown(environment);
+        Optional<InspectContainerResponse> airflow = runningContainer(airflowContainerName(environment));
+        Optional<InspectContainerResponse> db = runningContainer(dbContainerName(environment));
+        if (airflow.isEmpty() || db.isEmpty()) {
+            return false;
+        }
+        Map<String, String> airflowEnv = envVariables(airflow.get());
+        if (!hasSecrets(airflowEnv)) {
+            return false;
+        }
+        ContainerInfo info = lifecycleManager.adopt(airflow.get().getId(), List.of(AIRFLOW_WEBSERVER_PORT),
+                containerBuilder.resolveDockerNetwork(config.services().mwaa().dockerNetwork()));
+        applySecrets(environment, airflowEnv);
+        environment.setDbContainerId(db.get().getId());
+        environment.setAirflowContainerId(info.containerId());
+        applyAirflowEndpoint(environment, info);
+        LOG.infov("Took over the running containers of MWAA environment {0}", environment.getName());
+        return true;
+    }
+
+    /**
+     * Reads back the secrets the environment's metadata database was set up with from a container left under its
+     * Airflow name, running or not, for an environment stored before Floci kept them. False when none is left or it
+     * does not name them; a Docker that cannot say throws, rather than reading as none being left.
+     */
+    public boolean recoverSecrets(Environment environment) {
+        for (String name : namesOf(airflowContainerName(environment))) {
+            Optional<InspectContainerResponse> airflow = inspectNamed(name);
+            if (airflow.isPresent() && hasSecrets(envVariables(airflow.get()))) {
+                applySecrets(environment, envVariables(airflow.get()));
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Optional<InspectContainerResponse> runningContainer(String name) {
+        for (String candidate : namesOf(name)) {
+            Optional<InspectContainerResponse> container = inspectNamed(candidate).filter(inspect ->
+                    inspect.getState() != null && Boolean.TRUE.equals(inspect.getState().getRunning()));
+            if (container.isPresent()) {
+                return container;
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** The container of that name, or empty when Docker has none; a Docker that cannot say throws. */
+    private Optional<InspectContainerResponse> inspectNamed(String name) {
+        try {
+            return Optional.of(lifecycleManager.getDockerClient().inspectContainerCmd(name).exec());
+        } catch (NotFoundException expected) {
+            // No container of that name, which is what the caller asks.
+            return Optional.empty();
+        }
+    }
+
+    /** A container's name, current and from before the {@code floci-aws-} prefix, which may have left one. */
+    private List<String> namesOf(String name) {
+        String legacy = ContainerStorageHelper.legacyDockerName(config, name);
+        return legacy.equals(name) ? List.of(name) : List.of(name, legacy);
+    }
+
+    private static Map<String, String> envVariables(InspectContainerResponse container) {
+        Map<String, String> variables = new HashMap<>();
+        String[] entries = container.getConfig() == null ? null : container.getConfig().getEnv();
+        for (String entry : entries == null ? new String[0] : entries) {
+            int equals = entry.indexOf('=');
+            if (equals > 0) {
+                variables.put(entry.substring(0, equals), entry.substring(equals + 1));
+            }
+        }
+        return variables;
+    }
+
+    private static boolean hasSecrets(Map<String, String> airflowEnv) {
+        return dbPasswordOf(airflowEnv.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN")) != null
+                && airflowEnv.get("AIRFLOW__CORE__FERNET_KEY") != null
+                && airflowEnv.get("_AIRFLOW_WWW_USER_PASSWORD") != null;
+    }
+
+    private static void applySecrets(Environment environment, Map<String, String> airflowEnv) {
+        environment.setDbPassword(dbPasswordOf(airflowEnv.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN")));
+        environment.setFernetKey(airflowEnv.get("AIRFLOW__CORE__FERNET_KEY"));
+        environment.setAirflowAdminPassword(airflowEnv.get("_AIRFLOW_WWW_USER_PASSWORD"));
+    }
+
+    /** The password of the Postgres URL {@link #startAirflowContainer} gives Airflow, or null for any other. */
+    static String dbPasswordOf(String sqlAlchemyConn) {
+        if (sqlAlchemyConn == null || !sqlAlchemyConn.startsWith(SQL_ALCHEMY_CONN_PREFIX)) {
+            return null;
+        }
+        int at = sqlAlchemyConn.lastIndexOf('@');
+        return at > SQL_ALCHEMY_CONN_PREFIX.length()
+                ? sqlAlchemyConn.substring(SQL_ALCHEMY_CONN_PREFIX.length(), at) : null;
+    }
+
+    /** Stops Floci from starting or taking over environments, so none outlives the shutdown it overtakes. */
+    public synchronized void markShuttingDown() {
+        shuttingDown = true;
+    }
+
+    public synchronized boolean isShuttingDown() {
+        return shuttingDown;
+    }
+
+    private synchronized void requireNotShuttingDown(Environment environment) {
+        if (shuttingDown) {
+            throw new ShuttingDownException("Floci is shutting down; MWAA environment " + environment.getName()
+                    + " was not started");
+        }
+    }
+
+    /**
+     * Removes the containers this start started once Floci began shutting down meanwhile: the shutdown stops the
+     * environments' containers by the IDs they hold, and may have done so before this start recorded its own.
+     */
+    private void stopIfOvertaken(Environment environment) {
+        boolean overtaken;
+        synchronized (this) {
+            overtaken = shuttingDown;
+        }
+        if (overtaken) {
+            stopOwnContainers(environment);
+            throw new ShuttingDownException("Floci is shutting down; MWAA environment " + environment.getName()
+                    + " was not started");
+        }
     }
 
     // Package-private (not private) so MwaaEnvironmentManagerTest can exercise container-spec
@@ -175,19 +383,31 @@ public class MwaaEnvironmentManager {
     // the exec-based Postgres readiness wait that startEnvironment() performs first.
     void startAirflowContainer(Environment environment, String airflowVersion, String dbIp, String dbPassword,
                                byte[] startupScriptContent, byte[] requirementsContent) {
+        startAirflowContainer(environment, airflowVersion, dbIp, dbPassword, startupScriptContent, requirementsContent,
+                currentVolumes(environment));
+    }
+
+    private void startAirflowContainer(Environment environment, String airflowVersion, String dbIp, String dbPassword,
+                                       byte[] startupScriptContent, byte[] requirementsContent, Volumes volumes) {
         String name = environment.getName();
         String airflowContainerName = airflowContainerName(environment);
-        String dagsVolume = airflowContainerName + "-dags";
-        String logsVolume = airflowContainerName + "-logs";
+        String dagsVolume = volumes.dags();
+        String logsVolume = volumes.logs();
 
         lifecycleManager.removeIfExists(airflowContainerName);
         lifecycleManager.ensureVolume(dagsVolume);
         lifecycleManager.ensureVolume(logsVolume);
 
         String image = "apache/airflow:%s-%s".formatted(airflowVersion, pythonTagFor(airflowVersion));
-        String adminPassword = generateSecret(24);
-        environment.setAirflowAdminPassword(adminPassword);
-        String sqlAlchemyConn = "postgresql+psycopg2://airflow:" + dbPassword + "@" + dbIp + ":" + POSTGRES_PORT + "/airflow";
+        // The environment's own, generated the first time it starts.
+        if (environment.getAirflowAdminPassword() == null) {
+            environment.setAirflowAdminPassword(generateSecret(24));
+        }
+        if (environment.getFernetKey() == null) {
+            environment.setFernetKey(generateFernetKey());
+        }
+        String adminPassword = environment.getAirflowAdminPassword();
+        String sqlAlchemyConn = SQL_ALCHEMY_CONN_PREFIX + dbPassword + "@" + dbIp + ":" + POSTGRES_PORT + "/airflow";
 
         // Points DAG code's own AWS SDK calls (boto3, botocore) at Floci itself, the same way
         // Lambda/ECS containers already do via LaunchedContainerAwsEnv — otherwise a real DAG's
@@ -197,7 +417,7 @@ public class MwaaEnvironmentManager {
                 "AIRFLOW__CORE__EXECUTOR=LocalExecutor",
                 "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=" + sqlAlchemyConn,
                 "AIRFLOW__CORE__SQL_ALCHEMY_CONN=" + sqlAlchemyConn,
-                "AIRFLOW__CORE__FERNET_KEY=" + generateFernetKey(),
+                "AIRFLOW__CORE__FERNET_KEY=" + environment.getFernetKey(),
                 "AIRFLOW__WEBSERVER__SECRET_KEY=" + generateSecret(32),
                 "AIRFLOW__CORE__LOAD_EXAMPLES=false",
                 "_AIRFLOW_WWW_USER_USERNAME=" + AIRFLOW_ADMIN_USER,
@@ -272,7 +492,15 @@ public class MwaaEnvironmentManager {
             throw e;
         }
         environment.setAirflowContainerId(info.containerId());
+        applyAirflowEndpoint(environment, info);
 
+        LOG.infov("Started Airflow container {0} for MWAA environment {1} (image {2}), reachable at {3}:{4}",
+                info.containerId(), name, image, environment.getAirflowInternalHost(),
+                String.valueOf(environment.getAirflowInternalPort()));
+    }
+
+    /** Where Floci reaches the Airflow container's webserver, as the container's start or takeover reports it. */
+    private static void applyAirflowEndpoint(Environment environment, ContainerInfo info) {
         ContainerLifecycleManager.EndpointInfo endpoint = info.getEndpoint(AIRFLOW_WEBSERVER_PORT);
         if (endpoint != null) {
             environment.setAirflowInternalHost(endpoint.host());
@@ -281,10 +509,6 @@ public class MwaaEnvironmentManager {
             environment.setAirflowInternalHost("localhost");
             environment.setAirflowInternalPort(AIRFLOW_WEBSERVER_PORT);
         }
-
-        LOG.infov("Started Airflow container {0} for MWAA environment {1} (image {2}), reachable at {3}:{4}",
-                info.containerId(), name, image, environment.getAirflowInternalHost(),
-                String.valueOf(environment.getAirflowInternalPort()));
     }
 
     /**
@@ -377,9 +601,39 @@ public class MwaaEnvironmentManager {
         return healthyIdx >= 0 && (nextSectionCommaIdx < 0 || healthyIdx < nextSectionCommaIdx + 2);
     }
 
-    /** Stops and removes both containers and all three named volumes for the given environment. */
+    /**
+     * Stops and removes both containers and all three named volumes for the given environment, under either naming
+     * scheme: the containers by the IDs it holds, and any left under its names, which a restart may not have taken
+     * over. A container Docker will not remove is logged, and the delete goes on, as it always has.
+     */
     public void stopEnvironment(Environment environment) {
-        String name = environment.getName();
+        stopContainers(environment);
+        for (String volume : allVolumeNames(environment)) {
+            lifecycleManager.removeVolume(volume);
+        }
+        LOG.infov("Stopped MWAA containers for environment {0}", environment.getName());
+    }
+
+    /**
+     * Stops and removes the environment's containers, by the IDs it holds and under its names, and keeps its
+     * volumes, so its metadata database and DAGs are there when its containers start again. By name too, since an
+     * environment the startup restore has not reached yet holds no IDs. A container Docker will not remove is logged.
+     */
+    public void stopContainers(Environment environment) {
+        stopOwnContainers(environment);
+        try {
+            removeSurvivingContainers(environment);
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not remove the containers left under MWAA environment {0}''s names: {1}",
+                    environment.getName(), e.getMessage());
+        }
+    }
+
+    /**
+     * Stops and removes the containers the environment holds the IDs of, and nothing else: another environment created
+     * under its name since has containers of the same names.
+     */
+    public void stopOwnContainers(Environment environment) {
         if (environment.getAirflowContainerId() != null) {
             lifecycleManager.stopAndRemove(environment.getAirflowContainerId(), null);
             releaseVpcLeaseIfGone(environment.getAirflowContainerId());
@@ -387,11 +641,66 @@ public class MwaaEnvironmentManager {
         if (environment.getDbContainerId() != null) {
             lifecycleManager.stopAndRemove(environment.getDbContainerId(), null);
         }
+    }
+
+    /**
+     * Removes the containers under the environment's names, current and from before the {@code floci-aws-} prefix:
+     * ones a Floci that stopped without removing them left behind. Throws when Docker cannot say which are left or
+     * will not remove one, so nothing starts beside it on the same volumes.
+     */
+    private void removeSurvivingContainers(Environment environment) {
+        for (String current : List.of(airflowContainerName(environment), dbContainerName(environment))) {
+            for (String name : namesOf(current)) {
+                Optional<InspectContainerResponse> survivor = inspectNamed(name);
+                if (survivor.isPresent()) {
+                    lifecycleManager.removeIfExistsStrict(survivor.get().getId());
+                    releaseVpcLeaseIfGone(survivor.get().getId());
+                }
+            }
+        }
+    }
+
+    /** The volumes an environment's containers mount: its database, its DAGs and its logs. */
+    private record Volumes(String db, String dags, String logs) {
+        List<String> all() {
+            return List.of(db, dags, logs);
+        }
+    }
+
+    private Volumes currentVolumes(Environment environment) {
         String airflowContainerName = airflowContainerName(environment);
-        lifecycleManager.removeVolume(dbContainerName(environment));
-        lifecycleManager.removeVolume(airflowContainerName + "-dags");
-        lifecycleManager.removeVolume(airflowContainerName + "-logs");
-        LOG.infov("Stopped MWAA containers for environment {0}", name);
+        return new Volumes(dbContainerName(environment), airflowContainerName + "-dags",
+                airflowContainerName + "-logs");
+    }
+
+    /**
+     * The volumes the environment's data is on: each under its current name, or under its name from before the
+     * {@code floci-aws-} prefix when only that one is left.
+     */
+    private Volumes keptVolumes(Environment environment) {
+        Set<String> existing = existingVolumes();
+        Volumes current = currentVolumes(environment);
+        return new Volumes(kept(current.db(), existing), kept(current.dags(), existing),
+                kept(current.logs(), existing));
+    }
+
+    private String kept(String volume, Set<String> existing) {
+        String legacy = ContainerStorageHelper.legacyDockerName(config, volume);
+        return !existing.contains(volume) && existing.contains(legacy) ? legacy : volume;
+    }
+
+    /** Every volume name the environment may have, current and from before the {@code floci-aws-} prefix. */
+    private List<String> allVolumeNames(Environment environment) {
+        Set<String> names = new LinkedHashSet<>();
+        for (String volume : currentVolumes(environment).all()) {
+            names.addAll(namesOf(volume));
+        }
+        return List.copyOf(names);
+    }
+
+    private Set<String> existingVolumes() {
+        return lifecycleManager.tryListVolumeNames().orElseThrow(() -> new IllegalStateException(
+                "Docker could not list its volumes, so the MWAA environment's data could not be found"));
     }
 
     /**
@@ -459,6 +768,30 @@ public class MwaaEnvironmentManager {
     /** Writes {@code content} to {@code DAGS_MOUNT/relativePath} inside the Airflow container. */
     public void copyDagFile(Environment environment, String relativePath, byte[] content) {
         copyFileIntoContainer(environment.getAirflowContainerId(), DAGS_MOUNT, relativePath, content);
+    }
+
+    /**
+     * The files under {@code DAGS_MOUNT} in the Airflow container, relative to it, leaving out the {@code __pycache__}
+     * Python writes there: what the DAG volume holds, which after a restart may include DAGs removed from S3 while
+     * Floci was stopped. A listing that fails throws, rather than reading as an empty folder.
+     */
+    public List<String> listDagFiles(Environment environment) {
+        ContainerExec.Result result;
+        try {
+            result = execInContainer(environment.getAirflowContainerId(),
+                    new String[]{"find", DAGS_MOUNT, "-type", "f"});
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not list the DAGs of MWAA environment " + environment.getName(), e);
+        }
+        if (result.exitCode() != 0) {
+            throw new IllegalStateException("Could not list the DAGs of MWAA environment " + environment.getName()
+                    + ": " + result.stderr());
+        }
+        return result.stdout().lines()
+                .filter(line -> line.startsWith(DAGS_MOUNT + "/"))
+                .map(line -> line.substring(DAGS_MOUNT.length() + 1))
+                .filter(relative -> !relative.contains("__pycache__/"))
+                .toList();
     }
 
     /** Removes {@code DAGS_MOUNT/relativePath} from the Airflow container (best-effort). */

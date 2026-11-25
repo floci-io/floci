@@ -94,6 +94,23 @@ opensearch_default_image() {
 OPENSEARCH_IMAGE="$(opensearch_default_image)"
 starts ContainerBindDirectoryDockerIntegrationTest OpenSearchDomainRestartNightlyIntegrationTest \
     && [ -n "$OPENSEARCH_IMAGE" ] && pull "$OPENSEARCH_IMAGE"
+# MwaaEnvironmentRestartDockerNightlyIntegrationTest runs an environment on the default Airflow version, whose image
+# pairs it with the Python release MwaaEnvironmentManager.pythonTagFor names, beside its Postgres database.
+if starts MwaaEnvironmentRestartDockerNightlyIntegrationTest; then
+    MWAA_CONFIG="$(sed -n '/^    mwaa:$/,/^    [a-z]/p' src/main/resources/application.yml 2>/dev/null)"
+    MWAA_VERSION="$(printf '%s\n' "$MWAA_CONFIG" | grep -oE 'default-version: "[0-9.]+"' | cut -d '"' -f 2)"
+    MWAA_POSTGRES_IMAGE="$(printf '%s\n' "$MWAA_CONFIG" | grep -oE 'default-postgres-image: "[^"]+"' | cut -d '"' -f 2)"
+    case "$MWAA_VERSION" in
+        2.[0-9].*|2.10.*) MWAA_PYTHON=python3.11 ;;
+        *) MWAA_PYTHON=python3.12 ;;
+    esac
+    if [ -n "$MWAA_VERSION" ] && [ -n "$MWAA_POSTGRES_IMAGE" ]; then
+        pull "apache/airflow:$MWAA_VERSION-$MWAA_PYTHON"
+        pull "$MWAA_POSTGRES_IMAGE"
+    else
+        echo "$(date -u +%H:%M:%S) prefetch skipped: MWAA default images not readable" >> "$PREFETCH_LOG"
+    fi
+fi
 # EcsImagePullDockerIntegrationTest runs its own registry to move a tag in; the /ecr/ line below
 # covers the shards that run the ECR tests.
 REGISTRY_IMAGE="$(test_image REGISTRY)"

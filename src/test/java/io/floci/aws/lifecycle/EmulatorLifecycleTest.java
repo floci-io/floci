@@ -37,6 +37,7 @@ import io.floci.aws.services.lambda.durable.DurableExecutionService;
 import io.floci.aws.services.memorydb.MemoryDbService;
 import io.floci.aws.services.memorydb.container.MemoryDbContainerManager;
 import io.floci.aws.services.memorydb.proxy.MemoryDbProxyManager;
+import io.floci.aws.services.mwaa.MwaaService;
 import io.floci.aws.services.neptune.container.NeptuneContainerManager;
 import io.floci.aws.services.neptune.proxy.NeptuneProxyManager;
 import io.floci.aws.services.opensearch.OpenSearchService;
@@ -132,6 +133,8 @@ class EmulatorLifecycleTest {
     @Mock private EmulatorConfig.KinesisAnalyticsServiceConfig kinesisAnalyticsServiceConfig;
     @Mock private OpenSearchService openSearchService;
     @Mock private EmulatorConfig.OpenSearchServiceConfig openSearchServiceConfig;
+    @Mock private MwaaService mwaaService;
+    @Mock private EmulatorConfig.MwaaServiceConfig mwaaServiceConfig;
     @Mock private EmulatorConfig.AmazonMqServiceConfig amazonMqServiceConfig;
     @Mock private EmulatorConfig.SageMakerServiceConfig sageMakerServiceConfig;
     @Mock private EksService eksService;
@@ -186,6 +189,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(kinesisAnalyticsServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.opensearch()).thenReturn(openSearchServiceConfig);
         Mockito.lenient().when(openSearchServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.mwaa()).thenReturn(mwaaServiceConfig);
+        Mockito.lenient().when(mwaaServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.amazonmq()).thenReturn(amazonMqServiceConfig);
         Mockito.lenient().when(amazonMqServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.sagemaker()).thenReturn(sageMakerServiceConfig);
@@ -206,7 +211,7 @@ class EmulatorLifecycleTest {
                 memoryDbContainerManager, memoryDbProxyManager, memoryDbService,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
                 rabbitMqManager, amazonMqService, flinkContainerManager, kinesisAnalyticsService,
-                openSearchService,
+                openSearchService, mwaaService,
                 sageMakerService, rdsService, timestreamInfluxDbService,
                 elbV2Service, elbClassicService, ecsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
@@ -618,6 +623,48 @@ class EmulatorLifecycleTest {
         emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
 
         verify(openSearchService, never()).restorePersistedRuntime();
+    }
+
+    @Test
+    void restoresPersistedMwaaEnvironmentsAfterStorageLoad() {
+        stubStorageConfig();
+        when(mwaaServiceConfig.enabled()).thenReturn(true);
+        when(mwaaService.restorePersistedRuntime()).thenReturn(CompletableFuture.completedFuture(null));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, mwaaService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(mwaaService).restorePersistedRuntime();
+    }
+
+    @Test
+    void aFailedMwaaRestoreDoesNotStopTheOtherRestores() {
+        stubStorageConfig();
+        when(mwaaServiceConfig.enabled()).thenReturn(true);
+        when(elbv2ServiceConfig.enabled()).thenReturn(true);
+        when(mwaaService.restorePersistedRuntime()).thenReturn(CompletableFuture.failedFuture(
+                new IllegalStateException("Could not restore MWAA environment demo")));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(elbV2Service).restorePersistedRuntime();
+        verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void leavesMwaaEnvironmentsUntouchedWhenMwaaIsDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(mwaaService, never()).restorePersistedRuntime();
     }
 
     @Test
