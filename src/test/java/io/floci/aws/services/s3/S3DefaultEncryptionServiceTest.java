@@ -1,5 +1,6 @@
 package io.floci.aws.services.s3;
 
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.s3.model.CopyObjectOptions;
 import io.floci.aws.services.s3.model.MultipartUpload;
@@ -9,6 +10,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -17,8 +19,11 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * An object written without encryption headers is encrypted with its bucket's default encryption:
@@ -54,6 +59,64 @@ class S3DefaultEncryptionServiceTest {
         assertEquals("AES256", put.getServerSideEncryption());
         assertNull(put.getSseKmsKeyId());
         assertEquals("AES256", s3Service.getObject(BUCKET, "plain.txt").getServerSideEncryption());
+    }
+
+    @Test
+    void aNewBucketReportsAndEnforcesSseCustomerBlockingByDefault() throws Exception {
+        assertTrue(s3Service.getBucketEncryption(BUCKET).contains(
+                "<BlockedEncryptionTypes><EncryptionType>SSE-C</EncryptionType></BlockedEncryptionTypes>"));
+
+        AwsException denied = assertThrows(AwsException.class,
+                () -> put("default-blocked.txt", customerKey(new PutObjectOptions())));
+
+        assertEquals("AccessDenied", denied.getErrorCode());
+        assertEquals(403, denied.getHttpStatus());
+    }
+
+    @Test
+    void aPlainEncryptionRulePreservesSseCustomerBlocking() throws Exception {
+        s3Service.putBucketEncryption(BUCKET, configuration("AES256", null));
+
+        assertTrue(s3Service.getBucketEncryption(BUCKET).contains(
+                "<BlockedEncryptionTypes><EncryptionType>SSE-C</EncryptionType></BlockedEncryptionTypes>"));
+        AwsException denied = assertThrows(AwsException.class,
+                () -> put("still-blocked.txt", customerKey(new PutObjectOptions())));
+        assertEquals("AccessDenied", denied.getErrorCode());
+        assertEquals(403, denied.getHttpStatus());
+    }
+
+    @Test
+    void configuredEncryptionReadbackPreservesOtherRuleFields() {
+        s3Service.putBucketEncryption(BUCKET, "<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+                + "<Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm>"
+                + "<KMSMasterKeyID>alias/R&amp;D</KMSMasterKeyID></ApplyServerSideEncryptionByDefault>"
+                + "<BucketKeyEnabled>true</BucketKeyEnabled></Rule></ServerSideEncryptionConfiguration>");
+
+        String readback = s3Service.getBucketEncryption(BUCKET);
+        assertTrue(readback.startsWith("<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"));
+        assertTrue(readback.contains("<SSEAlgorithm>aws:kms</SSEAlgorithm>"));
+        assertTrue(readback.contains("<KMSMasterKeyID>alias/R&amp;D</KMSMasterKeyID>"));
+        assertTrue(readback.contains("<BucketKeyEnabled>true</BucketKeyEnabled>"));
+        assertTrue(readback.contains("<BlockedEncryptionTypes><EncryptionType>SSE-C</EncryptionType></BlockedEncryptionTypes>"));
+    }
+
+    @Test
+    void bahrainAndUaeBucketsDoNotBlockSseCustomerEncryptionByDefault() throws Exception {
+        for (String region : List.of("me-south-1", "me-central-1")) {
+            String bucket = "sse-c-" + region;
+            s3Service.createBucket(bucket, region);
+
+            assertFalse(s3Service.getBucketEncryption(bucket).contains("BlockedEncryptionTypes"));
+            S3Object written = s3Service.putObject(bucket, "allowed.txt", DATA, "text/plain", null,
+                    customerKey(new PutObjectOptions()));
+            assertEquals("AES256", written.getSseCustomerAlgorithm());
+
+            s3Service.putBucketEncryption(bucket, blockedEncryption("SSE-C"));
+            AwsException denied = assertThrows(AwsException.class,
+                    () -> s3Service.putObject(bucket, "blocked.txt", DATA, "text/plain", null,
+                            customerKey(new PutObjectOptions())));
+            assertEquals("AccessDenied", denied.getErrorCode());
+        }
     }
 
     @Test
@@ -104,13 +167,111 @@ class S3DefaultEncryptionServiceTest {
 
     @Test
     void anSseCustomerKeyUploadGetsNoDefault() throws Exception {
-        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY, "NONE"));
 
         S3Object put = put("sse-c.txt", customerKey(new PutObjectOptions()));
 
         assertNull(put.getServerSideEncryption());
         assertNull(put.getSseKmsKeyId());
         assertEquals("AES256", put.getSseCustomerAlgorithm());
+    }
+
+    @Test
+    void aBucketBlockingSseCustomerKeysRejectsPutObject() throws Exception {
+        s3Service.putBucketEncryption(BUCKET, "<ServerSideEncryptionConfiguration>"
+                + "<Rule><BlockedEncryptionTypes><EncryptionType>SSE-C</EncryptionType>"
+                + "</BlockedEncryptionTypes></Rule></ServerSideEncryptionConfiguration>");
+
+        AwsException denied = assertThrows(AwsException.class,
+                () -> put("blocked-sse-c.txt", customerKey(new PutObjectOptions())));
+
+        assertEquals("AccessDenied", denied.getErrorCode());
+        assertEquals(403, denied.getHttpStatus());
+        assertEquals("AES256", put("allowed-sse-s3.txt", new PutObjectOptions()).getServerSideEncryption());
+    }
+
+    @Test
+    void aBlockedStreamingPutFailsBeforeReadingItsBody() throws Exception {
+        PutObjectOptions sseC = customerKey(new PutObjectOptions());
+        InputStream unread = new InputStream() {
+            @Override
+            public int read() {
+                throw new AssertionError("Blocked upload body must not be read");
+            }
+        };
+
+        AwsException denied = assertThrows(AwsException.class,
+                () -> s3Service.putObject(BUCKET, "streamed.txt", unread, UploadChecksums.NONE,
+                        "text/plain", null, sseC));
+
+        assertEquals("AccessDenied", denied.getErrorCode());
+        assertEquals(403, denied.getHttpStatus());
+    }
+
+    @Test
+    void aBucketBlockingSseCustomerKeysRejectsPostAndDestinationCopy() throws Exception {
+        s3Service.putObject(SOURCE, "source.txt", DATA, "text/plain", null, new PutObjectOptions());
+        s3Service.putBucketEncryption(BUCKET, blockedEncryption("SSE-C"));
+        PutObjectOptions sseC = customerKey(new PutObjectOptions());
+
+        AwsException post = assertThrows(AwsException.class,
+                () -> s3Service.postObject(BUCKET, "posted.txt", DATA, "text/plain", null, sseC));
+        AwsException copy = assertThrows(AwsException.class,
+                () -> s3Service.copyObject(SOURCE, "source.txt", BUCKET, "copy.txt", null,
+                        new CopyObjectOptions()
+                                .withSseCustomerAlgorithm(sseC.getSseCustomerAlgorithm())
+                                .withSseCustomerKey(sseC.getSseCustomerKey())
+                                .withSseCustomerKeyMd5(sseC.getSseCustomerKeyMd5())));
+
+        assertEquals("AccessDenied", post.getErrorCode());
+        assertEquals(403, post.getHttpStatus());
+        assertEquals("AccessDenied", copy.getErrorCode());
+        assertEquals(403, copy.getHttpStatus());
+        assertEquals("AES256", s3Service.copyObject(SOURCE, "source.txt", BUCKET, "allowed-copy.txt")
+                .getServerSideEncryption());
+    }
+
+    @Test
+    void aBucketBlockingSseCustomerKeysRejectsMultipartInitiation() throws Exception {
+        s3Service.putBucketEncryption(BUCKET, blockedEncryption("SSE-C"));
+
+        AwsException denied = assertThrows(AwsException.class,
+                () -> s3Service.initiateMultipartUpload(BUCKET, "blocked.bin", "application/octet-stream",
+                        Map.of(), null, customerKey(new PutObjectOptions())));
+
+        assertEquals("AccessDenied", denied.getErrorCode());
+        assertEquals(403, denied.getHttpStatus());
+        MultipartUpload allowed = s3Service.initiateMultipartUpload(BUCKET, "allowed.bin",
+                "application/octet-stream", Map.of(), null, new PutObjectOptions());
+        assertEquals("AES256", allowed.effectiveServerSideEncryption());
+    }
+
+    @Test
+    void existingSseCustomerObjectCanBeCopiedAsAReadableSourceAfterBlocking() throws Exception {
+        PutObjectOptions sseC = customerKey(new PutObjectOptions());
+        s3Service.putBucketEncryption(BUCKET, blockedEncryption("NONE"));
+        put("existing.txt", sseC);
+        s3Service.putBucketEncryption(BUCKET, blockedEncryption("SSE-C"));
+
+        S3Object copy = s3Service.copyObject(BUCKET, "existing.txt", SOURCE, "copy.txt", null,
+                new CopyObjectOptions()
+                        .withCopySourceSseCustomerAlgorithm(sseC.getSseCustomerAlgorithm())
+                        .withCopySourceSseCustomerKey(sseC.getSseCustomerKey())
+                        .withCopySourceSseCustomerKeyMd5(sseC.getSseCustomerKeyMd5()));
+
+        assertEquals("AES256", s3Service.getObject(BUCKET, "existing.txt").getSseCustomerAlgorithm());
+        assertEquals("AES256", copy.getServerSideEncryption());
+        assertNull(copy.getSseCustomerAlgorithm());
+    }
+
+    @Test
+    void explicitNoneDoesNotBlockSseCustomerWrites() throws Exception {
+        s3Service.putBucketEncryption(BUCKET, blockedEncryption("NONE"));
+
+        S3Object written = put("allowed-sse-c.txt", customerKey(new PutObjectOptions()));
+
+        assertEquals("AES256", written.getSseCustomerAlgorithm());
+        assertNull(written.getServerSideEncryption());
     }
 
     @Test
@@ -140,7 +301,7 @@ class S3DefaultEncryptionServiceTest {
 
     @Test
     void anSseCustomerKeyMultipartUploadGetsNoDefault() throws Exception {
-        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY, "NONE"));
         PutObjectOptions sseC = customerKey(new PutObjectOptions());
         MultipartUpload upload = s3Service.initiateMultipartUpload(BUCKET, "multipart-sse-c.bin",
                 "application/octet-stream", Map.of(), null, sseC);
@@ -210,7 +371,7 @@ class S3DefaultEncryptionServiceTest {
 
     @Test
     void anUploadThatSendsItsOwnEncryptionRecordsNoDefault() throws Exception {
-        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY, "NONE"));
 
         MultipartUpload explicit = s3Service.initiateMultipartUpload(BUCKET, "explicit.bin",
                 "application/octet-stream", Map.of(), null, new PutObjectOptions().withServerSideEncryption("AES256"));
@@ -259,6 +420,7 @@ class S3DefaultEncryptionServiceTest {
         s3Service.putObject(SOURCE, "old.txt", DATA, "text/plain", null, new PutObjectOptions());
         objectStore.scan(key -> true).forEach(object -> object.setServerSideEncryption(null));
         PutObjectOptions sseC = customerKey(new PutObjectOptions());
+        s3Service.putBucketEncryption(SOURCE, blockedEncryption("NONE"));
         s3Service.putObject(SOURCE, "sse-c.txt", DATA, "text/plain", null, sseC);
         s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
 
@@ -323,7 +485,7 @@ class S3DefaultEncryptionServiceTest {
 
     @Test
     void aCopyEncryptedWithACustomerKeyGetsNoDefault() throws Exception {
-        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY, "NONE"));
         put("source.txt", new PutObjectOptions());
         PutObjectOptions sseC = customerKey(new PutObjectOptions());
 
@@ -342,10 +504,24 @@ class S3DefaultEncryptionServiceTest {
     }
 
     private static String configuration(String algorithm, String kmsKeyId) {
+        return configuration(algorithm, kmsKeyId, null);
+    }
+
+    private static String configuration(String algorithm, String kmsKeyId, String blockedType) {
         return "<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Rule>"
                 + "<ApplyServerSideEncryptionByDefault><SSEAlgorithm>" + algorithm + "</SSEAlgorithm>"
                 + (kmsKeyId == null ? "" : "<KMSMasterKeyID>" + kmsKeyId + "</KMSMasterKeyID>")
-                + "</ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+                + "</ApplyServerSideEncryptionByDefault>"
+                + (blockedType == null ? "" : "<BlockedEncryptionTypes><EncryptionType>" + blockedType
+                        + "</EncryptionType></BlockedEncryptionTypes>")
+                + "</Rule></ServerSideEncryptionConfiguration>";
+    }
+
+    private static String blockedEncryption(String type) {
+        return "<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Rule>"
+                + "<ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm>"
+                + "</ApplyServerSideEncryptionByDefault><BlockedEncryptionTypes><EncryptionType>" + type
+                + "</EncryptionType></BlockedEncryptionTypes></Rule></ServerSideEncryptionConfiguration>";
     }
 
     private static PutObjectOptions customerKey(PutObjectOptions options) throws Exception {

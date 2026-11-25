@@ -4218,7 +4218,10 @@ public class S3Controller {
         S3Object obj = s3Service.postObject(bucket, key, fileData, objectContentType,
             metadata.isEmpty() ? null : metadata, new PutObjectOptions()
                 .withServerSideEncryption(encryption)
-                .withSseKmsKeyId(kmsKeyId));
+                .withSseKmsKeyId(kmsKeyId)
+                .withSseCustomerAlgorithm(lcFields.get("x-amz-server-side-encryption-customer-algorithm"))
+                .withSseCustomerKey(lcFields.get("x-amz-server-side-encryption-customer-key"))
+                .withSseCustomerKeyMd5(lcFields.get("x-amz-server-side-encryption-customer-key-md5")));
         LOG.infov("Presigned POST upload: {0}/{1} ({2} bytes)", bucket, key, fileData.length);
 
         String xml = new XmlBuilder()
