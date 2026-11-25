@@ -1721,6 +1721,21 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void aGuestShutdownIsReportedWhenDockerAnswersOnlyOnASecondCheck() throws Exception {
+        LaunchHarness harness = launchHarness();
+        List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        harness.manager.setGuestShutdownHandler(shutDown::add);
+        Instance instance = launchRunningInstance(harness, "i-flakyprobe", exitWatches);
+
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID))
+                .thenReturn(ContainerLiveness.UNKNOWN, ContainerLiveness.NOT_RUNNING);
+        exitWatches.getLast().onNext(exitStatus(130));
+
+        assertEquals(List.of(instance), shutDown);
+    }
+
+    @Test
     void aGuestThatShutsDownAfterAStartIsReported() throws Exception {
         LaunchHarness harness = launchHarness();
         List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);

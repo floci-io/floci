@@ -160,6 +160,9 @@ public class Ec2ContainerManager {
     static long containerBridgeIpPollMillis = 500;
     private static final int PERSIST_ATTEMPTS = 5;
     private static final long PERSIST_RETRY_MILLIS = 100;
+    /** Inspects tried, the delay doubling from the first, before an exited container is left unconfirmed. */
+    private static final int EXIT_PROBE_ATTEMPTS = 5;
+    private static final long EXIT_PROBE_FIRST_RETRY_MILLIS = 200;
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -889,9 +892,20 @@ public class Ec2ContainerManager {
                 return;
             }
         }
-        // Only a container Docker reports stopped; one running again after a reboot, or one a failed
-        // inspect leaves unknown, is not a shutdown.
-        if (lifecycleManager.probeContainer(containerId) != ContainerLiveness.NOT_RUNNING) {
+        // Only a container Docker reports stopped is a shutdown; one running again after a reboot is
+        // not. The watch has reported its one exit, so a failed inspect is tried again, not dropped.
+        ContainerLiveness liveness = lifecycleManager.probeContainer(containerId);
+        for (int attempt = 1; liveness == ContainerLiveness.UNKNOWN && attempt < EXIT_PROBE_ATTEMPTS; attempt++) {
+            if (!pause(EXIT_PROBE_FIRST_RETRY_MILLIS << (attempt - 1))) {
+                return;
+            }
+            liveness = lifecycleManager.probeContainer(containerId);
+        }
+        if (liveness != ContainerLiveness.NOT_RUNNING) {
+            if (liveness == ContainerLiveness.UNKNOWN) {
+                LOG.warnv("EC2 instance {0}: Docker could not confirm its container {1} stopped after it "
+                        + "exited, so a shutdown from its guest is not applied", instance.getInstanceId(), containerId);
+            }
             return;
         }
         LOG.infov("EC2 instance {0} shut down from its guest (container exit code {1})",

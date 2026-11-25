@@ -970,12 +970,16 @@ public class Ec2QueryHandler {
                     "You can specify true for DeleteOnTermination only when creating a new network interface.", 400);
         }
 
+        String shutdownBehavior = p.getFirst("InstanceInitiatedShutdownBehavior");
+        if (shutdownBehavior == null && launchTemplateData != null) {
+            shutdownBehavior = launchTemplateData.getInstanceInitiatedShutdownBehavior();
+        }
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
                 creditSpecificationCpuCredits, userDataEncoded, dryRun(p),
                 p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), blockDeviceMappings,
-                "spot".equals(marketType), privateIpAddress, capacitySpecification);
+                "spot".equals(marketType), privateIpAddress, capacitySpecification, shutdownBehavior);
 
         // Apply an explicit NetworkInterface.1.DeleteOnTermination to the launched instance.
         if (explicitDeleteOnTermination != null) {
@@ -996,19 +1000,6 @@ public class Ec2QueryHandler {
             for (Instance inst : res.getInstances()) {
                 service.modifyInstanceAttribute(region, inst.getInstanceId(), "ebsOptimized", ebsOptimized.toString());
                 inst.setEbsOptimized(ebsOptimized);
-            }
-        }
-
-        // Applied after the launch, on this API path only, as EbsOptimized is.
-        String shutdownBehavior = p.getFirst("InstanceInitiatedShutdownBehavior");
-        if (shutdownBehavior == null && launchTemplateData != null) {
-            shutdownBehavior = launchTemplateData.getInstanceInitiatedShutdownBehavior();
-        }
-        if (shutdownBehavior != null) {
-            for (Instance inst : res.getInstances()) {
-                service.modifyInstanceAttribute(region, inst.getInstanceId(), "instanceInitiatedShutdownBehavior",
-                        shutdownBehavior);
-                inst.setInstanceInitiatedShutdownBehavior(shutdownBehavior);
             }
         }
 

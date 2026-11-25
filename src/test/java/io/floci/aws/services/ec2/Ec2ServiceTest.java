@@ -2563,6 +2563,27 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void anInstanceCarriesItsShutdownBehaviorBeforeItsContainerLaunches() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        List<String> behaviorsAtLaunch = new CopyOnWriteArrayList<>();
+        doAnswer(invocation -> {
+            Instance launched = invocation.getArgument(0);
+            behaviorsAtLaunch.add(launched.getInstanceInitiatedShutdownBehavior());
+            return null;
+        }).when(containerManager).launch(any(), any(ResolvedAmiImage.class), any(), any(), any(), any(), any());
+        AmiImageResolver images = mock(AmiImageResolver.class);
+        when(images.resolveImage(any())).thenReturn(ResolvedAmiImage.minimal("floci/base:latest"));
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class),
+                images, mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+
+        service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro", 2, 2, null, List.of(), null, null,
+                List.of(), null, null, null, null, 0, null, null, null, null, false, null, null, null, false, null,
+                null, "terminate");
+
+        assertEquals(List.of("terminate", "terminate"), behaviorsAtLaunch);
+    }
+
+    @Test
     void aGuestShutdownStopsAnInstanceByDefault() {
         Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
         AmiImageResolver images = mock(AmiImageResolver.class);

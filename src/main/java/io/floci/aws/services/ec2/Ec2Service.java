@@ -4421,6 +4421,32 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                     List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings, boolean spot,
                                     String privateIpAddress,
                                     LaunchTemplateData.CapacityReservationSpecification capacitySpecification) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, availabilityZone,
+                metadataOptions, creditSpecificationCpuCredits, encodedUserData, dryRun, hostId, tenancy,
+                blockDeviceMappings, spot, privateIpAddress, capacitySpecification, null);
+    }
+
+    /**
+     * @param instanceInitiatedShutdownBehavior InstanceInitiatedShutdownBehavior, or null for the
+     *                                          default, stop. Set before any container launches, so a
+     *                                          guest that powers off at once already finds it.
+     */
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp, String networkInterfaceId,
+                                    int networkInterfaceDeviceIndex, String availabilityZone,
+                                    LaunchTemplateData.MetadataOptions metadataOptions,
+                                    String creditSpecificationCpuCredits, String encodedUserData, boolean dryRun,
+                                    String hostId, String tenancy,
+                                    List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings, boolean spot,
+                                    String privateIpAddress,
+                                    LaunchTemplateData.CapacityReservationSpecification capacitySpecification,
+                                    String instanceInitiatedShutdownBehavior) {
         String capacityPreference = capacitySpecification == null
                 || capacitySpecification.getCapacityReservationPreference() == null ? "open"
                 : capacitySpecification.getCapacityReservationPreference();
@@ -4686,6 +4712,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             inst.setRegion(region);
                             inst.setUserData(userData);
                             inst.setEncodedUserData(encodedUserData);
+                            inst.setInstanceInitiatedShutdownBehavior(instanceInitiatedShutdownBehavior);
                             inst.setIamInstanceProfileArn(iamInstanceProfileArn);
                             if (launchProfile != null) {
                                 inst.setIamInstanceProfileId(launchProfile.getInstanceProfileId());
