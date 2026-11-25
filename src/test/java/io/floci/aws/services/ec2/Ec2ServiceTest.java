@@ -110,6 +110,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -7544,6 +7545,44 @@ class Ec2ServiceTest {
         assertDoesNotThrow(() -> service.restoreAttachedVolumesForInstance("us-east-1", instance));
         assertEquals("in-use", stored.getState());
         assertEquals(1, stored.getAttachments().size());
+    }
+
+    @Test
+    void detachDuringARestoreRemovesTheDeviceAfterTheRestoreCreatesIt() throws Exception {
+        VolumeAttachmentFixture fixture = volumeAttachmentFixture();
+        Ec2VolumeBlockDeviceManager blockDevices = fixture.blockDevices();
+        Ec2Service service = fixture.service();
+        Instance instance = fixture.instance();
+        Volume volume = fixture.volume();
+        doReturn(Optional.of("/dev/xvdf")).when(blockDevices).attachVolume(any(), any(), anyString());
+        service.attachVolume("us-east-1", volume.getVolumeId(), instance.getInstanceId(), "/dev/xvdf");
+        List<String> events = new CopyOnWriteArrayList<>();
+        CountDownLatch restoring = new CountDownLatch(1);
+        CountDownLatch detaching = new CountDownLatch(1);
+        when(blockDevices.attachVolume(any(), any(), anyString())).thenAnswer(invocation -> {
+            events.add("restore starts");
+            restoring.countDown();
+            detaching.await(1, TimeUnit.SECONDS);
+            events.add("restore ends");
+            return Optional.of("/dev/xvdf");
+        });
+        doAnswer(invocation -> {
+            events.add("detach");
+            detaching.countDown();
+            return null;
+        }).when(blockDevices).detachVolume(any(), any(), anyString());
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> restore = executor.submit(() -> service.restoreAttachedVolumesForInstance("us-east-1", instance));
+            assertTrue(restoring.await(5, TimeUnit.SECONDS));
+
+            service.detachVolume("us-east-1", volume.getVolumeId(), instance.getInstanceId(), "/dev/xvdf", false);
+            restore.get(5, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        assertEquals(List.of("restore starts", "restore ends", "detach"), events);
     }
 
     @Test
