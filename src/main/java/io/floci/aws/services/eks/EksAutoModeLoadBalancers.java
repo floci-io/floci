@@ -60,7 +60,7 @@ import java.util.regex.Pattern;
  * balancers serve TCP and HTTP only, and a Service with no TCP NodePort gets no load balancer.
  */
 @ApplicationScoped
-public class EksAutoModeLoadBalancers {
+public class EksAutoModeLoadBalancers implements EksAutoModeCleanup {
 
     private static final Logger LOG = Logger.getLogger(EksAutoModeLoadBalancers.class);
     static final String NLB_CLASS = "eks.amazonaws.com/nlb"; // partition-literal: a Kubernetes class name, not a host
@@ -163,6 +163,12 @@ public class EksAutoModeLoadBalancers {
     /** Deletes every load balancer made for {@code cluster}'s Services, with their listeners and target groups. */
     public void deleteLoadBalancers(Cluster cluster, String region) {
         loadBalancersOf(cluster, region).forEach((stack, lb) -> delete(cluster, region, stack, lb));
+    }
+
+    /** The cluster's load balancers go with it, as the controller's go on AWS. */
+    @Override
+    public void clusterDeleted(Cluster cluster, String region) {
+        deleteLoadBalancers(cluster, region);
     }
 
     /**

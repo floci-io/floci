@@ -450,14 +450,45 @@ Floci acts on the configuration as EKS does:
   `computeConfig.nodePools` names, as Auto Mode makes them: on-demand c, m and r instances of generation 5 and later,
   `amd64` (`system` also `arm64`, with a `CriticalAddonsOnly` `NoSchedule` taint), expiring after 336 hours. A pool
   `UpdateClusterConfig` drops is removed. The cluster's node carries Auto Mode's `eks.amazonaws.com/compute-type: auto`
-  label, so workloads that select Auto Mode nodes run on it.
+  label, so workloads that select Auto Mode nodes run on it. Pods it can't take get nodes of their own (see
+  [Auto Mode nodes](#auto-mode-nodes)).
 - **Block storage.** While it is on, claims of a StorageClass naming `ebs.csi.eks.amazonaws.com` are provisioned
   (see [Storage classes](#storage-classes)).
 - **Load balancing.** While it is on, Services get Network Load Balancers (see
   [Auto Mode load balancing for Services](#auto-mode-load-balancing-for-services)).
 
-Floci launches no nodes for the pools: workloads run on the cluster's k3s node.
 [#8914](https://github.com/floci-io/floci/issues/8914) plans the rest.
+
+### Auto Mode nodes
+
+While compute is on, a pod the scheduler can't place on any node, the cluster's own included, gets one, as Auto Mode
+launches nodes on AWS. Floci checks every 10 seconds.
+
+- **Pool.** The pod goes to the first NodePool, by `weight` then name, with an instance type the pool's requirements
+  allow, whose node the pod's `nodeSelector`, required node affinity and tolerations accept, and that fits its CPU and
+  memory requests. A requirement on a label Floci doesn't give its nodes (a GPU count, say) is left out. A pod one of
+  the pool's nodes has room for, joined or still joining, waits for the scheduler instead.
+- **Instance.** One node a pool and pass, of the smallest type in the instance type catalog with at least 2 vCPUs
+  that fits all of the pool's waiting pods, or else the largest of them. AWS picked a 2-vCPU `c6a.large` for a pod of
+  100m CPU. It is launched in the first subnet of the pool's NodeClass, with its security groups, the instance
+  profile `eks-<region>-<cluster>-<number>` (path `/eks/<region>/<cluster>/`) holding the NodeClass's role, and the
+  tags Auto Mode sets: `eks:eks-cluster-name`, `eks:kubernetes-node-pool-name`, `eks:kubernetes-node-class-name`,
+  `kubernetes.io/cluster/<cluster>: owned` and `aws:ec2:managed-launch: eks-auto`.
+- **Image.** The EKS optimized Amazon Linux 2023 image of the cluster's Kubernetes version and the node's
+  architecture, the one a managed node group of that version runs. AWS runs its own EKS Auto Mode image, which Floci
+  doesn't have. When the [image catalog](ec2.md) maps that image to one whose `kubeletRegistersNode` is on, pods
+  really run on the node. Otherwise the instance joins with the Ready node Floci registers for every joined
+  instance, and pods are scheduled to it but don't start.
+- **Node.** The instance joins the cluster through its EKS bootstrap user data (a nodeadm `NodeConfig`), as any
+  instance does, and then carries its pool's labels and taints: `karpenter.sh/nodepool`,
+  `eks.amazonaws.com/compute-type: auto`, `node.kubernetes.io/instance-type`, `karpenter.sh/capacity-type`, and the
+  `eks.amazonaws.com/instance-*` category, generation, family, size, CPU and memory labels.
+- **Removal.** Turning compute off terminates the cluster's Auto Mode instances and takes their nodes out of it.
+  Deleting the cluster terminates them and deletes the instance profiles made for it.
+
+On AWS, a node is named after its instance ID and is a managed instance a plain `DescribeInstances` doesn't list.
+In Floci it is named as other joined instances are, after its private DNS name, and `DescribeInstances` lists it.
+Floci makes no `NodeClaim` objects, and doesn't yet remove empty nodes.
 
 ### Auto Mode load balancing for Services
 

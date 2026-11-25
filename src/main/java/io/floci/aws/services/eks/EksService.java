@@ -131,7 +131,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private final EksPodIdentityAssociationService podIdentityAssociations;
     private final EksAddonService addons;
     /** Looked up when used: the reconciler depends on this service. */
-    private final jakarta.enterprise.inject.Instance<EksAutoModeLoadBalancers> autoModeLoadBalancers;
+    private final jakarta.enterprise.inject.Instance<EksAutoModeCleanup> autoModeCleanups;
     private final AutoScalingService autoScaling;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, UserDataClaim> appliedClusterUserData = new ConcurrentHashMap<>();
@@ -152,7 +152,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             EksOidcService oidcService, EksAccessEntryService accessEntries,
             EksPodIdentityAssociationService podIdentityAssociations,
             EksAddonService addons, AutoScalingService autoScaling,
-            jakarta.enterprise.inject.Instance<EksAutoModeLoadBalancers> autoModeLoadBalancers) {
+            jakarta.enterprise.inject.Instance<EksAutoModeCleanup> autoModeCleanups) {
         this.storage = storageFactory.create("eks", "eks-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {
                 });
@@ -173,7 +173,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         this.podIdentityAssociations = podIdentityAssociations;
         this.addons = addons;
         this.autoScaling = autoScaling;
-        this.autoModeLoadBalancers = autoModeLoadBalancers;
+        this.autoModeCleanups = autoModeCleanups;
         if (this.clusterManager != null) {
             this.clusterManager.setEc2Service(this.ec2Service);
         }
@@ -1800,7 +1800,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             endClusterNodeInstance(cluster);
             deleteClusterSecurityGroup(cluster);
             deleteNodeGroupAutoScalingGroups(cluster.getAccountId(), cluster);
-            deleteAutoModeLoadBalancers(cluster);
+            deleteAutoModeResources(cluster);
             if (podIdentityAssociations != null) {
                 podIdentityAssociations.deleteClusterAssociations(cluster);
             }
@@ -1824,12 +1824,22 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
     }
 
-    /** The cluster's EKS Auto Mode load balancers go with it, as the controller's go on AWS. */
-    private void deleteAutoModeLoadBalancers(Cluster cluster) {
-        if (autoModeLoadBalancers != null && autoModeLoadBalancers.isResolvable()) {
-            String region = clusterRegion(cluster);
-            RequestScopes.runAs(cluster.getAccountId(), region,
-                    () -> autoModeLoadBalancers.get().deleteLoadBalancers(cluster, region));
+    /**
+     * What the cluster's EKS Auto Mode capabilities made outside it go with it, as on AWS: the load balancers, and
+     * the compute capability's instances and instance profiles.
+     */
+    private void deleteAutoModeResources(Cluster cluster) {
+        if (autoModeCleanups == null) {
+            return;
+        }
+        String region = clusterRegion(cluster);
+        for (EksAutoModeCleanup cleanup : autoModeCleanups) {
+            try {
+                RequestScopes.runAs(cluster.getAccountId(), region, () -> cleanup.clusterDeleted(cluster, region));
+            } catch (RuntimeException e) {
+                LOG.warnv("EKS Auto Mode resources of cluster {0} were not all deleted: {1}", cluster.getName(),
+                        e.getMessage());
+            }
         }
     }
 

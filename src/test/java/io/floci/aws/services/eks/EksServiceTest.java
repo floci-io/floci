@@ -806,20 +806,22 @@ class EksServiceTest {
         verify(clusterManager, never()).detachCluster(any(Cluster.class));
     }
 
+    /** Each Auto Mode capability's own resources go with the cluster, even when another's cleanup fails. */
     @Test
-    void aDeletedClustersAutoModeLoadBalancersGoWithIt() {
+    void aDeletedClustersAutoModeResourcesGoWithIt() {
         Cluster cluster = activeCluster();
-        EksAutoModeLoadBalancers loadBalancers = mock(EksAutoModeLoadBalancers.class);
+        EksAutoModeCleanup loadBalancers = mock(EksAutoModeCleanup.class);
+        EksAutoModeCleanup compute = mock(EksAutoModeCleanup.class);
+        doThrow(new IllegalStateException("ELBv2 refused")).when(loadBalancers).clusterDeleted(any(), any());
         @SuppressWarnings("unchecked")
-        jakarta.enterprise.inject.Instance<EksAutoModeLoadBalancers> lookup =
-                mock(jakarta.enterprise.inject.Instance.class);
-        when(lookup.isResolvable()).thenReturn(true);
-        when(lookup.get()).thenReturn(loadBalancers);
+        jakarta.enterprise.inject.Instance<EksAutoModeCleanup> lookup = mock(jakarta.enterprise.inject.Instance.class);
+        when(lookup.iterator()).thenAnswer(inv -> List.of(loadBalancers, compute).iterator());
         EksService service = serviceWithCluster(cluster, mock(EksClusterManager.class), false, lookup);
 
         service.deleteCluster("running-cluster");
 
-        verify(loadBalancers).deleteLoadBalancers(cluster, service.clusterRegion(cluster));
+        verify(loadBalancers).clusterDeleted(cluster, service.clusterRegion(cluster));
+        verify(compute).clusterDeleted(cluster, service.clusterRegion(cluster));
     }
 
     @Test
@@ -918,7 +920,7 @@ class EksServiceTest {
 
     private EksService serviceWithCluster(Cluster cluster, EksClusterManager clusterManager,
             boolean keepRunningOnShutdown,
-            jakarta.enterprise.inject.Instance<EksAutoModeLoadBalancers> autoModeLoadBalancers) {
+            jakarta.enterprise.inject.Instance<EksAutoModeCleanup> autoModeCleanups) {
         AccountAwareStorageBackend<Cluster> clusterStore =
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
         clusterStore.putForAccount("000000000000", EksService.clusterKey(
@@ -927,7 +929,7 @@ class EksServiceTest {
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
                         new ObjectMapper()), mock(EksAccessEntryService.class), null, null, null,
-                autoModeLoadBalancers);
+                autoModeCleanups);
     }
 
     private StorageFactory fixedStorageFactory(StorageBackend<String, ?> backend) {
