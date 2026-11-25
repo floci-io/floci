@@ -838,6 +838,7 @@
       "metric-stream": "arn:${Partition}:cloudwatch:${Region}:${Account}:metric-stream/${MetricStreamName}",
       "omni-agent-asset": "arn:${Partition}:cloudwatch:${Region}:${Account}:omni-agent-asset/${AssetId}",
       "omni-dashboard": "arn:${Partition}:cloudwatch:${Region}:${Account}:omni-dashboard/${DashboardId}",
+      "omni-slo": "arn:${Partition}:cloudwatch:${Region}:${Account}:omni-slo/${SloId}",
       "organization-access-grant": "arn:${Partition}:cloudwatch:${Region}:${Account}:organization-access-grant/${GrantId}",
       "organization-domain": "arn:${Partition}:cloudwatch:${Region}:${Account}:organization-domain/${DomainId}",
       "service": "arn:${Partition}:cloudwatch:${Region}:${Account}:service/${ServiceName}-${UniqueAttributesHex}",
@@ -2248,6 +2249,9 @@
         "aws:ResourceTag/"
       ],
       "omni-dashboard": [
+        "aws:ResourceTag/"
+      ],
+      "omni-slo": [
         "aws:ResourceTag/"
       ],
       "organization-access-grant": [
@@ -29250,6 +29254,7 @@
         "insight-rule",
         "metric-query-definition",
         "metric-stream",
+        "omni-slo",
         "service",
         "slo"
       ],
@@ -29263,6 +29268,7 @@
             "insight-rule",
             "metric-query-definition",
             "metric-stream",
+            "omni-slo",
             "service",
             "slo"
           ],
@@ -29544,6 +29550,7 @@
         "insight-rule",
         "metric-query-definition",
         "metric-stream",
+        "omni-slo",
         "service",
         "slo"
       ],
@@ -29557,6 +29564,7 @@
             "insight-rule",
             "metric-query-definition",
             "metric-stream",
+            "omni-slo",
             "service",
             "slo"
           ],
@@ -29574,6 +29582,7 @@
         "insight-rule",
         "metric-query-definition",
         "metric-stream",
+        "omni-slo",
         "service",
         "slo"
       ],
@@ -29587,6 +29596,7 @@
             "insight-rule",
             "metric-query-definition",
             "metric-stream",
+            "omni-slo",
             "service",
             "slo"
           ],
