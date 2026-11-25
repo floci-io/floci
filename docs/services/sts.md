@@ -621,7 +621,19 @@ When the token's `iss` names a known Floci issuer, all of the following are enfo
 
 The response carries the token's real claims in `SubjectFromWebIdentityToken`, `Provider`, and `Audience`. A bad token returns `InvalidIdentityToken` (400), an expired one returns `ExpiredTokenException` (400), and a role that does not exist or a trust policy that does not permit the subject returns `AccessDenied` (403).
 
-By default, tokens from an issuer Floci does not host, or tokens that are not parseable JWTs, are treated as opaque and accepted for compatibility with existing workflows, provided the target role exists in IAM. When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, those tokens return `InvalidIdentityToken` because Floci cannot verify a third-party provider's signature. See [EKS](eks.md) for the full IRSA walkthrough and the token-minting endpoint.
+By default, tokens from an issuer Floci does not host, or tokens that are not parseable JWTs, are treated as opaque and accepted for compatibility with existing workflows, provided the target role exists in IAM. See [EKS](eks.md) for the full IRSA walkthrough and the token-minting endpoint.
+
+### Issuers registered in IAM
+
+When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, a token from an issuer Floci does not host is verified when the role's account registered that issuer with `CreateOpenIDConnectProvider`, as IAM verifies it (a self-hosted provider, a SPIFFE/SPIRE OIDC discovery provider, a CI system):
+
+- Floci reads `<issuer>/.well-known/openid-configuration`, fetches the key set at its `jwks_uri`, and verifies the signature with the key named by the token's `kid`. The key set is cached for 10 minutes and fetched again when a token names a key it does not hold.
+- `aud` must hold one of the provider's client IDs, and `Audience` in the response is that client ID. The other checks are the ones listed above.
+- When the key set cannot be fetched, or it holds no key with the token's `kid`, the call returns `InvalidIdentityToken` (400) with "Couldn't retrieve verification key from your identity provider, please reference AssumeRoleWithWebIdentity documentation for requirements". A token with no `kid` also returns `InvalidIdentityToken`.
+- Only an `https://` issuer matches a provider, as IAM accepts only `https://` provider URLs.
+- The issuer is fetched as API Gateway fetches a JWT authorizer's issuer: over HTTPS, trusting the JVM's roots and the CAs Floci trusts for its own outbound HTTPS, and refusing a private or local address unless `FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS=true`. The provider's thumbprints are not compared.
+
+A token from an issuer that is neither hosted by Floci nor registered in the role's account returns `InvalidIdentityToken`. With enforcement off, Floci fetches nothing and accepts such tokens as described above.
 
 ## Examples
 

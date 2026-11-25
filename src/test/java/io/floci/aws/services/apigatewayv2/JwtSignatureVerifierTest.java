@@ -110,6 +110,18 @@ class JwtSignatureVerifierTest {
     }
 
     @Test
+    void signingKeyIsThePublishedKeyWithTheTokensKid() throws Exception {
+        Optional<RSAPublicKey> key = verifier.signingKey(issuer, "test-key-1");
+
+        assertEquals(publicKey.getModulus(), key.orElseThrow().getModulus());
+    }
+
+    @Test
+    void signingKeyIsEmptyWhenNoPublishedKeyHasTheKid() throws Exception {
+        assertTrue(verifier.signingKey(issuer, "unknown-kid").isEmpty());
+    }
+
+    @Test
     void rejectsATokenSignedWithADifferentKey() throws Exception {
         KeyPairGenerator gen = KeyPairGenerator.getInstance("RSA");
         gen.initialize(2048);

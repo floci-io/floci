@@ -7,6 +7,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.WebIdentityToken;
 import io.floci.aws.core.common.WebIdentityTokenVerifier;
+import io.floci.aws.services.apigatewayv2.JwtSignatureVerifier;
 import io.floci.aws.services.iam.model.DelegationRequest;
 import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.iam.model.OutboundWebIdentityFederation;
@@ -122,6 +123,7 @@ class StsQueryHandlerTest {
                 mock(WebIdentityTrustPolicyEvaluator.class),
                 mock(WebIdentityTokenVerifier.class),
                 mock(OidcIssuerKeyLookup.class),
+                mock(JwtSignatureVerifier.class),
                 mock(SAMLProviderService.class),
                 mock(SAMLTrustPolicyEvaluator.class),
                 delegation,
@@ -1131,7 +1133,7 @@ class StsQueryHandlerTest {
         when(iamService.findRole("000000000000", "web-role")).thenReturn(Optional.of(role));
         WebIdentityTokenVerifier verifier = mock(WebIdentityTokenVerifier.class);
         when(verifier.peekIssuer("jwt0")).thenReturn(Optional.of(issuer));
-        when(verifier.verify(eq("jwt0"), any(), eq(issuer), anyString()))
+        when(verifier.verify(eq("jwt0"), any(), eq(issuer), anyList()))
                 .thenReturn(new WebIdentityToken(issuer, "system:serviceaccount:default:app",
                         List.of("sts.amazonaws.com"), Map.of("Project", "atlas"),
                         List.of("Project")));
@@ -1145,7 +1147,7 @@ class StsQueryHandlerTest {
 
         StsQueryHandler handler = new StsQueryHandler(iamService, mock(AccountResolver.class),
                 new RegionResolver(REGION, "000000000000"), config, mock(AssumeRolePolicyEvaluator.class),
-                trust, verifier, keys, mock(SAMLProviderService.class), mock(SAMLTrustPolicyEvaluator.class),
+                trust, verifier, keys, mock(JwtSignatureVerifier.class), mock(SAMLProviderService.class), mock(SAMLTrustPolicyEvaluator.class),
                 mock(DelegationRequestService.class), mock(CentralRootAccess.class),
                 mock(WebIdentityTokenIssuer.class), new RequestContext());
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();

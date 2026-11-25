@@ -83,6 +83,19 @@ public class WebIdentityTokenVerifier {
     }
 
     /**
+     * Reads the {@code kid} header without verifying the signature: the id of the issuer's key the
+     * token names as its signer. Empty when {@code token} is not a JWT or names none.
+     */
+    public Optional<String> peekKeyId(String token) {
+        String[] parts = token == null ? new String[0] : token.split("\\.", -1);
+        if (parts.length != 3) {
+            return Optional.empty();
+        }
+        return decodeJson(parts[0]).map(header -> header.path("kid").asText(null))
+                .filter(kid -> kid != null && !kid.isBlank());
+    }
+
+    /**
      * Fully verifies {@code token}: RS256 signature against {@code publicKey}, {@code iss} equal to
      * {@code expectedIssuer}, {@code aud} containing {@code requiredAudience}, and {@code exp}/
      * {@code nbf} within {@link #CLOCK_SKEW_SECONDS}.
@@ -91,6 +104,15 @@ public class WebIdentityTokenVerifier {
      */
     public WebIdentityToken verify(String token, RSAPublicKey publicKey, String expectedIssuer,
                                    String requiredAudience) throws InvalidTokenException {
+        return verify(token, publicKey, expectedIssuer, List.of(requiredAudience));
+    }
+
+    /**
+     * As {@link #verify(String, RSAPublicKey, String, String)}, with {@code aud} holding at least one
+     * of {@code acceptedAudiences}, the client IDs an IAM OIDC provider lists.
+     */
+    public WebIdentityToken verify(String token, RSAPublicKey publicKey, String expectedIssuer,
+                                   List<String> acceptedAudiences) throws InvalidTokenException {
         // Limit -1 keeps trailing empty segments, so an unsigned "header.payload." token is seen as
         // three parts and rejected by the algorithm check below rather than as malformed.
         String[] parts = token == null ? new String[0] : token.split("\\.", -1);
@@ -120,9 +142,9 @@ public class WebIdentityTokenVerifier {
         }
 
         List<String> audiences = readAudiences(claims);
-        if (!audiences.contains(requiredAudience)) {
+        if (audiences.stream().noneMatch(acceptedAudiences::contains)) {
             throw new InvalidTokenException("The web identity token audience does not include "
-                    + requiredAudience);
+                    + String.join(" or ", acceptedAudiences));
         }
 
         verifyValidityWindow(claims);
