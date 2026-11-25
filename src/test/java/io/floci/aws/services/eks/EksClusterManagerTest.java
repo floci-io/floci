@@ -4566,6 +4566,34 @@ class EksClusterManagerTest {
             assertFalse(manifest.contains("kind: NodePool\nmetadata"));
         }
 
+        @Test
+        void aClusterWithLoadBalancingGetsTheIngressClassParamsKindAndLosesItOnceItIsOff() throws Exception {
+            Cluster cluster = cluster();
+            KubernetesNetworkConfig network = new KubernetesNetworkConfig();
+            network.setElasticLoadBalancing(new ElasticLoadBalancing(true));
+            cluster.setKubernetesNetworkConfig(network);
+            Path localCopy = tempDir.resolve("auto-mode/000000000000/us-east-1/demo")
+                    .resolve(EksClusterManager.LOAD_BALANCING_MANIFEST_FILE);
+
+            manager.applyLoadBalancing("container-1", cluster);
+
+            assertEquals(manager.loadBalancingManifest(), Files.readString(localCopy));
+            assertTrue(manager.loadBalancingManifest().contains("name: ingressclassparams.eks.amazonaws.com"));
+
+            network.setElasticLoadBalancing(new ElasticLoadBalancing(false));
+            manager.applyLoadBalancing("container-1", cluster);
+
+            assertEquals(EksClusterManager.LOAD_BALANCING_MANIFEST_REMOVED, Files.readString(localCopy));
+            verify(dockerClient, Mockito.times(2)).copyArchiveToContainerCmd("container-1");
+        }
+
+        @Test
+        void aClusterThatNeverHadLoadBalancingGetsNoCopy() {
+            manager.applyLoadBalancing("container-1", cluster());
+
+            verify(dockerClient, never()).copyArchiveToContainerCmd(anyString());
+        }
+
         private Path blockStorageCopy() {
             return tempDir.resolve("auto-mode/000000000000/us-east-1/demo")
                     .resolve(EksClusterManager.BLOCK_STORAGE_MANIFEST_FILE);

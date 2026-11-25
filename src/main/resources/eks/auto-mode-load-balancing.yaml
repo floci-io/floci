@@ -1,0 +1,44 @@
+# EKS Auto Mode load balancing on a Floci cluster: the IngressClassParams kind an IngressClass for
+# eks.amazonaws.com/alb names, as Auto Mode installs it. Floci reads scheme, subnets.ids and targetType;
+# the other fields are kept as given.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: ingressclassparams.eks.amazonaws.com
+  labels:
+    app.kubernetes.io/managed-by: floci
+spec:
+  group: eks.amazonaws.com
+  scope: Cluster
+  names:
+    kind: IngressClassParams
+    listKind: IngressClassParamsList
+    plural: ingressclassparams
+    singular: ingressclassparams
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+            properties:
+              scheme:
+                type: string
+                enum: ["internal", "internet-facing"]
+              targetType:
+                type: string
+                enum: ["instance", "ip"]
+              subnets:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+                properties:
+                  ids:
+                    type: array
+                    items:
+                      type: string
+                      pattern: "^subnet-[0-9a-f]+$"

@@ -168,15 +168,97 @@ class EksAutoModeNlbDockerNightlyIntegrationTest {
                 "-o", "name"));
     }
 
+    @Test
+    void anIngressOfAnAlbClassGetsAnApplicationLoadBalancerRoutingToItsServicesNodePort() {
+        cluster = clusterInAVpc("alb-", "10.63", true);
+        EksTestNode node = EksTestNode.start(dockerClient, eksClusterManager, cluster, Duration.ofSeconds(90));
+        // The IngressClassParams kind Floci installs with load balancing, as Auto Mode does.
+        await("IngressClassParams kind").atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(2))
+                .until(() -> node.kubectl("get", "crd", "ingressclassparams.eks.amazonaws.com").exitCode() == 0);
+        node.apply("""
+                apiVersion: eks.amazonaws.com/v1
+                kind: IngressClassParams
+                metadata:
+                  name: alb
+                spec:
+                  scheme: internet-facing
+                ---
+                apiVersion: networking.k8s.io/v1
+                kind: IngressClass
+                metadata:
+                  name: alb
+                spec:
+                  controller: eks.amazonaws.com/alb
+                  parameters:
+                    apiGroup: eks.amazonaws.com
+                    kind: IngressClassParams
+                    name: alb
+                ---
+                apiVersion: v1
+                kind: Service
+                metadata:
+                  name: shop
+                  namespace: default
+                spec:
+                  type: NodePort
+                  selector:
+                    app: shop
+                  ports:
+                  - port: 80
+                    targetPort: 8080
+                ---
+                apiVersion: networking.k8s.io/v1
+                kind: Ingress
+                metadata:
+                  name: shop
+                  namespace: default
+                spec:
+                  ingressClassName: alb
+                  rules:
+                  - http:
+                      paths:
+                      - path: /
+                        pathType: Prefix
+                        backend:
+                          service:
+                            name: shop
+                            port:
+                              number: 80""");
+        int nodePort = Integer.parseInt(node.kubectlOutput("get", "service", "shop", "-n", "default",
+                "-o", "jsonpath={.spec.ports[0].nodePort}"));
+
+        RequestScopes.runAs(ACCOUNT, REGION, () -> loadBalancers.reconcile(cluster, REGION));
+
+        LoadBalancer lb = RequestScopes.callAs(ACCOUNT, REGION, () -> elb.describeLoadBalancers(REGION, null, null,
+                null, null)).stream().filter(found -> "application".equals(found.getType())).findFirst().orElseThrow();
+        assertEquals("internet-facing", lb.getScheme());
+        List<TargetGroup> groups = RequestScopes.callAs(ACCOUNT, REGION, () -> {
+            List<TargetGroup> all = elb.describeTargetGroups(REGION, null, null, null);
+            Map<String, Map<String, String>> tags = elb.describeTags(all.stream().map(TargetGroup::getTargetGroupArn).toList());
+            return all.stream().filter(group -> "default/shop".equals(tags.get(group.getTargetGroupArn())
+                    .get(EksAutoModeIngresses.STACK_TAG))).toList();
+        });
+        assertEquals(List.of(nodePort), groups.stream().map(TargetGroup::getPort).toList());
+        String listener = RequestScopes.callAs(ACCOUNT, REGION,
+                () -> elb.describeListeners(REGION, lb.getLoadBalancerArn(), null)).getFirst().getListenerArn();
+        assertEquals(List.of("/*"), RequestScopes.callAs(ACCOUNT, REGION, () -> elb.describeRules(REGION, listener, null))
+                .stream().filter(rule -> !"default".equals(rule.getPriority())).findFirst().orElseThrow()
+                .getConditions().getFirst().getValues());
+        assertEquals(lb.getDnsName(), node.kubectlOutput("get", "ingress", "shop", "-n", "default",
+                "-o", "jsonpath={.status.loadBalancer.ingress[0].hostname}"));
+    }
+
     /** A cluster with a VPC and subnet of its own, with EKS Auto Mode load balancing on or not. */
     private Cluster clusterInAVpc(String prefix, String cidr, boolean loadBalancing) {
         Cluster created = EksTestNode.cluster(ACCOUNT, prefix + UUID.randomUUID().toString().substring(0, 8));
         RequestScopes.runAs(ACCOUNT, REGION, () -> {
             String vpc = ec2.createVpc(REGION, cidr + ".0.0/16", false).getVpcId();
+            // Two subnets in two zones, as an Application Load Balancer needs.
             String subnet = ec2.createSubnet(REGION, vpc, cidr + ".1.0/24", "us-east-1a").getSubnetId();
+            String other = ec2.createSubnet(REGION, vpc, cidr + ".2.0/24", "us-east-1b").getSubnetId();
             ResourcesVpcConfig network = new ResourcesVpcConfig();
             network.setVpcId(vpc);
-            network.setSubnetIds(List.of(subnet));
+            network.setSubnetIds(List.of(subnet, other));
             created.setResourcesVpcConfig(network);
         });
         if (loadBalancing) {
@@ -194,6 +276,6 @@ class EksAutoModeNlbDockerNightlyIntegrationTest {
         }
         Map<String, Map<String, String>> tags = elb.describeTags(all.stream().map(LoadBalancer::getLoadBalancerArn).toList());
         return all.stream().filter(lb -> clusterName.equals(
-                tags.getOrDefault(lb.getLoadBalancerArn(), Map.of()).get(EksAutoModeLoadBalancers.CLUSTER_TAG))).toList();
+                tags.getOrDefault(lb.getLoadBalancerArn(), Map.of()).get(EksAutoModeElb.CLUSTER_TAG))).toList();
     }
 }

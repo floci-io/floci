@@ -121,9 +121,9 @@ class EksAutoModeLoadBalancersTest {
     void namesFitElbV2KeepTheirPortAndDifferBetweenClustersAndPorts() {
         String stack = "a-very-long-namespace/a-very-long-service-name";
 
-        String name = EksAutoModeLoadBalancers.resourceName(cluster("prod"), stack, "");
-        String port = EksAutoModeLoadBalancers.resourceName(cluster("prod"), stack, "-65535");
-        String other = EksAutoModeLoadBalancers.resourceName(cluster("dev"), stack, "");
+        String name = EksAutoModeElb.resourceName(cluster("prod"), stack, "");
+        String port = EksAutoModeElb.resourceName(cluster("prod"), stack, "-65535");
+        String other = EksAutoModeElb.resourceName(cluster("dev"), stack, "");
 
         for (String each : List.of(name, port, other)) {
             assertTrue(each.length() <= 32 && each.matches("[A-Za-z0-9-]+") && !each.endsWith("-"), each);
@@ -142,13 +142,13 @@ class EksAutoModeLoadBalancersTest {
 
         loadBalancers.reconcile(cluster, REGION);
 
-        Map<String, String> serviceTags = Map.of(EksAutoModeLoadBalancers.CLUSTER_TAG, "prod",
+        Map<String, String> serviceTags = Map.of(EksAutoModeElb.CLUSTER_TAG, "prod",
                 EksAutoModeLoadBalancers.STACK_TAG, "shop/web");
-        verify(elb).createLoadBalancer(eq(REGION), eq(EksAutoModeLoadBalancers.resourceName(cluster, "shop/web", "")),
+        verify(elb).createLoadBalancer(eq(REGION), eq(EksAutoModeElb.resourceName(cluster, "shop/web", "")),
                 eq("internet-facing"), eq("network"), eq("ipv4"), eq(List.of("subnet-a", "subnet-b")), eq(List.of()),
                 eq(serviceTags));
         // A TCP health check: ELBv2's default would probe the NodePort with HTTP.
-        verify(elb).createTargetGroup(eq(REGION), eq(EksAutoModeLoadBalancers.resourceName(cluster, "shop/web", "-80")),
+        verify(elb).createTargetGroup(eq(REGION), eq(EksAutoModeElb.resourceName(cluster, "shop/web", "-80")),
                 eq("TCP"), isNull(), eq(31080), eq("vpc-1"), eq("instance"), eq("TCP"), isNull(), isNull(), isNull(),
                 isNull(), isNull(), isNull(), isNull(), isNull(), eq("ipv4"), eq(serviceTags));
         verify(elb).registerTargets(eq(REGION), eq(groups.getFirst().getTargetGroupArn()),
@@ -302,24 +302,24 @@ class EksAutoModeLoadBalancersTest {
                 anyList(), any())).thenAnswer(inv -> {
                     Map<String, String> made = inv.getArgument(7);
                     return loadBalancer("arn:lb-" + (lbs.size() + 1), inv.getArgument(1), "network",
-                            made.get(EksAutoModeLoadBalancers.CLUSTER_TAG), made.get(EksAutoModeLoadBalancers.STACK_TAG));
+                            made.get(EksAutoModeElb.CLUSTER_TAG), made.get(EksAutoModeLoadBalancers.STACK_TAG));
                 });
         when(elb.createTargetGroup(anyString(), anyString(), anyString(), any(), anyInt(), any(), anyString(), any(),
                 any(), any(), any(), any(), any(), any(), any(), any(), any(), any())).thenAnswer(inv -> {
                     Map<String, String> made = inv.getArgument(17);
                     return targetGroup("arn:tg-" + (groups.size() + 1), inv.getArgument(1), inv.getArgument(4),
-                            made.get(EksAutoModeLoadBalancers.CLUSTER_TAG), made.get(EksAutoModeLoadBalancers.STACK_TAG));
+                            made.get(EksAutoModeElb.CLUSTER_TAG), made.get(EksAutoModeLoadBalancers.STACK_TAG));
                 });
     }
 
     private LoadBalancer ownLoadBalancer(Cluster cluster, String stack) {
-        return loadBalancer("arn:own-" + stack, EksAutoModeLoadBalancers.resourceName(cluster, stack, ""), "network",
+        return loadBalancer("arn:own-" + stack, EksAutoModeElb.resourceName(cluster, stack, ""), "network",
                 cluster.getName(), stack);
     }
 
     private TargetGroup ownTargetGroup(Cluster cluster, String stack, int servicePort) {
         return targetGroup("arn:own-tg-" + stack + "-" + servicePort,
-                EksAutoModeLoadBalancers.resourceName(cluster, stack, "-" + servicePort), 31080, cluster.getName(), stack);
+                EksAutoModeElb.resourceName(cluster, stack, "-" + servicePort), 31080, cluster.getName(), stack);
     }
 
     private LoadBalancer loadBalancer(String arn, String name, String type, String clusterName, String stack) {
@@ -330,7 +330,7 @@ class EksAutoModeLoadBalancersTest {
         lb.setDnsName(arn.substring(arn.indexOf(':') + 1) + ".elb.test");
         lbs.add(lb);
         if (clusterName != null) {
-            tags.put(arn, Map.of(EksAutoModeLoadBalancers.CLUSTER_TAG, clusterName, EksAutoModeLoadBalancers.STACK_TAG,
+            tags.put(arn, Map.of(EksAutoModeElb.CLUSTER_TAG, clusterName, EksAutoModeLoadBalancers.STACK_TAG,
                     stack));
         }
         return lb;
@@ -343,7 +343,7 @@ class EksAutoModeLoadBalancersTest {
         group.setPort(port);
         group.setTargets(new ArrayList<TargetDescription>());
         groups.add(group);
-        tags.put(arn, Map.of(EksAutoModeLoadBalancers.CLUSTER_TAG, clusterName, EksAutoModeLoadBalancers.STACK_TAG,
+        tags.put(arn, Map.of(EksAutoModeElb.CLUSTER_TAG, clusterName, EksAutoModeLoadBalancers.STACK_TAG,
                 stack));
         return group;
     }
