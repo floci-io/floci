@@ -1051,10 +1051,23 @@ public class ElbV2QueryHandler {
             for (String v : c.getHostHeaderValues()) xml.start("member").raw(v).end("member");
             xml.end("Values").end("HostHeaderConfig");
         }
-        if (!c.getPathPatternValues().isEmpty()) {
-            xml.start("PathPatternConfig").start("Values");
-            for (String v : c.getPathPatternValues()) xml.start("member").raw(v).end("member");
-            xml.end("Values").end("PathPatternConfig");
+        if (!c.getPathPatternValues().isEmpty() || !c.getPathPatternRegexValues().isEmpty()) {
+            xml.start("PathPatternConfig");
+            if (!c.getPathPatternValues().isEmpty()) {
+                xml.start("Values");
+                for (String value : c.getPathPatternValues()) {
+                    xml.start("member").raw(value).end("member");
+                }
+                xml.end("Values");
+            }
+            if (!c.getPathPatternRegexValues().isEmpty()) {
+                xml.start("RegexValues");
+                for (String value : c.getPathPatternRegexValues()) {
+                    xml.elem("member", value);
+                }
+                xml.end("RegexValues");
+            }
+            xml.end("PathPatternConfig");
         }
         if (c.getHttpHeaderName() != null) {
             xml.start("HttpHeaderConfig")
@@ -1361,6 +1374,8 @@ public class ElbV2QueryHandler {
                 v++;
             }
             c.setValues(legacyValues);
+            String pathConfig = "Conditions.member." + i + ".PathPatternConfig.";
+            c.setPathPatternRegexValues(readMembers(p, pathConfig + "RegexValues.member."));
 
             switch (field) {
                 case "host-header" -> {
@@ -1376,16 +1391,12 @@ public class ElbV2QueryHandler {
                     else c.setHostHeaderValues(new ArrayList<>(legacyValues));
                 }
                 case "path-pattern" -> {
-                    List<String> vals = new ArrayList<>();
-                    int j = 1;
-                    while (true) {
-                        String val = p.getFirst("Conditions.member." + i + ".PathPatternConfig.Values.member." + j);
-                        if (val == null) break;
-                        vals.add(val);
-                        j++;
+                    List<String> vals = readMembers(p, pathConfig + "Values.member.");
+                    if (!vals.isEmpty()) {
+                        c.setPathPatternValues(vals);
+                    } else {
+                        c.setPathPatternValues(new ArrayList<>(legacyValues));
                     }
-                    if (!vals.isEmpty()) c.setPathPatternValues(vals);
-                    else c.setPathPatternValues(new ArrayList<>(legacyValues));
                 }
                 case "http-header" -> {
                     c.setHttpHeaderName(p.getFirst("Conditions.member." + i + ".HttpHeaderConfig.HttpHeaderName"));
@@ -1440,7 +1451,19 @@ public class ElbV2QueryHandler {
             result.add(c);
             i++;
         }
+        PathPatternRegexValues.validateConditions(result);
         return result;
+    }
+
+    private static List<String> readMembers(MultivaluedMap<String, String> parameters, String prefix) {
+        List<String> values = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String value = parameters.getFirst(prefix + i);
+            if (value == null) {
+                return values;
+            }
+            values.add(value);
+        }
     }
 
     private List<TargetDescription> parseTargets(MultivaluedMap<String, String> p) {
