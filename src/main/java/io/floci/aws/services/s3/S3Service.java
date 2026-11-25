@@ -6568,7 +6568,8 @@ public class S3Service implements Resettable, ResourceProvider {
             String algorithmName = algorithm == null ? null : algorithm.text();
             if (!"aws:kms".equals(algorithmName) && !"aws:kms:dsse".equals(algorithmName)) {
                 throw new AwsException("InvalidArgument",
-                        "KMSMasterKeyID is allowed only with an SSEAlgorithm of aws:kms or aws:kms:dsse.", 400);
+                        "a KMSMasterKeyID is not applicable if the default sse algorithm is not aws:kms or aws:kms:dsse",
+                        400);
             }
             if (key.text().chars().anyMatch(Character::isISOControl)) {
                 throw new AwsException("InvalidArgument", "The KMSMasterKeyID is not valid.", 400);
