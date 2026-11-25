@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -213,6 +214,44 @@ class EksAutoModeComputeTest {
         verify(ec2).terminateInstances(REGION, List.of("i-node"));
         verify(iam).removeRoleFromInstanceProfile("eks-us-east-1-prod-1", "auto-node");
         verify(iam).deleteInstanceProfile("eks-us-east-1-prod-1");
+    }
+
+    /**
+     * A joined node has the room its kubelet says is allocatable, which is less than its instance type when the
+     * kubelet reserves some: a pod that fits the type but not what the node offers gets another node.
+     */
+    @Test
+    void aJoinedNodeHasTheRoomItsKubeletSaysIsAllocatable() {
+        Instance joined = new Instance();
+        joined.setInstanceId("i-joined");
+        joined.setInstanceType("c7a.large");
+        joined.setLaunchTime(Instant.now());
+        joined.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(joined));
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenReturn(List.of(reservation));
+        when(clusterManager.deriveInstanceNodeName(any(), eq(REGION))).thenReturn("node-1");
+        CatalogInstanceType large = new CatalogInstanceType();
+        large.instanceType = "c7a.large";
+        large.vcpu = 2;
+        large.memoryMib = 4096;
+        large.supportedArchitectures = List.of("x86_64");
+        when(instanceTypes.find("c7a.large")).thenReturn(Optional.of(large));
+        Cluster cluster = cluster("prod");
+        String node = "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}, "
+                + "\"status\": {\"allocatable\": {\"cpu\": \"%s\", \"memory\": \"3Gi\", \"pods\": \"110\"}}}]}";
+
+        lists.put("nodes", node.formatted("1900m"));
+        compute.reconcile(cluster, REGION);
+        verify(ec2, never()).runInstances(anyString(), anyString(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                anyString(), anyString(), anyList(), anyString(), anyString(), any(), any(), anyInt(), any(), any(),
+                any(), anyString(), anyBoolean(), any(), any(), any(), anyBoolean(), any(), any());
+
+        lists.put("nodes", node.formatted("50m"));
+        compute.reconcile(cluster, REGION);
+        verify(ec2).runInstances(anyString(), anyString(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                anyString(), anyString(), anyList(), anyString(), anyString(), any(), any(), anyInt(), any(), any(),
+                any(), anyString(), anyBoolean(), any(), any(), any(), anyBoolean(), any(), any());
     }
 
     /**

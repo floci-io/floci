@@ -184,10 +184,16 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                         t.path("value").asText(""), t.path("effect").asText())));
             }
             boolean schedulable = node == null || !node.path("spec").path("unschedulable").asBoolean(false);
-            int podSlots = node == null ? EksAutoModeNodes.MAX_PODS
-                    : node.path("status").path("allocatable").path("pods").asInt(EksAutoModeNodes.MAX_PODS);
-            poolNodes.add(new EksAutoModeNodes.PoolNode(pool, type.get(), zone(instance), used[0], used[1],
-                    (int) Math.max(0, podSlots - used[2]), schedulable, List.copyOf(nodeTaints)));
+            // A joined node offers what its kubelet says is allocatable, less what it reserves; one joining, its
+            // instance type's whole size.
+            JsonNode allocatable = node == null ? MAPPER.createObjectNode() : node.path("status").path("allocatable");
+            long cpu = allocatable.hasNonNull("cpu") ? EksAutoModeNodes.cpuMillis(allocatable.path("cpu").asText())
+                    : type.get().vcpu * 1000L;
+            long memory = allocatable.hasNonNull("memory") ? EksAutoModeNodes.bytes(allocatable.path("memory").asText())
+                    : type.get().memoryMib * 1024L * 1024L;
+            int podSlots = allocatable.path("pods").asInt(EksAutoModeNodes.MAX_PODS);
+            poolNodes.add(new EksAutoModeNodes.PoolNode(pool, type.get(), zone(instance), cpu - used[0],
+                    memory - used[1], (int) Math.max(0, podSlots - used[2]), schedulable, List.copyOf(nodeTaints)));
         }
         if (!neverRegistered.isEmpty()) {
             // A node that never joins would hold its pods' room for good; it goes, and they get another.

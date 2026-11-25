@@ -128,12 +128,16 @@ final class EksAutoModeNodes {
      * A node Auto Mode launched for a pool, joined or still joining, with the CPU and memory its pods request: a
      * pending pod it has room for is left to the scheduler rather than given another node.
      */
-    record PoolNode(NodePool pool, CatalogInstanceType instanceType, String zone, long usedCpuMillis,
-                    long usedMemoryBytes, int freePods, boolean schedulable, List<Taint> nodeTaints) {
+    record PoolNode(NodePool pool, CatalogInstanceType instanceType, String zone, long freeCpuMillis,
+                    long freeMemoryBytes, int freePods, boolean schedulable, List<Taint> nodeTaints) {
 
-        /** A node still joining: schedulable, with all its pod slots free and no taints but its pool's. */
+        /**
+         * A node still joining, with its pods' requests: it has its instance type's whole CPU and memory, as no
+         * kubelet has said what it reserves yet, all its pod slots, and no taints but its pool's.
+         */
         PoolNode(NodePool pool, CatalogInstanceType instanceType, String zone, long usedCpuMillis, long usedMemoryBytes) {
-            this(pool, instanceType, zone, usedCpuMillis, usedMemoryBytes, MAX_PODS, true, List.of());
+            this(pool, instanceType, zone, instanceType.vcpu * 1000L - usedCpuMillis,
+                    instanceType.memoryMib * 1024L * 1024L - usedMemoryBytes, MAX_PODS, true, List.of());
         }
 
         /** The taints a pod must tolerate there: the pool's and any the node carries besides. */
@@ -258,8 +262,8 @@ final class EksAutoModeNodes {
         int[] freePods = new int[nodes.size()];
         for (int i = 0; i < nodes.size(); i++) {
             PoolNode node = nodes.get(i);
-            freeCpu[i] = node.instanceType().vcpu * 1000L - node.usedCpuMillis();
-            freeMemory[i] = node.instanceType().memoryMib * 1024L * 1024L - node.usedMemoryBytes();
+            freeCpu[i] = node.freeCpuMillis();
+            freeMemory[i] = node.freeMemoryBytes();
             freePods[i] = node.freePods();
         }
         List<PendingPod> left = new ArrayList<>();
@@ -398,8 +402,8 @@ final class EksAutoModeNodes {
     }
 
     /**
-     * A pod spec's CPU (millicores) and memory (bytes) requests as the scheduler counts them: its containers' sum,
-     * or its largest init container's when that is larger, plus the pod's overhead.
+     * A pod spec's CPU (millicores) and memory (bytes) requests as the scheduler counts them: its containers' and
+     * sidecars' sum, or what its init containers need at once when that is larger, plus the pod's overhead.
      */
     private static long[] requests(JsonNode spec) {
         long[] total = new long[2];
@@ -408,13 +412,24 @@ final class EksAutoModeNodes {
             total[0] += cpuMillis(requests.path("cpu").asText(""));
             total[1] += bytes(requests.path("memory").asText(""));
         }
+        // Init containers run in order. A sidecar (restartPolicy Always) keeps running from its start, alongside the
+        // init containers after it and the app's; any other one runs alone with the sidecars started before it.
+        long[] sidecars = new long[2];
+        long[] init = new long[2];
         for (JsonNode container : spec.path("initContainers")) {
             JsonNode requests = container.path("resources").path("requests");
-            total[0] = Math.max(total[0], cpuMillis(requests.path("cpu").asText("")));
-            total[1] = Math.max(total[1], bytes(requests.path("memory").asText("")));
+            long cpu = cpuMillis(requests.path("cpu").asText(""));
+            long memory = bytes(requests.path("memory").asText(""));
+            boolean sidecar = "Always".equals(container.path("restartPolicy").asText());
+            init[0] = Math.max(init[0], sidecars[0] + cpu);
+            init[1] = Math.max(init[1], sidecars[1] + memory);
+            if (sidecar) {
+                sidecars[0] += cpu;
+                sidecars[1] += memory;
+            }
         }
-        total[0] += cpuMillis(spec.path("overhead").path("cpu").asText(""));
-        total[1] += bytes(spec.path("overhead").path("memory").asText(""));
+        total[0] = Math.max(total[0] + sidecars[0], init[0]) + cpuMillis(spec.path("overhead").path("cpu").asText(""));
+        total[1] = Math.max(total[1] + sidecars[1], init[1]) + bytes(spec.path("overhead").path("memory").asText(""));
         return total;
     }
 

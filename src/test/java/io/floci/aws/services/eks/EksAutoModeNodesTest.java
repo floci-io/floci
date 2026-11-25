@@ -150,12 +150,12 @@ class EksAutoModeNodesTest {
         PendingPod small = pod("small", "100m", "64Mi");
 
         List<PendingPod> cordoned = EksAutoModeNodes.withoutRoom(List.of(small), List.of(
-                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 0, 0, 110, false, List.of())));
+                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 64_000, 1L << 40, 110, false, List.of())));
         List<PendingPod> tainted = EksAutoModeNodes.withoutRoom(List.of(small), List.of(
-                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 0, 0, 110, true,
+                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 64_000, 1L << 40, 110, true,
                         List.of(new EksAutoModeNodes.Taint("maintenance", "", "NoSchedule")))));
         List<PendingPod> preferOnly = EksAutoModeNodes.withoutRoom(List.of(small), List.of(
-                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 0, 0, 110, true,
+                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 64_000, 1L << 40, 110, true,
                         List.of(new EksAutoModeNodes.Taint("busy", "", "PreferNoSchedule")))));
 
         assertEquals(List.of(small), cordoned);
@@ -171,12 +171,30 @@ class EksAutoModeNodesTest {
         PendingPod second = pod("second", "100m", "64Mi");
 
         List<PendingPod> full = EksAutoModeNodes.withoutRoom(List.of(first), List.of(
-                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 0, 0, 0, true, List.of())));
+                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 64_000, 1L << 40, 0, true, List.of())));
         List<PendingPod> oneSlot = EksAutoModeNodes.withoutRoom(List.of(first, second), List.of(
-                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 0, 0, 1, true, List.of())));
+                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 64_000, 1L << 40, 1, true, List.of())));
 
         assertEquals(List.of(first), full);
         assertEquals(List.of(second), oneSlot);
+    }
+
+    /** A joined node's room is what it offers, its allocatable CPU and memory less its pods', not its type's size. */
+    @Test
+    void aNodeHasOnlyTheRoomItOffers() throws Exception {
+        NodePool general = pools().getFirst();
+        PendingPod pod = pod("web", "500m", "64Mi");
+
+        List<PendingPod> tooLittleCpu = EksAutoModeNodes.withoutRoom(List.of(pod), List.of(
+                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 400, 1L << 30, 110, true, List.of())));
+        List<PendingPod> tooLittleMemory = EksAutoModeNodes.withoutRoom(List.of(pod), List.of(
+                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 1000, 32L << 20, 110, true, List.of())));
+        List<PendingPod> enough = EksAutoModeNodes.withoutRoom(List.of(pod), List.of(
+                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 500, 64L << 20, 110, true, List.of())));
+
+        assertEquals(List.of(pod), tooLittleCpu);
+        assertEquals(List.of(pod), tooLittleMemory);
+        assertEquals(List.of(), enough);
     }
 
     @Test
@@ -287,6 +305,28 @@ class EksAutoModeNodesTest {
 
         assertEquals(1050, pod.cpuMillis());
         assertEquals(144L << 20, pod.memoryBytes());
+    }
+
+    /**
+     * A sidecar, an init container with {@code restartPolicy: Always}, keeps running: its requests add to the app's,
+     * and to those of each init container after it, as the scheduler counts them.
+     */
+    @Test
+    void sidecarsAddToTheContainersAndToTheInitContainersAfterThem() throws Exception {
+        String pods = """
+                {"items": [{"metadata": {"namespace": "default", "name": "p"},
+                  "spec": {"containers": [{"resources": {"requests": {"cpu": "1500m", "memory": "64Mi"}}}],
+                           "initContainers": [
+                             {"restartPolicy": "Always", "resources": {"requests": {"cpu": "1", "memory": "32Mi"}}},
+                             {"resources": {"requests": {"cpu": "100m", "memory": "512Mi"}}}]},
+                  "status": {"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "False",
+                             "reason": "Unschedulable"}]}}]}""";
+
+        PendingPod pod = EksAutoModeNodes.unschedulablePods(json(pods)).getFirst();
+
+        // CPU: the app and the sidecar, 1500m + 1. Memory: the second init container beside the sidecar, 512Mi + 32Mi.
+        assertEquals(2500, pod.cpuMillis());
+        assertEquals(544L << 20, pod.memoryBytes());
     }
 
     /**
