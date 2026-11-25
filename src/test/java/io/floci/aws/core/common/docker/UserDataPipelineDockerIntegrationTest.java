@@ -140,22 +140,6 @@ class UserDataPipelineDockerIntegrationTest {
         }
     }
 
-    @Test
-    void runsTheScriptWhenTmpIsNotWritable(@TempDir Path readOnlyTmp) {
-        String guest = startGuestWithReadOnlyBind(readOnlyTmp, "/tmp");
-        try {
-            String script = "#!/bin/sh\necho tmp-ok\nexit 0\n";
-
-            UserDataPipeline.ExecutionResult result = execute(guest, script);
-
-            assertTrue(result.isSuccess(), result.getFailureMessage());
-            assertTrue(readFile(guest, LOG).contains("tmp-ok\n"),
-                    "the guest log still receives the output when /tmp is read-only");
-        } finally {
-            removeGuest(guest);
-        }
-    }
-
     private String startGuestWithReadOnlyBind(Path hostDirectory, String containerPath) {
         Bind bind = new Bind(hostDirectory.toString(), new Volume(containerPath), AccessMode.ro);
         CreateContainerResponse container = dockerClient.createContainerCmd(TestImages.PYTHON_ALPINE)

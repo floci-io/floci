@@ -88,6 +88,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -1908,7 +1909,8 @@ class Ec2ContainerManagerTest {
         verify(harness.builder).withReadOnlyBind("/lib/modules/6.8.0-test", "/lib/modules/6.8.0-test");
         verify(harness.builder, never()).withReadOnlyBind(eq("/lib/modules"), anyString());
         // User data runs after the sshd step, so once it has started that step is settled.
-        awaitUntil(() -> userDataCommandIndex(harness.executedCommands) >= 0, Duration.ofSeconds(2));
+        awaitUntil(() -> commandIndex(harness.executedCommands, Ec2ContainerManagerTest::isUserDataCommand) >= 0,
+                Duration.ofSeconds(2));
         assertEquals(-1, commandIndex(harness.executedCommands, "/usr/sbin/sshd"),
                 "a systemd guest's init starts sshd; Floci must not start a second one");
         verify(harness.lifecycleManager).create(any(ContainerSpec.class), eq("linux/arm64"));
@@ -2521,7 +2523,8 @@ class Ec2ContainerManagerTest {
         harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
 
         // UserData is the next step after sshd, so its exec marks sshd startup as finished.
-        awaitUntil(() -> userDataCommandIndex(harness.executedCommands) >= 0, Duration.ofSeconds(2));
+        awaitUntil(() -> commandIndex(harness.executedCommands, Ec2ContainerManagerTest::isUserDataCommand) >= 0,
+                Duration.ofSeconds(2));
         assertEquals(-1, commandIndex(harness.executedCommands, "/usr/local/sbin/sshd"));
     }
 
@@ -2957,17 +2960,12 @@ class Ec2ContainerManagerTest {
      * Index of the first exec matching {@code expected} exactly, or -1 when it was never run.
      */
     private static int commandIndex(List<String[]> executedCommands, String... expected) {
-        for (int i = 0; i < executedCommands.size(); i++) {
-            if (Arrays.equals(executedCommands.get(i), expected)) {
-                return i;
-            }
-        }
-        return -1;
+        return commandIndex(executedCommands, command -> Arrays.equals(command, expected));
     }
 
-    private static int userDataCommandIndex(List<String[]> executedCommands) {
+    private static int commandIndex(List<String[]> executedCommands, Predicate<String[]> predicate) {
         for (int i = 0; i < executedCommands.size(); i++) {
-            if (isUserDataCommand(executedCommands.get(i))) {
+            if (predicate.test(executedCommands.get(i))) {
                 return i;
             }
         }
