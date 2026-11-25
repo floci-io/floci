@@ -11,12 +11,14 @@ import io.floci.aws.services.cloudfront.model.CloudFrontFunction;
 import io.floci.aws.services.cloudfront.model.ConnectionGroup;
 import io.floci.aws.services.cloudfront.model.Distribution;
 import io.floci.aws.services.cloudfront.model.DistributionConfig;
+import io.floci.aws.services.cloudfront.model.DistributionTenant;
 import io.floci.aws.services.cloudfront.model.KeyGroup;
 import io.floci.aws.services.cloudfront.model.Origin;
 import io.floci.aws.services.cloudfront.model.OriginAccessControl;
 import io.floci.aws.services.cloudfront.model.OriginRequestPolicy;
 import io.floci.aws.services.cloudfront.model.PublicKey;
 import io.floci.aws.services.cloudfront.model.ResponseHeadersPolicy;
+import io.floci.aws.services.cloudfront.model.TenantCustomizations;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
@@ -62,6 +64,7 @@ class CloudFrontCfnProvisionerTest {
     private static final String KEY_GROUP = "AWS::CloudFront::KeyGroup";
     private static final String FUNCTION = "AWS::CloudFront::Function";
     private static final String CONNECTION_GROUP_TYPE = "AWS::CloudFront::ConnectionGroup";
+    private static final String TENANT_TYPE = "AWS::CloudFront::DistributionTenant";
     private static final String FUNCTION_ARN = "arn:aws:cloudfront::000000000000:function/my-function";
     private static final String REGION = "us-east-1";
     private static final String ID = "5cc3b908-e619-4b99-88e5-2cf7f45965bd";
@@ -122,7 +125,8 @@ class CloudFrontCfnProvisionerTest {
     @Test
     void servesTheDistributionAndTheTypesItReferences() {
         assertEquals(Set.of(DISTRIBUTION, RESPONSE_HEADERS_POLICY, CACHE_POLICY, ORIGIN_REQUEST_POLICY,
-                ORIGIN_ACCESS_CONTROL, PUBLIC_KEY, KEY_GROUP, FUNCTION, "AWS::CloudFront::ConnectionGroup"),
+                ORIGIN_ACCESS_CONTROL, PUBLIC_KEY, KEY_GROUP, FUNCTION, "AWS::CloudFront::ConnectionGroup",
+                "AWS::CloudFront::DistributionTenant"),
                 provisioner.resourceTypes());
     }
 
@@ -1411,5 +1415,168 @@ class CloudFrontCfnProvisionerTest {
                 new AwsException("EntityNotFound", "The connection group " + ID + " does not exist.", 404));
         provisioner.delete(CONNECTION_GROUP_TYPE, ID, REGION);
         verify(cloudFront, Mockito.times(1)).deleteConnectionGroup(any(), any());
+    }
+
+    private static DistributionTenant tenant(String id, String etag, String name) {
+        DistributionTenant t = new DistributionTenant();
+        t.setId(id);
+        t.setEtag(etag);
+        t.setName(name);
+        t.setArn("arn:aws:cloudfront::000000000000:distribution-tenant/" + id);
+        t.setStatus("Deployed");
+        t.setCreatedTime(MODIFIED);
+        t.setLastModifiedTime(MODIFIED);
+        return t;
+    }
+
+    @Test
+    void provisionsDistributionTenantWithEveryReadOnlyGetAttTheSchemaDeclares() throws Exception {
+        when(cloudFront.createDistributionTenant(any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(tenant("dt_abc", ETAG, "acme"));
+        StackResource r = resource(TENANT_TYPE);
+
+        provisioner.provision(r, json("""
+                {"DistributionId": "EDIST", "Name": "acme", "Domains": ["acme.example.com"],
+                 "Enabled": true, "ConnectionGroupId": "cg_x",
+                 "Tags": [{"Key": "env", "Value": "test"}],
+                 "Parameters": [{"Name": "origin_path", "Value": "/acme"}],
+                 "Customizations": {"WebAcl": {"Action": "override", "Arn": "arn:acl"},
+                                    "Certificate": {"Arn": "arn:cert"},
+                                    "GeoRestrictions": {"RestrictionType": "whitelist", "Locations": ["US"]}},
+                 "ManagedCertificateRequest": {"ValidationTokenHost": "cloudfront"}}
+                """), connectionCtx(null));
+
+        ArgumentCaptor<TenantCustomizations> customizations = ArgumentCaptor.forClass(TenantCustomizations.class);
+        verify(cloudFront).createDistributionTenant(eq("EDIST"), eq("acme"), eq(List.of("acme.example.com")),
+                eq(Map.of("env", "test")), customizations.capture(), eq(Map.of("origin_path", "/acme")),
+                eq("cg_x"), eq(Boolean.TRUE));
+        assertEquals("override", customizations.getValue().getWebAclAction());
+        assertEquals("arn:acl", customizations.getValue().getWebAclArn());
+        assertEquals("arn:cert", customizations.getValue().getCertificateArn());
+        assertEquals("whitelist", customizations.getValue().getGeoRestrictionType());
+        assertEquals(List.of("US"), customizations.getValue().getGeoLocations());
+        assertEquals("dt_abc", r.getPhysicalId());
+        assertEquals(Map.of("Id", "dt_abc",
+                "Arn", "arn:aws:cloudfront::000000000000:distribution-tenant/dt_abc",
+                "ETag", ETAG,
+                "Status", "Deployed",
+                "CreatedTime", MODIFIED.toString(),
+                "LastModifiedTime", MODIFIED.toString()), r.getAttributes());
+    }
+
+    @Test
+    void aTenantNeedsItsRequiredProperties() throws Exception {
+        assertThrows(AwsException.class, () -> provisioner.provision(resource(TENANT_TYPE), json("""
+                {"Name": "acme", "Domains": ["a.example.com"]}
+                """), connectionCtx(null)));
+        assertThrows(AwsException.class, () -> provisioner.provision(resource(TENANT_TYPE), json("""
+                {"DistributionId": "EDIST", "Domains": ["a.example.com"]}
+                """), connectionCtx(null)));
+        assertThrows(AwsException.class, () -> provisioner.provision(resource(TENANT_TYPE), json("""
+                {"DistributionId": "EDIST", "Name": "acme"}
+                """), connectionCtx(null)));
+    }
+
+    @Test
+    void updatesATenantInPlaceDeclarativelyWithThePriorEtag() throws Exception {
+        DistributionTenant prior = tenant("dt_prior", ETAG, "acme");
+        when(cloudFront.getDistributionTenant("dt_prior")).thenReturn(prior);
+        ConnectionGroup defaultGroup = new ConnectionGroup();
+        defaultGroup.setId("cg_default");
+        when(cloudFront.ensureDefaultConnectionGroup()).thenReturn(defaultGroup);
+        when(cloudFront.listTagsForResource(prior.getArn())).thenReturn(Map.of("stale", "1"));
+        when(cloudFront.updateDistributionTenant(eq("dt_prior"), eq(ETAG), eq("EDIST"),
+                eq(List.of("b.example.com")), any(), eq(Map.of()), eq("cg_default"),
+                eq(Boolean.TRUE))).thenReturn(tenant("dt_prior", NEW_ETAG, "acme"));
+        StackResource r = resource(TENANT_TYPE, "dt_prior", Map.of("Id", "dt_prior"));
+
+        provisioner.provision(r, json("""
+                {"DistributionId": "EDIST", "Name": "acme", "Domains": ["b.example.com"],
+                 "Tags": [{"Key": "env", "Value": "test"}]}
+                """), connectionCtx("dt_prior"));
+
+        assertEquals("dt_prior", r.getPhysicalId());
+        assertEquals(NEW_ETAG, r.getAttributes().get("ETag"));
+        verify(cloudFront, never()).createDistributionTenant(any(), any(), any(), any(), any(), any(), any(),
+                any());
+        ArgumentCaptor<TenantCustomizations> cleared = ArgumentCaptor.forClass(TenantCustomizations.class);
+        verify(cloudFront).updateDistributionTenant(eq("dt_prior"), eq(ETAG), eq("EDIST"), any(),
+                cleared.capture(), any(), any(), any());
+        assertTrue(cleared.getValue().isEmpty(), "a template that drops Customizations clears them");
+        verify(cloudFront).untagResource(prior.getArn(), List.of("stale"));
+        verify(cloudFront).tagResource(prior.getArn(), Map.of("env", "test"));
+    }
+
+    @Test
+    void anUpdateThatDropsTheConnectionGroupMovesTheTenantBackToTheDefaultGroup() throws Exception {
+        DistributionTenant prior = tenant("dt_prior", ETAG, "acme");
+        when(cloudFront.getDistributionTenant("dt_prior")).thenReturn(prior);
+        ConnectionGroup defaultGroup = new ConnectionGroup();
+        defaultGroup.setId("cg_default");
+        when(cloudFront.ensureDefaultConnectionGroup()).thenReturn(defaultGroup);
+        when(cloudFront.updateDistributionTenant(any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(tenant("dt_prior", NEW_ETAG, "acme"));
+        StackResource r = resource(TENANT_TYPE, "dt_prior", Map.of("Id", "dt_prior"));
+
+        provisioner.provision(r, json("""
+                {"DistributionId": "EDIST", "Name": "acme", "Domains": ["b.example.com"]}
+                """), connectionCtx("dt_prior"));
+
+        verify(cloudFront).updateDistributionTenant(eq("dt_prior"), eq(ETAG), eq("EDIST"), any(), any(), any(),
+                eq("cg_default"), any());
+    }
+
+    @Test
+    void aChangedNameReplacesTheTenantAndTheCleanupDeletesTheOldOne() throws Exception {
+        DistributionTenant prior = tenant("dt_prior", ETAG, "acme");
+        prior.setEnabled(false);
+        when(cloudFront.getDistributionTenant("dt_prior")).thenReturn(prior);
+        DistributionTenant created = tenant("dt_new", NEW_ETAG, "renamed");
+        when(cloudFront.createDistributionTenant(eq("EDIST"), eq("renamed"), any(), any(), any(), any(), any(),
+                any())).thenReturn(created);
+        StackResource r = resource(TENANT_TYPE, "dt_prior", Map.of("Id", "dt_prior"));
+
+        provisioner.provision(r, json("""
+                {"DistributionId": "EDIST", "Name": "renamed", "Domains": ["a.example.com"]}
+                """), connectionCtx("dt_prior"));
+
+        assertEquals("dt_new", r.getPhysicalId());
+        verify(cloudFront, never()).updateDistributionTenant(any(), any(), any(), any(), any(), any(), any(),
+                any());
+    }
+
+    @Test
+    void deleteOfAnEnabledTenantDisablesItFirstAndDeletesWithTheNewEtag() {
+        DistributionTenant enabled = tenant(ID, ETAG, "acme");
+        enabled.setEnabled(true);
+        when(cloudFront.getDistributionTenant(ID)).thenReturn(enabled);
+        DistributionTenant disabled = tenant(ID, NEW_ETAG, "acme");
+        when(cloudFront.updateDistributionTenant(ID, ETAG, null, null, null, null, null, false))
+                .thenReturn(disabled);
+
+        provisioner.delete(TENANT_TYPE, ID, REGION);
+
+        verify(cloudFront).updateDistributionTenant(ID, ETAG, null, null, null, null, null, false);
+        verify(cloudFront).deleteDistributionTenant(ID, NEW_ETAG);
+    }
+
+    @Test
+    void deleteOfADisabledTenantGoesStraightToTheServiceAndToleratesOnlyItsOwnNotFoundCode() {
+        DistributionTenant disabled = tenant(ID, ETAG, "acme");
+        disabled.setEnabled(false);
+        when(cloudFront.getDistributionTenant(ID)).thenReturn(disabled);
+
+        provisioner.delete(TENANT_TYPE, ID, REGION);
+        verify(cloudFront, never()).updateDistributionTenant(any(), any(), any(), any(), any(), any(), any(),
+                any());
+        verify(cloudFront).deleteDistributionTenant(ID, ETAG);
+
+        when(cloudFront.getDistributionTenant(ID)).thenThrow(
+                new AwsException("EntityNotFound", "The specified distribution tenant doesn't exist.", 404));
+        provisioner.delete(TENANT_TYPE, ID, REGION);
+        verify(cloudFront, Mockito.times(1)).deleteDistributionTenant(any(), any());
+
+        doThrow(new AwsException("AccessDenied", "no", 403)).when(cloudFront).getDistributionTenant(ID);
+        assertThrows(AwsException.class, () -> provisioner.delete(TENANT_TYPE, ID, REGION));
     }
 }

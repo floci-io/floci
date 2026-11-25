@@ -13,12 +13,14 @@ import io.floci.aws.services.cloudfront.model.ConnectionGroup;
 import io.floci.aws.services.cloudfront.model.DefaultCacheBehavior;
 import io.floci.aws.services.cloudfront.model.Distribution;
 import io.floci.aws.services.cloudfront.model.DistributionConfig;
+import io.floci.aws.services.cloudfront.model.DistributionTenant;
 import io.floci.aws.services.cloudfront.model.KeyGroup;
 import io.floci.aws.services.cloudfront.model.Origin;
 import io.floci.aws.services.cloudfront.model.OriginAccessControl;
 import io.floci.aws.services.cloudfront.model.OriginRequestPolicy;
 import io.floci.aws.services.cloudfront.model.PublicKey;
 import io.floci.aws.services.cloudfront.model.ResponseHeadersPolicy;
+import io.floci.aws.services.cloudfront.model.TenantCustomizations;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
@@ -70,6 +72,7 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
     static final String KEY_GROUP = "AWS::CloudFront::KeyGroup";
     static final String FUNCTION = "AWS::CloudFront::Function";
     static final String CONNECTION_GROUP = "AWS::CloudFront::ConnectionGroup";
+    static final String DISTRIBUTION_TENANT = "AWS::CloudFront::DistributionTenant";
 
     static final String NO_SUCH_RESPONSE_HEADERS_POLICY = "NoSuchResponseHeadersPolicy";
     static final String NO_SUCH_CACHE_POLICY = "NoSuchCachePolicy";
@@ -91,7 +94,7 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public Set<String> resourceTypes() {
         return Set.of(DISTRIBUTION, RESPONSE_HEADERS_POLICY, CACHE_POLICY, ORIGIN_REQUEST_POLICY,
-                ORIGIN_ACCESS_CONTROL, PUBLIC_KEY, KEY_GROUP, FUNCTION, CONNECTION_GROUP);
+                ORIGIN_ACCESS_CONTROL, PUBLIC_KEY, KEY_GROUP, FUNCTION, CONNECTION_GROUP, DISTRIBUTION_TENANT);
     }
 
     @Override
@@ -107,6 +110,7 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
             case KEY_GROUP -> provisionKeyGroup(r, props, ctx);
             case FUNCTION -> provisionFunction(r, props, ctx);
             case CONNECTION_GROUP -> provisionConnectionGroup(r, props, ctx);
+            case DISTRIBUTION_TENANT -> provisionDistributionTenant(r, props, ctx);
             default -> throw new IllegalArgumentException("Unsupported resource type: " + r.getResourceType());
         }
         ReplacementCleanup.record(r, ctx, attributesBefore);
@@ -191,6 +195,7 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
                     cloudFrontService::deleteKeyGroup, NO_SUCH_KEY_GROUP);
             case FUNCTION -> deleteFunction(physicalId);
             case CONNECTION_GROUP -> deleteConnectionGroup(physicalId);
+            case DISTRIBUTION_TENANT -> deleteDistributionTenant(physicalId);
             default -> { }
         }
     }
@@ -271,6 +276,128 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
                 provisioned.getCreatedTime() == null ? "" : provisioned.getCreatedTime().toString());
         r.getAttributes().put("LastModifiedTime",
                 provisioned.getLastModifiedTime() == null ? "" : provisioned.getLastModifiedTime().toString());
+    }
+
+    /**
+     * An enabled tenant refuses its delete with {@code ResourceNotDisabled}, so a stack delete, a
+     * replacement cleanup or a rollback disables it first with the etag it carries and deletes it
+     * with the fresh one the disable minted, as the registry schema's delete handler does (it asks
+     * for {@code UpdateDistributionTenant} as well as {@code DeleteDistributionTenant}). The tags
+     * kept under the ARN go with the tenant. Only the type's own not-found code is tolerated.
+     */
+    private void deleteDistributionTenant(String physicalId) {
+        CfnDeletes.safeDelete("distribution tenant", physicalId, () -> {
+            DistributionTenant tenant = cloudFrontService.getDistributionTenant(physicalId);
+            String etag = tenant.getEtag();
+            if (Boolean.TRUE.equals(tenant.getEnabled())) {
+                etag = cloudFrontService.updateDistributionTenant(physicalId, etag, null, null, null, null,
+                        null, false).getEtag();
+            }
+            cloudFrontService.deleteDistributionTenant(physicalId, etag);
+        }, ENTITY_NOT_FOUND);
+    }
+
+    /**
+     * The tenant the template names is created on first use and updated in place afterwards:
+     * {@code Name} is the only create-only property the registry schema declares, so an update whose
+     * resolved {@code Name} differs from the prior tenant's replaces it, and the engine's
+     * replacement cleanup deletes the old tenant through {@link #deleteDistributionTenant} once the
+     * update commits. Otherwise the physical id only changes when the prior tenant is already gone.
+     * The schema's read-only members ({@code Id}, {@code Arn}, {@code ETag}, {@code Status} and the
+     * two timestamps) travel to {@code Fn::GetAtt} from the provisioned object; {@code DomainResults}
+     * is a list, which attributes as Floci keeps them (text) cannot hold.
+     *
+     * <p>An update is declarative: it drives the tags, {@code Customizations} and {@code Parameters}
+     * to the template's set, so a template that drops one clears it, and it reads an absent
+     * {@code Enabled} as the default, true, and a dropped {@code ConnectionGroupId} as the account's
+     * default connection group, which is what a create picks. {@code ManagedCertificateRequest},
+     * {@code DomainMappings} and {@code OnDomainTakeover} are accepted and ignored: Floci issues no
+     * managed certificates and serves every domain the same way.
+     */
+    private void provisionDistributionTenant(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String distributionId = requireText(DISTRIBUTION_TENANT, "DistributionId", props, ctx);
+        String name = requireText(DISTRIBUTION_TENANT, "Name", props, ctx);
+        List<String> domains = tenantDomains(props, ctx);
+        TenantCustomizations customizations = tenantCustomizations(props, ctx);
+        Map<String, String> parameters = tenantParameters(props, ctx);
+        String connectionGroupId = ctx.resolveOptional(props, "ConnectionGroupId");
+        Boolean enabled = ctx.resolveOptionalBoolean(props, "Enabled");
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
+
+        DistributionTenant provisioned;
+        DistributionTenant prior = prior(ctx, "distribution tenant",
+                cloudFrontService::getDistributionTenant, ENTITY_NOT_FOUND);
+        if (prior == null || !name.equals(prior.getName())) {
+            provisioned = cloudFrontService.createDistributionTenant(distributionId, name, domains, tags,
+                    customizations, parameters, connectionGroupId, enabled);
+        } else {
+            String groupId = connectionGroupId == null || connectionGroupId.isBlank()
+                    ? cloudFrontService.ensureDefaultConnectionGroup().getId() : connectionGroupId;
+            provisioned = cloudFrontService.updateDistributionTenant(prior.getId(), prior.getEtag(),
+                    distributionId, domains, customizations == null ? new TenantCustomizations() : customizations,
+                    parameters == null ? Map.of() : parameters, groupId,
+                    enabled == null ? Boolean.TRUE : enabled);
+            reconcileTags(provisioned.getArn(), tags);
+        }
+        r.setPhysicalId(provisioned.getId());
+        r.getAttributes().put("Id", provisioned.getId());
+        r.getAttributes().put("Arn", provisioned.getArn());
+        r.getAttributes().put("ETag", provisioned.getEtag());
+        r.getAttributes().put("Status", provisioned.getStatus());
+        r.getAttributes().put("CreatedTime",
+                provisioned.getCreatedTime() == null ? "" : provisioned.getCreatedTime().toString());
+        r.getAttributes().put("LastModifiedTime",
+                provisioned.getLastModifiedTime() == null ? "" : provisioned.getLastModifiedTime().toString());
+    }
+
+    private static List<String> tenantDomains(JsonNode props, ProvisionContext ctx) {
+        JsonNode raw = props.get("Domains");
+        JsonNode resolved = raw == null || raw.isNull() ? null : ctx.engine().resolveNode(raw);
+        if (resolved == null || !resolved.isArray() || resolved.isEmpty()) {
+            throw new AwsException("ValidationError", DISTRIBUTION_TENANT + " requires Domains", 400);
+        }
+        List<String> domains = new ArrayList<>();
+        for (JsonNode domain : resolved) {
+            domains.add(domain.asText());
+        }
+        return domains;
+    }
+
+    private static Map<String, String> tenantParameters(JsonNode props, ProvisionContext ctx) {
+        JsonNode raw = props.get("Parameters");
+        JsonNode resolved = raw == null || raw.isNull() ? null : ctx.engine().resolveNode(raw);
+        if (resolved == null || !resolved.isArray()) {
+            return null;
+        }
+        Map<String, String> parameters = new LinkedHashMap<>();
+        for (JsonNode parameter : resolved) {
+            parameters.put(text(parameter, "Name"), text(parameter, "Value"));
+        }
+        return parameters;
+    }
+
+    private static TenantCustomizations tenantCustomizations(JsonNode props, ProvisionContext ctx) {
+        JsonNode raw = props.get("Customizations");
+        JsonNode resolved = raw == null || raw.isNull() ? null : ctx.engine().resolveNode(raw);
+        if (resolved == null || !resolved.isObject()) {
+            return null;
+        }
+        TenantCustomizations customizations = new TenantCustomizations();
+        JsonNode webAcl = resolved.get("WebAcl");
+        if (webAcl != null && webAcl.isObject()) {
+            customizations.setWebAclAction(text(webAcl, "Action"));
+            customizations.setWebAclArn(text(webAcl, "Arn"));
+        }
+        JsonNode certificate = resolved.get("Certificate");
+        if (certificate != null && certificate.isObject()) {
+            customizations.setCertificateArn(text(certificate, "Arn"));
+        }
+        JsonNode geo = resolved.get("GeoRestrictions");
+        if (geo != null && geo.isObject()) {
+            customizations.setGeoRestrictionType(text(geo, "RestrictionType"));
+            customizations.setGeoLocations(textList(geo, "Locations"));
+        }
+        return customizations;
     }
 
     private static void requireConnectionGroupName(String name) {
@@ -415,7 +542,7 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
             if (autoPublish) {
                 cloudFrontService.publishFunction(name, provisioned.getEtag());
             }
-            reconcileFunctionTags(arn, tags);
+            reconcileTags(arn, tags);
         } catch (RuntimeException failure) {
             if (prior == null) {
                 // The stack keeps its prior id when this resource fails, so nothing else would
@@ -454,7 +581,7 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
         return arn.substring(arn.lastIndexOf('/') + 1);
     }
 
-    private void reconcileFunctionTags(String arn, Map<String, String> desired) {
+    private void reconcileTags(String arn, Map<String, String> desired) {
         List<String> stale = ProvisionContext.staleTagKeys(cloudFrontService.listTagsForResource(arn), desired);
         if (!stale.isEmpty()) {
             cloudFrontService.untagResource(arn, stale);

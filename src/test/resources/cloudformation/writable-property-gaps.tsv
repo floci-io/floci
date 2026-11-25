@@ -136,6 +136,9 @@ AWS::CloudFormation::StackSet	CallAs	accepted and ignored; local StackSets do no
 AWS::CloudFormation::StackSet	ExecutionRoleName	accepted and ignored; local StackSets deploy without assuming an execution role
 AWS::CloudFormation::StackSet	OperationPreferences	accepted and ignored; explicit StackSet deployments execute locally without scheduling preferences
 AWS::CloudFront::Distribution	Tags	accepted and ignored
+AWS::CloudFront::DistributionTenant	DomainMappings	accepted and ignored: Floci serves every domain the same way
+AWS::CloudFront::DistributionTenant	ManagedCertificateRequest	accepted and ignored: Floci issues no managed certificates
+AWS::CloudFront::DistributionTenant	OnDomainTakeover	accepted and ignored: Floci has no domain takeover to allow or reject
 AWS::CloudFront::Function	FunctionMetadata	accepted and ignored
 AWS::CloudTrail::Trail	AggregationConfigurations	accepted and ignored
 AWS::CloudTrail::Trail	CloudWatchLogsLogGroupArn	accepted and ignored

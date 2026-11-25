@@ -53,6 +53,68 @@ and answer `InvalidIfMatchVersion` without it, `PreconditionFailed` on a stale v
 `Marker`, `MaxItems` and an optional `AssociationFilter.AnycastIpListId`, and returns
 `ConnectionGroupSummary` items carrying the group's `ETag`.
 
+### Distribution Tenants
+
+A distribution tenant is a customer of a multi-tenant distribution: it carries its own domains, a
+connection group, and optional parameters and customizations. The tenants' data plane (serving by
+tenant domain), tenant invalidations, WAF association operations and managed certificate details are
+not implemented.
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateDistributionTenant` | POST | `/2020-05-31/distribution-tenant` |
+| `GetDistributionTenant` | GET | `/2020-05-31/distribution-tenant/{Identifier}` |
+| `GetDistributionTenantByDomain` | GET | `/2020-05-31/distribution-tenant?domain` |
+| `UpdateDistributionTenant` | PUT | `/2020-05-31/distribution-tenant/{Id}` |
+| `DeleteDistributionTenant` | DELETE | `/2020-05-31/distribution-tenant/{Id}` |
+| `ListDistributionTenants` | POST | `/2020-05-31/distribution-tenants` |
+| `ListDistributionTenantsByCustomization` | POST | `/2020-05-31/distribution-tenants-by-customization` |
+
+The service model does not spell every outcome out, so these are Floci's readings of it:
+
+- `DistributionId` must name an existing distribution (`EntityNotFound` otherwise) whose
+  configuration has `ConnectionMode: tenant-only`. The model declares no code for a standard
+  distribution, so it is answered with `InvalidArgument`. A `ConnectionGroupId` that names no group
+  is `EntityNotFound`; an omitted one is the account's default connection group, and the id comes
+  back on the tenant.
+- `Name` is unique per account (`EntityAlreadyExists`), fixed after creation, and held to the
+  pattern the request shape declares. A tenant is addressable by its id, name or ARN in
+  `GetDistributionTenant`; `UpdateDistributionTenant` and `DeleteDistributionTenant` take the id.
+  Ids are `dt_` followed by 24 characters, like connection group ids. The ARN names the account of
+  the request, as a connection group's does.
+- At least one domain is required, and a tenant has up to 5 (the limit `UpdateDistributionTenant`
+  documents), answered with `EntityLimitExceeded` beyond that. A domain is unique, ignoring case,
+  across all tenants and all distribution `Aliases` (`CNAMEAlreadyExists`), in both directions: a
+  distribution cannot claim an alias a tenant holds, whether in its configuration or through
+  `AssociateAlias`, which also answers `CNAMEAlreadyExists` for a tenant's domain. Floci performs no DNS or certificate checks, so
+  every domain reads back with `Status: active`, and the tenant itself reads `Status: Deployed`.
+- `Enabled` defaults to true. `DeleteDistributionTenant` requires the tenant to be disabled
+  (`ResourceNotDisabled`) and, like `UpdateDistributionTenant`, requires `If-Match`: it answers
+  `InvalidIfMatchVersion` without it and `PreconditionFailed` on a stale value. Every write rotates
+  the `ETag`. An update leaves alone what it omits and replaces `Domains`, `Parameters` and
+  `Customizations` wholesale when it carries them; it may also move the tenant to another
+  `tenant-only` distribution or connection group.
+- `Parameters` and `Customizations` are validated for shape only (`Name` and `Value` are required,
+  parameter name pattern and value length, `WebAcl.Action` is required with a `WebAcl` and
+  `GeoRestrictions.RestrictionType` is held to its enumeration); each failure is `InvalidArgument`. A distribution's
+  `TenantConfig.ParameterDefinitions` is not modeled, so the parameters are stored as given and not
+  checked against the distribution. `ManagedCertificateRequest` is accepted and ignored.
+- `AWS::CloudFront::DistributionTenant` updates are declarative: a template that drops
+  `ConnectionGroupId` moves the tenant back to the account's default connection group, which is what
+  a create without it picks.
+- `ListDistributionTenants` takes `Marker`, `MaxItems` and an optional `AssociationFilter` by
+  `DistributionId` or `ConnectionGroupId`. `ListDistributionTenantsByCustomization` takes exactly one
+  of `WebACLArn` and `CertificateArn` and answers `InvalidArgument` for none or both. Both list
+  tenants by name and return `DistributionTenantSummary` items carrying the tenant's `ETag`.
+- Tags use the CloudFront tag operations on the tenant's ARN, and are removed with the tenant. The
+  `Domains` and `Parameters` lists declare no member name, so the SDKs read their items as `member`
+  elements, which is how Floci writes them; a request is read by position.
+- `DeleteConnectionGroup` answers `CannotDeleteEntityWhileInUse` for a group that a tenant still
+  references, after the `If-Match` checks and the default-group refusal and before the
+  `ResourceNotDisabled` check.
+- Deleting a distribution that still has tenants is not refused: AWS documents no such error, so
+  the tenants keep their stored `DistributionId`.
+
 ### Invalidations
 
 | Operation | Method | Path |
@@ -263,7 +325,8 @@ These operations store what they are given and return it, so code that manages t
   `<Quantity>N</Quantity><Items>...</Items>`.
 - OAI `CallerReference` uniqueness is enforced — duplicate `CallerReference` values return `CloudFrontOriginAccessIdentityAlreadyExists` (409).
 - CNAME aliases are globally unique. `AssociateAlias` atomically transfers an alias from its current
-  owner to the target distribution. Exact aliases take precedence over the most-specific matching
+  owner to the target distribution, except a domain a distribution tenant holds, which is refused
+  with `CNAMEAlreadyExists`. Exact aliases take precedence over the most-specific matching
   wildcard alias.
 - Viewer requests addressed to an enabled distribution's generated domain or alias are routed to the
   matching S3 or custom origin when the matched cache behavior's `AllowedMethods` includes the
@@ -726,9 +789,9 @@ signatures must still return 403. Verify those cases through the proxy after con
 - `TestFunction` execution (function is stored, not executed)
 - Serving RTMP for a streaming distribution (deprecated by AWS)
 - VPC origins, Anycast IP lists
-- Connection groups and distribution tenants (`CreateConnectionGroup`, `CreateDistributionTenant`,
-  etc.), their CloudFormation types, `ListDistributionsByConnectionMode`, and serving a
-  `tenant-only` distribution by a tenant's domain
+- Serving a `tenant-only` distribution by a tenant's domain, tenant invalidations, web ACL
+  association and managed certificate details (`CreateInvalidationForDistributionTenant`,
+  `AssociateDistributionTenantWebACL`, `GetManagedCertificateDetails`, etc.)
 - Importing keys into a key value store from S3: `CreateKeyValueStore` with an `ImportSource` is rejected with
   `InvalidArgument`
 - Running CloudFront Functions, so the key value store can only be read and written through its API, not
