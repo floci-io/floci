@@ -11,6 +11,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -890,6 +891,31 @@ class S3PresignedPostIntegrationTest {
                 .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeys[index]))
                 .body(equalTo("version-" + index));
         }
+    }
+
+    @Test
+    @Order(106)
+    void presignedPostRejectsSseCustomerEncryptionForNewBucket() throws Exception {
+        String bucket = "presigned-post-sse-c-blocked-bucket";
+        String key = "blocked.txt";
+        byte[] customerKey = "0123456789abcdef0123456789abcdef".getBytes(StandardCharsets.UTF_8);
+        String encodedKey = Base64.getEncoder().encodeToString(customerKey);
+        String keyMd5 = Base64.getEncoder().encodeToString(MessageDigest.getInstance("MD5").digest(customerKey));
+        given().put("/" + bucket).then().statusCode(200);
+
+        given()
+            .multiPart("key", key)
+            .multiPart("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .multiPart("x-amz-server-side-encryption-customer-key", encodedKey)
+            .multiPart("x-amz-server-side-encryption-customer-key-MD5", keyMd5)
+            .multiPart("file", "blocked.txt", "blocked".getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + bucket)
+        .then()
+            .statusCode(403)
+            .body(containsString("<Code>AccessDenied</Code>"));
+
+        given().get("/" + bucket + "/" + key).then().statusCode(404);
     }
 
     @Test

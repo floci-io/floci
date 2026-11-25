@@ -1972,6 +1972,33 @@ class S3IntegrationTest {
             .statusCode(200);
 
         given()
+        .when()
+            .get("/sse-bucket?encryption")
+        .then()
+            .statusCode(200)
+            .body(containsString("<BlockedEncryptionTypes><EncryptionType>SSE-C</EncryptionType>"));
+
+        given()
+            .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-server-side-encryption-customer-key", SSE_CUSTOMER_KEY)
+            .header("x-amz-server-side-encryption-customer-key-MD5", SSE_CUSTOMER_KEY_MD5)
+            .body("blocked")
+        .when()
+            .put("/sse-bucket/default-blocked.txt")
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        given()
+            .body("<ServerSideEncryptionConfiguration><Rule><BlockedEncryptionTypes>"
+                    + "<EncryptionType>NONE</EncryptionType></BlockedEncryptionTypes></Rule>"
+                    + "</ServerSideEncryptionConfiguration>")
+        .when()
+            .put("/sse-bucket?encryption")
+        .then()
+            .statusCode(200);
+
+        given()
             .contentType("text/plain")
             .header("x-amz-server-side-encryption", "AES256")
             .body("encrypted-content")

@@ -852,9 +852,10 @@ public class S3Service implements Resettable, ResourceProvider {
         rejectUploadAclWhenOwnershipEnforced(checkedBucket.value(), checkedBucket.account(), effectiveOptions, ownerId());
         rejectObjectLockWithoutLockEnabled(checkedBucket.value(), effectiveOptions);
         String normalizedServerSideEncryption = normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption());
-        rejectConflictingServerSideEncryption(normalizedServerSideEncryption,
-                validateSseCustomerKey(effectiveOptions.getSseCustomerAlgorithm(),
-                        effectiveOptions.getSseCustomerKey(), effectiveOptions.getSseCustomerKeyMd5()));
+        SseCustomerKey customerKey = validateSseCustomerKey(effectiveOptions.getSseCustomerAlgorithm(),
+                effectiveOptions.getSseCustomerKey(), effectiveOptions.getSseCustomerKeyMd5());
+        rejectConflictingServerSideEncryption(normalizedServerSideEncryption, customerKey);
+        rejectBlockedSseCustomerEncryption(checkedBucket.value(), bucketName, key, customerKey);
         rejectKmsKeyIdWithoutKmsEncryption(normalizedServerSideEncryption, effectiveOptions.getSseKmsKeyId());
         ChecksumAlgorithm declared = ChecksumAlgorithm.fromWireValue(effectiveOptions.getChecksumAlgorithm());
         // Checked again under the bucket lock when the object is stored; this only spares a transfer.
@@ -1019,6 +1020,7 @@ public class S3Service implements Resettable, ResourceProvider {
         String normalizedServerSideEncryption = normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption());
         SseCustomerKey sseCustomerKey = validateSseCustomerKey(effectiveOptions.getSseCustomerAlgorithm(), effectiveOptions.getSseCustomerKey(), effectiveOptions.getSseCustomerKeyMd5());
         rejectConflictingServerSideEncryption(normalizedServerSideEncryption, sseCustomerKey);
+        rejectBlockedSseCustomerEncryption(bucket, bucketName, key, sseCustomerKey);
         rejectKmsKeyIdWithoutKmsEncryption(normalizedServerSideEncryption, effectiveOptions.getSseKmsKeyId());
         checkWritePreconditions(bucketName, key, effectiveOptions.getIfMatch(), effectiveOptions.getIfNoneMatch());
 
@@ -4828,6 +4830,7 @@ public class S3Service implements Resettable, ResourceProvider {
             String normalizedServerSideEncryption = normalizeServerSideEncryption(serverSideEncryption);
             SseCustomerKey customerKey = validateSseCustomerKey(sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
             rejectConflictingServerSideEncryption(normalizedServerSideEncryption, customerKey);
+            rejectBlockedSseCustomerEncryption(destination, bucket, key, customerKey);
             MultipartUpload upload = new MultipartUpload(bucket, key, contentType);
             upload.setUploadId(orderedMultipartUploadId(upload.getInitiated(), upload.getUploadId()));
             upload.setOwnerAccountId(getBucketOwnerAccountId(bucket));
@@ -6519,25 +6522,28 @@ public class S3Service implements Resettable, ResourceProvider {
     /**
      * Returns the bucket's server-side encryption configuration as XML.
      * <p>
-     * Buckets that have
-     * never been configured return the AWS default (SSE-S3 / {@code AES256});
-     * since January 2023 AWS applies SSE-S3 as the base level of encryption on
-     * every bucket and never returns 404 for {@code GetBucketEncryption}.
+     * Buckets that have never been configured return the AWS default (SSE-S3 / {@code AES256});
+     * since January 2023 AWS applies SSE-S3 as the base level of encryption on every bucket and
+     * never returns 404 for {@code GetBucketEncryption}. New buckets outside Bahrain and UAE also
+     * report SSE-C blocking.
      */
     public String getBucketEncryption(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> noSuchBucket());
         if (bucket.getEncryptionConfiguration() == null) {
-            return new XmlBuilder()
+            XmlBuilder response = new XmlBuilder()
                     .start("ServerSideEncryptionConfiguration", AwsNamespaces.S3)
                       .start("Rule")
                         .start("ApplyServerSideEncryptionByDefault")
                           .elem("SSEAlgorithm", "AES256")
                         .end("ApplyServerSideEncryptionByDefault")
-                        .elem("BucketKeyEnabled", "false")
-                      .end("Rule")
-                    .end("ServerSideEncryptionConfiguration")
-                    .build();
+                        .elem("BucketKeyEnabled", "false");
+            if (blocksSseCustomerEncryptionByDefault(bucket)) {
+                response.start("BlockedEncryptionTypes")
+                        .elem("EncryptionType", "SSE-C")
+                        .end("BlockedEncryptionTypes");
+            }
+            return response.end("Rule").end("ServerSideEncryptionConfiguration").build();
         }
         return bucket.getEncryptionConfiguration();
     }
@@ -7266,6 +7272,31 @@ public class S3Service implements Resettable, ResourceProvider {
             throw new AwsException("InvalidRequest",
                     "SSE-C cannot be combined with x-amz-server-side-encryption.", 400);
         }
+    }
+
+    private void rejectBlockedSseCustomerEncryption(Bucket bucket, String bucketName, String key,
+                                                    SseCustomerKey customerKey) {
+        if (customerKey == null || !blocksSseCustomerEncryption(bucket)) {
+            return;
+        }
+        throw accessDeniedException(bucketName, key);
+    }
+
+    private boolean blocksSseCustomerEncryptionByDefault(Bucket bucket) {
+        String region = bucket.getRegion() != null ? bucket.getRegion()
+                : regionResolver != null ? regionResolver.getDefaultRegion() : null;
+        return !"me-south-1".equals(region) && !"me-central-1".equals(region);
+    }
+
+    private boolean blocksSseCustomerEncryption(Bucket bucket) {
+        if (bucket.getEncryptionConfiguration() == null) {
+            return blocksSseCustomerEncryptionByDefault(bucket);
+        }
+        XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(bucket.getEncryptionConfiguration());
+        XmlParser.XmlElement rule = root == null ? null : root.child("Rule");
+        XmlParser.XmlElement blocked = rule == null ? null : rule.child("BlockedEncryptionTypes");
+        return blocked != null && blocked.children().stream()
+                .anyMatch(type -> "EncryptionType".equals(type.name()) && "SSE-C".equals(type.text()));
     }
 
     /**
@@ -8715,6 +8746,8 @@ public class S3Service implements Resettable, ResourceProvider {
                 effectiveOptions.getSseCustomerKey(),
                 effectiveOptions.getSseCustomerKeyMd5());
         rejectConflictingServerSideEncryption(normalizedServerSideEncryption, destinationCustomerKey);
+        Bucket destination = resolveBucket(destBucket).orElseThrow(() -> noSuchBucket());
+        rejectBlockedSseCustomerEncryption(destination, destBucket, destKey, destinationCustomerKey);
 
         boolean replaceMetadata = "REPLACE".equalsIgnoreCase(effectiveOptions.getMetadataDirective());
         Map<String, String> metadata = replaceMetadata ? new LinkedHashMap<>() : new LinkedHashMap<>(source.getMetadata());
