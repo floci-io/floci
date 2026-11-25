@@ -17,6 +17,7 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.CloudFrontEdgeDomain;
 import io.floci.aws.core.common.ModelTemplateGenerator;
 import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ReservedTags;
 import io.floci.aws.core.common.Resettable;
@@ -2978,6 +2979,17 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         getDomainName(region, domainName);
         String prefix = region + "::" + domainName + "::";
         return basePathMappingStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public PaginatedResult<BasePathMapping> getBasePathMappingsPage(String region, String domainName,
+                                                                   String limit, String position) {
+        List<Map.Entry<String, BasePathMapping>> mappings =
+                new ArrayList<>(basePathMappingsByStoredPath(region, domainName).entrySet());
+        String scope = regionResolver.getAccountId() + "::" + mappingKey(region, domainName, "");
+        PaginatedResult<Map.Entry<String, BasePathMapping>> page = pageById(mappings,
+                entry -> scope + entry.getKey(), Pagination.parseMaxResults(limit, "limit", "BadRequestException"),
+                position);
+        return new PaginatedResult<>(page.items().stream().map(Map.Entry::getValue).toList(), page.nextToken());
     }
 
     public void deleteBasePathMapping(String region, String domainName, String basePath) {
