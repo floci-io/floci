@@ -29,6 +29,7 @@ import io.floci.aws.services.elb.ElbClassicService;
 import io.floci.aws.services.elbv2.ElbV2Service;
 import io.floci.aws.services.floci.ui.FlociUiManager;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.kinesisanalytics.KinesisAnalyticsV2Service;
 import io.floci.aws.services.kinesisanalytics.container.FlinkContainerManager;
 import io.floci.aws.services.lambda.DynamoDbStreamsEventSourcePoller;
 import io.floci.aws.services.lambda.KinesisEventSourcePoller;
@@ -105,6 +106,7 @@ public class EmulatorLifecycle {
     private final RabbitMqManager rabbitMqManager;
     private final AmazonMqService amazonMqService;
     private final FlinkContainerManager flinkContainerManager;
+    private final KinesisAnalyticsV2Service kinesisAnalyticsService;
     private final SageMakerService sageMakerService;
     private final RdsService rdsService;
     private final TimestreamInfluxDbService timestreamInfluxDbService;
@@ -154,6 +156,7 @@ public class EmulatorLifecycle {
                              RabbitMqManager rabbitMqManager,
                              AmazonMqService amazonMqService,
                              FlinkContainerManager flinkContainerManager,
+                             KinesisAnalyticsV2Service kinesisAnalyticsService,
                              SageMakerService sageMakerService,
                              RdsService rdsService,
                              TimestreamInfluxDbService timestreamInfluxDbService,
@@ -200,6 +203,7 @@ public class EmulatorLifecycle {
         this.rabbitMqManager = rabbitMqManager;
         this.amazonMqService = amazonMqService;
         this.flinkContainerManager = flinkContainerManager;
+        this.kinesisAnalyticsService = kinesisAnalyticsService;
         this.sageMakerService = sageMakerService;
         this.rdsService = rdsService;
         this.timestreamInfluxDbService = timestreamInfluxDbService;
@@ -314,6 +318,13 @@ public class EmulatorLifecycle {
             // Starts the brokers' containers in the background, failing the future with the ones it could not.
             amazonMqService.restorePersistedRuntime().exceptionally(ex -> {
                 LOG.error("Failed to restore persisted Amazon MQ brokers at startup", ex);
+                return null;
+            });
+        }
+        if (config.services().kinesisAnalytics().enabled()) {
+            // Starts the applications' Flink clusters in the background, failing the future with the ones it could not.
+            kinesisAnalyticsService.restorePersistedRuntime().exceptionally(ex -> {
+                LOG.error("Failed to restore persisted Kinesis Analytics V2 applications at startup", ex);
                 return null;
             });
         }
