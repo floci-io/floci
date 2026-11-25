@@ -204,6 +204,14 @@ uses each record's stored base path, so legacy root records that report the same
 `basePath` remain distinct. Looking up a missing domain still returns `NotFoundException`.
 
 
+### Deployment Pagination
+
+`GetDeployments` accepts `limit` and `position`, returns 25 deployments by default,
+and caps pages at 500. Use the returned `position` to continue a partial collection;
+the final page omits it. Positions belong to the caller's account, Region and REST
+API. A missing parent API returns `NotFoundException`.
+
+
 ### API Key Behaviour Notes
 
 #### `CreateApiKey` and `ImportApiKeys` share one route

@@ -939,6 +939,14 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return deploymentStore.scan(k -> k.startsWith(prefix));
     }
 
+    public PaginatedResult<Deployment> getDeploymentsPage(String region, String apiId,
+                                                        String limit, String position) {
+        List<Deployment> deployments = getDeployments(region, apiId);
+        String scope = regionResolver.getAccountId() + "::" + region + "::" + apiId + "::";
+        return pageById(deployments, deployment -> scope + deployment.id(),
+                Pagination.parseMaxResults(limit, "limit", "BadRequestException"), position);
+    }
+
     public Deployment getDeployment(String region, String apiId, String deploymentId) {
         return deploymentStore.get(deploymentKey(region, apiId, deploymentId))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Deployment not found", 404));
