@@ -4927,9 +4927,16 @@ public class CognitoService implements ResourceProvider, StoredResourceArns {
     /**
      * Mints new access and ID tokens from a refresh token, as the sign-in that issued it did: an OAuth
      * grant's access token keeps the grant's scopes, and has an ID token only with {@code openid}.
-     * Shared by {@code GetTokensFromRefreshToken} and the OAuth token endpoint's refresh_token grant.
+     * Shared by {@code GetTokensFromRefreshToken} and the OAuth token endpoint's refresh_token grant,
+     * which has no {@code ClientMetadata} to pass.
      */
     public Map<String, Object> getTokensFromRefreshToken(String clientId, String refreshToken) {
+        return getTokensFromRefreshToken(clientId, refreshToken, Map.of());
+    }
+
+    /** As above, with the request's {@code ClientMetadata}, which reaches only the PreTokenGeneration trigger. */
+    public Map<String, Object> getTokensFromRefreshToken(String clientId, String refreshToken,
+                                                         Map<String, String> clientMetadata) {
         if (refreshToken == null) {
             throw new AwsException("InvalidParameterException", "RefreshToken is required", 400);
         }
@@ -4963,7 +4970,8 @@ public class CognitoService implements ResourceProvider, StoredResourceArns {
 
         UserPool pool = describeUserPool(poolId);
         CognitoUser user = adminGetUser(poolId, username);
-        ClaimsOverride override = authFlowHandler.preTokenGenerationForRefresh(pool, client, user, scopes);
+        ClaimsOverride override = authFlowHandler.preTokenGenerationForRefresh(pool, client, user, scopes,
+                clientMetadata);
 
         // Use refresh token UUID as origin_jti for derived tokens
         Map<String, Object> result = new HashMap<>();
