@@ -1209,8 +1209,12 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             Optional<EksAddonService.StoredUpdate> previous = addons.findConfigUpdateByToken(cluster, token);
             if (previous.isPresent()) {
                 if (updateParametersMatch(previous.get().request(), request)) {
-                    // A retry finishes what the first attempt may not have: the node's entry, which it keeps if made.
-                    ensureAutoModeNodeEntry(cluster);
+                    // A retry of a request that makes the node's entry finishes it, should the first attempt not have;
+                    // a retry of any other update leaves the entries as they are.
+                    if (request.changesAutoMode() || (request.accessConfig() != null
+                            && request.accessConfig().authenticationMode() != null)) {
+                        ensureAutoModeNodeEntry(cluster);
+                    }
                     return List.of(previous.get().update());
                 }
                 throw new AwsException("InvalidParameterException", EksAddonService.TOKEN_REUSED, 400);

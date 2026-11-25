@@ -487,6 +487,29 @@ class EksServiceTest {
         verify(accessEntries, times(2)).ensureAutoModeNodeEntry(cluster, "arn:aws:iam::000000000000:role/node");
     }
 
+    /** A retry of an update that makes no node entry, such as a logging change, doesn't make one. */
+    @Test
+    void aRetriedLoggingUpdateLeavesTheNodeEntriesAlone() {
+        Cluster cluster = activeCluster();
+        cluster.setAccessConfig(new AccessConfig("API", false));
+        cluster.setComputeConfig(new ComputeConfig(true, List.of("general-purpose"), "arn:aws:iam::000000000000:role/node"));
+        EksAccessEntryService accessEntries = mock(EksAccessEntryService.class);
+        UpdateClusterConfigRequest request = new UpdateClusterConfigRequest(null, new Logging(List.of()), null, null,
+                "logging-token");
+        Update recorded = new Update("u", "Successful", "LoggingUpdate", List.of(), 0, List.of());
+        EksAddonService addons = mock(EksAddonService.class);
+        when(addons.findConfigUpdateByToken(any(), eq("logging-token")))
+                .thenReturn(Optional.of(new EksAddonService.StoredUpdate(recorded, null, request)));
+        EksService service = new EksService(fixedStorageFactory(clusterStoreWith(cluster)), testConfig(true),
+                new RegionResolver("us-east-1", "000000000000"), mock(EksClusterManager.class), null,
+                new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
+                        new ObjectMapper()), accessEntries, mock(EksPodIdentityAssociationService.class), addons);
+
+        assertEquals(List.of(recorded), service.updateClusterConfig("running-cluster", request));
+
+        verify(accessEntries, never()).ensureAutoModeNodeEntry(any(), any());
+    }
+
     @Test
     void aCreateWhoseNodeEntryFailsStoresNoClusterAndLeavesNoEntry() {
         EksAccessEntryService accessEntries = mock(EksAccessEntryService.class);
