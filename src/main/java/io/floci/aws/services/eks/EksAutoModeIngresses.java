@@ -84,9 +84,21 @@ final class EksAutoModeIngresses {
     /** A rule: the host it matches, if any, its path patterns, and the backend it forwards to. */
     record Route(String host, List<String> paths, Backend backend) { }
 
-    /** An Ingress that gets an Application Load Balancer, as its class and annotations configure it. */
+    /**
+     * An Ingress that gets an Application Load Balancer, as its class and annotations configure it. A held one's
+     * class names IngressClassParams that aren't there, so its load balancer is left as it is.
+     */
     record AlbIngress(String namespace, String name, String uid, String scheme, List<String> subnets,
-                      String healthCheckPath, List<Route> routes, Backend defaultBackend) {
+                      String healthCheckPath, List<Route> routes, Backend defaultBackend, boolean held) {
+
+        AlbIngress(String namespace, String name, String uid, String scheme, List<String> subnets,
+                   String healthCheckPath, List<Route> routes, Backend defaultBackend) {
+            this(namespace, name, uid, scheme, subnets, healthCheckPath, routes, defaultBackend, false);
+        }
+
+        static AlbIngress held(String namespace, String name, String uid) {
+            return new AlbIngress(namespace, name, uid, null, List.of(), null, List.of(), null, true);
+        }
 
         String stack() {
             return namespace + "/" + name;
@@ -116,6 +128,9 @@ final class EksAutoModeIngresses {
         Map<String, LoadBalancer> existing = resources.loadBalancersOf(cluster, region, STACK_TAG, KIND, "application");
         for (AlbIngress ingress : ingresses) {
             LoadBalancer lb = existing.remove(ingress.stack());
+            if (ingress.held()) {
+                continue;
+            }
             // One Ingress ELBv2 refuses, for its subnets say, leaves the others served.
             try {
                 if (lb != null && !ingress.scheme().equals(lb.getScheme())) {
@@ -194,6 +209,16 @@ final class EksAutoModeIngresses {
                 continue;
             }
             JsonNode classParams = paramsOf(ingressClass, paramsByName);
+            if (classParams == null) {
+                // As the Load Balancer Controller fails such an Ingress: the annotations don't stand in for the
+                // class's settings, so its load balancer keeps the ones it has.
+                LOG.warnv("Ingress {0}/{1} is left as it is: its IngressClass {2} names IngressClassParams {3}, "
+                        + "which aren't there", metadata.path("namespace").asText(), metadata.path("name").asText(),
+                        className, ingressClass.path("spec").path("parameters").path("name").asText());
+                found.add(AlbIngress.held(metadata.path("namespace").asText(), metadata.path("name").asText(),
+                        metadata.path("uid").asText("")));
+                continue;
+            }
             JsonNode annotations = metadata.path("annotations");
             String targetType = classParams.path("targetType").asText(annotations.path(TARGET_TYPE_ANNOTATION)
                     .asText("instance"));
@@ -254,6 +279,10 @@ final class EksAutoModeIngresses {
         return path.path("pathType").asText("ImplementationSpecific");
     }
 
+    /**
+     * The spec of the IngressClassParams a class names, missing when it names none, and null when it names ones that
+     * aren't there.
+     */
     private static JsonNode paramsOf(JsonNode ingressClass, Map<String, JsonNode> paramsByName) {
         JsonNode reference = ingressClass.path("spec").path("parameters");
         if (!"IngressClassParams".equals(reference.path("kind").asText())
@@ -261,7 +290,7 @@ final class EksAutoModeIngresses {
             return MissingNode.getInstance();
         }
         JsonNode found = paramsByName.get(reference.path("name").asText());
-        return found == null ? MissingNode.getInstance() : found.path("spec");
+        return found == null ? null : found.path("spec");
     }
 
     /** The Service port a backend names, by number or name, and its NodePort; null without one. */

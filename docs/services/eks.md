@@ -537,7 +537,8 @@ spec:
 - **Load balancer.** Named `k8s-<namespace>-<name>-<hash>`, with the scheme and subnets (`subnets.ids`) of the class's
   `IngressClassParams`, else the `alb.ingress.kubernetes.io/scheme` annotation and the cluster's subnets. As in
   ELBv2, it needs two subnets in two Availability Zones; an Ingress that can't have one is logged and the others are
-  served.
+  served. An Ingress whose class names `IngressClassParams` that aren't there is logged and its load balancer left as
+  it is, as the Load Balancer Controller fails it: the annotations don't stand in for the class's settings.
 - **Listener and rules.** An HTTP listener on port 80, whose default answers a fixed 404 (`text/plain`), or forwards
   to the Ingress's `defaultBackend`. Each path of each rule becomes a listener rule, in order: a `Prefix` path `/` is
   the path pattern `/*`, as AWS makes it, another `Prefix` path `/p` is `/p` and `/p/*`, and an `Exact` path is itself;

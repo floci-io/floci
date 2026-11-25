@@ -194,6 +194,29 @@ class EksAutoModeIngressesTest {
                 argThat(cmd -> cmd.length > 2 && "ingresses".equals(cmd[2])), anyInt());
     }
 
+    /** As the Load Balancer Controller: the annotations don't stand in for IngressClassParams that are gone. */
+    @Test
+    void anIngressWhoseClassParamsAreGoneKeepsItsLoadBalancerAsItIs() throws Exception {
+        Cluster cluster = cluster();
+        objects(cluster, INGRESSES);
+        holdElb();
+        ingresses.reconcile(cluster, REGION, node());
+        String frontName = EksAutoModeElb.resourceName(cluster, EksAutoModeIngresses.KIND, "shop/front", "");
+        String frontLb = lbs.stream().filter(lb -> frontName.equals(lb.getLoadBalancerName())).findFirst()
+                .orElseThrow().getLoadBalancerArn();
+        when(clusterManager.execInContainerForResult(eq("k3s-prod"),
+                argThat(cmd -> cmd.length > 2 && "ingressclassparams".equals(cmd[2])), anyInt()))
+                .thenReturn(new ContainerExec.Result(0, "{\"items\": []}", "", false));
+
+        ingresses.reconcile(cluster, REGION, node());
+
+        verify(elb, never()).deleteLoadBalancer(REGION, frontLb);
+        verify(elb, times(1)).createLoadBalancer(anyString(), eq(frontName), anyString(), anyString(), anyString(),
+                anyList(), anyList(), any());
+        assertEquals(1, EksAutoModeIngresses.albIngresses(json(INGRESSES), json(CLASSES), json("{\"items\": []}"),
+                json(SERVICES)).stream().filter(EksAutoModeIngresses.AlbIngress::held).count());
+    }
+
     @Test
     void anIngressElbV2RefusesLeavesTheOthersServed() throws Exception {
         Cluster cluster = cluster();
