@@ -130,6 +130,7 @@ class RdsZeroEtlInitialLoadIntegrationTest {
                                     + "JOIN information_schema.key_column_usage k "
                                     + "ON k.constraint_name = c.constraint_name AND k.table_schema = c.table_schema "
                                     + "WHERE c.constraint_type = 'PRIMARY KEY' "
+                                    + "AND c.table_schema IN ('public', 'sales') "
                                     + "GROUP BY k.table_name ORDER BY k.table_name"),
                     contains("customers:id", "orders:id,line"));
             assertThat(query(workgroupPort, "appdb_dw",
