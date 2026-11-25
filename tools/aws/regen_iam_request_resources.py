@@ -363,7 +363,8 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs", "cloudwatch",
               "comprehend", "config", "dms", "elasticache", "identitystore", "memorydb", "route53resolver",
-              "sagemaker", "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms", "dynamodb", "iam")
+              "sagemaker", "transcribe", "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms", "dynamodb",
+              "iam")
 
 # ---------------------------------------------------------------------------------------------------------------------
 # MEASURED: what AWS was measured to check where neither botocore nor the Service Reference says it.
@@ -645,7 +646,6 @@ NOT_COVERED: dict[str, str] = {
     "swf": "not read yet: the Service Reference gives a domain's ARN no Region, `swf::<account>:/domain/<name>`, "
            "while the SWF Developer Guide gives it as arn:aws:swf:Region:AccountID:/domain/DomainName, as Floci mints "
            "it; reading it needs that format corrected",
-    "transcribe": _LATER,
     "transfer": _LATER,
     "verifiedpermissions": "not read yet: a policyStoreId may name its store by an alias, `policy-store-alias/<name>`, "
                            "which AWS authorizes as the action on the store the alias points to and "

@@ -29,6 +29,13 @@ and CLI clients can exercise their Transcribe control-flow code locally.
 `LanguageCode` defaults to `en-US` and `MediaFormat` defaults to `mp4` when
 they are omitted from `StartTranscriptionJob`.
 
+With IAM enforcement on, each action is checked on the resources the AWS Service Authorization
+Reference lists for it, read from the request: `GetTranscriptionJob` and `DeleteTranscriptionJob`
+on `arn:aws:transcribe:<region>:<account>:transcription-job/<TranscriptionJobName>`, and
+`GetVocabulary` and `DeleteVocabulary` on `vocabulary/<VocabularyName>`. The reference lists no
+resource type for `StartTranscriptionJob` and `CreateVocabulary`, so they are checked on `*`, as
+are the list operations.
+
 ## Configuration
 
 | Variable | Default | Description |

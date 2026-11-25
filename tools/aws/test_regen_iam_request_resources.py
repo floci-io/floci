@@ -1535,6 +1535,10 @@ def test_the_vendored_file_is_well_formed():
     # SageMaker is read whole: a model, an endpoint or a training job by its name.
     assert "sagemaker" in document["namespaces"] and "sagemaker" not in document["notCovered"]
     assert operations["sagemaker:DescribeModel"]["resources"] == [{"type": "model", "fill": {"ModelName": "ModelName"}}]
+    # Transcribe is read whole: a transcription job or a vocabulary by its name.
+    assert "transcribe" in document["namespaces"] and "transcribe" not in document["notCovered"]
+    assert operations["transcribe:GetTranscriptionJob"]["resources"] == [
+        {"type": "transcriptionjob", "fill": {"JobName": "TranscriptionJobName"}}]
     # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
     assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]

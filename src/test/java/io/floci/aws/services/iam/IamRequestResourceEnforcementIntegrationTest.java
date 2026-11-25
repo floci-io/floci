@@ -3733,6 +3733,22 @@ class IamRequestResourceEnforcementIntegrationTest {
         refusedJson(send(configTagger, "sagemaker", "SageMaker.CreateEndpoint", "1.1", request), "sagemaker:AddTags");
     }
 
+    /**
+     * A Transcribe transcription job is checked on the ARN its name gives, {@code transcription-job/<name>}, so a grant
+     * on one lets the request reach Transcribe, which answers that the job does not exist, and refuses another.
+     */
+    @Test
+    void aTranscriptionJobIsCheckedOnTheArnItsNameGives() {
+        String job = "res-job-" + suffix();
+        User user = user("res-transcribe");
+        user.policy(allowOn("transcribe:GetTranscriptionJob",
+                "arn:aws:transcribe:" + REGION + ":" + ACCOUNT + ":transcription-job/" + job));
+        send(user, "transcribe", "Transcribe.GetTranscriptionJob", "1.1", "{\"TranscriptionJobName\":\"" + job + "\"}")
+                .statusCode(400).body(containsString("NotFoundException"));
+        refusedJson(send(user, "transcribe", "Transcribe.GetTranscriptionJob", "1.1",
+                "{\"TranscriptionJobName\":\"" + job + "-other\"}"), "transcribe:GetTranscriptionJob");
+    }
+
     private static ValidatableResponse glue(String operation, String body) {
         return adminJson("glue", "AWSGlue." + operation).body(body).post("/").then();
     }
