@@ -1,17 +1,16 @@
 package io.floci.aws.services.redshift.proxy;
 
+import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BackendResponseCoordinatorRecoveryTest {
@@ -56,7 +55,7 @@ class BackendResponseCoordinatorRecoveryTest {
                 new FutureTask<>(() -> coordinator.awaitExtendedExecuteTurn(next));
         Thread waiter = Thread.ofVirtual().start(turn);
         try {
-            assertThrows(TimeoutException.class, () -> turn.get(25, TimeUnit.MILLISECONDS),
+            assertEquals(Thread.State.WAITING, ThreadStates.awaitParkedOrDone(waiter),
                     "The new Execute must still wait for the previous Sync response");
             coordinator.onBackendFrame('Z', new byte[]{'I'});
             assertFalse(coordinator.extendedCycleFailed(), "ReadyForQuery ends the failed backend cycle");
