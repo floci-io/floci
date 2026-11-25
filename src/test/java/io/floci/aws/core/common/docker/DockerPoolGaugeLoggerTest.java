@@ -7,6 +7,7 @@ import com.github.dockerjava.core.DefaultDockerClientConfig;
 import com.github.dockerjava.transport.DockerHttpClient;
 import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
 import org.junit.jupiter.api.parallel.ResourceAccessMode;
 import org.junit.jupiter.api.parallel.ResourceLock;
 
@@ -23,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@Isolated("Observes the process-wide Docker stream counter")
 @ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class DockerPoolGaugeLoggerTest {
 
@@ -104,6 +106,13 @@ class DockerPoolGaugeLoggerTest {
         };
         DefaultDockerClientConfig config = DefaultDockerClientConfig.createDefaultConfigBuilder()
                 .withDockerHost("tcp://127.0.0.1:2375").build();
+        // Closing another test's client wakes its callbacks, which can retire after that test returns.
+        // Isolation prevents new producers; wait for the old callbacks before taking an exact baseline.
+        long idleDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (DockerPoolGaugeLogger.countStreamThreads() != 0 && System.nanoTime() < idleDeadline) {
+            Thread.sleep(1);
+        }
+        assertEquals(0, DockerPoolGaugeLogger.countStreamThreads(), "earlier stream callbacks should retire");
         int before = DockerPoolGaugeLogger.countStreamThreads();
 
         try (DockerClient client = DockerClientProducer.newDockerClient(config, transport);
