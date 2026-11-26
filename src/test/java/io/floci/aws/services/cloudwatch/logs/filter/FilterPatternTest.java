@@ -96,6 +96,13 @@ class FilterPatternTest {
         }
 
         @Test
+        void aMinusSeparatedFromItsTermBySpaceStillExcludesIt() {
+            assertTrue(matches("\"ERROR\" - \"Unauthorized\"", "[ERROR 400] Bad request"));
+            assertFalse(matches("\"ERROR\" - \"Unauthorized\"", "[ERROR 401] Unauthorized request"));
+            assertFalse(matches("ERROR - ARGUMENTS", "[ERROR 419] MISSING ARGUMENTS"));
+        }
+
+        @Test
         void aQuotedSpaceMatchesEverythingWithASpaceAndAnEmptyPatternMatchesEverything() {
             assertTrue(matches("\" \"", "two words"));
             assertTrue(matches("", "anything at all"));

@@ -70,8 +70,10 @@ final class TermPattern extends FilterPattern {
 
     private static Term readTerm(PatternCursor cursor) {
         Mode mode = Mode.INCLUDE;
-        if (cursor.peek() == '-' && !cursor.lookingAt("- ")) {
+        if (cursor.peek() == '-') {
+            // AWS also reads "- term" as an exclusion.
             cursor.next();
+            cursor.skipWhitespace();
             mode = Mode.EXCLUDE;
         } else if (cursor.peek() == '?' && !cursor.lookingAt("? ")) {
             cursor.next();
