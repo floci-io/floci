@@ -11,6 +11,7 @@ import io.floci.aws.services.bedrockagentcorecontrol.model.AgentRuntimeEndpoint;
 import io.floci.aws.services.bedrockagentcorecontrol.model.Memory;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -19,6 +20,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -166,6 +169,31 @@ class BedrockAgentCoreCfnProvisionerTest {
         }
         props.putObject("Tags").put("team", tag);
         return props;
+    }
+
+    @Test
+    void unsupportedRuntimeHooksAndResourcesWarnOnceWithoutLoggingValues() {
+        when(runtimes.createAgentRuntime(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(runtime(null, Map.of()));
+        when(runtimes.arn(any(), eq(REGION))).thenReturn(RUNTIME_ARN);
+        ObjectNode props = runtimeProps(mapper, null, "agents");
+        props.putNull("HooksConfiguration");
+        props.putNull("ResourceConfigurations");
+        List<LogRecord> absent = LogCapture.capture(BedrockAgentCoreCfnProvisioner.class,
+                () -> provisioner.provision(resource("AWS::BedrockAgentCore::Runtime"), props, ctx(null)));
+        assertTrue(absent.stream().noneMatch(record -> record.getLevel().intValue() >= Level.WARNING.intValue()));
+        props.putObject("HooksConfiguration").put("private-value", "must-not-be-logged");
+        props.putObject("ResourceConfigurations").put("private-value", "must-not-be-logged");
+        List<LogRecord> logs = LogCapture.capture(BedrockAgentCoreCfnProvisioner.class, () -> {
+            provisioner.provision(resource("AWS::BedrockAgentCore::Runtime"), props, ctx(null));
+            provisioner.provision(resource("AWS::BedrockAgentCore::Runtime"), props, ctx(null));
+        });
+        for (String property : List.of("HooksConfiguration", "ResourceConfigurations")) {
+            assertEquals(1, logs.stream().filter(record -> record.getLevel().intValue() >= Level.WARNING.intValue()
+                    && LogCapture.formatted(record).contains("AWS::BedrockAgentCore::Runtime " + property
+                    + " is accepted but not stored")).count(), property);
+        }
+        assertTrue(logs.stream().noneMatch(record -> LogCapture.formatted(record).contains("must-not-be-logged")));
     }
 
     @Test
