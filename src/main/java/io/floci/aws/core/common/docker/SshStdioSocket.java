@@ -28,6 +28,11 @@ import java.util.concurrent.TimeUnit;
  * <p>A process stream has no read timeout, so a virtual thread copies the process's output into a bounded queue and
  * a read waits on that queue for {@link #setSoTimeout(int)}, failing with {@link SocketTimeoutException} as a socket
  * does. httpclient5's stale-connection check, a read with a 1 ms timeout, works the same way.
+ *
+ * <p>Starting the process is not yet a connection: the SSH handshake and the daemon's first answer still lie ahead.
+ * Until the first byte arrives, a read also waits no longer than the connect timeout, so a session that stalls in its
+ * handshake fails even a request that disables its response timeout, such as a log follow or a container wait. The
+ * daemon answers those with their headers at once, so the bound never cuts a long-lived stream short.
  */
 final class SshStdioSocket extends Socket {
 
@@ -36,13 +41,16 @@ final class SshStdioSocket extends Socket {
     private static final byte[] END_OF_STREAM = new byte[0];
     private static final int CHUNK_SIZE = 16 * 1024;
     private static final int MAX_STDERR_CHARS = 2048;
+    static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 30_000;
 
     private final Process process;
     private final BlockingQueue<byte[]> chunks = new ArrayBlockingQueue<>(64);
     private final StringBuilder stderr = new StringBuilder();
     private final InputStream input = new QueueInputStream();
     private final OutputStream output;
+    private final Thread outputPump;
     private volatile int soTimeoutMillis;
+    private volatile long firstByteDeadlineNanos;
     private volatile boolean closed;
     private volatile boolean inputShutdown;
     private volatile boolean outputShutdown;
@@ -50,7 +58,8 @@ final class SshStdioSocket extends Socket {
     private SshStdioSocket(Process process) {
         this.process = process;
         this.output = new ProcessOutputStream(process.getOutputStream());
-        Thread.ofVirtual().name("docker-ssh-stdout").start(this::pumpOutput);
+        this.firstByteDeadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(DEFAULT_CONNECT_TIMEOUT_MILLIS);
+        this.outputPump = Thread.ofVirtual().name("docker-ssh-stdout").start(this::pumpOutput);
         Thread.ofVirtual().name("docker-ssh-stderr").start(this::pumpErrors);
     }
 
@@ -67,20 +76,23 @@ final class SshStdioSocket extends Socket {
     }
 
     private void pumpOutput() {
-        try (InputStream stdout = process.getInputStream()) {
-            byte[] buffer = new byte[CHUNK_SIZE];
-            int read;
-            while ((read = stdout.read(buffer)) >= 0) {
-                if (read > 0) {
-                    chunks.put(Arrays.copyOf(buffer, read));
+        try {
+            try (InputStream stdout = process.getInputStream()) {
+                byte[] buffer = new byte[CHUNK_SIZE];
+                int read;
+                while ((read = stdout.read(buffer)) >= 0) {
+                    if (read > 0) {
+                        chunks.put(Arrays.copyOf(buffer, read));
+                    }
                 }
+            } catch (IOException e) {
+                LOG.debugv("Stopped reading the Docker SSH session''s output: {0}", e.getMessage());
             }
-        } catch (IOException e) {
-            LOG.debugv("Stopped reading the Docker SSH session''s output: {0}", e.getMessage());
+            // Waits for room like the output before it, so a slow reader still gets every byte before the end.
+            chunks.put(END_OF_STREAM);
         } catch (InterruptedException e) {
+            // close() interrupts the pump so it never stays parked on a full queue nobody reads any more.
             Thread.currentThread().interrupt();
-        } finally {
-            endStream();
         }
     }
 
@@ -98,13 +110,6 @@ final class SshStdioSocket extends Socket {
             }
         } catch (IOException e) {
             LOG.debugv("Stopped reading the Docker SSH session''s errors: {0}", e.getMessage());
-        }
-    }
-
-    /** Wakes a waiting read with the end of the stream, dropping unread output when the socket is already closed. */
-    private void endStream() {
-        while (!chunks.offer(END_OF_STREAM)) {
-            chunks.poll();
         }
     }
 
@@ -132,9 +137,12 @@ final class SshStdioSocket extends Socket {
         // Connected by open(): httpclient5 calls this on the socket its factory returned.
     }
 
+    /** The process is already started; {@code timeout} bounds the wait for the session's first byte. */
     @Override
     public void connect(SocketAddress endpoint, int timeout) {
-        // Connected by open().
+        if (timeout > 0) {
+            firstByteDeadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout);
+        }
     }
 
     @Override
@@ -189,7 +197,10 @@ final class SshStdioSocket extends Socket {
         }
         closed = true;
         process.destroy();
-        endStream();
+        outputPump.interrupt();
+        // Unread output is of no use once closed; the end marker wakes a read still waiting on the queue.
+        chunks.clear();
+        chunks.offer(END_OF_STREAM);
     }
 
     @Override
@@ -235,6 +246,11 @@ final class SshStdioSocket extends Socket {
     @Override
     public InetAddress getLocalAddress() {
         return null;
+    }
+
+    /** Whether the thread copying the session's output is still running. */
+    boolean isOutputPumpAlive() {
+        return outputPump.isAlive();
     }
 
     private void ensureOpen() throws SocketException {
@@ -288,20 +304,38 @@ final class SshStdioSocket extends Socket {
 
         private byte[] take() throws IOException {
             ensureOpen();
-            int timeout = soTimeoutMillis;
+            long timeoutNanos = TimeUnit.MILLISECONDS.toNanos(soTimeoutMillis);
+            boolean connecting = !anyRead;
+            if (connecting) {
+                long untilDeadline = firstByteDeadlineNanos - System.nanoTime();
+                timeoutNanos = timeoutNanos == 0 ? untilDeadline : Math.min(timeoutNanos, untilDeadline);
+                if (timeoutNanos <= 0) {
+                    throw connectTimeout();
+                }
+            }
             try {
-                if (timeout == 0) {
+                if (timeoutNanos == 0) {
                     return chunks.take();
                 }
-                byte[] next = chunks.poll(timeout, TimeUnit.MILLISECONDS);
+                byte[] next = chunks.poll(timeoutNanos, TimeUnit.NANOSECONDS);
                 if (next == null) {
-                    throw new SocketTimeoutException("Read timed out after " + timeout + " ms");
+                    if (connecting && System.nanoTime() - firstByteDeadlineNanos >= 0) {
+                        throw connectTimeout();
+                    }
+                    throw new SocketTimeoutException("Read timed out after " + soTimeoutMillis + " ms");
                 }
                 return next;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 close();
                 throw new SocketException("Interrupted while reading from the Docker SSH session");
+            }
+        }
+
+        private SocketTimeoutException connectTimeout() {
+            synchronized (stderr) {
+                return new SocketTimeoutException("SSH session to the Docker daemon did not answer within the connect"
+                        + " timeout" + (stderr.isEmpty() ? "" : ": " + stderr));
             }
         }
 

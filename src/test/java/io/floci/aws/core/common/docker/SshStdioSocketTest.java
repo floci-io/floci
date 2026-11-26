@@ -9,12 +9,14 @@ import java.net.SocketTimeoutException;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.lessThan;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class SshStdioSocketTest {
@@ -98,6 +100,66 @@ class SshStdioSocketTest {
         }
     }
 
+    @Test
+    void aSlowReaderGetsEveryByteOfASessionThatAlreadyEnded() throws Exception {
+        try (SshStdioSocket socket = SshStdioSocket.open(javaMain(WriteManyThenExit.class))) {
+            socket.setSoTimeout(30_000);
+            InputStream in = socket.getInputStream();
+            in.read();
+            // Let the session finish while the queue is full and unread.
+            Thread.sleep(2_000);
+
+            byte[] rest = in.readAllBytes();
+
+            assertThat(1 + rest.length, equalTo(WriteManyThenExit.BYTES));
+        }
+    }
+
+    @Test
+    void aSessionThatNeverAnswersFailsAtTheConnectTimeoutEvenWithoutAReadTimeout() throws IOException {
+        try (SshStdioSocket socket = SshStdioSocket.open(javaMain(Echo.class))) {
+            socket.connect(null, 500);
+            socket.setSoTimeout(0);
+            long started = System.nanoTime();
+
+            SocketTimeoutException failure =
+                    assertThrows(SocketTimeoutException.class, () -> socket.getInputStream().read());
+
+            assertThat(failure.getMessage(), containsString("did not answer within the connect timeout"));
+            assertThat(Duration.ofNanos(System.nanoTime() - started).toMillis(), lessThan(10_000L));
+        }
+    }
+
+    @Test
+    void theConnectTimeoutNoLongerAppliesOnceTheSessionAnswered() throws Exception {
+        try (SshStdioSocket socket = SshStdioSocket.open(javaMain(Echo.class))) {
+            socket.connect(null, 300);
+            socket.setSoTimeout(30_000);
+            socket.getOutputStream().write('a');
+            InputStream in = socket.getInputStream();
+            assertThat(in.read(), equalTo((int) 'a'));
+            Thread.sleep(600);
+            socket.getOutputStream().write('b');
+
+            assertThat(in.read(), equalTo((int) 'b'));
+        }
+    }
+
+    @Test
+    void closingReleasesTheOutputPumpBlockedOnAFullQueue() throws Exception {
+        SshStdioSocket socket = SshStdioSocket.open(javaMain(WriteManyThenExit.class));
+        Thread.sleep(2_000);
+        assertThat(socket.isOutputPumpAlive(), is(true));
+
+        socket.close();
+
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        while (socket.isOutputPumpAlive() && System.nanoTime() < deadline) {
+            Thread.sleep(50);
+        }
+        assertThat(socket.isOutputPumpAlive(), is(false));
+    }
+
     /** Copies its input to its output, as {@code docker system dial-stdio} relays the daemon's socket. */
     public static final class Echo {
         public static void main(String[] args) throws IOException {
@@ -107,6 +169,19 @@ class SshStdioSocketTest {
                 System.out.write(buffer, 0, read);
                 System.out.flush();
             }
+        }
+    }
+
+    /** Writes more than the socket queues unread, then exits. */
+    public static final class WriteManyThenExit {
+        static final int BYTES = 4 * 1024 * 1024;
+
+        public static void main(String[] args) throws IOException {
+            byte[] chunk = new byte[64 * 1024];
+            for (int written = 0; written < BYTES; written += chunk.length) {
+                System.out.write(chunk);
+            }
+            System.out.flush();
         }
     }
 
