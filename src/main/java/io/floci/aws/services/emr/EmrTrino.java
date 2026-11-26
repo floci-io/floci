@@ -1,7 +1,9 @@
 package io.floci.aws.services.emr;
 
+import java.net.URI;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -19,8 +21,10 @@ import java.util.stream.Collectors;
  * {@code <catalog>.properties} file". EMR installs {@code hcatalog-server} with Trino, so the catalogs whose tables
  * are in S3, {@code hive}, {@code delta}, {@code hudi} and {@code iceberg}, are on the cluster's Hive metastore, as
  * the Release Guide's Delta Lake and Iceberg tutorials have them at {@code thrift://localhost:9083}, unless the
- * classification puts them in the Glue Data Catalog, as "Launch an Amazon EMR cluster with Trino" does. Its steps run
- * {@code trino-cli}, EMR's command for Trino's CLI, which this class writes for the image they run in.
+ * classification puts them in the Glue Data Catalog, as "Launch an Amazon EMR cluster with Trino" does. It starts as
+ * the cluster becomes ready, with the primary node, steps or none. Its steps run {@code trino-cli}, EMR's command for
+ * Trino's CLI, which this class writes for the image they run in, and clients outside the cluster reach it through
+ * Floci on a host of the cluster's own ({@link EmrTrinoRoutes}).
  */
 final class EmrTrino {
 
@@ -41,6 +45,11 @@ final class EmrTrino {
     static final Pattern CATALOG_NAME = Pattern.compile("[a-z][a-z0-9_]*");
     /** The component label of a cluster's Trino container, which goes with its primary node's. */
     static final String COMPONENT = "emr-trino";
+    /**
+     * The label under Floci's host name of the hosts clients outside the cluster reach a cluster's Trino at, one per
+     * cluster ({@link #address}).
+     */
+    static final String HOST_LABEL = "emr-trino";
     /** The variable a step's {@code trino-cli} reads the coordinator's address from. */
     static final String SERVER_VARIABLE = "FLOCI_TRINO_SERVER";
     /** Trino's CLI in its image, an executable jar, which the cluster's image takes. */
@@ -128,6 +137,16 @@ final class EmrTrino {
         return "http://" + host + ":" + port;
     }
 
+    /**
+     * The address clients outside the cluster reach its Trino at, through Floci at {@code baseUrl}: a host of the
+     * cluster's own under {@link #HOST_LABEL}, as EMR's clients reach the primary node's.
+     */
+    static String address(String baseUrl, String clusterId) {
+        URI base = URI.create(baseUrl);
+        return base.getScheme() + "://" + clusterId.toLowerCase(Locale.ROOT) + "." + HOST_LABEL + "."
+                + base.getRawAuthority();
+    }
+
     /** What tells the Trino container is ready: a query, run with the CLI of its image on {@code port}. */
     static List<String> readyQuery(int port) {
         return List.of(IMAGE_CLI, "--server", "localhost:" + port, "--execute", "SELECT 1");
@@ -135,8 +154,9 @@ final class EmrTrino {
 
     /**
      * The coordinator's {@code config.properties}: a coordinator that runs the queries too, on its {@link #port}, its
-     * discovery at that port unless the cluster's {@code trino-config} names another, and that classification's
-     * properties after these, each in its place.
+     * discovery at that port unless the cluster's {@code trino-config} names another; the scheme a client reached it
+     * over through Floci taken from {@code X-Forwarded-Proto}, as it names the query's next pages by the host and
+     * scheme it was asked on; and that classification's properties after these, each in its place.
      */
     static Map<String, String> config(Map<String, String> classification) {
         Map<String, String> config = new LinkedHashMap<>();
@@ -144,6 +164,7 @@ final class EmrTrino {
         config.put("node-scheduler.include-coordinator", "true");
         config.put("http-server.http.port", String.valueOf(PORT));
         config.put("discovery.uri", "http://localhost:" + port(classification));
+        config.put("http-server.process-forwarded", "true");
         config.putAll(classification);
         return config;
     }

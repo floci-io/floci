@@ -1941,6 +1941,8 @@ class EmrClusterStorageTest {
         verify(spec, never()).withJoinedNetwork(any());
         verify(spec, never()).withEmbeddedDns();
         verify(lifecycle, never()).ensureConnected(anyString(), anyString(), anyString());
+        // No Trino, so no port for one.
+        verify(spec, never()).withLoopbackPortBinding(anyInt(), anyInt());
         // Floci's S3 through S3A, as for the cluster's steps.
         verify(spec).withEnv(eq("FLOCI_HIVE_METASTORE"), argThat(settings -> settings.startsWith(
                 "--hiveconf fs.s3a.endpoint=http://host.docker.internal:4566"
@@ -2019,6 +2021,37 @@ class EmrClusterStorageTest {
         // It goes before the primary node, whose network it shares, and its session with it.
         assertEquals(List.of(trinoName, hdfsName), removed.subList(removed.size() - 2, removed.size()));
         verify(roleCredentials).unregister("123456789012", "ASIATRINO");
+    }
+
+    @Test
+    void trinosPortIsPublishedOnThePrimaryNodeAndReachedOnceTrinoIsReadyUntilItGoes() {
+        String trinoName = ContainerStorageHelper.dockerName(config, "emr-j-1-trino");
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-6", Map.of()),
+                new ContainerLifecycleManager.ContainerInfo("t-1", Map.of()));
+        trinoStarts(trinoName);
+        ContainerLifecycleManager.EndpointInfo published = new ContainerLifecycleManager.EndpointInfo("localhost",
+                32802);
+        when(lifecycle.resolveEndpoint(hdfsName, 8889, hdfsName)).thenReturn(published);
+        when(currentContainer.resolveContainerId()).thenReturn(Optional.empty());
+
+        // Not started yet.
+        assertTrue(ticking.trinoInterface("j-1", 8889).isEmpty());
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", TRINO_METASTORE, null,
+                NOT_STOPPED);
+
+        // Its port, on the node's container, whose network Trino's shares, as the node's web interfaces' are.
+        verify(spec).withLoopbackPortBinding(8889, 0);
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.RUNNING);
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+        assertEquals(Optional.of(published), ticking.trinoInterface("j-1", 8889));
+        // A Trino that has stopped is not reached.
+        when(lifecycle.probeContainer(trinoName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        assertTrue(ticking.trinoInterface("j-1", 8889).isEmpty());
+        when(lifecycle.probeContainer(trinoName)).thenReturn(ContainerLiveness.RUNNING);
+
+        ticking.remove("j-1");
+
+        assertTrue(ticking.trinoInterface("j-1", 8889).isEmpty());
     }
 
     @Test

@@ -201,6 +201,14 @@ public interface ClusterStorage {
     }
 
     /**
+     * Where Floci reaches {@code port}, its Trino's, on {@code clusterId}'s primary node: empty until that Trino has
+     * answered queries ({@link #hdfs}), and while it is not running, or where Floci cannot reach it.
+     */
+    default Optional<ContainerLifecycleManager.EndpointInfo> trinoInterface(String clusterId, int port) {
+        return Optional.empty();
+    }
+
+    /**
      * Keeps what a cluster's history interfaces show once it has ended, before its storage goes: the Spark
      * applications' event logs, copied out of its HDFS into the volume of its primary node that already holds the
      * YARN timeline server's store, which outlives the cluster's other storage until {@link #removeHistoriesBut} lets

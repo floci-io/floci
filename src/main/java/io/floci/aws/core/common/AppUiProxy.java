@@ -141,6 +141,7 @@ public class AppUiProxy {
             }
         }
         options.putHeader("accept-encoding", "identity");
+        route.headers().forEach(options::putHeader);
         HttpServerResponse response = request.response();
         client.request(options).onComplete(opened -> {
             if (opened.failed()) {
