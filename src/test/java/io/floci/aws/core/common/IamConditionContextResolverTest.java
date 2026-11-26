@@ -917,32 +917,17 @@ class IamConditionContextResolverTest {
         tags.putForAccount("123456789012", "eu-west-1::vpce-0123456789", List.of(new Tag("Team", "caller-west")));
         tags.putForAccount("111111111111", "us-east-1::vpce-0123456789", List.of(new Tag("Team", "foreign-east")));
         tags.putForAccount("111111111111", "eu-west-1::vpce-0123456789", List.of(new Tag("Team", "foreign-west")));
+        tags.putForAccount(targetAccount, "::vpce-0123456789", List.of(new Tag("Team", "empty-region")));
         IamConditionContextResolver stored = resolverWithStoredEc2Tags(tags);
         String prefix = targetAccount.equals("123456789012") ? "caller" : "foreign";
-        for (String region : List.of("us-east-1", "eu-west-1")) {
+        for (String region : List.of("us-east-1", "eu-west-1", "")) {
             Map<String, List<String>> context = ec2ResourceContext(stored, "ec2", "ec2:ModifyVpcEndpoint",
                     "arn:aws:ec2:" + region + ":" + targetAccount + ":vpc-endpoint/vpce-0123456789",
                     "us-east-1", "123456789012", Map.of("aws:ResourceTag/Team", List.of("stale")));
-            assertEquals(List.of(prefix + (region.equals("us-east-1") ? "-east" : "-west")),
+            assertEquals(List.of(prefix + (region.equals("eu-west-1") ? "-west" : "-east")),
                     context.get("aws:ResourceTag/Team"));
         }
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"111111111111", "123456789012"})
-    void ec2ArnWithoutARegionReadsTheCallersRegionInItsOwnAccount(String targetAccount) {
-        AccountAwareStorageBackend<List<Tag>> tags = AccountAwareStorageBackend.inMemory("123456789012");
-        tags.putForAccount("123456789012", "us-east-1::vpce-0123456789", List.of(new Tag("Team", "caller-east")));
-        tags.putForAccount("111111111111", "us-east-1::vpce-0123456789", List.of(new Tag("Team", "foreign-east")));
-        tags.putForAccount(targetAccount, "eu-west-1::vpce-0123456789", List.of(new Tag("Team", "other-region")));
-        tags.putForAccount(targetAccount, "::vpce-0123456789", List.of(new Tag("Team", "empty-region")));
-        IamConditionContextResolver reading = resolverWithStoredEc2Tags(tags);
-        String value = targetAccount.equals("123456789012") ? "caller-east" : "foreign-east";
-        Map<String, List<String>> context = ec2ResourceContext(reading, "ec2", "ec2:ModifyVpcEndpoint",
-                "arn:aws:ec2::" + targetAccount + ":vpc-endpoint/vpce-0123456789", "us-east-1", "123456789012",
-                Map.of("aws:ResourceTag/Team", List.of("stale")));
-        assertEquals(List.of(value), context.get("aws:ResourceTag/Team"));
-        assertEquals(List.of("other-region"), reading.resourceTags(
+        assertEquals(List.of(prefix + "-west"), stored.resourceTags(
                 "arn:aws:ec2:eu-west-1:" + targetAccount + ":vpc-endpoint/vpce-0123456789").get("aws:ResourceTag/Team"));
     }
 
