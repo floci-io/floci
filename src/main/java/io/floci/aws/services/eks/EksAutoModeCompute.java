@@ -182,6 +182,9 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         }
         Map<String, NodePool> pools = new HashMap<>();
         EksAutoModeNodes.nodePools(read(cluster, "nodepools")).forEach(pool -> pools.put(pool.name(), pool));
+        // The DaemonSet pods a node runs besides its workload, which room and sizing count; read only for pods to place.
+        List<EksAutoModeNodes.PendingPod> daemons = pods.isEmpty() ? List.of()
+                : EksAutoModeNodes.daemonPods(read(cluster, "daemonsets"));
         Map<String, long[]> requests = EksAutoModeNodes.requestsByNode(podList);
         Map<String, List<EksAutoModeNodes.BoundPod>> boundPods = EksAutoModeNodes.boundPodsByNode(podList);
         Set<String> busy = EksAutoModeNodes.nodesWithWorkloads(podList);
@@ -238,6 +241,13 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             long memory = allocatable.hasNonNull("memory") ? EksAutoModeNodes.bytes(allocatable.path("memory").asText())
                     : type.get().memoryMib * 1024L * 1024L;
             int podSlots = allocatable.path("pods").asInt(EksAutoModeNodes.MAX_PODS);
+            if (node == null) {
+                // A node still joining runs none of its DaemonSet pods yet; they take its room once it does.
+                long[] daemon = EksAutoModeNodes.daemonRequests(daemons,
+                        EksAutoModeNodes.labels(type.get(), pool, zone(instance)), pool.taints());
+                cpu -= daemon[0];
+                memory -= daemon[1];
+            }
             poolNodes.add(new EksAutoModeNodes.PoolNode(instance.getInstanceId(), pool, type.get(), zone(instance),
                     cpu - used[0], memory - used[1], (int) Math.max(0, podSlots - used[2]), schedulable,
                     List.copyOf(nodeTaints), boundPods.getOrDefault(nodeName, List.of())));
@@ -286,7 +296,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         nodeClasses.forEach((name, spec) -> zonesByNodeClass.put(name, ids(spec.path("subnetSelectorTerms")).stream()
                 .map(subnetZones::get).filter(Objects::nonNull).distinct().toList()));
         for (Launch launch : EksAutoModeNodes.plan(List.copyOf(pools.values()), withoutRoom,
-                instanceTypes.instanceTypes(), zonesByNodeClass)) {
+                instanceTypes.instanceTypes(), zonesByNodeClass, daemons)) {
             try {
                 launch(cluster, region, launch, nodeClasses.get(launch.pool().nodeClass()), subnetZones);
             } catch (RuntimeException e) {

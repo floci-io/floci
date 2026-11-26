@@ -476,7 +476,9 @@ launches nodes on AWS. Floci checks every 10 seconds.
   key isn't modelled; the taints a node carries while it starts (`node.kubernetes.io/not-ready` and the
   like) don't count in the 3 minutes after its launch, as Karpenter counts a starting node.
 - **Instance.** One node a pool and pass, of the smallest type in the instance type catalog with at least 2 vCPUs
-  that fits all of the pool's waiting pods, or else the largest of them. AWS picked a 2-vCPU `c6a.large` for a pod of
+  that fits all of the pool's waiting pods and the DaemonSet pods that would run on it (by their node selector,
+  required node affinity and tolerations), or else the largest of them. A node still joining has room for its
+  DaemonSet pods taken too. AWS picked a 2-vCPU `c6a.large` for a pod of
   100m CPU. It is launched in a subnet of the pool's NodeClass, in the zone the pods ask for if they do, with its
   security groups, the instance
   profile `eks-<region>-<cluster>-<number>` (path `/eks/<region>/<cluster>/`) holding the NodeClass's role, and the

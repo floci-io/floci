@@ -54,6 +54,31 @@ class EksAutoModeNodesTest {
             type("c7g.large", 2, 4096, "arm64"),
             type("m4.large", 2, 8192, "x86_64"));
 
+    /**
+     * A node is sized for the DaemonSet pods that would run on it as well, as Karpenter sizes it: 1900m of workload
+     * and a 300m daemon don't fit 2 vCPUs. A daemon whose node selector leaves the node out doesn't count.
+     */
+    @Test
+    void aNodeIsSizedForTheDaemonSetPodsItWouldRunToo() throws Exception {
+        String daemonSets = """
+                {"items": [
+                  {"metadata": {"namespace": "kube-system", "name": "agent"}, "spec": {"template": {"spec": {
+                    "containers": [{"resources": {"requests": {"cpu": "300m", "memory": "64Mi"}}}]}}}},
+                  {"metadata": {"namespace": "kube-system", "name": "arm-only"}, "spec": {"template": {"spec": {
+                    "nodeSelector": {"kubernetes.io/arch": "arm64"},
+                    "containers": [{"resources": {"requests": {"cpu": "1"}}}]}}}}
+                ]}""";
+        List<PendingPod> daemons = EksAutoModeNodes.daemonPods(json(daemonSets));
+        PendingPod big = pod("big", "1900m", "64Mi");
+
+        assertEquals("c7a.large", EksAutoModeNodes.plan(pools(), List.of(big), TYPES, Map.of())
+                .getFirst().instanceType().instanceType);
+        assertEquals("c7a.xlarge", EksAutoModeNodes.plan(pools(), List.of(big), TYPES, Map.of(), daemons)
+                .getFirst().instanceType().instanceType);
+        assertEquals(300, EksAutoModeNodes.daemonRequests(daemons,
+                EksAutoModeNodes.labels(TYPES.get(2), pools().getFirst(), null), List.of())[0]);
+    }
+
     @Test
     void aSmallPodGetsTheSmallestTwoVcpuTypeOfTheGeneralPurposePool() throws Exception {
         List<Launch> launches = EksAutoModeNodes.plan(pools(), List.of(pod("web", "100m", "64Mi")), TYPES, Map.of());

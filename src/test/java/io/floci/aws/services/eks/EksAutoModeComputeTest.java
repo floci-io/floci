@@ -80,7 +80,8 @@ class EksAutoModeComputeTest {
     private final EksAutoModeCompute compute = new EksAutoModeCompute(eksService, clusterManager, ec2,
             iam, instanceTypes, mock(EmulatorConfig.class), clock);
     private final Map<String, String> lists = new HashMap<>(Map.of("pods", PENDING_POD,
-            "nodepools", POOLS, "nodeclasses", NODE_CLASSES, "nodes", "{\"items\": []}"));
+            "nodepools", POOLS, "nodeclasses", NODE_CLASSES, "nodes", "{\"items\": []}", "daemonsets",
+            "{\"items\": []}"));
 
     @BeforeEach
     void cluster() {

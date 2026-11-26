@@ -300,6 +300,15 @@ final class EksAutoModeNodes {
      */
     static List<Launch> plan(List<NodePool> pools, List<PendingPod> pods, List<CatalogInstanceType> types,
                              Map<String, List<String>> zonesByNodeClass) {
+        return plan(pools, pods, types, zonesByNodeClass, List.of());
+    }
+
+    /**
+     * As above; with the cluster's DaemonSet pods, as {@link #daemonPods} reads them: a node is sized for its
+     * waiting pods and the DaemonSet pods that would run on it too, as Karpenter sizes it.
+     */
+    static List<Launch> plan(List<NodePool> pools, List<PendingPod> pods, List<CatalogInstanceType> types,
+                             Map<String, List<String>> zonesByNodeClass, List<PendingPod> daemons) {
         List<NodePool> ordered = pools.stream()
                 .sorted(Comparator.comparingInt(NodePool::weight).reversed().thenComparing(NodePool::name))
                 .toList();
@@ -311,7 +320,8 @@ final class EksAutoModeNodes {
         Map<String, List<PendingPod>> byPool = new LinkedHashMap<>();
         for (PendingPod pod : pods) {
             for (NodePool pool : ordered) {
-                if (candidate(pool, sized, zonesOf(pool, zonesByNodeClass), pod, pod.cpuMillis(), pod.memoryBytes())
+                if (candidate(pool, sized, zonesOf(pool, zonesByNodeClass), pod, pod.cpuMillis(), pod.memoryBytes(),
+                        daemons)
                         .isPresent()) {
                     byPool.computeIfAbsent(pool.name(), k -> new ArrayList<>()).add(pod);
                     break;
@@ -329,9 +339,10 @@ final class EksAutoModeNodes {
             PendingPod largest = group.stream().max(Comparator.comparingLong(PendingPod::cpuMillis)
                     .thenComparingLong(PendingPod::memoryBytes)).orElseThrow();
             List<String> placesIn = zonesOf(pool, zonesByNodeClass);
-            Optional<Placement> placement = candidate(pool, sized, placesIn, largest, cpu, memory)
+            Optional<Placement> placement = candidate(pool, sized, placesIn, largest, cpu, memory, daemons)
                     .filter(p -> group.stream().allMatch(pod -> pod.fits(labels(p.type(), pool, p.zone()), pool.taints())))
-                    .or(() -> candidate(pool, sized, placesIn, largest, largest.cpuMillis(), largest.memoryBytes()));
+                    .or(() -> candidate(pool, sized, placesIn, largest, largest.cpuMillis(), largest.memoryBytes(),
+                            daemons));
             placement.ifPresent(p -> launches.add(new Launch(pool, p.type(), p.zone(),
                     labels(p.type(), pool, p.zone()), List.copyOf(group))));
         }
@@ -389,19 +400,66 @@ final class EksAutoModeNodes {
     }
 
     private static Optional<Placement> candidate(NodePool pool, List<CatalogInstanceType> sized, List<String> zones,
-                                                 PendingPod pod, long cpuMillis, long memoryBytes) {
+                                                 PendingPod pod, long cpuMillis, long memoryBytes,
+                                                 List<PendingPod> daemons) {
         for (CatalogInstanceType type : sized) {
-            if (type.vcpu * 1000L < cpuMillis || type.memoryMib * 1024L * 1024L < memoryBytes) {
-                continue;
-            }
             for (String zone : zones) {
                 Map<String, String> labels = labels(type, pool, zone);
+                long[] daemon = daemonRequests(daemons, labels, pool.taints());
+                if (type.vcpu * 1000L < cpuMillis + daemon[0]
+                        || type.memoryMib * 1024L * 1024L < memoryBytes + daemon[1]) {
+                    continue;
+                }
                 if (poolAllows(pool, labels) && pod.fits(labels, pool.taints())) {
                     return Optional.of(new Placement(type, zone));
                 }
             }
         }
         return Optional.empty();
+    }
+
+    /**
+     * The CPU (millicores) and memory (bytes) the DaemonSet pods that would run on a node of {@code labels} and
+     * {@code taints} request: those whose node selector, required node affinity and tolerations accept it.
+     */
+    static long[] daemonRequests(List<PendingPod> daemons, Map<String, String> labels, List<Taint> taints) {
+        long[] total = new long[2];
+        for (PendingPod daemon : daemons) {
+            if (daemon.fits(labels, taints)) {
+                total[0] += daemon.cpuMillis();
+                total[1] += daemon.memoryBytes();
+            }
+        }
+        return total;
+    }
+
+    /**
+     * The pod each DaemonSet of {@code kubectl get daemonsets -A -o json} runs on a node, with its template's
+     * requests, node selector, required node affinity and tolerations. The DaemonSet controller lets its pods onto
+     * an unschedulable node, which Floci's nodes don't need.
+     */
+    static List<PendingPod> daemonPods(JsonNode list) {
+        List<PendingPod> daemons = new ArrayList<>();
+        for (JsonNode item : list.path("items")) {
+            JsonNode spec = item.path("spec").path("template").path("spec");
+            long[] requests = requests(spec);
+            Map<String, String> selector = new LinkedHashMap<>();
+            spec.path("nodeSelector").properties().forEach(e -> selector.put(e.getKey(), e.getValue().asText()));
+            List<List<Requirement>> terms = new ArrayList<>();
+            for (JsonNode term : spec.path("affinity").path("nodeAffinity")
+                    .path("requiredDuringSchedulingIgnoredDuringExecution").path("nodeSelectorTerms")) {
+                if (!term.path("matchExpressions").isEmpty()) {
+                    terms.add(requirements(term.path("matchExpressions")));
+                }
+            }
+            List<Toleration> tolerations = new ArrayList<>();
+            spec.path("tolerations").forEach(t -> tolerations.add(new Toleration(t.path("key").asText(""),
+                    t.path("operator").asText("Equal"), t.path("value").asText(""), t.path("effect").asText(""))));
+            daemons.add(new PendingPod(item.path("metadata").path("namespace").asText(),
+                    item.path("metadata").path("name").asText(), requests[0], requests[1], selector, List.copyOf(terms),
+                    List.copyOf(tolerations)));
+        }
+        return daemons;
     }
 
     /** The NodePools of {@code kubectl get nodepools -o json}. */
