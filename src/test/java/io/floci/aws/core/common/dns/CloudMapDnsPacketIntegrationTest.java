@@ -55,20 +55,13 @@ class CloudMapDnsPacketIntegrationTest {
 
     @Test
     void conflictingRuntimeOriginsRefuseCloudMapRecordsAcrossTheWire() throws Exception {
-        String namespace = uniqueNamespace();
-        String namespaceId = privateDnsNamespace(namespace);
-        Service service = cloudMapService.createService("api", namespaceId, null, null,
-                "{\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":15}]}", null, null, null, Map.of(), REGION);
-        cloudMapService.registerInstance(service.getId(), "task-1", null,
-                Map.of("AWS_INSTANCE_IPV4", "172.31.0.6"), REGION);
+        String namespace = namespaceWithApiInstance();
         DnsClientVpcSource first = address -> Optional.of(new DnsClientVpcSource.ClientVpc(
                 config.defaultAccountId(), REGION, "vpc-first"));
         DnsClientVpcSource second = address -> Optional.of(new DnsClientVpcSource.ClientVpc(
                 config.defaultAccountId(), REGION, "vpc-second"));
         byte[] request = DnsTestQuery.query("api." + namespace, 1, 0x1234);
-        for (List<DnsRecordSource> sources : List.of(
-                List.of(route53DnsRecordSource, cloudMapDnsRecordSource),
-                List.of(cloudMapDnsRecordSource, route53DnsRecordSource))) {
+        for (List<DnsRecordSource> sources : bothSourceOrders()) {
             for (List<DnsClientVpcSource> providers : List.of(List.of(first, second), List.of(second, first))) {
                 byte[] response = query(new EmbeddedDnsServer(List.of(), sources, List.of(), providers), request);
                 assertEquals(5, ByteBuffer.wrap(response).getShort(2) & 15);
@@ -79,12 +72,7 @@ class CloudMapDnsPacketIntegrationTest {
 
     @Test
     void configuredTtlReachesTheDnsPacket() throws Exception {
-        String namespace = uniqueNamespace();
-        String namespaceId = privateDnsNamespace(namespace);
-        Service service = cloudMapService.createService("api", namespaceId, null, null,
-                "{\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":15}]}", null, null, null, Map.of(), REGION);
-        cloudMapService.registerInstance(service.getId(), "task-1", null,
-                Map.of("AWS_INSTANCE_IPV4", "172.31.0.6"), REGION);
+        String namespace = namespaceWithApiInstance();
 
         byte[] request = DnsTestQuery.query("api." + namespace, 1, 0x1234);
         byte[] response = query(serverForVpc(List.of(cloudMapDnsRecordSource)), request);
@@ -99,16 +87,9 @@ class CloudMapDnsPacketIntegrationTest {
 
     @Test
     void unknownCallerRetainsPrivateCloudMapAnswersAcrossTheWire() throws Exception {
-        String namespace = uniqueNamespace();
-        String namespaceId = privateDnsNamespace(namespace);
-        Service service = cloudMapService.createService("api", namespaceId, null, null,
-                "{\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":15}]}", null, null, null, Map.of(), REGION);
-        cloudMapService.registerInstance(service.getId(), "task-1", null,
-                Map.of("AWS_INSTANCE_IPV4", "172.31.0.6"), REGION);
+        String namespace = namespaceWithApiInstance();
         byte[] request = DnsTestQuery.query("api." + namespace, 1, 0x1234);
-        for (List<DnsRecordSource> sources : List.of(
-                List.of(route53DnsRecordSource, cloudMapDnsRecordSource),
-                List.of(cloudMapDnsRecordSource, route53DnsRecordSource))) {
+        for (List<DnsRecordSource> sources : bothSourceOrders()) {
             byte[] response = query(new EmbeddedDnsServer(List.of(), sources, List.of(), List.of()), request);
             assertEquals(0, ByteBuffer.wrap(response).getShort(2) & 15);
             assertEquals(1, ByteBuffer.wrap(response).getShort(6));
@@ -150,9 +131,7 @@ class CloudMapDnsPacketIntegrationTest {
     }
 
     private void assertBothSourceOrdersResolve(String namespace) throws Exception {
-        for (List<DnsRecordSource> sources : List.of(
-                List.of(route53DnsRecordSource, cloudMapDnsRecordSource),
-                List.of(cloudMapDnsRecordSource, route53DnsRecordSource))) {
+        for (List<DnsRecordSource> sources : bothSourceOrders()) {
             byte[] request = DnsTestQuery.query("both." + namespace, 1, 0x1234);
             byte[] response = query(serverForVpc(sources), request);
             ByteBuffer packet = ByteBuffer.wrap(response);
@@ -221,6 +200,22 @@ class CloudMapDnsPacketIntegrationTest {
                 DnsTestQuery.query("missing." + namespace, 1, 0x1234));
 
         assertEquals(3, ByteBuffer.wrap(response).getShort(2) & 0x000F);
+    }
+
+    private String namespaceWithApiInstance() {
+        String namespace = uniqueNamespace();
+        String namespaceId = privateDnsNamespace(namespace);
+        Service service = cloudMapService.createService("api", namespaceId, null, null,
+                "{\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":15}]}", null, null, null, Map.of(), REGION);
+        cloudMapService.registerInstance(service.getId(), "task-1", null,
+                Map.of("AWS_INSTANCE_IPV4", "172.31.0.6"), REGION);
+        return namespace;
+    }
+
+    private List<List<DnsRecordSource>> bothSourceOrders() {
+        return List.of(
+                List.of(route53DnsRecordSource, cloudMapDnsRecordSource),
+                List.of(cloudMapDnsRecordSource, route53DnsRecordSource));
     }
 
     private String privateDnsNamespace(String name) {
