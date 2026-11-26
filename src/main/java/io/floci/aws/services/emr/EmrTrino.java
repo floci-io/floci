@@ -3,6 +3,8 @@ package io.floci.aws.services.emr;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -11,19 +13,32 @@ import java.util.stream.Collectors;
  * too, as a cluster of one node's does, runs from the Trino project's image of the version the release's page in the
  * Release Guide gives, in a container of its own that shares the primary node's network, as a daemon of that node.
  * "By default, Amazon EMR configures the Presto web interface on the Presto coordinator to use port 8889 (for PrestoDB
- * and Trino)", where it listens. EMR installs {@code hcatalog-server} with Trino, so its {@code hive} catalog is the
- * cluster's Hive metastore, unless the cluster's {@code trino-connector-hive} classification sets
- * {@code hive.metastore} to {@code glue}, as the Release Guide's "Launch an Amazon EMR cluster with Trino" does. Its
- * steps run {@code trino-cli}, EMR's command for Trino's CLI, which this class writes for the image they run in.
+ * and Trino)", where it listens unless the cluster's {@code trino-config} sets {@code http-server.http.port}, which
+ * classification changes "Trino's config.properties file". Its catalogs are the {@code hive} one and those the
+ * cluster's {@code trino-connector-<catalog>} classifications name, each of which changes "Trino's
+ * {@code <catalog>.properties} file". EMR installs {@code hcatalog-server} with Trino, so the catalogs whose tables
+ * are in S3, {@code hive}, {@code delta}, {@code hudi} and {@code iceberg}, are on the cluster's Hive metastore, as
+ * the Release Guide's Delta Lake and Iceberg tutorials have them at {@code thrift://localhost:9083}, unless the
+ * classification puts them in the Glue Data Catalog, as "Launch an Amazon EMR cluster with Trino" does. Its steps run
+ * {@code trino-cli}, EMR's command for Trino's CLI, which this class writes for the image they run in.
  */
 final class EmrTrino {
 
     /** The application's name, as the Release Guide's list of applications spells it. */
     static final String APPLICATION = "Trino";
-    /** The port Trino listens on, on the primary node. */
+    /** The port Trino listens on, on the primary node, unless the cluster's {@code trino-config} names another. */
     static final int PORT = 8889;
-    /** The classification whose properties go into the {@code hive} catalog. */
-    static final String HIVE_CONNECTOR = "trino-connector-hive";
+    /** The prefix of the classifications that each change a catalog, the rest of whose name names it. */
+    static final String CONNECTOR_PREFIX = "trino-connector-";
+    /** The classification that changes Trino's {@code config.properties}. */
+    static final String CONFIG_CLASSIFICATION = "trino-config";
+    /** The catalog every Trino cluster has. */
+    static final String HIVE = "hive";
+    /**
+     * A catalog's name as Floci takes it: Trino's own, letters, digits and underscores, which the entrypoint passes as
+     * the name of a shell variable.
+     */
+    static final Pattern CATALOG_NAME = Pattern.compile("[a-z][a-z0-9_]*");
     /** The component label of a cluster's Trino container, which goes with its primary node's. */
     static final String COMPONENT = "emr-trino";
     /** The variable a step's {@code trino-cli} reads the coordinator's address from. */
@@ -50,30 +65,28 @@ final class EmrTrino {
             done
             exec "$java" -jar %1$s --server "${%2$s:-localhost:%3$d}" "$@"
             """.formatted(CLI, SERVER_VARIABLE, PORT);
-    /** What tells the Trino container is ready: a query, run with the CLI of its image. */
-    static final List<String> READY_QUERY = List.of(IMAGE_CLI, "--server", "localhost:" + PORT, "--execute",
-            "SELECT 1");
-    /** The variables the Trino container's entrypoint writes its configuration from. */
+    /** The variable the Trino container's entrypoint writes its {@code config.properties} from. */
     static final String CONFIG_VARIABLE = "FLOCI_TRINO_CONFIG";
-    static final String CATALOG_VARIABLE = "FLOCI_TRINO_CATALOG_HIVE";
+    /** The prefix of the variables it writes its catalogs from, one each, the rest of whose name names it. */
+    static final String CATALOG_PREFIX = "FLOCI_TRINO_CATALOG_";
     /**
-     * The Trino container's entrypoint: its configuration, and its {@code hive} catalog alone, as EMR's Trino has the
-     * catalogs the cluster configures, then Trino, as its image starts it. Its image names the node after its host,
+     * The Trino container's entrypoint: its configuration, and the catalogs Floci gives it alone, as EMR's Trino has
+     * the catalogs the cluster configures, then Trino, as its image starts it. Its image names the node after its host,
      * which is the primary node's, whose dots Trino refuses in a node's id, so the node is named with hyphens instead.
      */
     static final String ENTRYPOINT = "printf '%s\\n' \"$" + CONFIG_VARIABLE + "\" > /etc/trino/config.properties"
             + " && rm -f /etc/trino/catalog/*.properties"
-            + " && printf '%s\\n' \"$" + CATALOG_VARIABLE + "\" > /etc/trino/catalog/hive.properties"
+            + " && for catalog in ${!" + CATALOG_PREFIX + "@}; do printf '%s\\n' \"${!catalog}\""
+            + " > \"/etc/trino/catalog/${catalog#" + CATALOG_PREFIX + "}.properties\" || exit; done"
             + " && printf 'node.id=%s\\n' \"${HOSTNAME//./-}\" >> /etc/trino/node.properties"
             + " && exec /usr/lib/trino/bin/run-trino";
-    /** A coordinator that runs the queries too, on {@link #PORT}. */
-    static final String CONFIG = """
-            coordinator=true
-            node-scheduler.include-coordinator=true
-            http-server.http.port=%1$d
-            discovery.uri=http://localhost:%1$d""".formatted(PORT);
 
     private static final String GLUE = "glue";
+    private static final String METASTORE_URI = "hive.metastore.uri";
+    // The catalogs of EMR's classifications whose connector Trino names otherwise; the others are named as theirs.
+    private static final Map<String, String> CONNECTORS = Map.of("delta", "delta_lake", "raptor", "raptor_legacy");
+    // The catalogs whose tables are in S3, their metadata in a Hive metastore or the Glue Data Catalog.
+    private static final Set<String> LAKES = Set.of(HIVE, "delta", "hudi", "iceberg");
 
     private EmrTrino() {
     }
@@ -97,33 +110,91 @@ final class EmrTrino {
                 .orElse(null);
     }
 
+    /** The port Trino listens on: the {@code http-server.http.port} of the cluster's {@code trino-config}, or EMR's. */
+    static int port(Map<String, String> config) {
+        String port = config.get("http-server.http.port");
+        if (port != null) {
+            try {
+                return Integer.parseInt(port.trim());
+            } catch (NumberFormatException ignored) {
+                // Trino refuses it as it starts, and says so in its log.
+            }
+        }
+        return PORT;
+    }
+
     /** The address a step's {@code trino-cli} reaches the coordinator at, on the primary node named {@code host}. */
-    static String server(String host) {
-        return "http://" + host + ":" + PORT;
+    static String server(String host, int port) {
+        return "http://" + host + ":" + port;
+    }
+
+    /** What tells the Trino container is ready: a query, run with the CLI of its image on {@code port}. */
+    static List<String> readyQuery(int port) {
+        return List.of(IMAGE_CLI, "--server", "localhost:" + port, "--execute", "SELECT 1");
     }
 
     /**
-     * The {@code hive} catalog: the cluster's metastore, which runs beside Trino on the primary node, or, with
-     * {@code hive.metastore} set to {@code glue}, Floci's Glue; Floci's S3 at {@code endpoint} in {@code region}, by
-     * path, the HDFS of the cluster's warehouse through Hadoop's file system; and the cluster's
-     * {@code trino-connector-hive} properties after these, each in its place. Credentials come from the container's
-     * environment, as neither file system has a setting for a session's token.
+     * The coordinator's {@code config.properties}: a coordinator that runs the queries too, on its {@link #port}, its
+     * discovery at that port unless the cluster's {@code trino-config} names another, and that classification's
+     * properties after these, each in its place.
      */
-    static Map<String, String> hiveCatalog(Map<String, String> classification, String endpoint, String region) {
+    static Map<String, String> config(Map<String, String> classification) {
+        Map<String, String> config = new LinkedHashMap<>();
+        config.put("coordinator", "true");
+        config.put("node-scheduler.include-coordinator", "true");
+        config.put("http-server.http.port", String.valueOf(PORT));
+        config.put("discovery.uri", "http://localhost:" + port(classification));
+        config.putAll(classification);
+        return config;
+    }
+
+    /**
+     * Trino's catalogs, by name: {@code hive}, then each that {@code connectors}, the cluster's
+     * {@code trino-connector-<catalog>} classifications' properties by catalog, name (see {@link #catalog}).
+     */
+    static Map<String, Map<String, String>> catalogs(Map<String, Map<String, String>> connectors, String endpoint,
+                                                     String region) {
+        Map<String, Map<String, String>> catalogs = new LinkedHashMap<>();
+        catalogs.put(HIVE, catalog(HIVE, connectors.getOrDefault(HIVE, Map.of()), endpoint, region));
+        connectors.forEach((name, classification) -> catalogs.computeIfAbsent(name,
+                catalog -> catalog(catalog, classification, endpoint, region)));
+        return catalogs;
+    }
+
+    /**
+     * A catalog: the connector of its name, as the Release Guide's Delta Lake tutorial gives {@code delta} no
+     * {@code connector.name} of its own; for {@code hive}, {@code delta}, {@code hudi} and {@code iceberg}, the
+     * cluster's metastore, which runs beside Trino on the primary node, or Floci's Glue where the classification says
+     * {@code glue} ({@code hive.metastore}, or Iceberg's {@code iceberg.catalog.type}), and Floci's S3 at
+     * {@code endpoint} in {@code region}, by path, with the HDFS of the cluster's warehouse through Hadoop's file
+     * system; for {@code delta}, writes to S3, which the tutorial makes with only a metastore configured; and the
+     * classification's properties after these, each in its place. Credentials come from the container's environment,
+     * as neither file system has a setting for a session's token.
+     */
+    static Map<String, String> catalog(String name, Map<String, String> classification, String endpoint,
+                                       String region) {
         Map<String, String> catalog = new LinkedHashMap<>();
-        catalog.put("connector.name", "hive");
-        if (GLUE.equalsIgnoreCase(classification.get("hive.metastore"))) {
-            catalog.put("hive.metastore", GLUE);
-            catalog.put("hive.metastore.glue.region", region);
-            catalog.put("hive.metastore.glue.endpoint-url", endpoint);
-        } else {
-            catalog.put("hive.metastore.uri", "thrift://localhost:" + EmrClusterStorage.HIVE_METASTORE_PORT);
+        catalog.put("connector.name", CONNECTORS.getOrDefault(name, name));
+        if (LAKES.contains(name)) {
+            String type = "iceberg".equals(name) ? classification.get("iceberg.catalog.type")
+                    : classification.get("hive.metastore");
+            if (GLUE.equalsIgnoreCase(type)) {
+                catalog.put("iceberg".equals(name) ? "iceberg.catalog.type" : "hive.metastore", GLUE);
+                catalog.put("hive.metastore.glue.region", region);
+                catalog.put("hive.metastore.glue.endpoint-url", endpoint);
+            } else if (type == null || "thrift".equalsIgnoreCase(type) || "hive_metastore".equalsIgnoreCase(type)) {
+                catalog.put(METASTORE_URI, "thrift://localhost:" + EmrClusterStorage.HIVE_METASTORE_PORT);
+            }
+            catalog.put("fs.native-s3.enabled", "true");
+            catalog.put("fs.hadoop.enabled", "true");
+            catalog.put("s3.endpoint", endpoint);
+            catalog.put("s3.region", region);
+            catalog.put("s3.path-style-access", "true");
         }
-        catalog.put("fs.native-s3.enabled", "true");
-        catalog.put("fs.hadoop.enabled", "true");
-        catalog.put("s3.endpoint", endpoint);
-        catalog.put("s3.region", region);
-        catalog.put("s3.path-style-access", "true");
+        if ("delta".equals(name)) {
+            // The tutorial's INSERT INTO a table in S3, which Trino refuses there unless told it may.
+            catalog.put("delta.enable-non-concurrent-writes", "true");
+        }
         catalog.putAll(classification);
         return catalog;
     }

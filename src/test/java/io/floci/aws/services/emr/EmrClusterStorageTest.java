@@ -127,7 +127,7 @@ class EmrClusterStorageTest {
     // The same with Trino beside it, from the image of emr-7.5.0's Trino.
     private static final ClusterStorage.HiveMetastore TRINO_METASTORE =
             new ClusterStorage.HiveMetastore("arn:aws:iam::123456789012:role/r", Map.of(),
-                    new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of()));
+                    new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of(), Map.of()));
 
     private final EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
     private final DockerClient docker = mock(DockerClient.class);
@@ -2003,9 +2003,9 @@ class EmrClusterStorageTest {
         verify(trinoSpec).withNetworkMode("container:c6c6c6");
         verify(trinoSpec).withMemoryMb(2048);
         verify(trinoSpec).withEnv(List.of("AWS_ACCESS_KEY_ID=ASIATRINO"));
-        verify(trinoSpec).withEnv(EmrTrino.CONFIG_VARIABLE, EmrTrino.CONFIG);
-        verify(trinoSpec).withEnv(EmrTrino.CATALOG_VARIABLE, EmrTrino.properties(EmrTrino.hiveCatalog(Map.of(),
-                "http://host.docker.internal:4566", "us-east-1")));
+        verify(trinoSpec).withEnv(EmrTrino.CONFIG_VARIABLE, EmrTrino.properties(EmrTrino.config(Map.of())));
+        verify(trinoSpec).withEnv(EmrTrino.CATALOG_PREFIX + "hive", EmrTrino.properties(EmrTrino.catalog("hive",
+                Map.of(), "http://host.docker.internal:4566", "us-east-1")));
         verify(trinoSpec).withEntrypoint(List.of("/bin/bash", "-c", EmrTrino.ENTRYPOINT));
         verify(trinoSpec).withJavaTrustStore();
         verify(trinoSpec).withLabels(argThat(labels ->

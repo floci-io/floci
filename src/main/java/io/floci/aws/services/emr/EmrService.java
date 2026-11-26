@@ -3107,7 +3107,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         Supplier<ClusterStorage.Yarn> nodeYarn = runsYarn(cluster) ? currentYarn(cluster, accountId, region) : null;
         String trinoImage = trinoImage(cluster);
         ClusterStorage.Trino trino = trinoImage == null ? null : new ClusterStorage.Trino(trinoImage, trinoMemoryMb,
-                EmrSparkSteps.trinoHiveConnector(cluster.getConfigurations(), SNAPSHOT_MAPPER));
+                EmrSparkSteps.trinoConnectors(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                EmrSparkSteps.trinoConfig(cluster.getConfigurations(), SNAPSHOT_MAPPER));
         ClusterStorage.HiveMetastore hiveMetastore = withHiveImage(cluster)
                 ? new ClusterStorage.HiveMetastore(instanceProfileRole(cluster, accountId),
                         EmrSparkSteps.hiveMetastoreSettings(cluster.getConfigurations(), SNAPSHOT_MAPPER), trino)
@@ -3165,7 +3166,9 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         application != null ? application : List.of(), command, Duration.ZERO,
                         EmrSparkSteps.logFolder(cluster, step), null,
                         stepEnvironment(step, cluster, command != null && pig,
-                                trinoImage(cluster) != null ? EmrTrino.server(masterPrivateDnsName(cluster)) : null),
+                                trinoImage(cluster) != null ? EmrTrino.server(masterPrivateDnsName(cluster),
+                                        EmrTrino.port(EmrSparkSteps.trinoConfig(cluster.getConfigurations(),
+                                                SNAPSHOT_MAPPER))) : null),
                         List.of(),
                         storage, EmrSparkSteps.coreSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                         EmrSparkSteps.sparkLog4j2(cluster.getConfigurations(), SNAPSHOT_MAPPER),

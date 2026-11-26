@@ -123,10 +123,11 @@ public interface ClusterStorage {
 
     /**
      * Trino's coordinator on a cluster's primary node: the {@code image} it runs from, the memory its container gets,
-     * and the cluster's {@code trino-connector-hive} properties, which its {@code hive} catalog gets after Floci's
-     * (see {@link EmrTrino#hiveCatalog}). It reaches S3 and Glue as the metastore does.
+     * the cluster's {@code trino-connector-<catalog>} properties by catalog, which its catalogs get after Floci's (see
+     * {@link EmrTrino#catalogs}), and its {@code trino-config} properties, which its {@code config.properties} gets
+     * after Floci's (see {@link EmrTrino#config}). It reaches S3 and Glue as the metastore does.
      */
-    record Trino(String image, int memoryMb, Map<String, String> hiveConnector) {
+    record Trino(String image, int memoryMb, Map<String, Map<String, String>> connectors, Map<String, String> config) {
     }
 
     /**

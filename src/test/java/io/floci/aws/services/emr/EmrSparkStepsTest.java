@@ -246,18 +246,28 @@ class EmrSparkStepsTest {
     }
 
     @Test
-    void trinosHiveCatalogGetsTheClustersTrinoConnectorHiveALaterConfigurationWinning() {
+    void trinosCatalogsAreTheClustersTrinoConnectorsALaterConfigurationWinning() {
         String configurations = """
                 [{"Classification": "trino-connector-hive", "Properties": {"hive.metastore": "glue",
                   "hive.metastore.glue.catalogid": "111122223333"}},
                  {"Classification": "hive-site", "Properties": {"hive.metastore.uris": "thrift://elsewhere:9083"}},
+                 {"Classification": "trino-connector-iceberg", "Properties": {"connector.name": "iceberg"}},
                  {"Classification": "trino-connector-hive",
-                  "Properties": {"hive.metastore.glue.catalogid": "444455556666"}}]
+                  "Properties": {"hive.metastore.glue.catalogid": "444455556666"}},
+                 {"Classification": "trino-connector-tpch"},
+                 {"Classification": "trino-connector-Bad-Name", "Properties": {"connector.name": "memory"}},
+                 {"Classification": "trino-config", "Properties": {"http-server.http.port": "8890"}}]
                 """;
 
+        Map<String, Map<String, String>> connectors = EmrSparkSteps.trinoConnectors(configurations, objectMapper);
+
+        assertEquals(List.of("hive", "iceberg", "tpch"), List.copyOf(connectors.keySet()));
         assertEquals(Map.of("hive.metastore", "glue", "hive.metastore.glue.catalogid", "444455556666"),
-                EmrSparkSteps.trinoHiveConnector(configurations, objectMapper));
-        assertEquals(Map.of(), EmrSparkSteps.trinoHiveConnector(null, objectMapper));
+                connectors.get("hive"));
+        assertEquals(Map.of(), connectors.get("tpch"));
+        assertEquals(Map.of("http-server.http.port", "8890"), EmrSparkSteps.trinoConfig(configurations,
+                objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.trinoConnectors(null, objectMapper));
     }
 
     @Test
