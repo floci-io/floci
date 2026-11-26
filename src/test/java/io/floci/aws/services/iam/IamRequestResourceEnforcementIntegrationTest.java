@@ -160,6 +160,25 @@ class IamRequestResourceEnforcementIntegrationTest {
         refused(configureHealthCheck(user, otherLoadBalancer), "elasticloadbalancing:ConfigureHealthCheck");
     }
 
+    /**
+     * A Query request's API is the {@code Version} its handler dispatches it by, its form's on a POST: one naming the
+     * v2 version only in its URL runs as the classic API, so it is checked on the classic load balancer its
+     * {@code LoadBalancerName} names, and a grant on a v2 load balancer's ARN does not delete that one.
+     */
+    @Test
+    void aQueryRequestsApiIsTheVersionItsFormNames() {
+        String name = classicLoadBalancer("data");
+        String v2 = ELB + "loadbalancer/app/res-v2/0123456789abcdef";
+        User user = user("res-elb-version");
+        user.policy(allowOn("elasticloadbalancing:DeleteLoadBalancer", v2));
+        refused(user.query("elasticloadbalancing", "DeleteLoadBalancer").queryParam("Version", "2015-12-01")
+                .formParam("LoadBalancerName", name).formParam("LoadBalancerArn", v2).post("/").then(),
+                "elasticloadbalancing:DeleteLoadBalancer");
+        admin("elasticloadbalancing").formParam("Action", "DescribeLoadBalancers").formParam("Version", "2012-06-01")
+                .formParam("LoadBalancerNames.member.1", name).post("/").then().statusCode(200)
+                .body(containsString(name));
+    }
+
     /** An IP target group an administrator creates, deleted after the test; its ARN. */
     private String elbTargetGroup() {
         String arn = admin("elasticloadbalancing").formParam("Action", "CreateTargetGroup")
@@ -242,8 +261,9 @@ class IamRequestResourceEnforcementIntegrationTest {
 
     /**
      * A v2 {@code CreateLoadBalancer} of a {@code Type} outside the enum names no v2 load balancer for IAM to check,
-     * and Elastic Load Balancing refuses it, as AWS does, so a grant on a classic load balancer's name does not
-     * create a v2 one under another.
+     * and a v2 request is never read for the classic API's {@code LoadBalancerName}, which only a classic request has
+     * (the table's rows name the API they are read for), so a grant on a classic load balancer's name does not create
+     * a v2 one under another: the request is checked on {@code *} and refused.
      */
     @Test
     void aLoadBalancerOfATypeOutsideTheEnumIsNotCreatedUnderAnotherName() {
@@ -253,8 +273,7 @@ class IamRequestResourceEnforcementIntegrationTest {
         user.query("elasticloadbalancing", "CreateLoadBalancer").formParam("Version", "2015-12-01")
                 .formParam("Name", name).formParam("Type", "other").formParam("LoadBalancerName", "res-allowed")
                 .formParam("Subnets.member.1", "subnet-a").formParam("Subnets.member.2", "subnet-b").post("/").then()
-                .statusCode(400).body(containsString("ValidationError"))
-                .body(containsString("Member must satisfy enum value set: [application, network, gateway]"));
+                .statusCode(403).body(containsString("elasticloadbalancing:CreateLoadBalancer"));
         admin("elasticloadbalancing").formParam("Action", "DescribeLoadBalancers").formParam("Version", "2015-12-01")
                 .post("/").then().statusCode(200).body(not(containsString(name)));
     }

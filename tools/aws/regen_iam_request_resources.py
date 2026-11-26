@@ -155,6 +155,10 @@ Beyond the members' names, botocore's shapes and documentation say what a member
   only to requests of its `endpoint` prefix (EventBridge's `events` and EventBridge V2's `eventsv2`), or to every
   request where they share one; a client takes the type its ARN patterns name of two it names by the same members,
   a versioned twin (`event-busv2`) for one they do not;
+- every row names the APIs it is read for (`apis`), each a protocol botocore gives a client of the operation with
+  its API version: one only some of the clients read names theirs, so clients sharing an endpoint prefix are still
+  told apart by the API a request reached them by (SES v1's `SourceArn` is `query/2010-12-01`, which no SES v2
+  request is), and every other row names every client's;
 - a variable no member fills is `fixed` to the one value of an enum named after it that the operation's name gives
   (CodePipeline's `CreateCustomActionType` makes an action type whose `ActionOwner` is `Custom`);
 - a type named only by an optional member documented as holding what the operation is about ("the cluster to which
@@ -373,7 +377,7 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "rekognition", "resource-explorer-2", "route53", "s3tables", "s3vectors", "servicediscovery",
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
-              "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs", "cloudwatch",
+              "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs", "ses", "cloudwatch",
               "comprehend", "config", "dms", "elasticache", "identitystore", "memorydb", "route53resolver",
               "sagemaker", "transcribe", "transfer", "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms",
               "dynamodb", "iam")
@@ -658,7 +662,6 @@ NOT_COVERED: dict[str, str] = {
                       "portfolio or product imported from another account keeps its owner's account in its ARN while "
                       "requests name it by its id alone; and AppRegistry's applications and attribute groups are "
                       "named in the path",
-    "ses": _LATER,
     "signin": _REST,
     "ssmmessages": "channel routes authorise agent and client resources directly rather than through generated request mappings",
     "sso-oauth": _REST,
@@ -686,6 +689,8 @@ ID_TARGETS = {"ec2": ("instance", "network-acl", "network-interface", "route-tab
 # An ARN format's account given as `${AccountId}`, the account `${Account}` gives in every other format.
 ACCOUNT_ID_SLOT_RE = re.compile(r"^(arn:[^:]*:[^:]*:[^:]*:)\$\{AccountId}:")
 VARIABLE_RE = re.compile(r"\$\{(\w+)}")
+# An API a request reaching an operation is one of: a protocol botocore gives a client's model and its API version.
+API_RE = re.compile(r"[a-z0-9-]+/\d{4}-\d{2}-\d{2}")
 # A resource-tag condition key the reference gives a type, named after the tag key it compares, which it writes as the
 # variable `${TagKey}` or as `tag-key`, as the IAM User Guide writes `aws:ResourceTag/tag-key` ("There is one context
 # key for each tag key-value pair"): Secrets Manager's `secretsmanager:ResourceTag/tag-key`. SSM spells the word
@@ -4250,13 +4255,42 @@ def by_client(operation: str, models: dict[str, dict], read, formats: dict[str, 
         apart[client] = narrowed(apart[client], client_words(models[client]), models[client], name, formats,
                                  arn_types=not shared)
     resources: list[dict] = []
+    readers: list[set[str]] = []
     for client in clients:
         for resource in apart[client]:
             everywhere = all(resource in apart[other] for other in clients)
             tagged = resource if everywhere or shared else dict(resource, endpoint=prefixes[client])
             if tagged not in resources:
                 resources.append(tagged)
-    return resources
+                readers.append(set())
+            readers[resources.index(tagged)].add(client)
+    # A row some of the clients read applies to the requests of their APIs alone; the rest, every client's, are read
+    # for every API of the operation (`with_read_apis`).
+    return [resource if named == set(clients) else dict(resource, apis=apis_of(models, sorted(named)))
+            for resource, named in zip(resources, readers, strict=True)]
+
+
+def apis_of(models: dict[str, dict], clients: list[str]) -> list[str]:
+    """The APIs of the clients, each a protocol botocore gives the client's model with its API version
+    (`query/2010-12-01` for SES v1, `rest-json/2019-09-27` for SES v2), which a request reaching the operation is
+    one of: a row read for some of an operation's clients applies to the requests of their APIs alone."""
+    return sorted({f"{protocol}/{models[client]['metadata']['apiVersion']}" for client in clients
+                   for protocol in models[client]["metadata"].get("protocols")
+                   or [models[client]["metadata"]["protocol"]]})
+
+
+def with_apis(resources: list[dict], apis: list[str]) -> list[dict]:
+    """The resources, each not yet read for some APIs read for `apis`."""
+    return [resource if "apis" in resource else dict(resource, apis=apis) for resource in resources]
+
+
+def with_read_apis(entry: dict, operation: str, models: dict[str, dict]) -> dict:
+    """The entry, each of its rows naming the APIs it is read for: one only some clients read was given theirs
+    (`by_client`), and every other row is read for every API of the clients whose model has the operation, or of the
+    namespace's clients where none does."""
+    name = operation.split(":", 1)[1]
+    clients = sorted(client for client, model in models.items() if name in model["operations"]) or sorted(models)
+    return {**entry, "resources": with_apis(entry["resources"], apis_of(models, clients))}
 
 
 def narrowed(resources: list[dict], words: set[str], model: dict, operation: str,
@@ -4789,9 +4823,9 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
         models = load_models(data, set(namespaces[namespace_of(operation)]))
         if namespace_of(operation) in permission_actions:
             value = {**value, "actions": permission_actions[namespace_of(operation)]}
-        operations[operation] = entry_for(operation, value, {**formats.get(namespace_of(operation), {}),
-                                                             **path_formats.get(namespace_of(operation), {})}, models,
-                                          prefixes.get(namespace_of(operation)), forwarded, routed.get(operation))
+        operations[operation] = with_read_apis(entry_for(
+            operation, value, {**formats.get(namespace_of(operation), {}), **path_formats.get(namespace_of(operation), {})},
+            models, prefixes.get(namespace_of(operation)), forwarded, routed.get(operation)), operation, models)
     unqualified = unqualified_types(formats, operations, namespaces, data)
     return {
         "_source": {
@@ -5153,6 +5187,9 @@ def validate(document: dict) -> list[str]:
             # A route authorized by its method names the type of its path, which its action may not list (`--check`
             # says whether it is the one its path is).
             routed = set(formats.get(namespace, {})) if namespace in PATH_SOURCES else set()
+            problems += _apis_problems(operation, resource)
+            if isinstance(resource, dict):
+                resource = {key: value for key, value in resource.items() if key != "apis"}
             problems += _resource_problems(operation, resource, acting | measured | routed,
                                            formats.get(namespace, {}))
         for created in entry.get("creates", []) if isinstance(entry.get("creates", []), list) else [None]:
@@ -5216,6 +5253,15 @@ def validate(document: dict) -> list[str]:
             problems.append(f"{operation} forwards no recorded action on a member of one of its types' records, from an "
                             f"endpoint prefix")
     return problems
+
+
+def _apis_problems(operation: str, resource: object) -> list[str]:
+    """A row that names no APIs it is read for, each a protocol and an API version, sorted and once each."""
+    apis = resource.get("apis") if isinstance(resource, dict) else None
+    if not isinstance(apis, list) or not apis or apis != sorted(set(apis)) \
+            or not all(isinstance(api, str) and API_RE.fullmatch(api) for api in apis):
+        return [f"{operation} reads {resource!r} for no protocol and API version it names (`apis`)"]
+    return []
 
 
 def _resource_problems(operation: str, resource: object, types: set[str], formats: dict[str, str]) -> list[str]:
@@ -5447,10 +5493,11 @@ def derive(document: dict, data: Path) -> list[str]:
     for operation, entry in document["operations"].items():
         namespace = namespace_of(operation)
         models = load_models(data, set(document["namespaces"][namespace]))
-        expected = entry_for(operation, {"action": entry["action"], "types": entry["types"],
-                                         **({"actions": entry["actions"]} if "actions" in entry else {})},
-                             {**document["arnFormats"].get(namespace, {}), **path_formats.get(namespace, {})}, models,
-                             prefixes.get(namespace), document["forwardedActions"], routed.get(operation))
+        expected = with_read_apis(entry_for(
+            operation, {"action": entry["action"], "types": entry["types"],
+                        **({"actions": entry["actions"]} if "actions" in entry else {})},
+            {**document["arnFormats"].get(namespace, {}), **path_formats.get(namespace, {})}, models,
+            prefixes.get(namespace), document["forwardedActions"], routed.get(operation)), operation, models)
         if expected != entry:
             problems.append(f"{operation}: the file has {json.dumps(entry)}, botocore gives {json.dumps(expected)}")
     return problems

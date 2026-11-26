@@ -318,7 +318,7 @@ class RequestResourceMembersTest {
                 null, Map.of(), false, List.of(), null, new Member("SessionId", false));
         for (String operation : List.of("ExecuteStatement", "BatchExecuteStatement")) {
             assertEquals(session, RequestResourceMembers.table().operations().get("redshift-data:" + operation)
-                    .getLast(), operation);
+                    .getLast().withApis(List.of()), operation);
         }
         assertTrue(RequestResourceMembers.table().operations().get("redshift-data:ListSessions").isEmpty());
         String formats = "\"arnFormats\":{\"a\":{\"cluster\":\"arn:${Partition}:a:${Region}:${Account}:cluster:${Name}\","
@@ -936,6 +936,34 @@ class RequestResourceMembersTest {
     }
 
     /** The request as the service of the endpoint prefix serves it; as no known service when there is none. */
+    /**
+     * A request is read for the members of its own API alone: SES v1's and v2's {@code SendEmail} share the operation,
+     * and a Query request naming {@code 2010-12-01} is read for v1's {@code SourceArn}, never v2's
+     * {@code FromEmailAddressIdentityArn}, whatever its form carries; one whose API is not known is read for both.
+     */
+    @Test
+    void aRequestIsReadForTheMembersOfItsOwnApi() {
+        String a = "arn:aws:ses:us-east-1:000000000000:identity/a@example.com";
+        String b = "arn:aws:ses:us-east-1:000000000000:identity/b@example.com";
+        String body = "Action=SendEmail&Version=2010-12-01&SourceArn=" + encoded(a) + "&FromEmailAddressIdentityArn="
+                + encoded(b);
+        ContainerRequestContext query = form(body);
+        ServiceDescriptor ses = new ServiceDescriptor("ses", "ses", true, true, null, null, 0L, null,
+                ServiceProtocol.QUERY, Set.of(ServiceProtocol.QUERY), Set.of(), Set.of(), Set.of(), Set.of(), Set.of());
+        when(query.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
+                .thenReturn(new ProtocolClaim(WireProtocol.AWS_QUERY, ses, "SendEmail", null));
+        assertEquals(List.of(a), RequestResources.of("ses:SendEmail", query, "aws", "us-east-1", "000000000000"));
+
+        assertEquals(Set.of(a, b), Set.copyOf(RequestResources.of("ses:SendEmail", form(body), "aws", "us-east-1",
+                "000000000000")));
+        // A Query version no row is read for names nothing apart: the request is read for every row.
+        ContainerRequestContext other = form(body.replace("2010-12-01", "2011-01-01"));
+        when(other.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
+                .thenReturn(new ProtocolClaim(WireProtocol.AWS_QUERY, ses, "SendEmail", null));
+        assertEquals(Set.of(a, b), Set.copyOf(RequestResources.of("ses:SendEmail", other, "aws", "us-east-1",
+                "000000000000")));
+    }
+
     static ContainerRequestContext servedBy(ContainerRequestContext request, String endpoint) {
         if (endpoint != null) {
             ServiceDescriptor service = new ServiceDescriptor(endpoint, endpoint, true, true, null, null, 0L, null,

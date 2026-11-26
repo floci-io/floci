@@ -171,12 +171,20 @@ final class IamRestRoutes {
     private final Map<String, Integer> accessDeniedStatuses;
     /** The credential scopes a documented model routes. */
     private final Set<String> documentedScopes;
+    /** Each botocore model's API version, by model. */
+    private final Map<String, String> apiVersions;
 
     private IamRestRoutes(Map<String, Map<String, List<Route>>> routes, Map<String, Integer> accessDeniedStatuses,
-                          Set<String> documentedScopes) {
+                          Set<String> documentedScopes, Map<String, String> apiVersions) {
         this.routes = routes;
         this.accessDeniedStatuses = accessDeniedStatuses;
         this.documentedScopes = documentedScopes;
+        this.apiVersions = apiVersions;
+    }
+
+    /** The API version of the botocore model of that name, null for a model the file does not give one. */
+    String apiVersion(String model) {
+        return model == null ? null : apiVersions.get(model);
     }
 
     /** The vendored routes. */
@@ -299,8 +307,12 @@ final class IamRestRoutes {
         Map<String, Map<String, List<Route>>> routes = new HashMap<>();
         Map<String, Integer> denialStatuses = new HashMap<>();
         Set<String> documentedScopes = new HashSet<>();
+        Map<String, String> apiVersions = new HashMap<>();
         models.properties().forEach(model -> {
             String scope = model.getValue().path("credentialScope").asText("");
+            if (model.getValue().path("apiVersion").isTextual()) {
+                apiVersions.put(model.getKey(), model.getValue().path("apiVersion").asText());
+            }
             JsonNode operations = model.getValue().path("operations");
             if (scope.isEmpty() || !operations.isObject() || operations.isEmpty()) {
                 throw new IllegalStateException(RESOURCE_NAME + " gives model " + model.getKey()
@@ -375,7 +387,8 @@ final class IamRestRoutes {
             byMethod.forEach((method, list) -> methods.put(method, List.copyOf(list)));
             copied.put(scope, Map.copyOf(methods));
         });
-        return new IamRestRoutes(Map.copyOf(copied), Map.copyOf(denialStatuses), Set.copyOf(documentedScopes));
+        return new IamRestRoutes(Map.copyOf(copied), Map.copyOf(denialStatuses), Set.copyOf(documentedScopes),
+                Map.copyOf(apiVersions));
     }
 
     /** The strings of a JSON array, none when it is missing. */
