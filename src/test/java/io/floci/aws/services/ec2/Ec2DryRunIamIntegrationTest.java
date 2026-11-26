@@ -164,6 +164,21 @@ class Ec2DryRunIamIntegrationTest {
         }
     }
 
+    @Test
+    void aKeyPairDryRunNeedsTheCallersCurrentPermission() throws Exception {
+        try (Ec2Client admin = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1, endpoint)) {
+            String name = "dry-run-iam-key";
+            admin.createKeyPair(r -> r.keyName(name));
+            try {
+                assertADryRunNeedsTheCallersCurrentPermission("DeleteKeyPair",
+                        () -> admin.describeKeyPairs(r -> r.keyNames(name)).keyPairs(),
+                        caller -> caller.deleteKeyPair(r -> r.keyName(name).dryRun(true)));
+            } finally {
+                admin.deleteKeyPair(r -> r.keyName(name));
+            }
+        }
+    }
+
     /**
      * A caller the policy allows {@code action} gets DryRunOperation for {@code dryRun}, and UnauthorizedOperation
      * once the policy is removed; {@code state} reads the same before and after.

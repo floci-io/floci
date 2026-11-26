@@ -443,7 +443,7 @@ naming different VPCs find nothing.
 | DescribeDhcpOptions | Lists DHCP options sets by ID or filters, with paginated results. |
 | AssociateDhcpOptions | Associates an options set with a VPC; `default` leaves the VPC with no DHCP options. |
 | DeleteDhcpOptions | Deletes an unassociated DHCP options set. |
-| DescribeVpcEndpointServices | Lists common AWS interface endpoint services, and S3 and DynamoDB (gateway and interface), in every availability zone, named per partition (see [Partitions](../configuration/partitions.md)). A `ServiceName` filter is echoed back as asked. |
+| DescribeVpcEndpointServices | Lists common AWS interface endpoint services, and S3 and DynamoDB (gateway and interface), in every availability zone, named per partition (see [Partitions](../configuration/partitions.md)). A `ServiceName` filter is echoed back as asked. `DryRun=true` is answered with `DryRunOperation` before any id is looked up, so a well-formed id that names nothing still gets it. |
 | CreateVpcEndpoint | Creates a VPC endpoint record, including its `PolicyDocument` and the per-subnet IPv4 and IPv6 addresses named by `SubnetConfiguration.N`. `IpAddressType` defaults to `ipv4`. Interface and gateway address types are stored as metadata. Synthesized endpoint interfaces still carry IPv4 only; IPv6 networking is not emulated. An `Ipv4` value outside the named subnet's CIDR, or among the first four or the last address AWS reserves in it, is rejected with `InvalidParameterValue`. |
 | DescribeVpcEndpoints | Lists or returns stored VPC endpoints, including their IP address type. |
 | ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, sets or resets the endpoint policy, and updates stored `IpAddressType` metadata. Omitting the type preserves its current value; malformed types are rejected before changes are applied. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` is accepted and ignored. |
@@ -523,7 +523,7 @@ and `sk-ecdsa-sha2-nistp256@openssh.com`.
 |--------|-------------|
 | CreateKeyPair | Creates an RSA or ED25519 key pair and returns its private key as PEM or as a PuTTY `.ppk` file, with `key-pair` tags from `TagSpecification` returned in `tagSet`. |
 | DescribeKeyPairs | Lists or returns stored key pairs. |
-| DeleteKeyPair | Deletes a key pair from the local EC2 store. |
+| DeleteKeyPair | Deletes a key pair from the local EC2 store. `DryRun=true` is answered with `DryRunOperation` and deletes nothing. |
 | ImportKeyPair | Imports a public key as a local key pair, with `key-pair` tags from `TagSpecification` returned in `tagSet`. |
 
 `CreateKeyPair` creates a 2048-bit RSA key unless `KeyType=ed25519` asks for an ED25519 key, and
@@ -628,7 +628,7 @@ Nested launch-template tags follow AWS's case-sensitive check: `aws:` is rejecte
 | Action | Description |
 |--------|-------------|
 | CreateRouteTable | Creates a route table in a VPC. |
-| DescribeRouteTables | Lists or returns stored route tables. |
+| DescribeRouteTables | Lists or returns stored route tables. `DryRun=true` is answered with `DryRunOperation` before any id is looked up, so a well-formed id that names nothing still gets it. |
 | DeleteRouteTable | Deletes a route table from the local EC2 store. |
 | AssociateRouteTable | Associates a route table with a subnet. |
 | DisassociateRouteTable | Removes a route table association. |
@@ -675,7 +675,7 @@ matching how AWS itself responds.
 | Action | Description |
 |--------|-------------|
 | CreateNetworkAcl | Creates a network ACL in a VPC, with `network-acl` tags from `TagSpecification`. |
-| DescribeNetworkAcls | Lists or returns stored network ACLs. |
+| DescribeNetworkAcls | Lists or returns stored network ACLs. `DryRun=true` is answered with `DryRunOperation` before any id is looked up, so a well-formed id that names nothing still gets it. |
 | DeleteNetworkAcl | Deletes a network ACL from the local EC2 store. |
 | CreateNetworkAclEntry | Adds an entry to a network ACL. The entry keeps whichever of `CidrBlock` or `Ipv6CidrBlock` was supplied, and `DescribeNetworkAcls` returns it under the same name. `IcmpTypeCode` is kept for ICMP (`1`) and ICMPv6 (`58`) entries only. |
 | ReplaceNetworkAclEntry | Replaces an entry in a network ACL, including its `CidrBlock` or `Ipv6CidrBlock` and, for ICMP and ICMPv6 entries, its `IcmpTypeCode`. |
@@ -686,9 +686,9 @@ matching how AWS itself responds.
 
 | Action | Description |
 |--------|-------------|
-| DescribePrefixLists | Returns prefix lists known to the local EC2 service. |
+| DescribePrefixLists | Returns prefix lists known to the local EC2 service. `DryRun=true` is answered with `DryRunOperation` before any id is looked up, so a well-formed id that names nothing still gets it. |
 | CreateManagedPrefixList | Creates a customer-managed prefix list with its initial entries. |
-| DescribeManagedPrefixLists | Lists customer-managed and AWS-managed prefix lists. |
+| DescribeManagedPrefixLists | Lists customer-managed and AWS-managed prefix lists. `DryRun=true` is answered with `DryRunOperation` before any id is looked up, so a well-formed id that names nothing still gets it. |
 | GetManagedPrefixListEntries | Returns the entries of a prefix list, optionally at an earlier version. |
 | ModifyManagedPrefixList | Adds or removes entries, renames the list, or raises its entry limit. |
 | DeleteManagedPrefixList | Deletes a customer-managed prefix list. |
@@ -754,9 +754,9 @@ exist returns `InvalidPrefixListID.NotFound`, so a typo cannot leave a rule poin
 | Action | Description |
 |--------|-------------|
 | CreateTransitGateway | Creates a transit gateway, applying AWS's option defaults and minting its default route table. |
-| DescribeTransitGateways | Lists or returns stored transit gateways. |
+| DescribeTransitGateways | Lists or returns stored transit gateways. `DryRun=true` is answered with `DryRunOperation` before any id is looked up, so a well-formed id that names nothing still gets it. |
 | ModifyTransitGateway | Updates a transit gateway's description, options and CIDR blocks. |
-| DeleteTransitGateway | Deletes a transit gateway and the default route table created with it. |
+| DeleteTransitGateway | Deletes a transit gateway and the default route table created with it. `DryRun=true` is answered with `DryRunOperation` and deletes nothing. |
 
 Transit gateway metadata only: nothing routes packets, and the value is in ids that later
 resources can reference and describes that round-trip so plans converge.
@@ -784,9 +784,9 @@ and `DescribeTransitGateways` include it.
 | Action | Description |
 |--------|-------------|
 | CreateTransitGatewayVpcAttachment | Attaches a VPC to a transit gateway through one subnet per availability zone. |
-| DescribeTransitGatewayVpcAttachments | Lists or returns VPC attachments with their subnets and options. |
-| DescribeTransitGatewayAttachments | Returns the same attachments in the resource-agnostic shape, including the route table association. |
-| DescribeTransitGatewayConnects | Always returns an empty list, since Connect attachments cannot be created yet; requested ids are still validated. |
+| DescribeTransitGatewayVpcAttachments | Lists or returns VPC attachments with their subnets and options. `DryRun=true` is answered with `DryRunOperation` before any id is looked up, so a well-formed id that names nothing still gets it. |
+| DescribeTransitGatewayAttachments | Returns the same attachments in the resource-agnostic shape, including the route table association. `DryRun=true` is answered with `DryRunOperation` before any id is looked up, so a well-formed id that names nothing still gets it. |
+| DescribeTransitGatewayConnects | Always returns an empty list, since Connect attachments cannot be created yet; requested ids are still validated. `DryRun=true` is answered with `DryRunOperation` before that validation. |
 | ModifyTransitGatewayVpcAttachment | Adds or removes attachment subnets and updates its options. |
 | DeleteTransitGatewayVpcAttachment | Deletes a VPC attachment. |
 
@@ -817,8 +817,8 @@ real AWS rejects; Floci does not model subnet IPv6 allocation.
 | Action | Description |
 |--------|-------------|
 | CreateTransitGatewayPeeringAttachment | Requests a peering between a local transit gateway and a peer one, pending acceptance. |
-| DescribeTransitGatewayPeeringAttachments | Lists or returns peering attachments, from either side's region. |
-| AcceptTransitGatewayPeeringAttachment | Accepts a pending peering attachment from the accepter's region. |
+| DescribeTransitGatewayPeeringAttachments | Lists or returns peering attachments, from either side's region. `DryRun=true` is answered with `DryRunOperation` before any id is looked up, so a well-formed id that names nothing still gets it. |
+| AcceptTransitGatewayPeeringAttachment | Accepts a pending peering attachment from the accepter's region. `DryRun=true` is answered with `DryRunOperation` before the attachment is looked up, and accepts nothing. |
 | DeleteTransitGatewayPeeringAttachment | Deletes a peering attachment from either side. |
 
 The requester's gateway must exist; the peer gateway is recorded as given and not resolved, since
@@ -838,19 +838,19 @@ that rejects the peering instead. Peering attachments do not yet appear in
 | Action | Description |
 |--------|-------------|
 | CreateTransitGatewayRouteTable | Creates a route table on a transit gateway. |
-| DescribeTransitGatewayRouteTables | Lists or returns stored transit gateway route tables. |
+| DescribeTransitGatewayRouteTables | Lists or returns stored transit gateway route tables. `DryRun=true` is answered with `DryRunOperation` before any id is looked up, so a well-formed id that names nothing still gets it. |
 | DeleteTransitGatewayRouteTable | Deletes a route table, along with its propagations and static routes. |
-| AssociateTransitGatewayRouteTable | Associates an attachment with a route table. |
+| AssociateTransitGatewayRouteTable | Associates an attachment with a route table. `DryRun=true` is answered with `DryRunOperation` and associates nothing. |
 | DisassociateTransitGatewayRouteTable | Removes an attachment's association. |
 | GetTransitGatewayRouteTableAssociations | Lists the attachments associated with a route table. |
 | EnableTransitGatewayRouteTablePropagation | Propagates an attachment's routes into a route table. |
-| DisableTransitGatewayRouteTablePropagation | Stops an attachment propagating into a route table. |
+| DisableTransitGatewayRouteTablePropagation | Stops an attachment propagating into a route table. `DryRun=true` is answered with `DryRunOperation` and leaves the propagation enabled. |
 | GetTransitGatewayRouteTablePropagations | Lists the propagations into a route table. |
-| CreateTransitGatewayRoute | Adds a static or blackhole route to a route table. |
+| CreateTransitGatewayRoute | Adds a static or blackhole route to a route table. `DryRun=true` is answered with `DryRunOperation` and writes no route. |
 | DeleteTransitGatewayRoute | Removes a static route. |
 | ReplaceTransitGatewayRoute | Points an existing route at a different target, or writes it if absent. |
 | SearchTransitGatewayRoutes | Returns a route table's routes, static and propagated, filtered. |
-| ExportTransitGatewayRoutes | Reports the S3 object a route-table export would be written to. |
+| ExportTransitGatewayRoutes | Reports the S3 object a route-table export would be written to. `DryRun=true` is answered with `DryRunOperation`. |
 
 A route table asked for by name is never a default one; only the table a gateway mints for itself
 carries `defaultAssociationRouteTable` or `defaultPropagationRouteTable`. Deleting a route table is
@@ -891,7 +891,7 @@ Route table ids follow the live API's own inconsistency: an id that does not exi
 | Action | Description |
 |--------|-------------|
 | CreateNatGateway | Creates a NAT gateway record. |
-| DescribeNatGateways | Lists or returns stored NAT gateways. |
+| DescribeNatGateways | Lists or returns stored NAT gateways. `DryRun=true` is answered with `DryRunOperation` before any id is looked up, so a well-formed id that names nothing still gets it. |
 | DeleteNatGateway | Deletes a NAT gateway record. |
 
 Every NAT gateway Floci creates is zonal: it sits in the subnet it was created in, and responses
@@ -937,8 +937,8 @@ A repeated `ClientToken` returns the endpoint the first call created (`Idempoten
 | Action | Description |
 |--------|-------------|
 | CreateCapacityReservation | Reserves EC2 instance capacity in a specific Availability Zone. |
-| DescribeCapacityReservations | Lists or returns stored Capacity Reservations. |
-| ModifyCapacityReservation | Updates `InstanceCount`, `EndDate`, `EndDateType` or `InstanceMatchCriteria` in place. |
+| DescribeCapacityReservations | Lists or returns stored Capacity Reservations. `DryRun=true` is answered with `DryRunOperation` before any id is looked up, so a well-formed id that names nothing still gets it. |
+| ModifyCapacityReservation | Updates `InstanceCount`, `EndDate`, `EndDateType` or `InstanceMatchCriteria` in place. `DryRun=true` is answered with `DryRunOperation` and changes nothing. |
 | CancelCapacityReservation | Marks a Capacity Reservation `cancelled` and its available count `0`, matching real AWS's retain-but-cancel behaviour rather than deleting the record. |
 
 `InstanceType`, `InstancePlatform` and `InstanceCount` are required, matching the AWS API, and
@@ -1027,7 +1027,7 @@ fixed socket/core/vCPU shape rather than one derived from the instance family.
 | DescribeAddresses | Lists or returns stored Elastic IP address records. |
 | DescribeAddressesAttribute | Returns allocation ID and public IP attributes for Elastic IP addresses. |
 | AssociateAddress | Associates an Elastic IP address with a resource. |
-| DisassociateAddress | Removes an Elastic IP address association. |
+| DisassociateAddress | Removes an Elastic IP address association. `DryRun=true` is answered with `DryRunOperation` and leaves the address associated. |
 | ReleaseAddress | Releases an Elastic IP address record. |
 
 `AllocateAddress` and `DescribeAddresses` return `PublicIpv4Pool` and `NetworkBorderGroup`.
@@ -1084,8 +1084,8 @@ allocated address.
 | Action | Description |
 |--------|-------------|
 | DescribeAvailabilityZones | Returns the configured local availability zones. |
-| DescribeRegions | Returns the regions known to the local EC2 service. |
-| DescribeAccountAttributes | Returns local account-level EC2 attributes. |
+| DescribeRegions | Returns the regions known to the local EC2 service. `DryRun=true` is answered with `DryRunOperation`. |
+| DescribeAccountAttributes | Returns local account-level EC2 attributes. `DryRun=true` is answered with `DryRunOperation`. |
 
 The modeled zones are standard Availability Zones. Each reports `NetworkBorderGroup` as its
 Region, such as `eu-west-1`. Local Zones and Wavelength Zones are not modeled.
@@ -1101,7 +1101,7 @@ regions, for which AWS publishes no zone id, keep the whole region as the prefix
 
 | Action | Description |
 |--------|-------------|
-| DescribeInstanceTypes | Returns instance type metadata known to the local EC2 service, including `burstablePerformanceSupported` for the T families. |
+| DescribeInstanceTypes | Returns instance type metadata known to the local EC2 service, including `burstablePerformanceSupported` for the T families. `DryRun=true` is answered with `DryRunOperation` before any id is looked up, so a well-formed id that names nothing still gets it. |
 | DescribeInstanceTypeOfferings | Returns instance type offerings for the requested location filters. An `instance-type` filter value may hold `*` and `?` wildcards, such as `t3.*`. |
 
 ### Launch Templates
@@ -1113,7 +1113,7 @@ regions, for which AWS publishes no zone id, keep the whole region as the prefix
 | DescribeLaunchTemplates | Lists or returns stored launch templates. |
 | DescribeLaunchTemplateVersions | Lists versions stored for a launch template. |
 | ModifyLaunchTemplate | Updates launch template metadata such as the default version. |
-| DeleteLaunchTemplate | Deletes a launch template and its versions. |
+| DeleteLaunchTemplate | Deletes a launch template and its versions. `DryRun=true` is answered with `DryRunOperation` and deletes nothing. |
 | DeleteLaunchTemplateVersions | Deletes up to 200 numbered versions by template ID or name, with separate success and error items. The default version is retained, and `DryRun` leaves all versions unchanged. |
 
 Launch templates store versioned launch data. New template versions can be created from an existing source version, and `ModifyLaunchTemplate` updates the default version used by later launches.
@@ -1312,7 +1312,7 @@ profile.
 | Action | Description |
 |--------|-------------|
 | CreateNetworkInterface | Creates a standalone elastic network interface (ENI) in a subnet, unattached. `Ipv6Addresses` names IPv6 addresses inside one of the subnet's IPv6 blocks; `Ipv6AddressCount` draws that many from the subnet. Left out, the subnet's `AssignIpv6AddressOnCreation` gives the interface one address; an explicit `0` overrides it. Create and describe responses also expose the first assigned IPv6 address as `ipv6Address`, omitting it when the interface has none. |
-| DescribeNetworkInterfaces | Lists network interfaces known to the local EC2 service: an instance's implicit primary interface, an EKS cluster node's primary interface, and standalone ENIs created via `CreateNetworkInterface`. |
+| DescribeNetworkInterfaces | Lists network interfaces known to the local EC2 service: an instance's implicit primary interface, an EKS cluster node's primary interface, and standalone ENIs created via `CreateNetworkInterface`. `DryRun=true` is answered with `DryRunOperation` before any id is looked up, so a well-formed id that names nothing still gets it. |
 | AttachNetworkInterface | Attaches an available standalone ENI to a running or stopped instance at a device index. |
 | DetachNetworkInterface | Detaches a standalone ENI by attachment ID, returning it to `available`. |
 | AssignIpv6Addresses | Gives a standalone ENI or an instance's launch-created interface the named IPv6 addresses (`Ipv6Addresses.N`) or a count drawn from its subnet (`Ipv6AddressCount`); one of the two is required. `assignedIpv6Addresses` lists only the addresses the call added. An address outside the subnet's IPv6 blocks answers `InvalidParameterValue`, one another interface holds `InvalidIPAddress.InUse`. Prefix delegation (`Ipv6Prefix`, `Ipv6PrefixCount`) answers `UnsupportedOperation`. |
@@ -1408,7 +1408,7 @@ Validation matches AWS behavior:
 |--------|-------------|
 | CreateFlowLogs | Creates flow logs for the given resources; returns one flow log id per resource. A `vpc-flow-log` `TagSpecification` tags each one, and `DescribeFlowLogs` returns the tags. |
 | DescribeFlowLogs | Lists stored flow logs, optionally filtered by id. |
-| DeleteFlowLogs | Deletes the named flow logs. |
+| DeleteFlowLogs | Deletes the named flow logs. `DryRun=true` is answered with `DryRunOperation` and deletes nothing. |
 
 ### Spot Instances
 
@@ -1439,20 +1439,20 @@ Spot prices returned by `DescribeSpotPriceHistory` are synthetic and derived det
 | Action | Description |
 |--------|-------------|
 | CreateClientVpnEndpoint | Creates an endpoint; a `client-vpn-endpoint` `TagSpecification` tags it. |
-| DescribeClientVpnEndpoints | Lists endpoints, or the ones `ClientVpnEndpointId.N` names. |
-| ModifyClientVpnEndpoint | Changes the members the request gives. |
-| DeleteClientVpnEndpoint | Deletes an endpoint with no associated target networks. |
+| DescribeClientVpnEndpoints | Lists endpoints, or the ones `ClientVpnEndpointId.N` names. `DryRun=true` is answered with `DryRunOperation`. |
+| ModifyClientVpnEndpoint | Changes the members the request gives. `DryRun=true` is answered with `DryRunOperation` and changes nothing. |
+| DeleteClientVpnEndpoint | Deletes an endpoint with no associated target networks. `DryRun=true` is answered with `DryRunOperation` and deletes nothing. |
 | AssociateClientVpnTargetNetwork | Associates a subnet and adds the route to its VPC through it. |
-| DescribeClientVpnTargetNetworks | Lists an endpoint's associations. |
-| DisassociateClientVpnTargetNetwork | Removes an association and the routes through its subnet. |
-| ApplySecurityGroupsToClientVpnTargetNetwork | Sets the security groups the endpoint applies in its VPC. |
-| AuthorizeClientVpnIngress | Adds an authorization rule for a network, for one group or all. |
-| DescribeClientVpnAuthorizationRules | Lists an endpoint's authorization rules. |
+| DescribeClientVpnTargetNetworks | Lists an endpoint's associations. `DryRun=true` is answered with `DryRunOperation`. |
+| DisassociateClientVpnTargetNetwork | Removes an association and the routes through its subnet. `DryRun=true` checks the endpoint and the association first, so an unknown one is refused as for the real call, and is otherwise answered with `DryRunOperation` and disassociates nothing. |
+| ApplySecurityGroupsToClientVpnTargetNetwork | Sets the security groups the endpoint applies in its VPC. `DryRun=true` is answered with `DryRunOperation` before the endpoint is looked up, and applies nothing. |
+| AuthorizeClientVpnIngress | Adds an authorization rule for a network, for one group or all. `DryRun=true` is answered with `DryRunOperation` and adds no rule. |
+| DescribeClientVpnAuthorizationRules | Lists an endpoint's authorization rules. `DryRun=true` is answered with `DryRunOperation`. |
 | RevokeClientVpnIngress | Removes an authorization rule. |
 | CreateClientVpnRoute | Adds a route through an associated subnet. |
-| DescribeClientVpnRoutes | Lists an endpoint's routes, the ones associations added included. |
-| DeleteClientVpnRoute | Removes a route the endpoint was given. |
-| ExportClientVpnClientConfiguration | Returns the OpenVPN client configuration for the endpoint. |
+| DescribeClientVpnRoutes | Lists an endpoint's routes, the ones associations added included. `DryRun=true` is answered with `DryRunOperation`. |
+| DeleteClientVpnRoute | Removes a route the endpoint was given. `DryRun=true` is answered with `DryRunOperation` and deletes nothing. |
+| ExportClientVpnClientConfiguration | Returns the OpenVPN client configuration for the endpoint. `DryRun=true` looks the endpoint up first, so an unknown one is refused as for the real call, and is otherwise answered with `DryRunOperation`. |
 
 Client VPN is a configuration registry: no VPN server runs, so clients cannot connect. An endpoint
 is `pending-associate` until a subnet is associated, then `available`, and its DNS name is
@@ -1494,9 +1494,9 @@ groups, the VPC's default security group.
 |--------|-------------|
 | EnableEbsEncryptionByDefault | Turns on default encryption for new volumes in the region. |
 | DisableEbsEncryptionByDefault | Turns default encryption back off. |
-| GetEbsEncryptionByDefault | Reports whether default encryption is on. |
+| GetEbsEncryptionByDefault | Reports whether default encryption is on. `DryRun=true` is answered with `DryRunOperation`. |
 | ModifyEbsDefaultKmsKeyId | Sets the KMS key an encrypted volume gets when it names none. |
-| GetEbsDefaultKmsKeyId | Reports the current default KMS key. |
+| GetEbsDefaultKmsKeyId | Reports the current default KMS key. `DryRun=true` is answered with `DryRunOperation`. |
 | ResetEbsDefaultKmsKeyId | Restores the AWS-managed default key. |
 
 These are account-level settings scoped per region, not per volume, and nothing here encrypts anything — no volume's stored bytes change. LZA's SecurityStack drives them through its `Custom::EnableEbsEncryptionByDefault` Lambda, which calls enable plus `ModifyEbsDefaultKmsKeyId` on create and disable on delete, then reads the state back with the two `Get` calls.
