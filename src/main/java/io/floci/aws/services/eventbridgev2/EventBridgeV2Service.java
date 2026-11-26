@@ -377,8 +377,9 @@ public class EventBridgeV2Service implements Resettable {
                 : subscribersOf(bus, region)).stream()
                 .filter(subscriber -> namePrefix == null || subscriber.getName().startsWith(namePrefix))
                 .toList();
-        return page(listed, subscriber -> busName(subscriber.getEventBusArn()) + "::" + subscriber.getName(),
-                request, "subscriber");
+        // A revoked subscriber of a deleted bus can share both names with one on the new bus of that name.
+        return page(listed, subscriber -> busName(subscriber.getEventBusArn()) + "::" + subscriber.getName() + "::"
+                + subscriber.getArn(), request, "subscriber");
     }
 
     /**

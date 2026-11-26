@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -636,6 +637,23 @@ class EventBridgeV2RevokeResourceTest {
         service.deleteSubscriber(json("{\"SubscriberArn\":\"" + orphan.getArn() + "\"}"), REGION);
         assertEquals(fresh.getArn(), subscriber(fresh.getArn()).getArn());
         assertEquals(1, service.listSubscribers(json("{}"), REGION).items().size());
+    }
+
+    @Test
+    void pagesOfSubscribersShowBothTheOrphanAndItsNamesakeOnTheNewBus() {
+        SubscriberV2 orphan = subscriber("keep", bus);
+        revoke(orphan.getArn());
+        service.deleteEventBus(bus, REGION);
+        String recreated = service.createEventBus(json("{\"Name\":\"orders\"}"), REGION).getArn();
+        SubscriberV2 fresh = subscriber("keep", recreated);
+
+        PaginatedResult<SubscriberV2> first = service.listSubscribers(json("{\"MaxResults\":1}"), REGION);
+        PaginatedResult<SubscriberV2> second = service.listSubscribers(
+                json("{\"MaxResults\":1,\"NextToken\":\"" + first.nextToken() + "\"}"), REGION);
+
+        assertEquals(Set.of(orphan.getArn(), fresh.getArn()),
+                Set.of(first.items().get(0).getArn(), second.items().get(0).getArn()));
+        assertNull(second.nextToken());
     }
 
     @Test
