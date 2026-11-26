@@ -60,7 +60,7 @@ A systemd guest gets a private cgroup namespace, as kind runs its nodes, so its 
 | `running → shutting-down → terminated` | `docker rm -f` |
 | Reboot | `docker restart` |
 
-A guest that shuts itself down (`shutdown -h now` or `poweroff` under the `systemd` guest runtime) exits its container. Floci then applies the instance's `InstanceInitiatedShutdownBehavior`, from `RunInstances` or its launch template: `stop` (the default) moves it to `stopped`, and `terminate` to `terminated`, deleting its `DeleteOnTermination` volumes as `TerminateInstances` does. A reboot, or Floci stopping its containers when it shuts down, is not a guest shutdown. An instance whose container kept running across a Floci restart is watched again once it is next started.
+A guest that shuts itself down (`shutdown -h now` or `poweroff` under the `systemd` guest runtime) exits its container. Floci then applies the instance's `InstanceInitiatedShutdownBehavior`, from `RunInstances`, its launch template or `ModifyInstanceAttribute`: `stop` (the default) moves it to `stopped`, and `terminate` to `terminated`, deleting its `DeleteOnTermination` volumes as `TerminateInstances` does. An instance launched through CloudFormation, Auto Scaling or `CreateFleet` always stops, whatever shutdown behavior it was given. A reboot, or Floci stopping its containers when it shuts down, is not a guest shutdown. An instance whose container kept running across a Floci restart is watched again once it is next started.
 
 Terminated instances remain queryable for 1 hour (matching real EC2 tombstone behavior) before being pruned. A sweep that runs every minute removes the expired ones, with their tags, for every account.
 

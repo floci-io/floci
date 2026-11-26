@@ -51,6 +51,19 @@ class Ec2InstanceInitiatedShutdownBehaviorIntegrationTest {
         }
     }
 
+    @Test
+    void modifyInstanceAttributeChangesTheShutdownBehavior() {
+        try (Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1)) {
+            String instanceId = ec2.runInstances(r -> r.imageId("ami-alpine").instanceType("t3.micro")
+                    .minCount(1).maxCount(1)).instances().getFirst().instanceId();
+
+            ec2.modifyInstanceAttribute(r -> r.instanceId(instanceId)
+                    .instanceInitiatedShutdownBehavior(v -> v.value("terminate")));
+
+            assertEquals("terminate", shutdownBehavior(ec2, instanceId));
+        }
+    }
+
     private static String shutdownBehavior(Ec2Client ec2, String instanceId) {
         return ec2.describeInstanceAttribute(r -> r.instanceId(instanceId)
                 .attribute(InstanceAttributeName.INSTANCE_INITIATED_SHUTDOWN_BEHAVIOR))

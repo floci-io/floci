@@ -5,6 +5,7 @@ import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import io.floci.aws.services.ec2.model.Volume;
 import io.floci.aws.services.ec2.model.VolumeAttachment;
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.IndependentServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
@@ -13,6 +14,8 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.ec2.Ec2Client;
 
 import java.time.Duration;
 import java.util.List;
@@ -68,8 +71,10 @@ class Ec2GuestShutdownDockerNightlyIntegrationTest {
         data.setDeviceName("/dev/sdf");
         data.setEbs(ebs);
         Instance instance = launch(List.of(data));
-        ec2Service.modifyInstanceAttribute(REGION, instance.getInstanceId(), "instanceInitiatedShutdownBehavior",
-                "terminate");
+        try (Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1)) {
+            ec2.modifyInstanceAttribute(r -> r.instanceId(instance.getInstanceId())
+                    .instanceInitiatedShutdownBehavior(v -> v.value("terminate")));
+        }
         ec2Service.awaitContainerLaunch(instance);
         List<String> volumeIds = ec2Service.instanceVolumeAttachments(List.of(instance))
                 .getOrDefault(instance.getInstanceId(), List.of()).stream()

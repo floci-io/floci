@@ -1727,7 +1727,8 @@ public class Ec2QueryHandler {
         // Find which attribute is being modified
         String attrName = null;
         String attrValue = null;
-        for (String attr : List.of("InstanceType.Value", "SourceDestCheck.Value", "EbsOptimized.Value")) {
+        for (String attr : List.of("InstanceType.Value", "SourceDestCheck.Value", "EbsOptimized.Value",
+                "InstanceInitiatedShutdownBehavior.Value")) {
             String val = p.getFirst(attr);
             if (val != null) {
                 attrName = attr.replace(".Value", "");
