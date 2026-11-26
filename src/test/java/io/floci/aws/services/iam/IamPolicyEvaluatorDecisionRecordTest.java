@@ -8,6 +8,8 @@ import io.floci.aws.services.iam.IamPolicyEvaluator.Outcome;
 import io.floci.aws.services.iam.IamPolicyEvaluator.PolicyLayer;
 import io.floci.aws.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
 import io.floci.aws.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
+import io.floci.aws.services.iam.IamPolicyEvaluator.SimulationDecision;
+import io.floci.aws.services.iam.IamPolicyEvaluator.SimulationReport;
 import io.floci.aws.services.iam.model.CallerContext;
 import org.junit.jupiter.api.Test;
 
@@ -75,6 +77,9 @@ class IamPolicyEvaluatorDecisionRecordTest {
                 row("scp level without a matching allow",
                         callerWithScps(List.of(ALLOW_ALL), List.of(List.of(ALLOW_DYNAMODB_ONLY))),
                         neutral, same, Outcome.IMPLICIT_DENY, PolicyLayer.SERVICE_CONTROL),
+                row("one scp level lacks an allow despite another level and the identity allowing",
+                        callerWithScps(List.of(ALLOW_ALL), List.of(List.of(ALLOW_DYNAMODB_ONLY), List.of(ALLOW_ALL))),
+                        neutral, same, Outcome.IMPLICIT_DENY, PolicyLayer.SERVICE_CONTROL),
                 row("scp level holding a malformed document fails closed",
                         callerWithScps(List.of(ALLOW_ALL), List.of(List.of(ALLOW_ALL, MALFORMED))),
                         neutral, same, Outcome.IMPLICIT_DENY, PolicyLayer.SERVICE_CONTROL),
@@ -90,6 +95,9 @@ class IamPolicyEvaluatorDecisionRecordTest {
                 row("session policy explicit deny",
                         callerWithSession(List.of(ALLOW_ALL), ALLOW_ALL_DENY_S3),
                         neutral, same, Outcome.EXPLICIT_DENY, PolicyLayer.SESSION),
+                row("session explicit deny wins when the identity allows and the boundary lacks an allow",
+                        new CallerContext(List.of(ALLOW_ALL), ALLOW_ALL_DENY_S3, ALLOW_DYNAMODB_ONLY),
+                        neutral, same, Outcome.EXPLICIT_DENY, PolicyLayer.SESSION),
                 row("session policy without a matching allow",
                         callerWithSession(List.of(ALLOW_ALL), ALLOW_DYNAMODB_ONLY),
                         neutral, same, Outcome.IMPLICIT_DENY, PolicyLayer.SESSION),
@@ -104,6 +112,10 @@ class IamPolicyEvaluatorDecisionRecordTest {
                         ResourcePolicyDecision.ALLOW, same, Outcome.IMPLICIT_DENY, PolicyLayer.PERMISSIONS_BOUNDARY),
                 row("boundary without a matching allow is checked before a session policy that also does not allow",
                         new CallerContext(List.of(ALLOW_ALL), ALLOW_DYNAMODB_ONLY, ALLOW_DYNAMODB_ONLY),
+                        neutral, same, Outcome.IMPLICIT_DENY, PolicyLayer.PERMISSIONS_BOUNDARY),
+                row("boundary and session lack an allow despite scp and identity allows",
+                        new CallerContext(List.of(ALLOW_ALL), ALLOW_DYNAMODB_ONLY, ALLOW_DYNAMODB_ONLY,
+                                List.of(List.of(ALLOW_ALL))),
                         neutral, same, Outcome.IMPLICIT_DENY, PolicyLayer.PERMISSIONS_BOUNDARY),
                 row("session policy without a matching allow decides once the boundary allows",
                         new CallerContext(List.of(ALLOW_ALL), ALLOW_DYNAMODB_ONLY, ALLOW_ALL),
@@ -161,6 +173,22 @@ class IamPolicyEvaluatorDecisionRecordTest {
             assertEquals(expected, record.decision(), r.name() + ": explain().decision()");
             assertEquals(r.outcome(), record.outcome(), r.name() + ": outcome");
             assertEquals(r.layer(), record.layer(), r.name() + ": layer");
+
+            if (r.resourceDecision() == ResourcePolicyDecision.NEUTRAL
+                    && r.relationship() == ResourceAccountRelationship.SAME_ACCOUNT) {
+                SimulationDecision expectedSimulation = switch (record.outcome()) {
+                    case ALLOW -> SimulationDecision.ALLOWED;
+                    case EXPLICIT_DENY -> SimulationDecision.EXPLICIT_DENY;
+                    case IMPLICIT_DENY -> SimulationDecision.IMPLICIT_DENY;
+                };
+                assertEquals(expectedSimulation, evaluator.simulatePrincipalPolicy(r.caller(), ACTION, RESOURCE, null),
+                        r.name() + ": simulatePrincipalPolicy decision");
+                if (r.outcome() == Outcome.EXPLICIT_DENY && r.layer() == PolicyLayer.SESSION) {
+                    SimulationReport report = evaluator.simulate(r.caller(), ACTION, RESOURCE, null);
+                    assertEquals(SimulationDecision.EXPLICIT_DENY, report.decision(), r.name() + ": simulate decision");
+                    assertEquals(List.of(), report.matchedStatements(), r.name() + ": MatchedStatements");
+                }
+            }
         }
     }
 
