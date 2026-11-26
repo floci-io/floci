@@ -64,10 +64,16 @@ public class DockerClientProducer {
     private final EmulatorConfig config;
     private final DockerPoolGaugeLogger gaugeLogger;
     private final DockerCircuitBreaker breaker;
+    private final SshDockerTunnel sshTunnel;
+
+    public DockerClientProducer(EmulatorConfig config) {
+        this(config, SshDockerTunnel.none());
+    }
 
     @Inject
-    public DockerClientProducer(EmulatorConfig config) {
+    public DockerClientProducer(EmulatorConfig config, SshDockerTunnel sshTunnel) {
         this.config = config;
+        this.sshTunnel = sshTunnel;
         this.gaugeLogger = new DockerPoolGaugeLogger(
                 validatePoolGaugeIntervalSeconds(config.docker().poolGaugeIntervalSeconds()));
         int breakerThreshold = validateBreakerFailureThreshold(config.docker().breakerFailureThreshold());
@@ -79,7 +85,7 @@ public class DockerClientProducer {
 
     /**
      * Normalizes a Docker host value by prepending {@code tcp://} when no recognized
-     * URI scheme ({@code tcp://}, {@code unix://}, {@code npipe://}) is present.
+     * URI scheme ({@code tcp://}, {@code unix://}, {@code npipe://}, {@code ssh://}) is present.
      *
      * @param dockerHost the raw Docker host configuration value
      * @return the normalized Docker host value, or the original value if it already has a scheme
@@ -92,7 +98,8 @@ public class DockerClientProducer {
             return dockerHost;
         }
         String lower = dockerHost.toLowerCase();
-        if (lower.startsWith("tcp://") || lower.startsWith("unix://") || lower.startsWith("npipe://")) {
+        if (lower.startsWith("tcp://") || lower.startsWith("unix://") || lower.startsWith("npipe://")
+                || SshDockerTunnel.isSshHost(lower)) {
             return dockerHost;
         }
         String normalized = "tcp://" + dockerHost;
@@ -573,7 +580,7 @@ public class DockerClientProducer {
      */
     private DefaultDockerClientConfig buildClientConfig() {
         ResolvedDockerConnection connection = resolveDockerConnection(config.docker(), System::getenv);
-        String dockerHost = connection.host();
+        String dockerHost = sshTunnel.connectableHost(connection.host());
 
         // createDefaultConfigBuilder() reads DOCKER_HOST directly from System.getenv() and passes
         // it to withDockerHost(), which calls URI.create() immediately. If DOCKER_HOST is set

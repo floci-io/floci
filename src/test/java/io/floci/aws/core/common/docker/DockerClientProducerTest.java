@@ -103,7 +103,9 @@ class DockerClientProducerTest {
                 "tcp://10.37.124.101:2375",
                 "tcp://localhost:2375",
                 "unix:///var/run/docker.sock",
-                "npipe:////./pipe/docker_engine"
+                "npipe:////./pipe/docker_engine",
+                "ssh://remote-docker",
+                "ssh://ubuntu@10.0.0.5:2222"
         );
     }
 
@@ -111,7 +113,7 @@ class DockerClientProducerTest {
      * Preservation: Schemed URIs are passed through unchanged.
      *
      * For any Docker host value that already contains a recognized URI scheme
-     * (tcp://, unix://, npipe://), normalizeDockerHost should return the value
+     * (tcp://, unix://, npipe://, ssh://), normalizeDockerHost should return the value
      * unchanged, preserving all existing Docker client initialization behavior.
      */
     @ParameterizedTest
