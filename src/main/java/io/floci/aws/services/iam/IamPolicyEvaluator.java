@@ -138,6 +138,14 @@ public class IamPolicyEvaluator {
             this.awsValue = awsValue;
         }
 
+        private static SimulationDecision from(Outcome outcome) {
+            return switch (outcome) {
+                case ALLOW -> ALLOWED;
+                case EXPLICIT_DENY -> EXPLICIT_DENY;
+                case IMPLICIT_DENY -> IMPLICIT_DENY;
+            };
+        }
+
         public String awsValue() {
             return awsValue;
         }
@@ -452,10 +460,9 @@ public class IamPolicyEvaluator {
                                                       String action,
                                                       String resource,
                                                       Map<String, List<String>> conditionCtx) {
-        Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
-        String loweredAction = lowercase(action);
-        return simulationDecision(simulatedPolicies(caller, loweredAction, resource, ctx),
-                loweredAction, resource, ctx);
+        DecisionRecord record = explain(caller, ResourcePolicyDecision.NEUTRAL,
+                ResourceAccountRelationship.SAME_ACCOUNT, action, resource, conditionCtx);
+        return SimulationDecision.from(record.outcome());
     }
 
     /**
@@ -471,10 +478,12 @@ public class IamPolicyEvaluator {
                                      String action,
                                      String resource,
                                      Map<String, List<String>> conditionCtx) {
+        DecisionRecord record = explain(caller, ResourcePolicyDecision.NEUTRAL,
+                ResourceAccountRelationship.SAME_ACCOUNT, action, resource, conditionCtx);
+        SimulationDecision decision = SimulationDecision.from(record.outcome());
         Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
         String loweredAction = lowercase(action);
         SimulatedPolicies policies = simulatedPolicies(caller, loweredAction, resource, ctx);
-        SimulationDecision decision = simulationDecision(policies, loweredAction, resource, ctx);
         List<CachedDocument> boundary = policies.boundary();
         return new SimulationReport(decision,
                 matchedStatements(decision, caller, policies.identity(), loweredAction, resource, ctx),
@@ -506,33 +515,6 @@ public class IamPolicyEvaluator {
                 caller.boundaryPolicyDocument() == null
                         ? null : parseEach(List.of(caller.boundaryPolicyDocument())),
                 scpWalk(caller.scpLevels(), action, resource, ctx));
-    }
-
-    private SimulationDecision simulationDecision(SimulatedPolicies policies, String action,
-                                                  String resource, Map<String, List<String>> ctx) {
-        List<CachedDocument> session = policies.session();
-        List<CachedDocument> boundary = policies.boundary();
-        if (policies.scp().firstDeny() != null) {
-            return SimulationDecision.EXPLICIT_DENY;
-        }
-        if (anyMatch(policies.identity(), true, action, resource, ctx)
-                || (session != null && anyMatch(session, true, action, resource, ctx))
-                || (boundary != null && anyMatch(boundary, true, action, resource, ctx))) {
-            return SimulationDecision.EXPLICIT_DENY;
-        }
-        if (!policies.scp().allows()) {
-            return SimulationDecision.IMPLICIT_DENY;
-        }
-        if (!anyMatch(policies.identity(), false, action, resource, ctx)) {
-            return SimulationDecision.IMPLICIT_DENY;
-        }
-        if (session != null && !anyMatch(session, false, action, resource, ctx)) {
-            return SimulationDecision.IMPLICIT_DENY;
-        }
-        if (boundary != null && !anyMatch(boundary, false, action, resource, ctx)) {
-            return SimulationDecision.IMPLICIT_DENY;
-        }
-        return SimulationDecision.ALLOWED;
     }
 
     /** Whether any statement of these documents denies (or allows) the request. */
