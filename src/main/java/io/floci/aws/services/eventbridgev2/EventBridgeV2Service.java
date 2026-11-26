@@ -221,8 +221,9 @@ public class EventBridgeV2Service implements Resettable {
                     "Event bus " + bus.getName() + " still has subscribers; delete them first.", 409);
         }
         for (SubscriberV2 orphan : subscribersOf(bus, region)) {
-            subscribers.delete(subscriberKey(region, bus.getName(), orphan.getName()));
+            // Written before the old entry goes, so a stop between the two writes loses nothing.
             subscribers.put(orphanKey(region, orphan), orphan);
+            subscribers.delete(subscriberKey(region, bus.getName(), orphan.getName()));
         }
         buses.delete(storageKey(region, bus.getName()));
         deliveriesByBus.remove(bus.getArn());
