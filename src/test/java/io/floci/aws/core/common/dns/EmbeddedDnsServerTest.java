@@ -315,6 +315,33 @@ class EmbeddedDnsServerTest {
     }
 
     @Test
+    void planQueryDoesNotChooseBetweenConflictingRuntimeOrigins() {
+        for (DnsClientVpcSource.ClientVpc other : List.of(
+                new DnsClientVpcSource.ClientVpc("111111111111", REGION, "vpc-a"),
+                new DnsClientVpcSource.ClientVpc(ACCOUNT, "us-west-2", "vpc-a"),
+                new DnsClientVpcSource.ClientVpc(ACCOUNT, REGION, "vpc-other"))) {
+            DnsClientVpcSource conflicting = address -> Optional.of(other);
+            for (List<DnsClientVpcSource> sources : List.of(List.of(clientVpc("vpc-a"), conflicting),
+                    List.of(conflicting, clientVpc("vpc-a")))) {
+                EmbeddedDnsServer server = new EmbeddedDnsServer(List.of(),
+                        List.of(source("db.corp.internal", List.of("192.0.2.17"))),
+                        List.of(rules("vpc-a", forward("corp.internal", "10.1.0.53"))), sources);
+                assertEquals(EmbeddedDnsServer.QueryPlan.answering(DnsAnswer.refused()),
+                        server.planQuery("db.corp.internal", CLIENT, MY_IP, 1));
+            }
+        }
+    }
+
+    @Test
+    void planQueryAcceptsMatchingRuntimeOrigins() {
+        EmbeddedDnsServer server = new EmbeddedDnsServer(List.of(), List.of(),
+                List.of(rules("vpc-a", forward("corp.internal", "10.1.0.53"))),
+                List.of(clientVpc("vpc-a"), clientVpc("vpc-a")));
+        assertEquals(List.of(new DnsForwardingRule.Target("10.1.0.53", 53)),
+                server.planQuery("db.corp.internal", CLIENT, MY_IP, 1).ruleTargets());
+    }
+
+    @Test
     void planQuery_appliesNoRuleWhenTheQueryOriginIsIncomplete() {
         DnsForwardingRuleSource anyOrigin = (accountId, region, vpcId) ->
                 List.of(forward("corp.internal", "10.1.0.53"));

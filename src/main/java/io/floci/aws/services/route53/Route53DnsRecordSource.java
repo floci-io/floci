@@ -4,6 +4,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.LocalStackParity;
 import io.floci.aws.core.common.DomainNames;
 import io.floci.aws.core.common.dns.DnsAnswer;
+import io.floci.aws.core.common.dns.DnsClientVpcSource.ClientVpc;
 import io.floci.aws.core.common.dns.DnsLookupHelper;
 import io.floci.aws.core.common.dns.DnsRecord;
 import io.floci.aws.core.common.dns.DnsRecordSource;
@@ -75,15 +76,25 @@ public class Route53DnsRecordSource implements DnsRecordSource {
 
     @Override
     public Optional<DnsAnswer> resolveAuthoritative(String name, int type) {
-        return resolveAuthoritative(name, type, null);
+        return resolveAuthoritative(name, type, null, null);
     }
 
     @Override
     public Optional<DnsAnswer> resolveAuthoritative(String name, int type, String listenerAddress) {
+        return resolveAuthoritative(name, type, listenerAddress, null);
+    }
+
+    @Override
+    public Optional<DnsAnswer> resolveAuthoritative(String name, int type, ClientVpc origin) {
+        return resolveAuthoritative(name, type, null, origin);
+    }
+
+    @Override
+    public Optional<DnsAnswer> resolveAuthoritative(String name, int type, String listenerAddress, ClientVpc origin) {
         if (name == null || name.isBlank() || (type != 1 && type != 2 && type != 6 && type != 16 && type != 28)) {
             return Optional.empty();
         }
-        if (route53Service.isCoveredByPrivateZone(name)) {
+        if (route53Service.isCoveredByPrivateZone(name, origin)) {
             return Optional.empty();
         }
         List<Route53Service.PublicDnsZone> zones = route53Service.publicDnsZones(name);
@@ -178,20 +189,21 @@ public class Route53DnsRecordSource implements DnsRecordSource {
 
     @Override
     public Optional<DnsAnswer> resolve(String name, int type) {
-        if (type != 33) {
-            return DnsRecordSource.super.resolve(name, type);
-        }
-        if (name == null || name.isBlank() || !route53Service.isCoveredByPrivateZone(name)) {
+        return resolve(name, type, null);
+    }
+
+    private Optional<DnsAnswer> resolveSrv(String name, ClientVpc origin) {
+        if (name == null || name.isBlank() || !route53Service.isCoveredByPrivateZone(name, origin)) {
             return Optional.empty();
         }
-        List<ResourceRecordSet> sets = route53Service.findPrivateRecordsForName(name);
+        List<ResourceRecordSet> sets = route53Service.findPrivateRecordsForName(name, origin);
         DnsAnswer answer = buildRecords(name, sets.stream()
                 .filter(set -> "SRV".equalsIgnoreCase(set.getType())).toList(),
                 Route53DnsRecordSource::srvRecord, Route53DnsRecordSource::ttlOf);
         if (answer.responseCode() != 0 || !answer.isEmpty()) {
             return Optional.of(answer);
         }
-        return Optional.of(!sets.isEmpty() || route53Service.hasPrivateRecordsBeneath(name)
+        return Optional.of(!sets.isEmpty() || route53Service.hasPrivateRecordsBeneath(name, origin)
                 ? DnsAnswer.noData() : DnsAnswer.nxDomain());
     }
 
@@ -236,20 +248,33 @@ public class Route53DnsRecordSource implements DnsRecordSource {
 
     @Override
     public Optional<DnsAnswer> resolveIpv4(String name) {
+        return resolveIpv4(name, null);
+    }
+
+    @Override
+    public Optional<DnsAnswer> resolve(String name, int type, ClientVpc origin) {
+        if (type == 33) {
+            return resolveSrv(name, origin);
+        }
+        return resolveIpv4(name, origin).map(answer -> type == 1 ? answer
+                : answer.nameExists() ? DnsAnswer.noData() : DnsAnswer.nxDomain());
+    }
+
+    private Optional<DnsAnswer> resolveIpv4(String name, ClientVpc origin) {
         if (name == null || name.isBlank()) {
             return Optional.empty();
         }
-        if (!route53Service.isCoveredByPrivateZone(name)) {
+        if (!route53Service.isCoveredByPrivateZone(name, origin)) {
             return Optional.empty();
         }
-        DnsAnswer answer = resolveAddresses(name, new HashSet<>(), 0);
+        DnsAnswer answer = resolveAddresses(name, new HashSet<>(), 0, origin);
         if (answer.addresses().size() > MAX_DNS_ANSWERS) {
             answer = DnsAnswer.records(answer.addresses().subList(0, MAX_DNS_ANSWERS), answer.ttlSeconds());
         }
         return Optional.of(answer);
     }
 
-    private DnsAnswer resolveAddresses(String qname, Set<String> visited, int depth) {
+    private DnsAnswer resolveAddresses(String qname, Set<String> visited, int depth, ClientVpc origin) {
         if (depth > MAX_CNAME_DEPTH) {
             return DnsAnswer.noData();
         }
@@ -258,9 +283,9 @@ public class Route53DnsRecordSource implements DnsRecordSource {
             return DnsAnswer.noData();
         }
 
-        List<ResourceRecordSet> recordSets = route53Service.findPrivateRecordsForName(qname);
+        List<ResourceRecordSet> recordSets = route53Service.findPrivateRecordsForName(qname, origin);
         if (recordSets.isEmpty()) {
-            return route53Service.hasPrivateRecordsBeneath(qname) ? DnsAnswer.noData() : DnsAnswer.nxDomain();
+            return route53Service.hasPrivateRecordsBeneath(qname, origin) ? DnsAnswer.noData() : DnsAnswer.nxDomain();
         }
 
         // 1. Direct A records
@@ -281,8 +306,8 @@ public class Route53DnsRecordSource implements DnsRecordSource {
                 if (alias != null && alias.getDnsName() != null && !alias.getDnsName().isBlank()) {
                     String cleanAlias = DnsLookupHelper.normalizeTarget(alias.getDnsName());
                     // An alias record has no TTL of its own; Route 53 answers with the target's.
-                    if (route53Service.isCoveredByPrivateZone(cleanAlias)) {
-                        DnsAnswer target = resolveAddresses(cleanAlias, visited, depth + 1);
+                    if (route53Service.isCoveredByPrivateZone(cleanAlias, origin)) {
+                        DnsAnswer target = resolveAddresses(cleanAlias, visited, depth + 1, origin);
                         if (!target.isEmpty()) {
                             addresses.addAll(target.addresses());
                             ttl = Math.min(ttl, target.ttlSeconds());
@@ -311,8 +336,8 @@ public class Route53DnsRecordSource implements DnsRecordSource {
                         // The answer is flattened to A records, so it can be cached only as long
                         // as the shortest-lived record in the chain.
                         int cnameTtl = ttlOf(rrs);
-                        if (route53Service.isCoveredByPrivateZone(cleanTarget)) {
-                            DnsAnswer targetAnswer = resolveAddresses(cleanTarget, visited, depth + 1);
+                        if (route53Service.isCoveredByPrivateZone(cleanTarget, origin)) {
+                            DnsAnswer targetAnswer = resolveAddresses(cleanTarget, visited, depth + 1, origin);
                             if (targetAnswer.isEmpty()) {
                                 return targetAnswer;
                             }

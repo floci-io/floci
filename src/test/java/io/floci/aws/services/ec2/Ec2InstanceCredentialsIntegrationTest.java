@@ -25,8 +25,8 @@ class Ec2InstanceCredentialsIntegrationTest {
     IamService iam;
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void imdsCredentialsResolveToTheAttachedRoleAndAreRevokedOnCleanup(boolean stopServer) throws Exception {
+    @ValueSource(strings = {"stop", "unregister", "revoke"})
+    void imdsCredentialsResolveToTheAttachedRoleAndAreRevokedOnCleanup(String cleanup) throws Exception {
         String account = "246813579012";
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String role = "worker-" + suffix;
@@ -68,14 +68,22 @@ class Ec2InstanceCredentialsIntegrationTest {
             assertEquals("arn:aws:sts::" + account + ":assumed-role/" + role + "/i-credentials",
                     iam.resolveCallerArn(key).orElseThrow());
             assertEquals(response.body(), fixture.get(path + role, token.body()).body());
-            if (stopServer) {
+            if ("stop".equals(cleanup)) {
                 server.stop();
             } else {
-                server.unregisterInstance(instance);
+                if ("revoke".equals(cleanup)) {
+                    server.revokeInstanceCredentials(instance);
+                } else {
+                    server.unregisterInstance(instance);
+                }
                 assertNotEquals(200, fixture.get(path + role, token.body()).statusCode());
             }
             assertTrue(iam.findSecretKey(key, sessionToken).isEmpty());
-            assertTrue(server.registeredContainer("127.0.0.1").isEmpty());
+            assertEquals("revoke".equals(cleanup), server.registeredContainer("127.0.0.1").isPresent());
+            if ("revoke".equals(cleanup)) {
+                server.registerContainer("127.0.0.1", instance.getInstanceId(), instance);
+                assertNotEquals(200, fixture.get(path + role, fixture.putToken("60").body()).statusCode());
+            }
         } finally {
             given().header("Authorization", auth).contentType("application/x-www-form-urlencoded")
                     .formParam("Action", "RemoveRoleFromInstanceProfile").formParam("InstanceProfileName", profile)

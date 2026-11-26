@@ -2999,9 +2999,9 @@ class Ec2ContainerManagerTest {
         int removed = harness.manager.reconcileOrphanedContainers(
                 (region, instanceId) -> "i-live".equals(instanceId));
 
-        verify(harness.lifecycleManager, never()).removeIfExists("c-sibling");
-        verify(harness.lifecycleManager, never()).removeIfExists("c-live");
-        verify(harness.lifecycleManager).removeIfExists("c-orphan");
+        verify(harness.lifecycleManager, never()).removeIfExistsStrict("c-sibling");
+        verify(harness.lifecycleManager, never()).removeIfExistsStrict("c-live");
+        verify(harness.lifecycleManager).removeIfExistsStrict("c-orphan");
         assertEquals(1, removed);
     }
 
@@ -3015,7 +3015,7 @@ class Ec2ContainerManagerTest {
         // stop/start across a restart.
         int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> true);
 
-        verify(harness.lifecycleManager, never()).removeIfExists(anyString());
+        verify(harness.lifecycleManager, never()).removeIfExistsStrict(anyString());
         assertEquals(0, removed);
     }
 
@@ -3031,7 +3031,7 @@ class Ec2ContainerManagerTest {
 
         int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> false);
 
-        verify(harness.lifecycleManager, never()).removeIfExists(anyString());
+        verify(harness.lifecycleManager, never()).removeIfExistsStrict(anyString());
         assertEquals(0, removed);
     }
 
@@ -3048,8 +3048,8 @@ class Ec2ContainerManagerTest {
         int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> false);
 
         assertEquals(1, removed);
-        verify(harness.lifecycleManager).removeIfExists("c-ours");
-        verify(harness.lifecycleManager, never()).removeIfExists("c-sibling");
+        verify(harness.lifecycleManager).removeIfExistsStrict("c-ours");
+        verify(harness.lifecycleManager, never()).removeIfExistsStrict("c-sibling");
     }
 
     @Test
@@ -3063,9 +3063,9 @@ class Ec2ContainerManagerTest {
         int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> false);
 
         assertEquals(2, removed);
-        verify(harness.lifecycleManager).removeIfExists("c-legacy");
-        verify(harness.lifecycleManager).removeIfExists("c-both");
-        verify(harness.lifecycleManager, never()).removeIfExists("c-legacy-sibling");
+        verify(harness.lifecycleManager).removeIfExistsStrict("c-legacy");
+        verify(harness.lifecycleManager).removeIfExistsStrict("c-both");
+        verify(harness.lifecycleManager, never()).removeIfExistsStrict("c-legacy-sibling");
     }
 
     @Test
@@ -3078,7 +3078,7 @@ class Ec2ContainerManagerTest {
         int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> false);
 
         assertEquals(0, removed);
-        verify(harness.lifecycleManager, never()).removeIfExists(anyString());
+        verify(harness.lifecycleManager, never()).removeIfExistsStrict(anyString());
     }
 
     private static Container withOwners(String containerId, Map<String, String> owners, String instanceId) {
@@ -3289,6 +3289,7 @@ class Ec2ContainerManagerTest {
 
         awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
         assertFalse(ran.get(), "the hook must not run when the container is still present");
+        verify(harness.metadataServer()).revokeInstanceCredentials(instance);
     }
 
     @Test

@@ -903,9 +903,27 @@ public class ContainerLifecycleManager {
         }
     }
 
+    /** Reports a confirmed stop before removal or log draining can block. */
+    public boolean stopAndConfirmRemoved(String containerId, Closeable logStream, int stopTimeoutSeconds,
+                                         boolean removeAnonymousVolumes, Runnable onStopped) {
+        try {
+            stopAndRemoveStrict(containerId, logStream, stopTimeoutSeconds, removeAnonymousVolumes, onStopped);
+            return true;
+        } catch (RuntimeException e) {
+            LOG.warnv("Container {0} was not confirmed removed: {1}", containerId, e.getMessage());
+            return false;
+        }
+    }
+
     /** Strict teardown that can also reclaim the container's anonymous volumes. */
     public void stopAndRemoveStrict(String containerId, Closeable logStream, int stopTimeoutSeconds,
                                      boolean removeAnonymousVolumes) {
+        stopAndRemoveStrict(containerId, logStream, stopTimeoutSeconds, removeAnonymousVolumes, () -> { });
+    }
+
+    /** Strict teardown with a notification as soon as the container cannot send more traffic. */
+    public void stopAndRemoveStrict(String containerId, Closeable logStream, int stopTimeoutSeconds,
+                                    boolean removeAnonymousVolumes, Runnable onStopped) {
         LOG.infov("Stopping container {0}", containerId);
 
         Exception stopFailure = null;
@@ -913,6 +931,7 @@ public class ContainerLifecycleManager {
             dockerClient.stopContainerCmd(containerId).withTimeout(stopTimeoutSeconds).exec();
         } catch (NotFoundException e) {
             LOG.debugv("Container {0} not found (already removed)", containerId);
+            onStopped.run();
             closeLogStreamIfPresent(logStream);
             return;
         } catch (NotModifiedException e) {
@@ -921,6 +940,9 @@ public class ContainerLifecycleManager {
         } catch (Exception e) {
             stopFailure = e;
             LOG.warnv("Error stopping container {0}: {1}", containerId, e.getMessage());
+        }
+        if (stopFailure == null) {
+            onStopped.run();
         }
         readLastLogLines(logStream);
 
@@ -948,6 +970,9 @@ public class ContainerLifecycleManager {
                 throw cleanupFailure;
             }
             LOG.debugv("Container {0} is absent after its removal response failed", containerId);
+        }
+        if (stopFailure != null) {
+            onStopped.run();
         }
         // Closed only once the container is stopped and gone, as in stopAndRemove, so the follower
         // can drain the final tail.

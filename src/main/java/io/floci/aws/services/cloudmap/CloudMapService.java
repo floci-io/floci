@@ -16,6 +16,7 @@ import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.dns.DnsAnswer;
+import io.floci.aws.core.common.dns.DnsClientVpcSource.ClientVpc;
 import io.floci.aws.core.common.dns.DnsRecord;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
@@ -42,6 +43,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.Executors;
@@ -509,6 +511,20 @@ public class CloudMapService implements StoredResourceArns {
     }
 
     public Optional<DnsAnswer> resolveDnsNameIfOwned(String queryName, int type) {
+        return resolveDnsNameIfOwned(queryName, type, dnsNamespacesByLongestName());
+    }
+
+    public Optional<DnsAnswer> resolveDnsNameIfOwned(String queryName, int type, ClientVpc origin) {
+        Set<String> privateZones = route53Service.privateDnsZoneIds(queryName, origin);
+        List<Namespace> visible = dnsNamespacesByLongestName().stream()
+                .filter(namespace -> "DNS_PRIVATE".equals(namespace.getType())
+                        ? privateZones.contains(namespace.getHostedZoneId())
+                        : privateZones.isEmpty())
+                .toList();
+        return resolveDnsNameIfOwned(queryName, type, visible);
+    }
+
+    private Optional<DnsAnswer> resolveDnsNameIfOwned(String queryName, int type, List<Namespace> namespaces) {
         if (queryName == null || queryName.isBlank()) {
             return Optional.empty();
         }
@@ -519,7 +535,7 @@ public class CloudMapService implements StoredResourceArns {
 
         String matchedNamespaceName = null;
         boolean nameExists = false;
-        for (Namespace namespace : dnsNamespacesByLongestName()) {
+        for (Namespace namespace : namespaces) {
             String namespaceName = namespace.getName().toLowerCase(Locale.ROOT);
             String suffix = "." + namespaceName;
             boolean apex = name.equals(namespaceName);

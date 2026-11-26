@@ -1,6 +1,7 @@
 package io.floci.aws.services.ecs;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.dns.DnsClientVpcSource.ClientVpc;
 import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.container.EcsTaskHandle;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
@@ -15,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -24,13 +26,63 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** DAEMON scheduling: one task per ACTIVE container instance, nothing else. */
 class EcsServiceDaemonSchedulingTest {
 
     private static final String REGION = "us-east-1";
+
+    @Test
+    void daemonLaunchCarriesTheRegisteredEc2HostsVpc() {
+        EcsContainerManager manager = mock(EcsContainerManager.class);
+        when(manager.removeLeftoverContainers()).thenReturn(true);
+        // Both launch paths succeed: the assertion detects lost host context, not a null mock handle.
+        when(manager.startTask(any(), any(), any(), eq(REGION))).thenAnswer(invocation ->
+                new EcsTaskHandle(invocation.<EcsTask>getArgument(0).getTaskArn(), Map.of("agent", "cid"), Map.of()));
+        EcsService service = EcsServiceFixtures.builder().dockerMode().containerManager(manager).build();
+        try {
+            service.createCluster("daemon-origin", REGION);
+            ContainerInstance host = service.registerContainerInstance("daemon-origin", null, List.of(), REGION);
+            ClientVpc origin = new ClientVpc("000000000000", REGION, "vpc-host");
+            when(manager.vpcForInstance("000000000000", REGION, host.getEc2InstanceId()))
+                    .thenReturn(Optional.of(origin));
+            when(manager.startTask(any(), any(), any(), eq(REGION), eq(origin))).thenAnswer(invocation ->
+                    new EcsTaskHandle(invocation.<EcsTask>getArgument(0).getTaskArn(), Map.of("agent", "cid"), Map.of()));
+            registerTaskDef(service);
+            service.createService("daemon-origin", "daemon-svc", "daemon-fam", 1, LaunchType.EC2,
+                    List.of(), null, null, "DAEMON", null, null, REGION);
+            service.reconcileServices();
+            assertEquals(1, runningTasks(service).size());
+            verify(manager).startTask(any(), any(), any(), eq(REGION), eq(origin));
+        } finally {
+            service.beginTeardown();
+        }
+    }
+
+    @Test
+    void unknownRegisteredHostDoesNotInventVpcContext() {
+        EcsContainerManager manager = mock(EcsContainerManager.class);
+        when(manager.removeLeftoverContainers()).thenReturn(true);
+        when(manager.startTask(any(), any(), any(), eq(REGION))).thenAnswer(invocation ->
+                new EcsTaskHandle(invocation.<EcsTask>getArgument(0).getTaskArn(), Map.of("agent", "cid"), Map.of()));
+        EcsService service = EcsServiceFixtures.builder().dockerMode().containerManager(manager).build();
+        try {
+            service.createCluster("daemon-unknown-origin", REGION);
+            service.registerContainerInstance("daemon-unknown-origin", null, List.of(), REGION);
+            registerTaskDef(service);
+            service.createService("daemon-unknown-origin", "daemon-svc", "daemon-fam", 1, LaunchType.EC2,
+                    List.of(), null, null, "DAEMON", null, null, REGION);
+            service.reconcileServices();
+            assertEquals(1, runningTasks(service).size());
+            verify(manager).startTask(any(), any(), any(), eq(REGION));
+        } finally {
+            service.beginTeardown();
+        }
+    }
 
     @Test
     void daemonServiceRunsExactlyOneTaskPerActiveContainerInstance() {

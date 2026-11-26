@@ -12,6 +12,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.core.common.dns.DnsClientVpcSource.ClientVpc;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
@@ -1744,6 +1745,22 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * StartTask run this on the task launcher once they have answered; the service scheduler runs
      * it inline. A StopTask that came first lands the task STOPPED without starting anything.
      */
+    private EcsTaskHandle startTaskContainers(EcsTask task, TaskDefinition definition,
+                                              List<ContainerOverride> overrides, String region) {
+        if (definition.getNetworkMode() != NetworkMode.awsvpc && definition.getNetworkMode() != NetworkMode.none
+                && task.getContainerInstanceArn() != null) {
+            ContainerInstance host = resolveContainerInstance(task.getClusterArn(), task.getContainerInstanceArn());
+            if (host != null) {
+                Optional<ClientVpc> origin = containerManager.vpcForInstance(
+                        taskAccountId(task.getTaskArn()), region, host.getEc2InstanceId());
+                if (origin.isPresent()) {
+                    return containerManager.startTask(task, definition, overrides, region, origin.orElseThrow());
+                }
+            }
+        }
+        return containerManager.startTask(task, definition, overrides, region);
+    }
+
     private void launchTask(EcsCluster cluster, EcsTask task, TaskDefinition taskDef,
                             List<ContainerOverride> containerOverrides, String region) {
         String taskArn = task.getTaskArn();
@@ -1774,7 +1791,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                             "the containers a previous run of Floci left on the Docker daemon could not be removed yet");
                 }
                 task.setPullStartedAt(Instant.now());
-                EcsTaskHandle handle = containerManager.startTask(task, taskDef, containerOverrides, region);
+                EcsTaskHandle handle = startTaskContainers(task, taskDef, containerOverrides, region);
                 task.setPullStoppedAt(Instant.now());
                 boolean stopRequested;
                 synchronized (task) {
@@ -5994,6 +6011,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
         try {
             containerManager.stopTaskAndCollectExitCodes(claimed);
+            EcsTask task = tasks.get(taskArn);
+            if (task != null) {
+                containerManager.releaseTaskNetwork(task, taskRegion(task));
+            }
         } finally {
             // A task can be reported STOPPED even if Docker rejected both teardown attempts.
             // Keep pending log readers and task volumes for later cleanup attempts.

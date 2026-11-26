@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -81,6 +82,50 @@ class ContainerLifecycleManagerTeardownTest {
 
         assertTrue(manager.stopAndConfirmRemoved("held", logStream, 5, true));
         verify(logStream).close();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"success", "stopped", "missing", "failed-stop", "failed-both", "failed-remove"})
+    void stopNotificationPrecedesRemovalAndRequiresConfirmedTermination(String outcome) throws Exception {
+        DockerClient docker = mock(DockerClient.class);
+        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, docker, null, null, null);
+        StopContainerCmd stop = mock(StopContainerCmd.class);
+        when(docker.stopContainerCmd("owned")).thenReturn(stop);
+        when(stop.withTimeout(5)).thenReturn(stop);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class);
+        when(docker.removeContainerCmd("owned")).thenReturn(remove);
+        when(remove.withForce(true)).thenReturn(remove);
+        AtomicInteger notifications = new AtomicInteger();
+        AtomicInteger notificationsBeforeRemoval = new AtomicInteger(-1);
+        AtomicInteger notificationsBeforeClose = new AtomicInteger(-1);
+        Closeable stream = () -> notificationsBeforeClose.set(notifications.get());
+        if ("stopped".equals(outcome)) {
+            doThrow(new NotModifiedException("already stopped")).when(stop).exec();
+        } else if ("missing".equals(outcome)) {
+            doThrow(new NotFoundException("already removed")).when(stop).exec();
+        } else if ("failed-stop".equals(outcome) || "failed-both".equals(outcome)) {
+            doThrow(new IllegalStateException("stop failed")).when(stop).exec();
+        }
+        doAnswer(invocation -> {
+            notificationsBeforeRemoval.set(notifications.get());
+            if ("failed-both".equals(outcome) || "failed-remove".equals(outcome)) {
+                throw new IllegalStateException("remove failed");
+            }
+            return null;
+        }).when(remove).exec();
+
+        boolean removed = manager.stopAndConfirmRemoved("owned", stream, 5, true, notifications::incrementAndGet);
+
+        boolean removalFailed = "failed-both".equals(outcome) || "failed-remove".equals(outcome);
+        assertEquals(!removalFailed, removed);
+        assertEquals("failed-both".equals(outcome) ? 0 : 1, notifications.get());
+        int beforeRemoval = switch (outcome) {
+            case "missing" -> -1;
+            case "failed-stop", "failed-both" -> 0;
+            default -> 1;
+        };
+        assertEquals(beforeRemoval, notificationsBeforeRemoval.get());
+        assertEquals(removalFailed ? -1 : 1, notificationsBeforeClose.get());
     }
 
     @ParameterizedTest

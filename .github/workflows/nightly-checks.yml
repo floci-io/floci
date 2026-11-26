@@ -27,6 +27,7 @@ on:
       - 'src/main/java/io/floci/aws/config/**'
       - 'src/main/java/io/floci/aws/services/**'
       - 'src/main/java/io/floci/aws/core/common/docker/**'
+      - 'src/main/java/io/floci/aws/core/common/dns/**'
 
 permissions:
   contents: read

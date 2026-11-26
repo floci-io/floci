@@ -36,6 +36,14 @@ ignored. These existing filter limitations are unchanged.
 
 ### DNS resolution
 
+For a querying workload with a known VPC, private namespace answers require an
+association with the namespace's backing Route 53 zone. Additional associations
+and their removal take effect on subsequent queries. An unrelated known VPC cannot
+read private registrations. Callers without a known VPC retain unscoped private
+answers for compatibility. Conflicting runtime identities return DNS REFUSED
+before any record lookup or forwarding. The most specific visible private zone wins, and its
+negative answers do not fall back to a public namespace.
+
 A DNS namespace is answerable, not just storable. Floci's embedded DNS server
 resolves `<service>.<namespace>` to the `AWS_INSTANCE_IPV4` of the instances
 registered under that service, one A record each, so a container that uses Floci
