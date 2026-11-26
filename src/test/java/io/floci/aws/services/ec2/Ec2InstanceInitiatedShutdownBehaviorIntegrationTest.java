@@ -5,12 +5,14 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 import software.amazon.awssdk.services.ec2.model.InstanceAttributeName;
 import software.amazon.awssdk.services.ec2.model.ShutdownBehavior;
 
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @QuarkusTest
 class Ec2InstanceInitiatedShutdownBehaviorIntegrationTest {
@@ -61,6 +63,31 @@ class Ec2InstanceInitiatedShutdownBehaviorIntegrationTest {
                     .instanceInitiatedShutdownBehavior(v -> v.value("terminate")));
 
             assertEquals("terminate", shutdownBehavior(ec2, instanceId));
+        }
+    }
+
+    @Test
+    void runInstancesRejectsAShutdownBehaviorThatIsNeitherStopNorTerminate() {
+        try (Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1)) {
+            Ec2Exception rejected = assertThrows(Ec2Exception.class, () -> ec2.runInstances(r -> r
+                    .imageId("ami-alpine").instanceType("t3.micro").minCount(1).maxCount(1)
+                    .instanceInitiatedShutdownBehavior("Terminate")));
+
+            assertEquals("InvalidParameterValue", rejected.awsErrorDetails().errorCode());
+        }
+    }
+
+    @Test
+    void modifyInstanceAttributeRejectsAShutdownBehaviorThatIsNeitherStopNorTerminate() {
+        try (Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1)) {
+            String instanceId = ec2.runInstances(r -> r.imageId("ami-alpine").instanceType("t3.micro")
+                    .minCount(1).maxCount(1)).instances().getFirst().instanceId();
+
+            Ec2Exception rejected = assertThrows(Ec2Exception.class, () -> ec2.modifyInstanceAttribute(r -> r
+                    .instanceId(instanceId).instanceInitiatedShutdownBehavior(v -> v.value("halt"))));
+
+            assertEquals("InvalidParameterValue", rejected.awsErrorDetails().errorCode());
+            assertEquals("stop", shutdownBehavior(ec2, instanceId));
         }
     }
 

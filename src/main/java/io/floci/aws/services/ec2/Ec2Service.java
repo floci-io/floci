@@ -4447,6 +4447,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                     String privateIpAddress,
                                     LaunchTemplateData.CapacityReservationSpecification capacitySpecification,
                                     String instanceInitiatedShutdownBehavior) {
+        requireShutdownBehavior(instanceInitiatedShutdownBehavior);
         String capacityPreference = capacitySpecification == null
                 || capacitySpecification.getCapacityReservationPreference() == null ? "open"
                 : capacitySpecification.getCapacityReservationPreference();
@@ -6492,9 +6493,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 inst.setSourceDestCheck(Boolean.parseBoolean(value));
             }
             case "ebsOptimized" -> inst.setEbsOptimized(Boolean.parseBoolean(value));
-            case "instanceInitiatedShutdownBehavior" -> inst.setInstanceInitiatedShutdownBehavior(value);
+            case "instanceInitiatedShutdownBehavior" -> {
+                requireShutdownBehavior(value);
+                inst.setInstanceInitiatedShutdownBehavior(value);
+            }
         }
         storeInstance(region, inst);
+    }
+
+    private static void requireShutdownBehavior(String behavior) {
+        if (behavior != null && !"stop".equals(behavior) && !"terminate".equals(behavior)) {
+            throw new AwsException("InvalidParameterValue", "Value (" + behavior
+                    + ") for parameter instanceInitiatedShutdownBehavior is invalid. Valid values are 'stop' and 'terminate'.",
+                    400);
+        }
     }
 
     /**
