@@ -9,6 +9,7 @@ import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.Filter;
 import software.amazon.awssdk.services.ec2.model.IpPermission;
 import software.amazon.awssdk.services.ec2.model.IpRange;
+import software.amazon.awssdk.services.ec2.model.Ipv6Range;
 import software.amazon.awssdk.services.ec2.model.SecurityGroup;
 
 import java.util.ArrayList;
@@ -43,8 +44,7 @@ class Ec2Ipv6DefaultEgressIntegrationTest {
                 }
                 SecurityGroup group = client.describeSecurityGroups(r -> r.groupIds(groupId))
                         .securityGroups().getFirst();
-                assertEquals(List.of("::/0"), group.ipPermissionsEgress().stream()
-                        .flatMap(permission -> permission.ipv6Ranges().stream()).map(range -> range.cidrIpv6()).toList());
+                assertDualStackEgress(group);
                 assertTrue(client.describeSecurityGroupRules(r -> r.filters(
                                 Filter.builder().name("group-id").values(groupId).build()))
                         .securityGroupRules().stream().anyMatch(rule -> rule.isEgress() && "::/0".equals(rule.cidrIpv6())));
@@ -52,8 +52,7 @@ class Ec2Ipv6DefaultEgressIntegrationTest {
                                 Filter.builder().name("vpc-id").values(vpcId).build(),
                                 Filter.builder().name("group-name").values("default").build()))
                         .securityGroups().getFirst();
-                assertTrue(defaultGroup.ipPermissionsEgress().stream()
-                        .flatMap(permission -> permission.ipv6Ranges().stream()).anyMatch(range -> "::/0".equals(range.cidrIpv6())));
+                assertDualStackEgress(defaultGroup);
                 if (changedId != null) {
                     SecurityGroup changed = client.describeSecurityGroups(r -> r.groupIds(groups.get(1)))
                             .securityGroups().getFirst();
@@ -67,5 +66,12 @@ class Ec2Ipv6DefaultEgressIntegrationTest {
                 client.deleteVpc(r -> r.vpcId(vpcId));
             }
         }
+    }
+
+    private static void assertDualStackEgress(SecurityGroup group) {
+        assertEquals(List.of(IpPermission.builder().ipProtocol("-1")
+                .userIdGroupPairs(List.of()).prefixListIds(List.of())
+                .ipRanges(IpRange.builder().cidrIp("0.0.0.0/0").build())
+                .ipv6Ranges(Ipv6Range.builder().cidrIpv6("::/0").build()).build()), group.ipPermissionsEgress());
     }
 }

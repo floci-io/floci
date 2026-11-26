@@ -7756,10 +7756,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 IpPermission ipv6All = new IpPermission();
                 ipv6All.setIpProtocol("-1");
                 ipv6All.getIpv6Ranges().add(new Ipv6Range("::/0"));
-                List<IpPermission> next = new ArrayList<>(current.getIpPermissionsEgress());
-                next.add(ipv6All);
+                IpPermission dualStack = copyPermissionSources(current.getIpPermissionsEgress().getFirst());
+                dualStack.getIpv6Ranges().addAll(ipv6All.getIpv6Ranges());
                 createRules(region, current.getGroupId(), ipv6All, true);
-                current.setIpPermissionsEgress(next);
+                current.setIpPermissionsEgress(new ArrayList<>(List.of(dualStack)));
                 securityGroups.put(key(region, current.getGroupId()), current);
             }
         }
