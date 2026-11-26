@@ -6011,6 +6011,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
         try {
             containerManager.stopTaskAndCollectExitCodes(claimed);
+            EcsTask task = tasks.get(taskArn);
+            if (task != null) {
+                containerManager.releaseTaskNetwork(task, taskRegion(task));
+            }
         } finally {
             // A task can be reported STOPPED even if Docker rejected both teardown attempts.
             // Keep pending log readers and task volumes for later cleanup attempts.
