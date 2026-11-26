@@ -337,35 +337,19 @@ public class RedshiftZeroEtlWriter {
      */
     public long loadTable(String accountId, String targetArn, String database, ReplicatedTable table,
                           InputStream csv) {
-        try (Connection connection = openDatabase(accountId, targetArn, database)) {
-            connection.setAutoCommit(false);
-            try (Statement statement = connection.createStatement()) {
-                statement.executeUpdate("CREATE SCHEMA IF NOT EXISTS " + PostgresWire.quoteIdentifier(table.schema()));
-                statement.executeUpdate("DROP TABLE IF EXISTS " + table.qualifiedName());
-                statement.executeUpdate(table.ddl());
-                long rows = connection.unwrap(PGConnection.class).getCopyAPI()
-                        .copyIn("COPY " + table.qualifiedName() + " FROM STDIN WITH (FORMAT csv)", csv);
-                connection.commit();
-                return rows;
-            } catch (SQLException | IOException | RuntimeException e) {
-                try {
-                    connection.rollback();
-                } catch (SQLException rollbackFailure) {
-                    e.addSuppressed(rollbackFailure);
-                }
-                throw e;
-            }
-        } catch (SQLException e) {
-            if (isConnectionFailure(e)) {
-                throw new TargetUnavailableException("Connection to Redshift database " + database
-                        + " failed while loading " + table.qualifiedName() + ": " + e.getMessage(), e);
-            }
-            LOG.warnv(e, "Could not load zero-ETL table {0} into database {1}", table.qualifiedName(), database);
-            throw new AwsException("InternalFailure", "Could not load table " + table.qualifiedName()
-                    + " into database " + database + ": " + e.getMessage(), 500);
-        } catch (IOException e) {
-            throw new UncheckedIOException("Could not read the rows of table " + table.qualifiedName(), e);
-        }
+        return inTransaction(accountId, targetArn, database, "loading " + table.qualifiedName(),
+                "load table " + table.qualifiedName() + " into database " + database, connection -> {
+                    try (Statement statement = connection.createStatement()) {
+                        statement.executeUpdate("CREATE SCHEMA IF NOT EXISTS "
+                                + PostgresWire.quoteIdentifier(table.schema()));
+                        statement.executeUpdate("DROP TABLE IF EXISTS " + table.qualifiedName());
+                        statement.executeUpdate(table.ddl());
+                        return connection.unwrap(PGConnection.class).getCopyAPI()
+                                .copyIn("COPY " + table.qualifiedName() + " FROM STDIN WITH (FORMAT csv)", csv);
+                    } catch (IOException e) {
+                        throw new UncheckedIOException("Could not read the rows of table " + table.qualifiedName(), e);
+                    }
+                });
     }
 
     /** One value of a replicated row: {@code expression} reads the value's source text, bound to its one {@code ?}. */
@@ -401,30 +385,13 @@ public class RedshiftZeroEtlWriter {
         if (changes.isEmpty()) {
             return;
         }
-        try (Connection connection = openDatabase(accountId, targetArn, database)) {
-            connection.setAutoCommit(false);
-            try {
-                for (RowChange change : changes) {
-                    apply(connection, change);
-                }
-                connection.commit();
-            } catch (SQLException | RuntimeException e) {
-                try {
-                    connection.rollback();
-                } catch (SQLException rollbackFailure) {
-                    e.addSuppressed(rollbackFailure);
-                }
-                throw e;
-            }
-        } catch (SQLException e) {
-            if (isConnectionFailure(e)) {
-                throw new TargetUnavailableException("Connection to Redshift database " + database
-                        + " failed while replicating: " + e.getMessage(), e);
-            }
-            LOG.warnv(e, "Could not replicate zero-ETL changes into database {0}", database);
-            throw new AwsException("InternalFailure", "Could not replicate changes into database " + database
-                    + ": " + e.getMessage(), 500);
-        }
+        inTransaction(accountId, targetArn, database, "replicating",
+                "replicate changes into database " + database, connection -> {
+                    for (RowChange change : changes) {
+                        apply(connection, change);
+                    }
+                    return null;
+                });
     }
 
     private static void apply(Connection connection, RowChange change) throws SQLException {
@@ -529,6 +496,42 @@ public class RedshiftZeroEtlWriter {
         } catch (SQLException e) {
             throw new TargetUnavailableException("Could not connect to Redshift database " + database
                     + ": " + e.getMessage(), e);
+        }
+    }
+
+    @FunctionalInterface
+    private interface TransactionWork<T> {
+        T run(Connection connection) throws SQLException;
+    }
+
+    /**
+     * Runs {@code work} in one transaction on {@code database} of the target, committing when it returns and rolling
+     * back when it throws. A lost connection surfaces as {@link TargetUnavailableException}, naming what was
+     * {@code during}; any other SQL failure as {@code InternalFailure}, saying what could not be done.
+     */
+    private <T> T inTransaction(String accountId, String targetArn, String database, String during, String failure,
+                                TransactionWork<T> work) {
+        try (Connection connection = openDatabase(accountId, targetArn, database)) {
+            connection.setAutoCommit(false);
+            try {
+                T result = work.run(connection);
+                connection.commit();
+                return result;
+            } catch (SQLException | RuntimeException e) {
+                try {
+                    connection.rollback();
+                } catch (SQLException rollbackFailure) {
+                    e.addSuppressed(rollbackFailure);
+                }
+                throw e;
+            }
+        } catch (SQLException e) {
+            if (isConnectionFailure(e)) {
+                throw new TargetUnavailableException("Connection to Redshift database " + database
+                        + " failed while " + during + ": " + e.getMessage(), e);
+            }
+            LOG.warnv(e, "Zero-ETL could not {0}", failure);
+            throw new AwsException("InternalFailure", "Could not " + failure + ": " + e.getMessage(), 500);
         }
     }
 
