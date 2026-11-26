@@ -655,6 +655,7 @@ class IamRoleCfnProvisionerTest {
         IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
                 "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
         existing.getTags().put("team", "prior");
+        existing.getTags().put("out-of-band", "theirs");
         when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600),
                 eq(Map.of("team", "new", "env", "prod")), any()))
                 .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
@@ -674,6 +675,7 @@ class IamRoleCfnProvisionerTest {
 
         verify(iam).untagRole("app-role", List.of("env"));
         verify(iam).tagRole("app-role", Map.of("team", "prior"));
+        verify(iam, never()).untagRole("app-role", List.of("out-of-band"));
     }
 
     @Test
