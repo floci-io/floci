@@ -3199,7 +3199,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         application != null ? application : List.of(), command, Duration.ZERO,
                         EmrSparkSteps.logFolder(cluster, step), null,
                         stepEnvironment(step, cluster, command != null && pig,
-                                trinoImage(cluster) != null ? EmrTrino.server(masterPrivateDnsName(cluster),
+                                runsTrino(cluster) ? EmrTrino.server(masterPrivateDnsName(cluster),
                                         EmrTrino.port(EmrSparkSteps.trinoConfig(cluster.getConfigurations(),
                                                 SNAPSHOT_MAPPER))) : null),
                         List.of(),
