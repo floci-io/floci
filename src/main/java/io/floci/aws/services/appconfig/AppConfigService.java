@@ -43,7 +43,7 @@ import java.util.regex.Pattern;
 public class AppConfigService {
     private static final Logger LOG = Logger.getLogger(AppConfigService.class);
 
-    private final StorageBackend<String, Application> applicationStore;
+    private final RegionScopedStorage<Application> applicationStore;
     private final StorageBackend<String, Environment> environmentStore;
     private final StorageBackend<String, ConfigurationProfile> profileStore;
     private final StorageBackend<String, DeploymentStrategy> strategyStore;
@@ -56,6 +56,7 @@ public class AppConfigService {
     private static final int MAX_DEPLOYMENT_PAGE_TOKENS = 1000;
     private static final int MAX_MONITORS = 5;
     private static final int MAX_ARN_LENGTH = 2048;
+    private static final String APPLICATION_RESOURCE = "application/";
     private static final Pattern ROLE_ARN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::\\d{12}:role/.*");
 
     @Inject
@@ -858,6 +859,77 @@ public class AppConfigService {
 
     public Map<String, String> getApplicationTags(String appId) {
         return getApplication(appId).getTags();
+    }
+
+    /**
+     * The ARN of the caller's application whose id or name is {@code idOrName} in the Region, as AppConfig Data finds
+     * the application a session names; empty for none, or for a name two applications share, which AppConfig refuses.
+     */
+    public Optional<String> applicationArn(String idOrName, String region) {
+        try {
+            return Optional.of(regions.buildArn("appconfig", region,
+                    APPLICATION_RESOURCE + resolveApplication(idOrName).getId()));
+        } catch (AwsException e) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * The ARN of the caller's application, environment, configuration profile or configuration an ARN names in the
+     * request's Region, each of its segments that names one by its name or its id written as that resource's id, as
+     * AppConfig's handlers resolve a name; empty for another ARN, or one naming no resource the caller holds there.
+     */
+    public Optional<String> storedArn(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "appconfig")) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String[] parts = parsed.resource().split("/", -1);
+        if (!parsed.region().equals(regions.getRegion()) || !parsed.accountId().equals(regions.getAccountId())
+                || parts.length < 2 || !"application".equals(parts[0])) {
+            return Optional.empty();
+        }
+        try {
+            String application = APPLICATION_RESOURCE + resolveApplication(parts[1]).getId();
+            String appId = application.substring(APPLICATION_RESOURCE.length());
+            String resource;
+            if (parts.length == 2) {
+                resource = application;
+            } else if (parts.length == 4 && "environment".equals(parts[2])) {
+                resource = application + "/environment/" + resolveEnvironment(appId, parts[3]).getId();
+            } else if (parts.length == 4 && "configurationprofile".equals(parts[2])) {
+                resource = application + "/configurationprofile/" + resolveConfigurationProfile(appId, parts[3]).getId();
+            } else if (parts.length == 6 && "environment".equals(parts[2]) && "configuration".equals(parts[4])) {
+                resource = application + "/environment/" + resolveEnvironment(appId, parts[3]).getId()
+                        + "/configuration/" + resolveConfigurationProfile(appId, parts[5]).getId();
+            } else {
+                return Optional.empty();
+            }
+            return Optional.of(regions.buildArn("appconfig", parsed.region(), resource));
+        } catch (AwsException notHeld) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * The tags of the application {@code arn} names by its id, read in the ARN's account and Region, which IAM gives a
+     * condition on a resource's tags; empty for any other resource, Floci keeping tags on applications alone, or for
+     * one it does not hold.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "appconfig")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String id = parsed.resource().startsWith(APPLICATION_RESOURCE)
+                ? parsed.resource().substring(APPLICATION_RESOURCE.length()) : "";
+        if (id.isEmpty() || id.contains("/")) {
+            return Map.of();
+        }
+        return applicationStore.readInAccount(parsed.accountId(), parsed.region(), id)
+                .filter(app -> id.equals(app.getId()))
+                .map(Application::getTags)
+                .orElse(Map.of());
     }
 
     public synchronized void tagApplication(String appId, Map<String, String> tags) {

@@ -859,12 +859,370 @@ class IamRestRouteEnforcementIntegrationTest {
         cleanup.register(() -> adminOf("elasticfilesystem").delete("/2015-02-01/access-points/" + accessPoint));
     }
 
+    /**
+     * AppConfig Data's calls are checked by their modeled routes, signed for {@code appconfig} as its SDK signs them:
+     * {@code GetLatestConfiguration}'s {@code GET /configuration}, which a route filter moves onto an internal path that
+     * records its prefix, and {@code StartConfigurationSession}. A caller holding no grant is refused either, and so is
+     * one sending the internal path itself, and one signing for {@code appconfigdata}, its model's own name, which
+     * Floci serves too and is checked under the {@code appconfig} its model gives as its signing name.
+     */
+    @Test
+    void appConfigDataCallsAreCheckedByTheirModeledRoutes() {
+        String user = user("route-appconfigdata");
+        refused(as(user, "appconfig").queryParam("configuration_token", "token").get("/configuration").then(),
+                "appconfig:GetLatestConfiguration");
+        refused(as(user, "appconfig").queryParam("configuration_token", "token").get("/_appconfigdata/configuration")
+                .then(), "appconfig:GetLatestConfiguration");
+        refused(as(user, "appconfig").body("{\"ApplicationIdentifier\":\"a\",\"EnvironmentIdentifier\":\"e\","
+                + "\"ConfigurationProfileIdentifier\":\"p\"}").post("/configurationsessions").then(),
+                "appconfig:StartConfigurationSession");
+        refused(as(user, "appconfigdata").body("{\"ApplicationIdentifier\":\"a\",\"EnvironmentIdentifier\":\"e\","
+                + "\"ConfigurationProfileIdentifier\":\"p\"}").post("/configurationsessions").then(),
+                "appconfig:StartConfigurationSession");
+        refused(as(user, "appconfigdata").queryParam("configuration_token", "token").get("/configuration").then(),
+                "appconfig:GetLatestConfiguration");
+    }
+
+    /**
+     * AppConfig Data's {@code GetLatestConfiguration} is checked on the configuration the session its token names is on,
+     * which AppConfig Data finds by the token: a grant on another configuration is refused, and a grant on that one
+     * lets the poll through.
+     */
+    @Test
+    void getLatestConfigurationIsCheckedOnTheConfigurationItsSessionIsOn() {
+        String application = adminOf("appconfig").body("{\"Name\":\"route-poll-" + suffix() + "\"}")
+                .post("/applications").then().statusCode(201).extract().path("Id");
+        cleanup.register(() -> adminOf("appconfig").delete("/applications/" + application));
+        String environment = adminOf("appconfig").body("{\"Name\":\"route-poll-env\"}")
+                .post("/applications/" + application + "/environments").then().statusCode(201).extract().path("Id");
+        String profile = adminOf("appconfig")
+                .body("{\"Name\":\"route-poll-profile\",\"LocationUri\":\"hosted\",\"Type\":\"AWS.Freeform\"}")
+                .post("/applications/" + application + "/configurationprofiles").then().statusCode(201)
+                .extract().path("Id");
+        String token = adminOf("appconfig").body("{\"ApplicationIdentifier\":\"" + application
+                        + "\",\"EnvironmentIdentifier\":\"" + environment + "\",\"ConfigurationProfileIdentifier\":\""
+                        + profile + "\"}")
+                .post("/configurationsessions").then().statusCode(201).extract().path("InitialConfigurationToken");
+        String configuration = "arn:aws:appconfig:us-east-1:" + ACCOUNT + ":application/" + application
+                + "/environment/" + environment + "/configuration/" + profile;
+        String user = user("route-latest-config");
+
+        policy(user, allow("appconfig:GetLatestConfiguration", configuration + "-other"));
+        refused(as(user, "appconfig").queryParam("configuration_token", token).get("/configuration").then(),
+                "appconfig:GetLatestConfiguration");
+        policy(user, allow("appconfig:GetLatestConfiguration", configuration));
+        as(user, "appconfig").queryParam("configuration_token", token).get("/configuration").then().statusCode(200);
+    }
+
+    /**
+     * AppConfig Data's {@code StartConfigurationSession} is checked on the application its {@code ApplicationIdentifier}
+     * names, by its id or its name, as AWS's refusal names it by its id: a grant on that application lets the request
+     * through to AppConfig Data either way, and a grant on another application does not.
+     */
+    @Test
+    void startConfigurationSessionIsCheckedOnTheApplicationItNames() {
+        String name = "route-session-" + suffix();
+        String application = adminOf("appconfig").body("{\"Name\":\"" + name + "\"}")
+                .post("/applications").then().statusCode(201).extract().path("Id");
+        String otherApplication = adminOf("appconfig").body("{\"Name\":\"route-session-" + suffix() + "\"}")
+                .post("/applications").then().statusCode(201).extract().path("Id");
+        cleanup.register(() -> adminOf("appconfig").delete("/applications/" + application));
+        cleanup.register(() -> adminOf("appconfig").delete("/applications/" + otherApplication));
+        String user = user("route-appconfig-session");
+        policy(user, allow("appconfig:StartConfigurationSession",
+                "arn:aws:appconfig:us-east-1:" + ACCOUNT + ":application/" + application));
+
+        // Past the check, AppConfig Data answers that the application has no such environment.
+        for (String identifier : new String[] {application, name}) {
+            as(user, "appconfig").body("{\"ApplicationIdentifier\":\"" + identifier + "\",\"EnvironmentIdentifier\":\"e\","
+                    + "\"ConfigurationProfileIdentifier\":\"p\"}").post("/configurationsessions").then().statusCode(404);
+        }
+        refused(as(user, "appconfig").body("{\"ApplicationIdentifier\":\"" + otherApplication
+                + "\",\"EnvironmentIdentifier\":\"e\",\"ConfigurationProfileIdentifier\":\"p\"}")
+                .post("/configurationsessions").then(), "appconfig:StartConfigurationSession");
+    }
+
     private String createFileSystem() {
         String id = adminOf("elasticfilesystem").contentType("application/json")
                 .body("{\"CreationToken\":\"route-efs-" + suffix() + "\"}")
                 .post("/2015-02-01/file-systems").then().statusCode(201).extract().path("FileSystemId");
         cleanup.register(() -> adminOf("elasticfilesystem").delete("/2015-02-01/file-systems/" + id));
         return id;
+    }
+
+    /**
+     * AppConfig, CodeArtifact and CodeGuru Reviewer are checked by their vendored routes on the resources the
+     * generated table reads: an AppConfig application by its id and a CodeArtifact domain by its name, so a grant on
+     * one does not reach another, and CodeGuru Reviewer's association by the ARN its request names.
+     */
+    @Test
+    void appConfigCodeArtifactAndCodeGuruReviewerAreCheckedOnTheResourcesTheirRequestsName() {
+        String applicationName = "route-app-" + suffix();
+        String application = adminOf("appconfig").body("{\"Name\":\"" + applicationName + "\"}")
+                .post("/applications").then().statusCode(201).extract().path("Id");
+        String otherApplication = adminOf("appconfig").body("{\"Name\":\"route-app-" + suffix() + "\"}")
+                .post("/applications").then().statusCode(201).extract().path("Id");
+        cleanup.register(() -> adminOf("appconfig").delete("/applications/" + application));
+        cleanup.register(() -> adminOf("appconfig").delete("/applications/" + otherApplication));
+        String domain = "route-domain-" + suffix();
+        String otherDomain = "route-domain-" + suffix();
+        for (String name : new String[] {domain, otherDomain}) {
+            adminOf("codeartifact").queryParam("domain", name).body("{}").post("/v1/domain").then().statusCode(200);
+            cleanup.register(() -> adminOf("codeartifact").queryParam("domain", name).delete("/v1/domain"));
+        }
+        String user = user("route-app-artifact");
+        policy(user, allow("appconfig:GetApplication",
+                "arn:aws:appconfig:us-east-1:000000000000:application/" + application) + ","
+                + allow("codeartifact:DescribeDomain", "arn:aws:codeartifact:us-east-1:000000000000:domain/" + domain));
+
+        as(user, "appconfig").get("/applications/" + application).then().statusCode(200);
+        // Floci's AppConfig also takes an application's name, which is checked on that application's own ARN.
+        as(user, "appconfig").get("/applications/" + applicationName).then().statusCode(200);
+        refused(as(user, "appconfig").get("/applications/" + otherApplication).then(), "appconfig:GetApplication");
+        as(user, "codeartifact").queryParam("domain", domain).get("/v1/domain").then().statusCode(200);
+        refused(as(user, "codeartifact").queryParam("domain", otherDomain).get("/v1/domain").then(),
+                "codeartifact:DescribeDomain");
+
+        String association = "arn:aws:codeguru-reviewer:us-east-1:000000000000:association:"
+                + "11111111-2222-3333-4444-555555555555";
+        refused(as(user, "codeguru-reviewer").get("/associations/" + association).then(),
+                "codeguru-reviewer:DescribeRepositoryAssociation");
+        policy(user, allow("codeguru-reviewer:DescribeRepositoryAssociation", association));
+        // Past the check, CodeGuru Reviewer answers that it holds no such association.
+        as(user, "codeguru-reviewer").get("/associations/" + association).then().statusCode(404);
+    }
+
+    /**
+     * A CodeArtifact request naming its domain's owner by {@code domain-owner}, an account id, is checked on that
+     * account's domain, where its handler looks the domain up, as AWS checks a cross-account request: a grant on the
+     * caller's own domain of that name does not reach another account's, and a grant on the other account's needs
+     * that account's domain policy to allow it too, after which CodeArtifact answers from that account.
+     */
+    @Test
+    void aCodeArtifactDomainIsCheckedInTheAccountItsDomainOwnerNames() {
+        String domain = "route-domain-" + suffix();
+        adminOf("codeartifact").queryParam("domain", domain).body("{}").post("/v1/domain").then().statusCode(200);
+        cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain).delete("/v1/domain"));
+        String user = user("route-artifact-owner");
+        policy(user, allow("codeartifact:DescribeDomain",
+                "arn:aws:codeartifact:us-east-1:" + ACCOUNT + ":domain/" + domain));
+
+        as(user, "codeartifact").queryParam("domain", domain).queryParam("domain-owner", ACCOUNT)
+                .get("/v1/domain").then().statusCode(200);
+        refused(as(user, "codeartifact").queryParam("domain", domain).queryParam("domain-owner", "111122223333")
+                .get("/v1/domain").then(), "codeartifact:DescribeDomain");
+
+        policy(user, allow("codeartifact:DescribeDomain", "arn:aws:codeartifact:us-east-1:111122223333:domain/" + domain));
+        codeArtifactOf("111122223333").queryParam("domain", domain).body("{}").post("/v1/domain").then().statusCode(200);
+        cleanup.register(() -> codeArtifactOf("111122223333").queryParam("domain", domain).delete("/v1/domain"));
+        // The other account's domain policy grants this account nothing yet.
+        refused(as(user, "codeartifact").queryParam("domain", domain).queryParam("domain-owner", "111122223333")
+                .get("/v1/domain").then(), "codeartifact:DescribeDomain");
+
+        String grant = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\""
+                + ACCOUNT + "\"},\"Action\":\"codeartifact:DescribeDomain\",\"Resource\":\"*\"}]}";
+        codeArtifactOf("111122223333").body("{\"domain\":\"" + domain + "\",\"policyDocument\":"
+                + quoted(grant) + "}").put("/v1/domain/permissions/policy").then().statusCode(200);
+        as(user, "codeartifact").queryParam("domain", domain).queryParam("domain-owner", "111122223333")
+                .get("/v1/domain").then().statusCode(200).body("domain.owner", equalTo("111122223333"));
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags AppConfig, CodeArtifact and CodeGuru Reviewer hold on the
+     * resource a request names: an allow on one team's tag lets the caller read that team's application, domain and
+     * association, and not another team's.
+     */
+    @Test
+    void aResourceTagConditionReadsTheTagsAppConfigCodeArtifactAndCodeGuruReviewerHold() {
+        String[] applications = new String[2];
+        String[] domains = new String[2];
+        String[] associations = new String[2];
+        String[] teams = {"data", "web"};
+        for (int i = 0; i < 2; i++) {
+            String application = adminOf("appconfig").body("{\"Name\":\"route-tags-" + suffix() + "\"}")
+                    .post("/applications").then().statusCode(201).extract().path("Id");
+            cleanup.register(() -> adminOf("appconfig").delete("/applications/" + application));
+            adminOf("appconfig").urlEncodingEnabled(false).body("{\"Tags\":{\"team\":\"" + teams[i] + "\"}}")
+                    .post("/tags/" + URLEncoder.encode("arn:aws:appconfig:us-east-1:" + ACCOUNT + ":application/"
+                            + application, StandardCharsets.UTF_8)).then().statusCode(204);
+            String domain = "route-tags-" + suffix();
+            adminOf("codeartifact").queryParam("domain", domain)
+                    .body("{\"tags\":[{\"key\":\"team\",\"value\":\"" + teams[i] + "\"}]}")
+                    .post("/v1/domain").then().statusCode(200);
+            cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain).delete("/v1/domain"));
+            String association = adminOf("codeguru-reviewer")
+                    .body("{\"Repository\":{\"CodeCommit\":{\"Name\":\"route-tags-" + suffix() + "\"}},"
+                            + "\"Tags\":{\"team\":\"" + teams[i] + "\"}}")
+                    .post("/associations").then().statusCode(200)
+                    .extract().path("RepositoryAssociation.AssociationArn");
+            cleanup.register(() -> adminOf("codeguru-reviewer").delete("/associations/" + association));
+            applications[i] = application;
+            domains[i] = domain;
+            associations[i] = association;
+        }
+        String user = user("route-tags-three");
+        policy(user, "{\"Effect\":\"Allow\",\"Action\":[\"appconfig:GetApplication\",\"codeartifact:DescribeDomain\","
+                + "\"codeguru-reviewer:DescribeRepositoryAssociation\"],\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+
+        as(user, "appconfig").get("/applications/" + applications[0]).then().statusCode(200);
+        refused(as(user, "appconfig").get("/applications/" + applications[1]).then(), "appconfig:GetApplication");
+        as(user, "codeartifact").queryParam("domain", domains[0]).get("/v1/domain").then().statusCode(200);
+        refused(as(user, "codeartifact").queryParam("domain", domains[1]).get("/v1/domain").then(),
+                "codeartifact:DescribeDomain");
+        as(user, "codeguru-reviewer").get("/associations/" + associations[0]).then().statusCode(200);
+        refused(as(user, "codeguru-reviewer").get("/associations/" + associations[1]).then(),
+                "codeguru-reviewer:DescribeRepositoryAssociation");
+    }
+
+    /**
+     * A CodeArtifact request naming a package group by its pattern is checked on that group's ARN, its pattern
+     * percent-encoded as CodeArtifact writes it ({@code /npm/team/*} is {@code /npm/team/%2a}), the ARN CodeArtifact
+     * answers for the group: a grant on it lets the caller describe the group, and a grant on another group does not.
+     * A tag call naming the group by another spelling of its pattern ({@code %2A}), which CodeArtifact reads as the same
+     * group, is checked on the group's own ARN, so a deny on that ARN holds.
+     */
+    @Test
+    void aPackageGroupIsCheckedOnItsEncodedArn() {
+        String domain = "route-groups-" + suffix();
+        adminOf("codeartifact").queryParam("domain", domain).body("{}").post("/v1/domain").then().statusCode(200);
+        cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain).delete("/v1/domain"));
+        String arn = adminOf("codeartifact").queryParam("domain", domain).body("{\"packageGroup\":\"/npm/team/*\"}")
+                .post("/v1/package-group").then().statusCode(200).extract().path("packageGroup.arn");
+        adminOf("codeartifact").queryParam("domain", domain).body("{\"packageGroup\":\"/npm/other/*\"}")
+                .post("/v1/package-group").then().statusCode(200);
+        assertEquals("arn:aws:codeartifact:us-east-1:" + ACCOUNT + ":package-group/" + domain + "/npm/team/%2a", arn);
+        String user = user("route-package-group");
+        policy(user, allow("codeartifact:DescribePackageGroup", arn));
+
+        as(user, "codeartifact").queryParam("domain", domain).queryParam("package-group", "/npm/team/*")
+                .get("/v1/package-group").then().statusCode(200).body("packageGroup.arn", equalTo(arn));
+        refused(as(user, "codeartifact").queryParam("domain", domain).queryParam("package-group", "/npm/other/*")
+                .get("/v1/package-group").then(), "codeartifact:DescribePackageGroup");
+
+        policy(user, allow("codeartifact:TagResource", "*") + "," + deny("codeartifact:TagResource", arn));
+        refused(as(user, "codeartifact").queryParam("resourceArn", arn.replace("%2a", "%2A"))
+                .body("{\"tags\":[{\"key\":\"team\",\"value\":\"red\"}]}").post("/v1/tag").then(),
+                "codeartifact:TagResource");
+    }
+
+    /**
+     * A {@code CopyPackageVersions} is checked as the CodeArtifact user guide says: as {@code ReadFromRepository} on
+     * its source repository and as {@code CopyPackageVersions} on its destination repository. The two grants that way
+     * round let the copy through to CodeArtifact, and the same two the other way round are refused.
+     */
+    @Test
+    void aCopyIsCheckedAsReadOnItsSourceAndCopyOnItsDestination() {
+        String domain = "route-copy-" + suffix();
+        adminOf("codeartifact").queryParam("domain", domain).body("{}").post("/v1/domain").then().statusCode(200);
+        cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain).delete("/v1/domain"));
+        for (String repository : new String[] {"source", "destination"}) {
+            adminOf("codeartifact").queryParam("domain", domain).queryParam("repository", repository).body("{}")
+                    .post("/v1/repository").then().statusCode(200);
+            cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain)
+                    .queryParam("repository", repository).delete("/v1/repository"));
+        }
+        String repositories = "arn:aws:codeartifact:us-east-1:" + ACCOUNT + ":repository/" + domain + "/";
+        String user = user("route-copy");
+
+        policy(user, allow("codeartifact:ReadFromRepository", repositories + "source") + ","
+                + allow("codeartifact:CopyPackageVersions", repositories + "destination"));
+        // Past the check, CodeArtifact answers which of the versions it could not copy.
+        copy(user, domain).statusCode(200);
+        policy(user, allow("codeartifact:ReadFromRepository", repositories + "destination") + ","
+                + allow("codeartifact:CopyPackageVersions", repositories + "source"));
+        refused(copy(user, domain), "codeartifact:ReadFromRepository");
+    }
+
+    private ValidatableResponse copy(String user, String domain) {
+        return as(user, "codeartifact").queryParam("domain", domain).queryParam("source-repository", "source")
+                .queryParam("destination-repository", "destination").queryParam("format", "npm")
+                .queryParam("package", "left-pad").body("{\"versions\":[\"1.0.0\"]}")
+                .post("/v1/package/versions/copy").then();
+    }
+
+    /**
+     * A CodeArtifact request naming a package with no {@code namespace}, as a PyPI or an unscoped npm package is, is
+     * checked on the package with its namespace empty, as the CodeArtifact user guide writes its ARN
+     * ({@code package/my_domain/my_repo/npm//react}): a grant on that ARN lets the request through, and one on the
+     * package under a namespace does not.
+     */
+    @Test
+    void aPackageWithNoNamespaceIsCheckedWithItsNamespaceEmpty() {
+        String domain = "route-pypi-" + suffix();
+        adminOf("codeartifact").queryParam("domain", domain).body("{}").post("/v1/domain").then().statusCode(200);
+        cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain).delete("/v1/domain"));
+        adminOf("codeartifact").queryParam("domain", domain).queryParam("repository", "python").body("{}")
+                .post("/v1/repository").then().statusCode(200);
+        cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain).queryParam("repository", "python")
+                .delete("/v1/repository"));
+        String packages = "arn:aws:codeartifact:us-east-1:" + ACCOUNT + ":package/" + domain + "/python/pypi/";
+        String user = user("route-pypi");
+
+        policy(user, allow("codeartifact:DescribePackage", packages + "scope/requests"));
+        refused(describePackage(user, domain), "codeartifact:DescribePackage");
+        policy(user, allow("codeartifact:DescribePackage", packages + "/requests"));
+        // Past the check, CodeArtifact answers that the repository holds no such package.
+        describePackage(user, domain).statusCode(404);
+    }
+
+    private ValidatableResponse describePackage(String user, String domain) {
+        return as(user, "codeartifact").queryParam("domain", domain).queryParam("repository", "python")
+                .queryParam("format", "pypi").queryParam("package", "requests").get("/v1/package").then();
+    }
+
+    /**
+     * A request naming an AppConfig environment by its name, which Floci's AppConfig resolves to the environment, is
+     * checked on that environment by its id, so a deny on the environment's ARN holds whichever the request names it by.
+     */
+    @Test
+    void anAppConfigEnvironmentNamedByItsNameIsCheckedByItsId() {
+        String application = adminOf("appconfig").body("{\"Name\":\"route-names-" + suffix() + "\"}")
+                .post("/applications").then().statusCode(201).extract().path("Id");
+        cleanup.register(() -> adminOf("appconfig").delete("/applications/" + application));
+        String environment = adminOf("appconfig").body("{\"Name\":\"route-env\"}")
+                .post("/applications/" + application + "/environments").then().statusCode(201).extract().path("Id");
+        String user = user("route-env-names");
+        policy(user, allow("appconfig:GetEnvironment", "*") + "," + deny("appconfig:GetEnvironment",
+                "arn:aws:appconfig:us-east-1:" + ACCOUNT + ":application/" + application + "/environment/" + environment));
+
+        refused(as(user, "appconfig").get("/applications/" + application + "/environments/" + environment).then(),
+                "appconfig:GetEnvironment");
+        refused(as(user, "appconfig").get("/applications/" + application + "/environments/route-env").then(),
+                "appconfig:GetEnvironment");
+    }
+
+    /**
+     * A PyPI package a request names by a name CodeArtifact normalizes ({@code Foo_Bar} is {@code foo-bar}) is checked
+     * on the package by its normalized name, as AWS writes it in the ARN, so a deny on that ARN holds whichever spelling
+     * the request gives.
+     */
+    @Test
+    void aPackageNamedByAnUnnormalizedNameIsCheckedByItsNormalizedName() {
+        String domain = "route-norm-" + suffix();
+        adminOf("codeartifact").queryParam("domain", domain).body("{}").post("/v1/domain").then().statusCode(200);
+        cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain).delete("/v1/domain"));
+        adminOf("codeartifact").queryParam("domain", domain).queryParam("repository", "python").body("{}")
+                .post("/v1/repository").then().statusCode(200);
+        cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain).queryParam("repository", "python")
+                .delete("/v1/repository"));
+        String user = user("route-norm");
+        policy(user, allow("codeartifact:DescribePackage", "*") + "," + deny("codeartifact:DescribePackage",
+                "arn:aws:codeartifact:us-east-1:" + ACCOUNT + ":package/" + domain + "/python/pypi//foo-bar"));
+
+        refused(as(user, "codeartifact").queryParam("domain", domain).queryParam("repository", "python")
+                .queryParam("format", "pypi").queryParam("package", "Foo_Bar").get("/v1/package").then(),
+                "codeartifact:DescribePackage");
+    }
+
+    /** A JSON string holding the text, as a request body carries a policy document. */
+    private static String quoted(String text) {
+        return "\"" + text.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    }
+
+    /** A CodeArtifact request of {@code account}'s root, whose access key is that account's id. */
+    private static RequestSpecification codeArtifactOf(String account) {
+        return given().header("Authorization", auth(account, "codeartifact")).contentType("application/json");
     }
 
     /**

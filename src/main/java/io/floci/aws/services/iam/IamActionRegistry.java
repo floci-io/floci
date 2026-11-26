@@ -484,6 +484,15 @@ public class IamActionRegistry {
      * path without the prefix ({@link #withoutInternalPrefix}), the path the model gives it. Returns {@code null}
      * when nothing maps the request (caller treats this as ALLOW).
      */
+    /**
+     * The scope a request Floci serves under {@code credentialScope} is checked under: the signing name AWS signs its
+     * model's requests with, where the scope is a vendored model's own name the routes file does not route
+     * ({@link IamRestRoutes#signedScope}), and the scope itself otherwise.
+     */
+    public String routedScope(String credentialScope) {
+        return restRoutes.signedScope(credentialScope);
+    }
+
     public String resolveRoute(String credentialScope, ContainerRequestContext ctx) {
         String method = ctx.getMethod().toUpperCase();
         // Matched on the path the router dispatched on, as every scope is: S3 too, whose key of slashes alone

@@ -173,13 +173,27 @@ final class IamRestRoutes {
     private final Set<String> documentedScopes;
     /** Each botocore model's API version, by model. */
     private final Map<String, String> apiVersions;
+    /** Each botocore model's credential scope, the signing name AWS signs its requests with, by model. */
+    private final Map<String, String> modelScopes;
 
     private IamRestRoutes(Map<String, Map<String, List<Route>>> routes, Map<String, Integer> accessDeniedStatuses,
-                          Set<String> documentedScopes, Map<String, String> apiVersions) {
+                          Set<String> documentedScopes, Map<String, String> apiVersions,
+                          Map<String, String> modelScopes) {
         this.routes = routes;
         this.accessDeniedStatuses = accessDeniedStatuses;
         this.documentedScopes = documentedScopes;
         this.apiVersions = apiVersions;
+        this.modelScopes = modelScopes;
+    }
+
+    /**
+     * The scope a request of {@code scope} is matched under: the scope itself when the file routes it, and else, for
+     * the name of a botocore model the file vendors, the scope its model gives, the signing name AWS signs that
+     * model's requests with. AppConfig Data's model, {@code appconfigdata}, is signed {@code appconfig}, so a request
+     * Floci serves under the model's name is matched to that model's routes, as one an SDK signs is.
+     */
+    String signedScope(String scope) {
+        return scope == null || routes.containsKey(scope) ? scope : modelScopes.getOrDefault(scope, scope);
     }
 
     /** The API version of the botocore model of that name, null for a model the file does not give one. */
@@ -308,8 +322,12 @@ final class IamRestRoutes {
         Map<String, Integer> denialStatuses = new HashMap<>();
         Set<String> documentedScopes = new HashSet<>();
         Map<String, String> apiVersions = new HashMap<>();
+        Map<String, String> modelScopes = new HashMap<>();
         models.properties().forEach(model -> {
             String scope = model.getValue().path("credentialScope").asText("");
+            if (!scope.isEmpty()) {
+                modelScopes.put(model.getKey(), scope);
+            }
             if (model.getValue().path("apiVersion").isTextual()) {
                 apiVersions.put(model.getKey(), model.getValue().path("apiVersion").asText());
             }
@@ -388,7 +406,7 @@ final class IamRestRoutes {
             copied.put(scope, Map.copyOf(methods));
         });
         return new IamRestRoutes(Map.copyOf(copied), Map.copyOf(denialStatuses), Set.copyOf(documentedScopes),
-                Map.copyOf(apiVersions));
+                Map.copyOf(apiVersions), Map.copyOf(modelScopes));
     }
 
     /** The strings of a JSON array, none when it is missing. */

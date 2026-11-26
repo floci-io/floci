@@ -18,6 +18,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -373,7 +375,10 @@ class CloudFormationAppConfigIntegrationTest {
     }
 
     private static Map<String, String> applicationTags(String applicationId) {
-        JsonPath body = appconfig().get("/tags/arn:aws:appconfig:us-east-1:000000000000:application/" + applicationId)
+        // The modeled `/tags/{ResourceArn}`, the ARN encoded as one path segment as an SDK sends it.
+        String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + applicationId;
+        JsonPath body = appconfig().urlEncodingEnabled(false)
+                .get("/tags/" + URLEncoder.encode(arn, StandardCharsets.UTF_8))
                 .then().statusCode(200).extract().jsonPath();
         return body.getMap("Tags", String.class, String.class);
     }

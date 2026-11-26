@@ -886,11 +886,12 @@ final class RequestResourceMembers {
             fill.put(variable.getKey(), fillMember(operation, variable.getValue().asText("")));
         });
         Map<String, String> fixed = new LinkedHashMap<>();
+        // A fixed value may be empty: AWS writes a CodeArtifact package with no namespace with its namespace empty.
         resource.path("fixed").properties().forEach(variable -> {
             if (!variables.contains(variable.getKey()) || fill.containsKey(variable.getKey())
-                    || !variable.getValue().isTextual() || variable.getValue().asText().isEmpty()) {
+                    || !variable.getValue().isTextual()) {
                 throw new IllegalStateException(RESOURCE_NAME + " fixes " + variable.getKey() + " for " + operation
-                        + ", no variable of " + type + "'s format that no member fills, or to no value");
+                        + ", no variable of " + type + "'s format that no member fills, or to no text");
             }
             fixed.put(variable.getKey(), variable.getValue().asText());
         });
