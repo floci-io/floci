@@ -341,22 +341,12 @@ public class EventBridgeV2Service implements Resettable {
         if (filterConfiguration != null) {
             SubscriberFilters.validate(filterConfiguration);
         }
-        SubscriberV2 changed = new SubscriberV2();
+        SubscriberV2 changed = copyOf(subscriber);
         applySettings(changed, settings, filterConfiguration);
         if (subscriber.isRevoked()) {
             throw new AwsException("InvalidStateException", "Subscriber is revoked and cannot be updated", 409);
         }
-        changed.setName(subscriber.getName());
-        changed.setArn(subscriber.getArn());
-        changed.setEventBusArn(subscriber.getEventBusArn());
-        changed.setType(subscriber.getType());
-        changed.setStartingPosition(subscriber.getStartingPosition());
-        changed.setPointInTimeConfiguration(subscriber.getPointInTimeConfiguration());
-        changed.setCreationTime(subscriber.getCreationTime());
         changed.setLastModifiedTime(clock.instant());
-        changed.setClientToken(subscriber.getClientToken());
-        changed.setCreateRequest(subscriber.getCreateRequest());
-        changed.setRevoked(subscriber.isRevoked());
         subscribers.put(keyOf(subscriber, region), changed);
         return changed;
     }
