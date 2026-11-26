@@ -18,7 +18,7 @@ The AWS CLI calls it `aws eventsv2` and the SDKs `EventBridgeV2`.
 | --- | --- |
 | `CreateEventBus` | Create an event bus, with an optional description, KMS key, retention period, and tags |
 | `DescribeEventBus` | Return an event bus's name, description, configuration, state and times |
-| `DeleteEventBus` | Delete an event bus that has no subscribers or event sources |
+| `DeleteEventBus` | Delete an event bus that has no subscribers or event sources that are not revoked |
 | `ListEventBuses` | List the Region's event buses in name order, filtered by name prefix, a page at a time |
 | `CreateSubscriber` | Create a subscriber that delivers the events its filters match to an Amazon SQS queue |
 | `DescribeSubscriber` | Return a subscriber's target, filters, transformer, delivery settings, state and times |
@@ -30,6 +30,7 @@ The AWS CLI calls it `aws eventsv2` and the SDKs `EventBridgeV2`.
 | `ListEventSources` | List the Region's event sources, or one event bus's, filtered by name prefix, a page at a time |
 | `UpdateEventSource` | Replace a webhook event source's configuration and description |
 | `RotateWebhookCredentials` | Replace the credential in a webhook event source's secret, with a given or a generated one |
+| `RevokeResource` | Revoke a webhook event source or a subscriber for good, keeping it but ending its use |
 | `DeleteEventSource` | Delete a webhook event source and schedule its secret for deletion |
 | `PutEvents` | Publish events in the EventBridge envelope to an event bus |
 <!-- floci:actions:end -->
@@ -97,7 +98,27 @@ A matcher Floci does not evaluate, such as `cidr` or `anything-but` with `numeri
 `UpdateSubscriber` changes only the settings the request gives. Its `InvokeConfiguration` replaces the role and
 the target parameters but has no `TargetArn`: a subscriber keeps its target. An update is checked as a whole, so a
 request with one invalid setting changes nothing. `ResumePosition` is accepted and has no effect, since events are
-not retained. `DescribeSubscriber` and `ListSubscribers` always report `Revoked` as `false`.
+not retained. `DescribeSubscriber` and `ListSubscribers` return `Revoked` once the subscriber is revoked, and leave it out before.
+
+## Revoking a resource
+
+`RevokeResource` takes the ARN of a webhook event source or of a subscriber and answers it back. A revoke cannot be
+undone. A second revoke answers `200` and changes nothing.
+
+- A revoked source answers `403` on its webhook URL for every POST that reaches authentication. Its secret stays
+  and its name stays taken. `UpdateEventSource` and `RotateWebhookCredentials` answer `InvalidStateException`
+  (409) after their own `400` checks. A rotation also checks its `ClientToken` first, so a repeat of an earlier
+  rotation still answers `200`.
+- A revoked subscriber receives no more events. `UpdateSubscriber` answers `InvalidStateException` (409) after its
+  own `400` checks.
+- Both stay `ACTIVE` or `RUNNING`, report `Revoked`, and can still be described, listed and deleted.
+- `DeleteEventBus` ignores revoked sources and subscribers. A revoked resource outlives its bus. Its description
+  then has no `Configuration` for a source. A subscriber has no `InvokeConfiguration`, `BatchConfiguration`,
+  `Transformer`, `RetryPolicy`, `FilterConfiguration`, `OnFailureConfiguration` or `LogConfiguration`, and its
+  `Description` reads `*** Not accessible: event bus deleted ***`. A new bus of the same name does not take it
+  over. It can have a subscriber of the orphan's name, but a source name stays taken.
+- The ARN of a webhook source or subscriber that does not exist is answered `403` as access denied. A source ARN of
+  type `aws.service` or `aws.partner` is answered `404`.
 
 ## Webhook event sources
 
@@ -124,7 +145,7 @@ Floci serves event sources of the `WebhookEventsConfiguration` kind. A request w
   secret is scheduled for deletion or deleted.
 - `KmsKeyIdentifier` is stored and returned. It is not used for the secret.
 - `DeleteEventSource` schedules the secret for deletion at once.
-- `DescribeEventSource` and `ListEventSources` do not return `Revoked`.
+- `DescribeEventSource` and `ListEventSources` return `Revoked` once the source is revoked, and leave it out before.
 
 ### Receiving events
 
@@ -166,7 +187,7 @@ A `400` also sends `Connection: close` and closes the connection.
   a 64 character hash, and otherwise a random UUID. The hash is SHA-256 over an encoding of Floci's own,
   so it does not equal the hash AWS gives. The hashes are kept in memory and are lost on restart.
 - The host of the request decides the source. The Region in the host is not checked.
-- Not emulated: `429` throttling, `LogConfiguration` delivery and `Revoked`.
+- Not emulated: `429` throttling and `LogConfiguration` delivery.
 
 ## IAM
 

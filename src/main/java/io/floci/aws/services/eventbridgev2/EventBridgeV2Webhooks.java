@@ -94,7 +94,7 @@ public class EventBridgeV2Webhooks {
         String accountId = located.get().accountId();
         String region = AwsArnUtils.parse(source.getArn()).region();
         JsonNode webhook = source.getConfiguration().path(WebhookEventsConfigurations.WEBHOOK);
-        if (!credentialAccepted(accountId, region, source, webhook, request)) {
+        if (source.isRevoked() || !credentialAccepted(accountId, region, source, webhook, request)) {
             return FORBIDDEN;
         }
         Optional<JsonNode> data = WebhookEvents.parseBody(request.body());

@@ -207,10 +207,10 @@ public class EventBridgeV2Service implements Resettable {
         deleteEventBus(requireText(request, "EventBusArn"), region);
     }
 
-    /** Deletes a bus, which must have no subscribers or event sources left. */
+    /** Deletes a bus, which must have no subscribers or event sources left that are not revoked. */
     public synchronized void deleteEventBus(String eventBusArn, String region) {
         EventBusV2 bus = requireEventBus(eventBusArn, region);
-        boolean hasSubscribers = !subscribersOf(bus, region).isEmpty();
+        boolean hasSubscribers = subscribersOf(bus, region).stream().anyMatch(subscriber -> !subscriber.isRevoked());
         if (eventSources.hasSourcesOn(bus.getArn(), region)) {
             throw new AwsException("ResourceInUseException", "The event bus cannot be deleted because it has "
                     + (hasSubscribers ? "subscribers and event sources" : "one or more event sources")
@@ -219,6 +219,10 @@ public class EventBridgeV2Service implements Resettable {
         if (hasSubscribers) {
             throw new AwsException("ResourceInUseException",
                     "Event bus " + bus.getName() + " still has subscribers; delete them first.", 409);
+        }
+        for (SubscriberV2 orphan : subscribersOf(bus, region)) {
+            subscribers.delete(subscriberKey(region, bus.getName(), orphan.getName()));
+            subscribers.put(orphanKey(region, orphan), orphan);
         }
         buses.delete(storageKey(region, bus.getName()));
         deliveriesByBus.remove(bus.getArn());
@@ -338,6 +342,9 @@ public class EventBridgeV2Service implements Resettable {
         }
         SubscriberV2 changed = new SubscriberV2();
         applySettings(changed, settings, filterConfiguration);
+        if (subscriber.isRevoked()) {
+            throw new AwsException("InvalidStateException", "Subscriber is revoked and cannot be updated", 409);
+        }
         changed.setName(subscriber.getName());
         changed.setArn(subscriber.getArn());
         changed.setEventBusArn(subscriber.getEventBusArn());
@@ -348,7 +355,8 @@ public class EventBridgeV2Service implements Resettable {
         changed.setLastModifiedTime(clock.instant());
         changed.setClientToken(subscriber.getClientToken());
         changed.setCreateRequest(subscriber.getCreateRequest());
-        subscribers.put(subscriberKey(region, busName(subscriber.getEventBusArn()), subscriber.getName()), changed);
+        changed.setRevoked(subscriber.isRevoked());
+        subscribers.put(keyOf(subscriber, region), changed);
         return changed;
     }
 
@@ -397,7 +405,7 @@ public class EventBridgeV2Service implements Resettable {
 
     public synchronized void deleteSubscriber(String subscriberArn, String region) {
         SubscriberV2 subscriber = requireSubscriber(subscriberArn, region);
-        subscribers.delete(subscriberKey(region, busName(subscriber.getEventBusArn()), subscriber.getName()));
+        subscribers.delete(keyOf(subscriber, region));
     }
 
     public Optional<SubscriberV2> findSubscriber(String subscriberArn, String region) {
@@ -442,6 +450,60 @@ public class EventBridgeV2Service implements Resettable {
         return eventSources.list(request, region, name -> buses.get(storageKey(region, name)));
     }
 
+    /**
+     * Revokes the event source or the subscriber {@code Arn} names, for good. The resource stays and can be
+     * described, listed and deleted, but it takes no more events and cannot be updated.
+     */
+    public synchronized String revokeResource(JsonNode request, String region) {
+        EventBridgeV2RequestShapes.check("RevokeResource", request);
+        String arn = request.get("Arn").textValue();
+        eventSources.checkArn(arn, region, "Arn");
+        if (AwsArnUtils.parse(arn).resource().startsWith("subscriber/")) {
+            revokeSubscriber(arn, region);
+        } else {
+            eventSources.revoke(arn, region);
+        }
+        return arn;
+    }
+
+    private void revokeSubscriber(String subscriberArn, String region) {
+        SubscriberV2 subscriber = findSubscriber(subscriberArn, region)
+                .orElseThrow(EventBridgeV2EventSources::accessDenied);
+        if (subscriber.isRevoked()) {
+            return;
+        }
+        SubscriberV2 revoked = copyOf(subscriber);
+        revoked.setRevoked(true);
+        revoked.setLastModifiedTime(clock.instant());
+        subscribers.put(keyOf(subscriber, region), revoked);
+    }
+
+    private static SubscriberV2 copyOf(SubscriberV2 subscriber) {
+        SubscriberV2 copy = new SubscriberV2();
+        copy.setName(subscriber.getName());
+        copy.setArn(subscriber.getArn());
+        copy.setEventBusArn(subscriber.getEventBusArn());
+        copy.setDescription(subscriber.getDescription());
+        copy.setType(subscriber.getType());
+        copy.setStartingPosition(subscriber.getStartingPosition());
+        copy.setState(subscriber.getState());
+        copy.setPointInTimeConfiguration(subscriber.getPointInTimeConfiguration());
+        copy.setInvokeConfiguration(subscriber.getInvokeConfiguration());
+        copy.setFilterConfiguration(subscriber.getFilterConfiguration());
+        copy.setTransformer(subscriber.getTransformer());
+        copy.setBatchConfiguration(subscriber.getBatchConfiguration());
+        copy.setRetryPolicy(subscriber.getRetryPolicy());
+        copy.setOnFailureConfiguration(subscriber.getOnFailureConfiguration());
+        copy.setLogConfiguration(subscriber.getLogConfiguration());
+        copy.setCreationTime(subscriber.getCreationTime());
+        copy.setLastModifiedTime(subscriber.getLastModifiedTime());
+        copy.setTags(subscriber.getTags());
+        copy.setClientToken(subscriber.getClientToken());
+        copy.setCreateRequest(subscriber.getCreateRequest());
+        copy.setRevoked(subscriber.isRevoked());
+        return copy;
+    }
+
     public String webhookUrl(EventSourceV2 source) {
         return eventSources.webhookUrl(source);
     }
@@ -478,7 +540,7 @@ public class EventBridgeV2Service implements Resettable {
         synchronized (this) {
             EventBusV2 bus = requireEventBus(eventBusArn, region);
             List<SubscriberV2> running = subscribersOf(bus, region).stream()
-                    .filter(subscriber -> RUNNING.equals(subscriber.getState()))
+                    .filter(subscriber -> RUNNING.equals(subscriber.getState()) && !subscriber.isRevoked())
                     .toList();
             for (int i = 0; i < entries.size(); i++) {
                 JsonNode entry = entries.get(i);
@@ -511,7 +573,7 @@ public class EventBridgeV2Service implements Resettable {
         synchronized (this) {
             EventBusV2 bus = requireEventBus(eventBusArn, region);
             List<SubscriberV2> running = subscribersOf(bus, region).stream()
-                    .filter(subscriber -> RUNNING.equals(subscriber.getState()))
+                    .filter(subscriber -> RUNNING.equals(subscriber.getState()) && !subscriber.isRevoked())
                     .toList();
             event = accept(bus, running, deliveries, build);
             ordered = enqueue(bus, region, deliveries);
@@ -860,6 +922,20 @@ public class EventBridgeV2Service implements Resettable {
 
     private static String subscriberKey(String region, String busName, String name) {
         return region + "::" + busName + "::" + name;
+    }
+
+    /** Where a subscriber is stored: under its bus's name while the bus exists, and under its bus's id after. */
+    private String keyOf(SubscriberV2 subscriber, String region) {
+        return findEventBus(subscriber.getEventBusArn(), region).isPresent()
+                ? subscriberKey(region, busName(subscriber.getEventBusArn()), subscriber.getName())
+                : orphanKey(region, subscriber);
+    }
+
+    /** A revoked subscriber outlives its bus under a key a new bus of the same name cannot reach. */
+    private static String orphanKey(String region, SubscriberV2 subscriber) {
+        String arn = subscriber.getEventBusArn();
+        return region + "::" + busName(arn) + "@" + arn.substring(arn.lastIndexOf('/') + 1) + "::"
+                + subscriber.getName();
     }
 
     // ──────────────────────────── Validation ────────────────────────────

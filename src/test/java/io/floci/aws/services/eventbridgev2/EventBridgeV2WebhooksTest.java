@@ -289,6 +289,75 @@ class EventBridgeV2WebhooksTest {
                 answer("POST", target, target.path(), Map.of("x-sig", signature), "{\"a\":1}"));
     }
 
+    // ──────────────────────────── Revoked sources and subscribers ────────────────────────────
+
+    @Test
+    void aRevokedStaticTokenSourceAnswersForbiddenForTheRightAndAWrongToken() {
+        Target target = source("hook", TOKEN_AUTH, "");
+        revoke(target.source().getArn());
+
+        assertEquals(EventBridgeV2Webhooks.FORBIDDEN, answer("POST", target, target.path(), Map.of("x-tok", "s3cret"), "{}"));
+        assertEquals(EventBridgeV2Webhooks.FORBIDDEN, answer("POST", target, target.path(), Map.of("x-tok", "no"), "{}"));
+        assertEquals(EventBridgeV2Webhooks.FORBIDDEN, answer("POST", target, target.path(), Map.of(), "{bad"));
+        assertTrue(deliveredBodies.isEmpty());
+    }
+
+    @Test
+    void aRevokedBasicSourceAnswersForbiddenForTheRightAndAWrongCredential() {
+        Target target = source("basic", "{\"BasicHttpAuthConfiguration\":{\"Username\":\"alice\","
+                + "\"Password\":\"pw1234\"}}", "");
+        String good = "Basic " + Base64.getEncoder().encodeToString("alice:pw1234".getBytes(StandardCharsets.UTF_8));
+        revoke(target.source().getArn());
+
+        assertEquals(EventBridgeV2Webhooks.FORBIDDEN, answer("POST", target, target.path(), Map.of("authorization", good), "{}"));
+        assertEquals(EventBridgeV2Webhooks.FORBIDDEN,
+                answer("POST", target, target.path(), Map.of("authorization", good + "x"), "{}"));
+        assertTrue(deliveredBodies.isEmpty());
+    }
+
+    @Test
+    void aRevokedHmacSourceAnswersForbiddenForTheRightAndAWrongSignature() throws Exception {
+        Target target = source("hmac", "{\"HmacAuthConfiguration\":{\"Algorithm\":\"SHA256\",\"Encoding\":\"HEX\","
+                + "\"SignatureHttpHeader\":\"X-Sig\",\"SignedMessageComposition\":\"BODY\","
+                + "\"SecretValue\":\"0123456789abcdef\"}}", "");
+        String body = "{\"a\":1}";
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec("0123456789abcdef".getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        String signature = HexFormat.of().formatHex(mac.doFinal(body.getBytes(StandardCharsets.UTF_8)));
+        revoke(target.source().getArn());
+
+        assertEquals(EventBridgeV2Webhooks.FORBIDDEN, answer("POST", target, target.path(), Map.of("x-sig", signature), body));
+        assertEquals(EventBridgeV2Webhooks.FORBIDDEN, answer("POST", target, target.path(), Map.of("x-sig", "00"), body));
+        assertTrue(deliveredBodies.isEmpty());
+    }
+
+    @Test
+    void aRevokedSourceKeepsTheEarlierChecksOfTheDataPlane() {
+        Target target = source("hook", TOKEN_AUTH, "");
+        revoke(target.source().getArn());
+        Map<String, String> good = Map.of("x-tok", "s3cret");
+
+        assertEquals(EventBridgeV2Webhooks.BAD_REQUEST, answer("GET", target, target.path(), good, "{}"));
+        assertEquals(EventBridgeV2Webhooks.NOT_FOUND,
+                answer("POST", target, target.path().substring(0, target.path().length() - 1), good, "{}"));
+        assertEquals(EventBridgeV2Webhooks.NOT_FOUND, answer("POST", target, target.path() + "extra/", good, "{}"));
+        assertEquals(EventBridgeV2Webhooks.BAD_REQUEST, webhooks.receive(new Request("POST", target.hostId(),
+                target.path(), good, new byte[0], true)));
+    }
+
+    @Test
+    void aRevokedSubscriberGetsNothingAndTheOthersOfTheBusStillDo() {
+        Target target = source("hook", TOKEN_AUTH, "");
+        String metaArn = service.listSubscribers(json("{\"EventBusArn\":\"" + bus + "\"}"), REGION).items().stream()
+                .filter(subscriber -> subscriber.getName().equals("meta")).findFirst().orElseThrow().getArn();
+        revoke(metaArn);
+
+        assertEquals(EventBridgeV2Webhooks.OK, answer("POST", target, target.path(), Map.of("x-tok", "s3cret"), "{}"));
+
+        assertEquals(1, deliveredBodies.size());
+        assertTrue(deliveredBodies.getFirst().startsWith("raw="));
+    }
+
     // ──────────────────────────── Deduplication ────────────────────────────
 
     private static final String DEDUP = ",\"DeduplicationConfiguration\":{\"DeduplicationType\":\"CONTENT_BASED\"}";
@@ -423,6 +492,10 @@ class EventBridgeV2WebhooksTest {
         service.createSubscriber(json("{\"Name\":\"" + name + "\",\"EventBusArn\":\"" + bus + "\",\"State\":\"" + state
                 + "\",\"InvokeConfiguration\":{\"TargetArn\":\"" + QUEUE + "\",\"RoleArn\":\"" + ROLE
                 + "\"},\"Transformer\":" + transformer + String.join("", extra) + "}"), REGION);
+    }
+
+    private void revoke(String arn) {
+        service.revokeResource(json("{\"Arn\":\"" + arn + "\"}"), REGION);
     }
 
     private Answer answer(String method, Target target, String path, Map<String, String> headers, String body) {
