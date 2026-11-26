@@ -48,37 +48,40 @@ final class PostgresCatalogReader implements JdbcCatalogReader {
         try (Connection connection = DriverManager.getConnection(jdbcUrl, properties);
              Statement statement = connection.createStatement();
              ResultSet rows = statement.executeQuery(CATALOG_SQL)) {
-            Map<String, TableBuilder> tables = new LinkedHashMap<>();
+            List<CatalogRow> catalog = new ArrayList<>();
             while (rows.next()) {
-                String schema = rows.getString(1);
-                String name = rows.getString(2);
-                boolean view = rows.getBoolean(3);
-                String comment = rows.getString(4);
-                TableBuilder table = tables.computeIfAbsent(schema + "." + name,
-                        key -> new TableBuilder(schema, name, view, comment));
-                table.columns.add(new JdbcColumn(rows.getString(5), rows.getString(6), rows.getString(7)));
+                catalog.add(new CatalogRow(rows.getString(1), rows.getString(2), rows.getBoolean(3),
+                        rows.getString(4), rows.getString(5), rows.getString(6), rows.getString(7)));
             }
-            List<JdbcTableSchema> result = new ArrayList<>();
-            for (TableBuilder table : tables.values()) {
-                result.add(new JdbcTableSchema(table.schema, table.name, table.view, table.comment,
-                        List.copyOf(table.columns)));
-            }
-            return result;
+            return group(catalog);
         }
     }
 
-    private static final class TableBuilder {
-        private final String schema;
-        private final String name;
-        private final boolean view;
-        private final String comment;
-        private final List<JdbcColumn> columns = new ArrayList<>();
+    /** One column of one relation, as a row of {@link #CATALOG_SQL}. */
+    record CatalogRow(String schema, String table, boolean view, String tableComment, String column,
+                      String columnType, String columnComment) {
+    }
 
-        private TableBuilder(String schema, String name, boolean view, String comment) {
-            this.schema = schema;
-            this.name = name;
-            this.view = view;
-            this.comment = comment;
+    /** A relation's identity. Schema and name stay apart: quoted names may hold dots. */
+    private record RelationKey(String schema, String table) {
+    }
+
+    /** Gathers the columns of each relation, keeping the order of the rows. */
+    static List<JdbcTableSchema> group(List<CatalogRow> rows) {
+        Map<RelationKey, List<CatalogRow>> byRelation = new LinkedHashMap<>();
+        for (CatalogRow row : rows) {
+            byRelation.computeIfAbsent(new RelationKey(row.schema(), row.table()), key -> new ArrayList<>()).add(row);
         }
+        List<JdbcTableSchema> tables = new ArrayList<>();
+        for (List<CatalogRow> relation : byRelation.values()) {
+            CatalogRow first = relation.getFirst();
+            List<JdbcColumn> columns = new ArrayList<>();
+            for (CatalogRow row : relation) {
+                columns.add(new JdbcColumn(row.column(), row.columnType(), row.columnComment()));
+            }
+            tables.add(new JdbcTableSchema(first.schema(), first.table(), first.view(), first.tableComment(),
+                    List.copyOf(columns)));
+        }
+        return tables;
     }
 }

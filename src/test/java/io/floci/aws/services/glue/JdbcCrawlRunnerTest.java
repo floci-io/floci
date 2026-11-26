@@ -410,4 +410,66 @@ class JdbcCrawlRunnerTest {
 
         assertThat(e.getMessage(), containsString("absent"));
     }
+
+    @Test
+    void anIncludePathNamingAnotherDatabaseFailsBeforeReading() {
+        passwordConnection("analytics");
+        create(crawler("elsewhere", target("analytics", "missing/public/%")));
+        tables.add(table("public", "orders", column("id", "integer")));
+
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> runner.read("elsewhere"));
+
+        assertThat(e.getMessage(), containsString("missing"));
+        assertThat(e.getMessage(), containsString("dev"));
+        assertThat(sessions, empty());
+    }
+
+    /** Adds a table parameter and a comment and parameter on the first column, as a user editing the table would. */
+    private void annotate(String tableName) {
+        Table table = glueService.getTable("lake", tableName);
+        Map<String, String> parameters = new LinkedHashMap<>(table.getParameters());
+        parameters.put("owner_team", "data");
+        table.setParameters(parameters);
+        Column first = table.getStorageDescriptor().getColumns().getFirst();
+        first.setComment("primary key");
+        first.setParameters(Map.of("pii", "false"));
+        glueService.updateTable("lake", table, null, false);
+    }
+
+    @Test
+    void anUnchangedSourceKeepsTheMetadataAUserAdded() {
+        passwordConnection("analytics");
+        create(crawler("orders", target("analytics", "dev/public/%")));
+        tables.add(table("public", "orders", column("id", "integer")));
+        crawl("orders");
+        annotate("dev_public_orders");
+
+        CrawlOutcome second = crawl("orders");
+
+        assertEquals(CrawlOutcome.succeeded(0, 0, 0), second);
+        Table table = glueService.getTable("lake", "dev_public_orders");
+        assertThat(table.getParameters(), hasEntry("owner_team", "data"));
+        assertEquals("primary key", table.getStorageDescriptor().getColumns().getFirst().getComment());
+    }
+
+    @Test
+    void aSchemaChangeKeepsTheMetadataAUserAdded() {
+        passwordConnection("analytics");
+        create(crawler("orders", target("analytics", "dev/public/%")));
+        tables.add(table("public", "orders", column("id", "integer")));
+        crawl("orders");
+        annotate("dev_public_orders");
+
+        tables.set(0, table("public", "orders", column("id", "integer"), column("total", "bigint")));
+        CrawlOutcome second = crawl("orders");
+
+        assertEquals(CrawlOutcome.succeeded(0, 1, 0), second);
+        Table table = glueService.getTable("lake", "dev_public_orders");
+        assertThat(columnsOf(table), contains("id:int", "total:bigint"));
+        assertThat(table.getParameters(), hasEntry("owner_team", "data"));
+        assertThat(table.getParameters(), hasEntry("classification", "redshift"));
+        Column id = table.getStorageDescriptor().getColumns().getFirst();
+        assertEquals("primary key", id.getComment());
+        assertThat(id.getParameters(), hasEntry("pii", "false"));
+    }
 }

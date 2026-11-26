@@ -22,7 +22,6 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -30,6 +29,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -52,6 +52,11 @@ public class JdbcCrawlRunner implements CrawlRunner {
     private static final int MAX_COMMENT_BYTES = 255;
     private static final Pattern NUMERIC = Pattern.compile("(?:numeric|decimal)\\((\\d+),(\\d+)\\)");
     private static final Pattern NOT_A_NAME_CHARACTER = Pattern.compile("[^a-z0-9_]");
+    // The table and column parameters a crawl writes; every other parameter belongs to whoever set it.
+    private static final Set<String> CRAWLER_TABLE_PARAMETERS = Set.of("classification", "compressionType",
+            "connectionName", "typeOfData", "CrawlerSchemaDeserializerVersion", "CrawlerSchemaSerializerVersion",
+            "UPDATED_BY_CRAWLER", "aws:RawTableComment");
+    private static final Set<String> CRAWLER_COLUMN_PARAMETERS = Set.of("aws:RawType", "aws:RawColumnComment");
 
     private final GlueService glueService;
     private final RedshiftJdbcTargets jdbcTargets;
@@ -132,6 +137,11 @@ public class JdbcCrawlRunner implements CrawlRunner {
         }
         String region = regionResolver.getRegion();
         RedshiftJdbcTargets.Backend backend = jdbcTargets.resolve(regionResolver.getAccountId(), region, url);
+        if (!includePath.database().equals(backend.database())) {
+            throw new IllegalStateException("Include path " + target.getPath() + " names database "
+                    + includePath.database() + ", but connection " + connectionName + " reaches "
+                    + backend.description() + ", whose only database is " + backend.database() + ".");
+        }
         DatabaseSecretCredentials credentials = credentials(connection, properties, region);
         String jdbcUrl = "jdbc:postgresql://" + backend.host() + ":" + backend.port() + "/" + backend.database()
                 + "?preferQueryMode=simple";
@@ -305,9 +315,7 @@ public class JdbcCrawlRunner implements CrawlRunner {
                             crawler.getName(), database, table.getName());
                     continue;
                 }
-                table.setDescription(current.getDescription());
-                table.setOwner(current.getOwner());
-                glueService.updateTable(database, table, null, false);
+                glueService.updateTable(database, merged(current, table), null, false);
                 updated++;
             }
         }
@@ -316,13 +324,17 @@ public class JdbcCrawlRunner implements CrawlRunner {
         return CrawlOutcome.succeeded(created, updated, 0);
     }
 
+    /**
+     * Whether the catalog table already holds what the crawl found. Only what the crawler writes is compared:
+     * metadata a user added (other parameters, column comments) never makes a table look changed.
+     */
     private static boolean sameSchema(Table current, Table crawled) {
         StorageDescriptor currentDescriptor = current.getStorageDescriptor();
         if (currentDescriptor == null) {
             return false;
         }
         return Objects.equals(currentDescriptor.getLocation(), crawled.getStorageDescriptor().getLocation())
-                && Objects.equals(current.getParameters(), crawled.getParameters())
+                && crawlerOwned(current.getParameters(), CRAWLER_TABLE_PARAMETERS).equals(crawled.getParameters())
                 && columnsOf(currentDescriptor).equals(columnsOf(crawled.getStorageDescriptor()));
     }
 
@@ -330,10 +342,73 @@ public class JdbcCrawlRunner implements CrawlRunner {
         List<List<Object>> columns = new ArrayList<>();
         if (descriptor.getColumns() != null) {
             for (Column column : descriptor.getColumns()) {
-                columns.add(Arrays.asList(column.getName(), column.getType(), column.getComment(),
-                        column.getParameters()));
+                columns.add(List.of(column.getName(), column.getType(),
+                        crawlerOwned(column.getParameters(), CRAWLER_COLUMN_PARAMETERS)));
             }
         }
         return columns;
+    }
+
+    private static Map<String, String> crawlerOwned(Map<String, String> parameters, Set<String> keys) {
+        Map<String, String> owned = new LinkedHashMap<>();
+        if (parameters != null) {
+            for (Map.Entry<String, String> parameter : parameters.entrySet()) {
+                if (keys.contains(parameter.getKey())) {
+                    owned.put(parameter.getKey(), parameter.getValue());
+                }
+            }
+        }
+        return owned;
+    }
+
+    /** The parameters the crawler did not write, which a user or another tool owns. */
+    private static Map<String, String> userOwned(Map<String, String> parameters, Set<String> crawlerKeys) {
+        Map<String, String> owned = new LinkedHashMap<>();
+        if (parameters != null) {
+            for (Map.Entry<String, String> parameter : parameters.entrySet()) {
+                if (!crawlerKeys.contains(parameter.getKey())) {
+                    owned.put(parameter.getKey(), parameter.getValue());
+                }
+            }
+        }
+        return owned;
+    }
+
+    /**
+     * The crawled schema laid over the stored table: the crawler's columns, location and parameters replace
+     * its own earlier ones, and the metadata a user added to the table and to columns that still exist stays.
+     */
+    private static Table merged(Table current, Table crawled) {
+        Map<String, String> tableParameters = userOwned(current.getParameters(), CRAWLER_TABLE_PARAMETERS);
+        tableParameters.putAll(crawled.getParameters());
+        crawled.setParameters(tableParameters);
+        StorageDescriptor descriptor = crawled.getStorageDescriptor();
+        StorageDescriptor currentDescriptor = current.getStorageDescriptor();
+        Map<String, String> descriptorParameters = userOwned(
+                currentDescriptor == null ? null : currentDescriptor.getParameters(), CRAWLER_TABLE_PARAMETERS);
+        descriptorParameters.putAll(descriptor.getParameters());
+        descriptor.setParameters(descriptorParameters);
+        Map<String, Column> currentColumns = new HashMap<>();
+        if (currentDescriptor != null && currentDescriptor.getColumns() != null) {
+            for (Column column : currentDescriptor.getColumns()) {
+                currentColumns.put(column.getName(), column);
+            }
+        }
+        for (Column column : descriptor.getColumns()) {
+            Column stored = currentColumns.get(column.getName());
+            if (stored == null) {
+                continue;
+            }
+            column.setComment(stored.getComment());
+            Map<String, String> columnParameters = userOwned(stored.getParameters(), CRAWLER_COLUMN_PARAMETERS);
+            if (column.getParameters() != null) {
+                columnParameters.putAll(column.getParameters());
+            }
+            column.setParameters(columnParameters.isEmpty() ? null : columnParameters);
+        }
+        crawled.setDescription(current.getDescription());
+        crawled.setOwner(current.getOwner());
+        crawled.setRetention(current.getRetention());
+        return crawled;
     }
 }
