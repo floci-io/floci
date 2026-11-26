@@ -267,10 +267,7 @@ final class WebhookEventsConfigurations {
         return base64 ? Base64.getDecoder().decode(stored).length : stored.getBytes(StandardCharsets.UTF_8).length;
     }
 
-    /**
-     * The HMAC secret a rotation stores for {@code value}, judged against the source's configuration. A rotation
-     * has an upper bound that create does not.
-     */
+    /** The HMAC secret a rotation stores for {@code value}, judged against the source's configuration. */
     static String rotatedHmacSecret(String value, JsonNode hmac) {
         boolean base64 = isBase64(hmac);
         String stored = storedHmacSecret(value, base64);
