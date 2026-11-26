@@ -482,7 +482,7 @@ class BackupJobRecoveryTest {
             ServiceConfigAccess access = mock(ServiceConfigAccess.class);
             when(access.storageMode("backup")).thenReturn("persistent");
             StorageFactory firstStorage = new StorageFactory(config, access);
-            RegionResolver resolver = new RegionResolver("us-east-1", ACCOUNT);
+            RegionResolver resolver = new RegionResolver(REGION, ACCOUNT);
             ObjectMapper mapper = new ObjectMapper();
             SnsService sns = mock(SnsService.class);
             BackupService first = new BackupService(firstStorage, config, resolver, mapper, sns);
@@ -577,7 +577,7 @@ class BackupJobRecoveryTest {
         private final Map<String, AccountAwareStorageBackend<?>> stores = new HashMap<>();
         private final StorageFactory storage = mock(StorageFactory.class);
         private final EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        private final RegionResolver resolver = new RegionResolver("us-east-1", ACCOUNT);
+        private final RegionResolver resolver = new RegionResolver(REGION, ACCOUNT);
         private final ObjectMapper mapper = new ObjectMapper();
         private final SnsService sns = mock(SnsService.class);
         private final AccountAwareStorageBackend<BackupVault> vaults;
