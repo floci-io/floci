@@ -121,9 +121,35 @@ class EksAutoModeNodeClaimsTest {
         assertEquals("True", condition(joined, "Ready"));
 
         JsonNode claim = MAPPER.createObjectNode().set("status", joined);
-        assertTrue(EksAutoModeNodeClaims.saysJoined(claim, "ip-10-0-1-10.ec2.internal", "True"));
-        assertFalse(EksAutoModeNodeClaims.saysJoined(claim, "ip-10-0-1-10.ec2.internal", "False"));
-        assertFalse(EksAutoModeNodeClaims.saysJoined(claim, "another", "True"));
+        assertTrue(EksAutoModeNodeClaims.saysJoined(claim, node));
+        assertFalse(EksAutoModeNodeClaims.saysJoined(claim, MAPPER.readTree("""
+                {"metadata": {"name": "ip-10-0-1-10.ec2.internal"},
+                 "status": {"capacity": {"cpu": "2"}, "allocatable": {"cpu": "1780m"},
+                            "conditions": [{"type": "Ready", "status": "False"}]}}""")));
+        assertFalse(EksAutoModeNodeClaims.saysJoined(claim, MAPPER.readTree("""
+                {"metadata": {"name": "another"},
+                 "status": {"capacity": {"cpu": "2"}, "allocatable": {"cpu": "1780m"},
+                            "conditions": [{"type": "Ready", "status": "True"}]}}""")));
+        // A resource the node reports after it was ready, as a device plugin adds one, is written again.
+        assertFalse(EksAutoModeNodeClaims.saysJoined(claim, MAPPER.readTree("""
+                {"metadata": {"name": "ip-10-0-1-10.ec2.internal"},
+                 "status": {"capacity": {"cpu": "2", "nvidia.com/gpu": "1"},
+                            "allocatable": {"cpu": "1780m", "nvidia.com/gpu": "1"},
+                            "conditions": [{"type": "Ready", "status": "True"}]}}""")));
+    }
+
+    /** Only the claims Auto Mode manages are its own; ending one takes Karpenter's finalizer off and keeps others. */
+    @Test
+    void onlyManagedClaimsAreOwnedAndEndingOneKeepsOtherFinalizers() throws Exception {
+        assertTrue(EksAutoModeNodeClaims.managed(MAPPER.readTree(
+                "{\"metadata\": {\"labels\": {\"app.kubernetes.io/managed-by\": \"eks\"}}}")));
+        assertFalse(EksAutoModeNodeClaims.managed(MAPPER.readTree("{\"metadata\": {\"labels\": {}}}")));
+
+        assertEquals("{\"metadata\":{\"finalizers\":null}}", EksAutoModeNodeClaims.withoutFinalizer(
+                MAPPER.readTree("{\"metadata\": {\"finalizers\": [\"karpenter.sh/termination\"]}}")));
+        assertEquals("{\"metadata\":{\"finalizers\":[\"example.com/audit\"]}}",
+                EksAutoModeNodeClaims.withoutFinalizer(MAPPER.readTree("{\"metadata\": {\"finalizers\": "
+                        + "[\"karpenter.sh/termination\", \"example.com/audit\"]}}")));
     }
 
     private static String condition(JsonNode status, String type) {

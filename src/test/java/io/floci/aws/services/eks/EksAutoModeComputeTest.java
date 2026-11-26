@@ -168,8 +168,9 @@ class EksAutoModeComputeTest {
     }
 
     /**
-     * Each pass keeps the NodeClaims in step: one whose node has joined is marked registered, initialized and ready;
-     * one whose instance is gone loses its finalizer and is deleted.
+     * Each pass keeps the NodeClaims Auto Mode manages in step: one whose node has joined is marked registered,
+     * initialized and ready; one whose instance is gone loses Karpenter's finalizer, keeping any other, and is deleted.
+     * A claim Auto Mode doesn't manage is left alone.
      */
     @Test
     void nodeClaimsFollowTheirInstancesAndNodes() {
@@ -180,8 +181,10 @@ class EksAutoModeComputeTest {
                 + "\"status\": {\"phase\": \"Running\"}}]}");
         lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}, "
                 + "\"status\": {\"conditions\": [{\"type\": \"Ready\", \"status\": \"True\"}]}}]}");
-        lists.put("nodeclaims", "{\"items\": [{\"metadata\": {\"name\": \"" + live + "\"}, \"status\": {}},"
-                + "{\"metadata\": {\"name\": \"" + gone + "\"}, \"status\": {}}]}");
+        lists.put("nodeclaims", "{\"items\": [" + managedClaim(live, "") + ", "
+                + managedClaim(gone, ", \"example.com/audit\"") + ", "
+                + "{\"metadata\": {\"name\": \"someone-elses\", "
+                + "\"finalizers\": [\"karpenter.sh/termination\"]}}]}");
         Cluster cluster = cluster("prod");
 
         compute.reconcile(cluster, REGION);
@@ -191,11 +194,68 @@ class EksAutoModeComputeTest {
                 && cmd[cmd.length - 1].contains("\"nodeName\":\"node-1\"")
                 && cmd[cmd.length - 1].contains("\"type\":\"Ready\",\"status\":\"True\"")), anyInt());
         verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "patch", "nodeclaim", gone,
-                "--type=merge", "-p", "{\"metadata\":{\"finalizers\":null}}"}, 15);
+                "--type=merge", "-p", "{\"metadata\":{\"finalizers\":[\"example.com/audit\"]}}"}, 15);
         verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "nodeclaim", gone,
                 "--ignore-not-found=true", "--wait=false"}, 15);
         verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete",
                 "nodeclaim", live, "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(clusterManager, never()).execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length > 3
+                && "someone-elses".equals(cmd[3])), anyInt());
+    }
+
+    /** A running instance whose claim is missing, as when making it failed, gets it again without a new launch. */
+    @Test
+    void aMissingClaimIsMadeAgainWithoutANewLaunch() {
+        joinedNode("i-node", "node-1");
+        String claim = EksAutoModeNodeClaims.name("general-purpose", "i-node");
+        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"node-1\"}, "
+                + "\"status\": {\"phase\": \"Running\"}}]}");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}, "
+                + "\"status\": {\"conditions\": [{\"type\": \"Ready\", \"status\": \"True\"}]}}]}");
+
+        compute.reconcile(cluster("prod"), REGION);
+
+        verify(clusterManager).execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length > 2
+                && "sh".equals(cmd[0]) && cmd[2].contains("\"name\":\"" + claim + "\"")
+                && cmd[2].contains("kubectl apply -f -")), anyInt());
+        verify(clusterManager).execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length > 4
+                && "patch".equals(cmd[1]) && claim.equals(cmd[3]) && "--subresource=status".equals(cmd[4])
+                && cmd[cmd.length - 1].contains("\"type\":\"Launched\",\"status\":\"True\"")), anyInt());
+        verify(ec2, never()).runInstances(anyString(), anyString(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                anyString(), anyString(), anyList(), anyString(), anyString(), any(), any(), anyInt(), any(), any(),
+                any(), anyString(), anyBoolean(), any(), any(), any(), anyBoolean(), any(), any());
+    }
+
+    /**
+     * With compute off, a claim left by an earlier pass whose deletion failed is deleted once its instance is
+     * terminating.
+     */
+    @Test
+    void withComputeOffALeftoverClaimOfATerminatedInstanceIsDeleted() {
+        Instance late = new Instance();
+        late.setInstanceId("i-late");
+        late.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
+        Reservation dead = new Reservation();
+        dead.setInstances(List.of(late));
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenAnswer(inv -> {
+            Map<String, List<String>> filters = inv.getArgument(2);
+            return filters.get("instance-state-name").contains("terminated") ? List.of(dead) : List.of();
+        });
+        String claim = EksAutoModeNodeClaims.name("general-purpose", "i-late");
+        lists.put("nodeclaims", "{\"items\": [" + managedClaim(claim, "") + "]}");
+        Cluster cluster = cluster("prod");
+        cluster.setComputeConfig(new ComputeConfig(false, List.of(), null));
+
+        compute.removeNodes(cluster, REGION);
+
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "nodeclaim", claim,
+                "--ignore-not-found=true", "--wait=false"}, 15);
+    }
+
+    private static String managedClaim(String name, String moreFinalizers) {
+        return "{\"metadata\": {\"name\": \"" + name + "\", "
+                + "\"labels\": {\"app.kubernetes.io/managed-by\": \"eks\"}, "
+                + "\"finalizers\": [\"karpenter.sh/termination\"" + moreFinalizers + "]}, \"status\": {}}";
     }
 
     @Test

@@ -25,6 +25,8 @@ final class EksAutoModeNodeClaims {
     static final String NODECLASS_LABEL = NODECLASS_GROUP + "/nodeclass";
     /** What Auto Mode puts in {@code expireAfter} when the pool doesn't say: its built-in pools' 14 days. */
     static final String DEFAULT_EXPIRE_AFTER = "336h";
+    static final String MANAGED_BY = "app.kubernetes.io/managed-by";
+    static final String MANAGED_BY_VALUE = "eks";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String SUFFIX_ALPHABET = "bcdfghjklmnpqrstvwxz2456789";
 
@@ -57,7 +59,7 @@ final class EksAutoModeNodeClaims {
         ObjectNode claimLabels = metadata.putObject("labels");
         labels.forEach(claimLabels::put);
         claimLabels.put(NODECLASS_LABEL, launch.pool().nodeClass());
-        claimLabels.put("app.kubernetes.io/managed-by", "eks");
+        claimLabels.put(MANAGED_BY, MANAGED_BY_VALUE);
         metadata.putArray("finalizers").add(FINALIZER);
         String uid = poolItem.path("metadata").path("uid").asText("");
         if (!uid.isEmpty()) {
@@ -144,17 +146,46 @@ final class EksAutoModeNodeClaims {
         return wrap(status);
     }
 
-    /** Whether a NodeClaim's status already says its node {@code nodeName} joined, with {@code ready} as its Ready. */
-    static boolean saysJoined(JsonNode claim, String nodeName, String ready) {
-        if (!nodeName.equals(claim.path("status").path("nodeName").asText())) {
+    /**
+     * Whether a NodeClaim's status already says {@code node} joined: its name, capacity and allocatable, and its
+     * Ready as the node's.
+     */
+    static boolean saysJoined(JsonNode claim, JsonNode node) {
+        JsonNode status = claim.path("status");
+        JsonNode nodeStatus = node.path("status");
+        if (!node.path("metadata").path("name").asText().equals(status.path("nodeName").asText())
+                || !nodeStatus.path("capacity").equals(status.path("capacity"))
+                || !nodeStatus.path("allocatable").equals(status.path("allocatable"))) {
             return false;
         }
-        for (JsonNode condition : claim.path("status").path("conditions")) {
+        for (JsonNode condition : status.path("conditions")) {
             if ("Ready".equals(condition.path("type").asText())) {
-                return ready.equals(condition.path("status").asText());
+                return nodeReady(node).equals(condition.path("status").asText());
             }
         }
         return false;
+    }
+
+    /** Whether Auto Mode manages a NodeClaim, as its {@code app.kubernetes.io/managed-by: eks} label says. */
+    static boolean managed(JsonNode claim) {
+        return MANAGED_BY_VALUE.equals(claim.path("metadata").path("labels").path(MANAGED_BY).asText());
+    }
+
+    /** The merge patch that takes Karpenter's finalizer off a NodeClaim and keeps its others. */
+    static String withoutFinalizer(JsonNode claim) {
+        ObjectNode patch = MAPPER.createObjectNode();
+        ArrayNode kept = MAPPER.createArrayNode();
+        claim.path("metadata").path("finalizers").forEach(f -> {
+            if (!FINALIZER.equals(f.asText())) {
+                kept.add(f);
+            }
+        });
+        if (kept.isEmpty()) {
+            patch.putObject("metadata").putNull("finalizers");
+        } else {
+            patch.putObject("metadata").set("finalizers", kept);
+        }
+        return patch.toString();
     }
 
     /** A node's Ready condition status, {@code Unknown} when it has none. */

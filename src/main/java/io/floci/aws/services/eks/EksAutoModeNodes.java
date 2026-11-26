@@ -516,6 +516,10 @@ final class EksAutoModeNodes {
     static List<NodePool> nodePools(JsonNode list) {
         List<NodePool> pools = new ArrayList<>();
         for (JsonNode item : list.path("items")) {
+            // A pool being deleted launches nothing more and its nodes go, as Karpenter treats it.
+            if (item.path("metadata").has("deletionTimestamp")) {
+                continue;
+            }
             JsonNode template = item.path("spec").path("template");
             Map<String, String> labels = new LinkedHashMap<>();
             template.path("metadata").path("labels").properties()

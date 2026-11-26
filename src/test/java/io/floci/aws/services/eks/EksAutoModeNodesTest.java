@@ -419,6 +419,17 @@ class EksAutoModeNodesTest {
         assertNull(read.get(1).consolidateAfter());
     }
 
+    /** A pool being deleted, held by its claims, launches nothing more and its nodes go, as Karpenter treats it. */
+    @Test
+    void aPoolBeingDeletedIsLeftOut() throws Exception {
+        String pools = """
+                {"items": [{"metadata": {"name": "leaving", "deletionTimestamp": "2026-11-26T00:00:00Z"},
+                  "spec": {"template": {"spec": {}}}},
+                 {"metadata": {"name": "staying"}, "spec": {"template": {"spec": {}}}}]}""";
+
+        assertEquals(List.of("staying"), EksAutoModeNodes.nodePools(json(pools)).stream().map(NodePool::name).toList());
+    }
+
     /** DaemonSet pods and static pods' mirrors don't keep a node busy; finished pods don't either. */
     @Test
     void onlyAWorkloadKeepsANodeBusy() throws Exception {
