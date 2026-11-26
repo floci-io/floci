@@ -159,7 +159,7 @@ public class BatchService {
         int offset = parseNextToken(textOrNull(request, "nextToken"));
         List<BatchComputeEnvironment> envs;
         if (refs.isEmpty()) {
-            envs = computeEnvironmentStore.scan(k -> true).stream()
+            envs = computeEnvironmentsInRegion().stream()
                     .sorted(Comparator.comparing(BatchComputeEnvironment::getComputeEnvironmentName))
                     .toList();
         } else {
@@ -215,7 +215,7 @@ public class BatchService {
             throw client("Cannot delete compute environment in " + target.getState() + " state: "
                     + target.getComputeEnvironmentName());
         }
-        boolean stillAttached = jobQueueStore.scan(k -> true).stream()
+        boolean stillAttached = jobQueuesInRegion().stream()
                 .flatMap(q -> q.getComputeEnvironmentOrder().stream())
                 .anyMatch(order -> resolveComputeEnvironmentOptional(order.getComputeEnvironment())
                         .map(BatchComputeEnvironment::getComputeEnvironmentArn)
@@ -434,7 +434,7 @@ public class BatchService {
         }
         if (resource.startsWith("job/")) {
             String jobId = resource.substring("job/".length());
-            BatchJob job = jobStore.get(jobId).orElseThrow(() -> client("Job not found: " + resourceArn));
+            BatchJob job = getJob(jobId).orElseThrow(() -> client("Job not found: " + resourceArn));
             return new Taggable(tagsOf(job.getTags()), tags -> {
                 job.setTags(tags);
                 jobStore.put(job.getJobId(), job);
@@ -456,7 +456,7 @@ public class BatchService {
         int offset = parseNextToken(textOrNull(request, "nextToken"));
         List<BatchJobQueue> queues;
         if (refs.isEmpty()) {
-            queues = jobQueueStore.scan(k -> true).stream()
+            queues = jobQueuesInRegion().stream()
                     .sorted(Comparator.comparing(BatchJobQueue::getJobQueueName))
                     .toList();
         } else {
@@ -546,7 +546,7 @@ public class BatchService {
         }
         int maxResults = describeMaxResults(request);
         int offset = parseNextToken(textOrNull(request, "nextToken"));
-        List<BatchJobDefinition> definitions = jobDefinitionStore.scan(k -> true).stream()
+        List<BatchJobDefinition> definitions = jobDefinitionsInRegion().stream()
                 .filter(def -> status == null || status.equals(def.getStatus()))
                 .filter(def -> name == null || name.equals(def.getJobDefinitionName()))
                 .filter(def -> refs.isEmpty() || refs.stream().anyMatch(ref -> matchesJobDefinition(def, ref)))
@@ -621,7 +621,7 @@ public class BatchService {
             BatchJob job = getJob(jobId).orElseThrow(() -> client("Job not found: " + jobId));
             if (job.getArraySize() != null) {
                 boolean changed = false;
-                List<BatchJob> children = jobStore.scan(k -> true).stream()
+                List<BatchJob> children = jobsInRegion().stream()
                         .filter(child -> jobId.equals(child.getArrayJobId()))
                         .toList();
                 for (BatchJob child : children) {
@@ -908,7 +908,7 @@ public class BatchService {
         int offset = parseNextToken(textOrNull(request, "nextToken"));
 
         // A queue-level listing shows one entry per array job (the parent), matching AWS.
-        List<BatchJob> jobs = jobStore.scan(k -> true).stream()
+        List<BatchJob> jobs = jobsInRegion().stream()
                 .filter(job -> queue.getJobQueueArn().equals(job.getJobQueue()))
                 .filter(job -> job.getArrayIndex() == null)
                 .filter(job -> (filter != null && !"SHARE_IDENTIFIER".equals(filter.name()))
@@ -941,7 +941,7 @@ public class BatchService {
                 : FILTERED_MAX_RESULTS;
         int offset = parseNextToken(textOrNull(request, "nextToken"));
 
-        List<BatchJob> children = jobStore.scan(k -> true).stream()
+        List<BatchJob> children = jobsInRegion().stream()
                 .filter(job -> arrayJobId.equals(job.getArrayJobId()))
                 .filter(job -> status == null || status.equals(job.getStatus()))
                 .sorted(Comparator.comparingInt(BatchJob::getArrayIndex))
@@ -996,7 +996,7 @@ public class BatchService {
         if (!retry.isEmpty()) {
             request.set("retryStrategy", retry);
         }
-        submitJob(request, region);
+        RequestScopes.runAs(regionResolver.getAccountId(), region, () -> submitJob(request, region));
     }
 
     private ObjectNode eventBridgeRetryStrategy(JsonNode retryStrategy) {
@@ -1319,11 +1319,11 @@ public class BatchService {
         if (ref == null || ref.isBlank()) {
             return Optional.empty();
         }
-        Optional<BatchJobQueue> byArn = jobQueueStore.get(ref);
+        Optional<BatchJobQueue> byArn = jobQueueStore.get(ref).filter(q -> inRequestRegion(q.getRegion()));
         if (byArn.isPresent()) {
             return byArn;
         }
-        return jobQueueStore.scan(k -> true).stream()
+        return jobQueuesInRegion().stream()
                 .filter(q -> ref.equals(q.getJobQueueName()) || ref.equals(q.getJobQueueArn()))
                 .findFirst();
     }
@@ -1337,11 +1337,12 @@ public class BatchService {
         if (ref == null || ref.isBlank()) {
             return Optional.empty();
         }
-        Optional<BatchComputeEnvironment> byArn = computeEnvironmentStore.get(ref);
+        Optional<BatchComputeEnvironment> byArn = computeEnvironmentStore.get(ref)
+                .filter(env -> inRequestRegion(env.getRegion()));
         if (byArn.isPresent()) {
             return byArn;
         }
-        return computeEnvironmentStore.scan(k -> true).stream()
+        return computeEnvironmentsInRegion().stream()
                 .filter(env -> ref.equals(env.getComputeEnvironmentName()) || ref.equals(env.getComputeEnvironmentArn()))
                 .findFirst();
     }
@@ -1355,7 +1356,7 @@ public class BatchService {
         if (ref == null || ref.isBlank()) {
             return Optional.empty();
         }
-        Optional<BatchJobDefinition> byArn = jobDefinitionStore.get(ref);
+        Optional<BatchJobDefinition> byArn = jobDefinitionStore.get(ref).filter(def -> inRequestRegion(def.getRegion()));
         if (byArn.isPresent() && (includeInactive || "ACTIVE".equals(byArn.get().getStatus()))) {
             return byArn;
         }
@@ -1383,7 +1384,7 @@ public class BatchService {
         }
         String finalName = name;
         Integer finalRevision = revision;
-        return jobDefinitionStore.scan(k -> true).stream()
+        return jobDefinitionsInRegion().stream()
                 .filter(def -> finalName.equals(def.getJobDefinitionName()))
                 .filter(def -> finalRevision == null || finalRevision == def.getRevision())
                 .filter(def -> includeInactive || "ACTIVE".equals(def.getStatus()))
@@ -1423,7 +1424,7 @@ public class BatchService {
     }
 
     private int nextRevision(String name) {
-        return jobDefinitionStore.scan(k -> true).stream()
+        return jobDefinitionsInRegion().stream()
                 .filter(def -> name.equals(def.getJobDefinitionName()))
                 .mapToInt(BatchJobDefinition::getRevision)
                 .max()
@@ -1788,7 +1789,7 @@ public class BatchService {
 
     // Computed live from children on every read, rather than an incrementally updated counter, to avoid races.
     private ArrayRollup arrayRollup(String parentJobId) {
-        List<BatchJob> children = jobStore.scan(k -> true).stream()
+        List<BatchJob> children = jobsInRegion().stream()
                 .filter(job -> parentJobId.equals(job.getArrayJobId()))
                 .toList();
         Map<String, Integer> statusSummary = new LinkedHashMap<>();
@@ -2080,8 +2081,41 @@ public class BatchService {
         return Math.max(1, Math.min(DESCRIBE_JOBS_LIMIT, request.path("maxResults").asInt()));
     }
 
+    /** The request's Region's job {@code jobId}: job ids are unique, but a job is visible only in its own Region. */
     private Optional<BatchJob> getJob(String jobId) {
-        return jobStore.get(jobId);
+        return jobStore.get(jobId).filter(job -> inRequestRegion(job.getRegion()));
+    }
+
+    /*
+     * The four stores are shared by every Region, keyed by ARN or job id, and each record carries the Region it was
+     * created in, records stored before this filter included, so a request sees only its own Region's records.
+     */
+    private List<BatchComputeEnvironment> computeEnvironmentsInRegion() {
+        return computeEnvironmentStore.scan(k -> true).stream()
+                .filter(env -> inRequestRegion(env.getRegion()))
+                .toList();
+    }
+
+    private List<BatchJobQueue> jobQueuesInRegion() {
+        return jobQueueStore.scan(k -> true).stream()
+                .filter(queue -> inRequestRegion(queue.getRegion()))
+                .toList();
+    }
+
+    private List<BatchJobDefinition> jobDefinitionsInRegion() {
+        return jobDefinitionStore.scan(k -> true).stream()
+                .filter(def -> inRequestRegion(def.getRegion()))
+                .toList();
+    }
+
+    private List<BatchJob> jobsInRegion() {
+        return jobStore.scan(k -> true).stream()
+                .filter(job -> inRequestRegion(job.getRegion()))
+                .toList();
+    }
+
+    private boolean inRequestRegion(String region) {
+        return regionResolver.getRegion().equals(region != null ? region : regionResolver.getDefaultRegion());
     }
 
     @SuppressWarnings("unchecked")
