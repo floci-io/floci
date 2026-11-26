@@ -36,7 +36,10 @@ class CloudFrontConnectionGroupTest {
                 assertNotNull(groupId);
                 assertTrue(groupId.startsWith("cg_"));
                 assertTrue(created.connectionGroup().arn().endsWith(":connection-group/" + groupId));
-                assertTrue(created.connectionGroup().routingEndpoint().endsWith(".cloudfront.net"));
+                // CloudFront in China names its edge hosts under cloudfront.cn.
+                String edgeSuffix = "aws-cn".equals(TestFixtures.partition()) ? ".cloudfront.cn" : ".cloudfront.net";
+                String routingEndpoint = created.connectionGroup().routingEndpoint();
+                assertTrue(routingEndpoint.endsWith(edgeSuffix), routingEndpoint);
                 assertFalse(created.connectionGroup().isDefault());
                 assertNotNull(created.connectionGroup().createdTime());
                 assertFalse(created.connectionGroup().ipv6Enabled());

@@ -80,7 +80,8 @@ SERVICE_SUFFIX = ".amazonaws.com"
 NAMESPACES = (
     "application-autoscaling", "aps", "athena", "autoscaling", "budgets", "cloudformation", "cloudtrail",
     "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito-identity", "cognito-idp",
-    "comprehend", "config", "datasync", "dms", "dsql", "ec2", "ecr", "ecs", "eks", "elasticmapreduce",
+    "comprehend", "config", "datasync", "dms", "dsql", "ec2", "ecr", "ecs", "eks", "elasticloadbalancing",
+    "elasticmapreduce",
     "emr-containers", "emr-serverless", "events", "firehose", "glue", "iam", "kinesis", "kinesisanalytics", "lambda",
     "logs", "pipes",
     "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups", "s3", "s3tables", "sagemaker",

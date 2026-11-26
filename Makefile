@@ -653,6 +653,7 @@ IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json
 	tools/aws/test_fetch_kms_api_permissions.py tools/aws/sources/dynamodb-permissions.json \
 	tools/aws/fetch_dynamodb_permissions.py tools/aws/test_fetch_dynamodb_permissions.py \
 	tools/aws/sources/iam-identifiers.json tools/aws/fetch_iam_identifiers.py tools/aws/test_fetch_iam_identifiers.py \
+	tools/aws/sources/ec2-id-examples.json tools/aws/fetch_ec2_id_examples.py tools/aws/test_fetch_ec2_id_examples.py \
 	tools/aws/sources/required-resource-types.json tools/aws/fetch_required_resource_types.py \
 	tools/aws/test_fetch_required_resource_types.py
 CLOUDTRAIL_S3_DATA_EVENTS_PATHS := src/main/resources/aws/cloudtrail-s3-data-events.json \
@@ -886,7 +887,7 @@ iam-request-resources-verify: ## CI gate (online): every vendored operation must
 	fi
 
 iam-request-resources-test: ## Run the IAM request resource generator's unit tests
-	$(PYTHON) -m pytest tools/aws/test_regen_iam_request_resources.py -q
+	$(PYTHON) -m pytest tools/aws/test_regen_iam_request_resources.py tools/aws/test_fetch_ec2_id_examples.py -q
 
 cfn-property-types-sync: ## Regenerate src/main/resources/aws/cfn-property-types.json from AWS's resource schemas (commit the result)
 	$(PYTHON) tools/aws/regen_cfn_property_types.py

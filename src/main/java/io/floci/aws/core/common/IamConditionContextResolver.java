@@ -183,8 +183,43 @@ public class IamConditionContextResolver {
         Map<String, List<String>> types = RequestResourceMembers.table().resourceTagKeys()
                 .getOrDefault(namespace, Map.of());
         StoredResourceArns stored = types.isEmpty() ? null : storedResourceArns(namespace);
-        Map<String, String> tags = stored == null ? Map.of() : stored.storedTags(resource);
-        List<String> prefixes = tags.isEmpty() ? List.of() : resourceTagPrefixes(namespace, resource, types);
+        return resourceTagKeys(resource, stored == null ? Map.of() : stored.storedTags(resource));
+    }
+
+    /**
+     * The condition keys {@link #resourceTags(String)} gives the resource {@code resource} names, as a request for
+     * {@code action} reads them: without the keys the generated IAM condition-key table does not read for the action
+     * (it reads no resource tag for {@code iam:PassRole}). Null when none is left.
+     */
+    public Map<String, List<String>> resourceTags(String action, String resource) {
+        Map<String, List<String>> tags = resourceTags(resource);
+        Set<String> unread = IamConditionKeys.unreadTagPrefixes(action);
+        if (tags == null || unread.isEmpty()) {
+            return tags;
+        }
+        Map<String, List<String>> read = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        tags.forEach((key, values) -> {
+            if (unread.stream().noneMatch(prefix -> key.regionMatches(true, 0, prefix, 0, prefix.length()))) {
+                read.put(key, values);
+            }
+        });
+        return read.isEmpty() ? null : read;
+    }
+
+    /**
+     * The condition keys {@code tags}, the tags of the resource {@code resource} names, give it: each resource-tag key
+     * the request-resources table gives the ARN's type for each tag, as {@link #resourceTags} gives them for the tags a
+     * service holds, for a caller that holds the resource itself (the role a trust policy belongs to). Null when the
+     * table gives the type no such keys or there are no tags.
+     */
+    public static Map<String, List<String>> resourceTagKeys(String resource, Map<String, String> tags) {
+        if (!AwsArnUtils.isArn(resource) || tags == null || tags.isEmpty()) {
+            return null;
+        }
+        String namespace = AwsArnUtils.parse(resource).service();
+        Map<String, List<String>> types = RequestResourceMembers.table().resourceTagKeys()
+                .getOrDefault(namespace, Map.of());
+        List<String> prefixes = types.isEmpty() ? List.of() : resourceTagPrefixes(namespace, resource, types);
         if (prefixes.isEmpty()) {
             return null;
         }

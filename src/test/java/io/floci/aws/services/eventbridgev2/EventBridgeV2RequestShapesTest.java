@@ -559,6 +559,72 @@ class EventBridgeV2RequestShapesTest {
         assertTrue(found.get(2).endsWith("' at 'tags' failed to satisfy constraint: " + "Map value must satisfy constraint: [Member must have length less than or equal to 256, Member must have length greater than or equal to 0, Member must satisfy regular expression pattern: (\\S([\\s\\S]*\\S)?)?(?![\\s\\S]).*, Member must not be null]"), found.get(2));
     }
 
+    private static final String ROTATE_ARN_PATTERN = "arn:aws(-[a-z0-9]+)*:events:[a-z][a-z0-9]*(-[a-z0-9]+)*:"
+            + "([0-9]{12}):event-sourcev2\\/webhook\\/[A-Za-z0-9][\\.\\-_A-Za-z0-9]{0,255}\\/[a-z0-9]{25}";
+
+    @Test
+    void rotateWebhookCredentialsWalksCredentialThenArnThenClientToken() {
+        assertAnswers("RotateWebhookCredentials",
+                "{\"EventSourceArn\":\"bad\",\"ClientToken\":\"a b\",\"Credential\":{\"StaticTokenSecretValue\":\"bad\"}}",
+                "Value at 'credential.staticTokenSecretValue' failed to satisfy constraint: "
+                        + "Member must have length greater than or equal to 6",
+                "Value 'bad' at 'eventSourceArn' failed to satisfy constraint: "
+                        + "Member must satisfy regular expression pattern: " + ROTATE_ARN_PATTERN,
+                "Value 'a b' at 'clientToken' failed to satisfy constraint: "
+                        + "Member must satisfy regular expression pattern: [\\u0021-\\u007E]+");
+    }
+
+    @Test
+    void rotateWebhookCredentialsPrintsLengthBeforePatternForAnEmptyClientToken() {
+        assertAnswers("RotateWebhookCredentials",
+                "{\"EventSourceArn\":\"bad\",\"ClientToken\":\"\",\"Credential\":{\"StaticTokenSecretValue\":\"bad\","
+                        + "\"BasicHttpPassword\":\"bad\",\"HmacSecretValue\":\"bad\"}}",
+                "Value at 'credential.staticTokenSecretValue' failed to satisfy constraint: "
+                        + "Member must have length greater than or equal to 6",
+                "Value at 'credential.basicHttpPassword' failed to satisfy constraint: "
+                        + "Member must have length greater than or equal to 6",
+                "Value at 'credential.hmacSecretValue' failed to satisfy constraint: "
+                        + "Member must have length greater than or equal to 6",
+                "Value 'bad' at 'eventSourceArn' failed to satisfy constraint: "
+                        + "Member must satisfy regular expression pattern: " + ROTATE_ARN_PATTERN,
+                "Value '' at 'clientToken' failed to satisfy constraint: Member must have length greater than or equal to 1",
+                "Value '' at 'clientToken' failed to satisfy constraint: "
+                        + "Member must satisfy regular expression pattern: [\\u0021-\\u007E]+");
+    }
+
+    @Test
+    void rotateWebhookCredentialsMissingArnAndOversizeMembers() {
+        assertAnswers("RotateWebhookCredentials", "{}",
+                "Value null at 'eventSourceArn' failed to satisfy constraint: Member must not be null");
+        assertAnswers("RotateWebhookCredentials",
+                "{\"EventSourceArn\":\"arn:aws:events:us-east-1:123456789012:event-sourcev2/webhook/x/abcdefghijklmnopqrstuvwxy\","
+                        + "\"Credential\":{\"StaticTokenSecretValue\":\"" + "a".repeat(513) + "\"}}",
+                "Value at 'credential.staticTokenSecretValue' failed to satisfy constraint: "
+                        + "Member must have length less than or equal to 512");
+        assertAnswers("RotateWebhookCredentials",
+                "{\"EventSourceArn\":\"arn:aws:events:us-east-1:123456789012:event-sourcev2/webhook/x/abcdefghijklmnopqrstuvwxy\","
+                        + "\"ClientToken\":\"" + "c".repeat(65) + "\"}",
+                "Value '" + "c".repeat(65) + "' at 'clientToken' failed to satisfy constraint: "
+                        + "Member must have length less than or equal to 64");
+    }
+
+    @Test
+    void rotateWebhookCredentialsAnswersSerializationExceptionForACredentialOfTheWrongType() {
+        assertSerializationException("RotateWebhookCredentials",
+                "{\"EventSourceArn\":\"arn:aws:events:us-east-1:123456789012:event-sourcev2/webhook/x/abcdefghijklmnopqrstuvwxy\","
+                        + "\"Credential\":\"secret\"}");
+    }
+
+    @Test
+    void rotateWebhookCredentialsAcceptsANullCredentialAndANullMember() {
+        assertDoesNotThrow(() -> EventBridgeV2RequestShapes.check("RotateWebhookCredentials", json(
+                "{\"EventSourceArn\":\"arn:aws:events:us-east-1:123456789012:event-sourcev2/webhook/x/abcdefghijklmnopqrstuvwxy\","
+                        + "\"Credential\":null}")));
+        assertDoesNotThrow(() -> EventBridgeV2RequestShapes.check("RotateWebhookCredentials", json(
+                "{\"EventSourceArn\":\"arn:aws:events:us-east-1:123456789012:event-sourcev2/webhook/x/abcdefghijklmnopqrstuvwxy\","
+                        + "\"Credential\":{\"StaticTokenSecretValue\":\"abcdef\",\"HmacSecretValue\":null}}")));
+    }
+
     private static void assertAnswers(String operation, String request, String... violations) {
         assertAnswers(operation, json(request), violations);
     }

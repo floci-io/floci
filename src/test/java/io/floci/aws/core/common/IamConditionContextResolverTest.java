@@ -1015,6 +1015,34 @@ class IamConditionContextResolverTest {
     }
 
     @Test
+    void aRolesTagsAreNotReadForPassRole() {
+        // The generated IAM condition-key table reads no resource tag for iam:PassRole: AWS warns that
+        // ResourceTag conditions with it "do not have reliable results". sts:AssumeRole reads both keys.
+        String role = "arn:aws:iam::123456789012:role/app";
+        IamConditionContextResolver reading = resolverReading(new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "iam";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Map<String, String> storedTags(String arn) {
+                return role.equals(arn) ? Map.of("Project", "Alpha") : Map.of();
+            }
+        });
+
+        assertNull(reading.resourceTags("iam:PassRole", role));
+        Map<String, List<String>> assumed = reading.resourceTags("sts:AssumeRole", role);
+        assertEquals(List.of("Alpha"), assumed.get("aws:ResourceTag/Project"));
+        assertEquals(List.of("Alpha"), assumed.get("iam:ResourceTag/Project"));
+    }
+
+    @Test
     void resourceTagsAreTheGeneratedKeysOfTheArnsTypeValuedFromItsServicesStoredTags() {
         String secret = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:app-AbCdEf";
         Map<String, String> held = new LinkedHashMap<>();
@@ -1038,6 +1066,8 @@ class IamConditionContextResolverTest {
         });
 
         Map<String, List<String>> tags = reading.resourceTags(secret);
+        // An action the IAM condition-key table reads every key for sees the same keys.
+        assertEquals(tags, reading.resourceTags("secretsmanager:GetSecretValue", secret));
         assertEquals(2, tags.size());
         assertEquals(List.of("prod", "dev"), tags.get("aws:ResourceTag/Environment"));
         assertEquals(List.of("prod", "dev"), tags.get("secretsmanager:resourcetag/environment"));

@@ -3743,6 +3743,9 @@ floci populates:
   the request account and the tags before any mutation. The table retains the source
   resource types so a secondary `RoleName`, such as on `AddRoleToInstanceProfile`, cannot
   supply the instance profile's tags. Missing targets carry no resource-tag values.
+  IAM's stored lookup answers the same tags for the user or role ARN a request is checked on,
+  in the account the ARN names, so `sts:AssumeRole`, which this table does not cover, sees the
+  role's tags too; on an IAM action both routes give the same values.
   Creation of the target, unsupported target types, and ARN/task-ID-based lookups are
   recorded in `notRead`. `PassRole` is a reasoned generator exception: the
   [IAM guide](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_tags.html) warns that

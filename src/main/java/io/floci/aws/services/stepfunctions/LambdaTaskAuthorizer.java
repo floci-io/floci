@@ -209,9 +209,11 @@ public class LambdaTaskAuthorizer {
         AwsArnUtils.Arn callerId = AwsArnUtils.parse(callerRoleArn);
         String roleAccount = AwsArnUtils.parse(targetRoleArn).accountId();
         List<List<String>> scpLevels = access.scpLevels(callerId.accountId());
-        Map<String, List<String>> context = IamConditionContextResolver.withGlobalContext(
-                Map.of("aws:PrincipalArn", List.of(callerRoleArn), "sts:ExternalId", List.of(stateMachineArn)),
-                targetRoleArn, AwsArnUtils.parse(stateMachineArn).region(), callerId.accountId(), roleAccount);
+        Map<String, List<String>> context = IamConditionContextResolver.withResourceTags(
+                IamConditionContextResolver.withGlobalContext(
+                        Map.of("aws:PrincipalArn", List.of(callerRoleArn), "sts:ExternalId", List.of(stateMachineArn)),
+                        targetRoleArn, AwsArnUtils.parse(stateMachineArn).region(), callerId.accountId(), roleAccount),
+                IamConditionContextResolver.resourceTagKeys(targetRoleArn, target.get().getTags()));
 
         // Step Functions assumes the execution role on the state machine's behalf, so the caller
         // is a session of it and carries AssumedRole as its aws:PrincipalType. That path mints no

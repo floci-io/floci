@@ -106,6 +106,9 @@ public class Environment {
     @JsonIgnore
     private String airflowAdminPassword;
 
+    @JsonIgnore
+    private String fernetKey;
+
     public Environment() {}
 
     public String getName() { return name; }
@@ -197,6 +200,9 @@ public class Environment {
 
     public String getAirflowAdminPassword() { return airflowAdminPassword; }
     public void setAirflowAdminPassword(String airflowAdminPassword) { this.airflowAdminPassword = airflowAdminPassword; }
+
+    public String getFernetKey() { return fernetKey; }
+    public void setFernetKey(String fernetKey) { this.fernetKey = fernetKey; }
 
     @RegisterForReflection
     @JsonIgnoreProperties(ignoreUnknown = true)

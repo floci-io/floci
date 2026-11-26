@@ -29,6 +29,7 @@ The AWS CLI calls it `aws eventsv2` and the SDKs `EventBridgeV2`.
 | `DescribeEventSource` | Return a webhook event source's configuration, URL, secret ARN, state and times |
 | `ListEventSources` | List the Region's event sources, or one event bus's, filtered by name prefix, a page at a time |
 | `UpdateEventSource` | Replace a webhook event source's configuration and description |
+| `RotateWebhookCredentials` | Replace the credential in a webhook event source's secret, with a given or a generated one |
 | `DeleteEventSource` | Delete a webhook event source and schedule its secret for deletion |
 | `PutEvents` | Publish events in the EventBridge envelope to an event bus |
 <!-- floci:actions:end -->
@@ -114,6 +115,13 @@ Floci serves event sources of the `WebhookEventsConfiguration` kind. A request w
 - `DescribeEventSource` returns `Configuration` as given, without `SecretValue`, `Username` and `Password`.
 - `UpdateEventSource` replaces the whole webhook configuration and keeps the URL, the secret and the
   authentication type. It does not accept credentials.
+- `RotateWebhookCredentials` replaces the credential in the secret and keeps the URL, the secret ARN and
+  `LastModifiedTime`. The new value becomes `AWSCURRENT` and the one it replaces `AWSPREVIOUS`. The webhook URL
+  keeps accepting the credential the last rotation replaced for 15 minutes. An earlier one is refused at once.
+  `Credential` must set the member of the source's authentication type, or be left out to generate a value.
+  Basic keeps its username. A repeat of a `ClientToken` of the source with the same request changes nothing.
+  Floci forgets a token 8 hours after its rotation. A rotation answers `InvalidStateException` (409) when the
+  secret is scheduled for deletion or deleted.
 - `KmsKeyIdentifier` is stored and returned. It is not used for the secret.
 - `DeleteEventSource` schedules the secret for deletion at once.
 - `DescribeEventSource` and `ListEventSources` do not return `Revoked`.
