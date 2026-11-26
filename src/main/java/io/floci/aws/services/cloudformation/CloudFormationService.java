@@ -66,7 +66,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -1446,9 +1445,7 @@ public class CloudFormationService implements ResourceProvider {
             return false;
         }
         if (CfnCreateOnlyProperties.hasSchema(resourceType)) {
-            return CfnCreateOnlyProperties.replacementPointers(resourceType).stream()
-                    .filter(pointer -> ReplacementDecider.under(pointer, property))
-                    .flatMap(pointer -> CfnCreateOnlyProperties.subtreesAt(pointer, props).stream())
+            return CfnCreateOnlyProperties.createOnlySubtrees(resourceType, props, property).stream()
                     .anyMatch(test);
         }
         for (Iterator<String> it = props.fieldNames(); it.hasNext(); ) {
@@ -1598,7 +1595,7 @@ public class CloudFormationService implements ResourceProvider {
                 return comparedChanged(resourceType, logicalId, props[0], props[1], property);
             }
             return CfnCreateOnlyProperties.replacementPointers(resourceType).stream()
-                    .filter(pointer -> under(pointer, property))
+                    .filter(pointer -> CfnCreateOnlyProperties.isUnder(pointer, property))
                     .anyMatch(pointer -> writtenPointerChanged(pointer, props[0], props[1]));
         }
 
@@ -1621,10 +1618,6 @@ public class CloudFormationService implements ResourceProvider {
                 }
             });
             return details;
-        }
-
-        private static boolean under(String pointer, String property) {
-            return property == null || pointer.equals(property) || pointer.startsWith(property + "/");
         }
 
         /** The block as written with every AWS::NoValue member left out, by the side's own conditions. */
@@ -1683,7 +1676,7 @@ public class CloudFormationService implements ResourceProvider {
             JsonNode digestedBefore = digested(before);
             JsonNode digestedAfter = digested(after);
             for (String pointer : CfnCreateOnlyProperties.replacementPointers(resourceType)) {
-                if (!under(pointer, property)) {
+                if (!CfnCreateOnlyProperties.isUnder(pointer, property)) {
                     continue;
                 }
                 boolean changed = noEvidence(pointer, before)
@@ -1856,8 +1849,8 @@ public class CloudFormationService implements ResourceProvider {
 
     /**
      * One change of a resource. {@code scope} and {@code details} are those of {@code
-     * DescribeChangeSet}: filled for a Modify that the template diff found, empty for an Add, a Remove, a nested
-     * stack and a resource that changes only because it reads a replaced resource or a changed attribute.
+     * DescribeChangeSet}: filled for a Modify, whether the template diff found it or the resource reads a replaced
+     * resource or a changed attribute, empty for an Add, a Remove and a nested stack.
      */
     public record ResourceChange(String action, String logicalResourceId, String physicalResourceId,
                                  String resourceType, String replacement,
@@ -1894,8 +1887,8 @@ public class CloudFormationService implements ResourceProvider {
             "Metadata", "DeletionPolicy", "UpdateReplacePolicy", "UpdatePolicy");
 
     /**
-     * The details of a modified resource: one entry per property and per resource-level attribute that
-     * differs, in the forms the diff compared ({@code comparedOld} and {@code comparedNew}, null when the
+     * The details of a resource the template diff found modified: one entry per property and per
+     * resource-level attribute that differs, in the forms the diff compared ({@code comparedOld} and {@code comparedNew}, null when the
      * template did not resolve and the definitions as written were diffed). See {@link #addDetails}.
      * {@code RequiresRecreation} is {@code Always} when the replacement decision's rule for the create-only
      * pointers at and under the property says the update recreates, and {@code Never} otherwise.
@@ -6277,31 +6270,39 @@ public class CloudFormationService implements ResourceProvider {
 
     private void collectDependencies(JsonNode node, Set<String> allIds, Set<String> deps,
                                      Map<String, Boolean> conditions) {
-        visitResourceReads(node, conditions, false, (id, attribute) -> {
+        visitResourceReads(node, conditions, false, (id, getAtt, subAttribute) -> {
             if (allIds.contains(id)) {
                 deps.add(id);
             }
         });
     }
 
-    /** A null attribute denotes a Ref. Attribute matching also checks both branches of an unknown condition. */
+    /**
+     * Receives one read of a resource: the raw {@code Fn::GetAtt} node when the template reads an attribute that
+     * way, so the engine's one attribute rule and its validation apply; the attribute text of a {@code Fn::Sub}
+     * variable {@code Id.Attribute}; neither for a Ref and for a Sub variable without an attribute.
+     */
+    private interface ResourceReadVisitor {
+        void read(String logicalId, JsonNode getAtt, String subAttribute);
+    }
+
+    /** Attribute matching also checks both branches of a condition that is not known. */
     private void visitResourceReads(JsonNode node, Map<String, Boolean> conditions, boolean bothIfUnknown,
-                                    BiConsumer<String, JsonNode> read) {
+                                    ResourceReadVisitor read) {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return;
         }
         if (node.isObject()) {
             if (node.has("Ref")) {
-                read.accept(node.get("Ref").asText(), null);
+                read.read(node.get("Ref").asText(), null, null);
                 return;
             }
             if (node.has("Fn::GetAtt")) {
                 JsonNode getAtt = node.get("Fn::GetAtt");
                 if (getAtt.isArray() && !getAtt.isEmpty()) {
-                    read.accept(getAtt.get(0).asText(), getAtt.path(1));
+                    read.read(getAtt.get(0).asText(), getAtt, null);
                 } else {
-                    String[] parts = getAtt.asText().split("\\.", 2);
-                    read.accept(parts[0], TextNode.valueOf(parts.length == 2 ? parts[1] : ""));
+                    read.read(getAtt.asText().split("\\.", 2)[0], getAtt, null);
                 }
                 return;
             }
@@ -6309,10 +6310,10 @@ public class CloudFormationService implements ResourceProvider {
                 JsonNode fnIf = node.get("Fn::If");
                 if (fnIf.isArray() && fnIf.size() == 3) {
                     String name = fnIf.get(0).asText();
-                    if (bothIfUnknown && !conditions.containsKey(name)) {
+                    if (bothIfUnknown && (conditions == null || !conditions.containsKey(name))) {
                         visitResourceReads(fnIf.get(1), conditions, true, read);
                     }
-                    boolean condition = conditions.getOrDefault(name, false);
+                    boolean condition = conditions != null && conditions.getOrDefault(name, false);
                     visitResourceReads(fnIf.get(condition ? 1 : 2), conditions, bothIfUnknown, read);
                     return;
                 }
@@ -6326,7 +6327,7 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     private void visitSubReads(JsonNode sub, Map<String, Boolean> conditions, boolean bothIfUnknown,
-                              BiConsumer<String, JsonNode> read) {
+                              ResourceReadVisitor read) {
         String template;
         Set<String> explicitVars = new HashSet<>();
 
@@ -6350,7 +6351,7 @@ public class CloudFormationService implements ResourceProvider {
             }
             int dot = varName.indexOf('.');
             String resourcePart = dot > 0 ? varName.substring(0, dot) : varName;
-            read.accept(resourcePart, dot > 0 ? TextNode.valueOf(varName.substring(dot + 1)) : null);
+            read.read(resourcePart, null, dot > 0 ? varName.substring(dot + 1) : null);
         }
     }
 
@@ -6370,9 +6371,9 @@ public class CloudFormationService implements ResourceProvider {
                                                    CloudFormationTemplateEngine engine) {
         Set<ResourceRead> reads = new LinkedHashSet<>();
         if (!replacedIds.isEmpty()) {
-            visitResourceReads(node, conditions, false, (id, attribute) -> {
+            visitResourceReads(node, conditions, false, (id, getAtt, subAttribute) -> {
                 if (replacedIds.contains(id)) {
-                    String name = attributeName(attribute, engine);
+                    String name = readAttribute(getAtt, subAttribute, engine);
                     if (name == null || !name.isEmpty()) {
                         reads.add(new ResourceRead(id, name));
                     }
@@ -6380,23 +6381,19 @@ public class CloudFormationService implements ResourceProvider {
             });
         }
         if (!changedAttributes.isEmpty()) {
-            visitResourceReads(node, conditions, true, (id, attribute) -> {
-                if (attribute != null && changedAttributes.containsKey(id)) {
-                    String name = attributeName(attribute, engine);
-                    if (changedAttributes.get(id).contains(name)) {
-                        reads.add(new ResourceRead(id, name));
-                    }
+            visitResourceReads(node, conditions, true, (id, getAtt, subAttribute) -> {
+                String name = readAttribute(getAtt, subAttribute, engine);
+                if (name != null && changedAttributes.getOrDefault(id, Set.of()).contains(name)) {
+                    reads.add(new ResourceRead(id, name));
                 }
             });
         }
         return reads;
     }
 
-    private static String attributeName(JsonNode attribute, CloudFormationTemplateEngine engine) {
-        if (attribute == null) {
-            return null;
-        }
-        return attribute.has("Ref") ? engine.resolveWithoutDynamicReferences(attribute) : attribute.asText();
+    /** The attribute of a read by the engine's rule: null for a Ref, empty when a GetAtt names none. */
+    private static String readAttribute(JsonNode getAtt, String subAttribute, CloudFormationTemplateEngine engine) {
+        return getAtt != null ? engine.getAttAttributeName(getAtt) : subAttribute;
     }
 
     private Set<String> expectedChangedAttributes(String resourceType, JsonNode oldDef, JsonNode newDef) {
@@ -6423,82 +6420,19 @@ public class CloudFormationService implements ResourceProvider {
      */
     private boolean referencesAnyAttribute(JsonNode node, String targetLogicalId, Set<String> targetAttrNames,
                                            Map<String, Boolean> conditions, CloudFormationTemplateEngine engine) {
-        if (node == null || node.isNull() || node.isMissingNode()) {
-            return false;
-        }
-        if (node.isObject()) {
-            if (node.has("Fn::GetAtt")
-                    && engine.referencesGetAttAttribute(node.get("Fn::GetAtt"), targetLogicalId, targetAttrNames)) {
-                return true;
+        boolean[] found = {false};
+        visitResourceReads(node, conditions, true, (id, getAtt, subAttribute) -> {
+            // The first match ends the check, as before: a GetAtt after it is not validated.
+            if (found[0]) {
+                return;
             }
-            if (node.has("Fn::If")) {
-                JsonNode fnIf = node.get("Fn::If");
-                if (fnIf.isArray() && fnIf.size() == 3) {
-                    if (conditions != null && conditions.containsKey(fnIf.get(0).asText())) {
-                        boolean condition = conditions.get(fnIf.get(0).asText());
-                        return referencesAnyAttribute(fnIf.get(condition ? 1 : 2), targetLogicalId, targetAttrNames,
-                                conditions, engine);
-                    }
-                    return referencesAnyAttribute(fnIf.get(1), targetLogicalId, targetAttrNames, conditions, engine)
-                            || referencesAnyAttribute(fnIf.get(2), targetLogicalId, targetAttrNames, conditions, engine);
-                }
+            if (getAtt != null) {
+                found[0] = engine.referencesGetAttAttribute(getAtt, targetLogicalId, targetAttrNames);
+            } else if (subAttribute != null) {
+                found[0] = targetLogicalId.equals(id) && targetAttrNames.contains(subAttribute);
             }
-            if (node.has("Fn::Sub")) {
-                if (subReferencesAttribute(node.get("Fn::Sub"), targetLogicalId, targetAttrNames, conditions, engine)) {
-                    return true;
-                }
-            }
-            for (Iterator<JsonNode> it = node.elements(); it.hasNext(); ) {
-                if (referencesAnyAttribute(it.next(), targetLogicalId, targetAttrNames, conditions, engine)) {
-                    return true;
-                }
-            }
-            return false;
-        } else if (node.isArray()) {
-            for (JsonNode item : node) {
-                if (referencesAnyAttribute(item, targetLogicalId, targetAttrNames, conditions, engine)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private boolean subReferencesAttribute(JsonNode sub, String targetLogicalId, Set<String> targetAttrNames,
-                                           Map<String, Boolean> conditions, CloudFormationTemplateEngine engine) {
-        String template;
-        Set<String> explicitVars = new HashSet<>();
-
-        if (sub.isTextual()) {
-            template = sub.textValue();
-        } else if (sub.isArray() && sub.size() >= 1) {
-            template = sub.get(0).asText();
-            if (sub.size() >= 2 && sub.get(1).isObject()) {
-                sub.get(1).fieldNames().forEachRemaining(explicitVars::add);
-                if (referencesAnyAttribute(sub.get(1), targetLogicalId, targetAttrNames, conditions, engine)) {
-                    return true;
-                }
-            }
-        } else {
-            return false;
-        }
-
-        Matcher matcher = SUB_VAR_PATTERN.matcher(template);
-        while (matcher.find()) {
-            String varName = matcher.group(1);
-            if (varName.startsWith("AWS::") || explicitVars.contains(varName)) {
-                continue;
-            }
-            int dot = varName.indexOf('.');
-            if (dot > 0) {
-                String resourcePart = varName.substring(0, dot);
-                String attrPart = varName.substring(dot + 1);
-                if (targetLogicalId.equals(resourcePart) && targetAttrNames.contains(attrPart)) {
-                    return true;
-                }
-            }
-        }
-        return false;
+        });
+        return found[0];
     }
 
     private static String stackStorageKey(String stackName, String region) {

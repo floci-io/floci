@@ -946,28 +946,41 @@ public class CloudFormationTemplateEngine {
     }
 
     private String[] getAttParts(JsonNode getAtt) {
-        String errorMessage = "Template error: every Fn::GetAtt object requires two non-empty parameters, "
-                + "the resource name and the resource attribute";
-        String[] parts;
+        String[] parts = getAttOperands(getAtt);
+        if (parts == null) {
+            return null;
+        }
+        if (parts.length != 2 || parts[0].isEmpty() || parts[1].isEmpty()) {
+            throw new AwsException("ValidationError", getAtt.isTextual()
+                    ? "Template error: if specifying one argument to Fn::GetAtt, "
+                            + "that argument must be a non-empty string in format <LogicalId>.<Attribute>"
+                    : "Template error: every Fn::GetAtt object requires two non-empty parameters, "
+                            + "the resource name and the resource attribute", 400);
+        }
+        return parts;
+    }
+
+    /**
+     * The resource and the attribute a GetAtt names, as written: a Ref-valued attribute is resolved. Null when
+     * the node is no GetAtt form; an array of the wrong size gives no operands, and a text without a dot gives one.
+     */
+    private String[] getAttOperands(JsonNode getAtt) {
         if (getAtt.isArray()) {
             if (getAtt.size() != 2) {
-                throw new AwsException("ValidationError", errorMessage, 400);
+                return new String[0];
             }
             JsonNode attribute = getAtt.get(1);
             String attributeName = attribute.has("Ref")
                     ? resolveRef(attribute.get("Ref").asText()) : attribute.asText();
-            parts = new String[] {getAtt.get(0).asText(), attributeName};
-        } else if (getAtt.isTextual()) {
-            errorMessage = "Template error: if specifying one argument to Fn::GetAtt, "
-                    + "that argument must be a non-empty string in format <LogicalId>.<Attribute>";
-            parts = getAtt.textValue().split("\\.", 2);
-        } else {
-            return null;
+            return new String[] {getAtt.get(0).asText(), attributeName};
         }
-        if (parts.length != 2 || parts[0].isEmpty() || parts[1].isEmpty()) {
-            throw new AwsException("ValidationError", errorMessage, 400);
-        }
-        return parts;
+        return getAtt.isTextual() ? getAtt.textValue().split("\\.", 2) : null;
+    }
+
+    /** The attribute a GetAtt reads by the rule of {@link #getAttParts}, empty when the node names none. */
+    public String getAttAttributeName(JsonNode getAtt) {
+        String[] parts = getAttOperands(getAtt);
+        return parts != null && parts.length == 2 ? parts[1] : "";
     }
 
     private Map<String, String> findAttributeSource(String logicalId, String attrName) {
