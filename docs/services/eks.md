@@ -503,7 +503,8 @@ launches nodes on AWS. Floci checks every 10 seconds.
   pod's shutdown, evicted pods go at once), its node is taken out and its instance terminated. A node a removal
   that was called off or failed left with the taint, and that isn't being removed, has it taken off by the next pass. AWS removed an empty node within 90
   seconds. A pool whose `consolidateAfter` is `Never` keeps its nodes. Each pass removes no more of a pool's nodes
-  than its disruption budgets that cover emptiness allow, less its nodes already not Ready or being deleted (a percentage rounded up, 10% without a budget; one whose
+  than its disruption budgets that cover emptiness allow (a percentage is of its joined nodes, as Karpenter leaves
+  out nodes not yet initialized), less its nodes already not Ready or being deleted (a percentage rounded up, 10% without a budget; one whose
   `reasons` leave out `Empty` doesn't count); a budget with a `schedule` is
   left out, as Floci doesn't model its window. How long a node has been empty is kept in memory, so a restart starts
   the wait again.

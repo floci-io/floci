@@ -45,6 +45,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -458,6 +459,48 @@ class EksAutoModeComputeTest {
         compute.reconcile(cluster, REGION);
         verify(clusterManager).removeJoinedNode(cluster, empty);
         verify(clusterManager, never()).removeJoinedNode(cluster, sick);
+    }
+
+    /**
+     * A budget's percentage is of the pool's joined nodes: one still joining isn't counted, as Karpenter leaves out
+     * nodes that aren't initialized. Ten empty joined nodes and one joining, at 10%, lose one node a pass, not two.
+     */
+    @Test
+    void aBudgetsPercentageLeavesOutNodesStillJoining() {
+        List<Instance> instances = new ArrayList<>();
+        StringBuilder nodes = new StringBuilder("{\"items\": [");
+        for (int i = 0; i < 11; i++) {
+            Instance instance = new Instance();
+            instance.setInstanceId("i-" + i);
+            instance.setInstanceType("c7a.large");
+            instance.setLaunchTime(clock.instant());
+            instance.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
+            when(clusterManager.deriveInstanceNodeName(instance, REGION)).thenReturn("node-" + i);
+            instances.add(instance);
+            if (i < 10) {
+                nodes.append(i == 0 ? "" : ",").append("{\"metadata\": {\"name\": \"node-").append(i)
+                        .append("\", \"labels\": {}}}");
+            }
+        }
+        Reservation reservation = new Reservation();
+        reservation.setInstances(instances);
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenReturn(List.of(reservation));
+        CatalogInstanceType large = new CatalogInstanceType();
+        large.instanceType = "c7a.large";
+        large.vcpu = 2;
+        large.memoryMib = 4096;
+        large.supportedArchitectures = List.of("x86_64");
+        when(instanceTypes.find("c7a.large")).thenReturn(Optional.of(large));
+        lists.put("pods", "{\"items\": []}");
+        lists.put("nodes", nodes.append("]}").toString());
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"0s\", \"budgets\": [{\"nodes\": \"10%\"}]}, "
+                        + "\"template\""));
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
+        verify(clusterManager, times(1)).removeJoinedNode(eq(cluster), any());
     }
 
     @Test

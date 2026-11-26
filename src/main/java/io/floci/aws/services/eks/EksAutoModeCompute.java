@@ -318,8 +318,14 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         Map<String, Instant> since = emptySince.computeIfAbsent(cluster.getArn(), arn -> new HashMap<>());
         // A node that runs a workload again, or that a pending pod counts on, waits from the start next time.
         since.keySet().removeIf(id -> !empty.containsKey(id) || counted.contains(id));
+        // A budget's percentage is of the pool's joined nodes: one still joining isn't counted at all, as Karpenter
+        // leaves out nodes that aren't initialized yet.
         Map<String, Integer> poolSizes = new HashMap<>();
-        launched.forEach(instance -> poolSizes.merge(String.valueOf(tag(instance, POOL_TAG)), 1, Integer::sum));
+        for (Instance instance : launched) {
+            if (nodesByName.containsKey(clusterManager.deriveInstanceNodeName(instance, region))) {
+                poolSizes.merge(String.valueOf(tag(instance, POOL_TAG)), 1, Integer::sum);
+            }
+        }
         // As Karpenter counts a budget: the pool's nodes already unavailable, not Ready or being deleted, use it up
         // first. One this removal tainted before is the same removal tried again, not another.
         Map<String, Integer> removed = new HashMap<>();

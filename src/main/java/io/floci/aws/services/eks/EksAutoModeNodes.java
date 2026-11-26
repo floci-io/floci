@@ -429,10 +429,6 @@ final class EksAutoModeNodes {
         return Optional.empty();
     }
 
-    /**
-     * The CPU (millicores) and memory (bytes) the DaemonSet pods that would run on a node of {@code labels} and
-     * {@code taints} request: those whose node selector, required node affinity and tolerations accept it.
-     */
     /** A node's labels with the {@code topology.kubernetes.io/region} it joins with, when the region is known. */
     static Map<String, String> withRegion(Map<String, String> labels, String region) {
         if (region == null) {
@@ -443,6 +439,10 @@ final class EksAutoModeNodes {
         return all;
     }
 
+    /**
+     * The CPU (millicores) and memory (bytes) the DaemonSet pods that would run on a node of {@code labels} and
+     * {@code taints} request: those whose node selector, required node affinity and tolerations accept it.
+     */
     static long[] daemonRequests(List<PendingPod> daemons, Map<String, String> labels, List<Taint> taints) {
         long[] total = new long[2];
         for (PendingPod daemon : daemons) {
@@ -464,7 +464,7 @@ final class EksAutoModeNodes {
         List<PendingPod> daemons = new ArrayList<>();
         for (JsonNode item : list.path("items")) {
             JsonNode spec = item.path("spec").path("template").path("spec");
-            Optional<NodeAsk> ask = nodeAsk(spec);
+            Optional<NodeAsk> ask = nodeAsk(spec, false);
             if (ask.isEmpty()) {
                 continue;
             }
@@ -485,13 +485,18 @@ final class EksAutoModeNodes {
      * What a pod spec asks of a node Auto Mode launches, or empty when no such node could take it. The required node
      * affinity terms are alternatives: one with {@code matchFields}, which names nodes and so none Auto Mode
      * launches, or with no expressions, which Kubernetes matches with no node, is no alternative for a new node, and
-     * a spec all of whose terms are such asks for none.
+     * a spec all of whose terms are such asks for none. With {@code refuseMatchFields}, a spec with any
+     * {@code matchFields} term asks for none, as Karpenter refuses a pending pod with one ("node selector term with
+     * matchFields is not supported") rather than read its other terms.
      */
-    private static Optional<NodeAsk> nodeAsk(JsonNode spec) {
+    private static Optional<NodeAsk> nodeAsk(JsonNode spec, boolean refuseMatchFields) {
         JsonNode termList = spec.path("affinity").path("nodeAffinity")
                 .path("requiredDuringSchedulingIgnoredDuringExecution").path("nodeSelectorTerms");
         List<List<Requirement>> terms = new ArrayList<>();
         for (JsonNode term : termList) {
+            if (refuseMatchFields && !term.path("matchFields").isEmpty()) {
+                return Optional.empty();
+            }
             if (term.path("matchFields").isEmpty() && !term.path("matchExpressions").isEmpty()) {
                 terms.add(requirements(term.path("matchExpressions")));
             }
@@ -542,8 +547,9 @@ final class EksAutoModeNodes {
 
     /**
      * The pods of {@code kubectl get pods -A -o json} the scheduler marked unschedulable and a new node could take.
-     * As Karpenter does, a DaemonSet's pods are left out, as are pods none of whose required node affinity terms a
-     * new node could match: each term pins named nodes ({@code matchFields}) or is empty (see {@link #nodeAsk}).
+     * As Karpenter does, a DaemonSet's pods are left out, as are pods with a required node affinity term that pins
+     * named nodes ({@code matchFields}), which Karpenter refuses, and pods whose terms are all empty, which match no
+     * node (see {@link #nodeAsk}).
      */
     static List<PendingPod> unschedulablePods(JsonNode list) {
         List<PendingPod> pods = new ArrayList<>();
@@ -566,7 +572,7 @@ final class EksAutoModeNodes {
                 daemonSet |= "DaemonSet".equals(owner.path("kind").asText());
             }
             JsonNode spec = item.path("spec");
-            Optional<NodeAsk> ask = nodeAsk(spec);
+            Optional<NodeAsk> ask = nodeAsk(spec, true);
             if (daemonSet || ask.isEmpty()) {
                 continue;
             }

@@ -108,11 +108,11 @@ class EksAutoModeNodesTest {
     }
 
     /**
-     * A pod's required node affinity terms are alternatives: one pinned to a named node is no alternative for a new
-     * node, but another the new node could match keeps the pod, with that term only.
+     * A pending pod with a {@code matchFields} term is left out, whatever its other terms, as Karpenter refuses it
+     * ("node selector term with matchFields is not supported"); a DaemonSet reads its terms as alternatives instead.
      */
     @Test
-    void aPodWithAnotherAffinityTermThanItsPinnedOneGetsANode() throws Exception {
+    void aPodWithAMatchFieldsTermIsLeftOutWhateverItsOtherTerms() throws Exception {
         String pods = """
                 {"items": [{"metadata": {"namespace": "default", "name": "either"},
                   "spec": {"affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
@@ -122,10 +122,7 @@ class EksAutoModeNodesTest {
                   "status": {"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "False",
                              "reason": "Unschedulable"}]}}]}""";
 
-        PendingPod either = EksAutoModeNodes.unschedulablePods(json(pods)).getFirst();
-
-        assertEquals(List.of(List.of(new Requirement("kubernetes.io/arch", "In", List.of("arm64")))),
-                either.affinityTerms());
+        assertEquals(List.of(), EksAutoModeNodes.unschedulablePods(json(pods)));
     }
 
     @Test
