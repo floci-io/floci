@@ -8,6 +8,7 @@
     "DeleteEventSource": "DeleteEventSourceRequest",
     "DescribeEventSource": "DescribeEventSourceRequest",
     "ListEventSources": "ListEventSourcesRequest",
+    "RotateWebhookCredentials": "RotateWebhookCredentialsRequest",
     "UpdateEventSource": "UpdateEventSourceRequest"
   },
   "shapes": {
@@ -195,6 +196,17 @@
       "max": 1600,
       "pattern": "arn:aws(-[a-z0-9]+)*:iam::\\d{12}:role\\/[\\w+=,.@/-]+"
     },
+    "RotateWebhookCredentialsRequest": {
+      "type": "structure",
+      "required": [
+        "EventSourceArn"
+      ],
+      "members": {
+        "Credential": "WebhookCredential",
+        "EventSourceArn": "WebhookEventSourceArn",
+        "ClientToken": "ClientToken"
+      }
+    },
     "TagKey": {
       "type": "string",
       "min": 1,
@@ -240,6 +252,14 @@
         "Username": "WebhookUsername"
       }
     },
+    "WebhookCredential": {
+      "type": "structure",
+      "members": {
+        "StaticTokenSecretValue": "WebhookSecretValue",
+        "BasicHttpPassword": "WebhookSecretValue",
+        "HmacSecretValue": "WebhookSecretValue"
+      }
+    },
     "WebhookDeduplicationConfiguration": {
       "type": "structure",
       "required": [
@@ -260,6 +280,12 @@
       "min": 1,
       "max": 64,
       "pattern": "[\\u0020-\\u007E]+"
+    },
+    "WebhookEventSourceArn": {
+      "type": "string",
+      "min": 1,
+      "max": 1011,
+      "pattern": "arn:aws(-[a-z0-9]+)*:events:[a-z][a-z0-9]*(-[a-z0-9]+)*:([0-9]{12}):event-sourcev2\\/webhook\\/[A-Za-z0-9][\\.\\-_A-Za-z0-9]{0,255}\\/[a-z0-9]{25}"
     },
     "WebhookEventsSourceConfiguration": {
       "type": "structure",

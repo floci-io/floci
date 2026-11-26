@@ -22,6 +22,11 @@ final class EventBridgeV2RequestShapes {
             "aws/eventbridgev2-request-shapes.json", "EventBridge V2 request shapes", new Messages(),
             new RequestConstraintCheck.ViolationOrder(true, true));
 
+    /** Every string member of RotateWebhookCredentials reports its length before its pattern. */
+    private static final RequestConstraintCheck LENGTH_FIRST_CHECK = RequestConstraintCheck.load(
+            "aws/eventbridgev2-request-shapes.json", "EventBridge V2 request shapes", new Messages(),
+            new RequestConstraintCheck.ViolationOrder(false, true));
+
     private EventBridgeV2RequestShapes() {
     }
 
@@ -31,7 +36,8 @@ final class EventBridgeV2RequestShapes {
     }
 
     static void check(String operation, JsonNode request) {
-        List<String> violations = CHECK.violations(operation, withoutWhsecPrefix(request));
+        RequestConstraintCheck check = "RotateWebhookCredentials".equals(operation) ? LENGTH_FIRST_CHECK : CHECK;
+        List<String> violations = check.violations(operation, withoutWhsecPrefix(request));
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.exception("InvalidInputException",
                     violations.subList(0, Math.min(violations.size(), MAX_VIOLATIONS)));

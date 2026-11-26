@@ -57,6 +57,7 @@ public class EventBridgeV2Handler {
             case "DescribeEventSource" -> handleDescribeEventSource(request, region);
             case "ListEventSources" -> handleListEventSources(request, region);
             case "UpdateEventSource" -> handleUpdateEventSource(request, region);
+            case "RotateWebhookCredentials" -> handleRotateWebhookCredentials(request, region);
             case "DeleteEventSource" -> handleDeleteEventSource(request, region);
             case "PutEvents" -> handlePutEvents(request, region);
             default -> throw new AwsException("UnsupportedOperation",
@@ -230,6 +231,12 @@ public class EventBridgeV2Handler {
         EventSourceV2 source = service.updateEventSource(request, region);
         ObjectNode response = eventSourceIdentity(source);
         response.put("LastModifiedTime", epochSeconds(source.getLastModifiedTime()));
+        return Response.ok(response).build();
+    }
+
+    private Response handleRotateWebhookCredentials(JsonNode request, String region) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("SecretArn", service.rotateWebhookCredentials(request, region));
         return Response.ok(response).build();
     }
 
