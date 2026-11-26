@@ -1139,6 +1139,8 @@ class Ec2ContainerManagerTest {
         // API decoding and guest execution share a budget of at most four active decompressions.
         int concurrentLaunches = 12;
         CountDownLatch firstFourDecompressions = new CountDownLatch(4);
+        CountDownLatch fifthDecompression = new CountDownLatch(1);
+        CountDownLatch releaseDecompressions = new CountDownLatch(1);
         AtomicInteger totalDecompressions = new AtomicInteger(0);
         AtomicInteger active = new AtomicInteger(0);
         AtomicInteger peakActive = new AtomicInteger(0);
@@ -1157,8 +1159,11 @@ class Ec2ContainerManagerTest {
             peakActive.accumulateAndGet(now, Math::max);
             try {
                 firstFourDecompressions.countDown();
-                assertTrue(firstFourDecompressions.await(10, TimeUnit.SECONDS),
-                        "four decompressions did not enter the shared budget concurrently");
+                if (now > 4) {
+                    fifthDecompression.countDown();
+                }
+                assertTrue(releaseDecompressions.await(10, TimeUnit.SECONDS),
+                        "the test did not release the admitted decompressions");
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 throw new AssertionError("interrupted while waiting for concurrent decompressions", ie);
@@ -1183,10 +1188,19 @@ class Ec2ContainerManagerTest {
                     futures.add(pool.submit(() -> List.of(Ec2UserDataDecoder.decode(gzipped))));
                 }
             }
+            try {
+                assertTrue(firstFourDecompressions.await(10, TimeUnit.SECONDS),
+                        "four decompressions did not enter the shared budget concurrently");
+                assertFalse(fifthDecompression.await(1, TimeUnit.SECONDS),
+                        "a fifth decompression entered while four held the shared budget");
+            } finally {
+                releaseDecompressions.countDown();
+            }
             for (Future<List<String>> future : futures) {
                 results.add(future.get(30, TimeUnit.SECONDS));
             }
         } finally {
+            releaseDecompressions.countDown();
             try {
                 pool.shutdownNow();
                 assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
