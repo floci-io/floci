@@ -14,8 +14,10 @@ import com.github.dockerjava.api.command.InspectExecResponse;
 import com.github.dockerjava.api.command.ListContainersCmd;
 import com.github.dockerjava.api.command.PingCmd;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
+import com.github.dockerjava.api.command.RestartContainerCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
 import com.github.dockerjava.api.command.StopContainerCmd;
+import com.github.dockerjava.api.command.WaitContainerCmd;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.model.AccessMode;
 import com.github.dockerjava.api.model.Bind;
@@ -27,6 +29,7 @@ import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Info;
 import com.github.dockerjava.api.model.NetworkSettings;
 import com.github.dockerjava.api.model.StreamType;
+import com.github.dockerjava.api.model.WaitResponse;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
@@ -34,6 +37,7 @@ import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerExecStubs;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
+import io.floci.aws.core.common.docker.ContainerLiveness;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.core.common.docker.ContainerSpec;
@@ -1718,6 +1722,145 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void aGuestThatShutsDownWhileRunningIsReported() throws Exception {
+        LaunchHarness harness = launchHarness();
+        List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        harness.manager.setGuestShutdownHandler(shutDown::add);
+        Instance instance = launchRunningInstance(harness, "i-guesthalt", exitWatches);
+
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        exitWatches.getLast().onNext(exitStatus(130));
+
+        assertEquals(List.of(instance), shutDown);
+    }
+
+    @Test
+    void aGuestShutdownIsReportedWhenDockerAnswersOnlyOnASecondCheck() throws Exception {
+        LaunchHarness harness = launchHarness();
+        List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        harness.manager.setGuestShutdownHandler(shutDown::add);
+        Instance instance = launchRunningInstance(harness, "i-flakyprobe", exitWatches);
+
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID))
+                .thenReturn(ContainerLiveness.UNKNOWN, ContainerLiveness.NOT_RUNNING);
+        exitWatches.getLast().onNext(exitStatus(130));
+
+        assertEquals(List.of(instance), shutDown);
+    }
+
+    @Test
+    void aGuestThatShutsDownAfterAStartIsReported() throws Exception {
+        LaunchHarness harness = launchHarness();
+        List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        harness.manager.setGuestShutdownHandler(shutDown::add);
+        when(harness.dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(mock(StopContainerCmd.class, RETURNS_SELF));
+        when(harness.dockerClient.startContainerCmd(TEST_CONTAINER_ID)).thenReturn(mock(StartContainerCmd.class));
+        Instance instance = launchRunningInstance(harness, "i-restarted", exitWatches);
+        harness.manager.stop(instance);
+        awaitUntil(() -> "stopped".equals(instance.getState().getName()), Duration.ofSeconds(5));
+
+        harness.manager.start(instance);
+        awaitUntil(() -> exitWatches.size() == 2, Duration.ofSeconds(5));
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        exitWatches.getLast().onNext(exitStatus(130));
+
+        assertEquals(List.of(instance), shutDown);
+    }
+
+    @Test
+    void aRebootIsNotReportedAsAGuestShutdown() throws Exception {
+        LaunchHarness harness = launchHarness();
+        List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        harness.manager.setGuestShutdownHandler(shutDown::add);
+        Instance instance = launchRunningInstance(harness, "i-reboot", exitWatches);
+        RestartContainerCmd restart = mock(RestartContainerCmd.class, RETURNS_SELF);
+        when(harness.dockerClient.restartContainerCmd(TEST_CONTAINER_ID)).thenReturn(restart);
+        ResultCallback<WaitResponse> beforeReboot = exitWatches.getLast();
+        when(restart.exec()).thenAnswer(invocation -> {
+            when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
+            beforeReboot.onNext(exitStatus(0));
+            when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.RUNNING);
+            return null;
+        });
+
+        harness.manager.reboot(instance);
+        awaitUntil(() -> exitWatches.size() == 2, Duration.ofSeconds(5));
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        exitWatches.getLast().onNext(exitStatus(130));
+
+        assertEquals(1, shutDown.size(), "only the exit after the reboot is the guest's");
+    }
+
+    @Test
+    void aRebootRequestedWhileAnotherRunsIsNotReportedAsAGuestShutdown() throws Exception {
+        LaunchHarness harness = launchHarness();
+        List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        harness.manager.setGuestShutdownHandler(shutDown::add);
+        Instance instance = launchRunningInstance(harness, "i-tworeboots", exitWatches);
+        RestartContainerCmd restart = mock(RestartContainerCmd.class, RETURNS_SELF);
+        when(harness.dockerClient.restartContainerCmd(TEST_CONTAINER_ID)).thenReturn(restart);
+        CountDownLatch firstRestartMayFinish = new CountDownLatch(1);
+        AtomicInteger restarts = new AtomicInteger();
+        when(restart.exec()).thenAnswer(invocation -> {
+            if (restarts.incrementAndGet() == 1) {
+                firstRestartMayFinish.await();
+                return null;
+            }
+            // The second restart's exit reaches the watch the first reboot re-armed.
+            awaitUntil(() -> exitWatches.size() >= 2, Duration.ofSeconds(5));
+            when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
+            exitWatches.getLast().onNext(exitStatus(0));
+            when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.RUNNING);
+            return null;
+        });
+
+        harness.manager.reboot(instance);
+        awaitUntil(() -> restarts.get() == 1, Duration.ofSeconds(5));
+        harness.manager.reboot(instance);
+        firstRestartMayFinish.countDown();
+        awaitUntil(() -> exitWatches.size() == 3, Duration.ofSeconds(10));
+
+        assertEquals(List.of(), shutDown);
+    }
+
+    @Test
+    void anExitAfterAStopThroughFlociIsNotReportedAsAGuestShutdown() throws Exception {
+        LaunchHarness harness = launchHarness();
+        List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        harness.manager.setGuestShutdownHandler(shutDown::add);
+        when(harness.dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(mock(StopContainerCmd.class, RETURNS_SELF));
+        Instance instance = launchRunningInstance(harness, "i-apistop", exitWatches);
+
+        harness.manager.stop(instance);
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        exitWatches.getLast().onNext(exitStatus(0));
+
+        assertEquals(List.of(), shutDown);
+    }
+
+    @Test
+    void anExitWhileFlociShutsDownIsNotReportedAsAGuestShutdown() throws Exception {
+        LaunchHarness harness = launchHarness();
+        List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        harness.manager.setGuestShutdownHandler(shutDown::add);
+        when(harness.dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(mock(StopContainerCmd.class, RETURNS_SELF));
+        Instance instance = launchRunningInstance(harness, "i-flocistop", exitWatches);
+
+        harness.manager.stopForShutdown(instance);
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        exitWatches.getLast().onNext(exitStatus(0));
+
+        assertEquals(List.of(), shutDown);
+    }
+
+    @Test
     void launchLabelsContainerWithResourceIdentity() throws Exception {
         LaunchHarness harness = launchHarness();
         harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
@@ -2685,6 +2828,38 @@ class Ec2ContainerManagerTest {
 
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
         return execCreate;
+    }
+
+    private static List<ResultCallback<WaitResponse>> stubExitWatches(LaunchHarness harness) {
+        List<ResultCallback<WaitResponse>> watches = new CopyOnWriteArrayList<>();
+        WaitContainerCmd wait = mock(WaitContainerCmd.class, RETURNS_SELF);
+        when(harness.streamingDockerClient.waitContainerCmd(TEST_CONTAINER_ID)).thenReturn(wait);
+        when(wait.exec(any())).thenAnswer(invocation -> {
+            ResultCallback<WaitResponse> callback = invocation.getArgument(0);
+            watches.add(callback);
+            return callback;
+        });
+        return watches;
+    }
+
+    private static Instance launchRunningInstance(LaunchHarness harness, String instanceId,
+                                                  List<ResultCallback<WaitResponse>> exitWatches) throws Exception {
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse response = inspectResponse("192.168.215.42");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(response);
+        Instance instance = instance(instanceId);
+        harness.manager.launch(instance, ResolvedAmiImage.minimal("ubuntu:24.04"), null, "us-west-2");
+        awaitUntil(() -> !exitWatches.isEmpty(), Duration.ofSeconds(5));
+        assertEquals("running", instance.getState().getName());
+        return instance;
+    }
+
+    private static WaitResponse exitStatus(int statusCode) {
+        WaitResponse response = mock(WaitResponse.class);
+        when(response.getStatusCode()).thenReturn(statusCode);
+        return response;
     }
 
     private static LaunchHarness launchHarness() {

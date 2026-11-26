@@ -106,7 +106,7 @@ class Ec2RunInstancesPublicIpParamTest {
                 nullable(Boolean.class), nullable(String.class), anyInt(), nullable(String.class),
                 nullable(LaunchTemplateData.MetadataOptions.class), nullable(String.class), nullable(String.class), eq(false),
                 nullable(String.class), nullable(String.class), nullable(List.class), eq(false), nullable(String.class),
-                nullable(LaunchTemplateData.CapacityReservationSpecification.class)))
+                nullable(LaunchTemplateData.CapacityReservationSpecification.class), nullable(String.class)))
                 .thenReturn(new Reservation());
         handler(service).handle("RunInstances", p, REGION);
 
@@ -118,7 +118,7 @@ class Ec2RunInstancesPublicIpParamTest {
                 associatePublicIp.capture(), nullable(String.class), anyInt(), nullable(String.class),
                 nullable(LaunchTemplateData.MetadataOptions.class), nullable(String.class), nullable(String.class), eq(false),
                 nullable(String.class), nullable(String.class), nullable(List.class), eq(false), nullable(String.class),
-                nullable(LaunchTemplateData.CapacityReservationSpecification.class));
+                nullable(LaunchTemplateData.CapacityReservationSpecification.class), nullable(String.class));
         return new Forwarded(groups.getValue(), associatePublicIp.getValue());
     }
 

@@ -115,7 +115,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     /**
      * Nanosecond clock the grace is measured on, a package-private constructor argument so a test
      * can advance it and simulate a grace expiry without waiting it out in real time, as
-     * {@code LambdaExitWatcher}'s {@code nanoClock} does.
+     * {@code ContainerExitWatcher}'s {@code nanoClock} does.
      */
     private final LongSupplier unschedulableClock;
     private final AtomicBoolean caConfigMapApplied = new AtomicBoolean(false);
