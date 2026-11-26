@@ -89,7 +89,7 @@ class EventsArchiveCfnProvisionerTest {
         when(events.describeArchive(anyString(), eq(REGION))).thenAnswer(i -> {
             Archive archive = archives.get(i.<String>getArgument(0));
             if (archive == null) {
-                throw new AwsException("ResourceNotFoundException", "Archive not found: " + i.getArgument(0), 400);
+                throw new AwsException("ResourceNotFoundException", "Archive " + i.getArgument(0) + " does not exist.", 400);
             }
             return archive;
         });
