@@ -102,7 +102,7 @@ public class ContainerLifecycleManager {
     private final LongSupplier nanoTime;
     private final CreateWait createWait;
     private final GelfLogListener gelfLogListener;
-    private final SshDockerTunnel sshTunnel;
+    private final SshDockerEndpoint sshEndpoint;
 
     /** Volumes whose shared-ownership root has already been initialised this process (run-once guard). */
     private final ConcurrentHashMap<String, Boolean> initializedSharedVolumes = new ConcurrentHashMap<>();
@@ -120,10 +120,10 @@ public class ContainerLifecycleManager {
                                      ContainerDetector containerDetector,
                                      EmulatorConfig config,
                                      GelfLogListener gelfLogListener,
-                                     SshDockerTunnel sshTunnel) {
+                                     SshDockerEndpoint sshEndpoint) {
         this(dockerClient, streamingDockerClient, imageCacheService, containerDetector, config,
                 RetryingTarCopier.DEFAULT_BACKOFF_MS, System::nanoTime, TimeUnit.NANOSECONDS::sleep,
-                gelfLogListener, sshTunnel);
+                gelfLogListener, sshEndpoint);
     }
 
     public ContainerLifecycleManager(DockerClient dockerClient,
@@ -132,7 +132,7 @@ public class ContainerLifecycleManager {
                                      ContainerDetector containerDetector,
                                      EmulatorConfig config) {
         this(dockerClient, streamingDockerClient, imageCacheService, containerDetector, config,
-                GelfLogListener.disabled(), SshDockerTunnel.none());
+                GelfLogListener.disabled(), SshDockerEndpoint.none());
     }
 
     ContainerLifecycleManager(DockerClient dockerClient,
@@ -152,7 +152,7 @@ public class ContainerLifecycleManager {
                               LongSupplier nanoTime,
                               CreateWait createWait) {
         this(dockerClient, dockerClient, imageCacheService, containerDetector, config, archiveRetryBackoffMillis,
-                nanoTime, createWait, GelfLogListener.disabled(), SshDockerTunnel.none());
+                nanoTime, createWait, GelfLogListener.disabled(), SshDockerEndpoint.none());
     }
 
     ContainerLifecycleManager(DockerClient dockerClient,
@@ -162,7 +162,7 @@ public class ContainerLifecycleManager {
                               GelfLogListener gelfLogListener) {
         this(dockerClient, dockerClient, imageCacheService, containerDetector, config,
                 RetryingTarCopier.DEFAULT_BACKOFF_MS, System::nanoTime, TimeUnit.NANOSECONDS::sleep, gelfLogListener,
-                SshDockerTunnel.none());
+                SshDockerEndpoint.none());
     }
 
     private ContainerLifecycleManager(DockerClient dockerClient,
@@ -174,9 +174,9 @@ public class ContainerLifecycleManager {
                                       LongSupplier nanoTime,
                                       CreateWait createWait,
                                       GelfLogListener gelfLogListener,
-                                      SshDockerTunnel sshTunnel) {
+                                      SshDockerEndpoint sshEndpoint) {
         this.gelfLogListener = gelfLogListener;
-        this.sshTunnel = sshTunnel;
+        this.sshEndpoint = sshEndpoint;
         this.dockerClient = dockerClient;
         this.streamingDockerClient = streamingDockerClient;
         this.imageCacheService = imageCacheService;
@@ -2132,7 +2132,7 @@ public class ContainerLifecycleManager {
 
             if (binding != null && binding.length > 0) {
                 int hostPort = Integer.parseInt(binding[0].getHostPortSpec());
-                return new EndpointInfo(sshTunnel.publishedPortHost(), hostPort);
+                return new EndpointInfo(sshEndpoint.publishedPortHost(), hostPort);
             }
             if (requireReachable) {
                 throw new IllegalStateException(

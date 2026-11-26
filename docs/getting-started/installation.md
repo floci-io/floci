@@ -112,9 +112,10 @@ gh attestation verify "$ASSET" --repo floci-io/floci
   warning at startup naming the affected services when Docker is unreachable. With Docker, the binary finds
   the daemon the way the Docker CLI does: `DOCKER_HOST`, then the active Docker context (Docker Desktop,
   OrbStack, Colima, Podman), then the default socket. A daemon on another machine named by an `ssh://`
-  endpoint (`docker context create --docker host=ssh://user@host`) is reached through the system `ssh`
-  client, which forwards a loopback port to `/var/run/docker.sock` on that host with your own
-  `~/.ssh/config` and keys; key-based login must work without a prompt. Container ports are then published
+  endpoint (`docker context create --docker host=ssh://user@host`) is reached the way the Docker CLI
+  reaches it: each connection runs `ssh <host> docker system dial-stdio` with your own `~/.ssh/config`
+  and keys, so key-based login must work without a prompt and the `docker` CLI must be installed on
+  that host. Container ports are then published
   on the remote host, so Floci connects to them at that host's address, which must be reachable from where
   Floci runs. Bind mounts of local paths, as Lambda and ECS use, are not carried to the remote host.
 
