@@ -721,17 +721,35 @@ public final class RequestResources {
      * The resources that apply to a request of the service serving it: one with an {@code endpoint} applies only to
      * a request the service of that endpoint prefix serves, read from the claim of the service whose handler runs it
      * and never from the request's members, which a caller could add to a request of the other API. A request no
-     * service is known to serve keeps them all, which can only check it on more.
+     * service is known to serve keeps them all, which can only check it on more. One with a {@code protocol} applies
+     * only to a request of that protocol, the one its claim gives, or a REST one for a request no RPC protocol
+     * claims: a member of one API a caller adds to a request of the other, which its service ignores, names nothing.
      */
     private static List<RequestResourceMembers.Resource> served(List<RequestResourceMembers.Resource> resources,
                                                                 ContainerRequestContext ctx) {
-        String endpoint = ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
-                && claim.service() != null ? claim.service().externalKey() : null;
-        if (resources == null || endpoint == null) {
-            return resources;
+        ProtocolClaim claim = ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim found
+                ? found : null;
+        String endpoint = claim != null && claim.service() != null ? claim.service().externalKey() : null;
+        if (resources == null) {
+            return null;
         }
-        return resources.stream().filter(resource -> resource.endpoint() == null
-                || resource.endpoint().equals(endpoint)).toList();
+        String protocol = protocolOf(claim == null ? WireProtocol.REST : claim.protocol());
+        return resources.stream()
+                .filter(resource -> endpoint == null || resource.endpoint() == null
+                        || resource.endpoint().equals(endpoint))
+                .filter(resource -> resource.protocol() == null || resource.protocol().equals(protocol)
+                        || WireProtocol.REST.name().equals(protocol) && resource.protocol().startsWith("rest-"))
+                .toList();
+    }
+
+    /** The protocol a request speaks, as botocore names it, or {@code REST} for either REST protocol. */
+    private static String protocolOf(WireProtocol protocol) {
+        return switch (protocol) {
+            case AWS_QUERY -> "query";
+            case AWS_JSON_1_0, AWS_JSON_1_1 -> "json";
+            case REST -> WireProtocol.REST.name();
+            case RPCV2_CBOR, RPCV2_JSON, AWS_CBOR_TARGET -> protocol.name();
+        };
     }
 
     /**

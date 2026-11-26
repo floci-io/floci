@@ -4279,11 +4279,17 @@ def client_words(model: dict) -> set[str]:
                          if shape.get("type") == "string"))
 
 
+# The protocols a resource only one client reads is tagged with, where clients sharing an endpoint prefix each speak
+# their own: the request's protocol tells its client, which its members cannot.
+TAGGED_PROTOCOLS = {"query", "json", "rest-json", "rest-xml"}
+
+
 def by_client(operation: str, models: dict[str, dict], read, formats: dict[str, str] | None = None) -> list[dict]:
     """The resources read from every client of the namespace whose model has the operation, each read apart when
     they disagree: a resource every client names stays as it is, and one only some name applies to the requests of
-    their endpoint prefix (EventBridge's `events` and EventBridge V2's `eventsv2`), or to every request where the
-    clients share one (Elastic Load Balancing's classic and v2 APIs). Where a client's ARN patterns name one of two
+    their endpoint prefix (EventBridge's `events` and EventBridge V2's `eventsv2`), to the requests of their protocol
+    where the clients share one but each speaks its own (SES's Query `ses` and REST-JSON `sesv2`), or to every
+    request where the clients share one and a protocol (Elastic Load Balancing's classic and v2 APIs). Where a client's ARN patterns name one of two
     types its request names by the same members, that client's request names that one: EventBridge V2's
     `CreateEventBus` makes an `event-busv2`."""
     name = operation.split(":", 1)[1]
@@ -4297,6 +4303,9 @@ def by_client(operation: str, models: dict[str, dict], read, formats: dict[str, 
         return merged
     prefixes = {client: models[client]["metadata"].get("endpointPrefix") for client in clients}
     shared = len(set(prefixes.values())) < len(clients)
+    protocols = {client: models[client]["metadata"].get("protocol") for client in clients}
+    by_protocol = shared and len(set(protocols.values())) == len(clients) \
+        and set(protocols.values()) <= TAGGED_PROTOCOLS
     # Clients serving one endpoint cannot be told apart by a request, so an ARN member of theirs keeps every type the
     # action acts on, each ARN read by its format: Lambda's `lambda` and `lambda-microvms` both tag on
     # `/2017-03-31/tags/{Resource}`.
@@ -4307,7 +4316,8 @@ def by_client(operation: str, models: dict[str, dict], read, formats: dict[str, 
     for client in clients:
         for resource in apart[client]:
             everywhere = all(resource in apart[other] for other in clients)
-            tagged = resource if everywhere or shared else dict(resource, endpoint=prefixes[client])
+            tagged = resource if everywhere else dict(resource, protocol=protocols[client]) if by_protocol \
+                else resource if shared else dict(resource, endpoint=prefixes[client])
             if tagged not in resources:
                 resources.append(tagged)
     return resources
@@ -5274,6 +5284,12 @@ def validate(document: dict) -> list[str]:
 
 
 def _resource_problems(operation: str, resource: object, types: set[str], formats: dict[str, str]) -> list[str]:
+    if isinstance(resource, dict) and "protocol" in resource:
+        if resource["protocol"] not in TAGGED_PROTOCOLS or "endpoint" in resource \
+                or not {"arn", "fill", "through"} & set(resource):
+            return [f"{operation} reads {resource!r} for requests of {resource['protocol']!r}, which is no protocol "
+                    f"of a client, or beside an endpoint"]
+        resource = {key: value for key, value in resource.items() if key != "protocol"}
     if isinstance(resource, dict) and "statement" in resource:
         kinds = _kinds(resource)
         names = resource.get("names")

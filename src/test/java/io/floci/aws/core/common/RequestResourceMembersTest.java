@@ -345,7 +345,7 @@ class RequestResourceMembersTest {
     }
 
     @Test
-    void aMalformedTableFailsToLoad() {
+    void aMalformedTableFailsToLoad() throws Exception {
         assertThrows(IllegalStateException.class, () -> parse("{\"operations\":{}}"));
         // An operation of a namespace the file does not read.
         assertThrows(IllegalStateException.class, () -> parse("{\"namespaces\":{\"a\":[]},\"arnFormats\":{},"
@@ -355,6 +355,13 @@ class RequestResourceMembersTest {
         assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"types\":[\"other\"],\"arn\":\"Arn\"}")));
         assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"type\":\"thing\",\"fill\":{\"Other\":\"Name\"}}")));
         assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"types\":[\"thing\"],\"arn\":\"a.b.c.d\"}")));
+        // A protocol no client speaks, or one beside an endpoint.
+        assertThrows(IllegalStateException.class, () -> parse(document(formats,
+                "{\"types\":[\"thing\"],\"arn\":\"Arn\",\"protocol\":\"soap\"}")));
+        assertThrows(IllegalStateException.class, () -> parse(document(formats,
+                "{\"types\":[\"thing\"],\"arn\":\"Arn\",\"protocol\":\"query\",\"endpoint\":\"a\"}")));
+        assertEquals("query", parse(document(formats, "{\"types\":[\"thing\"],\"arn\":\"Arn\",\"protocol\":\"query\"}"))
+                .operations().get("a:Op").getFirst().protocol());
         assertThrows(IllegalStateException.class, () -> parse(
                 "{\"namespaces\":{\"a\":[]},\"arnFormats\":{\"a\":{\"thing\":\"*\"}},\"operations\":{\"a:Op\":{\"resources\":[]}}}"));
         // A type made under a parent whose format it does not extend by one id.
@@ -603,7 +610,9 @@ class RequestResourceMembersTest {
                                     || !other.find().isEmpty() && other.find().equals(resource.find())
                                     && other.when().equals(resource.when()) && other.unless().equals(resource.unless()))
                                     && (other.endpoint() == null || resource.endpoint() == null
-                                    || other.endpoint().equals(resource.endpoint())))
+                                    || other.endpoint().equals(resource.endpoint()))
+                                    && (other.protocol() == null || resource.protocol() == null
+                                    || other.protocol().equals(resource.protocol())))
                             .flatMap(other -> other == resource ? inTheRequestsRegionToo(expected, resource).stream()
                                     : other.signer() ? Stream.of(arn)
                                     : Stream.of(expected(table.formats().get(namespace).get(other.types().getFirst())
@@ -611,11 +620,11 @@ class RequestResourceMembersTest {
                             .distinct().toList();
                     StoredResourceArns stored = runningOn(namespace, arn, resource.byDefault());
                     assertEquals(named, RequestResources.of(operation.getKey(),
-                            sentWith(servedBy(json(body.toString()), resource.endpoint()), query), "aws", "us-east-1",
+                            sentWith(spoken(servedBy(json(body.toString()), resource.endpoint()), resource.protocol()), query), "aws", "us-east-1",
                             "000000000000", stored, labels), body + " " + labels + " " + query);
                     if (given.keySet().stream().noneMatch(Member::map)) {
                         assertEquals(named, RequestResources.of(operation.getKey(),
-                                sentWith(servedBy(form(form.toString()), resource.endpoint()), query), "aws", "us-east-1",
+                                sentWith(spoken(servedBy(form(form.toString()), resource.endpoint()), resource.protocol()), query), "aws", "us-east-1",
                                 "000000000000", stored, labels), form + " " + labels + " " + query);
                     }
                 })));
@@ -943,6 +952,20 @@ class RequestResourceMembersTest {
                     Set.of());
             when(request.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
                     .thenReturn(new ProtocolClaim(WireProtocol.AWS_JSON_1_1, service, null, null));
+        }
+        return request;
+    }
+
+    /** The request, claimed as one of the {@code protocol} a resource applies to alone, when it names one. */
+    private static ContainerRequestContext spoken(ContainerRequestContext request, String protocol) {
+        if (protocol != null) {
+            WireProtocol wire = switch (protocol) {
+                case "query" -> WireProtocol.AWS_QUERY;
+                case "json" -> WireProtocol.AWS_JSON_1_1;
+                default -> WireProtocol.REST;
+            };
+            when(request.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
+                    .thenReturn(new ProtocolClaim(wire, null, null, null));
         }
         return request;
     }

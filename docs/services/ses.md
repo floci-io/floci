@@ -590,7 +590,9 @@ without `Source` (probed). Here such a send is checked only on the other resourc
 on `identity/example.com` alone does not let `sender@example.com` send, and an allow on a configuration
 set alone lets it send from any identity. A v2 templated send is also checked on the template its
 `Content.Template` (or `DefaultContent.Template` for `SendBulkEmail`) names by `TemplateName` or
-`TemplateArn`; one with inline `TemplateContent` names no template. `CreateConfigurationSet` is not
+`TemplateArn`; one with inline `TemplateContent` names no template. A member only one API has is read
+from requests of that API alone, so a v1 request carrying a v2 `Content.Template`, which SES ignores, is
+not checked on that template. `CreateConfigurationSet` is not
 checked on the dedicated IP pool its `DeliveryOptions.SendingPoolName` names, which AWS lists among the
 resources the action acts on; `PutConfigurationSetDeliveryOptions` is. An operation whose action has no
 resource type, or whose request names none, is checked on `*`. The other actions the service reference lists for some operations are checked too:

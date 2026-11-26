@@ -93,6 +93,8 @@ final class RequestResourceMembers {
     private static final Set<String> STATEMENT_KEYS = Set.of("types", "statement", "verb", "names");
     /** The keys of a resource its service acts on for a request naming none of it: it is read no other way. */
     private static final Set<String> DEFAULT_KEYS = Set.of("type", "fill", "when", "default", "endpoint");
+    /** The protocols of a request a resource may apply to alone, as botocore names them. */
+    private static final Set<String> TAGGED_PROTOCOLS = Set.of("query", "json", "rest-json", "rest-xml");
     /** The keys of the user who signs a request, which an operation acts on: it is read no other way. */
     private static final Set<String> SIGNER_KEYS = Set.of("types", "signer", "when");
 
@@ -240,8 +242,10 @@ final class RequestResourceMembers {
      * and read no other way, in the caller's account (a scalable target by its service namespace, resource id and
      * scalable dimension). A resource with an {@code endpoint} applies only to a request the service of that endpoint
      * prefix serves, where two APIs share the operation's name and nothing in a request tells them apart
-     * (EventBridge's {@code events} and EventBridge V2's {@code eventsv2}); null for every request. A resource of one
-     * of {@code types} may be named {@code through} a member naming, by each of its values, a resource of its
+     * (EventBridge's {@code events} and EventBridge V2's {@code eventsv2}); null for every request. One with a
+     * {@code protocol} applies only to a request of that protocol, where two APIs share the operation's name and
+     * endpoint prefix but each speaks its own (SES's Query and REST-JSON APIs); null for every request. A resource
+     * of one of {@code types} may be named {@code through} a member naming, by each of its values, a resource of its
      * service's own that runs on it, is in it or reaches it (a Data API session, by its {@code SessionId}; an EMR
      * instance group, by its {@code InstanceGroups[].InstanceGroupId}), {@code when} the request gives the values it
      * names, and read no other way. A resource {@code byDefault} is the one of its type its service acts on for a
@@ -271,7 +275,25 @@ final class RequestResourceMembers {
                     Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
                     boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault,
                     Map<String, String> defaults, boolean partialArn, Member statement, String verb,
-                    Map<String, String> names, Member path, Member renames, boolean signer) {
+                    Map<String, String> names, Member path, Member renames, boolean signer, String protocol) {
+
+        Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
+                 Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
+                 Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
+                 boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault,
+                 Map<String, String> defaults, boolean partialArn, Member statement, String verb,
+                 Map<String, String> names, Member path, Member renames, boolean signer) {
+            this(types, arn, fill, when, unless, arnOf, account, fixed, made, find, endpoint, through, byDefault,
+                    whenDefault, unlessDefault, defaults, partialArn, statement, verb, names, path, renames, signer,
+                    null);
+        }
+
+        /** This resource, applying only to a request of the {@code protocol}. */
+        Resource withProtocol(String protocol) {
+            return new Resource(types, arn, fill, when, unless, arnOf, account, fixed, made, find, endpoint, through,
+                    byDefault, whenDefault, unlessDefault, defaults, partialArn, statement, verb, names, path, renames,
+                    signer, protocol);
+        }
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                  Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
@@ -786,6 +808,20 @@ final class RequestResourceMembers {
     }
 
     private static Resource resource(String operation, JsonNode resource, Map<String, ArnFormat> formats) {
+        if (!resource.has("protocol")) {
+            return untaggedResource(operation, resource, formats);
+        }
+        String protocol = resource.path("protocol").asText("");
+        if (!TAGGED_PROTOCOLS.contains(protocol) || resource.has("endpoint")
+                || !(resource.has("arn") || resource.has("fill") || resource.has("through"))) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads a resource of " + operation + " for requests of "
+                    + resource.path("protocol") + ", which is no protocol of a client, or beside an endpoint");
+        }
+        return untaggedResource(operation, ((ObjectNode) resource.deepCopy()).without("protocol"), formats)
+                .withProtocol(protocol);
+    }
+
+    private static Resource untaggedResource(String operation, JsonNode resource, Map<String, ArnFormat> formats) {
         if (resource.has("made") && !(resource.path("made").isBoolean() && resource.path("made").booleanValue())) {
             throw new IllegalStateException(RESOURCE_NAME + " marks a resource of " + operation + " made by "
                     + resource.path("made") + ", which is not true");

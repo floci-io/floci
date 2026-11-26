@@ -1322,6 +1322,8 @@ def with_a_create() -> dict:
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(types=["pool"]), "not resource types"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a.b.c.d"), "no member"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a[][]"), "no member"),
+    (lambda d: d["operations"]["svc:A"]["resources"][0].update(protocol="soap"), "no protocol"),
+    (lambda d: d["operations"]["svc:A"]["resources"][0].update(protocol="query", endpoint="svc"), "no protocol"),
     (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "Ids[][]"}),
      "no member"),
     (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "a.b.c.d"}),
@@ -1479,6 +1481,15 @@ def test_the_vendored_file_is_well_formed():
     assert not any("when" in resource or "unless" in resource
                    for operation, entry in operations.items() if operation.startswith("events:")
                    and "endpoint" in json.dumps(entry) for resource in entry["resources"])
+    # SES's Query and REST-JSON APIs share the endpoint prefix, so what one alone reads applies to the requests of
+    # its protocol: a v1 SendEmail carrying a v2 Content.Template, which SES ignores, names no template.
+    send = operations["ses:SendEmail"]["resources"]
+    assert {"type": "template", "fill": {"TemplateName": "Content.Template.TemplateName"},
+            "protocol": "rest-json"} in send
+    assert {"types": ["configuration-set", "identity", "template"], "arn": "SourceArn", "protocol": "query"} in send
+    assert {"type": "configuration-set", "fill": {"ConfigurationSetName": "ConfigurationSetName"}} in send
+    assert {resource.get("protocol") for entry in operations.values() for resource in entry["resources"]} \
+        == {None, "query", "rest-json"}
     # A state machine's version or alias is checked on the state machine; a Lambda function's is checked qualified.
     assert document["unqualified"] == {"ssm": ["parameter"], "states": ["statemachine"]}
     assert document["integerVariables"] == {"lambda": {"layerVersion": ["LayerVersion"]}}

@@ -226,6 +226,23 @@ class SesIamIntegrationTest {
         denied(send(caller.signer(), "POST", "/v2/email/outbound-emails", v2Send(sender)), "ses:SendEmail");
     }
 
+    /** A v2 member a caller adds to a v1 request, which SES ignores, does not name what the request is checked on. */
+    @Test
+    void aV1SendCarryingAV2TemplateIsNotCheckedOnThatTemplate() throws Exception {
+        String sender = "sender-" + suffix() + "@example.com";
+        String template = "send-" + suffix();
+        Caller caller = caller("[\"ses:SendEmail\"]", "template/" + template);
+        send(caller.owner(), "POST", "/v2/email/identities", "{\"EmailIdentity\":\"" + sender + "\"}")
+                .then().statusCode(200);
+        send(caller.owner(), "POST", "/v2/email/templates", "{\"TemplateName\":\"" + template
+                + "\",\"TemplateContent\":{\"Subject\":\"s\",\"Text\":\"t\"}}").then().statusCode(200);
+
+        denied(query(caller.signer(), "Action=SendEmail&Source=" + URLEncoder.encode(sender, StandardCharsets.UTF_8)
+                + "&Destination.ToAddresses.member.1=success%40simulator.amazonses.com"
+                + "&Message.Subject.Data=s&Message.Body.Text.Data=b&Content.Template.TemplateName=" + template),
+                "ses:SendEmail");
+    }
+
     private static String v2Send(String from) {
         return "{\"FromEmailAddress\":\"" + from + "\","
                 + "\"Destination\":{\"ToAddresses\":[\"success@simulator.amazonses.com\"]},"
