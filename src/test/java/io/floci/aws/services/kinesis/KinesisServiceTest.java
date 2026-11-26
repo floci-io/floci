@@ -352,6 +352,9 @@ class KinesisServiceTest {
                         kinesisService.getShardIterator("my-stream", shardId, type, missing, REGION));
                 assertEquals("InvalidArgumentException", ex.getErrorCode(), type);
                 assertEquals(400, ex.getHttpStatus(), type);
+                assertEquals("Must either specify (1) AT_SEQUENCE_NUMBER or AFTER_SEQUENCE_NUMBER and "
+                        + "StartingSequenceNumber or (2) TRIM_HORIZON or LATEST and no StartingSequenceNumber. "
+                        + "Request specified " + type + " and no StartingSequenceNumber.", ex.getMessage());
             }
         }
     }

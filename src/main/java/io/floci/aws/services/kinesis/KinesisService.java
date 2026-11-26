@@ -1301,7 +1301,10 @@ public class KinesisService implements ResourceProvider {
             boolean sequenceType = "AT_SEQUENCE_NUMBER".equals(type) || "AFTER_SEQUENCE_NUMBER".equals(type);
             if (sequenceType && (sequenceNumber == null || sequenceNumber.isEmpty())) {
                 throw new AwsException("InvalidArgumentException",
-                        "ShardIteratorType " + type + " requires a StartingSequenceNumber", 400);
+                        "Must either specify (1) AT_SEQUENCE_NUMBER or AFTER_SEQUENCE_NUMBER and "
+                                + "StartingSequenceNumber or (2) TRIM_HORIZON or LATEST and no "
+                                + "StartingSequenceNumber. Request specified " + type
+                                + " and no StartingSequenceNumber.", 400);
             }
             return sequenceNumber != null ? sequenceNumber : "";
         }
