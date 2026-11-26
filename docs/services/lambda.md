@@ -1603,7 +1603,7 @@ of `{}` or with an empty `Filters` array clears any existing filters.
 
 ## Supported Runtimes
 
-Any runtime that has an official AWS Lambda container image works with Floci (e.g. `nodejs22.x`, `python3.13`, `java21`, `go1.x`, `provided.al2023`).
+Floci runs every runtime in Lambda's [supported runtimes](https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtimes.html) table, each in its AWS Lambda base image from `public.ecr.aws/lambda`. Of the deprecated runtimes, it runs `nodejs20.x`, `nodejs18.x`, `nodejs16.x`, `python3.10`, `python3.9`, `java8`, `ruby3.2`, `dotnet9`, `dotnet8`, `dotnet6`, `go1.x`, `provided.al2` and `provided`. A function with any other runtime fails to start on invoke.
 
 With the Docker and Kubernetes executors, ZIP-based `provided.*` runtimes execute the package's
 `/var/task/bootstrap`, falling back to `/opt/bootstrap` only when the package has
