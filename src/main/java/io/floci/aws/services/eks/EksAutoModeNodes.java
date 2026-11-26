@@ -438,40 +438,55 @@ final class EksAutoModeNodes {
 
     /**
      * The pod each DaemonSet of {@code kubectl get daemonsets -A -o json} runs on a node, with its template's
-     * requests, node selector, required node affinity and tolerations; one pinned to named nodes is left out, as it
-     * runs on none Auto Mode launches. The DaemonSet controller lets its pods onto
+     * requests, node selector, required node affinity and tolerations, read as {@link #unschedulablePods} reads a
+     * pod's; one none of whose affinity terms a new node could match is left out. The DaemonSet controller lets its pods onto
      * an unschedulable node, which Floci's nodes don't need.
      */
     static List<PendingPod> daemonPods(JsonNode list) {
         List<PendingPod> daemons = new ArrayList<>();
         for (JsonNode item : list.path("items")) {
             JsonNode spec = item.path("spec").path("template").path("spec");
-            long[] requests = requests(spec);
-            Map<String, String> selector = new LinkedHashMap<>();
-            spec.path("nodeSelector").properties().forEach(e -> selector.put(e.getKey(), e.getValue().asText()));
-            JsonNode termList = spec.path("affinity").path("nodeAffinity")
-                    .path("requiredDuringSchedulingIgnoredDuringExecution").path("nodeSelectorTerms");
-            List<List<Requirement>> terms = new ArrayList<>();
-            boolean pinned = false;
-            for (JsonNode term : termList) {
-                pinned |= !term.path("matchFields").isEmpty();
-                if (!term.path("matchExpressions").isEmpty()) {
-                    terms.add(requirements(term.path("matchExpressions")));
-                }
-            }
-            // One pinned to named nodes (matchFields), which a new node isn't, or whose only terms match no node,
-            // runs on no new node.
-            if (pinned || (!termList.isEmpty() && terms.isEmpty())) {
+            Optional<NodeAsk> ask = nodeAsk(spec);
+            if (ask.isEmpty()) {
                 continue;
             }
-            List<Toleration> tolerations = new ArrayList<>();
-            spec.path("tolerations").forEach(t -> tolerations.add(new Toleration(t.path("key").asText(""),
-                    t.path("operator").asText("Equal"), t.path("value").asText(""), t.path("effect").asText(""))));
+            long[] requests = requests(spec);
             daemons.add(new PendingPod(item.path("metadata").path("namespace").asText(),
-                    item.path("metadata").path("name").asText(), requests[0], requests[1], selector, List.copyOf(terms),
-                    List.copyOf(tolerations)));
+                    item.path("metadata").path("name").asText(), requests[0], requests[1], ask.get().nodeSelector(),
+                    ask.get().affinityTerms(), ask.get().tolerations()));
         }
         return daemons;
+    }
+
+    /** What a pod spec asks of its node: its node selector, required node affinity terms and tolerations. */
+    private record NodeAsk(Map<String, String> nodeSelector, List<List<Requirement>> affinityTerms,
+                           List<Toleration> tolerations) {
+    }
+
+    /**
+     * What a pod spec asks of a node Auto Mode launches, or empty when no such node could take it. The required node
+     * affinity terms are alternatives: one with {@code matchFields}, which names nodes and so none Auto Mode
+     * launches, or with no expressions, which Kubernetes matches with no node, is no alternative for a new node, and
+     * a spec all of whose terms are such asks for none.
+     */
+    private static Optional<NodeAsk> nodeAsk(JsonNode spec) {
+        JsonNode termList = spec.path("affinity").path("nodeAffinity")
+                .path("requiredDuringSchedulingIgnoredDuringExecution").path("nodeSelectorTerms");
+        List<List<Requirement>> terms = new ArrayList<>();
+        for (JsonNode term : termList) {
+            if (term.path("matchFields").isEmpty() && !term.path("matchExpressions").isEmpty()) {
+                terms.add(requirements(term.path("matchExpressions")));
+            }
+        }
+        if (!termList.isEmpty() && terms.isEmpty()) {
+            return Optional.empty();
+        }
+        Map<String, String> selector = new LinkedHashMap<>();
+        spec.path("nodeSelector").properties().forEach(e -> selector.put(e.getKey(), e.getValue().asText()));
+        List<Toleration> tolerations = new ArrayList<>();
+        spec.path("tolerations").forEach(t -> tolerations.add(new Toleration(t.path("key").asText(""),
+                t.path("operator").asText("Equal"), t.path("value").asText(""), t.path("effect").asText(""))));
+        return Optional.of(new NodeAsk(selector, List.copyOf(terms), List.copyOf(tolerations)));
     }
 
     /** The NodePools of {@code kubectl get nodepools -o json}. */
@@ -509,8 +524,8 @@ final class EksAutoModeNodes {
 
     /**
      * The pods of {@code kubectl get pods -A -o json} the scheduler marked unschedulable and a new node could take.
-     * As Karpenter does, a DaemonSet's pods and pods pinned to a named node ({@code matchFields}) are left out, as
-     * are pods whose required node affinity can match no node (only empty terms).
+     * As Karpenter does, a DaemonSet's pods are left out, as are pods none of whose required node affinity terms a
+     * new node could match: each term pins named nodes ({@code matchFields}) or is empty (see {@link #nodeAsk}).
      */
     static List<PendingPod> unschedulablePods(JsonNode list) {
         List<PendingPod> pods = new ArrayList<>();
@@ -533,29 +548,15 @@ final class EksAutoModeNodes {
                 daemonSet |= "DaemonSet".equals(owner.path("kind").asText());
             }
             JsonNode spec = item.path("spec");
-            JsonNode termList = spec.path("affinity").path("nodeAffinity")
-                    .path("requiredDuringSchedulingIgnoredDuringExecution").path("nodeSelectorTerms");
-            boolean pinned = false;
-            List<List<Requirement>> terms = new ArrayList<>();
-            for (JsonNode term : termList) {
-                pinned |= !term.path("matchFields").isEmpty();
-                // An empty term matches no node, as Kubernetes reads it, so it adds no alternative.
-                if (!term.path("matchExpressions").isEmpty()) {
-                    terms.add(requirements(term.path("matchExpressions")));
-                }
-            }
-            if (daemonSet || pinned || (!termList.isEmpty() && terms.isEmpty())) {
+            Optional<NodeAsk> ask = nodeAsk(spec);
+            if (daemonSet || ask.isEmpty()) {
                 continue;
             }
             long[] requests = requests(spec);
-            Map<String, String> selector = new LinkedHashMap<>();
-            spec.path("nodeSelector").properties().forEach(e -> selector.put(e.getKey(), e.getValue().asText()));
-            List<Toleration> tolerations = new ArrayList<>();
-            spec.path("tolerations").forEach(t -> tolerations.add(new Toleration(t.path("key").asText(""),
-                    t.path("operator").asText("Equal"), t.path("value").asText(""), t.path("effect").asText(""))));
             String namespace = item.path("metadata").path("namespace").asText();
             pods.add(new PendingPod(namespace, item.path("metadata").path("name").asText(), requests[0], requests[1],
-                    selector, List.copyOf(terms), List.copyOf(tolerations), podLabels(item), antiAffinity(item)));
+                    ask.get().nodeSelector(), ask.get().affinityTerms(), ask.get().tolerations(), podLabels(item),
+                    antiAffinity(item)));
         }
         return pods;
     }

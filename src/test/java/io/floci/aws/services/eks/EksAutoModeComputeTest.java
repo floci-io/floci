@@ -16,16 +16,14 @@ import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ComputeConfig;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.model.InstanceProfile;
+import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -76,7 +74,7 @@ class EksAutoModeComputeTest {
     private final IamService iam = mock(IamService.class);
     private final Ec2InstanceTypeCatalog instanceTypes = mock(Ec2InstanceTypeCatalog.class);
     private final EksService eksService = mock(EksService.class);
-    private final MutableClock clock = new MutableClock(Instant.parse("2026-11-25T12:00:00Z"));
+    private final MutableClock clock = new MutableClock();
     private final EksAutoModeCompute compute = new EksAutoModeCompute(eksService, clusterManager, ec2,
             iam, instanceTypes, mock(EmulatorConfig.class), clock);
     private final Map<String, String> lists = new HashMap<>(Map.of("pods", PENDING_POD,
@@ -304,10 +302,6 @@ class EksAutoModeComputeTest {
     }
 
     /**
-     * The nodes of a NodePool that was deleted, or that UpdateClusterConfig dropped, go as Karpenter removes them:
-     * tainted as disrupted and drained, whatever they run, then deleted and terminated.
-     */
-    /**
      * The node of an Auto Mode instance that is terminated, one that registered while a pass terminated its
      * instance, or whose deletion failed after it, is deleted by the next pass. A node no Auto Mode instance is
      * named for stays, though it carries a pool's label and the Auto Mode compute label, as the cluster's own node
@@ -407,6 +401,10 @@ class EksAutoModeComputeTest {
         verify(clusterManager).removeJoinedNode(cluster, node);
     }
 
+    /**
+     * The nodes of a NodePool that was deleted, or that UpdateClusterConfig dropped, go as Karpenter removes them:
+     * tainted as disrupted and drained, whatever they run, then deleted and terminated.
+     */
     @Test
     void aDeletedPoolsNodeIsDrainedAndRemoved() {
         Instance node = joinedNode("i-node", "node-1");
@@ -459,34 +457,6 @@ class EksAutoModeComputeTest {
         large.supportedArchitectures = List.of("x86_64");
         when(instanceTypes.find("c7a.large")).thenReturn(Optional.of(large));
         return node;
-    }
-
-    /** A clock the test moves on. */
-    private static final class MutableClock extends Clock {
-        private Instant now;
-
-        MutableClock(Instant now) {
-            this.now = now;
-        }
-
-        void advance(Duration by) {
-            now = now.plus(by);
-        }
-
-        @Override
-        public Instant instant() {
-            return now;
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
     }
 
     @Test

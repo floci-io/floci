@@ -56,8 +56,8 @@ class EksAutoModeNodesTest {
 
     /**
      * A node is sized for the DaemonSet pods that would run on it as well, as Karpenter sizes it: 1900m of workload
-     * and a 300m daemon don't fit 2 vCPUs. A daemon whose node selector leaves the node out doesn't count, nor one
-     * pinned to a named node.
+     * and 400m of daemons don't fit 2 vCPUs. A daemon whose node selector leaves the node out doesn't count, nor one
+     * pinned to a named node; one with another term a new node matches does.
      */
     @Test
     void aNodeIsSizedForTheDaemonSetPodsItWouldRunToo() throws Exception {
@@ -71,18 +71,45 @@ class EksAutoModeNodesTest {
                   {"metadata": {"namespace": "kube-system", "name": "pinned"}, "spec": {"template": {"spec": {
                     "affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
                       {"matchFields": [{"key": "metadata.name", "operator": "In", "values": ["old-node"]}]}]}}},
-                    "containers": [{"resources": {"requests": {"cpu": "1"}}}]}}}}
+                    "containers": [{"resources": {"requests": {"cpu": "1"}}}]}}}},
+                  {"metadata": {"namespace": "kube-system", "name": "either"}, "spec": {"template": {"spec": {
+                    "affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
+                      {"matchFields": [{"key": "metadata.name", "operator": "In", "values": ["old-node"]}]},
+                      {"matchExpressions": [{"key": "kubernetes.io/arch", "operator": "In", "values": ["amd64"]}]}]}}},
+                    "containers": [{"resources": {"requests": {"cpu": "100m"}}}]}}}}
                 ]}""";
         List<PendingPod> daemons = EksAutoModeNodes.daemonPods(json(daemonSets));
-        assertEquals(List.of("agent", "arm-only"), daemons.stream().map(PendingPod::name).toList());
-        PendingPod big = pod("big", "1900m", "64Mi");
+        // Terms are alternatives: "either" may run on any amd64 node, whatever its first term pins.
+        assertEquals(List.of("agent", "arm-only", "either"), daemons.stream().map(PendingPod::name).toList());
+        PendingPod big = pod("big", "1700m", "64Mi");
 
         assertEquals("c7a.large", EksAutoModeNodes.plan(pools(), List.of(big), TYPES, Map.of())
                 .getFirst().instanceType().instanceType);
         assertEquals("c7a.xlarge", EksAutoModeNodes.plan(pools(), List.of(big), TYPES, Map.of(), daemons)
                 .getFirst().instanceType().instanceType);
-        assertEquals(300, EksAutoModeNodes.daemonRequests(daemons,
+        assertEquals(400, EksAutoModeNodes.daemonRequests(daemons,
                 EksAutoModeNodes.labels(TYPES.get(2), pools().getFirst(), null), List.of())[0]);
+    }
+
+    /**
+     * A pod's required node affinity terms are alternatives: one pinned to a named node is no alternative for a new
+     * node, but another the new node could match keeps the pod, with that term only.
+     */
+    @Test
+    void aPodWithAnotherAffinityTermThanItsPinnedOneGetsANode() throws Exception {
+        String pods = """
+                {"items": [{"metadata": {"namespace": "default", "name": "either"},
+                  "spec": {"affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
+                    {"matchFields": [{"key": "metadata.name", "operator": "In", "values": ["old-node"]}]},
+                    {"matchExpressions": [{"key": "kubernetes.io/arch", "operator": "In", "values": ["arm64"]}]}]}}},
+                           "containers": [{"resources": {"requests": {"cpu": "100m"}}}]},
+                  "status": {"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "False",
+                             "reason": "Unschedulable"}]}}]}""";
+
+        PendingPod either = EksAutoModeNodes.unschedulablePods(json(pods)).getFirst();
+
+        assertEquals(List.of(List.of(new Requirement("kubernetes.io/arch", "In", List.of("arm64")))),
+                either.affinityTerms());
     }
 
     @Test

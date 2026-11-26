@@ -172,10 +172,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         if (launched.isEmpty()) {
             emptySince.remove(cluster.getArn());
         }
-        Map<String, JsonNode> nodesByName = new HashMap<>();
-        for (JsonNode node : read(cluster, "nodes").path("items")) {
-            nodesByName.put(node.path("metadata").path("name").asText(), node);
-        }
+        Map<String, JsonNode> nodesByName = nodesByName(cluster);
         removeStrayNodes(cluster, region, nodesByName);
         if (launched.isEmpty() && pods.isEmpty()) {
             return;
@@ -577,11 +574,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         // A worker that was joining can register while it terminates; its node goes on a later pass, as with compute
         // on. The nodes are read only while EC2 still keeps such an instance.
         if (!instancesOf(cluster, region, "shutting-down", "terminated").isEmpty()) {
-            Map<String, JsonNode> nodesByName = new HashMap<>();
-            for (JsonNode node : read(cluster, "nodes").path("items")) {
-                nodesByName.put(node.path("metadata").path("name").asText(), node);
-            }
-            removeStrayNodes(cluster, region, nodesByName);
+            removeStrayNodes(cluster, region, nodesByName(cluster));
         }
     }
 
@@ -712,6 +705,15 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
 
     private static List<String> podNames(Launch launch) {
         return launch.pods().stream().map(p -> p.namespace() + "/" + p.name()).toList();
+    }
+
+    /** The cluster's nodes by name. */
+    private Map<String, JsonNode> nodesByName(Cluster cluster) {
+        Map<String, JsonNode> nodesByName = new HashMap<>();
+        for (JsonNode node : read(cluster, "nodes").path("items")) {
+            nodesByName.put(node.path("metadata").path("name").asText(), node);
+        }
+        return nodesByName;
     }
 
     private JsonNode read(Cluster cluster, String kind) {
