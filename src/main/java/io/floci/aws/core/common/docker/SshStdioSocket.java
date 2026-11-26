@@ -29,10 +29,12 @@ import java.util.concurrent.TimeUnit;
  * a read waits on that queue for {@link #setSoTimeout(int)}, failing with {@link SocketTimeoutException} as a socket
  * does. httpclient5's stale-connection check, a read with a 1 ms timeout, works the same way.
  *
- * <p>Starting the process is not yet a connection: the SSH handshake and the daemon's first answer still lie ahead.
- * Until the first byte arrives, a read also waits no longer than the connect timeout, so a session that stalls in its
- * handshake fails even a request that disables its response timeout, such as a log follow or a container wait. The
- * daemon answers those with their headers at once, so the bound never cuts a long-lived stream short.
+ * <p>Starting the process is not yet a connection: the SSH handshake and login still lie ahead, and a request that
+ * disables its response timeout, such as a log follow or a container wait, would wait on a stalled handshake forever.
+ * The session runs with {@code LogLevel=VERBOSE}, so {@code ssh} reports a finished login on its error output
+ * ({@link #AUTHENTICATED}). Until then, or until the daemon's first byte, a read waits no longer than the connect
+ * timeout. Once the session is up, only the read timeout applies, so an upload that outlasts the connect timeout is
+ * not cut short.
  */
 final class SshStdioSocket extends Socket {
 
@@ -42,6 +44,9 @@ final class SshStdioSocket extends Socket {
     private static final int CHUNK_SIZE = 16 * 1024;
     private static final int MAX_STDERR_CHARS = 2048;
     static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 30_000;
+    /** What {@code ssh} at {@code LogLevel=VERBOSE} writes once the login succeeded. */
+    static final String AUTHENTICATED = "Authenticated to ";
+    private static final long CONNECTING_POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
 
     private final Process process;
     private final BlockingQueue<byte[]> chunks = new ArrayBlockingQueue<>(64);
@@ -50,7 +55,8 @@ final class SshStdioSocket extends Socket {
     private final OutputStream output;
     private final Thread outputPump;
     private volatile int soTimeoutMillis;
-    private volatile long firstByteDeadlineNanos;
+    private volatile long connectDeadlineNanos;
+    private volatile boolean established;
     private volatile boolean closed;
     private volatile boolean inputShutdown;
     private volatile boolean outputShutdown;
@@ -58,7 +64,7 @@ final class SshStdioSocket extends Socket {
     private SshStdioSocket(Process process) {
         this.process = process;
         this.output = new ProcessOutputStream(process.getOutputStream());
-        this.firstByteDeadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(DEFAULT_CONNECT_TIMEOUT_MILLIS);
+        this.connectDeadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(DEFAULT_CONNECT_TIMEOUT_MILLIS);
         this.outputPump = Thread.ofVirtual().name("docker-ssh-stdout").start(this::pumpOutput);
         Thread.ofVirtual().name("docker-ssh-stderr").start(this::pumpErrors);
     }
@@ -102,6 +108,9 @@ final class SshStdioSocket extends Socket {
             String line;
             while ((line = reader.readLine()) != null) {
                 LOG.debugv("ssh: {0}", line);
+                if (line.startsWith(AUTHENTICATED)) {
+                    established = true;
+                }
                 synchronized (stderr) {
                     if (stderr.length() < MAX_STDERR_CHARS) {
                         stderr.append(stderr.isEmpty() ? "" : " | ").append(line);
@@ -137,11 +146,11 @@ final class SshStdioSocket extends Socket {
         // Connected by open(): httpclient5 calls this on the socket its factory returned.
     }
 
-    /** The process is already started; {@code timeout} bounds the wait for the session's first byte. */
+    /** The process is already started; {@code timeout} bounds the SSH login that follows. */
     @Override
     public void connect(SocketAddress endpoint, int timeout) {
         if (timeout > 0) {
-            firstByteDeadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout);
+            connectDeadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout);
         }
     }
 
@@ -304,25 +313,32 @@ final class SshStdioSocket extends Socket {
 
         private byte[] take() throws IOException {
             ensureOpen();
-            long timeoutNanos = TimeUnit.MILLISECONDS.toNanos(soTimeoutMillis);
-            boolean connecting = !anyRead;
-            if (connecting) {
-                long untilDeadline = firstByteDeadlineNanos - System.nanoTime();
-                timeoutNanos = timeoutNanos == 0 ? untilDeadline : Math.min(timeoutNanos, untilDeadline);
-                if (timeoutNanos <= 0) {
-                    throw connectTimeout();
-                }
-            }
+            long readTimeoutNanos = TimeUnit.MILLISECONDS.toNanos(soTimeoutMillis);
+            long started = System.nanoTime();
             try {
-                if (timeoutNanos == 0) {
-                    return chunks.take();
-                }
-                byte[] next = chunks.poll(timeoutNanos, TimeUnit.NANOSECONDS);
-                if (next == null) {
-                    if (connecting && System.nanoTime() - firstByteDeadlineNanos >= 0) {
+                while (isConnecting()) {
+                    long waited = System.nanoTime() - started;
+                    if (readTimeoutNanos > 0 && waited >= readTimeoutNanos) {
+                        throw readTimeout();
+                    }
+                    long wait = readTimeoutNanos > 0
+                            ? Math.min(CONNECTING_POLL_NANOS, readTimeoutNanos - waited) : CONNECTING_POLL_NANOS;
+                    // Output already queued wins over an expired deadline.
+                    byte[] next = chunks.poll(wait, TimeUnit.NANOSECONDS);
+                    if (next != null) {
+                        return next;
+                    }
+                    if (isConnecting() && System.nanoTime() - connectDeadlineNanos >= 0) {
                         throw connectTimeout();
                     }
-                    throw new SocketTimeoutException("Read timed out after " + soTimeoutMillis + " ms");
+                }
+                if (readTimeoutNanos == 0) {
+                    return chunks.take();
+                }
+                long left = readTimeoutNanos - (System.nanoTime() - started);
+                byte[] next = left > 0 ? chunks.poll(left, TimeUnit.NANOSECONDS) : chunks.poll();
+                if (next == null) {
+                    throw readTimeout();
                 }
                 return next;
             } catch (InterruptedException e) {
@@ -332,9 +348,17 @@ final class SshStdioSocket extends Socket {
             }
         }
 
+        private boolean isConnecting() {
+            return !anyRead && !established;
+        }
+
+        private SocketTimeoutException readTimeout() {
+            return new SocketTimeoutException("Read timed out after " + soTimeoutMillis + " ms");
+        }
+
         private SocketTimeoutException connectTimeout() {
             synchronized (stderr) {
-                return new SocketTimeoutException("SSH session to the Docker daemon did not answer within the connect"
+                return new SocketTimeoutException("SSH session to the Docker daemon did not log in within the connect"
                         + " timeout" + (stderr.isEmpty() ? "" : ": " + stderr));
             }
         }

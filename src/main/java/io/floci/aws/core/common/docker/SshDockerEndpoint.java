@@ -146,6 +146,7 @@ public class SshDockerEndpoint {
         List<String> command = new ArrayList<>(List.of("ssh",
                 "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=" + SshStdioSocket.DEFAULT_CONNECT_TIMEOUT_MILLIS / 1000,
+                "-o", "LogLevel=VERBOSE",
                 "-o", "ServerAliveInterval=30"));
         command.addAll(destination(sshHost));
         command.addAll(List.of("docker", "system", "dial-stdio"));

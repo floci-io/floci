@@ -125,7 +125,7 @@ class SshStdioSocketTest {
             SocketTimeoutException failure =
                     assertThrows(SocketTimeoutException.class, () -> socket.getInputStream().read());
 
-            assertThat(failure.getMessage(), containsString("did not answer within the connect timeout"));
+            assertThat(failure.getMessage(), containsString("did not log in within the connect timeout"));
             assertThat(Duration.ofNanos(System.nanoTime() - started).toMillis(), lessThan(10_000L));
         }
     }
@@ -142,6 +142,35 @@ class SshStdioSocketTest {
             socket.getOutputStream().write('b');
 
             assertThat(in.read(), equalTo((int) 'b'));
+        }
+    }
+
+    @Test
+    void anAnswerAlreadyQueuedIsReadEvenAfterTheConnectDeadlinePassed() throws Exception {
+        try (SshStdioSocket socket = SshStdioSocket.open(javaMain(Echo.class))) {
+            socket.connect(null, 300);
+            socket.setSoTimeout(30_000);
+            socket.getOutputStream().write('a');
+            Thread.sleep(800);
+
+            assertThat(socket.getInputStream().read(), equalTo((int) 'a'));
+        }
+    }
+
+    @Test
+    void aSlowUploadAfterLoginIsNotCutShortByTheConnectTimeout() throws Exception {
+        try (SshStdioSocket socket = SshStdioSocket.open(javaMain(LoggedInEcho.class))) {
+            socket.connect(null, 300);
+            socket.setSoTimeout(30_000);
+            // The request body is still being sent well past the connect timeout.
+            for (int i = 0; i < 4; i++) {
+                Thread.sleep(250);
+                socket.getOutputStream().write('u');
+            }
+
+            byte[] answer = socket.getInputStream().readNBytes(4);
+
+            assertThat(new String(answer, StandardCharsets.UTF_8), equalTo("uuuu"));
         }
     }
 
@@ -169,6 +198,15 @@ class SshStdioSocketTest {
                 System.out.write(buffer, 0, read);
                 System.out.flush();
             }
+        }
+    }
+
+    /** Reports a finished login as {@code ssh} at {@code LogLevel=VERBOSE} does, then relays like {@link Echo}. */
+    public static final class LoggedInEcho {
+        public static void main(String[] args) throws IOException {
+            System.err.println(SshStdioSocket.AUTHENTICATED + "remote-docker ([10.0.0.5]:22) using \"publickey\".");
+            System.err.flush();
+            Echo.main(args);
         }
     }
 

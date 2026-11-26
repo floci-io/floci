@@ -23,6 +23,7 @@ class SshDockerEndpointTest {
         assertThat(SshDockerEndpoint.dialStdioCommand(URI.create("ssh://remote-docker")), contains("ssh",
                 "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=30",
+                "-o", "LogLevel=VERBOSE",
                 "-o", "ServerAliveInterval=30",
                 "remote-docker", "docker", "system", "dial-stdio"));
     }
