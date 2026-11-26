@@ -350,6 +350,32 @@ class EksAutoModeComputeTest {
                 "cluster-node", "--ignore-not-found=true", "--wait=false"}, 15);
     }
 
+    /**
+     * With compute off, a worker that was joining when it was terminated and registered while it shut down has its
+     * node deleted by the next pass too, as with compute on.
+     */
+    @Test
+    void withComputeOffTheNodeOfAWorkerThatRegisteredWhileTerminatingIsDeleted() {
+        Instance late = new Instance();
+        late.setInstanceId("i-late");
+        when(clusterManager.deriveInstanceNodeName(late, REGION)).thenReturn("late-node");
+        Reservation dead = new Reservation();
+        dead.setInstances(List.of(late));
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenAnswer(inv -> {
+            Map<String, List<String>> filters = inv.getArgument(2);
+            return filters.get("instance-state-name").contains("terminated") ? List.of(dead) : List.of();
+        });
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"late-node\", \"labels\": {}}}]}");
+        Cluster cluster = cluster("prod");
+        cluster.setComputeConfig(new ComputeConfig(false, List.of(), null));
+
+        compute.removeNodes(cluster, REGION);
+
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
+                "late-node", "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
+    }
+
     @Test
     void aDeletedPoolsNodeIsDrainedAndRemoved() {
         Instance node = joinedNode("i-node", "node-1");

@@ -533,7 +533,8 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
 
     /**
      * Takes the cluster's Auto Mode nodes out of it and terminates their instances, as turning compute off does. An
-     * instance whose node can't be deleted is kept, so the next pass tries it again.
+     * instance whose node can't be deleted is kept, so the next pass tries it again; the node of one that registered
+     * while it terminated is deleted by a later pass.
      */
     synchronized void removeNodes(Cluster cluster, String region) {
         emptySince.remove(cluster.getArn());
@@ -548,11 +549,19 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                         instance.getInstanceId(), cluster.getName(), e.getMessage());
             }
         }
-        if (removed.isEmpty()) {
-            return;
+        if (!removed.isEmpty()) {
+            ec2.terminateInstances(region, removed);
+            LOG.infov("EKS Auto Mode compute of cluster {0} is off: terminated {1}", cluster.getName(), removed);
         }
-        ec2.terminateInstances(region, removed);
-        LOG.infov("EKS Auto Mode compute of cluster {0} is off: terminated {1}", cluster.getName(), removed);
+        // A worker that was joining can register while it terminates; its node goes on a later pass, as with compute
+        // on. The nodes are read only while EC2 still keeps such an instance.
+        if (!instancesOf(cluster, region, "shutting-down", "terminated").isEmpty()) {
+            Map<String, JsonNode> nodesByName = new HashMap<>();
+            for (JsonNode node : read(cluster, "nodes").path("items")) {
+                nodesByName.put(node.path("metadata").path("name").asText(), node);
+            }
+            removeStrayNodes(cluster, region, nodesByName);
+        }
     }
 
     /** The cluster's Auto Mode instances and the instance profiles made for it go with it, as on AWS. */
