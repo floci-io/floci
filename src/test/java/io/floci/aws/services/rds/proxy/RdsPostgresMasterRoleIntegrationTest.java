@@ -5,9 +5,9 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.postgresql.Driver;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -136,6 +136,6 @@ class RdsPostgresMasterRoleIntegrationTest {
     }
 
     private static Connection connect(int port, String database, Properties properties) throws SQLException {
-        return DriverManager.getConnection("jdbc:postgresql://localhost:" + port + "/" + database, properties);
+        return new Driver().connect("jdbc:postgresql://localhost:" + port + "/" + database, properties);
     }
 }
