@@ -76,6 +76,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -1130,13 +1131,22 @@ class Ec2ContainerManagerTest {
 
     @Test
     void ec2UserDataPathsShareAggregateConcurrentDecompressionBudget() throws Exception {
-        // API decoding and guest execution share the same budget. The hook must see every
-        // decompression, and no more than four may run at once across both entry points.
+        // Count the submitted work across both entry points without observing unrelated callers.
+        // API decoding and guest execution share a budget of at most four active decompressions.
         int concurrentLaunches = 12;
         AtomicInteger totalDecompressions = new AtomicInteger(0);
         AtomicInteger active = new AtomicInteger(0);
         AtomicInteger peakActive = new AtomicInteger(0);
+        Set<Thread> observedThreads = ConcurrentHashMap.newKeySet();
+        ExecutorService pool = Executors.newFixedThreadPool(concurrentLaunches, task -> {
+            Thread thread = Thread.ofPlatform().unstarted(task);
+            observedThreads.add(thread);
+            return thread;
+        });
         UserDataPipeline.userDataDecompressionTestHook = () -> {
+            if (!observedThreads.contains(Thread.currentThread())) {
+                return;
+            }
             totalDecompressions.incrementAndGet();
             int now = active.incrementAndGet();
             peakActive.accumulateAndGet(now, Math::max);
@@ -1150,11 +1160,12 @@ class Ec2ContainerManagerTest {
         };
 
         List<List<String>> results = new CopyOnWriteArrayList<>();
-        ExecutorService pool = Executors.newFixedThreadPool(concurrentLaunches);
         try {
             // ~9 MB of a repeated character: near the 10 MB per-payload cap, well within it.
             String nearCapPayload = "A".repeat(9 * 1024 * 1024);
             String gzipped = gzipBase64(nearCapPayload);
+            // Another caller may decompress user data while this test's observer is installed.
+            assertEquals(nearCapPayload, Ec2UserDataDecoder.decode(gzipped));
 
             List<Future<List<String>>> futures = new ArrayList<>();
             for (int i = 0; i < concurrentLaunches; i++) {
@@ -1168,8 +1179,12 @@ class Ec2ContainerManagerTest {
                 results.add(future.get(30, TimeUnit.SECONDS));
             }
         } finally {
-            pool.shutdownNow();
-            UserDataPipeline.userDataDecompressionTestHook = null;
+            try {
+                pool.shutdownNow();
+                assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
+            } finally {
+                UserDataPipeline.userDataDecompressionTestHook = null;
+            }
         }
 
         assertEquals(concurrentLaunches, results.size());
