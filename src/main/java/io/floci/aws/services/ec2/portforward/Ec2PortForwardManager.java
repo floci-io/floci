@@ -6,13 +6,13 @@ import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.core.common.ListenBacklog;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.PortAllocator;
+import io.floci.aws.core.common.docker.SocatTcpRelay;
 import io.floci.aws.services.ec2.SecurityGroupPolicy;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.IpPermission;
@@ -46,15 +46,7 @@ import java.util.stream.Stream;
  * as a host sibling (created through the mounted Docker socket, exactly like the instance
  * container and its SSH binding). The sidecar publishes an allocated host port and forwards
  * it to the instance container's IP, so {@code curl localhost:<hostPort>} reaches the app.
- *
- * <p>Both socat addresses run with {@code nodelay} (TCP_NODELAY). With Nagle's algorithm left
- * on, socat holds a client's second small write until the first is acknowledged, and a peer
- * with delayed ACK stretches that to roughly 40 ms on the Docker network, so a request the
- * client sends as two writes pays a visible stall on every round trip.
- *
- * <p>The listen address also sets {@code backlog} to {@link ListenBacklog#ACCEPT}, since
- * socat's default accept queue of 5 silently drops the final ACK of a burst's overflow
- * connections, which the client then pays for in retransmit stalls or a reset.
+ * Its two socat addresses come from {@link SocatTcpRelay}.
  *
  * <p>Because each forward is a fresh container, ports opened <em>after</em> launch via
  * {@code authorize-security-group-ingress} are handled the same way as ports present at
@@ -324,9 +316,9 @@ public class Ec2PortForwardManager {
                     .withName(name)
                     .withEntrypoint(drainable ? DRAINABLE_ENTRYPOINT : List.of("socat"))
                     .withCmd(List.of(
-                            (ipv6 ? "TCP6-LISTEN:" + appPort + ",ipv6only=0" : "TCP-LISTEN:" + appPort)
-                                    + ",fork,reuseaddr,nodelay,backlog=" + ListenBacklog.ACCEPT,
-                            (ipv6 ? "TCP6:" : "TCP:") + address + ":" + appPort + ",nodelay"))
+                            ipv6 ? SocatTcpRelay.listenDualStack(appPort) : SocatTcpRelay.listen(appPort),
+                            ipv6 ? SocatTcpRelay.connectIpv6(target.ip(), appPort)
+                                    : SocatTcpRelay.connect(target.ip(), appPort)))
                     .withPortBinding(appPort, hostPort, switch (family) {
                         case IPV4 -> IPV4_HOST_ADDRESSES;
                         case IPV6 -> IPV6_HOST_ADDRESSES;
