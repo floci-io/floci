@@ -1209,6 +1209,9 @@ class CloudFormationChangeSetDiffIntegrationTest {
             "AvailabilityZones":["us-east-1a"],"LaunchTemplate":{
               "LaunchTemplateId":{"Ref":"Lt"},"Version":{"Fn::GetAtt":["Lt","LatestVersionNumber"]}}
             """;
+        String asgSub = asg.replace("{\"Fn::GetAtt\":[\"Lt\",\"LatestVersionNumber\"]}",
+            "{\"Fn::Sub\":[\"${Ref}\",{\"Ref\":{\"Fn::GetAtt\":[\"Lt\",\"LatestVersionNumber\"]}}]}")
+            .replace("cs-det-asg", "cs-det-asg-sub");
         List<DetailsRow> rows = List.of(
             new DetailsRow("changed", "AWS::SNS::Topic", "\"DisplayName\":\"a\"", "\"DisplayName\":\"b\"", null,
                 List.of("Properties"), List.of("Properties|DisplayName|Never" + direct), "False", true),
@@ -1242,22 +1245,26 @@ class CloudFormationChangeSetDiffIntegrationTest {
                 List.of("Properties|DelaySeconds|Never|DirectModification|Dynamic|"), "False", false),
             new DetailsRow("replaced-ref", "AWS::SQS::Queue", queueName.formatted("ref", "a"),
                 queueName.formatted("ref", "b"), null, List.of("Properties"),
-                List.of("Properties|DisplayName|Never|ResourceReference|Dynamic|R"), "False", true,
+                List.of("Properties|DisplayName|Never|ResourceReference|Static|R"), "False", true,
                 "Reader", readsRef, readsRef),
             new DetailsRow("replaced-get-att", "AWS::SQS::Queue", queueName.formatted("arn", "a"),
                 queueName.formatted("arn", "b"), null, List.of("Properties"),
-                List.of("Properties|DisplayName|Never|ResourceAttribute|Dynamic|R.Arn"), "False", true,
+                List.of("Properties|DisplayName|Never|ResourceAttribute|Static|R.Arn"), "False", true,
                 "Reader", readsArn, readsArn),
             new DetailsRow("create-only-ref", "AWS::Batch::ComputeEnvironment", compute, compute, null,
-                List.of("Properties"), List.of("Properties|ComputeResources|Always|ResourceReference|Dynamic|Role"),
+                List.of("Properties"), List.of("Properties|ComputeResources|Always|ResourceReference|Static|Role"),
                 "True", true, "R", role.formatted("a"), role.formatted("b")),
             new DetailsRow("in-place-get-att", "AWS::AutoScaling::AutoScalingGroup", asg, asg, null,
                 List.of("Properties"), List.of("Properties|LaunchTemplate|Never|ResourceAttribute|Dynamic|Lt.LatestVersionNumber"),
                 "False", true, "R", launchTemplate.formatted("ami-12345678"), launchTemplate.formatted("ami-87654321")),
+            new DetailsRow("sub-variable-named-ref", "AWS::AutoScaling::AutoScalingGroup", asgSub, asgSub, null,
+                List.of("Properties"), List.of("Properties|LaunchTemplate|Never|ResourceAttribute|Dynamic|Lt.LatestVersionNumber"),
+                "False", true, "R", launchTemplate.formatted("ami-12345678").replace("cs-det-lt", "cs-det-lt-sub"),
+                launchTemplate.formatted("ami-87654321").replace("cs-det-lt", "cs-det-lt-sub")),
             // This pins Floci's merge of both details. The AWS response for this combination is unconfirmed.
             new DetailsRow("edited-and-ref", "AWS::SQS::Queue", queueName.formatted("both", "a"),
                 queueName.formatted("both", "b"), null, List.of("Properties"),
-                List.of("Properties|DisplayName|Never" + direct, "Properties|DisplayName|Never|ResourceReference|Dynamic|R"),
+                List.of("Properties|DisplayName|Never" + direct, "Properties|DisplayName|Never|ResourceReference|Static|R"),
                 "False", true, "Reader", topic.formatted("\"before\""), readsRef));
 
         List<String> failures = new ArrayList<>();
