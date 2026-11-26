@@ -98,8 +98,10 @@ public class NeptuneService {
         // Open the try immediately after reserving the port so config reads below can't leak it.
         int proxyPort = allocateProxyPort(settings.port());
         NeptuneContainerHandle handle = null;
+        String volumeId = null;
         boolean provisioned = false;
         try {
+            volumeId = keepsClusters() ? UUID.randomUUID().toString() : null;
             String configuredDbType = config.services().neptune().dbType();
             NeptuneDbType dbType = NeptuneDbType.fromConfig(configuredDbType).orElseGet(() -> {
                 LOG.warnv("Unsupported Neptune db-type ''{0}'', falling back to {1}. Supported: gremlin, neo4j.",
@@ -121,7 +123,7 @@ public class NeptuneService {
             String accountId = currentAccount();
             String identity = resourceIdentity(accountId, region, id);
             // graph database needs the container.
-            handle = containerManager.tryStart(id, image, dbType, accountId, region);
+            handle = containerManager.tryStart(id, image, dbType, accountId, region, volumeId);
             String endpointHost = resolveEndpointHost();
 
             NeptuneCluster cluster = new NeptuneCluster();
@@ -138,6 +140,7 @@ public class NeptuneService {
             cluster.setCreatedAt(Instant.now());
             cluster.setDbClusterMembers(new ArrayList<>());
             cluster.setProxyPort(proxyPort);
+            cluster.setVolumeId(volumeId);
             settings.applyTo(cluster);
             if (tags != null && !tags.isEmpty()) {
                 cluster.setTags(tags);
@@ -168,12 +171,13 @@ public class NeptuneService {
             // catch (RuntimeException) would miss — so a failed create never leaks the
             // reserved port or leaves a container behind. Idempotent and a no-op on success.
             if (!provisioned) {
-                rollbackDbCluster(resourceIdentity(currentAccount(), currentRegion(), id), handle, proxyPort);
+                rollbackDbCluster(resourceIdentity(currentAccount(), currentRegion(), id), handle, proxyPort,
+                        volumeId);
             }
         }
     }
 
-    private void rollbackDbCluster(String identity, NeptuneContainerHandle handle, int proxyPort) {
+    private void rollbackDbCluster(String identity, NeptuneContainerHandle handle, int proxyPort, String volumeId) {
         try {
             try {
                 // The proxy only starts after the container is ready, so a null handle means it
@@ -193,6 +197,8 @@ public class NeptuneService {
             } catch (RuntimeException e) {
                 LOG.warnv("Error stopping container for Neptune cluster {0}: {1}", identity, e.getMessage());
             }
+            // The cluster never reached the caller, so the volume made for it goes too.
+            containerManager.discardStorage(volumeId);
         } finally {
             // Always release the port — even if a cleanup step throws a non-RuntimeException
             // (e.g. an Error) — since leaking the port is the exact failure this rollback prevents.
@@ -292,6 +298,7 @@ public class NeptuneService {
                     cluster.getContainerHost(), cluster.getContainerPort()));
         }
 
+        containerManager.removeStorage(cluster.getVolumeId());
         releaseProxyPort(cluster.getProxyPort());
         deleteCluster(cluster);
         LOG.infov("Neptune cluster {0} deleted", id);
@@ -709,6 +716,14 @@ public class NeptuneService {
     private static String resourceIdentity(NeptuneCluster cluster) {
         return resourceIdentity(arnAccount(cluster.getDbClusterArn()), arnRegion(cluster.getDbClusterArn()),
                 cluster.getDbClusterIdentifier());
+    }
+
+    /**
+     * Whether Neptune's records outlive Floci, under its own storage mode or the global one, so that a cluster's
+     * data is kept in a volume of its own as well.
+     */
+    private boolean keepsClusters() {
+        return !"memory".equals(NeptuneContainerManager.storageMode(config));
     }
 
     private String resolveEndpointHost() {

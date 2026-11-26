@@ -78,6 +78,33 @@ A requested `Port` is honoured when it is free and inside the proxy port range (
 | `FLOCI_SERVICES_NEPTUNE_DEFAULT_NEO4J_IMAGE` | `neo4j:5-community` | Image used when `db-type=neo4j` |
 | `FLOCI_SERVICES_NEPTUNE_DOCKER_NETWORK` | _(host default)_ | Docker network for container connectivity |
 
+### Graph data
+
+When Neptune's records are kept, with `FLOCI_STORAGE_MODE` (or `FLOCI_STORAGE_SERVICES_NEPTUNE_MODE`)
+set to `persistent`, `hybrid` or `wal`, each cluster keeps its graph in a Docker volume of its own,
+`floci-aws-neptune-<volume-id>` (`floci-aws-<namespace>-neptune-<volume-id>` when
+`FLOCI_DOCKER_RESOURCE_NAMESPACE` is set), so the graph outlives the cluster's container. When
+`FLOCI_STORAGE_HOST_PERSISTENT_PATH` is an absolute path, the graph goes in
+`<host-path>/[<namespace>/]neptune/<volume-id>` on the Docker host instead.
+
+- **`neo4j`:** the volume is Neo4j's data directory, `/data`.
+- **`gremlin`:** the volume is the image's `/opt/gremlin-server/data`, and the server's TinkerGraph
+  saves the graph there, to `floci-graph.kryo`, when the server stops, and loads it from there when
+  it starts. The graph is written only when the server stops, which Floci gives a container 30
+  seconds to do before Docker kills it, so a container that is killed rather than stopped loses
+  what changed since it started. Under the host path the server runs as
+  root, since the directory there belongs to whoever created it rather than to the image's
+  `gremlin` user. Floci writes the graph settings into the image's
+  `/opt/gremlin-server/conf/tinkergraph-empty.properties`, so an image configured in place of the
+  default needs the same layout; one laid out otherwise keeps its graph in memory, and Floci logs a
+  warning.
+
+Deleting the cluster keeps its volume, for you to remove with `docker volume rm`, unless
+`FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`; a directory under the host path is always kept. A
+create that fails leaves no volume behind. A cluster created again under a deleted one's identifier
+starts on a new, empty volume. In `memory` mode a cluster's graph lasts only as long as its
+container.
+
 ### Docker Compose
 
 Neptune requires the Docker socket and the Gremlin proxy port range to be exposed. The first cluster claims `PROXY_BASE_PORT`; each additional cluster increments the port.

@@ -46,6 +46,8 @@ public class NeptuneCluster {
     private String containerHost;
     private int containerPort;
     private int proxyPort;
+    /** Names the cluster's data volume; null for a cluster whose data is not kept, in memory mode. */
+    private String volumeId;
 
     public NeptuneCluster() {}
 
@@ -168,4 +170,7 @@ public class NeptuneCluster {
 
     public int getProxyPort() { return proxyPort; }
     public void setProxyPort(int proxyPort) { this.proxyPort = proxyPort; }
+
+    public String getVolumeId() { return volumeId; }
+    public void setVolumeId(String volumeId) { this.volumeId = volumeId; }
 }
