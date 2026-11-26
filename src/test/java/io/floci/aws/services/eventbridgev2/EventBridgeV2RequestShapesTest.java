@@ -23,6 +23,9 @@ class EventBridgeV2RequestShapesTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    private static final String BUS_ARN =
+            "arn:aws:events:us-east-1:123456789012:event-busv2/orders/abcdefghijklmnopqrstuvwxy";
+
     private static final String REQUEST = "{\"Name\":\"n\",\"EventBusArn\":"
             + "\"arn:aws:events:us-east-1:123456789012:event-busv2/orders/abcdefghijklmnopqrstuvwxy\","
             + "\"Configuration\":{\"WebhookEventsConfiguration\":{\"RoleArn\":"
@@ -155,8 +158,8 @@ class EventBridgeV2RequestShapesTest {
                 "Value 'X' at 'configuration.webhookEventsConfiguration.logConfiguration.includePayload' failed to satisfy constraint: Member must satisfy enum value set: [ON_ERROR_ONLY, FULL]",
                 "Value '[bad header]' at 'configuration.webhookEventsConfiguration.metadataHttpHeaders' failed to satisfy constraint: Member must satisfy constraint: [Member must have length less than or equal to 128, Member must have length greater than or equal to 1, Member must satisfy regular expression pattern: [!#$%&'*+\\-.^_`|~0-9A-Za-z]+, Member must not be null]",
                 "Value 'X' at 'configuration.webhookEventsConfiguration.authConfiguration.hmacAuthConfiguration.secretEncoding' failed to satisfy constraint: Member must satisfy enum value set: [RAW, BASE64]",
-                "Value '' at 'configuration.webhookEventsConfiguration.authConfiguration.hmacAuthConfiguration.timestampPrefix' failed to satisfy constraint: Member must satisfy regular expression pattern: [\\u0020-\\u007E]+",
                 "Value '' at 'configuration.webhookEventsConfiguration.authConfiguration.hmacAuthConfiguration.timestampPrefix' failed to satisfy constraint: Member must have length greater than or equal to 1",
+                "Value '' at 'configuration.webhookEventsConfiguration.authConfiguration.hmacAuthConfiguration.timestampPrefix' failed to satisfy constraint: Member must satisfy regular expression pattern: [\\u0020-\\u007E]+",
                 "Value 'bad header' at 'configuration.webhookEventsConfiguration.authConfiguration.hmacAuthConfiguration.messageIdHttpHeader' failed to satisfy constraint: Member must satisfy regular expression pattern: [!#$%&'*+\\-.^_`|~0-9A-Za-z]+");
     }
 
@@ -226,10 +229,47 @@ class EventBridgeV2RequestShapesTest {
     }
 
     @Test
-    void listEmptyNamePrefixBreaksPatternThenLength() {
+    void createEmptyNameBreaksLengthThenPattern() {
+        assertAnswers("CreateEventSource", "{\"Name\":\"\",\"EventBusArn\":\"" + BUS_ARN + "\",\"Configuration\":{}}",
+                "Value '' at 'name' failed to satisfy constraint: Member must have length greater than or equal to 1",
+                "Value '' at 'name' failed to satisfy constraint: Member must satisfy regular expression pattern: (?!aws\\.)[A-Za-z0-9][\\.\\-_A-Za-z0-9]*");
+    }
+
+    @Test
+    void createOverlongClientTokenWithABadPatternBreaksLengthThenPattern() {
+        String token = " ".repeat(65);
+        assertAnswers("CreateEventSource", "{\"Name\":\"n\",\"EventBusArn\":\"" + BUS_ARN + "\",\"ClientToken\":\"" + token
+                + "\",\"Configuration\":{}}",
+                "Value '" + token + "' at 'clientToken' failed to satisfy constraint: Member must have length less than or equal to 64",
+                "Value '" + token + "' at 'clientToken' failed to satisfy constraint: Member must satisfy regular expression pattern: [\\u0021-\\u007E]+");
+    }
+
+    @Test
+    void describeEmptyEventSourceArnBreaksLengthThenPattern() {
+        assertAnswers("DescribeEventSource", "{\"EventSourceArn\":\"\"}",
+                "Value '' at 'eventSourceArn' failed to satisfy constraint: Member must have length greater than or equal to 1",
+                "Value '' at 'eventSourceArn' failed to satisfy constraint: Member must satisfy regular expression pattern: " + DESCRIBE_ARN_PATTERN);
+    }
+
+    @Test
+    void emptyTimestampPrefixBreaksLengthThenPattern() {
+        ObjectNode request = json("{\"Name\":\"n\",\"EventBusArn\":\"" + BUS_ARN + "\",\"Configuration\":{"
+                + "\"WebhookEventsConfiguration\":{\"RoleArn\":\"arn:aws:iam::123456789012:role/probe\","
+                + "\"AuthConfiguration\":{\"HmacAuthConfiguration\":{\"TimestampPrefix\":\"\"}}}}}");
+        List<String> found = violationsOf("CreateEventSource", request).stream()
+                .filter(v -> v.contains("hmacAuthConfiguration.timestampPrefix'"))
+                .toList();
+        assertEquals(List.of(
+                "Value '' at 'configuration.webhookEventsConfiguration.authConfiguration.hmacAuthConfiguration.timestampPrefix' failed to satisfy constraint: Member must have length greater than or equal to 1",
+                "Value '' at 'configuration.webhookEventsConfiguration.authConfiguration.hmacAuthConfiguration.timestampPrefix' failed to satisfy constraint: Member must satisfy regular expression pattern: [\\u0020-\\u007E]+"),
+                found);
+    }
+
+    @Test
+    void listEmptyNamePrefixBreaksLengthThenPattern() {
         assertAnswers("ListEventSources", "{\"NamePrefix\":\"\"}",
-                "Value '' at 'namePrefix' failed to satisfy constraint: Member must satisfy regular expression pattern: (?!aws\\.)[A-Za-z0-9][\\.\\-_A-Za-z0-9]*",
-                "Value '' at 'namePrefix' failed to satisfy constraint: Member must have length greater than or equal to 1");
+                "Value '' at 'namePrefix' failed to satisfy constraint: Member must have length greater than or equal to 1",
+                "Value '' at 'namePrefix' failed to satisfy constraint: Member must satisfy regular expression pattern: (?!aws\\.)[A-Za-z0-9][\\.\\-_A-Za-z0-9]*");
     }
 
     @Test
@@ -492,29 +532,29 @@ class EventBridgeV2RequestShapesTest {
     }
 
     @Test
-    void nameBreakingPatternAndLengthAnswersThePatternFirst() {
+    void nameBreakingPatternAndLengthAnswersTheLengthFirst() {
         assertAnswers("CreateEventSource", "{\"Name\":\" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"EventBusArn\":\"arn:aws:events:u" +
                 "s-east-1:123456789012:event-busv2/orders/abcdefghijklmnopqrstuvwxy\",\"Configuration\":{\"WebhookEventsC" +
                 "onfiguration\":{\"RoleArn\":\"arn:aws:iam::123456789012:role/probe\",\"AuthConfiguration\":{\"BasicHttpAuthC" +
                 "onfiguration\":{}}}}}",
-                "Value ' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' at 'name' failed to satisfy constraint: Member must satisfy regular expression pattern: (?!aws\\.)[A-Za-z0-9][\\.\\-_A-Za-z0-9]*",
-                "Value ' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' at 'name' failed to satisfy constraint: Member must have length less than or equal to 256");
+                "Value ' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' at 'name' failed to satisfy constraint: Member must have length less than or equal to 256",
+                "Value ' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' at 'name' failed to satisfy constraint: Member must satisfy regular expression pattern: (?!aws\\.)[A-Za-z0-9][\\.\\-_A-Za-z0-9]*");
     }
 
     @Test
-    void clientTokenBreakingPatternAndLengthAnswersThePatternFirst() {
+    void clientTokenBreakingPatternAndLengthAnswersTheLengthFirst() {
         assertAnswers("CreateEventSource", "{\"Name\":\"n\",\"EventBusArn\":\"arn:aws:events:us-east-1:123456789012:event-busv2/orders/abcdefghijklmnop" +
                 "qrstuvwxy\",\"Configuration\":{\"WebhookEventsConfiguration\":{\"RoleArn\":\"arn:aws:iam::123456789012:role/" +
                 "probe\",\"AuthConfiguration\":{\"BasicHttpAuthConfiguration\":{}}}},\"ClientToken\":\"                      " +
                 "                                           \"}",
-                "Value '                                                                 ' at 'clientToken' failed to satisfy constraint: Member must satisfy regular expression pattern: [\\u0021-\\u007E]+",
-                "Value '                                                                 ' at 'clientToken' failed to satisfy constraint: Member must have length less than or equal to 64");
+                "Value '                                                                 ' at 'clientToken' failed to satisfy constraint: Member must have length less than or equal to 64",
+                "Value '                                                                 ' at 'clientToken' failed to satisfy constraint: Member must satisfy regular expression pattern: [\\u0021-\\u007E]+");
     }
 
     @Test
-    void tokenHeaderBreakingPatternAndLengthAnswersThePatternFirst() {
+    void tokenHeaderBreakingPatternAndLengthAnswersTheLengthFirst() {
         assertAnswers("CreateEventSource", "{\"Name\":\"n\",\"EventBusArn\":\"arn:aws:events:us-east-1:123456789012:event-busv2/orders/abcdefghijklmnop" +
                 "qrstuvwxy\",\"Configuration\":{\"WebhookEventsConfiguration\":{\"RoleArn\":\"arn:aws:iam::123456789012:role/" +
                 "probe\",\"AuthConfiguration\":{\"StaticTokenAuthConfiguration\":{\"TokenHttpHeader\":\"                     " +
@@ -523,8 +563,8 @@ class EventBridgeV2RequestShapesTest {
                 "                                                                                                    " +
                 "                                                                                                    " +
                 "                                                                                            \"}}}}}",
-                "Value '                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ' at 'configuration.webhookEventsConfiguration.authConfiguration.staticTokenAuthConfiguration.tokenHttpHeader' failed to satisfy constraint: Member must satisfy regular expression pattern: [!#$%&'*+\\-.^_`|~0-9A-Za-z]+",
-                "Value '                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ' at 'configuration.webhookEventsConfiguration.authConfiguration.staticTokenAuthConfiguration.tokenHttpHeader' failed to satisfy constraint: Member must have length less than or equal to 512");
+                "Value '                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ' at 'configuration.webhookEventsConfiguration.authConfiguration.staticTokenAuthConfiguration.tokenHttpHeader' failed to satisfy constraint: Member must have length less than or equal to 512",
+                "Value '                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ' at 'configuration.webhookEventsConfiguration.authConfiguration.staticTokenAuthConfiguration.tokenHttpHeader' failed to satisfy constraint: Member must satisfy regular expression pattern: [!#$%&'*+\\-.^_`|~0-9A-Za-z]+");
     }
 
     @Test
@@ -558,6 +598,9 @@ class EventBridgeV2RequestShapesTest {
         assertTrue(found.get(1).endsWith("' at 'tags' failed to satisfy constraint: " + "Map keys must satisfy constraint: [Member must have length less than or equal to 128, Member must have length greater than or equal to 1, Member must satisfy regular expression pattern: \\S([\\s\\S]*\\S)?(?![\\s\\S]).*]"), found.get(1));
         assertTrue(found.get(2).endsWith("' at 'tags' failed to satisfy constraint: " + "Map value must satisfy constraint: [Member must have length less than or equal to 256, Member must have length greater than or equal to 0, Member must satisfy regular expression pattern: (\\S([\\s\\S]*\\S)?)?(?![\\s\\S]).*, Member must not be null]"), found.get(2));
     }
+
+    private static final String DESCRIBE_ARN_PATTERN = "arn:aws(-[a-z0-9]+)*:events:[a-z][a-z0-9]*(-[a-z0-9]+)*:([0-9]{12}):"
+            + "event-sourcev2\\/(aws\\.service|aws\\.partner|webhook)\\/[A-Za-z0-9][\\.\\-_A-Za-z0-9]{0,255}\\/[a-z0-9]{25}";
 
     private static final String ROTATE_ARN_PATTERN = "arn:aws(-[a-z0-9]+)*:events:[a-z][a-z0-9]*(-[a-z0-9]+)*:"
             + "([0-9]{12}):event-sourcev2\\/webhook\\/[A-Za-z0-9][\\.\\-_A-Za-z0-9]{0,255}\\/[a-z0-9]{25}";

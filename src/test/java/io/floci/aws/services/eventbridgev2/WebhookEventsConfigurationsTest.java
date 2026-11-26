@@ -73,10 +73,10 @@ class WebhookEventsConfigurationsTest {
         List<String> violations = violations("CreateEventSource", create("{\"Name\":\"-x\","
                 + "\"EventBusArn\":\"nope\",\"ClientToken\":\"\",\"Configuration\":{}}"));
         assertEquals(4, violations.size());
-        assertTrue(violations.get(0).contains("at 'clientToken' failed to satisfy constraint: Member must satisfy "
-                + "regular expression pattern: [\\u0021-\\u007E]+"));
         assertEquals("Value '' at 'clientToken' failed to satisfy constraint: Member must have length greater than "
-                + "or equal to 1", violations.get(1));
+                + "or equal to 1", violations.get(0));
+        assertTrue(violations.get(1).contains("at 'clientToken' failed to satisfy constraint: Member must satisfy "
+                + "regular expression pattern: [\\u0021-\\u007E]+"));
         assertTrue(violations.get(2).contains("at 'name'"));
         assertTrue(violations.get(3).contains("at 'eventBusArn' failed to satisfy constraint: Member must satisfy "
                 + "regular expression pattern: arn:aws(-[a-z0-9]+)*:events:"), violations.get(3));
