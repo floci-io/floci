@@ -1364,6 +1364,9 @@ public class BatchService {
         if (AwsArnUtils.looksLikeArn(ref)) {
             try {
                 String resource = AwsArnUtils.parse(ref).resource();
+                if (!regionResolver.inRequestRegion(ref)) {
+                    return Optional.empty();
+                }
                 if (resource.startsWith("job-definition/")) {
                     logical = resource.substring("job-definition/".length());
                 }
@@ -1402,7 +1405,7 @@ public class BatchService {
         if (AwsArnUtils.looksLikeArn(ref)) {
             try {
                 String resource = AwsArnUtils.parse(ref).resource();
-                if (!resource.startsWith("job-definition/")) {
+                if (!regionResolver.inRequestRegion(ref) || !resource.startsWith("job-definition/")) {
                     return false;
                 }
                 logical = resource.substring("job-definition/".length());

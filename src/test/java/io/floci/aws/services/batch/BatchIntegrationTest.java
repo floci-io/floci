@@ -943,6 +943,52 @@ class BatchIntegrationTest {
         deleteComputeEnvironment(EU_AUTH, euCeArn);
     }
 
+    @Test
+    void aJobDefinitionArnOfAnotherRegionNeverReachesTheLocalRevision() {
+        String definitionName = "batch-region-arn-" + uniqueSuffix();
+        String usArn = registerJobDefinition(definitionName, "[]", "[]");
+        String euArn = givenJson(EU_AUTH, """
+                {"jobDefinitionName":"%s","type":"container","platformCapabilities":["FARGATE"],
+                 "containerProperties":{"image":"public.ecr.aws/example/job:latest","command":[],
+                  "resourceRequirements":[{"type":"VCPU","value":"1"},{"type":"MEMORY","value":"512"}]}}
+                """.formatted(definitionName))
+        .when()
+            .post("/v1/registerjobdefinition")
+        .then()
+            .statusCode(200)
+            .body("revision", equalTo(1))
+            .extract().path("jobDefinitionArn");
+
+        givenJson(EU_AUTH, "{\"jobDefinitions\":[\"%s\"]}".formatted(usArn))
+        .when()
+            .post("/v1/describejobdefinitions")
+        .then()
+            .statusCode(200)
+            .body("jobDefinitions", hasSize(0));
+        given()
+            .header("Authorization", EU_AUTH)
+        .when()
+            .get("/v1/tags/" + usArn)
+        .then()
+            .statusCode(400)
+            .header("X-Amzn-Errortype", "ClientException");
+        givenJson(EU_AUTH, "{\"jobDefinition\":\"%s\"}".formatted(usArn))
+        .when()
+            .post("/v1/deregisterjobdefinition")
+        .then()
+            .statusCode(400)
+            .header("X-Amzn-Errortype", "ClientException");
+        givenJson(EU_AUTH, "{\"jobDefinitions\":[\"%s\"]}".formatted(euArn))
+        .when()
+            .post("/v1/describejobdefinitions")
+        .then()
+            .statusCode(200)
+            .body("jobDefinitions[0].status", equalTo("ACTIVE"));
+
+        deregister(AUTH, definitionName + ":1");
+        deregister(EU_AUTH, definitionName + ":1");
+    }
+
     private static void deregister(String auth, String definition) {
         givenJson(auth, "{\"jobDefinition\":\"%s\"}".formatted(definition))
         .when()
