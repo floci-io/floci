@@ -1196,6 +1196,18 @@ class SqsServiceTest {
     }
 
     @Test
+    void receiveMessageFromContentBasedFifoQueueExposesSha256OfBodyAsDeduplicationId() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("sha.fifo",
+                Map.of("ContentBasedDeduplication", "true"), region);
+        sqsService.sendMessage(queue.getQueueUrl(), "Hello FIFO", 0, "group1", null, region);
+        List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region);
+        assertEquals(1, received.size());
+        assertEquals("b5e96aefb0edd6cda6902fa13329717f12231718298872fa7f6a822305b743dd",
+                received.get(0).getMessageDeduplicationId());
+    }
+
+    @Test
     void sendMessageToFifoQueueWithExplicitDedupId() {
         String region = "eu-west-1";
         Queue queue = sqsService.createQueue("test.fifo", null, region);
