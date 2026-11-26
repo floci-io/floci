@@ -139,7 +139,7 @@ final class Ec2Tags {
         Set<String> touched = touched(owned, desired);
         touched.forEach(snapshot.putArray("touched")::add);
         ObjectNode tags = snapshot.putObject("tags");
-        touched.stream().filter(current::containsKey).forEach(key -> tags.put(key, current.get(key)));
+        CfnRollback.valuesOf(current, touched).forEach(tags::put);
         snapshot.put("tagKeys", priorRecord);
     }
 

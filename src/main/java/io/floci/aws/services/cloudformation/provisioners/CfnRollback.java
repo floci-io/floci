@@ -3,7 +3,6 @@ package io.floci.aws.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import org.jboss.logging.Logger;
@@ -13,6 +12,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -638,14 +638,10 @@ public final class CfnRollback {
      */
     public static void putTagSnapshot(ObjectNode snapshot, Collection<String> managedKeys,
                                       Map<String, String> current) {
-        ArrayNode tagKeys = snapshot.putArray("tagKeys");
+        SortedSet<String> keys = new TreeSet<>(managedKeys);
+        keys.forEach(snapshot.putArray("tagKeys")::add);
         ObjectNode tags = snapshot.putObject("tags");
-        for (String key : new TreeSet<>(managedKeys)) {
-            tagKeys.add(key);
-            if (current.containsKey(key)) {
-                tags.put(key, current.get(key));
-            }
-        }
+        valuesOf(current, keys).forEach(tags::put);
     }
 
     /** The tag keys {@link #putTagSnapshot} recorded as managed by the update. */
@@ -653,6 +649,21 @@ public final class CfnRollback {
         List<String> keys = new ArrayList<>();
         snapshot.path("tagKeys").forEach(key -> keys.add(key.asText()));
         return keys;
+    }
+
+    /**
+     * The values {@code current} holds for {@code keys}, in the keys' order: the one filter the tag
+     * snapshots and the IAM Role provisioner's failure cleanup all restore from, which keeps a
+     * key's null value as no value rather than the text "null".
+     */
+    public static Map<String, String> valuesOf(Map<String, String> current, Collection<String> keys) {
+        Map<String, String> values = new LinkedHashMap<>();
+        for (String key : keys) {
+            if (current.containsKey(key)) {
+                values.put(key, current.get(key));
+            }
+        }
+        return values;
     }
 
     /** The tags {@link #putTagSnapshot} recorded, which are what the rollback puts back. */

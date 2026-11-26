@@ -183,9 +183,9 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         final String roleIdToRestore = priorAssumeRoleId;
         final String boundaryToRestore = priorPermissionsBoundary;
         final int durationToRestore = priorMaxSessionDuration;
-        final Set<String> ownedTags = ownedTagKeys;
-        final Map<String, String> tagsToRestore = ownedTags == null
-                ? null : priorTagsOfTouched(priorRoleTags, Ec2Tags.touched(ownedTags, tags));
+        Set<String> ownedTags = ownedTagKeys;
+        Map<String, String> tagsToRestore = ownedTags == null
+                ? null : CfnRollback.valuesOf(priorRoleTags, Ec2Tags.touched(ownedTags, tags));
         boolean boundaryChangedByThisAttempt = false;
         boolean durationChangedByThisAttempt = false;
         try {
