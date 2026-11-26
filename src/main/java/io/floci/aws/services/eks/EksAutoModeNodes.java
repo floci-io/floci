@@ -80,7 +80,8 @@ final class EksAutoModeNodes {
             }
             try {
                 return Long.compare(Long.parseLong(value), Long.parseLong(values.getFirst()));
-            } catch (NumberFormatException e) {
+            } catch (NumberFormatException expected) {
+                // Gt and Lt compare integers; Kubernetes matches no node when either side isn't one, which 0 gives.
                 return 0;
             }
         }
@@ -126,7 +127,9 @@ final class EksAutoModeNodes {
                     allowed = Math.min(allowed, value.endsWith("%")
                             ? (int) Math.ceil(nodes * Integer.parseInt(value.substring(0, value.length() - 1)) / 100.0)
                             : Integer.parseInt(value));
-                } catch (NumberFormatException e) {
+                } catch (NumberFormatException expected) {
+                    // The NodePool schema refuses such a value; one that got through allows no disruption, the safe
+                    // reading.
                     allowed = 0;
                 }
             }
@@ -435,7 +438,8 @@ final class EksAutoModeNodes {
 
     /**
      * The pod each DaemonSet of {@code kubectl get daemonsets -A -o json} runs on a node, with its template's
-     * requests, node selector, required node affinity and tolerations. The DaemonSet controller lets its pods onto
+     * requests, node selector, required node affinity and tolerations; one pinned to named nodes is left out, as it
+     * runs on none Auto Mode launches. The DaemonSet controller lets its pods onto
      * an unschedulable node, which Floci's nodes don't need.
      */
     static List<PendingPod> daemonPods(JsonNode list) {
@@ -445,12 +449,20 @@ final class EksAutoModeNodes {
             long[] requests = requests(spec);
             Map<String, String> selector = new LinkedHashMap<>();
             spec.path("nodeSelector").properties().forEach(e -> selector.put(e.getKey(), e.getValue().asText()));
+            JsonNode termList = spec.path("affinity").path("nodeAffinity")
+                    .path("requiredDuringSchedulingIgnoredDuringExecution").path("nodeSelectorTerms");
             List<List<Requirement>> terms = new ArrayList<>();
-            for (JsonNode term : spec.path("affinity").path("nodeAffinity")
-                    .path("requiredDuringSchedulingIgnoredDuringExecution").path("nodeSelectorTerms")) {
+            boolean pinned = false;
+            for (JsonNode term : termList) {
+                pinned |= !term.path("matchFields").isEmpty();
                 if (!term.path("matchExpressions").isEmpty()) {
                     terms.add(requirements(term.path("matchExpressions")));
                 }
+            }
+            // One pinned to named nodes (matchFields), which a new node isn't, or whose only terms match no node,
+            // runs on no new node.
+            if (pinned || (!termList.isEmpty() && terms.isEmpty())) {
+                continue;
             }
             List<Toleration> tolerations = new ArrayList<>();
             spec.path("tolerations").forEach(t -> tolerations.add(new Toleration(t.path("key").asText(""),
@@ -739,7 +751,9 @@ final class EksAutoModeNodes {
         }
         try {
             return Duration.parse("PT" + value.toUpperCase(Locale.ROOT));
-        } catch (RuntimeException e) {
+        } catch (RuntimeException expected) {
+            // The NodePool schema refuses such a value (500ms, say, which the parse above doesn't read); one that got
+            // through waits the 30 seconds of Auto Mode's built-in pools.
             return Duration.ofSeconds(30);
         }
     }

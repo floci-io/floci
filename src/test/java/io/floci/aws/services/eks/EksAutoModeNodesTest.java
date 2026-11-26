@@ -56,7 +56,8 @@ class EksAutoModeNodesTest {
 
     /**
      * A node is sized for the DaemonSet pods that would run on it as well, as Karpenter sizes it: 1900m of workload
-     * and a 300m daemon don't fit 2 vCPUs. A daemon whose node selector leaves the node out doesn't count.
+     * and a 300m daemon don't fit 2 vCPUs. A daemon whose node selector leaves the node out doesn't count, nor one
+     * pinned to a named node.
      */
     @Test
     void aNodeIsSizedForTheDaemonSetPodsItWouldRunToo() throws Exception {
@@ -66,9 +67,14 @@ class EksAutoModeNodesTest {
                     "containers": [{"resources": {"requests": {"cpu": "300m", "memory": "64Mi"}}}]}}}},
                   {"metadata": {"namespace": "kube-system", "name": "arm-only"}, "spec": {"template": {"spec": {
                     "nodeSelector": {"kubernetes.io/arch": "arm64"},
+                    "containers": [{"resources": {"requests": {"cpu": "1"}}}]}}}},
+                  {"metadata": {"namespace": "kube-system", "name": "pinned"}, "spec": {"template": {"spec": {
+                    "affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
+                      {"matchFields": [{"key": "metadata.name", "operator": "In", "values": ["old-node"]}]}]}}},
                     "containers": [{"resources": {"requests": {"cpu": "1"}}}]}}}}
                 ]}""";
         List<PendingPod> daemons = EksAutoModeNodes.daemonPods(json(daemonSets));
+        assertEquals(List.of("agent", "arm-only"), daemons.stream().map(PendingPod::name).toList());
         PendingPod big = pod("big", "1900m", "64Mi");
 
         assertEquals("c7a.large", EksAutoModeNodes.plan(pools(), List.of(big), TYPES, Map.of())
