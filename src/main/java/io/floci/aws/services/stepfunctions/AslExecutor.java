@@ -33,6 +33,7 @@ import io.floci.aws.services.dynamodb.DynamoDbFacade;
 import io.floci.aws.services.dynamodb.DynamoDbJsonHandler;
 import io.floci.aws.services.dynamodb.backend.DynamoDbItemAccess;
 import io.floci.aws.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ecs.EcsJsonHandler;
 import io.floci.aws.services.ecs.EcsService;
@@ -135,6 +136,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.IntFunction;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -1284,7 +1286,7 @@ public class AslExecutor {
                         cloudFormationHandler == null ? null : cloudFormationHandler.storedResourceArns(),
                         sdkManagementTaskInvoker == null ? null : sdkManagementTaskInvoker.secretsStoredResourceArns(),
                         sfnService == null || !sfnService.isResolvable() ? null : sfnService.get(),
-                        schedulerService), new TaskPermissions.RequestLookups(passedRoleLookups));
+                        schedulerService), new TaskPermissions.RequestLookups(passedRoleLookups, dynamoDbTables(sm)));
         if (required.isEmpty()) {
             return;
         }
@@ -1293,6 +1295,15 @@ public class AslExecutor {
         }
         lambdaTaskAuthorizer.authorize(sm, credentials == null ? null : credentials.path("RoleArn").asText(),
                 required.get().deniedError(), required.get().permissions(), required.get().checksExecutionRole());
+    }
+
+    /** The DynamoDB table of a name in the state machine's Region, as its task's call finds it; null for none. */
+    private Function<String, TableDefinition> dynamoDbTables(StateMachine sm) {
+        if (dynamoDb == null) {
+            return null;
+        }
+        Scope scope = dynamoDb.scope(AwsArnUtils.parse(sm.getStateMachineArn()).region());
+        return name -> dynamoDb.tables().findTable(scope, name).orElse(null);
     }
 
     /**

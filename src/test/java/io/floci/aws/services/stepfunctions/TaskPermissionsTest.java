@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PassedRoleLookups;
 import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.services.dynamodb.model.KeySchemaElement;
+import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.PassedRoleLookup;
 import io.floci.aws.services.iam.model.IamRole;
@@ -20,9 +22,11 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -196,9 +200,11 @@ class TaskPermissionsTest {
     @ParameterizedTest
     @CsvSource({"putItem,PutItem", "getItem,GetItem", "deleteItem,DeleteItem", "updateItem,UpdateItem", "scan,Scan"})
     void anOptimizedDynamoDbTaskNeedsItsActionOnTheTable(String api, String operation) throws Exception {
-        assertEquals(TaskPermissions.accessDenied("DynamoDB.", List.of(new Permission("dynamodb:" + operation, table("orders")))),
-                TaskPermissions.of(integration("dynamodb:" + api), json("{\"TableName\":\"orders\"}"), machine("aws"))
-                        .orElseThrow());
+        TaskPermissions permissions = TaskPermissions.of(integration("dynamodb:" + api),
+                json("{\"TableName\":\"orders\"}"), machine("aws")).orElseThrow();
+        assertEquals("DynamoDB.AccessDeniedException", permissions.deniedError());
+        assertEquals(List.of(new Permission("dynamodb:" + operation, table("orders"))),
+                withoutItemKeys(permissions.permissions()));
     }
 
     @ParameterizedTest
@@ -220,8 +226,70 @@ class TaskPermissionsTest {
         List<Permission> both = List.of(new Permission("dynamodb:PutItem", arn),
                 new Permission("dynamodb:PutItem", table("orders")));
         assertEquals(both, sdkPermissions("putItem", "{\"TableName\":\"" + arn + "\"}"));
-        assertEquals(both, TaskPermissions.of(integration("dynamodb:putItem"), json("{\"TableName\":\"" + arn + "\"}"),
-                machine("aws")).orElseThrow().permissions());
+        assertEquals(both, withoutItemKeys(TaskPermissions.of(integration("dynamodb:putItem"),
+                json("{\"TableName\":\"" + arn + "\"}"), machine("aws")).orElseThrow().permissions()));
+    }
+
+    /**
+     * A task's item request offers the keys a direct one does: the partition key's value, by the table's key schema,
+     * the attributes it names and what it selects, and a write's return values.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"dynamodb:getItem", "aws-sdk:dynamodb:getItem"})
+    void anItemRequestOffersItsLeadingKeysAttributesAndSelect(String tail) throws Exception {
+        assertEquals(List.of(new Permission("dynamodb:GetItem", table("orders"), Map.of(
+                        "dynamodb:LeadingKeys", List.of("o-1"), "dynamodb:Attributes", List.of("pk", "total"),
+                        "dynamodb:Select", List.of("SPECIFIC_ATTRIBUTES")))),
+                dynamoDbPermissions(tail, """
+                        {"TableName":"orders","Key":{"pk":{"S":"o-1"}},"ProjectionExpression":"total"}"""));
+    }
+
+    @Test
+    void aWriteOffersItsReturnValues() throws Exception {
+        assertEquals(List.of("ALL_OLD"), dynamoDbPermissions("dynamodb:putItem", """
+                {"TableName":"orders","Item":{"pk":{"S":"o-1"}},"ReturnValues":"ALL_OLD"}""")
+                .getFirst().conditionKeys().get("dynamodb:ReturnValues"));
+    }
+
+    /** A table DynamoDB does not have has no partition key to read, so the request offers no leading key. */
+    @Test
+    void aTableDynamoDbDoesNotHaveOffersNoLeadingKeys() throws Exception {
+        assertFalse(dynamoDbPermissions("dynamodb:getItem", "{\"TableName\":\"other\",\"Key\":{\"pk\":{\"S\":\"o-1\"}}}")
+                .getFirst().conditionKeys().containsKey("dynamodb:LeadingKeys"));
+    }
+
+    /** Each table of a batch is checked with the keys its own entry names. */
+    @Test
+    void eachTableOfABatchOffersItsOwnEntrysKeys() throws Exception {
+        List<Permission> permissions = dynamoDbPermissions("aws-sdk:dynamodb:batchGetItem", """
+                {"RequestItems":{"orders":{"Keys":[{"pk":{"S":"o-1"}}]},"other":{"Keys":[{"id":{"S":"x"}}]}}}""");
+
+        assertEquals(List.of(table("orders"), table("other")),
+                permissions.stream().map(Permission::resourceArn).toList());
+        assertEquals(List.of("o-1"), permissions.get(0).conditionKeys().get("dynamodb:LeadingKeys"));
+        assertEquals(List.of("pk"), permissions.get(0).conditionKeys().get("dynamodb:Attributes"));
+        assertEquals(List.of("id"), permissions.get(1).conditionKeys().get("dynamodb:Attributes"));
+    }
+
+    /** A transaction's item offers its own keys beside the enclosing operation. */
+    @Test
+    void aTransactionItemOffersItsOwnKeys() throws Exception {
+        assertEquals(List.of(new Permission("dynamodb:PutItem", table("orders"), Map.of(
+                        "dynamodb:EnclosingOperation", List.of("TransactWriteItems"),
+                        "dynamodb:LeadingKeys", List.of("o-1"), "dynamodb:Attributes", List.of("pk")))),
+                dynamoDbPermissions("aws-sdk:dynamodb:transactWriteItems", """
+                        {"TransactItems":[{"Put":{"TableName":"orders","Item":{"pk":{"S":"o-1"}}}}]}"""));
+    }
+
+    /** DynamoDB's table {@code orders}, keyed by {@code pk}. */
+    private static List<Permission> dynamoDbPermissions(String tail, String request) throws Exception {
+        TableDefinition orders = new TableDefinition();
+        orders.setTableName("orders");
+        orders.setKeySchema(List.of(new KeySchemaElement("pk", "HASH")));
+        return TaskPermissions.of(integration(tail), json(request), machine("aws"), null, null, false,
+                new TaskPermissions.ControlServices(null, null, null, null),
+                new TaskPermissions.RequestLookups(null, name -> "orders".equals(name) ? orders : null))
+                .orElseThrow().permissions();
     }
 
     @Test
@@ -761,7 +829,7 @@ class TaskPermissionsTest {
                         ? List.of(TASK_ROLE, EXECUTION_ROLE) : List.of();
             }
         };
-        return new TaskPermissions.RequestLookups(new PassedRoleLookups(iam, List.of(taskDefinitions)));
+        return new TaskPermissions.RequestLookups(new PassedRoleLookups(iam, List.of(taskDefinitions)), null);
     }
 
     private static List<Permission> passedRoles(TaskPermissions permissions) {
@@ -1204,8 +1272,21 @@ class TaskPermissionsTest {
         };
     }
 
+    /** The permissions of a DynamoDB SDK task, without the item keys the tests of those keys pin. */
     private static List<Permission> sdkPermissions(String api, String request) throws Exception {
-        return TaskPermissions.of(integration("aws-sdk:dynamodb:" + api), json(request), machine("aws")).orElseThrow().permissions();
+        return withoutItemKeys(TaskPermissions.of(integration("aws-sdk:dynamodb:" + api), json(request), machine("aws"))
+                .orElseThrow().permissions());
+    }
+
+    /** {@code permissions} without the keys a request's items and projection give, which their own tests pin. */
+    private static List<Permission> withoutItemKeys(List<Permission> permissions) {
+        Set<String> itemKeys = Set.of("dynamodb:LeadingKeys", "dynamodb:Attributes", "dynamodb:Select",
+                "dynamodb:ReturnValues");
+        return permissions.stream().map(permission -> {
+            Map<String, List<String>> kept = new LinkedHashMap<>(permission.conditionKeys());
+            kept.keySet().removeAll(itemKeys);
+            return new Permission(permission.action(), permission.resourceArn(), kept);
+        }).toList();
     }
 
     private static List<Permission> redshiftPermissions(String api, String request, StoredResourceArns stored) throws Exception {

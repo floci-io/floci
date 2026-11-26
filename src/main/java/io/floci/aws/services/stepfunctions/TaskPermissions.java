@@ -3,13 +3,17 @@ package io.floci.aws.services.stepfunctions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PassedRoleLookups;
 import io.floci.aws.core.common.RequestChecks;
 import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.services.dynamodb.DynamoDbConditionKeys;
 import io.floci.aws.services.dynamodb.DynamoDbStoredResourceArns;
+import io.floci.aws.services.dynamodb.DynamoDbTableNames;
+import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.iam.IamAuthorizedActions;
 import io.floci.aws.services.redshiftdata.RedshiftDataTargetSubmitter;
@@ -27,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * What a task's call to its integrated service needs from IAM. A request that names no resource
@@ -56,6 +61,7 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     private static final String EMR_SERVERLESS_PREFIX = "EmrServerless.";
     private static final String LAMBDA_PREFIX = "Lambda.";
     private static final String SECRETS_MANAGER_PREFIX = "SecretsManager.";
+    private static final Set<String> DYNAMODB_BATCHES = Set.of("dynamodb:BatchGetItem", "dynamodb:BatchWriteItem");
     private static final Set<String> DYNAMODB_OPTIMIZED =
             Set.of("putItem", "getItem", "deleteItem", "updateItem", "scan");
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -106,14 +112,21 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     }
 
     /**
-     * What finds the roles a task's request passes, as a direct request's are found, reading only.
+     * What finds what a task's request names beyond the resources it is checked on, as a direct request's is found,
+     * reading only.
      *
-     * @param roles the roles IAM holds by name, an instance profile's roles and an ECS task definition's; without it
-     *              a role given by name is the account's of that name and a resource holding roles holds none
+     * @param roles  the roles IAM holds by name, an instance profile's roles and an ECS task definition's; without it
+     *               a role given by name is the account's of that name and a resource holding roles holds none
+     * @param tables the DynamoDB table of a name in the state machine's Region, null for none, whose partition key a
+     *               request's {@code dynamodb:LeadingKeys} are read by; without it a request offers none
      */
-    record RequestLookups(PassedRoleLookups roles) {
+    record RequestLookups(PassedRoleLookups roles, Function<String, TableDefinition> tables) {
 
-        static final RequestLookups NONE = new RequestLookups(null);
+        static final RequestLookups NONE = new RequestLookups(null, null);
+
+        TableDefinition table(String name) {
+            return tables == null || name == null ? null : tables.apply(name);
+        }
     }
 
     /** The permissions of a mapped integration, or nothing for one that is not checked. */
@@ -237,10 +250,10 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
             return Optional.of(eventsPutEvents(input, machine));
         }
         if (integration.isOptimizedService("dynamodb") && DYNAMODB_OPTIMIZED.contains(integration.api())) {
-            return Optional.of(dynamoDbOptimized(integration.api(), input, machine));
+            return Optional.of(dynamoDbOptimized(integration.api(), input, machine, lookups));
         }
         if (integration.isSdkService("dynamodb")) {
-            return Optional.of(dynamoDbSdk(AslExecutor.capitalizeFirst(integration.api()), input, machine));
+            return Optional.of(dynamoDbSdk(AslExecutor.capitalizeFirst(integration.api()), input, machine, lookups));
         }
         if (integration.is("s3", "putObject") || integration.isSdk("s3", "putObject")) {
             return Optional.of(s3PutObject(input, machine));
@@ -307,17 +320,50 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     }
 
     /**
-     * The action on the table the request names, as the request-resources table reads it, or nothing for a request
-     * naming none, which DynamoDB answers.
+     * The action on the table the request names, as the request-resources table reads it, with the condition keys a
+     * direct request offers ({@link #dynamoDbConditionKeys}), or nothing for a request naming none, which DynamoDB
+     * answers.
      */
-    private static TaskPermissions dynamoDbOptimized(String api, JsonNode input, StateMachine machine) {
+    private static TaskPermissions dynamoDbOptimized(String api, JsonNode input, StateMachine machine,
+                                                     RequestLookups lookups) {
         String action = "dynamodb:" + AslExecutor.capitalizeFirst(api);
         AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
+        Map<String, List<String>> context = dynamoDbConditionKeys(action, input, owner.region(), lookups);
         return accessDenied(DYNAMODB_OPTIMIZED_PREFIX, RequestResources.ofBody(action, input, owner.partition(),
                 owner.region(), owner.accountId(), null).stream()
                 .filter(AwsArnUtils::isArn)
-                .map(resource -> new Permission(action, resource))
+                .map(resource -> new Permission(action, resource, context))
                 .toList());
+    }
+
+    /**
+     * The DynamoDB condition keys a direct request for {@code action} offers: {@code dynamodb:LeadingKeys} by the
+     * partition key of the table it names, which a table DynamoDB does not have leaves out, {@code dynamodb:Attributes}
+     * and {@code dynamodb:Select}, and a single-item write's {@code dynamodb:ReturnValues}.
+     */
+    private static Map<String, List<String>> dynamoDbConditionKeys(String action, JsonNode request, String region,
+                                                                   RequestLookups lookups) {
+        Map<String, List<String>> context = new LinkedHashMap<>(DynamoDbConditionKeys.extract(action, request,
+                dynamoDbTable(request.path("TableName"), region, lookups)).conditionKeys());
+        List<String> returnValues = DynamoDbConditionKeys.returnValues(action, request);
+        if (!returnValues.isEmpty()) {
+            context.put("dynamodb:ReturnValues", List.of(returnValues.getFirst()));
+        }
+        return Map.copyOf(context);
+    }
+
+    /** The table a name or an ARN in {@code region} names; null when it names none DynamoDB has. */
+    private static TableDefinition dynamoDbTable(JsonNode reference, String region, RequestLookups lookups) {
+        String name = text(reference);
+        if (name == null) {
+            return null;
+        }
+        try {
+            return lookups.table(DynamoDbTableNames.resolveWithRegion(name.trim(), region).name());
+        } catch (AwsException expected) {
+            LOG.debugv("The DynamoDB table {0} names no table: {1}", name, expected.getMessage());
+            return null;
+        }
     }
 
     /**
@@ -325,29 +371,47 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
      * parts each take an action (a transaction's items, each PartiQL statement) by each part's action on what it names,
      * a transaction's with {@code dynamodb:EnclosingOperation}, and anything else by its action on the resources it
      * names, every table of a batch. A request whose parts name nothing, or a value that is not an ARN where the
-     * request names a resource by one, reaches nothing, so DynamoDB answers it.
+     * request names a resource by one, reaches nothing, so DynamoDB answers it. Each check offers the condition keys
+     * the same direct request's does: a part's its own, a batch's each table's its entry gives, and any other
+     * request's its whole body gives ({@link #dynamoDbConditionKeys}).
      */
-    private static TaskPermissions dynamoDbSdk(String operation, JsonNode input, StateMachine machine) {
+    private static TaskPermissions dynamoDbSdk(String operation, JsonNode input, StateMachine machine,
+                                               RequestLookups lookups) {
         AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
         String namedAs = "dynamodb:" + operation;
         if (RequestResources.checkedByParts(namedAs)) {
-            boolean transaction = operation.startsWith("Transact") || "ExecuteTransaction".equals(operation);
             List<Permission> permissions = new ArrayList<>();
             for (RequestResources.Target target : RequestResources.targetsOfBody(namedAs, input, owner.partition(),
                     owner.region(), owner.accountId(), DynamoDbStoredResourceArns.STATEMENTS)) {
-                Map<String, List<String>> context = transaction && target.element() != null
-                        ? Map.of("dynamodb:EnclosingOperation", List.of(operation)) : Map.of();
+                Map<String, List<String>> context = target.element() == null ? Map.of()
+                        : Map.copyOf(DynamoDbConditionKeys.partConditionKeys(target.action(), operation,
+                                target.element(), lookups::table, owner.region()));
                 target.resources().stream()
                         .filter(resource -> ANY_RESOURCE.equals(resource) || AwsArnUtils.isArn(resource))
                         .forEach(resource -> permissions.add(new Permission(target.action(), resource, context)));
             }
             return accessDenied(DYNAMODB_SDK_PREFIX, permissions);
         }
+        if (DYNAMODB_BATCHES.contains(namedAs) && input.path("RequestItems").isObject()) {
+            List<Permission> permissions = new ArrayList<>();
+            input.path("RequestItems").properties().forEach(entry -> {
+                ObjectNode single = input.deepCopy();
+                single.putObject("RequestItems").set(entry.getKey(), entry.getValue());
+                Map<String, List<String>> context = Map.copyOf(DynamoDbConditionKeys.extract(namedAs, single,
+                        dynamoDbTable(TextNode.valueOf(entry.getKey()), owner.region(), lookups)).conditionKeys());
+                RequestResources.ofBody(namedAs, single, owner.partition(), owner.region(), owner.accountId(), null)
+                        .stream().filter(AwsArnUtils::isArn)
+                        .forEach(resource -> permissions.add(new Permission(namedAs, resource, context)));
+            });
+            return accessDenied(DYNAMODB_SDK_PREFIX, permissions);
+        }
         List<String> named = RequestResources.ofBody(namedAs, input, owner.partition(), owner.region(),
                 owner.accountId(), null);
+        Map<String, List<String>> context = input.isObject()
+                ? dynamoDbConditionKeys(namedAs, input, owner.region(), lookups) : Map.of();
         return accessDenied(DYNAMODB_SDK_PREFIX, (named.isEmpty() ? List.of(ANY_RESOURCE) : named).stream()
                 .filter(resource -> ANY_RESOURCE.equals(resource) || AwsArnUtils.isArn(resource))
-                .map(resource -> new Permission(namedAs, resource))
+                .map(resource -> new Permission(namedAs, resource, context))
                 .toList());
     }
 
