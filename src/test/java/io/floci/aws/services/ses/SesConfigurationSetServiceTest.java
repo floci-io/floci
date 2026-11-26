@@ -158,6 +158,55 @@ class SesConfigurationSetServiceTest {
     }
 
     @Test
+    void setDeliveryOptions_omittedSharedPoolDeliveryModeKeepsStoredValue() {
+        service.create(cs("my-cs"), REGION);
+        DeliveryOptions regional = new DeliveryOptions();
+        regional.setSharedPoolDeliveryMode("REGIONAL");
+        regional.setTlsPolicy("REQUIRE");
+        service.setDeliveryOptions("my-cs", regional, REGION, pool -> true);
+
+        DeliveryOptions tlsOnly = new DeliveryOptions();
+        tlsOnly.setTlsPolicy("OPTIONAL");
+        service.setDeliveryOptions("my-cs", tlsOnly, REGION, pool -> true);
+        DeliveryOptions stored = service.get("my-cs", REGION).getDeliveryOptions();
+        assertEquals("OPTIONAL", stored.getTlsPolicy());
+        assertEquals("REGIONAL", stored.getSharedPoolDeliveryMode());
+
+        service.setDeliveryOptions("my-cs", null, REGION, pool -> true);
+        stored = service.get("my-cs", REGION).getDeliveryOptions();
+        assertNull(stored.getTlsPolicy());
+        assertEquals("REGIONAL", stored.getSharedPoolDeliveryMode());
+
+        DeliveryOptions global = new DeliveryOptions();
+        global.setSharedPoolDeliveryMode("GLOBAL");
+        service.setDeliveryOptions("my-cs", global, REGION, pool -> true);
+        assertEquals("GLOBAL", service.get("my-cs", REGION).getDeliveryOptions().getSharedPoolDeliveryMode());
+    }
+
+    @Test
+    void setDeliveryOptions_withoutStoredModeClearsAsBefore() {
+        service.create(cs("my-cs"), REGION);
+        DeliveryOptions tls = new DeliveryOptions();
+        tls.setTlsPolicy("REQUIRE");
+        service.setDeliveryOptions("my-cs", tls, REGION, pool -> true);
+
+        service.setDeliveryOptions("my-cs", null, REGION, pool -> true);
+        assertNull(service.get("my-cs", REGION).getDeliveryOptions());
+    }
+
+    @Test
+    void validateDeliveryOptions_rejectsUnknownSharedPoolDeliveryMode() {
+        DeliveryOptions bad = new DeliveryOptions();
+        bad.setSharedPoolDeliveryMode("EVERYWHERE");
+        assertTrue(assertThrows(AwsException.class, () -> service.validateDeliveryOptions(bad, pool -> true))
+                .getMessage().contains("enum value set: [GLOBAL, REGIONAL, ACCOUNT]"));
+
+        DeliveryOptions account = new DeliveryOptions();
+        account.setSharedPoolDeliveryMode("ACCOUNT");
+        service.validateDeliveryOptions(account, pool -> true);
+    }
+
+    @Test
     void validateDeliveryOptions_orderAndPredicate() {
         DeliveryOptions badTls = new DeliveryOptions();
         badTls.setTlsPolicy("BOGUS");

@@ -24,8 +24,8 @@ import java.util.regex.Pattern;
  * split. Reached through the {@code SesService} facade, which delegates here.
  *
  * <p>Owns the account sending-enabled flag ({@code accountSettingsStore}), the VDM (Virtual
- * Deliverability Manager) attributes ({@code accountVdmStore}), and the provisioning details
- * ({@code accountDetailsStore}). Account suppression is account-level too, but it shares
+ * Deliverability Manager) attributes ({@code accountVdmStore}), the provisioning details
+ * ({@code accountDetailsStore}), and the shared pool delivery mode ({@code accountDeliveryStore}). Account suppression is account-level too, but it shares
  * {@code validateSuppressionReason} with the suppression list, so it lives in
  * {@link SesSuppressionService} instead.
  */
@@ -37,6 +37,7 @@ public class SesAccountService {
     private final StorageBackend<String, Boolean> accountSettingsStore;
     private final StorageBackend<String, AccountVdmAttributes> accountVdmStore;
     private final StorageBackend<String, AccountDetails> accountDetailsStore;
+    private final StorageBackend<String, String> accountDeliveryStore;
 
     @Inject
     public SesAccountService(StorageFactory storageFactory) {
@@ -46,14 +47,18 @@ public class SesAccountService {
                 new TypeReference<Map<String, AccountVdmAttributes>>() {});
         this.accountDetailsStore = storageFactory.create("ses", "ses-account-details.json",
                 new TypeReference<Map<String, AccountDetails>>() {});
+        this.accountDeliveryStore = storageFactory.create("ses", "ses-account-delivery.json",
+                new TypeReference<Map<String, String>>() {});
     }
 
     SesAccountService(StorageBackend<String, Boolean> accountSettingsStore,
                       StorageBackend<String, AccountVdmAttributes> accountVdmStore,
-                      StorageBackend<String, AccountDetails> accountDetailsStore) {
+                      StorageBackend<String, AccountDetails> accountDetailsStore,
+                      StorageBackend<String, String> accountDeliveryStore) {
         this.accountSettingsStore = accountSettingsStore;
         this.accountVdmStore = accountVdmStore;
         this.accountDetailsStore = accountDetailsStore;
+        this.accountDeliveryStore = accountDeliveryStore;
     }
 
     public boolean isAccountSendingEnabled(String region) {
@@ -81,6 +86,31 @@ public class SesAccountService {
 
     public void setDedicatedIpAutoWarmup(String region, boolean enabled) {
         accountSettingsStore.put("dedicatedIpAutoWarmup::" + region, enabled);
+    }
+
+    // GetAccount reports DeliveryAttributes even for a region that never set it (probed 2026-11-25:
+    // REGIONAL for an account older than the 2026-11-19 launch). The Developer Guide enables global
+    // shared delivery for accounts that start using SES on or after that date, which every Floci
+    // account does, so an unset region reads GLOBAL.
+    public String getSharedPoolDeliveryMode(String region) {
+        return accountDeliveryStore.get(accountDeliveryKey(region)).orElse(SHARED_POOL_GLOBAL);
+    }
+
+    public void putSharedPoolDeliveryMode(String region, String mode) {
+        if (mode == null) {
+            throw SmithyValidationErrors.badRequest(
+                    SmithyValidationErrors.notNullWithoutValue("sharedPoolDeliveryMode"));
+        }
+        if (!ACCOUNT_SHARED_POOL_DELIVERY_MODES.contains(mode)) {
+            throw SmithyValidationErrors.badRequest(constraint("sharedPoolDeliveryMode",
+                    "Member must satisfy enum value set: " + ACCOUNT_SHARED_POOL_DELIVERY_MODES));
+        }
+        accountDeliveryStore.put(accountDeliveryKey(region), mode);
+        LOG.infov("Updated account shared pool delivery mode for region {0}: {1}", region, mode);
+    }
+
+    private static String accountDeliveryKey(String region) {
+        return "account-delivery::" + region;
     }
 
     // VDM (Virtual Deliverability Manager) is opt-in and per region: GetAccount omits VdmAttributes
@@ -156,6 +186,8 @@ public class SesAccountService {
                 + Math.floorMod((region + "::" + mailType + "::" + websiteUrl).hashCode(), 1_000_000_000));
     }
 
+    private static final String SHARED_POOL_GLOBAL = "GLOBAL";
+    private static final List<String> ACCOUNT_SHARED_POOL_DELIVERY_MODES = List.of(SHARED_POOL_GLOBAL, "REGIONAL");
     private static final Set<String> MAIL_TYPES = Set.of("MARKETING", "TRANSACTIONAL");
     private static final Set<String> CONTACT_LANGUAGES = Set.of("EN", "JA");
     // Modeled constraint bounds (from the SES v2 SDK model, probe-confirmed against real AWS).

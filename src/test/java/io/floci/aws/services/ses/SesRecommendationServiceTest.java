@@ -37,7 +37,8 @@ class SesRecommendationServiceTest {
         clock = new MutableClock();
         // No Route53, so no domain has DMARC or BIMI records.
         identities = new SesIdentityService(new InMemoryStorage<>(), null, clock);
-        accounts = new SesAccountService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        accounts = new SesAccountService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>());
         accounts.putAccountVdmAttributes(REGION, new AccountVdmAttributes(true, false, false));
         service = new SesRecommendationService(identities, accounts, new RegionResolver(REGION, ACCOUNT), clock);
     }

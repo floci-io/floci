@@ -27,7 +27,8 @@ class SesAccountServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new SesAccountService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        service = new SesAccountService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>());
     }
 
     @Test
@@ -48,6 +49,28 @@ class SesAccountServiceTest {
     void sendingEnabled_isPerRegion() {
         service.setAccountSendingEnabled(REGION, false);
         assertTrue(service.isAccountSendingEnabled("eu-west-1"));
+    }
+
+    @Test
+    void sharedPoolDeliveryMode_defaultsGlobal_thenRoundTripsPerRegion() {
+        assertEquals("GLOBAL", service.getSharedPoolDeliveryMode(REGION));
+
+        service.putSharedPoolDeliveryMode(REGION, "REGIONAL");
+        assertEquals("REGIONAL", service.getSharedPoolDeliveryMode(REGION));
+        assertEquals("GLOBAL", service.getSharedPoolDeliveryMode("eu-west-1"));
+    }
+
+    @Test
+    void putSharedPoolDeliveryMode_rejectsMissingAndConfigurationSetOnlyValues() {
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.putSharedPoolDeliveryMode(REGION, null));
+        assertTrue(missing.getMessage().contains("'sharedPoolDeliveryMode' failed to satisfy constraint: "
+                + "Member must not be null"));
+
+        AwsException account = assertThrows(AwsException.class,
+                () -> service.putSharedPoolDeliveryMode(REGION, "ACCOUNT"));
+        assertTrue(account.getMessage().contains("enum value set: [GLOBAL, REGIONAL]"));
+        assertEquals("GLOBAL", service.getSharedPoolDeliveryMode(REGION));
     }
 
     @Test
