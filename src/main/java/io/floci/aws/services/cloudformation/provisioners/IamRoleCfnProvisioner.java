@@ -412,22 +412,6 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
      * {@code TagRole}: the one path an update and its rollback take. Only {@code managedKeys}
      * absent from {@code desired} are removed, so a tag added outside the stack stays.
      */
-    /**
-     * The prior values of the keys the update touched, so the failure cleanup restores only those:
-     * a tag changed outside the stack in the meantime keeps its new value, and a key the update
-     * added has no prior value and is reconciled off the role instead.
-     */
-    private static Map<String, String> priorTagsOfTouched(Map<String, String> priorTags, Set<String> touchedKeys) {
-        Map<String, String> priorOfTouched = new LinkedHashMap<>();
-        for (String key : touchedKeys) {
-            String value = priorTags.get(key);
-            if (value != null) {
-                priorOfTouched.put(key, value);
-            }
-        }
-        return priorOfTouched;
-    }
-
     private void reconcileTags(String roleName, Collection<String> managedKeys, Map<String, String> desired) {
         CfnRollback.reconcileTags(managedKeys, desired, dropped -> iamService.untagRole(roleName, dropped),
                 added -> iamService.tagRole(roleName, added));
