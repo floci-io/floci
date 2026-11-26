@@ -52,6 +52,7 @@ import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.services.ec2instanceconnect.InstanceConnectKeys;
 import io.floci.aws.testing.HelperShellFixture;
 import io.floci.aws.testing.ParallelLocks;
+import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -1162,8 +1163,7 @@ class Ec2ContainerManagerTest {
                 if (now > 4) {
                     fifthDecompression.countDown();
                 }
-                assertTrue(releaseDecompressions.await(10, TimeUnit.SECONDS),
-                        "the test did not release the admitted decompressions");
+                releaseDecompressions.await();
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 throw new AssertionError("interrupted while waiting for concurrent decompressions", ie);
@@ -1191,7 +1191,10 @@ class Ec2ContainerManagerTest {
             try {
                 assertTrue(firstFourDecompressions.await(10, TimeUnit.SECONDS),
                         "four decompressions did not enter the shared budget concurrently");
-                assertFalse(fifthDecompression.await(1, TimeUnit.SECONDS),
+                for (Thread thread : observedThreads) {
+                    ThreadStates.awaitBlockedOrDone(thread);
+                }
+                assertEquals(1, fifthDecompression.getCount(),
                         "a fifth decompression entered while four held the shared budget");
             } finally {
                 releaseDecompressions.countDown();
