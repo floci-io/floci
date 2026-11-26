@@ -30,7 +30,7 @@ class BedrockApplicationInferenceProfileServiceTest {
     private final BedrockService service = serviceFor(ACCOUNT);
 
     private BedrockService serviceFor(String account) {
-        return new BedrockService(new InMemoryStorage<>(), new InMemoryStorage<>(), profiles,
+        return new BedrockService(new InMemoryStorage<>(), new InMemoryStorage<>(), profiles, new InMemoryStorage<>(),
                 new RegionResolver(REGION, account), new ObjectMapper(), mock(KmsService.class));
     }
 

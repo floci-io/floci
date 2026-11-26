@@ -8,8 +8,11 @@ import io.floci.aws.core.common.JsonErrorResponseUtils;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.services.bedrock.model.ApplicationInferenceProfile;
+import io.floci.aws.services.bedrock.model.EnforcedGuardrailConfiguration;
 import io.floci.aws.services.bedrock.model.Guardrail;
+import io.floci.aws.services.iam.IamService;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -47,13 +50,17 @@ public class BedrockController {
     private final BedrockService bedrockService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
+    private final RequestContext requestContext;
+    private final IamService iamService;
 
     @Inject
     public BedrockController(BedrockService bedrockService, RegionResolver regionResolver,
-                             ObjectMapper objectMapper) {
+                             ObjectMapper objectMapper, RequestContext requestContext, IamService iamService) {
         this.bedrockService = bedrockService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.requestContext = requestContext;
+        this.iamService = iamService;
     }
 
     // Guardrails
@@ -263,6 +270,45 @@ public class BedrockController {
         return Response.ok().build();
     }
 
+    // Account-level enforced guardrail configurations
+
+    @PUT
+    @Path("/enforcedGuardrailsConfiguration")
+    public Response putEnforcedGuardrailConfiguration(@Context HttpHeaders headers, String body) {
+        EnforcedGuardrailConfiguration configuration = bedrockService.putEnforcedGuardrailConfiguration(
+                readTree(body), callerArn(), regionResolver.resolveRegion(headers));
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("configId", configuration.getConfigId());
+        response.put("updatedAt", iso8601(configuration.getUpdatedAt()));
+        response.put("updatedBy", configuration.getUpdatedBy());
+        return Response.ok(response).build();
+    }
+
+    @GET
+    @Path("/enforcedGuardrailsConfiguration")
+    public Response listEnforcedGuardrailsConfiguration(@Context HttpHeaders headers,
+                                                        @QueryParam("nextToken") String nextToken) {
+        PaginatedResult<EnforcedGuardrailConfiguration> page = bedrockService.listEnforcedGuardrailConfigurations(
+                nextToken, regionResolver.resolveRegion(headers));
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode configurations = response.putArray("guardrailsConfig");
+        page.items().forEach(configuration -> configurations.add(enforcedGuardrailConfigurationNode(configuration)));
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    @DELETE
+    @Path("/enforcedGuardrailsConfiguration/{configId}")
+    public Response deleteEnforcedGuardrailConfiguration(@Context HttpHeaders headers,
+                                                         @PathParam("configId") String configId) {
+        bedrockService.deleteEnforcedGuardrailConfiguration(configId, regionResolver.resolveRegion(headers));
+        return Response.ok().build();
+    }
+
     // Tags
 
     @POST
@@ -389,6 +435,29 @@ public class BedrockController {
         node.put("updatedAt", iso8601(guardrail.getUpdatedAt()));
         setIfPresent(node, "crossRegionDetails", guardrail.getCrossRegionDetails());
         return node;
+    }
+
+    /** {@code owner} is always {@code ACCOUNT}: the only {@code ConfigurationOwner} in the AWS model. */
+    private ObjectNode enforcedGuardrailConfigurationNode(EnforcedGuardrailConfiguration configuration) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("configId", configuration.getConfigId());
+        node.put("guardrailArn", configuration.getGuardrailArn());
+        node.put("guardrailId", configuration.getGuardrailId());
+        node.put("guardrailVersion", configuration.getGuardrailVersion());
+        setIfPresent(node, "selectiveContentGuarding", configuration.getSelectiveContentGuarding());
+        setIfPresent(node, "modelEnforcement", configuration.getModelEnforcement());
+        node.put("createdAt", iso8601(configuration.getCreatedAt()));
+        node.put("createdBy", configuration.getCreatedBy());
+        node.put("updatedAt", iso8601(configuration.getUpdatedAt()));
+        node.put("updatedBy", configuration.getUpdatedBy());
+        node.put("owner", "ACCOUNT");
+        return node;
+    }
+
+    /** The calling identity's ARN, or the account root when the access key belongs to no IAM identity. */
+    private String callerArn() {
+        return iamService.resolveCallerArn(requestContext.getAccessKeyId())
+                .orElseGet(() -> regionResolver.buildGlobalArn("iam", "root"));
     }
 
     private void setIfPresent(ObjectNode node, String field, JsonNode value) {
