@@ -61,7 +61,7 @@ class RedshiftDataStatementStore {
     }
 
     RedshiftDataStatementStore(int resultTtlHours, Clock clock) {
-        this(resultTtlHours, clock, new RegionResolver("us-east-1", "000000000000"));
+        this(resultTtlHours, clock, new RegionResolver("us-east-1", "000000000000")); // partition-literal: test-shaped constructor default
     }
 
     RedshiftDataStatementStore(int resultTtlHours, Clock clock, RegionResolver regions) {

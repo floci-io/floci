@@ -1161,7 +1161,6 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
         int offset = decodeToken(textOrNull(request, "NextToken"));
 
         List<RedshiftDataStatementStore.StoredStatement> all = store.values().stream()
-                .filter(s -> s.id.indexOf(':') < 0)
                 .filter(s -> nameFilter == null || nameFilter.equals(s.statementName))
                 .filter(s -> statusFilter == null || statusFilter.equalsIgnoreCase(s.status.name()))
                 .sorted(Comparator.comparing((RedshiftDataStatementStore.StoredStatement s) -> s.createdAt).reversed())

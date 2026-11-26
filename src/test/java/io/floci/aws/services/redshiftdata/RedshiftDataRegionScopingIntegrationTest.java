@@ -12,11 +12,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.sql.SQLException;
-import java.time.Duration;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
@@ -63,11 +61,10 @@ class RedshiftDataRegionScopingIntegrationTest {
     @Test
     void aStatementIsListedAndReachedOnlyInTheRegionItRanIn() {
         String id = call(HOME, "ExecuteStatement",
-                "{\"ClusterIdentifier\":\"regional\",\"Database\":\"dev\",\"DbUser\":\"admin\",\"Sql\":\"select 1\"}")
+                "{\"ClusterIdentifier\":\"regional\",\"Database\":\"dev\",\"DbUser\":\"admin\",\"Sql\":\"select 1\",\"WaitTimeSeconds\":10}")
                 .statusCode(200).extract().path("Id");
         String byId = "{\"Id\":\"" + id + "\"}";
-        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
-                call(HOME, "DescribeStatement", byId).statusCode(200).body("Status", equalTo("FAILED")));
+        call(HOME, "DescribeStatement", byId).statusCode(200).body("Status", equalTo("FAILED"));
 
         call(OTHER, "ListStatements", "{}").statusCode(200).body("Statements.Id", not(hasItem(id)));
         notFound(call(OTHER, "DescribeStatement", byId));
