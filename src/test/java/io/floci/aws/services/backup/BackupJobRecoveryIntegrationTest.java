@@ -53,7 +53,7 @@ class BackupJobRecoveryIntegrationTest {
         try {
             restarted.resumeJobs();
             for (String account : accounts) {
-                await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> RequestScopes.runAs(account, () -> {
+                await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> RequestScopes.runAs(account, "eu-west-1", () -> {
                     assertEquals("COMPLETED", restarted.listBackupJobs(vaultName, null, null, null).getFirst().getState());
                     assertEquals(1, restarted.listRecoveryPointsByBackupVault(vaultName, "eu-west-1").size());
                     String arn = restarted.listRecoveryPointsByBackupVault(vaultName, "eu-west-1")
@@ -67,7 +67,7 @@ class BackupJobRecoveryIntegrationTest {
         } finally {
             restarted.shutdown();
             for (String account : accounts) {
-                RequestScopes.runAs(account, () -> {
+                RequestScopes.runAs(account, "eu-west-1", () -> {
                     restarted.listRecoveryPointsByBackupVault(vaultName, "eu-west-1").forEach(point ->
                             restarted.deleteRecoveryPoint(vaultName, point.getRecoveryPointArn(), "eu-west-1"));
                     restarted.listBackupJobs(vaultName, null, null, null).forEach(job -> jobs.delete(job.getBackupJobId()));
