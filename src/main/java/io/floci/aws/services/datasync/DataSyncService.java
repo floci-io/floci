@@ -117,7 +117,7 @@ public class DataSyncService implements StoredResourceArns {
 
     public DataSyncAgent getAgent(String agentArn) {
         requireArn(agentArn, "AgentArn");
-        return agents.get(agentArn).orElseThrow(() -> new AwsException("InvalidRequestException",
+        return agents.get(agentArn).filter(agent -> inRequestRegion(agentArn)).orElseThrow(() -> new AwsException("InvalidRequestException",
                 "Agent " + agentArn + " is not found.", 400));
     }
 
@@ -137,7 +137,7 @@ public class DataSyncService implements StoredResourceArns {
     }
 
     public Page<DataSyncAgent> listAgents(String nextToken, int maxResults) {
-        List<DataSyncAgent> all = agents.scan(key -> true);
+        List<DataSyncAgent> all = agents.scan(this::inRequestRegion);
         all.sort(Comparator.comparing(DataSyncAgent::getAgentArn));
         return paginate(all, DataSyncAgent::getAgentArn, nextToken, maxResults);
     }
@@ -177,7 +177,7 @@ public class DataSyncService implements StoredResourceArns {
 
     public DataSyncLocation getLocation(String locationArn) {
         requireArn(locationArn, "LocationArn");
-        return locations.get(locationArn).orElseThrow(() -> new AwsException("InvalidRequestException",
+        return locations.get(locationArn).filter(location -> inRequestRegion(locationArn)).orElseThrow(() -> new AwsException("InvalidRequestException",
                 "Location " + locationArn + " is not found.", 400));
     }
 
@@ -219,7 +219,7 @@ public class DataSyncService implements StoredResourceArns {
 
     public Page<DataSyncLocation> listLocations(JsonNode filters, String nextToken, int maxResults) {
         List<DataSyncLocation> all = new ArrayList<>();
-        for (DataSyncLocation location : locations.scan(key -> true)) {
+        for (DataSyncLocation location : locations.scan(this::inRequestRegion)) {
             if (matchesLocationFilters(location, filters)) {
                 all.add(location);
             }
@@ -261,7 +261,7 @@ public class DataSyncService implements StoredResourceArns {
 
     public DataSyncTask getTask(String taskArn) {
         requireArn(taskArn, "TaskArn");
-        return tasks.get(taskArn).orElseThrow(() -> new AwsException("InvalidRequestException",
+        return tasks.get(taskArn).filter(task -> inRequestRegion(taskArn)).orElseThrow(() -> new AwsException("InvalidRequestException",
                 "Task " + taskArn + " is not found.", 400));
     }
 
@@ -307,7 +307,7 @@ public class DataSyncService implements StoredResourceArns {
 
     public Page<DataSyncTask> listTasks(JsonNode filters, String nextToken, int maxResults) {
         List<DataSyncTask> all = new ArrayList<>();
-        for (DataSyncTask task : tasks.scan(key -> true)) {
+        for (DataSyncTask task : tasks.scan(this::inRequestRegion)) {
             if (matchesTaskFilters(task, filters)) {
                 all.add(task);
             }
@@ -379,6 +379,9 @@ public class DataSyncService implements StoredResourceArns {
 
     private DataSyncTaggable findTaggable(String resourceArn) {
         requireArn(resourceArn, "ResourceArn");
+        if (!inRequestRegion(resourceArn)) {
+            throw new AwsException("InvalidRequestException", "Resource " + resourceArn + " is not found.", 400);
+        }
         return agents.get(resourceArn).<DataSyncTaggable>map(agent -> agent)
                 .or(() -> locations.get(resourceArn).map(location -> location))
                 .or(() -> tasks.get(resourceArn).map(task -> task))
@@ -757,6 +760,14 @@ public class DataSyncService implements StoredResourceArns {
 
     private static String optionalText(JsonNode request, String member) {
         return request.hasNonNull(member) ? request.get(member).asText() : null;
+    }
+
+    /**
+     * Whether {@code arn}, the key an agent, a location or a task is stored under, names one of the request's Region.
+     * The ARN carries its Region, so each resource is Regional without a key of its own, those stored before included.
+     */
+    private boolean inRequestRegion(String arn) {
+        return AwsArnUtils.isArn(arn) && AwsArnUtils.parse(arn).region().equals(regionResolver.getRegion());
     }
 
     private static void requireArn(String arn, String member) {
