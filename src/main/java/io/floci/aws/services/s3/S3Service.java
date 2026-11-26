@@ -8794,9 +8794,10 @@ public class S3Service implements Resettable, ResourceProvider {
             metadata.putAll(effectiveOptions.getReplacementMetadata());
         }
 
-        // REPLACE takes these headers from the request only; an omitted one is not carried over.
+        // REPLACE takes these headers from the request only; an omitted one is not carried over,
+        // and an omitted Content-Type becomes S3's binary/octet-stream.
         String effectiveContentType = replaceMetadata
-                ? effectiveOptions.getContentType()
+                ? (effectiveOptions.getContentType() != null ? effectiveOptions.getContentType() : "binary/octet-stream")
                 : source.getContentType();
         String effectiveStorageClass = effectiveOptions.getStorageClass() != null
                 ? effectiveOptions.getStorageClass()

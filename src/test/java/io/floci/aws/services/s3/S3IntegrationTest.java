@@ -1889,7 +1889,7 @@ class S3IntegrationTest {
         .then()
             .statusCode(200)
             .header("x-amz-meta-owner", equalTo("team-b"))
-            .header("Content-Type", equalTo("application/octet-stream"))
+            .header("Content-Type", equalTo("binary/octet-stream"))
             .header("Content-Encoding", nullValue())
             .header("Content-Disposition", nullValue())
             .header("Cache-Control", nullValue());
