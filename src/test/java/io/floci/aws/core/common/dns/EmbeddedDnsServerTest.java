@@ -439,6 +439,38 @@ class EmbeddedDnsServerTest {
     }
 
     @Test
+    void planQuery_missingPublicNamesDoNotShadowEmulatorEndpoints() {
+        DnsRecordSource missing = new DnsRecordSource() {
+            @Override
+            public Optional<DnsAnswer> resolveAuthoritative(String name, int type) {
+                return Optional.of(DnsAnswer.nxDomain());
+            }
+
+            @Override
+            public Optional<DnsAnswer> resolveIpv4(String name) {
+                return Optional.empty();
+            }
+        };
+        EmbeddedDnsServer dns = withRules(List.of(missing),
+                rules("vpc-a", forward("rule.localhost.floci.io", "10.1.0.53")), clientVpc("vpc-a"));
+
+        for (String name : List.of("cluster.dsql.us-east-1.localhost.floci.io",
+                "uploads.s3.localhost.floci.io", "sts.us-east-1.localhost.floci.io")) {
+            assertEquals(List.of(MY_IP), dns.planQuery(name, CLIENT, MY_IP, 1).answer().orElseThrow().addresses());
+            assertEquals(DnsAnswer.noData(), dns.planQuery(name, CLIENT, MY_IP, 28).answer().orElseThrow());
+            for (int type : List.of(2, 6, 16)) {
+                assertEquals(DnsAnswer.nxDomain(), dns.planQuery(name, CLIENT, MY_IP, type).answer().orElseThrow());
+            }
+            assertEquals(DnsAnswer.nxDomain(),
+                    dns.planQuery(name, CLIENT, MY_IP, 1, false).answer().orElseThrow());
+        }
+        assertEquals(DnsAnswer.nxDomain(),
+                dns.planQuery("missing.example.test", CLIENT, MY_IP, 1).answer().orElseThrow());
+        assertEquals(List.of(new DnsForwardingRule.Target("10.1.0.53", 53)),
+                dns.planQuery("api.rule.localhost.floci.io", CLIENT, MY_IP, 1).ruleTargets());
+    }
+
+    @Test
     void planQuery_keepsResolvingWhenARuleSourceThrows() {
         DnsForwardingRuleSource failing = (accountId, region, vpcId) -> {
             throw new IllegalStateException("storage is down");
