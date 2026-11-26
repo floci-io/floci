@@ -31,6 +31,13 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 
+import static io.floci.aws.services.eventbridgev2.WebhookSourceFixture.HMAC_AUTH;
+import static io.floci.aws.services.eventbridgev2.WebhookSourceFixture.MAPPER;
+import static io.floci.aws.services.eventbridgev2.WebhookSourceFixture.NOW;
+import static io.floci.aws.services.eventbridgev2.WebhookSourceFixture.REGION;
+import static io.floci.aws.services.eventbridgev2.WebhookSourceFixture.ROLE;
+import static io.floci.aws.services.eventbridgev2.WebhookSourceFixture.STATIC_AUTH;
+import static io.floci.aws.services.eventbridgev2.WebhookSourceFixture.json;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -49,17 +56,7 @@ import static org.mockito.Mockito.when;
  * measured on AWS.
  */
 class EventBridgeV2RevokeResourceTest {
-    private static final String REGION = "us-east-1";
-    private static final String ACCOUNT = "000000000000";
-    private static final Instant NOW = Instant.parse("2026-11-25T06:00:00Z");
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String ROLE = "arn:aws:iam::000000000000:role/Hook";
     private static final String QUEUE = "arn:aws:sqs:us-east-1:000000000000:orders";
-    private static final String STATIC_AUTH = "{\"StaticTokenAuthConfiguration\":{\"TokenHttpHeader\":\"X-Tok\","
-            + "\"SecretValue\":\"original-token\"}}";
-    private static final String HMAC_AUTH = "{\"HmacAuthConfiguration\":{\"Algorithm\":\"SHA256\","
-            + "\"Encoding\":\"HEX\",\"SignatureHttpHeader\":\"X-Sig\",\"SignedMessageComposition\":\"BODY\","
-            + "\"SecretValue\":\"0123456789abcdef\"}}";
     private static final String ID = "abcdefghijklmnopqrstuvwxy";
     private static final String ARN_PATTERN = "arn:aws(-[a-z0-9]+)*:events:[a-z][a-z0-9]*(-[a-z0-9]+)*:([0-9]{12}):"
             + "(subscriber|event-sourcev2\\/(aws\\.service|aws\\.partner|webhook))"
@@ -75,6 +72,7 @@ class EventBridgeV2RevokeResourceTest {
             + "sources that are not revoked. Delete or revoke them and retry.";
 
     private final List<String> delivered = new ArrayList<>();
+    private WebhookSourceFixture fixture;
     private SecretsManagerService secrets;
     private EventBridgeV2Service service;
     private EventBridgeV2Handler handler;
@@ -85,31 +83,23 @@ class EventBridgeV2RevokeResourceTest {
 
     @BeforeEach
     void setUp() {
-        StorageFactory factory = mock(StorageFactory.class);
-        when(factory.create(eq("secretsmanager"), any(), any(TypeReference.class)))
-                .thenAnswer(call -> AccountAwareStorageBackend.<Secret>inMemory(ACCOUNT));
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().secretsmanager().defaultRecoveryWindowDays()).thenReturn(30);
-        RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
-        secrets = new SecretsManagerService(factory, config, regionResolver, null, MAPPER, null);
-        clock = new ManualClock(NOW);
         EventBridgeV2Delivery delivery = mock(EventBridgeV2Delivery.class);
         doAnswer(call -> delivered.add(call.<SubscriberV2>getArgument(0).getName())).when(delivery)
                 .deliver(any(), any());
-        EventBridgeV2EventSources sources = new EventBridgeV2EventSources(
-                AccountAwareStorageBackend.inMemory(ACCOUNT), secrets, regionResolver, clock, "http://floci.test:4566");
-        service = new EventBridgeV2Service(AccountAwareStorageBackend.inMemory(ACCOUNT),
-                AccountAwareStorageBackend.inMemory(ACCOUNT), regionResolver, delivery, sources, clock, true);
+        fixture = new WebhookSourceFixture(delivery);
+        secrets = fixture.secrets;
+        service = fixture.service;
+        webhooks = fixture.webhooks;
+        clock = fixture.clock;
+        bus = fixture.bus;
         handler = new EventBridgeV2Handler(service, MAPPER);
-        webhooks = new EventBridgeV2Webhooks(service, sources, secrets, clock);
-        bus = service.createEventBus(json("{\"Name\":\"orders\"}"), REGION).getArn();
     }
 
     // ──────────────────────────── Order of checks ────────────────────────────
 
     @Test
     void theArnIsAnsweredBackForASourceAndForASubscriber() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         SubscriberV2 subscriber = subscriber("keep", bus);
 
         assertEquals(source.getArn(), revoke(source.getArn()));
@@ -166,7 +156,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void aWebhookSourceThatDoesNotExistIsAccessDeniedNotNotFound() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         String wrongId = source.getArn().substring(0, source.getArn().length() - 5) + "aaaaa";
 
         assertRefused(403, "AccessDeniedException", "Access denied.", "{\"Arn\":\"arn:aws:events:us-east-1:"
@@ -199,7 +189,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void aRevokedSourceStaysActiveAndMovesItsModifiedTimeToTheRevokeTime() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         clock.advance(Duration.ofMinutes(1));
 
         revoke(source.getArn());
@@ -214,7 +204,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void aSecondRevokeAnswersOkAndLeavesTheModifiedTimeAlone() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         clock.advance(Duration.ofMinutes(1));
         revoke(source.getArn());
         clock.advance(Duration.ofMinutes(1));
@@ -229,7 +219,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void theSecretOfARevokedSourceStaysAndItsNameStaysTaken() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         revoke(source.getArn());
 
         assertNull(secrets.describeSecret(source.getSecretArn(), REGION).getDeletedDate());
@@ -246,8 +236,8 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void describeAndListReportRevokedOnlyOnceTheSourceIsRevoked() {
-        EventSourceV2 revoked = source("rv-src", STATIC_AUTH);
-        EventSourceV2 live = source("rv-live", STATIC_AUTH);
+        EventSourceV2 revoked = fixture.source("rv-src", STATIC_AUTH);
+        EventSourceV2 live = fixture.source("rv-live", STATIC_AUTH);
         revoke(revoked.getArn());
 
         assertEquals(true, describe(revoked).get("Revoked").booleanValue());
@@ -268,7 +258,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void updateOfARevokedSourceIsInvalidStateAndChangesNothing() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         revoke(source.getArn());
 
         assertAnswer(409, "InvalidStateException", UPDATE_MESSAGE, "UpdateEventSource",
@@ -284,7 +274,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void theRevokedCheckOfUpdateComesAfterItsBadRequestChecks() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         revoke(source.getArn());
 
         assertAnswer(400, "InvalidInputException", "Exactly one Configuration sub-field must be provided",
@@ -306,7 +296,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void rotateOfARevokedSourceIsInvalidState() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         revoke(source.getArn());
 
         assertAnswer(409, "InvalidStateException", ROTATE_MESSAGE, "RotateWebhookCredentials",
@@ -318,7 +308,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void theRevokedCheckOfRotateComesAfterItsBadRequestChecks() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         revoke(source.getArn());
 
         assertAnswer(400, "InvalidInputException",
@@ -336,7 +326,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void theRevokedCheckOfRotateComesAfterTheValueRulesOfTheAuthenticationType() {
-        EventSourceV2 source = source("hmac", HMAC_AUTH);
+        EventSourceV2 source = fixture.source("hmac", HMAC_AUTH);
         revoke(source.getArn());
 
         assertAnswer(400, "InvalidInputException",
@@ -348,7 +338,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void theRevokedCheckOfRotateComesAfterTheReplayOfAClientToken() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         String request = "{\"EventSourceArn\":\"" + source.getArn() + "\",\"ClientToken\":\"same\","
                 + "\"Credential\":{\"StaticTokenSecretValue\":\"second-token\"}}";
         service.rotateWebhookCredentials(json(request), REGION);
@@ -364,19 +354,19 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void aRevokedSourceCanStillBeDescribedAndDeletedAndItsSecretGoesWithIt() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         revoke(source.getArn());
 
         service.deleteEventSource(json("{\"EventSourceArn\":\"" + source.getArn() + "\"}"), REGION);
 
         assertNotNull(secrets.describeSecret(source.getSecretArn(), REGION).getDeletedDate());
         assertTrue(list("{}").get("EventSources").isEmpty());
-        assertEquals("hook", source("hook", STATIC_AUTH).getName());
+        assertEquals("hook", fixture.source("hook", STATIC_AUTH).getName());
     }
 
     @Test
     void aRevokedSourceAnswersForbiddenOnItsUrl() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         URI url = URI.create(service.webhookUrl(source));
         revoke(source.getArn());
 
@@ -484,7 +474,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void aLiveSourceOrSubscriberStillKeepsTheBus() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         SubscriberV2 subscriber = subscriber("keep", bus);
 
         assertBusKept(IN_USE_BOTH);
@@ -497,7 +487,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void aBusWhoseOnlySourceIsRevokedIsDeleted() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         revoke(source.getArn());
 
         service.deleteEventBus(bus, REGION);
@@ -517,7 +507,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void aLiveSubscriberAlongsideARevokedSourceKeepsTheBus() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         subscriber("keep", bus);
         revoke(source.getArn());
 
@@ -528,7 +518,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void aRevokedSourceOutlivesItsBusAndIsDescribedWithoutItsConfiguration() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         revoke(source.getArn());
         service.deleteEventBus(bus, REGION);
 
@@ -560,7 +550,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void listingTheSourcesOfADeletedBusIsNotFound() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         revoke(source.getArn());
         service.deleteEventBus(bus, REGION);
 
@@ -570,7 +560,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void anOrphanCanBeRevokedAgainAndDeletedAndItsSecretGoesWithIt() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         SubscriberV2 subscriber = subscriber("keep", bus);
         revoke(source.getArn());
         revoke(subscriber.getArn());
@@ -588,7 +578,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void aNewBusOfTheSameNameDoesNotAdoptTheOrphans() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         SubscriberV2 subscriber = subscriber("keep", bus);
         revoke(source.getArn());
         revoke(subscriber.getArn());
@@ -658,7 +648,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void aSourceOfTheOrphansNameIsRefusedOnTheNewBusAndTheNewBusListsNone() {
-        EventSourceV2 orphan = source("hook", STATIC_AUTH);
+        EventSourceV2 orphan = fixture.source("hook", STATIC_AUTH);
         revoke(orphan.getArn());
         service.deleteEventBus(bus, REGION);
         String recreated = service.createEventBus(json("{\"Name\":\"orders\"}"), REGION).getArn();
@@ -700,7 +690,7 @@ class EventBridgeV2RevokeResourceTest {
 
     @Test
     void theFlagSurvivesTheCopiesAnUpdateOrARotationMakes() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         SubscriberV2 subscriber = subscriber("keep", bus);
         revoke(subscriber.getArn());
 
@@ -718,12 +708,6 @@ class EventBridgeV2RevokeResourceTest {
 
     private String revoke(String arn) {
         return service.revokeResource(json("{\"Arn\":\"" + arn + "\"}"), REGION);
-    }
-
-    private EventSourceV2 source(String name, String auth) {
-        return service.createEventSource(json("{\"ClientToken\":\"" + name + "-token\",\"Name\":\"" + name
-                + "\",\"EventBusArn\":\"" + bus + "\",\"Configuration\":{\"WebhookEventsConfiguration\":"
-                + "{\"AuthConfiguration\":" + auth + ",\"RoleArn\":\"" + ROLE + "\"}}}"), REGION);
     }
 
     private SubscriberV2 subscriber(String name, String eventBusArn) {
@@ -790,13 +774,5 @@ class EventBridgeV2RevokeResourceTest {
         Set<String> names = new TreeSet<>();
         node.fieldNames().forEachRemaining(names::add);
         return names;
-    }
-
-    private static JsonNode json(String json) {
-        try {
-            return MAPPER.readTree(json);
-        } catch (Exception e) {
-            throw new IllegalArgumentException(json, e);
-        }
     }
 }
