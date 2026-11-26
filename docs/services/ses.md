@@ -587,8 +587,10 @@ stored for it. A send that gives no identity ARN for an address (`SourceArn`, `F
 the verified identity that address sends as: the address itself, else its domain or a parent domain, so a
 policy on `identity/example.com` lets `sender@example.com` send and one on the address's own ARN does not
 (probed). A raw send without `Source` is checked on the identity of its first `From` header address; a v2
-raw send without `FromEmailAddress` is not checked on an identity. An operation whose action has no
-resource type, or whose request names none, is checked on `*`. The other actions the service reference lists for some operations are checked too:
+raw send without `FromEmailAddress` is not checked on an identity. A v2 templated send is also checked
+on the template its `Content.Template` (or `DefaultContent.Template` for `SendBulkEmail`) names by
+`TemplateName` or `TemplateArn`; one with inline `TemplateContent` names no template. An operation
+whose action has no resource type, or whose request names none, is checked on `*`. The other actions the service reference lists for some operations are checked too:
 `ses:TagResource` for a create that tags what it makes, and `iam:PassRole` (with `iam:PassedToService`
 `ses.amazonaws.com`) for creating or updating an event destination that delivers through a role. A
 v2 `SendEmail` is authorized as `ses:SendEmail` whatever its content: `ses:SendRawEmail` is a v1 action.

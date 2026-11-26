@@ -227,6 +227,29 @@ class SesIamIntegrationTest {
     }
 
     @Test
+    void aV2TemplatedSendIsCheckedOnTheTemplateItsContentNames() throws Exception {
+        String domain = "d-" + suffix() + ".example.com";
+        String template = "send-" + suffix();
+        Caller caller = caller("[\"ses:SendEmail\"]", "identity/" + domain);
+        verifiedDomain(caller, domain);
+        send(caller.owner(), "POST", "/v2/email/templates", "{\"TemplateName\":\"" + template
+                + "\",\"TemplateContent\":{\"Subject\":\"s\",\"Text\":\"t\"}}").then().statusCode(200);
+        String byName = v2TemplatedSend("sender@" + domain, "\"TemplateName\":\"" + template + "\"");
+        String byArn = v2TemplatedSend("sender@" + domain, "\"TemplateArn\":\"" + caller.arn("template/" + template)
+                + "\"");
+
+        send(caller.signer(), "POST", "/v2/email/outbound-emails", v2Send("sender@" + domain, null))
+                .then().statusCode(200);
+        denied(send(caller.signer(), "POST", "/v2/email/outbound-emails", byName), "ses:SendEmail");
+        denied(send(caller.signer(), "POST", "/v2/email/outbound-emails", byArn), "ses:SendEmail");
+        AwsRequestSigner both = user(caller.account(), "ses-both", "{\"Version\":\"2012-10-17\",\"Statement\":[{"
+                + "\"Effect\":\"Allow\",\"Action\":\"ses:SendEmail\",\"Resource\":[\""
+                + caller.arn("identity/" + domain) + "\",\"" + caller.arn("template/" + template) + "\"]}]}");
+        send(both, "POST", "/v2/email/outbound-emails", byName).then().statusCode(200);
+        send(both, "POST", "/v2/email/outbound-emails", byArn).then().statusCode(200);
+    }
+
+    @Test
     void aV1SendIsCheckedOnTheIdentityItsSourceSendsAs() throws Exception {
         String domain = "d-" + suffix() + ".example.com";
         Caller caller = caller("[\"ses:SendEmail\"]", "identity/" + domain);
@@ -293,6 +316,12 @@ class SesIamIntegrationTest {
                 + (configurationSet == null ? "" : "\"ConfigurationSetName\":\"" + configurationSet + "\",")
                 + "\"Destination\":{\"ToAddresses\":[\"success@simulator.amazonses.com\"]},"
                 + "\"Content\":{\"Simple\":{\"Subject\":{\"Data\":\"s\"},\"Body\":{\"Text\":{\"Data\":\"b\"}}}}}";
+    }
+
+    private static String v2TemplatedSend(String from, String selector) {
+        return "{\"FromEmailAddress\":\"" + from + "\","
+                + "\"Destination\":{\"ToAddresses\":[\"success@simulator.amazonses.com\"]},"
+                + "\"Content\":{\"Template\":{" + selector + ",\"TemplateData\":\"{}\"}}}";
     }
 
     /** IAM let the request through to SES, which refused it for naming nothing it holds. */

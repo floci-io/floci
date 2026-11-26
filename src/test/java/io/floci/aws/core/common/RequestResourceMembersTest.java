@@ -334,7 +334,7 @@ class RequestResourceMembersTest {
         // No types, a type with no format, no member, or beside members reading it otherwise.
         for (String bad : List.of("\"types\":[],\"through\":\"SessionId\"",
                 "\"types\":[\"pool\"],\"through\":\"SessionId\"", "\"types\":[\"group\"],\"through\":\"Ids[][]\"",
-                "\"types\":[\"group\"],\"through\":\"Session.Id.Part\"",
+                "\"types\":[\"group\"],\"through\":\"Session.Id.Part.Name\"",
                 "\"types\":[\"group\"],\"through\":\"SessionId\",\"unless\":{\"GroupId\":[null]}",
                 "\"types\":[\"group\"],\"through\":\"SessionId\",\"when\":{\"Ids[]\":[\"a\"]}",
                 "\"types\":[\"group\"],\"through\":\"SessionId\",\"arn\":\"GroupArn\"",
@@ -354,7 +354,7 @@ class RequestResourceMembersTest {
         String formats = "\"arnFormats\":{\"a\":{\"thing\":\"arn:${Partition}:a:${Region}:${Account}:thing/${ThingName}\"}}";
         assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"types\":[\"other\"],\"arn\":\"Arn\"}")));
         assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"type\":\"thing\",\"fill\":{\"Other\":\"Name\"}}")));
-        assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"types\":[\"thing\"],\"arn\":\"a.b.c\"}")));
+        assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"types\":[\"thing\"],\"arn\":\"a.b.c.d\"}")));
         assertThrows(IllegalStateException.class, () -> parse(
                 "{\"namespaces\":{\"a\":[]},\"arnFormats\":{\"a\":{\"thing\":\"*\"}},\"operations\":{\"a:Op\":{\"resources\":[]}}}"));
         // A type made under a parent whose format it does not extend by one id.
