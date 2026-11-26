@@ -4302,8 +4302,8 @@ public class EksClusterManager
 
     /**
      * Takes a joined instance out of the cluster before it is terminated: its node is deleted and it is no longer
-     * joined. The cluster's record of it is pruned by the next restore, which finds it terminated. A node that
-     * can't be deleted throws and leaves the instance joined, so the caller keeps it and can try again.
+     * joined, and the cluster no longer records it. A node that can't be deleted throws and leaves the instance
+     * joined, so the caller keeps it and can try again.
      */
     void removeJoinedNode(Cluster cluster, Instance instance) {
         String region = instance.getRegion() != null ? instance.getRegion() : clusterRegion(cluster);
@@ -4319,6 +4319,10 @@ public class EksClusterManager
         Map<String, Instance> joined = joinedClusterInstances.get(clusterResourceName(cluster));
         if (joined != null) {
             joined.remove(instance.getInstanceId());
+        }
+        // Forgotten as well, so the readiness poller doesn't join it again while its instance is shutting down.
+        if (cluster.getJoinedInstanceIds() != null) {
+            cluster.getJoinedInstanceIds().remove(instance.getInstanceId());
         }
     }
 

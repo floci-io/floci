@@ -5648,6 +5648,33 @@ class EksClusterManagerTest {
             assertTrue(applyScript.contains("\"kubernetes.io/arch\":\"amd64\""), applyScript);
         }
 
+        /**
+         * A removed node's instance is forgotten by the cluster too, so the readiness poller doesn't join it again
+         * while it shuts down; a node that can't be deleted keeps both.
+         */
+        @Test
+        void aRemovedNodesInstanceIsForgottenByTheCluster() {
+            Cluster cluster = clusterNamed("remove-cluster", "remove-container");
+            Instance inst = createInstance("i-0remove123456789a", "us-east-1a", "t3.medium", "x86_64", "10.0.1.71");
+            doReturn(new ContainerExec.Result(0L, "", "", false)).when(manager)
+                    .execInContainerForResult(eq("remove-container"), any(), anyInt());
+            manager.joinInstance(cluster, inst);
+            manager.recordJoinedInstanceId(cluster, inst);
+            doReturn(new ContainerExec.Result(1L, "", "refused", false)).when(manager)
+                    .execInContainerForResult(eq("remove-container"), any(), anyInt());
+
+            assertThrows(IllegalStateException.class, () -> manager.removeJoinedNode(cluster, inst));
+            assertEquals(Map.of(inst.getInstanceId(), "us-east-1"), cluster.getJoinedInstanceIds());
+            assertTrue(manager.isInstanceJoined(cluster, inst.getInstanceId()));
+
+            doReturn(new ContainerExec.Result(0L, "", "", false)).when(manager)
+                    .execInContainerForResult(eq("remove-container"), any(), anyInt());
+            manager.removeJoinedNode(cluster, inst);
+
+            assertEquals(Map.of(), cluster.getJoinedInstanceIds());
+            assertFalse(manager.isInstanceJoined(cluster, inst.getInstanceId()));
+        }
+
         @Test
         void joinArmInstanceRegistersWithArm64Label() {
             Cluster cluster = clusterNamed("arm-cluster", "arm-container-123");

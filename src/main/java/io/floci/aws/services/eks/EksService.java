@@ -378,7 +378,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             String reg = instEntry.getValue();
             RequestScopes.runAs(accountId, reg, () -> {
                 Instance inst = ec2Service.getInstance(reg, instId).orElse(null);
-                if (inst == null || (inst.getState() != null && "terminated".equals(inst.getState().getName()))) {
+                // One shutting down is on its way out too: joining it again would bring back the node it took away.
+                if (inst == null || (inst.getState() != null && ("terminated".equals(inst.getState().getName())
+                        || "shutting-down".equals(inst.getState().getName())))) {
                     cluster.getJoinedInstanceIds().remove(instId);
                     prunedInstanceIds.add(instId);
                 } else {

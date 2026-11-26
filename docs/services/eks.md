@@ -469,8 +469,10 @@ launches nodes on AWS. Floci checks every 10 seconds.
   memory requests. A requirement on a label Floci doesn't give its nodes (a GPU count, say) is left out. A pod one of
   the pool's schedulable nodes has room for, joined or still joining, waits for the scheduler instead. A joined
   node's room is its `status.allocatable` CPU, memory and pods less its pods' requests (sidecars included); one still
-  joining has its instance type's whole size and 110 pods. A cordoned node, or one with a taint of its own the pod
-  doesn't tolerate, has none; the taints a node carries while it starts (`node.kubernetes.io/not-ready` and the
+  joining has its instance type's whole size and 110 pods. A cordoned node, one with a taint of its own the pod
+  doesn't tolerate, or one with a pod that the pod's required anti-affinity on `kubernetes.io/hostname` keeps it
+  apart from (either pod's, counting pods placed on it in the same pass) has none; anti-affinity on another topology
+  key isn't modelled; the taints a node carries while it starts (`node.kubernetes.io/not-ready` and the
   like) don't count in the 3 minutes after its launch, as Karpenter counts a starting node.
 - **Instance.** One node a pool and pass, of the smallest type in the instance type catalog with at least 2 vCPUs
   that fits all of the pool's waiting pods, or else the largest of them. AWS picked a 2-vCPU `c6a.large` for a pod of

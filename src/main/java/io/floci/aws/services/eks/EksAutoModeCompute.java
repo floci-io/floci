@@ -161,6 +161,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             nodesByName.put(node.path("metadata").path("name").asText(), node);
         }
         Map<String, long[]> requests = EksAutoModeNodes.requestsByNode(podList);
+        Map<String, List<EksAutoModeNodes.BoundPod>> boundPods = EksAutoModeNodes.boundPodsByNode(podList);
         List<EksAutoModeNodes.PoolNode> poolNodes = new ArrayList<>();
         List<Instance> neverRegistered = new ArrayList<>();
         for (Instance instance : launched) {
@@ -208,7 +209,8 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                     : type.get().memoryMib * 1024L * 1024L;
             int podSlots = allocatable.path("pods").asInt(EksAutoModeNodes.MAX_PODS);
             poolNodes.add(new EksAutoModeNodes.PoolNode(pool, type.get(), zone(instance), cpu - used[0],
-                    memory - used[1], (int) Math.max(0, podSlots - used[2]), schedulable, List.copyOf(nodeTaints)));
+                    memory - used[1], (int) Math.max(0, podSlots - used[2]), schedulable, List.copyOf(nodeTaints),
+                    boundPods.getOrDefault(nodeName, List.of())));
         }
         if (!neverRegistered.isEmpty()) {
             // A node that never joins would hold its pods' room for good; it goes, and they get another.

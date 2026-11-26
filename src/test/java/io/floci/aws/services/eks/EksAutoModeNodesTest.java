@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -177,6 +178,61 @@ class EksAutoModeNodesTest {
 
         assertEquals(List.of(first), full);
         assertEquals(List.of(second), oneSlot);
+    }
+
+    /**
+     * A replica whose required anti-affinity on {@code kubernetes.io/hostname} keeps it off its siblings' nodes has
+     * no room on the node of one, whether that one runs there or was counted on it in the same pass; either pod's
+     * anti-affinity counts. A term on another topology key isn't modelled, and one for another namespace doesn't
+     * match.
+     */
+    @Test
+    void requiredPodAntiAffinityOnTheHostnameKeepsReplicasOnNodesOfTheirOwn() throws Exception {
+        NodePool general = pools().getFirst();
+        String pods = """
+                {"items": [
+                  {"metadata": {"namespace": "shop", "name": "web-1", "labels": {"app": "web"}},
+                   "spec": {"nodeName": "n1", "affinity": {"podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [
+                     {"labelSelector": {"matchLabels": {"app": "web"}}, "topologyKey": "kubernetes.io/hostname"}]}}},
+                   "status": {"phase": "Running"}},
+                  {"metadata": {"namespace": "shop", "name": "web-2", "labels": {"app": "web"}},
+                   "spec": {"affinity": {"podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [
+                     {"labelSelector": {"matchExpressions": [{"key": "app", "operator": "In", "values": ["web"]}]},
+                      "topologyKey": "kubernetes.io/hostname"}]}}},
+                   "status": {"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "False",
+                              "reason": "Unschedulable"}]}},
+                  {"metadata": {"namespace": "shop", "name": "zonal", "labels": {"app": "zonal"}},
+                   "spec": {"affinity": {"podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [
+                     {"labelSelector": {"matchLabels": {"app": "other"}}, "topologyKey": "topology.kubernetes.io/zone"}]}}},
+                   "status": {"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "False",
+                              "reason": "Unschedulable"}]}},
+                  {"metadata": {"namespace": "elsewhere", "name": "free", "labels": {"app": "api"}},
+                   "spec": {"affinity": {"podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [
+                     {"labelSelector": {"matchLabels": {"app": "web"}}, "topologyKey": "kubernetes.io/hostname"}]}}},
+                   "status": {"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "False",
+                              "reason": "Unschedulable"}]}}
+                ]}""";
+        JsonNode list = json(pods);
+        Map<String, PendingPod> pending = new LinkedHashMap<>();
+        EksAutoModeNodes.unschedulablePods(list).forEach(p -> pending.put(p.name(), p));
+        EksAutoModeNodes.PoolNode withWeb1 = new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 64_000,
+                1L << 40, 110, true, List.of(), EksAutoModeNodes.boundPodsByNode(list).get("n1"));
+        EksAutoModeNodes.PoolNode empty = new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 64_000,
+                1L << 40, 110, true, List.of());
+
+        // web-2 can't join web-1, by its own anti-affinity; zonal's term isn't on the hostname, and web-1's doesn't
+        // match it; free is in another namespace than web-1's term reads, and its own term reads its namespace, which
+        // has no web pod.
+        assertEquals(List.of(pending.get("web-2")), EksAutoModeNodes.withoutRoom(List.copyOf(pending.values()),
+                List.of(withWeb1)));
+        // Two replicas counted on one empty node in the same pass: the second has no room there.
+        PendingPod web3 = new PendingPod("shop", "web-3", 100, 64L << 20, Map.of(), List.of(), List.of(),
+                Map.of("app", "web"), pending.get("web-2").antiAffinity());
+        // A pod with no anti-affinity of its own is still kept off the node of one whose anti-affinity matches it.
+        PendingPod plain = new PendingPod("shop", "plain", 100, 64L << 20, Map.of(), List.of(), List.of(),
+                Map.of("app", "web"), List.of());
+        assertEquals(List.of(plain), EksAutoModeNodes.withoutRoom(List.of(plain), List.of(withWeb1)));
+        assertEquals(List.of(web3), EksAutoModeNodes.withoutRoom(List.of(pending.get("web-2"), web3), List.of(empty)));
     }
 
     /** A joined node's room is what it offers, its allocatable CPU and memory less its pods', not its type's size. */

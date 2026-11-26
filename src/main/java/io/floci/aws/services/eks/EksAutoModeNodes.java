@@ -8,6 +8,7 @@ import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +32,8 @@ final class EksAutoModeNodes {
     static final int MIN_VCPUS = 2;
     /** The pods a node takes when it doesn't say: the kubelet's default, which Floci's own Ready node advertises. */
     static final int MAX_PODS = 110;
+    /** The topology key of the pod anti-affinity a node's own pods decide. */
+    static final String HOSTNAME_LABEL = "kubernetes.io/hostname";
     /** Instance family names: category letters, generation digits, then attribute letters, as in {@code c7gd}. */
     private static final Pattern FAMILY = Pattern.compile("^([a-z]+)(\\d+)([a-z-]*)$");
     private static final Pattern QUANTITY = Pattern.compile("^([0-9]*\\.?[0-9]+(?:[eE][+-]?[0-9]+)?)([a-zA-Z]*)$");
@@ -109,7 +112,18 @@ final class EksAutoModeNodes {
     /** A pod the scheduler couldn't place, with what it asks of a node and the resources it requests. */
     record PendingPod(String namespace, String name, long cpuMillis, long memoryBytes,
                       Map<String, String> nodeSelector, List<List<Requirement>> affinityTerms,
-                      List<Toleration> tolerations) {
+                      List<Toleration> tolerations, Map<String, String> labels, List<PodTerm> antiAffinity) {
+
+        /** A pod with no labels and no pod anti-affinity. */
+        PendingPod(String namespace, String name, long cpuMillis, long memoryBytes, Map<String, String> nodeSelector,
+                   List<List<Requirement>> affinityTerms, List<Toleration> tolerations) {
+            this(namespace, name, cpuMillis, memoryBytes, nodeSelector, affinityTerms, tolerations, Map.of(), List.of());
+        }
+
+        /** The pod as one placed on a node, for the anti-affinity of the pods after it. */
+        BoundPod bound() {
+            return new BoundPod(namespace, labels, antiAffinity);
+        }
 
         /** Whether a node with {@code labels} and {@code taints} could take it. */
         boolean fits(Map<String, String> labels, List<Taint> taints) {
@@ -133,11 +147,47 @@ final class EksAutoModeNodes {
     }
 
     /**
+     * A required pod anti-affinity term on {@code kubernetes.io/hostname}: the pods it keeps a pod off the node of,
+     * by label selector and namespaces ({@code null} for every namespace, as a {@code namespaceSelector} reads).
+     */
+    record PodTerm(Map<String, String> matchLabels, List<Requirement> matchExpressions, Set<String> namespaces) {
+
+        boolean matches(String namespace, Map<String, String> labels) {
+            if (namespaces != null && !namespaces.contains(namespace)) {
+                return false;
+            }
+            for (Map.Entry<String, String> wanted : matchLabels.entrySet()) {
+                if (!wanted.getValue().equals(labels.get(wanted.getKey()))) {
+                    return false;
+                }
+            }
+            return matchExpressions.stream().allMatch(r -> r.matches(labels));
+        }
+    }
+
+    /** A pod on a node, with what its own anti-affinity keeps off that node. */
+    record BoundPod(String namespace, Map<String, String> labels, List<PodTerm> antiAffinity) {
+
+        /** Whether the pod and this one can't share a node, by either one's required anti-affinity. */
+        boolean conflicts(PendingPod pod) {
+            return pod.antiAffinity().stream().anyMatch(t -> t.matches(namespace, labels))
+                    || antiAffinity.stream().anyMatch(t -> t.matches(pod.namespace(), pod.labels()));
+        }
+    }
+
+    /**
      * A node Auto Mode launched for a pool, joined or still joining, with the CPU and memory its pods request: a
      * pending pod it has room for is left to the scheduler rather than given another node.
      */
     record PoolNode(NodePool pool, CatalogInstanceType instanceType, String zone, long freeCpuMillis,
-                    long freeMemoryBytes, int freePods, boolean schedulable, List<Taint> nodeTaints) {
+                    long freeMemoryBytes, int freePods, boolean schedulable, List<Taint> nodeTaints,
+                    List<BoundPod> pods) {
+
+        /** A node whose pods carry no labels and no anti-affinity that could keep a pending pod off it. */
+        PoolNode(NodePool pool, CatalogInstanceType instanceType, String zone, long freeCpuMillis, long freeMemoryBytes,
+                 int freePods, boolean schedulable, List<Taint> nodeTaints) {
+            this(pool, instanceType, zone, freeCpuMillis, freeMemoryBytes, freePods, schedulable, nodeTaints, List.of());
+        }
 
         /**
          * A node still joining, with its pods' requests: it has its instance type's whole CPU and memory, as no
@@ -259,8 +309,9 @@ final class EksAutoModeNodes {
 
     /**
      * The pods none of the pools' nodes has room for: each pod takes room on the first schedulable node whose
-     * labels and taints, the pool's and the node's own, it accepts, that has a pod slot left and whose free CPU and
-     * memory fit its requests,
+     * labels and taints, the pool's and the node's own, it accepts, that has a pod slot left, whose free CPU and
+     * memory fit its requests, and where no pod, one there or one counted on it before, shares it against either's
+     * required anti-affinity on {@code kubernetes.io/hostname},
      * as Karpenter counts its nodes, those still joining among them, before it launches another. A cordoned node
      * has no room.
      */
@@ -268,8 +319,10 @@ final class EksAutoModeNodes {
         long[] freeCpu = new long[nodes.size()];
         long[] freeMemory = new long[nodes.size()];
         int[] freePods = new int[nodes.size()];
+        List<List<BoundPod>> onNode = new ArrayList<>();
         for (int i = 0; i < nodes.size(); i++) {
             PoolNode node = nodes.get(i);
+            onNode.add(new ArrayList<>(node.pods()));
             freeCpu[i] = node.freeCpuMillis();
             freeMemory[i] = node.freeMemoryBytes();
             freePods[i] = node.freePods();
@@ -281,10 +334,12 @@ final class EksAutoModeNodes {
                 PoolNode node = nodes.get(i);
                 if (node.schedulable() && freePods[i] > 0 && freeCpu[i] >= pod.cpuMillis()
                         && freeMemory[i] >= pod.memoryBytes()
-                        && pod.fits(labels(node.instanceType(), node.pool(), node.zone()), node.taints())) {
+                        && pod.fits(labels(node.instanceType(), node.pool(), node.zone()), node.taints())
+                        && onNode.get(i).stream().noneMatch(other -> other.conflicts(pod))) {
                     freeCpu[i] -= pod.cpuMillis();
                     freeMemory[i] -= pod.memoryBytes();
                     freePods[i]--;
+                    onNode.get(i).add(pod.bound());
                     placed = true;
                 }
             }
@@ -381,11 +436,60 @@ final class EksAutoModeNodes {
             List<Toleration> tolerations = new ArrayList<>();
             spec.path("tolerations").forEach(t -> tolerations.add(new Toleration(t.path("key").asText(""),
                     t.path("operator").asText("Equal"), t.path("value").asText(""), t.path("effect").asText(""))));
-            pods.add(new PendingPod(item.path("metadata").path("namespace").asText(),
-                    item.path("metadata").path("name").asText(), requests[0], requests[1], selector, List.copyOf(terms),
-                    List.copyOf(tolerations)));
+            String namespace = item.path("metadata").path("namespace").asText();
+            pods.add(new PendingPod(namespace, item.path("metadata").path("name").asText(), requests[0], requests[1],
+                    selector, List.copyOf(terms), List.copyOf(tolerations), podLabels(item), antiAffinity(item)));
         }
         return pods;
+    }
+
+    /** The pods of {@code kubectl get pods -A -o json} bound to each node that haven't finished. */
+    static Map<String, List<BoundPod>> boundPodsByNode(JsonNode list) {
+        Map<String, List<BoundPod>> byNode = new LinkedHashMap<>();
+        for (JsonNode item : list.path("items")) {
+            String node = item.path("spec").path("nodeName").asText("");
+            String phase = item.path("status").path("phase").asText();
+            if (node.isEmpty() || "Succeeded".equals(phase) || "Failed".equals(phase)) {
+                continue;
+            }
+            byNode.computeIfAbsent(node, k -> new ArrayList<>()).add(new BoundPod(
+                    item.path("metadata").path("namespace").asText(), podLabels(item), antiAffinity(item)));
+        }
+        return byNode;
+    }
+
+    private static Map<String, String> podLabels(JsonNode item) {
+        Map<String, String> labels = new LinkedHashMap<>();
+        item.path("metadata").path("labels").properties().forEach(e -> labels.put(e.getKey(), e.getValue().asText()));
+        return labels;
+    }
+
+    /**
+     * A pod's required anti-affinity terms on {@code kubernetes.io/hostname}, the ones a node's pods decide; those on
+     * another topology key, a zone's say, aren't modelled. A term without a label selector matches no pod.
+     */
+    private static List<PodTerm> antiAffinity(JsonNode item) {
+        List<PodTerm> terms = new ArrayList<>();
+        String own = item.path("metadata").path("namespace").asText();
+        for (JsonNode term : item.path("spec").path("affinity").path("podAntiAffinity")
+                .path("requiredDuringSchedulingIgnoredDuringExecution")) {
+            JsonNode selector = term.path("labelSelector");
+            if (!HOSTNAME_LABEL.equals(term.path("topologyKey").asText()) || selector.isMissingNode()
+                    || selector.isNull()) {
+                continue;
+            }
+            Map<String, String> matchLabels = new LinkedHashMap<>();
+            selector.path("matchLabels").properties().forEach(e -> matchLabels.put(e.getKey(), e.getValue().asText()));
+            Set<String> named = new HashSet<>();
+            term.path("namespaces").forEach(n -> named.add(n.asText()));
+            if (named.isEmpty()) {
+                named.add(own);
+            }
+            // A namespaceSelector, which Floci can't evaluate without the namespaces' labels, is read as all of them.
+            Set<String> namespaces = term.has("namespaceSelector") ? null : Set.copyOf(named);
+            terms.add(new PodTerm(matchLabels, requirements(selector.path("matchExpressions")), namespaces));
+        }
+        return List.copyOf(terms);
     }
 
     /**
