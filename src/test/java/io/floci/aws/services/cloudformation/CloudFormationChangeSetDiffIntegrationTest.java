@@ -1274,7 +1274,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
                 List.of("Properties|GroupName|Always|DirectModification|Dynamic|",
                         "Properties|GroupName|Always|ParameterReference|Static|P"), "True", true),
             new DetailsRow("nested-automatic", "AWS::CloudFormation::Stack", nestedUrl, nestedUrl, null, List.of(),
-                List.of("||||Automatic||"), "False", true, "R", topic.formatted("\"a\""), topic.formatted("\"b\"")),
+                List.of("|||Automatic||"), "False", true, "R", topic.formatted("\"a\""), topic.formatted("\"b\"")),
             new DetailsRow("nested-parameters", "AWS::CloudFormation::Stack", nestedParams.formatted("a"),
                 nestedParams.formatted("b"), null, List.of("Properties"), List.of("Properties|Parameters|Never" + direct),
                 "False", true),
