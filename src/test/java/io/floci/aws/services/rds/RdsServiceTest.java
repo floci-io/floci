@@ -254,6 +254,131 @@ class RdsServiceTest {
                         .toList());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void stoppedDsqlPortConflictDoesNotAbortOtherRestores(boolean clusterCase) {
+        when(rdsConfig.mock()).thenReturn(true);
+        when(rdsConfig.proxyMaxPort()).thenReturn(7001);
+        StorageBackend<String, DbInstance> instances = new InMemoryStorage<>();
+        StorageBackend<String, DbCluster> clusters = new InMemoryStorage<>();
+        RdsService initial = newService(containerManager, proxyManager, instances, clusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        if (clusterCase) {
+            DbCluster stopped = initial.createDbCluster("stopped", "aurora-mysql", "8.0", "admin",
+                    "password", "dbname", false, null);
+            stopped.setStatus(DbInstanceStatus.STOPPED);
+            clusters.put("us-east-1::stopped", stopped);
+        } else {
+            DbInstance stopped = initial.createDbInstance("stopped", "postgres", "13", "admin", "password",
+                    "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                    Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, 5432);
+            stopped.setStatus(DbInstanceStatus.STOPPED);
+            instances.put("us-east-1::stopped", stopped);
+        }
+        DbInstance healthy = initial.createDbInstance("healthy", "postgres", "13", "admin", "password",
+                "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, 5432);
+        healthy.setStatus(DbInstanceStatus.CREATING);
+        instances.put("us-east-1::healthy", healthy);
+        configureDsqlPort(7000, true, false);
+        RdsService restored = newService(containerManager, proxyManager, instances, clusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+
+        assertDoesNotThrow(restored::restorePersistedRuntime);
+
+        assertEquals(DbInstanceStatus.AVAILABLE, restored.getDbInstance("healthy").getStatus());
+        if (clusterCase) {
+            DbCluster stopped = restored.getDbCluster("stopped");
+            assertEquals(DbInstanceStatus.STOPPED, stopped.getStatus());
+            assertEquals(7000, stopped.getProxyPort());
+            assertEquals("password", stopped.getMasterPassword());
+            assertEquals("dbname", stopped.getDatabaseName());
+        } else {
+            DbInstance stopped = restored.getDbInstance("stopped");
+            assertEquals(DbInstanceStatus.STOPPED, stopped.getStatus());
+            assertEquals(7000, stopped.getProxyPort());
+            assertEquals("password", stopped.getMasterPassword());
+            assertEquals("dbname", stopped.getDbName());
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false,false", "false,true,false", "true,false,false", "true,true,false",
+            "false,false,true", "false,true,true", "true,false,true", "true,true,true"})
+    void migratedManagedSecretKeepsItsPasswordAndTracksTheConnectablePort(boolean clusterCase,
+                                                                          boolean stopped,
+                                                                          boolean retryFailure) throws Exception {
+        when(rdsConfig.mock()).thenReturn(true);
+        when(rdsConfig.advertiseRequestedPort()).thenReturn(true);
+        SecretsManagerService secrets = spy(realSecretsForOptOut());
+        StorageBackend<String, DbInstance> instances = new InMemoryStorage<>();
+        StorageBackend<String, DbCluster> clusters = new InMemoryStorage<>();
+        RdsService initial = newService(containerManager, proxyManager, instances, clusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), secrets);
+        DbInstance instance = null;
+        DbCluster cluster = null;
+        String host;
+        int initialPort;
+        if (clusterCase) {
+            cluster = initial.createDbCluster("managed", "aurora-mysql", "8.0", "admin", "password",
+                    "dbname", false, null, null, null, false, null, null, null, null, false, null,
+                    null, false, 3306);
+            host = cluster.getEndpoint().address();
+            initialPort = cluster.getProxyPort();
+        } else {
+            instance = initial.createDbInstance("managed", "postgres", "13", "admin", "password",
+                    "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                    Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, 5432);
+            host = instance.getEndpoint().address();
+            initialPort = instance.getProxyPort();
+        }
+        String value = new ObjectMapper().writeValueAsString(Map.of("username", "admin", "password", "password",
+                "host", host, "port", initialPort, "custom", "retained"));
+        Secret secret = secrets.createSecret("managed-endpoint", value, null, null, null, List.of(), "rds", "us-east-1");
+        if (clusterCase) {
+            cluster.setMasterUserSecretArn(secret.getArn());
+            cluster.setStatus(stopped ? DbInstanceStatus.STOPPED : DbInstanceStatus.AVAILABLE);
+            clusters.put("us-east-1::managed", cluster);
+        } else {
+            instance.setMasterUserSecretArn(secret.getArn());
+            instance.setStatus(stopped ? DbInstanceStatus.STOPPED : DbInstanceStatus.AVAILABLE);
+            instances.put("us-east-1::managed", instance);
+        }
+        if (retryFailure) {
+            doThrow(new IllegalStateException("secret write temporarily unavailable")).doCallRealMethod()
+                    .when(secrets).putSecretValue(eq(secret.getArn()), anyString(), isNull(), isNull(),
+                            eq("us-east-1"), isNull());
+        }
+        configureDsqlPort(initialPort, true, false);
+        RdsService restored = newService(containerManager, proxyManager, instances, clusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), secrets);
+
+        restored.restorePersistedRuntime();
+        if (retryFailure) {
+            restored = newService(containerManager, proxyManager, instances, clusters,
+                    new InMemoryStorage<>(), new InMemoryStorage<>(), secrets);
+            restored.restorePersistedRuntime();
+        }
+
+        Map<String, Object> migrated = new ObjectMapper().readValue(
+                secrets.getSecretValue(secret.getArn(), null, null, "us-east-1").getSecretString(),
+                new TypeReference<Map<String, Object>>() {});
+        int newPort = clusterCase ? restored.getDbCluster("managed").getProxyPort()
+                : restored.getDbInstance("managed").getProxyPort();
+        String newHost = clusterCase ? restored.getDbCluster("managed").getEndpoint().address()
+                : restored.getDbInstance("managed").getEndpoint().address();
+        assertNotEquals(initialPort, newPort);
+        assertEquals(newPort, migrated.get("port"));
+        assertEquals(newHost, migrated.get("host"));
+        assertEquals("password", migrated.get("password"));
+        assertEquals("retained", migrated.get("custom"));
+        int versions = secrets.describeSecret(secret.getArn(), "us-east-1").getVersions().size();
+        RdsService unchanged = newService(containerManager, proxyManager, instances, clusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), secrets);
+        unchanged.restorePersistedRuntime();
+        assertEquals(versions, secrets.describeSecret(secret.getArn(), "us-east-1").getVersions().size());
+    }
+
     private void configureDsqlPort(int port, boolean enabled, boolean mockMode) {
         EmulatorConfig.DsqlServiceConfig dsql = mock(EmulatorConfig.DsqlServiceConfig.class);
         when(config.services().dsql()).thenReturn(dsql);
@@ -268,8 +393,9 @@ class RdsServiceTest {
         int[] ports = FreePorts.anyInterfacePorts(2);
         int dsqlPort = Math.min(ports[0], ports[1]);
         configureDsqlPort(dsqlPort, true, false);
-        when(rdsConfig.proxyBasePort()).thenReturn(dsqlPort);
-        when(rdsConfig.proxyMaxPort()).thenReturn(Math.max(ports[0], ports[1]));
+        int rdsPortCandidate = Math.max(ports[0], ports[1]);
+        when(rdsConfig.proxyBasePort()).thenReturn(rdsPortCandidate);
+        when(rdsConfig.proxyMaxPort()).thenReturn(rdsPortCandidate);
         when(rdsConfig.proxyMaxConnections()).thenReturn(10);
         @SuppressWarnings("unchecked")
         Instance<ScpProvider> scps = mock(Instance.class);

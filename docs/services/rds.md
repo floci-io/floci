@@ -447,6 +447,10 @@ services:
     restoring a relay. A DB proxy whose preferred or persisted port belongs to DSQL uses the
     RDS proxy range instead. This avoids startup-order collisions; it does not provide
     engine-default-port routing for that fallback relay.
+    A stopped database that cannot reserve a replacement port remains stopped without blocking
+    other resources from restoring. Managed secrets follow the restored connection address and
+    port while retaining their password and other fields; a failed secret update is retried on
+    the next restore.
 
 !!! note "DB proxy control-plane settings"
 
