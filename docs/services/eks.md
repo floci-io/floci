@@ -491,7 +491,9 @@ launches nodes on AWS. Floci checks every 10 seconds.
   `eks.amazonaws.com/compute-type: auto`, `node.kubernetes.io/instance-type`, `karpenter.sh/capacity-type`, and the
   `eks.amazonaws.com/instance-*` category, generation, family, size, CPU and memory labels.
 - **Removal.** Turning compute off terminates the cluster's Auto Mode instances and takes their nodes out of it.
-  Deleting the cluster terminates them and deletes the instance profiles made for it.
+  Deleting the cluster terminates them, waits up to a minute for them to finish terminating, as they hold the
+  cluster security group deleted next (one that doesn't fails the delete, which can be retried), and deletes the
+  instance profiles made for it.
 
 On AWS, a node is named after its instance ID and is a managed instance a plain `DescribeInstances` doesn't list.
 In Floci it is named as other joined instances are, after its private DNS name, and `DescribeInstances` lists it.

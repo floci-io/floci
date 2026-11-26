@@ -80,6 +80,8 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
     static final String MANAGED_LAUNCH = "eks-auto";
     /** How long a launched node may take to register before its pool may get another. */
     static final Duration REGISTRATION_WAIT = Duration.ofMinutes(3);
+    /** How long a deleted cluster waits for its Auto Mode instances to finish terminating, which EC2 does after. */
+    static final Duration TERMINATION_WAIT = Duration.ofMinutes(1);
 
     private final EksService eksService;
     private final EksClusterManager clusterManager;
@@ -87,6 +89,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
     private final IamService iam;
     private final Ec2InstanceTypeCatalog instanceTypes;
     private final EmulatorConfig config;
+    private Duration terminationWait = TERMINATION_WAIT;
     private final ScheduledExecutorService scheduler =
             Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "eks-auto-mode-compute"));
 
@@ -99,6 +102,11 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         this.iam = iam;
         this.instanceTypes = instanceTypes;
         this.config = config;
+    }
+
+    /** For tests: how long a deleted cluster waits for its instances to terminate. */
+    void terminationWait(Duration wait) {
+        this.terminationWait = wait;
     }
 
     void onStart(@Observes StartupEvent event) {
@@ -267,8 +275,9 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                 null, false, null, null);
         String instanceId = reservation.getInstances().getFirst().getInstanceId();
         if (!stillRunning(cluster)) {
-            // Deleted while this launch ran: what the deletion missed goes now.
-            clusterDeleted(cluster, region);
+            // Deleted while this launch ran: what the deletion missed goes now. Its security group is gone already,
+            // so nothing waits for the instance to end.
+            removeAll(cluster, region);
             return;
         }
         LOG.infov("EKS Auto Mode pool {0} of cluster {1} launched {2} ({3}) for {4}", launch.pool().name(),
@@ -355,6 +364,28 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
     /** The cluster's Auto Mode instances and the instance profiles made for it go with it, as on AWS. */
     @Override
     public synchronized void clusterDeleted(Cluster cluster, String region) {
+        removeAll(cluster, region);
+        // EC2 ends an instance after TerminateInstances answers, and one shutting down still holds the cluster
+        // security group, which EKS deletes next: wait until none is. One that doesn't end in time fails the
+        // delete, which keeps the cluster for a retry.
+        Instant deadline = Instant.now().plus(terminationWait);
+        while (!instancesOf(cluster, region, "pending", "running", "stopping", "stopped", "shutting-down").isEmpty()) {
+            if (Instant.now().isAfter(deadline)) {
+                throw new IllegalStateException("EKS Auto Mode instances of cluster " + cluster.getName()
+                        + " didn't finish terminating within " + terminationWait);
+            }
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted waiting for the Auto Mode instances of cluster "
+                        + cluster.getName() + " to terminate", e);
+            }
+        }
+    }
+
+    /** Terminates the cluster's Auto Mode instances and deletes the instance profiles made for it. */
+    private void removeAll(Cluster cluster, String region) {
         List<Instance> launched = instancesOf(cluster, region, "pending", "running", "stopping", "stopped");
         if (!launched.isEmpty()) {
             ec2.terminateInstances(region, launched.stream().map(Instance::getInstanceId).toList());

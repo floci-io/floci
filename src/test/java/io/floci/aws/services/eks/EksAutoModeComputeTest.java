@@ -20,6 +20,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -28,6 +29,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -203,7 +205,9 @@ class EksAutoModeComputeTest {
         node.setInstanceId("i-node");
         Reservation reservation = new Reservation();
         reservation.setInstances(List.of(node));
-        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenReturn(List.of(reservation));
+        // Running, then still shutting down once after TerminateInstances, then gone.
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenReturn(List.of(reservation),
+                List.of(reservation), List.of());
         InstanceProfile profile = new InstanceProfile("AIPA1", "eks-us-east-1-prod-1", "/eks/us-east-1/prod/",
                 "arn:aws:iam::000000000000:instance-profile/eks/us-east-1/prod/eks-us-east-1-prod-1");
         profile.getRoleNames().add("auto-node");
@@ -321,6 +325,27 @@ class EksAutoModeComputeTest {
         compute.removeNodes(cluster, REGION);
 
         verify(ec2).terminateInstances(REGION, List.of("i-stuck"));
+    }
+
+    /**
+     * An instance shutting down still holds the cluster security group EKS deletes next, so the cleanup waits for it;
+     * one that doesn't finish in time fails the delete, which keeps the cluster for a retry.
+     */
+    @Test
+    void aDeletedClustersInstanceThatDoesntFinishTerminatingFailsTheCleanup() {
+        Instance node = new Instance();
+        node.setInstanceId("i-node");
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(node));
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenReturn(List.of(reservation));
+        compute.terminationWait(Duration.ofMillis(300));
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> compute.clusterDeleted(cluster("prod"), REGION));
+
+        assertEquals("EKS Auto Mode instances of cluster prod didn't finish terminating within PT0.3S",
+                failure.getMessage());
+        verify(ec2).terminateInstances(REGION, List.of("i-node"));
     }
 
     private static Subnet subnet(String id, String zone) {
