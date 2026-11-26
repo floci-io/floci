@@ -23,7 +23,6 @@ import software.amazon.awssdk.services.redshiftdata.model.StatusString;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -198,22 +197,13 @@ class GlueCrawlerRunTest {
         throw new IllegalStateException("Crawler " + name + " did not finish in time");
     }
 
-    private static void execute(RedshiftDataClient data, String clusterId, String sql) throws InterruptedException {
+    private static void execute(RedshiftDataClient data, String clusterId, String sql) {
         String id = data.executeStatement(r -> r.clusterIdentifier(clusterId).dbUser("admin").database("dev")
-                .sql(sql)).id();
-        Instant deadline = Instant.now().plus(Duration.ofSeconds(60));
-        while (Instant.now().isBefore(deadline)) {
-            DescribeStatementResponse describe = data.describeStatement(r -> r.id(id));
-            if (describe.status() == StatusString.FINISHED) {
-                return;
-            }
-            if (List.of(StatusString.FAILED, StatusString.ABORTED).contains(describe.status())) {
-                throw new IllegalStateException("Statement " + id + " ended " + describe.status() + ": "
-                        + describe.error());
-            }
-            Thread.sleep(250);
-        }
-        throw new IllegalStateException("Statement " + id + " did not finish in time");
+                .sql(sql).waitTimeSeconds(30)).id();
+        DescribeStatementResponse describe = data.describeStatement(r -> r.id(id));
+        assertThat(describe.status())
+                .as("statement %s error: %s", id, describe.error())
+                .isEqualTo(StatusString.FINISHED);
     }
 
     private static void cleanUp(Runnable step) {

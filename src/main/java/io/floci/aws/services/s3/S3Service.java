@@ -23,6 +23,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.ServicePrincipals;
+import io.floci.aws.core.common.Utf8;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.core.resource.ExplorerResource;
@@ -8194,7 +8195,7 @@ public class S3Service implements Resettable, ResourceProvider {
         if (representable && utf8Length(segment) <= budget && !hasEncodedShape(segment, budget)) {
             return segment;
         }
-        String prefix = truncateUtf8(segment, budget - 1 - SHA256_HEX_CHARS);
+        String prefix = Utf8.truncate(segment, budget - 1 - SHA256_HEX_CHARS);
         if (WINDOWS_FILE_NAMES) {
             prefix = windowsSafePrefix(prefix);
         }
@@ -8265,23 +8266,6 @@ public class S3Service implements Resettable, ResourceProvider {
             }
         }
         return true;
-    }
-
-    private static String truncateUtf8(String segment, int maxBytes) {
-        int end = 0;
-        int used = 0;
-        int i = 0;
-        while (i < segment.length()) {
-            int codePoint = segment.codePointAt(i);
-            int byteCount = codePoint < 0x80 ? 1 : codePoint < 0x800 ? 2 : codePoint < 0x10000 ? 3 : 4;
-            if (used + byteCount > maxBytes) {
-                break;
-            }
-            used += byteCount;
-            i += Character.charCount(codePoint);
-            end = i;
-        }
-        return segment.substring(0, end);
     }
 
     private static int utf8Length(String segment) {

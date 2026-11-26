@@ -490,4 +490,23 @@ class JdbcCrawlRunnerTest {
         assertEquals(CrawlOutcome.succeeded(0, 1, 0), outcome);
         assertThat(columnsOf(glueService.getTable("lake", "dev_public_orders")), contains("id:int"));
     }
+
+    @Test
+    void truncatesLongCommentsOnCodePointBoundaries() {
+        passwordConnection("analytics");
+        JdbcTarget withComments = target("analytics", "dev/public/orders");
+        withComments.setEnableAdditionalMetadata(List.of("COMMENTS"));
+        create(crawler("emoji", withComments));
+        String comment = "a".repeat(253) + "😀";
+        tables.add(new JdbcTableSchema("public", "orders", false, comment,
+                List.of(new JdbcColumn("id", "integer", comment))));
+
+        crawl("emoji");
+
+        Table table = glueService.getTable("lake", "dev_public_orders");
+        String expected = "a".repeat(253);
+        assertEquals(expected, table.getParameters().get("aws:RawTableComment"));
+        assertEquals(expected, table.getStorageDescriptor().getColumns().getFirst().getParameters()
+                .get("aws:RawColumnComment"));
+    }
 }

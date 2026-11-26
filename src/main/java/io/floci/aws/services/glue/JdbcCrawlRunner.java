@@ -3,6 +3,7 @@ package io.floci.aws.services.glue;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.DatabaseSecretCredentials;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.Utf8;
 import io.floci.aws.services.glue.JdbcCatalogReader.JdbcColumn;
 import io.floci.aws.services.glue.JdbcCatalogReader.JdbcTableSchema;
 import io.floci.aws.services.glue.model.AuthenticationConfiguration;
@@ -210,7 +211,7 @@ public class JdbcCrawlRunner implements CrawlRunner {
                 parameters.put("aws:RawType", source.rawType());
             }
             if (comments && source.comment() != null) {
-                parameters.put("aws:RawColumnComment", truncate(source.comment()));
+                parameters.put("aws:RawColumnComment", Utf8.truncate(source.comment(), MAX_COMMENT_BYTES));
             }
             if (!parameters.isEmpty()) {
                 column.setParameters(parameters);
@@ -226,7 +227,7 @@ public class JdbcCrawlRunner implements CrawlRunner {
         parameters.put("CrawlerSchemaSerializerVersion", "1.0");
         parameters.put("UPDATED_BY_CRAWLER", crawler.getName());
         if (comments && schema.comment() != null) {
-            parameters.put("aws:RawTableComment", truncate(schema.comment()));
+            parameters.put("aws:RawTableComment", Utf8.truncate(schema.comment(), MAX_COMMENT_BYTES));
         }
         StorageDescriptor descriptor = new StorageDescriptor();
         descriptor.setColumns(columns);
@@ -271,18 +272,6 @@ public class JdbcCrawlRunner implements CrawlRunner {
             case "timestampwithouttimezone", "timestampwithtimezone", "timestamp", "timestamptz" -> "timestamp";
             default -> "string";
         };
-    }
-
-    private static String truncate(String comment) {
-        byte[] bytes = comment.getBytes(StandardCharsets.UTF_8);
-        if (bytes.length <= MAX_COMMENT_BYTES) {
-            return comment;
-        }
-        int end = comment.length();
-        while (comment.substring(0, end).getBytes(StandardCharsets.UTF_8).length > MAX_COMMENT_BYTES) {
-            end--;
-        }
-        return comment.substring(0, end);
     }
 
     /**
@@ -352,28 +341,25 @@ public class JdbcCrawlRunner implements CrawlRunner {
     }
 
     private static Map<String, String> crawlerOwned(Map<String, String> parameters, Set<String> keys) {
-        Map<String, String> owned = new LinkedHashMap<>();
-        if (parameters != null) {
-            for (Map.Entry<String, String> parameter : parameters.entrySet()) {
-                if (keys.contains(parameter.getKey())) {
-                    owned.put(parameter.getKey(), parameter.getValue());
-                }
-            }
-        }
-        return owned;
+        return filterParameters(parameters, keys, true);
     }
 
     /** The parameters the crawler did not write, which a user or another tool owns. */
     private static Map<String, String> userOwned(Map<String, String> parameters, Set<String> crawlerKeys) {
-        Map<String, String> owned = new LinkedHashMap<>();
+        return filterParameters(parameters, crawlerKeys, false);
+    }
+
+    private static Map<String, String> filterParameters(Map<String, String> parameters, Set<String> keys,
+                                                        boolean include) {
+        Map<String, String> filtered = new LinkedHashMap<>();
         if (parameters != null) {
             for (Map.Entry<String, String> parameter : parameters.entrySet()) {
-                if (!crawlerKeys.contains(parameter.getKey())) {
-                    owned.put(parameter.getKey(), parameter.getValue());
+                if (keys.contains(parameter.getKey()) == include) {
+                    filtered.put(parameter.getKey(), parameter.getValue());
                 }
             }
         }
-        return owned;
+        return filtered;
     }
 
     /**
