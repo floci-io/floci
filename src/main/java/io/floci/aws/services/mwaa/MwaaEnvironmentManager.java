@@ -721,27 +721,27 @@ public class MwaaEnvironmentManager {
     /**
      * Re-claims the VPC address an environment's Airflow container still holds after Floci restarts, when it was
      * kept running ({@code keep-running-on-shutdown}): the address leases are in memory, so without this EC2 could
-     * hand the same address to an instance and Docker would refuse it. The container is found by its name.
+     * hand the same address to an instance and Docker would refuse it. The container is found by its name, current or
+     * from before the {@code floci-aws-} prefix; none of either name means none outlived the restart. A Docker that
+     * cannot say throws.
      */
     void reclaimVpcAddress(Environment environment) {
         String subnetId = firstSubnet(environment);
         if (ec2Service == null || subnetId == null) {
             return;
         }
-        String containerId;
-        Collection<ContainerNetwork> networks;
-        try {
-            InspectContainerResponse inspect = lifecycleManager.getDockerClient()
-                    .inspectContainerCmd(airflowContainerName(environment)).exec();
-            containerId = inspect.getId();
-            networks = inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null
-                    ? List.of() : inspect.getNetworkSettings().getNetworks().values();
-        } catch (NotFoundException expected) {
-            // The container did not outlive the restart, so there is no address to re-claim.
-            return;
+        for (String name : namesOf(airflowContainerName(environment))) {
+            Optional<InspectContainerResponse> kept = inspectNamed(name);
+            if (kept.isPresent()) {
+                InspectContainerResponse inspect = kept.get();
+                Collection<ContainerNetwork> networks = inspect.getNetworkSettings() == null
+                        || inspect.getNetworkSettings().getNetworks() == null
+                        ? List.of() : inspect.getNetworkSettings().getNetworks().values();
+                vpcLeases.reclaim(environmentAccount(environment), regionOf(environment), subnetId, inspect.getId(),
+                        networks.stream().map(ContainerNetwork::getIpAddress).toList(), environment.getName());
+                return;
+            }
         }
-        vpcLeases.reclaim(environmentAccount(environment), regionOf(environment), subnetId, containerId,
-                networks.stream().map(ContainerNetwork::getIpAddress).toList(), environment.getName());
     }
 
     /** Whether a live Airflow container of the account holds an address in the subnet. */

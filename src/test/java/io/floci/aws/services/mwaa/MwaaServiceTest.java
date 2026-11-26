@@ -1059,6 +1059,69 @@ class MwaaServiceTest {
         }
 
         @Test
+        void theVpcAddressesAreReclaimedOnTheStartingThreadBeforeTheRestoreGoesOn() {
+            Environment first = storedEnvironment("reclaim-a-env", EnvironmentStatus.AVAILABLE);
+            storedSecrets(first);
+            Environment second = storedEnvironment("reclaim-b-env", EnvironmentStatus.CREATE_FAILED);
+            Thread starting = Thread.currentThread();
+            List<Thread> reclaimedOn = new ArrayList<>();
+            Mockito.doAnswer(invocation -> {
+                reclaimedOn.add(Thread.currentThread());
+                return null;
+            }).when(environmentManager).reclaimVpcAddress(any());
+
+            realModeService.restorePersistedRuntime().join();
+
+            assertEquals(List.of(starting, starting), reclaimedOn);
+            verify(environmentManager).reclaimVpcAddress(first);
+            verify(environmentManager).reclaimVpcAddress(second);
+        }
+
+        @Test
+        void aReclaimThatFailedAtStartupIsTriedAgainBeforeTheTakeover() {
+            Environment stored = storedEnvironment("reclaim-retried-env", EnvironmentStatus.AVAILABLE);
+            storedSecrets(stored);
+            Mockito.doThrow(new IllegalStateException("daemon unreachable")).doNothing()
+                    .when(environmentManager).reclaimVpcAddress(stored);
+
+            realModeService.restorePersistedRuntime().join();
+
+            InOrder inOrder = Mockito.inOrder(environmentManager);
+            inOrder.verify(environmentManager, Mockito.times(2)).reclaimVpcAddress(stored);
+            inOrder.verify(environmentManager).adoptRunningEnvironment(stored);
+            assertEquals(EnvironmentStatus.MAINTENANCE, stored("reclaim-retried-env").getStatus());
+        }
+
+        @Test
+        void anEnvironmentWhoseAddressCannotBeReclaimedIsUnavailableAndTheOthersRestore() {
+            Environment unreclaimable = storedEnvironment("unreclaimable-env", EnvironmentStatus.AVAILABLE);
+            storedSecrets(unreclaimable);
+            Environment other = storedEnvironment("reclaimable-env", EnvironmentStatus.AVAILABLE);
+            storedSecrets(other);
+            Mockito.doThrow(new IllegalStateException("daemon unreachable"))
+                    .when(environmentManager).reclaimVpcAddress(unreclaimable);
+
+            assertThrows(CompletionException.class, () -> realModeService.restorePersistedRuntime().join());
+
+            assertEquals(EnvironmentStatus.UNAVAILABLE, stored("unreclaimable-env").getStatus());
+            verify(environmentManager, Mockito.never()).adoptRunningEnvironment(unreclaimable);
+            verify(environmentManager).restartEnvironment(eq(other), any(), any(), any());
+            assertEquals(EnvironmentStatus.MAINTENANCE, stored("reclaimable-env").getStatus());
+        }
+
+        @Test
+        void startingTheServiceAsksNothingOfDocker() {
+            storedEnvironment("untouched-env", EnvironmentStatus.AVAILABLE);
+
+            realModeService.init();
+            try {
+                verify(environmentManager, Mockito.never()).reclaimVpcAddress(any());
+            } finally {
+                realModeService.shutdown();
+            }
+        }
+
+        @Test
         void restoreInstallsTheRequirementsInTheNewContainerAsCreateDoesAndTheFirstSyncDoesNotAgain() {
             byte[] requirements = "boto3==1.35.0\n".getBytes(StandardCharsets.UTF_8);
             when(s3Service.getObject("my-bucket", "requirements.txt"))

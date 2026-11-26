@@ -262,6 +262,36 @@ class MwaaEnvironmentManagerTest {
     }
 
     @Test
+    void aContainerAnOlderFlociNamedReclaimsItsVpcAddressAndADockerThatCannotSayThrows() {
+        subnetInVpc("subnet-a", "vpc-1");
+        Environment environment = environmentInSubnets("subnet-a");
+        environment.setArn("arn:aws:airflow:us-east-1:000000000000:environment/vpc-env");
+        DockerClient dockerClient = Mockito.mock(DockerClient.class);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        String current = manager.airflowContainerName(environment);
+        String legacy = ContainerStorageHelper.legacyDockerName(config, current);
+        InspectContainerCmd missing = Mockito.mock(InspectContainerCmd.class);
+        when(missing.exec()).thenThrow(new NotFoundException("No such container: " + current));
+        InspectContainerCmd kept = Mockito.mock(InspectContainerCmd.class);
+        InspectContainerResponse response = Mockito.mock(InspectContainerResponse.class);
+        NetworkSettings settings = Mockito.mock(NetworkSettings.class);
+        when(dockerClient.inspectContainerCmd(current)).thenReturn(missing);
+        when(dockerClient.inspectContainerCmd(legacy)).thenReturn(kept);
+        when(kept.exec()).thenReturn(response);
+        when(response.getId()).thenReturn("legacy-container-id");
+        when(response.getNetworkSettings()).thenReturn(settings);
+        when(settings.getNetworks()).thenReturn(Map.of(
+                "floci-vpc-1", new ContainerNetwork().withIpv4Address("172.31.0.31")));
+        when(ec2Service.reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.31")).thenReturn(true);
+
+        manager.reclaimVpcAddress(environment);
+
+        verify(ec2Service).reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.31");
+        when(dockerClient.inspectContainerCmd(current)).thenThrow(new IllegalStateException("daemon unreachable"));
+        assertThrows(IllegalStateException.class, () -> manager.reclaimVpcAddress(environment));
+    }
+
+    @Test
     void anEnvironmentOutsideAnyVpcEc2KnowsStaysOnItsOwnNetwork() {
         airflowContainerStarts();
         when(ec2Service.describeSubnets("us-east-1", List.of("subnet-unknown"), Map.of())).thenReturn(List.of());
