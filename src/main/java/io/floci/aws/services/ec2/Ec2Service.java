@@ -1430,30 +1430,24 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (volumeBlockDeviceManager == null || inst == null) {
             return;
         }
-        Map<String, Volume> allVolumes;
-        if (volumes instanceof AccountAwareStorageBackend<?> rawAccountAware) {
-            @SuppressWarnings("unchecked")
-            AccountAwareStorageBackend<Volume> accountAware = (AccountAwareStorageBackend<Volume>) rawAccountAware;
-            allVolumes = accountAware.scanAllAccountsAsMap();
-        } else {
-            allVolumes = new LinkedHashMap<>();
-            for (String k : volumes.keys()) {
-                volumes.get(k).ifPresent(v -> allVolumes.put(k, v));
-            }
-        }
-        for (Volume vol : allVolumes.values()) {
-            if (vol == null || !region.equals(vol.getRegion()) || vol.getAttachments().isEmpty()) {
+        for (AccountAwareStorageBackend.AccountEntry<Volume> entry : entriesOfEveryAccount(volumes)) {
+            Volume vol = entry.value();
+            if (vol == null || !region.equals(vol.getRegion()) || vol.getVolumeId().equals(inst.getRootVolumeId())) {
                 continue;
             }
-            if (vol.getVolumeId().equals(inst.getRootVolumeId())) {
-                continue;
-            }
-            for (VolumeAttachment att : vol.getAttachments()) {
-                if (inst.getInstanceId().equals(att.getInstanceId())
-                        && (inst.getRootDeviceName() == null || !att.getDevice().equals(inst.getRootDeviceName()))) {
-                    restoreVolumeDevice(vol, inst, att.getDevice());
-                }
-            }
+            // Under the lock a detach or delete takes, and from the stored volume: one that ended
+            // the attachment after the scan must not have its device created again.
+            withVolumeLock(vol.getVolumeId(), () -> AccountAwareStorageBackend
+                    .readInAccount(volumes, entry.accountId(), entry.key())
+                    .ifPresent(current -> {
+                        for (VolumeAttachment att : List.copyOf(current.getAttachments())) {
+                            if (inst.getInstanceId().equals(att.getInstanceId())
+                                    && (inst.getRootDeviceName() == null
+                                    || !att.getDevice().equals(inst.getRootDeviceName()))) {
+                                restoreVolumeDevice(current, inst, att.getDevice());
+                            }
+                        }
+                    }));
         }
     }
 
@@ -4816,7 +4810,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                 .orElseThrow(() -> new IllegalStateException("Missing security group " + group.getGroupId())))
                         .toList();
                 containerManager.launch(inst, dockerImage, publicKey, region, desiredPublishedPorts(region, inst),
-                        policyGroups, policyPrefixLists(region, policyGroups));
+                        policyGroups, policyPrefixLists(region, policyGroups),
+                        () -> restoreAttachedVolumesForInstance(region, inst));
             }
         }
 
@@ -16652,45 +16647,47 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (volumeId == null || volumeId.isEmpty()) {
             throw new AwsException("MissingParameter", "The parameter VolumeId is missing", 400);
         }
-        ensureDefaultResources(region);
-        Volume volume = getRequiredVolume(region, volumeId);
+        return withVolumeLock(volumeId, () -> {
+            ensureDefaultResources(region);
+            Volume volume = getRequiredVolume(region, volumeId);
 
-        if ("available".equals(volume.getState()) || volume.getAttachments().isEmpty()) {
-            throw new AwsException("InvalidVolume.NotAttached",
-                    "Volume '" + volumeId + "' is not attached", 400);
-        }
-        VolumeAttachment target = volume.getAttachments().getFirst();
-        if (instanceId != null && !target.getInstanceId().equals(instanceId)) {
-            throw new AwsException("InvalidAttachment.NotFound",
-                    "Volume '" + volumeId + "' is not attached to instance '" + instanceId + "'", 400);
-        }
-        if (device != null && !target.getDevice().equals(device)) {
-            throw new AwsException("InvalidAttachment.NotFound",
-                    "Volume '" + volumeId + "' is not attached with device '" + device + "'", 400);
-        }
-        Instance inst = getRequiredInstance(region, target.getInstanceId());
-        if (!inst.getState().getName().equals("stopped") && target.getDevice().equals(inst.getRootDeviceName())) {
-            throw new AwsException("OperationNotPermitted",
-                    "The root volume of an instance cannot be detached while the instance is running", 400);
-        }
-        if (!force && target.getDevice().equals(inst.getRootDeviceName())) {
-            throw new AwsException("InvalidParameterCombination",
-                    "Device " + inst.getRootDeviceName() + " has the root partition on it. Detaching it will damage the " +
-                            "filesystem/partition tables. To force detachment, use the force parameter", 400);
-        }
-        if (dryRun) {
-            throw dryRunOperation();
-        }
-        target.setState("detached");
-        volume.getAttachments().clear();
-        volume.setState("available");
-        volumes.put(key(region, volumeId), volume);
+            if ("available".equals(volume.getState()) || volume.getAttachments().isEmpty()) {
+                throw new AwsException("InvalidVolume.NotAttached",
+                        "Volume '" + volumeId + "' is not attached", 400);
+            }
+            VolumeAttachment target = volume.getAttachments().getFirst();
+            if (instanceId != null && !target.getInstanceId().equals(instanceId)) {
+                throw new AwsException("InvalidAttachment.NotFound",
+                        "Volume '" + volumeId + "' is not attached to instance '" + instanceId + "'", 400);
+            }
+            if (device != null && !target.getDevice().equals(device)) {
+                throw new AwsException("InvalidAttachment.NotFound",
+                        "Volume '" + volumeId + "' is not attached with device '" + device + "'", 400);
+            }
+            Instance inst = getRequiredInstance(region, target.getInstanceId());
+            if (!inst.getState().getName().equals("stopped") && target.getDevice().equals(inst.getRootDeviceName())) {
+                throw new AwsException("OperationNotPermitted",
+                        "The root volume of an instance cannot be detached while the instance is running", 400);
+            }
+            if (!force && target.getDevice().equals(inst.getRootDeviceName())) {
+                throw new AwsException("InvalidParameterCombination",
+                        "Device " + inst.getRootDeviceName() + " has the root partition on it. Detaching it will damage the " +
+                                "filesystem/partition tables. To force detachment, use the force parameter", 400);
+            }
+            if (dryRun) {
+                throw dryRunOperation();
+            }
+            target.setState("detached");
+            volume.getAttachments().clear();
+            volume.setState("available");
+            volumes.put(key(region, volumeId), volume);
 
-        if (volumeBlockDeviceManager != null) {
-            volumeBlockDeviceManager.detachVolume(volume, inst, target.getDevice());
-        }
+            if (volumeBlockDeviceManager != null) {
+                volumeBlockDeviceManager.detachVolume(volume, inst, target.getDevice());
+            }
 
-        return target;
+            return target;
+        });
     }
 
     private Volume getRequiredVolume(String region, String volumeId) {
