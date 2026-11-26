@@ -198,6 +198,46 @@ class StepFunctionsSqsTaskIamIntegrationTest {
         assertEquals("hello", queue.receive().getFirst().getBody());
     }
 
+    /**
+     * The call runs in the Credentials role's account (Developer Guide, "Accessing cross-account AWS resources in Step
+     * Functions"), so a queue named without its URL is the one of that account, which its own policy lets it send to.
+     */
+    @Test
+    void aForeignCredentialsRoleSendsToTheSameNamedQueueOfItsOwnAccount() throws Exception {
+        String name = "sfn-sqs-iam-" + UUID.randomUUID().toString().substring(0, 8);
+        SqsTestQueue own = namedQueue(ACCOUNT, name);
+        SqsTestQueue foreign = namedQueue(OTHER_ACCOUNT, name);
+        String executionRole = role(STATES_TRUST, ASSUME);
+        String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-sqs-", trusting(executionRole), allow(foreign.arn(),
+                "sqs:SendMessage"));
+        String machine = machine(namedQueueTask(name, foreignRole), executionRole);
+
+        Response completed = terminal(start(machine, "{}"));
+
+        assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
+        assertEquals("hello", foreign.receive().getFirst().getBody());
+        assertEquals(0, own.receive().size());
+    }
+
+    /** The target role's trust has to name the state machine's side; one that trusts only Lambda reaches neither queue. */
+    @Test
+    void aForeignCredentialsRoleWhoseTrustDoesNotNameTheMachineIsRefused() throws Exception {
+        String name = "sfn-sqs-iam-" + UUID.randomUUID().toString().substring(0, 8);
+        SqsTestQueue own = namedQueue(ACCOUNT, name);
+        SqsTestQueue foreign = namedQueue(OTHER_ACCOUNT, name);
+        String executionRole = role(STATES_TRUST, ASSUME);
+        String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-sqs-", LAMBDA_TRUST, SEND);
+        String machine = machine(namedQueueTask(name, foreignRole), executionRole);
+
+        Response completed = terminal(start(machine, "{}"));
+
+        assertFailed(completed, "States.TaskFailed");
+        assertEquals("The role " + executionRole + " is not authorized to assume the task state's role, "
+                + foreignRole + ".", completed.jsonPath().getString("cause"));
+        assertEquals(0, foreign.receive().size());
+        assertEquals(0, own.receive().size());
+    }
+
     @Test
     void aQueueInAnotherAccountNeedsItsOwnGrant() throws Exception {
         SqsTestQueue queue = sfn().queue(sqsService, OTHER_ACCOUNT, REGION, "sfn-sqs-iam-");
@@ -385,6 +425,18 @@ class StepFunctionsSqsTaskIamIntegrationTest {
                     "Credentials", Map.of("RoleArn", "{% $states.input.role %}"),
                     "Arguments", Map.of("QueueUrl", queue.url(), "MessageBody", "hello"), "End", true);
         };
+    }
+
+    private SqsTestQueue namedQueue(String account, String name) {
+        SqsTestQueue queue = SqsTestQueue.named(sqsService, account, REGION, name);
+        cleanup.register(queue::delete);
+        return queue;
+    }
+
+    private static Map<String, Object> namedQueueTask(String name, String taskRole) {
+        return new LinkedHashMap<>(Map.of("Type", "Task", "Resource", "arn:aws:states:::sqs:sendMessage",
+                "Credentials", Map.of("RoleArn", taskRole),
+                "Parameters", Map.of("QueueUrl", name, "MessageBody", "hello"), "End", true));
     }
 
     private SqsTestQueue queue() {

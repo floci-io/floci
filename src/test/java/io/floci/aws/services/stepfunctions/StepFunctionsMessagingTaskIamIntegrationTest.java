@@ -427,27 +427,24 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
         assertNothingDelivered(target);
     }
 
-    /** Another account's role needs the bus's grant as well as its own, which {@code PutPermission} gives. */
+    /**
+     * A bus named by its name is the one of the account the task's calls run in, a foreign Credentials role's own
+     * (Developer Guide, "Accessing cross-account AWS resources in Step Functions"), where the role's identity policy
+     * is enough: the same-named bus of the state machine's account receives nothing.
+     */
     @Test
-    void aForeignCredentialsRoleNeedsTheBusPolicyToo() throws Exception {
+    void aForeignCredentialsRoleSendsToTheSameNamedBusOfItsOwnAccount() throws Exception {
         Target target = target("events:putEvents");
+        String name = busName(target.resourceArn());
+        events(OTHER_ACCOUNT, "CreateEventBus", Map.of("Name", name));
+        cleanup.register(() -> events(OTHER_ACCOUNT, "DeleteEventBus", Map.of("Name", name)));
         String executionRole = role(STATES_TRUST, ASSUME);
         String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole), PUBLISH_ANY);
-        String machine = machine(jsonPathTask(target, foreignRole), executionRole);
 
-        Response refused = terminal(start(machine, "{}"));
+        Response completed = terminal(start(machine(jsonPathTask(target, foreignRole), executionRole), "{}"));
 
-        assertFailed(refused, "EventBridge.AccessDeniedException");
-        String cause = refused.jsonPath().getString("cause");
-        assertTrue(cause.contains("arn:aws:sts::" + OTHER_ACCOUNT + ":assumed-role/"), cause);
+        assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
         assertNothingDelivered(target);
-
-        events("PutPermission", Map.of("EventBusName", busName(target.resourceArn()), "StatementId", "s",
-                "Action", "events:PutEvents", "Principal", OTHER_ACCOUNT));
-        Response allowed = terminal(start(machine, "{}"));
-
-        assertEquals("SUCCEEDED", allowed.jsonPath().getString("status"), allowed.asString());
-        assertDelivered(target);
     }
 
     @Test
@@ -684,7 +681,11 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
     }
 
     private Response events(String action, Map<String, ?> input) {
-        Response response = given().port(baseUri.getPort()).header("Authorization", auth(ACCOUNT, "events"))
+        return events(ACCOUNT, action, input);
+    }
+
+    private Response events(String account, String action, Map<String, ?> input) {
+        Response response = given().port(baseUri.getPort()).header("Authorization", auth(account, "events"))
                 .header("X-Amz-Target", "AWSEvents." + action)
                 .contentType("application/x-amz-json-1.1").body(MAPPER.valueToTree(input).toString()).post("/");
         response.then().statusCode(200);

@@ -11,6 +11,14 @@ import jakarta.inject.Inject;
 import java.util.Optional;
 import java.util.Set;
 
+/**
+ * The account a task's calls run in when its {@code Credentials} name a role. The execution role assumes that role
+ * "before invoking the specified Resource", which Task types using Lambda functions and supported AWS services allow
+ * (Developer Guide, Task state), and the calls then reach "resources that the target account owns", the role being
+ * in one partition with the state machine (Developer Guide, "Accessing cross-account AWS resources in Step
+ * Functions"). Activities take no {@code Credentials}; HTTP tasks, for which AWS does not say, keep the state
+ * machine's account. The class keeps its name from when only nested executions were routed.
+ */
 @ApplicationScoped
 public class NestedTaskCredentials {
     private final IamService iam;
@@ -24,11 +32,19 @@ public class NestedTaskCredentials {
         this.authorizer = authorizer;
     }
 
+    /**
+     * The account of the role {@code credentials} name, checked as the role the task's calls are made as: it has to be
+     * an IAM role of the execution's partition that exists. Under IAM enforcement the execution role has to be able to
+     * assume it when it is in another account or the task is a nested execution, whose target has to be in the role's
+     * account and allowed to it; another task's own authorization decides an assumption within one account.
+     *
+     * @param resource the state's {@code Resource}, which {@link #routes} accepts
+     */
     String account(JsonNode credentials, String resource, JsonNode input, StateMachine machine) {
         StatesIntegration integration = StatesIntegration.parse(resource).orElse(null);
-        if (!isNested(integration)) {
+        if (!routes(resource)) {
             throw new AslExecutor.FailStateException("States.Runtime",
-                    "Task Credentials account routing is supported only for nested executions");
+                    "Task Credentials account routing is supported only for Lambda and AWS service integrations");
         }
         validateShape(credentials);
         String roleArn = credentials.path("RoleArn").asText();
@@ -49,22 +65,72 @@ public class NestedTaskCredentials {
         if (iam.findRole(role.accountId(), name).filter(found -> IamService.roleArnMatches(roleArn, found)).isEmpty()) {
             throw assumptionDenied(machine, roleArn);
         }
-        if (config.services().iam().enforcementEnabled()) {
-            if (authorizer.assumeRefusal(machine.getRoleArn(), roleArn, machine.getStateMachineArn()).isPresent()) {
-                throw assumptionDenied(machine, roleArn);
-            }
-            validateTargetAccount(resource, input, machine, role.accountId());
-            String target = input.path("StateMachineArn").asText(null);
-            if (AwsArnUtils.isArn(target)) {
-                String action = integration.isSdk("sfn", "startSyncExecution")
-                        ? "states:StartSyncExecution" : "states:StartExecution";
-                Optional<String> refusal = authorizer.refusal(roleArn, action, target);
+        if (!config.services().iam().enforcementEnabled()) {
+            return role.accountId();
+        }
+        if (!isNested(integration)) {
+            if (!role.accountId().equals(owner.accountId())) {
+                Optional<String> refusal = authorizer.assumeRefusal(machine.getRoleArn(), roleArn,
+                        machine.getStateMachineArn());
                 if (refusal.isPresent()) {
-                    throw accessDenied(integration, refusal.get());
+                    // The Lambda task's own check refuses an assumption this way, so the error stays the same.
+                    throw isLambda(resource, integration)
+                            ? new AslExecutor.FailStateException("States.Permissions", refusal.get())
+                            : assumptionDenied(machine, roleArn);
                 }
+            }
+            return role.accountId();
+        }
+        if (authorizer.assumeRefusal(machine.getRoleArn(), roleArn, machine.getStateMachineArn()).isPresent()) {
+            throw assumptionDenied(machine, roleArn);
+        }
+        validateTargetAccount(resource, input, machine, role.accountId());
+        String target = input.path("StateMachineArn").asText(null);
+        if (AwsArnUtils.isArn(target)) {
+            String action = integration.isSdk("sfn", "startSyncExecution")
+                    ? "states:StartSyncExecution" : "states:StartExecution";
+            Optional<String> refusal = authorizer.refusal(roleArn, action, target);
+            if (refusal.isPresent()) {
+                throw accessDenied(integration, refusal.get());
             }
         }
         return role.accountId();
+    }
+
+    /**
+     * Whether a task with {@code resource} makes its calls as its {@code Credentials} role, in that role's account: a
+     * Lambda function or an AWS service integration, in any of its forms. Not an activity, nor an HTTP task.
+     */
+    static boolean routes(String resource) {
+        StatesIntegration integration = StatesIntegration.parse(resource).orElse(null);
+        if (integration == null) {
+            return isLambdaFunctionArn(resource);
+        }
+        return !integration.isAnySuffix("http", "invoke");
+    }
+
+    /**
+     * The machine as the account a task's calls run in sees it, so a resource the task names without its account is
+     * the one of that account. The role and the rest stay the state machine's.
+     */
+    static StateMachine inAccount(StateMachine machine, String account) {
+        AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
+        if (account == null || account.equals(owner.accountId())) {
+            return machine;
+        }
+        StateMachine view = new StateMachine();
+        view.setStateMachineArn(new AwsArnUtils.Arn(owner.partition(), owner.service(), owner.region(), account,
+                owner.resource()).toString());
+        view.setRoleArn(machine.getRoleArn());
+        return view;
+    }
+
+    private static boolean isLambda(String resource, StatesIntegration integration) {
+        return integration == null ? isLambdaFunctionArn(resource) : integration.isAnySuffix("lambda", "invoke");
+    }
+
+    private static boolean isLambdaFunctionArn(String resource) {
+        return AwsArnUtils.isArnFor(resource, "lambda") && resource.contains(":function:");
     }
 
     static void validateShape(JsonNode credentials) {
