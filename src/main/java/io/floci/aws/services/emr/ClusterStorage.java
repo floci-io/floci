@@ -127,11 +127,13 @@ public interface ClusterStorage {
      * {@link EmrTrino#catalogs}), its {@code trino-config} properties, which its {@code config.properties} gets after
      * Floci's (see {@link EmrTrino#config}), its {@code trino-node} and {@code trino-log} properties, which its
      * {@code node.properties} and {@code log.properties} get after its image's own (see {@link EmrTrino#ENTRYPOINT}),
-     * and the variables its {@code trino-env} exports, which its environment gets after Floci's own. It reaches S3 and
-     * Glue as the metastore does.
+     * the variables its {@code trino-env} exports, which its environment gets after Floci's own, and its
+     * {@code trino-exchange-manager} properties, null where it has none, which make its exchange manager (see
+     * {@link EmrTrino#exchangeManager}). It reaches S3 and Glue as the metastore does.
      */
     record Trino(String image, int memoryMb, Map<String, Map<String, String>> connectors, Map<String, String> config,
-                 Map<String, String> node, Map<String, String> log, Map<String, String> environment) {
+                 Map<String, String> node, Map<String, String> log, Map<String, String> environment,
+                 Map<String, String> exchangeManager) {
     }
 
     /**

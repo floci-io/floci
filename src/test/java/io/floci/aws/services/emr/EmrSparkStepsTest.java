@@ -261,6 +261,10 @@ class EmrSparkStepsTest {
         // "If any classification ends in env, use the export sub-classification."
         assertEquals(Map.of("DB_PASSWORD", "s3cret"), EmrSparkSteps.trinoEnvironment(configurations, objectMapper));
         assertEquals(Map.of(), EmrSparkSteps.trinoEnvironment(null, objectMapper));
+        // An exchange manager only where the cluster names one, one with no properties at EMR's defaults.
+        assertNull(EmrSparkSteps.trinoExchangeManager(configurations, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.trinoExchangeManager("[{\"Classification\": \"trino-exchange-manager\"}]",
+                objectMapper));
     }
 
     @Test

@@ -311,6 +311,16 @@ final class EmrSparkSteps {
         return properties(configurations, objectMapper, EmrTrino.NODE_CLASSIFICATION);
     }
 
+    /**
+     * The properties of a cluster's {@code trino-exchange-manager}, which make its Trino's exchange manager, or null
+     * where it has none: one with no properties gives EMR's default, "To use the default settings, set the following
+     * configuration: { "Classification": "trino-exchange-manager" }".
+     */
+    static Map<String, String> trinoExchangeManager(String configurations, ObjectMapper objectMapper) {
+        return classified(configurations, objectMapper, EmrTrino.EXCHANGE_CLASSIFICATION).isEmpty() ? null
+                : properties(configurations, objectMapper, EmrTrino.EXCHANGE_CLASSIFICATION);
+    }
+
     /** The properties of a cluster's {@code trino-log}, which make its Trino's {@code log.properties}. */
     static Map<String, String> trinoLog(String configurations, ObjectMapper objectMapper) {
         return properties(configurations, objectMapper, EmrTrino.LOG_CLASSIFICATION);

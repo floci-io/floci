@@ -1621,6 +1621,10 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                         .withLabels(labels(clusterId, accountId, region, EmrTrino.COMPONENT));
                 EmrTrino.catalogs(trino.connectors(), endpoint, region).forEach((catalog, properties) ->
                         spec.withEnv(EmrTrino.CATALOG_PREFIX + catalog, EmrTrino.properties(properties)));
+                if (trino.exchangeManager() != null) {
+                    spec.withEnv(EmrTrino.EXCHANGE_VARIABLE, EmrTrino.properties(EmrTrino.exchangeManager(
+                            trino.exchangeManager(), endpoint, region)));
+                }
                 lifecycleManager.createAndStart(spec.build());
             } catch (RuntimeException e) {
                 releaseSession(name);
