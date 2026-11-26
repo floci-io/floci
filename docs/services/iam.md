@@ -2580,7 +2580,7 @@ AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Acce
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
 Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, AWS Fault Injection Service, AWS Resource
 Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, AWS Account Management, AWS Control
-Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes, Aurora DSQL, STS, Amazon EKS, AWS Resource Groups, Amazon CloudWatch Logs, Amazon CloudWatch, Amazon Comprehend, AWS Config, AWS DMS, Amazon ElastiCache, AWS Identity Store, Amazon MemoryDB, Amazon Route 53 Resolver, Amazon SageMaker, Amazon Transcribe, AWS Transfer Family and Amazon EFS they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes, Aurora DSQL, STS, Amazon EKS, AWS Resource Groups, Amazon CloudWatch Logs, Amazon CloudWatch, Amazon Comprehend, AWS Config, AWS DMS, Amazon ElastiCache, AWS Identity Store, Amazon MemoryDB, Amazon Route 53 Resolver, Amazon SageMaker, Amazon Transcribe, AWS Transfer Family, Amazon EFS and Amazon SES they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. Nothing in it is
@@ -2692,7 +2692,14 @@ AWS does not document which resource a request naming a session is authorized on
 target is Floci's inference: a session runs on the cluster or workgroup named by the statement that
 opened it.
 EventBridge V2's requests are read beside EventBridge's, each checked on the resources the API serving
-it names (an EventBridge V2 `PutEvents` on the bus its `EventBusArn` names). A
+it names (an EventBridge V2 `PutEvents` on the bus its `EventBusArn` names). Every row of the table names
+the APIs it is read for (`apis`), each a protocol botocore gives a client of the operation with its API
+version, and a request is read for the rows of its own API: a Query request's by the `Version` it names,
+a REST request's by the version of the model whose route it matched. So clients that share an operation
+and an endpoint are told apart by the request itself, never by a member a caller adds: an SES v2
+`SendEmail` is not read for SES v1's `SourceArn`, nor an Elastic Load Balancing v2 request for a classic
+one's members. A request whose API neither gives, a JSON or CBOR request among them, is read for every
+row, as one no row names is. A
 state machine's version or alias
 (`stateMachine:<name>:<qualifier>`) is checked on the state machine's ARN, as Step Functions
 authorizes it, so a grant or a deny on `stateMachine:<name>` covers its versions and aliases, and
@@ -2733,7 +2740,7 @@ serves, and OAM's on `/tags/<arn>` whether the ARN's slash is encoded or not. A 
 tags needs `oam:TagResource` on the sink it names, where the operation is checked, since it acts on no
 link.
 
-The REST routes mapped to an action are those of S3, Lambda, API Gateway, SES v2, RDS Data,
+The REST routes mapped to an action are those of S3, Lambda, API Gateway, RDS Data,
 Kinesis, EKS, EventBridge Scheduler, EventBridge Pipes and Aurora DSQL. In EKS that is every route,
 including those Floci does not serve yet, each checked as the action of its own name, except an
 access entry's access policy routes: Floci takes the entry's principal as the rest of the path, so a
@@ -2887,7 +2894,12 @@ Formation and Amazon Inspector is one AWS authorizes on no resource type, as is 
 account's members, `member/*`, as nothing botocore or the Service Reference says names the member it makes by its
 `account.accountId`, and needs `macie2:TagResource` when it carries tags. Amazon EFS's routes are checked on the
 resources the table of request resources reads: a file system by its id, and a mount target's operations and the tag
-calls on the file system or access point EFS answers their `MountTargetId` or `ResourceId` reaches. API Gateway's
+calls on the file system or access point EFS answers their `MountTargetId` or `ResourceId` reaches. Amazon SES v2's
+and Amazon Pinpoint Email's routes are checked by their routes, on the resources the table reads, as SES v1's Query
+requests are by their `Action`. Two `GET` routes an SDK built before botocore moved `ListConfigurationSets` and
+`ListEmailIdentities` to `POST /v2/email/list-configuration-sets` and `POST /v2/email/list-identities` still sends,
+`GET /v2/email/configuration-sets` and `GET /v2/email/identities`, are served but match no route of the model, so
+they are not checked. API Gateway's
 routes are checked by their routes alone too, on the path Floci builds the ARN from, and the authorized
 actions list the operations AWS checks as the action their HTTP method names (above). A route whose action AWS checks on a
 resource Floci neither builds nor reads would not be checked, since checked on `*` a grant scoped to

@@ -570,14 +570,19 @@ See the [AWS receipt-rule resource reference](https://docs.aws.amazon.com/AWSClo
 
 ### IAM enforcement
 
-With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, every SES v2 operation is authorized as the `ses:`
-action AWS's service reference lists for it, which is always `ses:<Operation>`, in the `ses` namespace
-v1 and v2 share. The v1 Query API resolves the same way from its `Action`. Both are evaluated with
-resource `*`, so a policy that limits `ses:` actions to an identity, configuration set or template ARN
-does not grant them yet. The other actions the service reference lists for some operations are not
-checked: `ses:TagResource` for the create operations, and `iam:PassRole` (with `iam:PassedToService`
-`ses.amazonaws.com`) for creating or updating an event destination. A v2 `SendEmail` is authorized as
-`ses:SendEmail` whatever its content: `ses:SendRawEmail` is a v1 action.
+With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, every SES operation is authorized as the `ses:`
+action AWS's Service Reference lists for it, in the `ses` namespace v1 and v2 share: a v2 request by the
+route botocore's model gives its operation, a v1 request by its `Action`. Each is checked on the resources
+the generated table of request resources reads from the request, as for every namespace that table reads:
+an identity by its name (`identity/<name>`), a configuration set, a template or a contact list by theirs,
+an ARN member by the ARN it holds; an operation naming none of the types its action acts on is checked on
+`*`. A create that carries tags also needs `ses:TagResource`, and an event destination or a receipt rule
+that names a role `iam:PassRole` for it. A v2 `SendEmail` is authorized as `ses:SendEmail` whatever its
+content: `ses:SendRawEmail` is a v1 action. v1 and v2 share the operation in that table, and a request is read
+for its own API's members alone: a v1 `SendEmail` names its identity by its `SourceArn`, a v2 one by its
+`FromEmailAddressIdentityArn`, and neither is read for the other's. `ListConfigurationSets` and `ListEmailIdentities` are
+`POST /v2/email/list-configuration-sets` and `POST /v2/email/list-identities` in the model; the `GET` routes
+an SDK built before that still sends are served but match no route of the model, so they are not checked.
 
 SES publishes to an SNS topic as `ses.amazonaws.com`, so the topic's policy decides whether it may,
 whatever the sender's own SNS permissions: an event destination's events with the configuration set's

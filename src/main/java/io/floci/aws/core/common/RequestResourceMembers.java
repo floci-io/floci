@@ -75,6 +75,8 @@ final class RequestResourceMembers {
     private static final Pattern APPENDED_ID = Pattern.compile("[/:]\\$\\{\\w+}");
     /** A word of a child type's own and one id, which its format appends to its parent's whole resource. */
     private static final Pattern NESTED_ID = Pattern.compile("[/:][A-Za-z][A-Za-z0-9-]*[/:]\\$\\{\\w+}");
+    /** An API a row is read for: a protocol botocore gives a client and its API version ({@code query/2010-12-01}). */
+    private static final Pattern API = Pattern.compile("[a-z0-9-]+/\\d{4}-\\d{2}-\\d{2}");
     /** The keys a resource found by members does not take: it is read no other way. */
     private static final List<String> FOUND_ONLY = List.of("arnOf", "fixed");
     /** The keys of a resource read from a member holding its ARN. */
@@ -262,14 +264,35 @@ final class RequestResourceMembers {
      * {@code renames} is the resource the member it names gives, as its service holds it, with the name and the path
      * the request gives each in place of its own (UpdateUser's {@code UserName}, renamed {@code NewUserName}, moved
      * {@code NewPath}). A {@code signer} resource is the user whose access key signs the request, which its service
-     * gives, {@code when} the request leaves out the members that would name another.
+     * gives, {@code when} the request leaves out the members that would name another. Each resource names the
+     * {@code apis} it is read for, each a protocol botocore gives a client of the operation with its API version
+     * ({@code query/2010-12-01}): one some of the operation's clients read applies to the requests of their APIs alone
+     * (SES v1's {@code SourceArn}, which no v2 request has); none for every request.
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
                     Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
                     boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault,
                     Map<String, String> defaults, boolean partialArn, Member statement, String verb,
-                    Map<String, String> names, Member path, Member renames, boolean signer) {
+                    Map<String, String> names, Member path, Member renames, boolean signer, List<String> apis) {
+
+        Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
+                 Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
+                 Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
+                 boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault,
+                 Map<String, String> defaults, boolean partialArn, Member statement, String verb,
+                 Map<String, String> names, Member path, Member renames, boolean signer) {
+            this(types, arn, fill, when, unless, arnOf, account, fixed, made, find, endpoint, through, byDefault,
+                    whenDefault, unlessDefault, defaults, partialArn, statement, verb, names, path, renames, signer,
+                    List.of());
+        }
+
+        /** This resource, read for those APIs alone. */
+        Resource withApis(List<String> read) {
+            return new Resource(types, arn, fill, when, unless, arnOf, account, fixed, made, find, endpoint, through,
+                    byDefault, whenDefault, unlessDefault, defaults, partialArn, statement, verb, names, path, renames,
+                    signer, List.copyOf(read));
+        }
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                  Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
@@ -531,7 +554,7 @@ final class RequestResourceMembers {
                     throw new IllegalStateException(RESOURCE_NAME + " checks a resource of " + operation.getKey()
                             + " as " + action + ", none of the actions it records for the operation");
                 }
-                (action == null ? resources : byAction.get(action)).add(resource(operation.getKey(),
+                (action == null ? resources : byAction.get(action)).add(readRow(operation.getKey(),
                         action == null ? resource : ((ObjectNode) resource.deepCopy()).without("action"),
                         formats.getOrDefault(namespace, Map.of())));
             }
@@ -781,6 +804,21 @@ final class RequestResourceMembers {
 
     private static Set<String> names(JsonNode list) {
         return Set.copyOf(list.valueStream().map(JsonNode::asText).toList());
+    }
+
+    /** A row of the resources an operation reads, with the APIs it names it is read for ({@code apis}), if any. */
+    private static Resource readRow(String operation, JsonNode row, Map<String, ArnFormat> formats) {
+        if (!row.has("apis")) {
+            return resource(operation, row, formats);
+        }
+        JsonNode apis = row.path("apis");
+        if (!apis.isArray() || apis.isEmpty()
+                || !apis.valueStream().allMatch(api -> api.isTextual() && API.matcher(api.asText()).matches())) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads a resource of " + operation + " for " + apis
+                    + ", which is no list of protocols with their API versions");
+        }
+        return resource(operation, ((ObjectNode) row.deepCopy()).without("apis"), formats)
+                .withApis(apis.valueStream().map(JsonNode::asText).toList());
     }
 
     private static Resource resource(String operation, JsonNode resource, Map<String, ArnFormat> formats) {

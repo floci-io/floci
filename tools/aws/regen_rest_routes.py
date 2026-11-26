@@ -91,6 +91,7 @@ MODELS: dict[str, str] = {
     "opensearch": "es",
     # The data plane is signed for the service, which is one scope for both of its planes.
     "payment-cryptography-data": "payment-cryptography",
+    "pinpoint-email": "ses",
     "pipes": "pipes",
     "quicksight": "quicksight",
     "ram": "ram",
@@ -102,6 +103,7 @@ MODELS: dict[str, str] = {
     "s3vectors": "s3vectors",
     "scheduler": "scheduler",
     "securityhub": "securityhub",
+    "sesv2": "ses",
     "signer": "signer",
     "xray": "xray",
 }
