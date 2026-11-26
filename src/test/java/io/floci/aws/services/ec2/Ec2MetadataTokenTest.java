@@ -46,6 +46,20 @@ class Ec2MetadataTokenTest {
     }
 
     @Test
+    void credentialRevocationKeepsTransportOwnershipButRefusesOldAndNewTokens() throws Exception {
+        Ec2MetadataServer server = fixture.server();
+        String token = fixture.putToken("60").body();
+        assertEquals(200, getInstanceId(token).statusCode());
+
+        server.revokeInstanceCredentials(instance);
+        assertEquals(instance, server.registeredContainer("127.0.0.1").orElseThrow());
+        assertEquals(404, getInstanceId(token).statusCode());
+        assertEquals(404, getWithoutToken("/latest/meta-data/instance-id").statusCode());
+        server.registerContainer("127.0.0.1", instance.getInstanceId(), instance);
+        assertEquals(404, getInstanceId(fixture.putToken("60").body()).statusCode());
+    }
+
+    @Test
     void tokenWithTheMaximumTtlIsIssued() throws Exception {
         HttpResponse<String> token = fixture.putToken("21600");
 

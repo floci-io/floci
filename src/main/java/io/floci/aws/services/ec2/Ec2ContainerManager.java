@@ -1828,6 +1828,7 @@ public class Ec2ContainerManager {
             firewallEniId = instance.getNetworkInterfaces() == null || instance.getNetworkInterfaces().isEmpty()
                     ? null : instance.getNetworkInterfaces().getFirst().getNetworkInterfaceId();
             instance.setState(InstanceState.shuttingDown());
+            metadataServer.revokeInstanceCredentials(instance);
             // In-flight lookups no longer match and publish nothing; later ones see the state.
             serviceNetworkRetries.remove(instance.getInstanceId());
             serviceNetworkLookups.remove(instance.getInstanceId());

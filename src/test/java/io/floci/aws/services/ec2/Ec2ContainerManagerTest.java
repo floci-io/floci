@@ -3268,6 +3268,7 @@ class Ec2ContainerManagerTest {
 
         awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
         assertFalse(ran.get(), "the hook must not run when the container is still present");
+        verify(harness.metadataServer()).revokeInstanceCredentials(instance);
     }
 
     @Test
