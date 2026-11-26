@@ -63,6 +63,11 @@ class SelectNightlyChecksTest(unittest.TestCase):
     def e2e(self, files):
         return self.select(files).get('docker-e2e', [])
 
+    def test_dnsChangesStartThePullRequestWorkflow(self):
+        workflow = PATH.parent.parent / 'workflows' / 'nightly-checks.yml'
+        pull_request = workflow.read_text().split('  pull_request:', 1)[1].split('\npermissions:', 1)[0]
+        self.assertIn("      - 'src/main/java/io/floci/aws/core/common/dns/**'", pull_request)
+
     def test_scheduleRunsEveryCheck(self):
         groups = self.select()
         self.assertEqual(E2E, groups['docker-e2e'])
