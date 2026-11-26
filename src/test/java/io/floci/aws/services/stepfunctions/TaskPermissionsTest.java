@@ -251,6 +251,24 @@ class TaskPermissionsTest {
                 .getFirst().conditionKeys().get("dynamodb:ReturnValues"));
     }
 
+    /**
+     * A write asking for two return modes is checked once per mode, as a direct request is, so a policy refusing the
+     * mode returned on a failed condition refuses the task.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"dynamodb:updateItem", "aws-sdk:dynamodb:updateItem"})
+    void aWriteWithTwoReturnModesIsCheckedForEach(String resource) throws Exception {
+        List<Permission> permissions = dynamoDbPermissions(resource, """
+                {"TableName":"orders","Key":{"pk":{"S":"o-1"}},"UpdateExpression":"SET total = :t",
+                 "ExpressionAttributeValues":{":t":{"N":"1"}},"ReturnValues":"UPDATED_NEW",
+                 "ReturnValuesOnConditionCheckFailure":"ALL_OLD"}""");
+
+        assertEquals(List.of(List.of("UPDATED_NEW"), List.of("ALL_OLD")),
+                permissions.stream().map(permission -> permission.conditionKeys().get("dynamodb:ReturnValues")).toList());
+        assertEquals(List.of(table("orders"), table("orders")),
+                permissions.stream().map(Permission::resourceArn).toList());
+    }
+
     /** A table DynamoDB does not have has no partition key to read, so the request offers no leading key. */
     @Test
     void aTableDynamoDbDoesNotHaveOffersNoLeadingKeys() throws Exception {

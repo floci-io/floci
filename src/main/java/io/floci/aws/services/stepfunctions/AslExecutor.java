@@ -2689,13 +2689,9 @@ public class AslExecutor {
                 return objectMapper.createObjectNode();
             }
             case "getItem" -> {
-                JsonNode key = input.path("Key");
-                JsonNode item = dynamoDb.items().getItem(scope, tableName, key);
-                ObjectNode result = objectMapper.createObjectNode();
-                if (item != null) {
-                    result.set("Item", item);
-                }
-                return result;
+                // The GetItem request as DynamoDB reads it, so ProjectionExpression and AttributesToGet decide
+                // which attributes come back, as the dynamodb:Attributes the task was authorized for say.
+                return dynamoDbRequest("GetItem", input, region, "DynamoDB.");
             }
             case "deleteItem" -> {
                 JsonNode key = input.path("Key");
@@ -2759,14 +2755,18 @@ public class AslExecutor {
     private JsonNode invokeAwsSdkDynamoDb(String camelCaseAction, JsonNode input, String region) {
         // Convert camelCase to PascalCase (e.g., putItem → PutItem)
         String pascalAction = Character.toUpperCase(camelCaseAction.charAt(0)) + camelCaseAction.substring(1);
+        return dynamoDbRequest(pascalAction, input, region, "DynamoDb.");
+    }
 
+    /** One DynamoDB request through its JSON handler, a failure named with {@code errorPrefix}. */
+    private JsonNode dynamoDbRequest(String pascalAction, JsonNode input, String region, String errorPrefix) {
         Response response;
         try {
             response = dynamoDbJsonHandler.handle(pascalAction, input, region);
         } catch (AwsException e) {
-            throw new FailStateException("DynamoDb." + e.getErrorCode(), e.getMessage());
+            throw new FailStateException(errorPrefix + e.getErrorCode(), e.getMessage());
         } catch (Exception e) {
-            throw new FailStateException("DynamoDb.InternalServerError",
+            throw new FailStateException(errorPrefix + "InternalServerError",
                     e.getMessage() != null ? e.getMessage() : "DynamoDB error");
         }
 
@@ -2778,9 +2778,9 @@ public class AslExecutor {
                 String errorName = errorNode.path("__type").asText("UnknownError");
                 String errorMessage = errorNode.path("message").asText(
                         errorNode.path("Message").asText("DynamoDB operation failed"));
-                throw new FailStateException("DynamoDb." + errorName, errorMessage);
+                throw new FailStateException(errorPrefix + errorName, errorMessage);
             }
-            throw new FailStateException("DynamoDb.ServiceException", "DynamoDB operation failed");
+            throw new FailStateException(errorPrefix + "ServiceException", "DynamoDB operation failed");
         }
 
         if (entity instanceof JsonNode jsonNode) {

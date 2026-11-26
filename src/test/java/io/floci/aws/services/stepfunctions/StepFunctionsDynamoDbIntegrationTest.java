@@ -521,6 +521,29 @@ class StepFunctionsDynamoDbIntegrationTest {
         assertEquals("hello", result.path("Item").path("value").path("S").asText());
     }
 
+    /**
+     * The optimized getItem takes the GetItem request, so its ProjectionExpression decides which attributes come
+     * back: a policy on dynamodb:Attributes is only as narrow as the item the task returns.
+     */
+    @Test
+    @Order(73)
+    void optimizedGetItemReturnsOnlyTheProjectedAttributes() throws Exception {
+        String output = executeSfnOptimized("opt-get-projected", "dynamodb:getItem", """
+                {
+                    "TableName": "%s",
+                    "Key": {
+                        "pk": {"S": "opt-get-test"},
+                        "sk": {"S": "row"}
+                    },
+                    "ProjectionExpression": "pk, sk"
+                }
+                """.formatted(TABLE_NAME));
+
+        JsonNode item = mapper.readTree(output).path("Item");
+        assertEquals("opt-get-test", item.path("pk").path("S").asText());
+        assertFalse(item.has("value"), output);
+    }
+
     @Test
     @Order(72)
     void optimized_getItem_notFound_returnsEmptyObject() throws Exception {

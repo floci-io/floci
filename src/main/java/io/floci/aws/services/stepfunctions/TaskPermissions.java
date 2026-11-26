@@ -328,28 +328,36 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
                                                      RequestLookups lookups) {
         String action = "dynamodb:" + AslExecutor.capitalizeFirst(api);
         AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
-        Map<String, List<String>> context = dynamoDbConditionKeys(action, input, owner.region(), lookups);
+        List<Map<String, List<String>>> contexts = dynamoDbConditionKeys(action, input, owner.region(), lookups);
         return accessDenied(DYNAMODB_OPTIMIZED_PREFIX, RequestResources.ofBody(action, input, owner.partition(),
                 owner.region(), owner.accountId(), null).stream()
                 .filter(AwsArnUtils::isArn)
-                .map(resource -> new Permission(action, resource, context))
+                .flatMap(resource -> contexts.stream().map(context -> new Permission(action, resource, context)))
                 .toList());
     }
 
     /**
      * The DynamoDB condition keys a direct request for {@code action} offers: {@code dynamodb:LeadingKeys} by the
      * partition key of the table it names, which a table DynamoDB does not have leaves out, {@code dynamodb:Attributes}
-     * and {@code dynamodb:Select}, and a single-item write's {@code dynamodb:ReturnValues}.
+     * and {@code dynamodb:Select}, and a single-item write's {@code dynamodb:ReturnValues}. A write asking for two
+     * return modes gets one context for each, as {@code IamConditionContextResolver.resolveRemainingTargets} gives the
+     * direct request, so every output it can return is authorized.
      */
-    private static Map<String, List<String>> dynamoDbConditionKeys(String action, JsonNode request, String region,
-                                                                   RequestLookups lookups) {
-        Map<String, List<String>> context = new LinkedHashMap<>(DynamoDbConditionKeys.extract(action, request,
-                dynamoDbTable(request.path("TableName"), region, lookups)).conditionKeys());
+    private static List<Map<String, List<String>>> dynamoDbConditionKeys(String action, JsonNode request,
+                                                                         String region, RequestLookups lookups) {
+        Map<String, List<String>> context = DynamoDbConditionKeys.extract(action, request,
+                dynamoDbTable(request.path("TableName"), region, lookups)).conditionKeys();
         List<String> returnValues = DynamoDbConditionKeys.returnValues(action, request);
-        if (!returnValues.isEmpty()) {
-            context.put("dynamodb:ReturnValues", List.of(returnValues.getFirst()));
+        if (returnValues.isEmpty()) {
+            return List.of(Map.copyOf(context));
         }
-        return Map.copyOf(context);
+        List<Map<String, List<String>>> contexts = new ArrayList<>();
+        for (String mode : returnValues) {
+            Map<String, List<String>> withMode = new LinkedHashMap<>(context);
+            withMode.put("dynamodb:ReturnValues", List.of(mode));
+            contexts.add(Map.copyOf(withMode));
+        }
+        return List.copyOf(contexts);
     }
 
     /** The table a name or an ARN in {@code region} names; null when it names none DynamoDB has. */
@@ -407,11 +415,11 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
         }
         List<String> named = RequestResources.ofBody(namedAs, input, owner.partition(), owner.region(),
                 owner.accountId(), null);
-        Map<String, List<String>> context = input.isObject()
-                ? dynamoDbConditionKeys(namedAs, input, owner.region(), lookups) : Map.of();
+        List<Map<String, List<String>>> contexts = input.isObject()
+                ? dynamoDbConditionKeys(namedAs, input, owner.region(), lookups) : List.of(Map.of());
         return accessDenied(DYNAMODB_SDK_PREFIX, (named.isEmpty() ? List.of(ANY_RESOURCE) : named).stream()
                 .filter(resource -> ANY_RESOURCE.equals(resource) || AwsArnUtils.isArn(resource))
-                .map(resource -> new Permission(namedAs, resource, context))
+                .flatMap(resource -> contexts.stream().map(context -> new Permission(namedAs, resource, context)))
                 .toList());
     }
 
