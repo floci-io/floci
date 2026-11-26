@@ -12,6 +12,7 @@ import io.floci.aws.testing.ParallelLocks;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
 import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.InputStream;
@@ -28,6 +29,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 /** Builds and reuses a native helper when the configured Docker daemon answers. */
+@ResourceLock(value = ParallelLocks.DOCKER_ACTIVE_STREAMS, mode = ResourceAccessMode.READ)
 @ResourceLock(ParallelLocks.CONFIG_MAPPING)
 class LocallyBuiltHelperImageDockerIntegrationTest {
     private static final String BASE = "busybox:1.37.0";

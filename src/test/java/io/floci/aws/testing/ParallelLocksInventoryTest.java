@@ -43,6 +43,26 @@ class ParallelLocksInventoryTest {
     private static final Pattern CONFIG_MAPPING_LOCK = Pattern.compile(
             "@ResourceLock\\(\\s*(?:value\\s*=\\s*)?ParallelLocks\\.CONFIG_MAPPING\\b");
 
+    private static final Pattern USES_FLOCI_DOCKER_STREAMS = Pattern.compile(
+            "new DockerClientProducer\\s*\\(|DockerClientProducer\\.newDockerClient\\s*\\("
+                    + "|new FlociInvocationBuilder\\s*\\(");
+    private static final Pattern DOCKER_ACTIVE_STREAMS_LOCK = Pattern.compile(
+            "@ResourceLock\\(\\s*(?:value\\s*=\\s*)?ParallelLocks\\.DOCKER_ACTIVE_STREAMS\\b");
+
+    @Test
+    void everyPlainFlociDockerStreamConsumerDeclaresItsLock() {
+        Map<String, String> sources = sources();
+        Set<String> missing = new TreeSet<>();
+        sources.forEach((name, source) -> {
+            if (isTestClass(name) && USES_FLOCI_DOCKER_STREAMS.matcher(source).find()
+                    && !isQuarkus(name, sources, new TreeSet<>()) && !DOCKER_ACTIVE_STREAMS_LOCK.matcher(source).find()) {
+                missing.add(name);
+            }
+        });
+        assertTrue(missing.isEmpty(), "Plain Floci Docker stream consumers without "
+                + "@ResourceLock(ParallelLocks.DOCKER_ACTIVE_STREAMS): " + missing);
+    }
+
     @Test
     void everyPlainClassThatOpensASocketDeclaresThePortsLock() {
         Map<String, String> sources = sources();

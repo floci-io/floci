@@ -29,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 /** How a stream from {@link FlociInvocationBuilder#get()} gives its connection back when it is closed. */
+@ResourceLock(value = ParallelLocks.DOCKER_ACTIVE_STREAMS, mode = ResourceAccessMode.READ)
 @ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class FlociInvocationBuilderTest {
 

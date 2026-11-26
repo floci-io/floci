@@ -30,6 +30,9 @@ public final class ParallelLocks {
      */
     public static final String CONFIG_MAPPING = "floci-config-mapping";
 
+    /** The process-wide count of active Floci Docker callbacks. Producers read-lock; exact observers write-lock. */
+    public static final String DOCKER_ACTIVE_STREAMS = "floci-docker-active-streams";
+
     private ParallelLocks() {
     }
 }
