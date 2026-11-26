@@ -129,6 +129,12 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     // How long the command that starts a cluster's primary node for its application UIs or its Trino may run: it runs
     // nothing.
     private static final Duration PRIMARY_NODE_START = Duration.ofMinutes(5);
+    /**
+     * How long after a start of a cluster's primary node failed ({@link #startPrimaryNode}) another is not tried: a
+     * failure that repeats, a Trino whose catalog names a connector its image lacks, would otherwise start it again at
+     * each request of a client that asks again. A step on the cluster starts it at once still.
+     */
+    static final Duration PRIMARY_NODE_RETRY = Duration.ofMinutes(1);
     // AWS's answer to a change on a terminated cluster, for AddJobFlowSteps and ModifyInstanceFleet; Floci
     // gives it to AddInstanceGroups and AddInstanceFleet too, for one shutting down.
     private static final String JOB_FLOW_SHUT_DOWN =
@@ -191,6 +197,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     // The clusters whose primary node an application UI link is starting, by account and id, and how many it has.
     private final Set<String> primaryNodeStarts = ConcurrentHashMap.newKeySet();
     private final AtomicLong primaryNodeStartCount = new AtomicLong();
+    // The clusters whose last such start failed, by account and id: when, and why.
+    private final Map<String, FailedStart> failedPrimaryNodeStarts = new ConcurrentHashMap<>();
     // The Spark Connect servers of the sessions, in the docker runner mode, and the tokens given for every session.
     private final SessionServers sessionServers;
     private final SessionOwner sessionOwner = new SessionOwner();
@@ -494,6 +502,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         executing.clear();
         bootstrapping.clear();
         clusterRuns.clear();
+        failedPrimaryNodeStarts.clear();
         sessionServers.reset();
         if (bootstrapRunner != null) {
             bootstrapRunner.removeImages(Set.of());
@@ -1096,15 +1105,25 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         return clusterStorage == null ? Optional.empty() : clusterStorage.trinoInterface(clusterId, port);
     }
 
+    // A start of a cluster's primary node that failed: when, and why.
+    private record FailedStart(Instant at, String reason) {
+    }
+
     /**
      * Starts the cluster's primary node, its HDFS and YARN, and its Trino where it runs Floci's, as its first step
-     * would, by running nothing on it ({@link #runOnCluster}), unless such a start is under way already: an
-     * application UI link, or a client of its Trino, may ask for it before any step has run, and a cluster with Trino
-     * starts it as it becomes ready.
+     * would, by running nothing on it ({@link #runOnCluster}), unless such a start is under way already, or the last
+     * one failed less than {@link #PRIMARY_NODE_RETRY} ago: an application UI link, or a client of its Trino, may ask
+     * for it before any step has run, and a cluster with Trino starts it as it becomes ready.
      */
     public void startPrimaryNode(String clusterId) {
         String key = regionResolver.getAccountId() + "/" + clusterId;
+        // Claimed before the last failure is read, as a start that ends records its failure before it lets go of its
+        // claim: one let go of in between cannot be started again at once.
         if (!primaryNodeStarts.add(key)) {
+            return;
+        }
+        if (primaryNodeFailure(clusterId).isPresent()) {
+            primaryNodeStarts.remove(key);
             return;
         }
         runOnCluster(clusterId, "ui-" + clusterId + "-" + primaryNodeStartCount.incrementAndGet(), null,
@@ -1116,11 +1135,19 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
 
                     @Override
                     public void ended(SparkJobRunner.Outcome outcome) {
-                        primaryNodeStarts.remove(key);
                         if (outcome.failure() != null) {
-                            LOG.warnv("Could not start the primary node of EMR cluster {0}: {1}", clusterId,
+                            Instant failedAt = now();
+                            // The ones whose minute has passed go, as no cluster may ask for them again.
+                            failedPrimaryNodeStarts.values().removeIf(failed -> !failedAt.isBefore(
+                                    failed.at().plus(PRIMARY_NODE_RETRY)));
+                            failedPrimaryNodeStarts.put(key, new FailedStart(failedAt, outcome.failure()));
+                            LOG.warnv("Could not start the primary node of EMR cluster {0}, which is not tried again"
+                                    + " for {1} seconds: {2}", clusterId, PRIMARY_NODE_RETRY.toSeconds(),
                                     outcome.failure());
+                        } else {
+                            failedPrimaryNodeStarts.remove(key);
                         }
+                        primaryNodeStarts.remove(key);
                     }
 
                     @Override
@@ -1128,6 +1155,23 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         return false;
                     }
                 });
+    }
+
+    /**
+     * Why the last start of the cluster's primary node ({@link #startPrimaryNode}) failed, while it is less than
+     * {@link #PRIMARY_NODE_RETRY} old and no other is tried; empty otherwise.
+     */
+    public Optional<String> primaryNodeFailure(String clusterId) {
+        String key = regionResolver.getAccountId() + "/" + clusterId;
+        FailedStart failed = failedPrimaryNodeStarts.get(key);
+        if (failed == null) {
+            return Optional.empty();
+        }
+        if (!now().isBefore(failed.at().plus(PRIMARY_NODE_RETRY))) {
+            failedPrimaryNodeStarts.remove(key, failed);
+            return Optional.empty();
+        }
+        return Optional.of(failed.reason());
     }
 
     /**

@@ -87,6 +87,21 @@ class EmrTrinoRoutesTest {
     }
 
     @Test
+    void aTrinoWhoseStartFailedTellsTheClientWhyWhileItIsNotTriedAgain() {
+        when(clusters.trinoCluster(CLUSTER)).thenReturn(Optional.of(cluster("WAITING")));
+        when(clusters.trinoInterface(CLUSTER, 8890)).thenReturn(Optional.empty());
+        when(clusters.primaryNodeFailure(CLUSTER)).thenReturn(Optional.of("Trino stopped before it was ready"));
+
+        AppUiRoute route = routes.route(HOST, "http");
+
+        assertEquals(503, route.status());
+        assertEquals(String.format(EmrTrinoRoutes.NOT_STARTED, CLUSTER, "Trino stopped before it was ready"),
+                route.refusal());
+        // Asked for still: the service does not start it again within the minute.
+        verify(clusters).startPrimaryNode(CLUSTER);
+    }
+
+    @Test
     void aRunningTrinoIsReachedWithTheSchemeTheClientUsedItsPortFoundOnceInTenSeconds() {
         when(clusters.trinoCluster(CLUSTER)).thenReturn(Optional.of(cluster("RUNNING")));
         when(clusters.trinoInterface(CLUSTER, 8890)).thenReturn(Optional.of(ENDPOINT));

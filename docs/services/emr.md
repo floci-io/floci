@@ -542,6 +542,7 @@ arrives, and an interface that sends nothing for a minute has the request given 
   applications, its running ones, its jobs, its Spark applications, its application history and its DAGs. A link Floci opens for real is
   `PresignedURLReady` once the primary node is: until then, as on a cluster no step has run on yet, the node starts as
   a step's would ("Used to determine if the presigned URL is ready"), and its host answers with a `503` page meanwhile.
+  A start that failed is not tried again for a minute, though a step on the cluster starts the node at once.
   Any other is ready at once.
 * **GetClusterSessionCredentials** gives "temporary, HTTP basic credentials that are associated with a given runtime
   IAM role and used by a cluster with fine-grained access control activated": a random username and password that
@@ -865,11 +866,12 @@ holding the driver and its executors, or a command or a script. The cluster itse
   whoever reaches Floci's port reaches the cluster's Trino. Trino names a query's next pages by the host it was asked
   on, and by the scheme the client used, which Floci passes on as `X-Forwarded-Proto` (Floci sets
   `http-server.process-forwarded` in `config.properties`). Until Trino answers, the host answers with a `503`, which
-  Trino's clients ask again on, and starts the primary node where it is not running, as after a restart; once the
-  cluster is ending or has ended, a `404`. Trino's port is published on the primary node's container, on the host's
-  loopback interface alone, as the node's web interfaces' are. It goes before its primary node, whose network it shares,
-  when the cluster ends, on a reset and on a shutdown, and one an earlier Floci left goes when the EMR service starts,
-  whatever its cluster, as its session went with that Floci: the cluster's next step, or a client, starts another.
+  Trino's clients ask again on, and starts the primary node where it is not running, as after a restart, though not for
+  a minute after a start that failed, the `503` saying why meanwhile; once the cluster is ending or has ended, a `404`.
+  Trino's port is published on the primary node's container, on the host's loopback interface alone, as the node's web
+  interfaces' are. It goes before its primary node, whose network it shares, when the cluster ends, on a reset and on a
+  shutdown, and one an earlier Floci left goes when the EMR service starts, whatever its cluster, as its session went
+  with that Floci: the cluster's next step, or a client, starts another.
 * **S3DistCp**: the image has no `s3-dist-cp`, so a `command-runner.jar` step whose
   first argument is `s3-dist-cp`, the Release Guide's form, runs Floci's own program instead, through
   `spark-submit` in the step's container, copying through Hadoop's file systems: `--src` and `--dest` take

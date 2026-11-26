@@ -22,7 +22,9 @@ import java.util.regex.Pattern;
  * Floci's Trino has no authentication, so whoever reaches Floci's port reaches the cluster's Trino. Trino names a
  * query's next pages by the host it was asked on, which the request keeps, and by the scheme it was reached over,
  * which goes on as {@code X-Forwarded-Proto}. A cluster whose Trino is not running yet has its primary node started,
- * as an application UI link does, and the request answered with a {@code 503}, which Trino's clients try again on.
+ * as an application UI link does, and the request answered with a {@code 503}, which Trino's clients try again on;
+ * a start that failed is not tried again for a minute ({@link EmrService#PRIMARY_NODE_RETRY}), its reason in the
+ * answer meanwhile.
  */
 @ApplicationScoped
 public class EmrTrinoRoutes implements AppUiRoutes {
@@ -32,6 +34,8 @@ public class EmrTrinoRoutes implements AppUiRoutes {
     static final String CLUSTER_ENDED = "EMR cluster %s is no longer running, and its Trino is there only while it is"
             + " RUNNING or WAITING.";
     static final String NOT_READY = "The Trino of EMR cluster %s is starting. Try again in a moment.";
+    static final String NOT_STARTED = "The Trino of EMR cluster %s could not start: %s. Floci tries again a minute"
+            + " after that failure, and a step on the cluster starts it at once.";
     // How long a port found for a cluster's Trino is used before it is asked for again, as for the application UIs.
     private static final Duration ENDPOINT_RECHECK = Duration.ofSeconds(10);
     // A cluster's id, as a host name holds it, without case.
@@ -100,9 +104,14 @@ public class EmrTrinoRoutes implements AppUiRoutes {
                     .orElse(null);
             if (endpoint == null) {
                 endpoints.remove(key);
-                RequestScopes.runAs(cluster.accountId(), cluster.region(),
-                        () -> clusters.startPrimaryNode(cluster.clusterId()));
-                return AppUiRoute.refused(503, String.format(NOT_READY, cluster.clusterId()));
+                // Not started again while its last start failed less than a minute ago, which the client is told.
+                String failure = RequestScopes.callAs(cluster.accountId(), cluster.region(), () -> {
+                    clusters.startPrimaryNode(cluster.clusterId());
+                    return clusters.primaryNodeFailure(cluster.clusterId()).orElse(null);
+                });
+                return AppUiRoute.refused(503, failure != null
+                        ? String.format(NOT_STARTED, cluster.clusterId(), failure)
+                        : String.format(NOT_READY, cluster.clusterId()));
             }
             found = new Found(endpoint, now);
             endpoints.put(key, found);

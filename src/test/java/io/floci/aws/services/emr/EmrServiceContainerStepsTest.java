@@ -1152,6 +1152,53 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void aPrimaryNodeStartThatFailedIsNotTriedAgainForAMinuteItsReasonKept() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrService withTrino = fixture.withTrino();
+        EmrCluster requested = cluster("trino", true);
+        requested.setApplications(TRINO);
+        String clusterId = withTrino.runJobFlow(requested, REGION).getId();
+        // Its Trino stops at once, as one whose catalog names a connector its image lacks would.
+        fixture.clusterStorage.hdfsFailure = new IllegalStateException("The Trino of EMR cluster " + clusterId
+                + " stopped before it was ready");
+
+        fixture.runStepThread();
+        fixture.runStepThread();
+
+        assertTrue(withTrino.primaryNodeFailure(clusterId).orElseThrow().contains("stopped before it was ready"));
+        // A client asking again, or a link, starts nothing for a minute.
+        withTrino.startPrimaryNode(clusterId);
+        assertEquals(0, fixture.stepThreadsWaiting());
+        fixture.clock.advance(EmrService.PRIMARY_NODE_RETRY.minusSeconds(1));
+        withTrino.startPrimaryNode(clusterId);
+        assertEquals(0, fixture.stepThreadsWaiting());
+        fixture.clock.advance(Duration.ofSeconds(1));
+        assertEquals(Optional.empty(), withTrino.primaryNodeFailure(clusterId));
+        fixture.clusterStorage.hdfsFailure = null;
+        withTrino.startPrimaryNode(clusterId);
+        assertEquals(1, fixture.stepThreadsWaiting());
+        fixture.runStepThread();
+        assertEquals(Optional.empty(), withTrino.primaryNodeFailure(clusterId));
+    }
+
+    @Test
+    void aResetForgetsAFailedPrimaryNodeStart() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrService withTrino = fixture.withTrino();
+        EmrCluster requested = cluster("trino", true);
+        requested.setApplications(TRINO);
+        String clusterId = withTrino.runJobFlow(requested, REGION).getId();
+        fixture.clusterStorage.hdfsFailure = new IllegalStateException("Trino stopped before it was ready");
+        fixture.runStepThread();
+        fixture.runStepThread();
+        assertTrue(withTrino.primaryNodeFailure(clusterId).isPresent());
+
+        withTrino.beforeReset();
+
+        assertEquals(Optional.empty(), withTrino.primaryNodeFailure(clusterId));
+    }
+
+    @Test
     void aClusterWithoutFlocisTrinoStartsNothingAsItBecomesReady() {
         fixture.clusterStorage.ownNetwork = true;
         EmrCluster trino = cluster("trino", true);
