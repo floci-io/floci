@@ -1789,14 +1789,14 @@ class Ec2ContainerManagerTest {
         Instance instance = launchRunningInstance(harness, "i-tworeboots", exitWatches);
         RestartContainerCmd restart = mock(RestartContainerCmd.class, RETURNS_SELF);
         when(harness.dockerClient.restartContainerCmd(TEST_CONTAINER_ID)).thenReturn(restart);
-        CountDownLatch secondRestartBegun = new CountDownLatch(1);
+        CountDownLatch firstRestartMayFinish = new CountDownLatch(1);
         AtomicInteger restarts = new AtomicInteger();
         when(restart.exec()).thenAnswer(invocation -> {
             if (restarts.incrementAndGet() == 1) {
-                secondRestartBegun.await(2, TimeUnit.SECONDS);
+                firstRestartMayFinish.await();
                 return null;
             }
-            secondRestartBegun.countDown();
+            // The second restart's exit reaches the watch the first reboot re-armed.
             awaitUntil(() -> exitWatches.size() >= 2, Duration.ofSeconds(5));
             when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
             exitWatches.getLast().onNext(exitStatus(0));
@@ -1805,7 +1805,9 @@ class Ec2ContainerManagerTest {
         });
 
         harness.manager.reboot(instance);
+        awaitUntil(() -> restarts.get() == 1, Duration.ofSeconds(5));
         harness.manager.reboot(instance);
+        firstRestartMayFinish.countDown();
         awaitUntil(() -> exitWatches.size() == 3, Duration.ofSeconds(10));
 
         assertEquals(List.of(), shutDown);
