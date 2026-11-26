@@ -52,6 +52,7 @@ import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.services.ec2instanceconnect.InstanceConnectKeys;
 import io.floci.aws.testing.HelperShellFixture;
 import io.floci.aws.testing.ParallelLocks;
+import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -1138,6 +1139,9 @@ class Ec2ContainerManagerTest {
         // Count the submitted work across both entry points without observing unrelated callers.
         // API decoding and guest execution share a budget of at most four active decompressions.
         int concurrentLaunches = 12;
+        CountDownLatch firstFourDecompressions = new CountDownLatch(4);
+        CountDownLatch fifthDecompression = new CountDownLatch(1);
+        CountDownLatch releaseDecompressions = new CountDownLatch(1);
         AtomicInteger totalDecompressions = new AtomicInteger(0);
         AtomicInteger active = new AtomicInteger(0);
         AtomicInteger peakActive = new AtomicInteger(0);
@@ -1155,9 +1159,14 @@ class Ec2ContainerManagerTest {
             int now = active.incrementAndGet();
             peakActive.accumulateAndGet(now, Math::max);
             try {
-                Thread.sleep(75);
+                firstFourDecompressions.countDown();
+                if (now > 4) {
+                    fifthDecompression.countDown();
+                }
+                releaseDecompressions.await();
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
+                throw new AssertionError("interrupted while waiting for concurrent decompressions", ie);
             } finally {
                 active.decrementAndGet();
             }
@@ -1179,10 +1188,22 @@ class Ec2ContainerManagerTest {
                     futures.add(pool.submit(() -> List.of(Ec2UserDataDecoder.decode(gzipped))));
                 }
             }
+            try {
+                assertTrue(firstFourDecompressions.await(10, TimeUnit.SECONDS),
+                        "four decompressions did not enter the shared budget concurrently");
+                for (Thread thread : observedThreads) {
+                    ThreadStates.awaitBlockedOrDone(thread);
+                }
+                assertEquals(1, fifthDecompression.getCount(),
+                        "a fifth decompression entered while four held the shared budget");
+            } finally {
+                releaseDecompressions.countDown();
+            }
             for (Future<List<String>> future : futures) {
                 results.add(future.get(30, TimeUnit.SECONDS));
             }
         } finally {
+            releaseDecompressions.countDown();
             try {
                 pool.shutdownNow();
                 assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
