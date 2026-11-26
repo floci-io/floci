@@ -12,6 +12,8 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.function.Consumer;
 
@@ -151,6 +153,47 @@ class SecretsManagerJsonHandlerTest {
         assertThat(response.getStatus(), is(200));
         ObjectNode body = (ObjectNode) response.getEntity();
         assertThat(body.get("KmsKeyId").asText(), is("my-kms-key"));
+    }
+
+    @Test
+    void describeSecretOmitsRotationEnabledAndLastAccessedDateForAFreshSecret() {
+        createSecret("fresh-secret");
+
+        ObjectNode described = describe("fresh-secret");
+
+        assertThat(described.has("RotationEnabled"), is(false));
+        assertThat(described.has("LastAccessedDate"), is(false));
+    }
+
+    @Test
+    void describeSecretReturnsLastAccessedDateAfterGetSecretValue() {
+        createSecret("read-secret");
+        ObjectNode getReq = MAPPER.createObjectNode();
+        getReq.put("SecretId", "read-secret");
+        long before = Instant.now().truncatedTo(ChronoUnit.DAYS).getEpochSecond();
+        handler.handle("GetSecretValue", getReq, REGION);
+        long after = Instant.now().truncatedTo(ChronoUnit.DAYS).getEpochSecond();
+
+        // AWS stamps the UTC day, truncated to midnight, not the read time.
+        double accessed = describe("read-secret").get("LastAccessedDate").asDouble();
+        assertThat(accessed == before || accessed == after, is(true));
+    }
+
+    @Test
+    void listSecretsOmitsRotationEnabledForASecretNeverConfiguredForRotation() {
+        createSecret("list-fresh");
+        createSecret("list-rotating");
+        enableRotation("list-rotating");
+
+        ObjectNode body = (ObjectNode) handler.handle("ListSecrets", MAPPER.createObjectNode(), REGION).getEntity();
+
+        for (JsonNode entry : body.get("SecretList")) {
+            if ("list-fresh".equals(entry.get("Name").asText())) {
+                assertThat(entry.has("RotationEnabled"), is(false));
+            } else {
+                assertThat(entry.get("RotationEnabled").asBoolean(), is(true));
+            }
+        }
     }
 
     @Test

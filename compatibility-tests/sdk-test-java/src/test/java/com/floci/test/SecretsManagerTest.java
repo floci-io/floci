@@ -164,7 +164,7 @@ class SecretsManagerTest {
 
         assertThat(response.tags()).isNotEmpty();
         assertThat(response.versionIdsToStages()).hasSize(2);
-        assertThat(response.rotationEnabled()).isFalse();
+        assertThat(response.rotationEnabled()).isNull();
     }
 
     @Test
