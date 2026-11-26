@@ -1167,7 +1167,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
 
     private static List<String> detailsOf(XmlParser.XmlElement rc) {
         List<String> result = new ArrayList<>();
-        for (XmlParser.XmlElement d : rc.child("Details").children()) {
+        for (XmlParser.XmlElement d : rc.child("Details") == null ? List.<XmlParser.XmlElement>of() : rc.child("Details").children()) {
             XmlParser.XmlElement t = d.child("Target");
             result.add(String.join("|", text(t, "Attribute"), text(t, "Name"), text(t, "RequiresRecreation"),
                     text(d, "ChangeSource"), text(d, "Evaluation"), text(d, "CausingEntity")));
@@ -1212,6 +1212,11 @@ class CloudFormationChangeSetDiffIntegrationTest {
         String asgSub = asg.replace("{\"Fn::GetAtt\":[\"Lt\",\"LatestVersionNumber\"]}",
             "{\"Fn::Sub\":[\"${Ref}\",{\"Ref\":{\"Fn::GetAtt\":[\"Lt\",\"LatestVersionNumber\"]}}]}")
             .replace("cs-det-asg", "cs-det-asg-sub");
+        String nestedUrl = "\"TemplateURL\":\"http://localhost/cs-det-nested-tpl/child.json\"";
+        String nestedParams = nestedUrl + ",\"Parameters\":{\"K\":\"%s\"}";
+        given().when().put("/cs-det-nested-tpl");
+        given().contentType("application/json").body("{\"Parameters\":{\"K\":{\"Type\":\"String\",\"Default\":\"d\"}},\"Resources\":{}}")
+            .when().put("/cs-det-nested-tpl/child.json").then().statusCode(200);
         List<DetailsRow> rows = List.of(
             new DetailsRow("changed", "AWS::SNS::Topic", "\"DisplayName\":\"a\"", "\"DisplayName\":\"b\"", null,
                 List.of("Properties"), List.of("Properties|DisplayName|Never" + direct), "False", true),
@@ -1261,6 +1266,18 @@ class CloudFormationChangeSetDiffIntegrationTest {
                 List.of("Properties"), List.of("Properties|LaunchTemplate|Never|ResourceAttribute|Dynamic|Lt.LatestVersionNumber"),
                 "False", true, "R", launchTemplate.formatted("ami-12345678").replace("cs-det-lt", "cs-det-lt-sub"),
                 launchTemplate.formatted("ami-87654321").replace("cs-det-lt", "cs-det-lt-sub")),
+            new DetailsRow("name-derived-create-only", "AWS::IAM::Group", "\"GroupName\":\"cs-det-g-a\"",
+                "\"GroupName\":\"cs-det-g-b\"", null, List.of("Properties"), List.of("Properties|GroupName|Always" + direct),
+                "True", true),
+            new DetailsRow("name-derived-parameter", "AWS::IAM::Group", "\"GroupName\":{\"Ref\":\"P\"}",
+                "\"GroupName\":{\"Ref\":\"P\"}", "P=v2", List.of("Properties"),
+                List.of("Properties|GroupName|Always|DirectModification|Dynamic|",
+                        "Properties|GroupName|Always|ParameterReference|Static|P"), "True", true),
+            new DetailsRow("nested-automatic", "AWS::CloudFormation::Stack", nestedUrl, nestedUrl, null, List.of(),
+                List.of("||||Automatic||"), "False", true, "R", topic.formatted("\"a\""), topic.formatted("\"b\"")),
+            new DetailsRow("nested-parameters", "AWS::CloudFormation::Stack", nestedParams.formatted("a"),
+                nestedParams.formatted("b"), null, List.of("Properties"), List.of("Properties|Parameters|Never" + direct),
+                "False", true),
             // This pins Floci's merge of both details. The AWS response for this combination is unconfirmed.
             new DetailsRow("edited-and-ref", "AWS::SQS::Queue", queueName.formatted("both", "a"),
                 queueName.formatted("both", "b"), null, List.of("Properties"),
@@ -1278,7 +1295,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
                 failures.add(row.name() + ": expected Modify for " + row.logicalId() + ", action=" + text(rc, "Action"));
                 continue;
             }
-            List<String> scope = rc.child("Scope").children().stream().map(XmlParser.XmlElement::text).sorted().toList();
+            List<String> scope = (rc.child("Scope") == null ? List.<XmlParser.XmlElement>of() : rc.child("Scope").children()).stream().map(XmlParser.XmlElement::text).sorted().toList();
             List<String> details = detailsOf(rc);
             boolean recreates = row.details().stream().anyMatch(d -> d.contains("|Always|"));
             boolean staticDirect = details.stream().anyMatch(d -> d.endsWith("|DirectModification|Static|"));
