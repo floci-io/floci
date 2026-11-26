@@ -80,8 +80,8 @@ SERVICE_SUFFIX = ".amazonaws.com"
 NAMESPACES = (
     "application-autoscaling", "aps", "athena", "autoscaling", "budgets", "cloudformation", "cloudtrail",
     "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito-identity", "cognito-idp",
-    "comprehend", "config", "datasync", "dms", "dsql", "ec2", "ecr", "ecs", "eks", "elasticloadbalancing",
-    "elasticmapreduce",
+    "comprehend", "config", "datasync", "dms", "dsql", "ec2", "ecr", "ecs", "eks",
+    "elasticfilesystem", "elasticloadbalancing", "elasticmapreduce",
     "emr-containers", "emr-serverless", "events", "firehose", "glue", "iam", "kinesis", "kinesisanalytics", "lambda",
     "logs", "pipes",
     "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups", "s3", "s3tables", "sagemaker",
@@ -104,7 +104,6 @@ NOT_COVERED = {
     "bedrock-agentcore": "REST routes no rule maps yet",
     "cloudfront": "REST routes no rule maps yet",
     "dlm": "REST routes no rule maps yet",
-    "elasticfilesystem": "REST routes no rule maps yet",
     "es": "REST routes no rule maps yet",
     "fis": "REST routes no rule maps yet",
     "guardduty": "REST routes no rule maps yet",

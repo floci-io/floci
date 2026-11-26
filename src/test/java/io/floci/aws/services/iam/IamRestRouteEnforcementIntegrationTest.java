@@ -813,6 +813,61 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
+     * EFS is checked by its vendored routes on the file system a request names: by its id, and through a resource id,
+     * which EFS answers with the file system of that id.
+     */
+    @Test
+    void efsIsCheckedOnTheFileSystemItsRequestNames() {
+        String fileSystem = createFileSystem();
+        String other = createFileSystem();
+        String user = user("route-efs");
+        String arn = "arn:aws:elasticfilesystem:us-east-1:000000000000:file-system/";
+        policy(user, allow("elasticfilesystem:DescribeFileSystems", arn + fileSystem) + ","
+                + allow("elasticfilesystem:ListTagsForResource", arn + fileSystem));
+
+        as(user, "elasticfilesystem").queryParam("FileSystemId", fileSystem).get("/2015-02-01/file-systems")
+                .then().statusCode(200);
+        refused(as(user, "elasticfilesystem").queryParam("FileSystemId", other).get("/2015-02-01/file-systems").then(),
+                "elasticfilesystem:DescribeFileSystems");
+        as(user, "elasticfilesystem").get("/2015-02-01/resource-tags/" + fileSystem).then().statusCode(200);
+        refused(as(user, "elasticfilesystem").get("/2015-02-01/resource-tags/" + other).then(),
+                "elasticfilesystem:ListTagsForResource");
+    }
+
+    /**
+     * A tagged {@code CreateAccessPoint} is checked as its action on the file system its request names, and its tags,
+     * as {@code elasticfilesystem:TagResource}, on the access point it makes, whose id is EFS's to mint:
+     * {@code access-point/*}. A grant on the file system alone does not tag it.
+     */
+    @Test
+    void efsChecksATaggedAccessPointsTagsOnTheAccessPointItMakes() {
+        String fileSystem = createFileSystem();
+        String arn = "arn:aws:elasticfilesystem:us-east-1:" + ACCOUNT + ":";
+        String body = "{\"ClientToken\":\"route-ap-" + suffix() + "\",\"FileSystemId\":\"" + fileSystem
+                + "\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}";
+        String user = user("route-efs-ap");
+        policy(user, allow("elasticfilesystem:CreateAccessPoint", arn + "file-system/" + fileSystem) + ","
+                + allow("elasticfilesystem:TagResource", arn + "file-system/" + fileSystem));
+
+        refused(as(user, "elasticfilesystem").contentType("application/json").body(body)
+                .post("/2015-02-01/access-points").then(), "elasticfilesystem:TagResource");
+
+        policy(user, allow("elasticfilesystem:CreateAccessPoint", arn + "file-system/" + fileSystem) + ","
+                + allow("elasticfilesystem:TagResource", arn + "access-point/*"));
+        String accessPoint = as(user, "elasticfilesystem").contentType("application/json").body(body)
+                .post("/2015-02-01/access-points").then().statusCode(200).extract().path("AccessPointId");
+        cleanup.register(() -> adminOf("elasticfilesystem").delete("/2015-02-01/access-points/" + accessPoint));
+    }
+
+    private String createFileSystem() {
+        String id = adminOf("elasticfilesystem").contentType("application/json")
+                .body("{\"CreationToken\":\"route-efs-" + suffix() + "\"}")
+                .post("/2015-02-01/file-systems").then().statusCode(201).extract().path("FileSystemId");
+        cleanup.register(() -> adminOf("elasticfilesystem").delete("/2015-02-01/file-systems/" + id));
+        return id;
+    }
+
+    /**
      * Macie's {@code CreateMember} is checked on the account's members, {@code member/*}: nothing botocore or the
      * Service Reference says names the member it makes by its {@code account.accountId}, so a grant scoped to one
      * member does not reach it, a grant on the members lets the request reach Macie, which answers that this account

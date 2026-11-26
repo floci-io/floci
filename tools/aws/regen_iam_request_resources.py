@@ -76,7 +76,9 @@ service is made in, marks the one it makes `made`, of a type, or with an ARN for
 related to its name past the verb, so its tags are checked there alone. A create whose request carries tags,
 whose action acts on other types alone, makes the resource of the type it is named after when the request names
 every variable of it, a field of a top-level structure included (`makes`): Glue's `CreateConnection` acts on its
-connection type and the catalog, and its tags go on `connection/<ConnectionInput.Name>`.
+connection type and the catalog, and its tags go on `connection/<ConnectionInput.Name>`. A variable its service
+mints, which no request names, stays open there as in every resource a create makes: EFS's `CreateAccessPoint` acts
+on its file system, and its tags go on `access-point/*`.
 
 A type of no variables of its own, the account's one (Glue's `catalog`), is named by every request, so it is no
 alternative to the unnamed type a create makes: `CreateDatabase` is checked on it and on the database its
@@ -360,8 +362,8 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "aps", "athena", "bcm-data-exports",
               "bcm-pricing-calculator", "budgets", "ce", "cloudfront", "cloudfront-keyvaluestore", "cloudtrail",
               "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "controlcatalog", "controltower", "cur",
-              "datasync", "ec2", "ecr", "ecs", "elasticloadbalancing", "elasticmapreduce", "emr-containers",
-              "emr-serverless", "es", "events",
+              "datasync", "ec2", "ecr", "ecs", "elasticfilesystem", "elasticloadbalancing", "elasticmapreduce",
+              "emr-containers", "emr-serverless", "es", "events",
               "firehose", "fis", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "oam",
               "payment-cryptography", "quicksight", "ram", "rds", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "s3tables", "s3vectors", "servicediscovery",
@@ -635,7 +637,6 @@ NOT_COVERED: dict[str, str] = {
     "elasticbeanstalk": "not read yet: an environment's ARN carries its application's name, "
                         "`environment/<application>/<name>`, while most of its requests name it by EnvironmentName "
                         "or EnvironmentId alone, so reading it needs the stored environment those find",
-    "elasticfilesystem": _REST,
     "execute-api": _REST,
     "iot": _LATER,
     "kafka": _REST,
@@ -2520,8 +2521,10 @@ def made_by_a_create_of_other_types(operation: str, types: list[str], formats: d
                                     labels: dict[str, str] | None, aliased: set[str] | None,
                                     models: dict[str, dict] | None) -> list[dict]:
     """The resource of the type a create whose action acts on other types alone makes, when its request carries tags
-    (a top-level member named `Tags`, `TagList` or the like) and names every variable of it, as the rules name a type
-    an action acts on and from the fields of a top-level structure its documentation reads; none otherwise."""
+    (a top-level member named `Tags`, `TagList` or the like) and names every variable of it but those its service
+    mints (`minted_by_the_create`), which no request can name, as the rules name a type an action acts on and from the
+    fields of a top-level structure its documentation reads; none otherwise. EFS's `CreateAccessPoint` names its file
+    system alone, and the `AccessPointId` of the access point it makes is one EFS answers."""
     name = operation.split(":", 1)[1]
     created = stem(CREATING_RE.sub("", name))
     # A type related to the create's name is the one it makes, unless the request names it by a member of its own,
@@ -2538,8 +2541,10 @@ def made_by_a_create_of_other_types(operation: str, types: list[str], formats: d
     found = with_documented(operation, [kind], formats, models,
                             resources_for(operation, [kind], formats, members, arn_members, labels, shapes, aliased))
     variables = [v for v in VARIABLE_RE.findall(formats[kind]) if v not in KNOWN_VARIABLES]
+    named = set(variables) - minted_by_the_create(models, name)
     return [resource for resource in found if resource.get("type") == kind and variables
-            and set(resource.get("fill", {})) == set(variables) and set(resource) == {"type", "fill"}][:1]
+            and set(resource.get("fill", {})) | (set(variables) - named) == set(variables)
+            and set(resource) == {"type", "fill"}][:1]
 
 
 def by_members_key_is_empty(kinds: list[str], filled: dict[str, dict[str, str]]) -> bool:

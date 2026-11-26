@@ -3044,6 +3044,17 @@ def test_a_create_acting_on_other_types_alone_tags_what_it_makes_when_it_names_i
     # One whose request does not name every variable of what it makes leaves it to the action's own resources.
     formats["widget"] = "arn:${Partition}:svc:${Region}:${Account}:widget/${WidgetName}/${WidgetId}"
     assert r.makes_for("svc:CreateWidget", ["kind"], formats, members("KindName"), models=widget_model(True)) == []
+    # A variable its service mints, answered and never carried, counts as named, staying open as in every resource a
+    # create makes: EFS's CreateAccessPoint names its file system and answers the AccessPointId. Another one the
+    # request leaves out still leaves it to the action's own resources.
+    minting = widget_model(True)
+    minting["svc"]["shapes"]["CreateWidgetOut"] = {"type": "structure", "members": {"WidgetId": {"shape": "String"}}}
+    minting["svc"]["operations"]["CreateWidget"]["output"] = {"shape": "CreateWidgetOut"}
+    assert r.makes_for("svc:CreateWidget", ["kind"], formats, members("KindName"), models=minting) == []
+    formats["widget"] = "arn:${Partition}:svc:${Region}:${Account}:widget/${WidgetId}"
+    assert r.makes_for("svc:CreateWidget", ["kind"], formats, members("KindName"), models=minting) == [
+        {"type": "widget", "fill": {}}]
+    assert r.makes_for("svc:CreateWidget", ["kind"], formats, members("KindName"), models=widget_model(True)) == []
 
 
 def test_an_arn_identifying_a_type_is_not_read_as_its_name():
