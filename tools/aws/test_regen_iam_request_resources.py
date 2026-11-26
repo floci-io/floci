@@ -3758,3 +3758,78 @@ def test_the_vendored_ec2_examples_give_tag_calls_the_endpoint_prefix_and_leave_
             "vpc-endpoint": "vpce-"}
     assert r.id_targets("ec2:DeleteVpcEndpoints", ["vpc-endpoint"], formats, models, merged) == \
         r.id_targets("ec2:DeleteVpcEndpoints", ["vpc-endpoint"], formats, models, known)
+
+
+SSM_SESSION_FORMATS = {
+    "document": "arn:${Partition}:ssm:${Region}:${Account}:document/${DocumentName}",
+    "instance": "arn:${Partition}:ec2:${Region}:${Account}:instance/${InstanceId}",
+    "managed-instance": "arn:${Partition}:ssm:${Region}:${Account}:managed-instance/${InstanceId}",
+    "task": "arn:${Partition}:ecs:${Region}:${Account}:task/${TaskId}",
+}
+
+
+@pytest.fixture
+def session_models() -> dict[str, dict]:
+    return {"ssm": {
+        "metadata": {"protocol": "json"},
+        "operations": {operation: {"input": {"shape": operation + "Request"}}
+                       for operation in ("StartSession", "GetConnectionStatus", "SendCommand")},
+        "shapes": {
+            "StartSessionRequest": {"type": "structure", "required": ["Target"], "members": {
+                "DocumentName": {"shape": "DocumentName"}, "Target": {"shape": "SessionTarget"}}},
+            "GetConnectionStatusRequest": {"type": "structure", "required": ["Target"], "members": {
+                "Target": {"shape": "SessionTarget"}}},
+            "SendCommandRequest": {"type": "structure", "required": ["Target"], "members": {
+                "Target": {"shape": "SessionTarget"}}},
+            "DocumentName": {"type": "string"},
+            "SessionTarget": {"type": "string", "min": 1, "max": 400},
+        },
+    }}
+
+
+def test_start_session_names_both_the_document_and_ec2_target(session_models: dict[str, dict]) -> None:
+    operation = "ssm:StartSession"
+    upstream = {"action": operation, "types": list(SSM_SESSION_FORMATS)}
+    assert r.entry_for(operation, upstream, SSM_SESSION_FORMATS, session_models)["resources"] == [
+        {"type": "document", "fill": {"DocumentName": "DocumentName"}, "defaults": {"DocumentName": "document"}},
+        {"types": ["instance"], "through": "Target"},
+    ]
+
+
+def test_connection_status_names_only_the_ec2_target(session_models: dict[str, dict]) -> None:
+    operation = "ssm:GetConnectionStatus"
+    upstream = {"action": operation, "types": ["instance", "managed-instance", "task"]}
+    assert r.entry_for(operation, upstream, SSM_SESSION_FORMATS, session_models)["resources"] == [
+        {"types": ["instance"], "through": "Target"},
+    ]
+
+
+def test_session_evidence_does_not_apply_to_another_ssm_target(session_models: dict[str, dict]) -> None:
+    operation = "ssm:SendCommand"
+    upstream = {"action": operation, "types": ["instance", "managed-instance"]}
+    assert r.entry_for(operation, upstream, SSM_SESSION_FORMATS, session_models)["resources"] == []
+
+
+def test_connection_status_requires_the_shared_scalar_shape(session_models: dict[str, dict]) -> None:
+    operation = "ssm:GetConnectionStatus"
+    session_models["ssm"]["shapes"]["GetConnectionStatusRequest"]["members"]["Target"]["shape"] = "DocumentName"
+    upstream = {"action": operation, "types": ["instance", "managed-instance", "task"]}
+    with pytest.raises(ValueError, match="shared scalar shape"):
+        r.entry_for(operation, upstream, SSM_SESSION_FORMATS, session_models)
+
+
+def test_connection_status_requires_the_ec2_type_in_the_reference(session_models: dict[str, dict]) -> None:
+    operation = "ssm:GetConnectionStatus"
+    upstream = {"action": operation, "types": ["managed-instance", "task"]}
+    with pytest.raises(ValueError, match="EC2 type allowed by the reference"):
+        r.entry_for(operation, upstream, SSM_SESSION_FORMATS, session_models)
+
+
+def test_start_session_requires_an_account_owned_default_in_the_policy(session_models: dict[str, dict]) -> None:
+    operation = "ssm:StartSession"
+    source = r.load_permission_source("ssm")
+    source["defaultPolicy"]["Statement"][0]["Resource"].pop()
+    with pytest.raises(ValueError, match="no account-owned default document"):
+        r.session_permissions([{"type": "document", "fill": {"DocumentName": "DocumentName"}}],
+                              operation, source, list(SSM_SESSION_FORMATS),
+                              SSM_SESSION_FORMATS, session_models)

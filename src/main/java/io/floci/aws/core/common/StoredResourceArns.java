@@ -209,6 +209,14 @@ public interface StoredResourceArns {
     }
 
     /**
+     * The default used for an omitted resource when its rule does not declare a default.
+     * Services whose defaults apply only where declared can return empty.
+     */
+    default Optional<String> findImplicitDefault(String type, String region) {
+        return findDefault(type, region);
+    }
+
+    /**
      * Whether an ARN naming another account than the caller's, {@code accountId}, names a resource the service holds
      * in that account and acts on there, never as the caller's resource of that name (the sink an OAM link is made
      * to, a RAM invitation sent to the caller, a share another account owns or a role STS assumes in its account), so

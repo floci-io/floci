@@ -37,6 +37,8 @@ import io.floci.aws.services.ssm.model.PatchBaselineIdentity;
 import io.floci.aws.services.ssm.model.ServiceSetting;
 import io.floci.aws.services.ssm.model.SsmAssociation;
 import io.floci.aws.services.ssm.model.SsmDocument;
+import io.floci.aws.services.ssm.session.SessionDocumentResolver;
+import io.floci.aws.services.ssm.session.SsmSessionService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -1608,23 +1610,23 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
      */
     private SsmDocument associatedDocument(String nameOrArn, String region) {
         if (!AwsArnUtils.looksLikeArn(nameOrArn)) {
-            return getDocument(nameOrArn, region);
+            return requireOwnedDocument(nameOrArn, region);
         }
         AwsArnUtils.Arn arn;
         try {
             arn = AwsArnUtils.parse(nameOrArn);
         } catch (IllegalArgumentException e) {
             LOG.debugv("Failed to parse document name as ARN: {0}", nameOrArn);
-            return getDocument(nameOrArn, region);
+            return requireOwnedDocument(nameOrArn, region);
         }
         if (!"ssm".equals(arn.service()) || !arn.resource().startsWith(DOCUMENT_PREFIX)
                 || !arn.region().equals(region) || !arn.partition().equals(regionResolver.partitionForRegion(region))) {
-            return getDocument(nameOrArn, region);
+            return requireOwnedDocument(nameOrArn, region);
         }
         String name = arn.resource().substring(DOCUMENT_PREFIX.length());
         String caller = regionResolver.getAccountId();
         if (arn.accountId().equals(caller)) {
-            return getDocument(name, region);
+            return requireOwnedDocument(name, region);
         }
         if (!documentSharedWith(arn.accountId(), name, region).contains(caller)) {
             throw new AwsException("InvalidDocument", "Document " + nameOrArn + " does not exist.", 400);
@@ -1635,13 +1637,33 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
     }
 
     public SsmDocument getDocument(String name, String region) {
-        SsmDocument document = documentStore.get(regionKey(region, name))
-                .orElseThrow(() -> new AwsException("InvalidDocument",
-                        "Document " + name + " does not exist.", 400));
-        if (document.getOwner() == null) {
-            document.setOwner(regionResolver.getAccountId());
-        }
-        return document;
+        return findDocument(name, region).orElseThrow(() -> missingDocument(name));
+    }
+
+    public Optional<SsmDocument> findDocument(String name, String region) {
+        return BuiltinSessionDocuments.find(name).or(() -> findOwnedDocument(name, region));
+    }
+
+    public static String documentArn(String region, String accountId, String name) {
+        String owner = BuiltinSessionDocuments.contains(name) ? "" : accountId;
+        return AwsArnUtils.Arn.of("ssm", region, owner, DOCUMENT_PREFIX + name).toString();
+    }
+
+    private SsmDocument requireOwnedDocument(String name, String region) {
+        return findOwnedDocument(name, region).orElseThrow(() -> missingDocument(name));
+    }
+
+    private Optional<SsmDocument> findOwnedDocument(String name, String region) {
+        return documentStore.get(regionKey(region, name)).map(document -> {
+            if (document.getOwner() == null) {
+                document.setOwner(regionResolver.getAccountId());
+            }
+            return document;
+        });
+    }
+
+    private static AwsException missingDocument(String name) {
+        return new AwsException("InvalidDocument", "Document " + name + " does not exist.", 400);
     }
 
     public synchronized SsmDocument createDocument(String name, String content, String documentType, String region) {
@@ -1651,6 +1673,9 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
     public synchronized SsmDocument createDocument(String name, String content, String documentType,
                                                    Map<String, String> tags, String region) {
         validateTagKeys(tags);
+        if (BuiltinSessionDocuments.contains(name)) {
+            throw new AwsException("InvalidDocumentName", "Document name " + name + " is reserved.", 400);
+        }
         String storageKey = regionKey(region, name);
         if (documentStore.get(storageKey).isPresent()) {
             throw new AwsException("DocumentAlreadyExists",
@@ -1687,7 +1712,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
      * is resolved first.
      */
     public List<String> describeDocumentPermission(String name, String region) {
-        getDocument(name, region);
+        requireOwnedDocument(name, region);
         return documentPermissionStore.get(regionKey(region, name))
                 .map(List::copyOf)
                 .orElse(List.of());
@@ -1699,7 +1724,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
      * <p>Only the document's owner may share it. Ownership here <em>is</em> the storage
      * partition: {@code documentStore} is an {@code AccountAwareStorageBackend}, whose key
      * prefix is the caller's account from {@code RequestContext} — the same resolution
-     * {@code RegionResolver.getAccountId()} performs — so {@link #getDocument} can only
+     * {@code RegionResolver.getAccountId()} performs — so {@link #requireOwnedDocument} can only
      * resolve a document in the caller's own partition. A caller that does not own the
      * document therefore gets InvalidDocument, which is AWS's answer for a document the
      * caller cannot see. Deriving the check from the partition rather than a second stored
@@ -1707,7 +1732,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
      */
     public synchronized void modifyDocumentPermission(String name, List<String> accountIdsToAdd,
                                          List<String> accountIdsToRemove, String region) {
-        getDocument(name, region);
+        requireOwnedDocument(name, region);
         String storageKey = regionKey(region, name);
         List<String> accountIds = new ArrayList<>(
                 documentPermissionStore.get(storageKey).orElse(List.of()));
@@ -1723,13 +1748,14 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
 
     public List<SsmDocument> listDocuments(String region, Map<String, List<String>> filters) {
         String prefix = regionKey(region, "");
-        List<SsmDocument> docs = documentStore.scan(k -> k.startsWith(prefix));
+        List<SsmDocument> docs = new ArrayList<>(documentStore.scan(k -> k.startsWith(prefix)));
         String accountId = regionResolver.getAccountId();
         for (SsmDocument d : docs) {
             if (d.getOwner() == null) {
                 d.setOwner(accountId);
             }
         }
+        docs.addAll(BuiltinSessionDocuments.list());
         if (filters == null || filters.isEmpty()) {
             return docs;
         }
@@ -1753,26 +1779,14 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
                 .toList();
     }
 
-    /**
-     * Every document visible through {@code documentStore} already belongs to the caller's
-     * account (it is an account-partitioned store), so "Self"/"Private"/"All" and the caller's own
-     * account id all match every visible document; "Amazon"/"Public"/"ThirdParty" match none, since
-     * no AWS-owned or other-account documents are ever visible here. Documents created before the
-     * {@code Owner} field existed persist with a null owner; since the store already guarantees the
-     * caller's own partition, such a document is normalized to the current caller's account ID so
-     * that it both matches owner filters and serializes its effective owner in list responses.
-     */
     private boolean matchesOwner(String filterValue, String documentOwner, String accountId) {
-        if ("Self".equalsIgnoreCase(filterValue) || "Private".equalsIgnoreCase(filterValue)
-                || "All".equalsIgnoreCase(filterValue)) {
-            return true;
-        }
-        if ("Amazon".equalsIgnoreCase(filterValue) || "Public".equalsIgnoreCase(filterValue)
-                || "ThirdParty".equalsIgnoreCase(filterValue)) {
-            return false;
-        }
-        String effectiveOwner = documentOwner != null ? documentOwner : accountId;
-        return filterValue.equals(effectiveOwner);
+        return switch (filterValue.toLowerCase(Locale.ROOT)) {
+            case "all" -> true;
+            case "self", "private" -> accountId.equals(documentOwner);
+            case "amazon" -> BuiltinSessionDocuments.OWNER.equals(documentOwner);
+            case "public", "thirdparty" -> false;
+            default -> filterValue.equals(documentOwner);
+        };
     }
 
     private List<String> findFilterValues(Map<String, List<String>> filters, String targetKey) {
@@ -2197,17 +2211,45 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
 
     /**
      * The {@code parameter/<name>} ARN a legacy {@code parameter<name>} ARN of the caller's partition, Region and
-     * account names, which the tagging operations act on as {@link #parameterTagName} reads it; empty for any other
-     * value, whose ARN is the one its name renders.
+     * account names, which the tagging operations act on as {@link #parameterTagName} reads it, or the ARN of an
+     * AWS-owned Session document. Other resource identifiers use their regular ARN template.
      */
     @Override
     public Optional<String> find(String type, List<String> names, String region) {
-        if (!"parameter".equals(type) || names.size() != 1) {
+        if (names.size() != 1) {
             return Optional.empty();
         }
         String name = names.getFirst();
+        if ("document".equals(type) && BuiltinSessionDocuments.contains(name)) {
+            return Optional.of(documentArn(region, regionResolver.getAccountId(), name));
+        }
+        if (!"parameter".equals(type)) {
+            return Optional.empty();
+        }
         String arn = withLegacyParameterSlash(name, regionResolver.partitionForRegion(region), region,
                 regionResolver.getAccountId());
         return arn == null || arn.equals(name) ? Optional.empty() : Optional.of(arn);
+    }
+
+    @Override
+    public Optional<String> findDefault(String type, String region) {
+        return "document".equals(type)
+                ? Optional.of(regionResolver.buildArn("ssm", region,
+                        DOCUMENT_PREFIX + SessionDocumentResolver.DEFAULT_DOCUMENT_NAME))
+                : Optional.empty();
+    }
+
+    @Override
+    public Optional<String> findImplicitDefault(String type, String region) {
+        // Only a request with a declared default can select the shell document by omitting its name.
+        return Optional.empty();
+    }
+
+    @Override
+    public List<String> through(String member, String value, String region) {
+        if (!"Target".equals(member) || !SsmSessionService.isEc2Target(value)) {
+            return List.of();
+        }
+        return List.of(regionResolver.buildArn("ec2", region, "instance/" + value));
     }
 }
