@@ -1132,7 +1132,7 @@ class SqsJsonProtocolTest {
     }
 
     @Test
-    void fifoQueueRejectsPerMessageDelaySecondsAsAPerEntryBatchFailure() {
+    void fifoQueueRejectsWholeBatchWhenAnEntryHasPerMessageDelaySeconds() {
         String fifoUrl = given()
             .contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "AmazonSQS.CreateQueue")
@@ -1158,11 +1158,18 @@ class SqsJsonProtocolTest {
                     + "{\"Id\":\"zero\",\"MessageBody\":\"b\",\"MessageGroupId\":\"g\",\"DelaySeconds\":0},"
                     + "{\"Id\":\"plain\",\"MessageBody\":\"c\",\"MessageGroupId\":\"g\"}]}")
         .when().post("/").then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"))
+            .body("message", equalTo("Value 5 for parameter DelaySeconds is invalid. "
+                    + "Reason: The request include parameter that is not valid for this queue type."));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+            .body("{\"QueueUrl\":\"" + fifoUrl + "\",\"MaxNumberOfMessages\":10}")
+        .when().post("/").then()
             .statusCode(200)
-            .body("Failed.Id", contains("delayed"))
-            .body("Failed[0].Code", equalTo("InvalidParameterValue"))
-            .body("Failed[0].SenderFault", equalTo(true))
-            .body("Successful.Id", contains("zero", "plain"));
+            .body("Messages", anyOf(nullValue(), empty()));
     }
 
     @Test
