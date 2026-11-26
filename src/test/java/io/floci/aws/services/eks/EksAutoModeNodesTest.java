@@ -12,12 +12,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EksAutoModeNodesTest {
@@ -50,6 +53,77 @@ class EksAutoModeNodesTest {
             type("m7a.large", 2, 8192, "x86_64"),
             type("c7g.large", 2, 4096, "arm64"),
             type("m4.large", 2, 8192, "x86_64"));
+
+    /**
+     * A node is sized for the DaemonSet pods that would run on it as well, as Karpenter sizes it: 1900m of workload
+     * and 400m of daemons don't fit 2 vCPUs. A daemon whose node selector leaves the node out doesn't count, nor one
+     * pinned to a named node; one with another term a new node matches does.
+     */
+    @Test
+    void aNodeIsSizedForTheDaemonSetPodsItWouldRunToo() throws Exception {
+        String daemonSets = """
+                {"items": [
+                  {"metadata": {"namespace": "kube-system", "name": "agent"}, "spec": {"template": {"spec": {
+                    "containers": [{"resources": {"requests": {"cpu": "300m", "memory": "64Mi"}}}]}}}},
+                  {"metadata": {"namespace": "kube-system", "name": "arm-only"}, "spec": {"template": {"spec": {
+                    "nodeSelector": {"kubernetes.io/arch": "arm64"},
+                    "containers": [{"resources": {"requests": {"cpu": "1"}}}]}}}},
+                  {"metadata": {"namespace": "kube-system", "name": "pinned"}, "spec": {"template": {"spec": {
+                    "affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
+                      {"matchFields": [{"key": "metadata.name", "operator": "In", "values": ["old-node"]}]}]}}},
+                    "containers": [{"resources": {"requests": {"cpu": "1"}}}]}}}},
+                  {"metadata": {"namespace": "kube-system", "name": "either"}, "spec": {"template": {"spec": {
+                    "affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
+                      {"matchFields": [{"key": "metadata.name", "operator": "In", "values": ["old-node"]}]},
+                      {"matchExpressions": [{"key": "kubernetes.io/arch", "operator": "In", "values": ["amd64"]}]}]}}},
+                    "containers": [{"resources": {"requests": {"cpu": "100m"}}}]}}}}
+                ]}""";
+        List<PendingPod> daemons = EksAutoModeNodes.daemonPods(json(daemonSets));
+        // Terms are alternatives: "either" may run on any amd64 node, whatever its first term pins.
+        assertEquals(List.of("agent", "arm-only", "either"), daemons.stream().map(PendingPod::name).toList());
+        PendingPod big = pod("big", "1700m", "64Mi");
+
+        assertEquals("c7a.large", EksAutoModeNodes.plan(pools(), List.of(big), TYPES, Map.of())
+                .getFirst().instanceType().instanceType);
+        assertEquals("c7a.xlarge", EksAutoModeNodes.plan(pools(), List.of(big), TYPES, Map.of(), daemons)
+                .getFirst().instanceType().instanceType);
+        assertEquals(400, EksAutoModeNodes.daemonRequests(daemons,
+                EksAutoModeNodes.labels(TYPES.get(2), pools().getFirst(), null), List.of())[0]);
+    }
+
+    /** A DaemonSet selecting on the region, which a joined node carries, counts on a new node in that region. */
+    @Test
+    void aDaemonSetSelectingTheRegionCountsOnANodeThere() throws Exception {
+        String daemonSets = """
+                {"items": [{"metadata": {"namespace": "kube-system", "name": "regional"}, "spec": {"template": {"spec": {
+                  "nodeSelector": {"topology.kubernetes.io/region": "us-east-1"},
+                  "containers": [{"resources": {"requests": {"cpu": "300m"}}}]}}}}]}""";
+        List<PendingPod> daemons = EksAutoModeNodes.daemonPods(json(daemonSets));
+        PendingPod big = pod("big", "1900m", "64Mi");
+
+        assertEquals("c7a.xlarge", EksAutoModeNodes.plan(pools(), List.of(big), TYPES, Map.of(), daemons, "us-east-1")
+                .getFirst().instanceType().instanceType);
+        assertEquals("c7a.large", EksAutoModeNodes.plan(pools(), List.of(big), TYPES, Map.of(), daemons, "eu-west-1")
+                .getFirst().instanceType().instanceType);
+    }
+
+    /**
+     * A pending pod with a {@code matchFields} term is left out, whatever its other terms, as Karpenter refuses it
+     * ("node selector term with matchFields is not supported"); a DaemonSet reads its terms as alternatives instead.
+     */
+    @Test
+    void aPodWithAMatchFieldsTermIsLeftOutWhateverItsOtherTerms() throws Exception {
+        String pods = """
+                {"items": [{"metadata": {"namespace": "default", "name": "either"},
+                  "spec": {"affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
+                    {"matchFields": [{"key": "metadata.name", "operator": "In", "values": ["old-node"]}]},
+                    {"matchExpressions": [{"key": "kubernetes.io/arch", "operator": "In", "values": ["arm64"]}]}]}}},
+                           "containers": [{"resources": {"requests": {"cpu": "100m"}}}]},
+                  "status": {"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "False",
+                             "reason": "Unschedulable"}]}}]}""";
+
+        assertEquals(List.of(), EksAutoModeNodes.unschedulablePods(json(pods)));
+    }
 
     @Test
     void aSmallPodGetsTheSmallestTwoVcpuTypeOfTheGeneralPurposePool() throws Exception {
@@ -134,14 +208,17 @@ class EksAutoModeNodesTest {
         PendingPod big = pod("big", "1500m", "512Mi");
 
         // 1 vCPU of 2 in use: room for the small pod, not for the big one.
-        List<PendingPod> left = EksAutoModeNodes.withoutRoom(List.of(small, big),
-                List.of(new EksAutoModeNodes.PoolNode(general, large, null, 1000, 1L << 30)));
+        EksAutoModeNodes.Room room = EksAutoModeNodes.withoutRoom(List.of(small, big),
+                List.of(new EksAutoModeNodes.PoolNode("i-1", general, large, null, 1000, 1L << 30)));
         // A system pool node doesn't take pods that don't tolerate its taint, however much room it has.
-        List<PendingPod> untolerated = EksAutoModeNodes.withoutRoom(List.of(small),
-                List.of(new EksAutoModeNodes.PoolNode(pools().get(1), TYPES.get(3), null, 0, 0)));
+        EksAutoModeNodes.Room untolerated = EksAutoModeNodes.withoutRoom(List.of(small),
+                List.of(new EksAutoModeNodes.PoolNode("i-2", pools().get(1), TYPES.get(3), null, 0, 0)));
 
-        assertEquals(List.of(big), left);
-        assertEquals(List.of(small), untolerated);
+        assertEquals(List.of(big), room.left());
+        // The node the small pod counts on isn't empty, whatever runs on it.
+        assertEquals(Set.of("i-1"), room.counted());
+        assertEquals(List.of(small), untolerated.left());
+        assertEquals(Set.of(), untolerated.counted());
     }
 
     /** A cordoned node, or one with a taint of its own the pod doesn't tolerate, has no room for it. */
@@ -151,13 +228,14 @@ class EksAutoModeNodesTest {
         PendingPod small = pod("small", "100m", "64Mi");
 
         List<PendingPod> cordoned = EksAutoModeNodes.withoutRoom(List.of(small), List.of(
-                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 64_000, 1L << 40, 110, false, List.of())));
+                new EksAutoModeNodes.PoolNode("i-3", general, TYPES.get(2), null, 64_000, 1L << 40, 110, false,
+                        List.of()))).left();
         List<PendingPod> tainted = EksAutoModeNodes.withoutRoom(List.of(small), List.of(
-                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 64_000, 1L << 40, 110, true,
-                        List.of(new EksAutoModeNodes.Taint("maintenance", "", "NoSchedule")))));
+                new EksAutoModeNodes.PoolNode("i-3", general, TYPES.get(2), null, 64_000, 1L << 40, 110, true,
+                        List.of(new EksAutoModeNodes.Taint("maintenance", "", "NoSchedule"))))).left();
         List<PendingPod> preferOnly = EksAutoModeNodes.withoutRoom(List.of(small), List.of(
-                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 64_000, 1L << 40, 110, true,
-                        List.of(new EksAutoModeNodes.Taint("busy", "", "PreferNoSchedule")))));
+                new EksAutoModeNodes.PoolNode("i-3", general, TYPES.get(2), null, 64_000, 1L << 40, 110, true,
+                        List.of(new EksAutoModeNodes.Taint("busy", "", "PreferNoSchedule"))))).left();
 
         assertEquals(List.of(small), cordoned);
         assertEquals(List.of(small), tainted);
@@ -172,9 +250,11 @@ class EksAutoModeNodesTest {
         PendingPod second = pod("second", "100m", "64Mi");
 
         List<PendingPod> full = EksAutoModeNodes.withoutRoom(List.of(first), List.of(
-                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 64_000, 1L << 40, 0, true, List.of())));
+                new EksAutoModeNodes.PoolNode("i-3", general, TYPES.get(2), null, 64_000, 1L << 40, 0, true,
+                        List.of()))).left();
         List<PendingPod> oneSlot = EksAutoModeNodes.withoutRoom(List.of(first, second), List.of(
-                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 64_000, 1L << 40, 1, true, List.of())));
+                new EksAutoModeNodes.PoolNode("i-3", general, TYPES.get(2), null, 64_000, 1L << 40, 1, true,
+                        List.of()))).left();
 
         assertEquals(List.of(first), full);
         assertEquals(List.of(second), oneSlot);
@@ -215,24 +295,24 @@ class EksAutoModeNodesTest {
         JsonNode list = json(pods);
         Map<String, PendingPod> pending = new LinkedHashMap<>();
         EksAutoModeNodes.unschedulablePods(list).forEach(p -> pending.put(p.name(), p));
-        EksAutoModeNodes.PoolNode withWeb1 = new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 64_000,
+        EksAutoModeNodes.PoolNode withWeb1 = new EksAutoModeNodes.PoolNode("i-3", general, TYPES.get(2), null, 64_000,
                 1L << 40, 110, true, List.of(), EksAutoModeNodes.boundPodsByNode(list).get("n1"));
-        EksAutoModeNodes.PoolNode empty = new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 64_000,
+        EksAutoModeNodes.PoolNode empty = new EksAutoModeNodes.PoolNode("i-3", general, TYPES.get(2), null, 64_000,
                 1L << 40, 110, true, List.of());
 
         // web-2 can't join web-1, by its own anti-affinity; zonal's term isn't on the hostname, and web-1's doesn't
         // match it; free is in another namespace than web-1's term reads, and its own term reads its namespace, which
         // has no web pod.
         assertEquals(List.of(pending.get("web-2")), EksAutoModeNodes.withoutRoom(List.copyOf(pending.values()),
-                List.of(withWeb1)));
+                List.of(withWeb1)).left());
         // Two replicas counted on one empty node in the same pass: the second has no room there.
         PendingPod web3 = new PendingPod("shop", "web-3", 100, 64L << 20, Map.of(), List.of(), List.of(),
                 Map.of("app", "web"), pending.get("web-2").antiAffinity());
         // A pod with no anti-affinity of its own is still kept off the node of one whose anti-affinity matches it.
         PendingPod plain = new PendingPod("shop", "plain", 100, 64L << 20, Map.of(), List.of(), List.of(),
                 Map.of("app", "web"), List.of());
-        assertEquals(List.of(plain), EksAutoModeNodes.withoutRoom(List.of(plain), List.of(withWeb1)));
-        assertEquals(List.of(web3), EksAutoModeNodes.withoutRoom(List.of(pending.get("web-2"), web3), List.of(empty)));
+        assertEquals(List.of(plain), EksAutoModeNodes.withoutRoom(List.of(plain), List.of(withWeb1)).left());
+        assertEquals(List.of(web3), EksAutoModeNodes.withoutRoom(List.of(pending.get("web-2"), web3), List.of(empty)).left());
     }
 
     /** A joined node's room is what it offers, its allocatable CPU and memory less its pods', not its type's size. */
@@ -242,11 +322,14 @@ class EksAutoModeNodesTest {
         PendingPod pod = pod("web", "500m", "64Mi");
 
         List<PendingPod> tooLittleCpu = EksAutoModeNodes.withoutRoom(List.of(pod), List.of(
-                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 400, 1L << 30, 110, true, List.of())));
+                new EksAutoModeNodes.PoolNode("i-3", general, TYPES.get(2), null, 400, 1L << 30, 110, true,
+                        List.of()))).left();
         List<PendingPod> tooLittleMemory = EksAutoModeNodes.withoutRoom(List.of(pod), List.of(
-                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 1000, 32L << 20, 110, true, List.of())));
+                new EksAutoModeNodes.PoolNode("i-3", general, TYPES.get(2), null, 1000, 32L << 20, 110, true,
+                        List.of()))).left();
         List<PendingPod> enough = EksAutoModeNodes.withoutRoom(List.of(pod), List.of(
-                new EksAutoModeNodes.PoolNode(general, TYPES.get(2), null, 500, 64L << 20, 110, true, List.of())));
+                new EksAutoModeNodes.PoolNode("i-3", general, TYPES.get(2), null, 500, 64L << 20, 110, true,
+                        List.of()))).left();
 
         assertEquals(List.of(pod), tooLittleCpu);
         assertEquals(List.of(pod), tooLittleMemory);
@@ -304,6 +387,53 @@ class EksAutoModeNodesTest {
                 List.of(pod("web", "100m", "64Mi")), TYPES, Map.of());
 
         assertEquals("c7a.large", launches.getFirst().instanceType().instanceType);
+    }
+
+    /** Percentages round up, as AWS removed the only node of a pool budgeted at 10%; the least budget wins. */
+    @ParameterizedTest
+    @CsvSource({"'10%',1,1", "'10%',10,1", "'10%',11,2", "'0',5,0", "'20%;1',10,1", "'',3,1", "'x',3,0"})
+    void disruptionBudgets(String budgets, int nodes, int disruptable) {
+        NodePool pool = new NodePool("p", "default", List.of(), List.of(), Map.of(), 0, Duration.ofSeconds(30),
+                budgets.isEmpty() ? List.of() : List.of(budgets.split(";")));
+
+        assertEquals(disruptable, pool.disruptable(nodes));
+    }
+
+    @Test
+    void consolidateAfterAndBudgetsAreReadFromThePoolScheduledAndOtherReasonsBudgetsLeftOut() throws Exception {
+        String pools = """
+                {"items": [{"metadata": {"name": "batch"}, "spec": {
+                  "disruption": {"consolidateAfter": "1m30s",
+                                 "budgets": [{"nodes": "50%"}, {"nodes": "0", "schedule": "@daily", "duration": "1h"},
+                                             {"nodes": "0", "reasons": ["Underutilized"]},
+                                             {"nodes": "2", "reasons": ["Drifted", "Empty"]}]},
+                  "template": {"spec": {}}}},
+                 {"metadata": {"name": "pinned"}, "spec": {"disruption": {"consolidateAfter": "Never"},
+                  "template": {"spec": {}}}}]}""";
+
+        List<NodePool> read = EksAutoModeNodes.nodePools(json(pools));
+
+        assertEquals(Duration.ofSeconds(90), read.getFirst().consolidateAfter());
+        // A budget for other reasons than emptiness doesn't hold empty nodes back.
+        assertEquals(List.of("50%", "2"), read.getFirst().budgets());
+        assertNull(read.get(1).consolidateAfter());
+    }
+
+    /** DaemonSet pods and static pods' mirrors don't keep a node busy; finished pods don't either. */
+    @Test
+    void onlyAWorkloadKeepsANodeBusy() throws Exception {
+        String pods = """
+                {"items": [
+                  {"metadata": {"ownerReferences": [{"kind": "ReplicaSet"}]}, "spec": {"nodeName": "busy"},
+                   "status": {"phase": "Running"}},
+                  {"metadata": {"ownerReferences": [{"kind": "DaemonSet"}]}, "spec": {"nodeName": "daemons"},
+                   "status": {"phase": "Running"}},
+                  {"metadata": {"ownerReferences": [{"kind": "Node"}]}, "spec": {"nodeName": "daemons"},
+                   "status": {"phase": "Running"}},
+                  {"metadata": {}, "spec": {"nodeName": "finished"}, "status": {"phase": "Succeeded"}}
+                ]}""";
+
+        assertEquals(Set.of("busy"), EksAutoModeNodes.nodesWithWorkloads(json(pods)));
     }
 
     @Test

@@ -5,12 +5,14 @@ import io.floci.aws.services.ec2.Ec2InstanceTypeCatalog.CatalogInstanceType;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -34,6 +36,8 @@ final class EksAutoModeNodes {
     static final int MAX_PODS = 110;
     /** The topology key of the pod anti-affinity a node's own pods decide. */
     static final String HOSTNAME_LABEL = "kubernetes.io/hostname";
+    /** The region label a joined node carries, which DaemonSets may select on. */
+    static final String REGION_LABEL = "topology.kubernetes.io/region";
     /** Instance family names: category letters, generation digits, then attribute letters, as in {@code c7gd}. */
     private static final Pattern FAMILY = Pattern.compile("^([a-z]+)(\\d+)([a-z-]*)$");
     private static final Pattern QUANTITY = Pattern.compile("^([0-9]*\\.?[0-9]+(?:[eE][+-]?[0-9]+)?)([a-zA-Z]*)$");
@@ -78,7 +82,8 @@ final class EksAutoModeNodes {
             }
             try {
                 return Long.compare(Long.parseLong(value), Long.parseLong(values.getFirst()));
-            } catch (NumberFormatException e) {
+            } catch (NumberFormatException expected) {
+                // Gt and Lt compare integers; Kubernetes matches no node when either side isn't one, which 0 gives.
                 return 0;
             }
         }
@@ -104,9 +109,34 @@ final class EksAutoModeNodes {
         }
     }
 
-    /** A NodePool: its NodeClass, its requirements, the taints and labels its nodes get, and its weight. */
+    /**
+     * A NodePool: its NodeClass, its requirements, the taints and labels its nodes get, its weight, how long a node
+     * stays empty before it goes (null for {@code Never}), and its disruption budgets' {@code nodes} values.
+     */
     record NodePool(String name, String nodeClass, List<Requirement> requirements, List<Taint> taints,
-                    Map<String, String> labels, int weight) {
+                    Map<String, String> labels, int weight, Duration consolidateAfter, List<String> budgets) {
+
+        /**
+         * How many of the pool's {@code nodes} may be disrupted at once: the least its budgets allow, a percentage
+         * of them rounded up, as Karpenter counts it (AWS removed the only node of a pool budgeted at 10%). Without
+         * a budget Karpenter allows 10%.
+         */
+        int disruptable(int nodes) {
+            List<String> values = budgets.isEmpty() ? List.of("10%") : budgets;
+            int allowed = Integer.MAX_VALUE;
+            for (String value : values) {
+                try {
+                    allowed = Math.min(allowed, value.endsWith("%")
+                            ? (int) Math.ceil(nodes * Integer.parseInt(value.substring(0, value.length() - 1)) / 100.0)
+                            : Integer.parseInt(value));
+                } catch (NumberFormatException expected) {
+                    // The NodePool schema refuses such a value; one that got through allows no disruption, the safe
+                    // reading.
+                    allowed = 0;
+                }
+            }
+            return Math.max(0, allowed);
+        }
     }
 
     /** A pod the scheduler couldn't place, with what it asks of a node and the resources it requests. */
@@ -179,22 +209,24 @@ final class EksAutoModeNodes {
      * A node Auto Mode launched for a pool, joined or still joining, with the CPU and memory its pods request: a
      * pending pod it has room for is left to the scheduler rather than given another node.
      */
-    record PoolNode(NodePool pool, CatalogInstanceType instanceType, String zone, long freeCpuMillis,
-                    long freeMemoryBytes, int freePods, boolean schedulable, List<Taint> nodeTaints,
-                    List<BoundPod> pods) {
+    record PoolNode(String instanceId, NodePool pool, CatalogInstanceType instanceType, String zone,
+                    long freeCpuMillis, long freeMemoryBytes, int freePods, boolean schedulable,
+                    List<Taint> nodeTaints, List<BoundPod> pods) {
 
         /** A node whose pods carry no labels and no anti-affinity that could keep a pending pod off it. */
-        PoolNode(NodePool pool, CatalogInstanceType instanceType, String zone, long freeCpuMillis, long freeMemoryBytes,
-                 int freePods, boolean schedulable, List<Taint> nodeTaints) {
-            this(pool, instanceType, zone, freeCpuMillis, freeMemoryBytes, freePods, schedulable, nodeTaints, List.of());
+        PoolNode(String instanceId, NodePool pool, CatalogInstanceType instanceType, String zone, long freeCpuMillis,
+                 long freeMemoryBytes, int freePods, boolean schedulable, List<Taint> nodeTaints) {
+            this(instanceId, pool, instanceType, zone, freeCpuMillis, freeMemoryBytes, freePods, schedulable,
+                    nodeTaints, List.of());
         }
 
         /**
          * A node still joining, with its pods' requests: it has its instance type's whole CPU and memory, as no
          * kubelet has said what it reserves yet, all its pod slots, and no taints but its pool's.
          */
-        PoolNode(NodePool pool, CatalogInstanceType instanceType, String zone, long usedCpuMillis, long usedMemoryBytes) {
-            this(pool, instanceType, zone, instanceType.vcpu * 1000L - usedCpuMillis,
+        PoolNode(String instanceId, NodePool pool, CatalogInstanceType instanceType, String zone, long usedCpuMillis,
+                 long usedMemoryBytes) {
+            this(instanceId, pool, instanceType, zone, instanceType.vcpu * 1000L - usedCpuMillis,
                     instanceType.memoryMib * 1024L * 1024L - usedMemoryBytes, MAX_PODS, true, List.of());
         }
 
@@ -204,6 +236,10 @@ final class EksAutoModeNodes {
             nodeTaints.stream().filter(t -> !all.contains(t)).forEach(all::add);
             return all;
         }
+    }
+
+    /** The pending pods no pool node has room for, and the nodes whose room the others are counting on. */
+    record Room(List<PendingPod> left, Set<String> counted) {
     }
 
     /** A node to launch: its pool, instance type, zone (null when no subnet's zone is known) and labels, and its pods. */
@@ -269,6 +305,21 @@ final class EksAutoModeNodes {
      */
     static List<Launch> plan(List<NodePool> pools, List<PendingPod> pods, List<CatalogInstanceType> types,
                              Map<String, List<String>> zonesByNodeClass) {
+        return plan(pools, pods, types, zonesByNodeClass, List.of());
+    }
+
+    /**
+     * As above; with the cluster's DaemonSet pods, as {@link #daemonPods} reads them: a node is sized for its
+     * waiting pods and the DaemonSet pods that would run on it too, as Karpenter sizes it.
+     */
+    static List<Launch> plan(List<NodePool> pools, List<PendingPod> pods, List<CatalogInstanceType> types,
+                             Map<String, List<String>> zonesByNodeClass, List<PendingPod> daemons) {
+        return plan(pools, pods, types, zonesByNodeClass, daemons, null);
+    }
+
+    /** As above; with the region the nodes join in, whose label DaemonSets may select on. */
+    static List<Launch> plan(List<NodePool> pools, List<PendingPod> pods, List<CatalogInstanceType> types,
+                             Map<String, List<String>> zonesByNodeClass, List<PendingPod> daemons, String region) {
         List<NodePool> ordered = pools.stream()
                 .sorted(Comparator.comparingInt(NodePool::weight).reversed().thenComparing(NodePool::name))
                 .toList();
@@ -280,7 +331,8 @@ final class EksAutoModeNodes {
         Map<String, List<PendingPod>> byPool = new LinkedHashMap<>();
         for (PendingPod pod : pods) {
             for (NodePool pool : ordered) {
-                if (candidate(pool, sized, zonesOf(pool, zonesByNodeClass), pod, pod.cpuMillis(), pod.memoryBytes())
+                if (candidate(pool, sized, zonesOf(pool, zonesByNodeClass), pod, pod.cpuMillis(), pod.memoryBytes(),
+                        daemons, region)
                         .isPresent()) {
                     byPool.computeIfAbsent(pool.name(), k -> new ArrayList<>()).add(pod);
                     break;
@@ -298,9 +350,10 @@ final class EksAutoModeNodes {
             PendingPod largest = group.stream().max(Comparator.comparingLong(PendingPod::cpuMillis)
                     .thenComparingLong(PendingPod::memoryBytes)).orElseThrow();
             List<String> placesIn = zonesOf(pool, zonesByNodeClass);
-            Optional<Placement> placement = candidate(pool, sized, placesIn, largest, cpu, memory)
+            Optional<Placement> placement = candidate(pool, sized, placesIn, largest, cpu, memory, daemons, region)
                     .filter(p -> group.stream().allMatch(pod -> pod.fits(labels(p.type(), pool, p.zone()), pool.taints())))
-                    .or(() -> candidate(pool, sized, placesIn, largest, largest.cpuMillis(), largest.memoryBytes()));
+                    .or(() -> candidate(pool, sized, placesIn, largest, largest.cpuMillis(), largest.memoryBytes(),
+                            daemons, region));
             placement.ifPresent(p -> launches.add(new Launch(pool, p.type(), p.zone(),
                     labels(p.type(), pool, p.zone()), List.copyOf(group))));
         }
@@ -315,7 +368,7 @@ final class EksAutoModeNodes {
      * as Karpenter counts its nodes, those still joining among them, before it launches another. A cordoned node
      * has no room.
      */
-    static List<PendingPod> withoutRoom(List<PendingPod> pods, List<PoolNode> nodes) {
+    static Room withoutRoom(List<PendingPod> pods, List<PoolNode> nodes) {
         long[] freeCpu = new long[nodes.size()];
         long[] freeMemory = new long[nodes.size()];
         int[] freePods = new int[nodes.size()];
@@ -328,6 +381,7 @@ final class EksAutoModeNodes {
             freePods[i] = node.freePods();
         }
         List<PendingPod> left = new ArrayList<>();
+        Set<String> counted = new HashSet<>();
         for (PendingPod pod : pods) {
             boolean placed = false;
             for (int i = 0; i < nodes.size() && !placed; i++) {
@@ -340,6 +394,7 @@ final class EksAutoModeNodes {
                     freeMemory[i] -= pod.memoryBytes();
                     freePods[i]--;
                     onNode.get(i).add(pod.bound());
+                    counted.add(node.instanceId());
                     placed = true;
                 }
             }
@@ -347,7 +402,7 @@ final class EksAutoModeNodes {
                 left.add(pod);
             }
         }
-        return left;
+        return new Room(left, counted);
     }
 
     private static List<String> zonesOf(NodePool pool, Map<String, List<String>> zonesByNodeClass) {
@@ -356,19 +411,105 @@ final class EksAutoModeNodes {
     }
 
     private static Optional<Placement> candidate(NodePool pool, List<CatalogInstanceType> sized, List<String> zones,
-                                                 PendingPod pod, long cpuMillis, long memoryBytes) {
+                                                 PendingPod pod, long cpuMillis, long memoryBytes,
+                                                 List<PendingPod> daemons, String region) {
         for (CatalogInstanceType type : sized) {
-            if (type.vcpu * 1000L < cpuMillis || type.memoryMib * 1024L * 1024L < memoryBytes) {
-                continue;
-            }
             for (String zone : zones) {
                 Map<String, String> labels = labels(type, pool, zone);
+                long[] daemon = daemonRequests(daemons, withRegion(labels, region), pool.taints());
+                if (type.vcpu * 1000L < cpuMillis + daemon[0]
+                        || type.memoryMib * 1024L * 1024L < memoryBytes + daemon[1]) {
+                    continue;
+                }
                 if (poolAllows(pool, labels) && pod.fits(labels, pool.taints())) {
                     return Optional.of(new Placement(type, zone));
                 }
             }
         }
         return Optional.empty();
+    }
+
+    /** A node's labels with the {@code topology.kubernetes.io/region} it joins with, when the region is known. */
+    static Map<String, String> withRegion(Map<String, String> labels, String region) {
+        if (region == null) {
+            return labels;
+        }
+        Map<String, String> all = new LinkedHashMap<>(labels);
+        all.put(REGION_LABEL, region);
+        return all;
+    }
+
+    /**
+     * The CPU (millicores) and memory (bytes) the DaemonSet pods that would run on a node of {@code labels} and
+     * {@code taints} request: those whose node selector, required node affinity and tolerations accept it.
+     */
+    static long[] daemonRequests(List<PendingPod> daemons, Map<String, String> labels, List<Taint> taints) {
+        long[] total = new long[2];
+        for (PendingPod daemon : daemons) {
+            if (daemon.fits(labels, taints)) {
+                total[0] += daemon.cpuMillis();
+                total[1] += daemon.memoryBytes();
+            }
+        }
+        return total;
+    }
+
+    /**
+     * The pod each DaemonSet of {@code kubectl get daemonsets -A -o json} runs on a node, with its template's
+     * requests, node selector, required node affinity and tolerations, read as {@link #unschedulablePods} reads a
+     * pod's; one none of whose affinity terms a new node could match is left out. The DaemonSet controller lets its pods onto
+     * an unschedulable node, which Floci's nodes don't need.
+     */
+    static List<PendingPod> daemonPods(JsonNode list) {
+        List<PendingPod> daemons = new ArrayList<>();
+        for (JsonNode item : list.path("items")) {
+            JsonNode spec = item.path("spec").path("template").path("spec");
+            Optional<NodeAsk> ask = nodeAsk(spec, false);
+            if (ask.isEmpty()) {
+                continue;
+            }
+            long[] requests = requests(spec);
+            daemons.add(new PendingPod(item.path("metadata").path("namespace").asText(),
+                    item.path("metadata").path("name").asText(), requests[0], requests[1], ask.get().nodeSelector(),
+                    ask.get().affinityTerms(), ask.get().tolerations()));
+        }
+        return daemons;
+    }
+
+    /** What a pod spec asks of its node: its node selector, required node affinity terms and tolerations. */
+    private record NodeAsk(Map<String, String> nodeSelector, List<List<Requirement>> affinityTerms,
+                           List<Toleration> tolerations) {
+    }
+
+    /**
+     * What a pod spec asks of a node Auto Mode launches, or empty when no such node could take it. The required node
+     * affinity terms are alternatives: one with {@code matchFields}, which names nodes and so none Auto Mode
+     * launches, or with no expressions, which Kubernetes matches with no node, is no alternative for a new node, and
+     * a spec all of whose terms are such asks for none. With {@code refuseMatchFields}, a spec with any
+     * {@code matchFields} term asks for none, as Karpenter refuses a pending pod with one ("node selector term with
+     * matchFields is not supported") rather than read its other terms.
+     */
+    private static Optional<NodeAsk> nodeAsk(JsonNode spec, boolean refuseMatchFields) {
+        JsonNode termList = spec.path("affinity").path("nodeAffinity")
+                .path("requiredDuringSchedulingIgnoredDuringExecution").path("nodeSelectorTerms");
+        List<List<Requirement>> terms = new ArrayList<>();
+        for (JsonNode term : termList) {
+            if (refuseMatchFields && !term.path("matchFields").isEmpty()) {
+                return Optional.empty();
+            }
+            if (term.path("matchFields").isEmpty() && !term.path("matchExpressions").isEmpty()) {
+                terms.add(requirements(term.path("matchExpressions")));
+            }
+        }
+        if (!termList.isEmpty() && terms.isEmpty()) {
+            return Optional.empty();
+        }
+        Map<String, String> selector = new LinkedHashMap<>();
+        spec.path("nodeSelector").properties().forEach(e -> selector.put(e.getKey(), e.getValue().asText()));
+        List<Toleration> tolerations = new ArrayList<>();
+        spec.path("tolerations").forEach(t -> tolerations.add(new Toleration(t.path("key").asText(""),
+                t.path("operator").asText("Equal"), t.path("value").asText(""), t.path("effect").asText(""))));
+        return Optional.of(new NodeAsk(selector, List.copyOf(terms), List.copyOf(tolerations)));
     }
 
     /** The NodePools of {@code kubectl get nodepools -o json}. */
@@ -382,18 +523,33 @@ final class EksAutoModeNodes {
             List<Taint> taints = new ArrayList<>();
             template.path("spec").path("taints").forEach(t -> taints.add(new Taint(t.path("key").asText(),
                     t.path("value").asText(""), t.path("effect").asText())));
+            JsonNode disruption = item.path("spec").path("disruption");
+            List<String> budgets = new ArrayList<>();
+            // A budget with a schedule applies only in its window, which Floci doesn't model; the others always do.
+            // A budget naming reasons covers only those; one without covers every reason, emptiness among them.
+            disruption.path("budgets").forEach(b -> {
+                boolean coversEmpty = !b.has("reasons") || b.path("reasons").isEmpty();
+                for (JsonNode reason : b.path("reasons")) {
+                    coversEmpty |= "Empty".equals(reason.asText());
+                }
+                if (coversEmpty && b.path("schedule").asText("").isEmpty() && !b.path("nodes").asText("").isEmpty()) {
+                    budgets.add(b.path("nodes").asText());
+                }
+            });
             pools.add(new NodePool(item.path("metadata").path("name").asText(),
                     template.path("spec").path("nodeClassRef").path("name").asText("default"),
                     requirements(template.path("spec").path("requirements")), List.copyOf(taints), labels,
-                    item.path("spec").path("weight").asInt(0)));
+                    item.path("spec").path("weight").asInt(0), duration(disruption.path("consolidateAfter").asText("0s")),
+                    List.copyOf(budgets)));
         }
         return pools;
     }
 
     /**
      * The pods of {@code kubectl get pods -A -o json} the scheduler marked unschedulable and a new node could take.
-     * As Karpenter does, a DaemonSet's pods and pods pinned to a named node ({@code matchFields}) are left out, as
-     * are pods whose required node affinity can match no node (only empty terms).
+     * As Karpenter does, a DaemonSet's pods are left out, as are pods with a required node affinity term that pins
+     * named nodes ({@code matchFields}), which Karpenter refuses, and pods whose terms are all empty, which match no
+     * node (see {@link #nodeAsk}).
      */
     static List<PendingPod> unschedulablePods(JsonNode list) {
         List<PendingPod> pods = new ArrayList<>();
@@ -416,29 +572,15 @@ final class EksAutoModeNodes {
                 daemonSet |= "DaemonSet".equals(owner.path("kind").asText());
             }
             JsonNode spec = item.path("spec");
-            JsonNode termList = spec.path("affinity").path("nodeAffinity")
-                    .path("requiredDuringSchedulingIgnoredDuringExecution").path("nodeSelectorTerms");
-            boolean pinned = false;
-            List<List<Requirement>> terms = new ArrayList<>();
-            for (JsonNode term : termList) {
-                pinned |= !term.path("matchFields").isEmpty();
-                // An empty term matches no node, as Kubernetes reads it, so it adds no alternative.
-                if (!term.path("matchExpressions").isEmpty()) {
-                    terms.add(requirements(term.path("matchExpressions")));
-                }
-            }
-            if (daemonSet || pinned || (!termList.isEmpty() && terms.isEmpty())) {
+            Optional<NodeAsk> ask = nodeAsk(spec, true);
+            if (daemonSet || ask.isEmpty()) {
                 continue;
             }
             long[] requests = requests(spec);
-            Map<String, String> selector = new LinkedHashMap<>();
-            spec.path("nodeSelector").properties().forEach(e -> selector.put(e.getKey(), e.getValue().asText()));
-            List<Toleration> tolerations = new ArrayList<>();
-            spec.path("tolerations").forEach(t -> tolerations.add(new Toleration(t.path("key").asText(""),
-                    t.path("operator").asText("Equal"), t.path("value").asText(""), t.path("effect").asText(""))));
             String namespace = item.path("metadata").path("namespace").asText();
             pods.add(new PendingPod(namespace, item.path("metadata").path("name").asText(), requests[0], requests[1],
-                    selector, List.copyOf(terms), List.copyOf(tolerations), podLabels(item), antiAffinity(item)));
+                    ask.get().nodeSelector(), ask.get().affinityTerms(), ask.get().tolerations(), podLabels(item),
+                    antiAffinity(item)));
         }
         return pods;
     }
@@ -490,6 +632,29 @@ final class EksAutoModeNodes {
             terms.add(new PodTerm(matchLabels, requirements(selector.path("matchExpressions")), namespaces));
         }
         return List.copyOf(terms);
+    }
+
+    /**
+     * The nodes of {@code kubectl get pods -A -o json} that run a workload: a pod bound to them that hasn't finished
+     * and that isn't a DaemonSet's or a static pod's mirror, which Karpenter doesn't count either.
+     */
+    static Set<String> nodesWithWorkloads(JsonNode list) {
+        Set<String> nodes = new HashSet<>();
+        for (JsonNode item : list.path("items")) {
+            String node = item.path("spec").path("nodeName").asText("");
+            String phase = item.path("status").path("phase").asText();
+            if (node.isEmpty() || "Succeeded".equals(phase) || "Failed".equals(phase)) {
+                continue;
+            }
+            boolean daemon = false;
+            for (JsonNode owner : item.path("metadata").path("ownerReferences")) {
+                daemon |= "DaemonSet".equals(owner.path("kind").asText()) || "Node".equals(owner.path("kind").asText());
+            }
+            if (!daemon) {
+                nodes.add(node);
+            }
+        }
+        return nodes;
     }
 
     /**
@@ -602,5 +767,19 @@ final class EksAutoModeNodes {
             default -> BigDecimal.ZERO;
         };
         return value.setScale(0, RoundingMode.CEILING).longValue();
+    }
+
+    /** A Kubernetes duration such as {@code 30s}, {@code 5m} or {@code 1h30m}; null for {@code Never}. */
+    static Duration duration(String value) {
+        if ("Never".equals(value)) {
+            return null;
+        }
+        try {
+            return Duration.parse("PT" + value.toUpperCase(Locale.ROOT));
+        } catch (RuntimeException expected) {
+            // The NodePool schema refuses such a value (500ms, say, which the parse above doesn't read); one that got
+            // through waits the 30 seconds of Auto Mode's built-in pools.
+            return Duration.ofSeconds(30);
+        }
     }
 }

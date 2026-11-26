@@ -16,9 +16,11 @@ import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ComputeConfig;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.model.InstanceProfile;
+import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -40,14 +42,19 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class EksAutoModeComputeTest {
 
     private static final String REGION = "us-east-1";
+    /** The drain of Floci's own Ready node, which has no kubelet to finish a pod's graceful shutdown. */
+    private static final String[] DRAIN_NODE_1 = {"kubectl", "drain", "node-1", "--ignore-daemonsets",
+        "--delete-emptydir-data", "--force", "--timeout=10s", "--grace-period=0"};
     private static final String PENDING_POD = """
             {"items": [{"metadata": {"namespace": "default", "name": "web"},
               "spec": {"nodeSelector": {"karpenter.sh/nodepool": "general-purpose"},
@@ -68,10 +75,12 @@ class EksAutoModeComputeTest {
     private final IamService iam = mock(IamService.class);
     private final Ec2InstanceTypeCatalog instanceTypes = mock(Ec2InstanceTypeCatalog.class);
     private final EksService eksService = mock(EksService.class);
+    private final MutableClock clock = new MutableClock();
     private final EksAutoModeCompute compute = new EksAutoModeCompute(eksService, clusterManager, ec2,
-            iam, instanceTypes, mock(EmulatorConfig.class));
+            iam, instanceTypes, mock(EmulatorConfig.class), clock);
     private final Map<String, String> lists = new HashMap<>(Map.of("pods", PENDING_POD,
-            "nodepools", POOLS, "nodeclasses", NODE_CLASSES, "nodes", "{\"items\": []}"));
+            "nodepools", POOLS, "nodeclasses", NODE_CLASSES, "nodes", "{\"items\": []}", "daemonsets",
+            "{\"items\": []}"));
 
     @BeforeEach
     void cluster() {
@@ -80,6 +89,8 @@ class EksAutoModeComputeTest {
                     String[] cmd = inv.getArgument(1);
                     return new ContainerExec.Result(0, lists.get(cmd[2]), "", false);
                 });
+        when(clusterManager.execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length > 1 && !"get".equals(cmd[1])),
+                anyInt())).thenReturn(new ContainerExec.Result(0, "", "", false));
         when(clusterManager.imageCatalog()).thenReturn(new Ec2ImageCatalog());
         when(ec2.describeInstances(eq(REGION), anyList(), any())).thenReturn(List.of());
         when(eksService.runningClusters()).thenReturn(List.of(new AccountAwareStorageBackend.AccountEntry<>(
@@ -184,7 +195,7 @@ class EksAutoModeComputeTest {
         Instance stuck = new Instance();
         stuck.setInstanceId("i-stuck");
         stuck.setInstanceType("c7a.large");
-        stuck.setLaunchTime(Instant.now().minus(EksAutoModeCompute.REGISTRATION_WAIT).minusSeconds(1));
+        stuck.setLaunchTime(clock.instant().minus(EksAutoModeCompute.REGISTRATION_WAIT).minusSeconds(1));
         stuck.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
         Reservation reservation = new Reservation();
         reservation.setInstances(List.of(stuck));
@@ -197,6 +208,334 @@ class EksAutoModeComputeTest {
         verify(ec2).runInstances(anyString(), anyString(), anyString(), anyInt(), anyInt(), any(), anyList(),
                 anyString(), anyString(), anyList(), anyString(), anyString(), any(), any(), anyInt(), any(), any(),
                 any(), anyString(), anyBoolean(), any(), any(), any(), anyBoolean(), any(), any());
+    }
+
+    /**
+     * As Auto Mode consolidates: a node that runs no workload for its pool's consolidateAfter is tainted as
+     * disrupted, its node taken out and its instance terminated; a pod running on it again starts the wait over.
+     */
+    @Test
+    void aNodeEmptyForItsPoolsConsolidateAfterIsRemoved() {
+        Instance node = joinedNode("i-node", "node-1");
+        lists.put("pods", "{\"items\": []}");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}}]}");
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"30s\"}, \"template\""));
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+        clock.advance(Duration.ofSeconds(20));
+        // A pod runs there for a while, which starts the wait over.
+        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"node-1\"}, "
+                + "\"status\": {\"phase\": \"Running\"}}]}");
+        compute.reconcile(cluster, REGION);
+        lists.put("pods", "{\"items\": []}");
+        clock.advance(Duration.ofSeconds(20));
+        compute.reconcile(cluster, REGION);
+        clock.advance(Duration.ofSeconds(20));
+        compute.reconcile(cluster, REGION);
+        verify(ec2, never()).terminateInstances(REGION, List.of("i-node"));
+
+        clock.advance(Duration.ofSeconds(11));
+        compute.reconcile(cluster, REGION);
+
+        // Tainted as disrupted and drained, then its node goes before its instance does.
+        InOrder order = inOrder(clusterManager, ec2);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "taint", "node",
+                "node-1", "karpenter.sh/disrupted:NoSchedule", "--overwrite"}, 15);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", DRAIN_NODE_1, 15);
+        order.verify(clusterManager).removeJoinedNode(cluster, node);
+        order.verify(ec2).terminateInstances(REGION, List.of("i-node"));
+    }
+
+    /**
+     * A pod the scheduler bound to the node after the pass read the pods, but before it was tainted, keeps it: the
+     * pass looks again once the node is tainted, and takes the taint off.
+     */
+    @Test
+    void aPodBoundJustBeforeTheTaintKeepsTheNode() {
+        Instance node = joinedNode("i-node", "node-1");
+        lists.put("pods", "{\"items\": []}");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}}]}");
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"0s\"}, \"template\""));
+        when(clusterManager.execInContainerForResult(eq("k3s-1"),
+                argThat(cmd -> List.of(cmd).contains("--field-selector")), anyInt()))
+                .thenReturn(new ContainerExec.Result(0, "{\"items\": [{\"metadata\": {}, "
+                        + "\"spec\": {\"nodeName\": \"node-1\"}, \"status\": {\"phase\": \"Pending\"}}]}", "", false));
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "taint", "node", "node-1",
+                "karpenter.sh/disrupted:NoSchedule", "--overwrite"}, 15);
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "taint", "node", "node-1",
+                "karpenter.sh/disrupted:NoSchedule-"}, 15);
+        verify(clusterManager, never()).removeJoinedNode(cluster, node);
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
+    }
+
+    /**
+     * A node a removal left tainted as disrupted, because it was called off and taking the taint off failed or the
+     * pass failed after the taint, has it taken off by the next pass once it runs a workload again.
+     */
+    @Test
+    void aBusyNodeLeftTaintedAsDisruptedHasTheTaintTakenOff() {
+        Instance node = joinedNode("i-node", "node-1");
+        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"node-1\"}, "
+                + "\"status\": {\"phase\": \"Running\"}}]}");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}, \"spec\": "
+                + "{\"unschedulable\": true, "
+                + "\"taints\": [{\"key\": \"karpenter.sh/disrupted\", \"effect\": \"NoSchedule\"}]}}]}");
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"0s\"}, \"template\""));
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
+        // A drain that failed left it cordoned too: that is undone first, and the taint last.
+        InOrder order = inOrder(clusterManager);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "uncordon", "node-1"}, 15);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "taint", "node",
+                "node-1", "karpenter.sh/disrupted:NoSchedule-"}, 15);
+        verify(clusterManager, never()).removeJoinedNode(cluster, node);
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
+    }
+
+    /**
+     * The node of an Auto Mode instance that is terminated, one that registered while a pass terminated its
+     * instance, or whose deletion failed after it, is deleted by the next pass. A node no Auto Mode instance is
+     * named for stays, though it carries a pool's label and the Auto Mode compute label, as the cluster's own node
+     * can; so does one whose name a live instance's node has again.
+     */
+    @Test
+    void theNodeOfATerminatedAutoModeInstanceIsDeleted() {
+        Instance live = joinedNode("i-node", "node-1");
+        Instance dead = new Instance();
+        dead.setInstanceId("i-dead");
+        Instance reused = new Instance();
+        reused.setInstanceId("i-old");
+        Instance replaced = new Instance();
+        replaced.setInstanceId("i-gone");
+        when(clusterManager.deriveInstanceNodeName(dead, REGION)).thenReturn("stray");
+        when(clusterManager.deriveInstanceNodeName(reused, REGION)).thenReturn("node-1");
+        when(clusterManager.deriveInstanceNodeName(replaced, REGION)).thenReturn("taken");
+        Reservation liveReservation = new Reservation();
+        liveReservation.setInstances(List.of(live));
+        Reservation deadReservation = new Reservation();
+        deadReservation.setInstances(List.of(dead, reused, replaced));
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenAnswer(inv -> {
+            Map<String, List<String>> filters = inv.getArgument(2);
+            return filters.get("instance-state-name").contains("terminated") ? List.of(deadReservation)
+                    : List.of(liveReservation);
+        });
+        lists.put("pods", "{\"items\": []}");
+        String autoLabels = "{\"karpenter.sh/nodepool\": \"general-purpose\", "
+                + "\"eks.amazonaws.com/compute-type\": \"auto\"}";
+        // A node group's worker joined under the name of a terminated Auto Mode instance's node: its provider ID is
+        // its own.
+        lists.put("nodes", "{\"items\": ["
+                + "{\"metadata\": {\"name\": \"node-1\", \"labels\": " + autoLabels + "}, "
+                + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-node\"}},"
+                + "{\"metadata\": {\"name\": \"stray\", \"labels\": " + autoLabels + "}, "
+                + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-dead\"}},"
+                + "{\"metadata\": {\"name\": \"taken\", \"labels\": {}}, "
+                + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-worker\"}},"
+                + "{\"metadata\": {\"name\": \"cluster-node\", \"labels\": " + autoLabels + "}}]}");
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"Never\"}, \"template\""));
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node", "stray",
+                "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
+                "node-1", "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
+                "cluster-node", "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
+                "taken", "--ignore-not-found=true", "--wait=false"}, 15);
+    }
+
+    /**
+     * With compute off, a worker that was joining when it was terminated and registered while it shut down has its
+     * node deleted by the next pass too, as with compute on.
+     */
+    @Test
+    void withComputeOffTheNodeOfAWorkerThatRegisteredWhileTerminatingIsDeleted() {
+        Instance late = new Instance();
+        late.setInstanceId("i-late");
+        when(clusterManager.deriveInstanceNodeName(late, REGION)).thenReturn("late-node");
+        Reservation dead = new Reservation();
+        dead.setInstances(List.of(late));
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenAnswer(inv -> {
+            Map<String, List<String>> filters = inv.getArgument(2);
+            return filters.get("instance-state-name").contains("terminated") ? List.of(dead) : List.of();
+        });
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"late-node\", \"labels\": {}}, "
+                + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-late\"}}]}");
+        Cluster cluster = cluster("prod");
+        cluster.setComputeConfig(new ComputeConfig(false, List.of(), null));
+
+        compute.removeNodes(cluster, REGION);
+
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
+                "late-node", "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
+    }
+
+    /** A node whose kubelet runs keeps its pods' graceful shutdown: the drain gives them their grace period. */
+    @Test
+    void aKubeletsNodeIsDrainedWithItsPodsGracePeriod() {
+        Instance node = joinedNode("i-node", "node-1");
+        when(clusterManager.kubeletRegistersNode(node)).thenReturn(true);
+        lists.put("pods", "{\"items\": []}");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}}]}");
+        lists.put("nodepools", "{\"items\": []}");
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "drain", "node-1",
+                "--ignore-daemonsets", "--delete-emptydir-data", "--force", "--timeout=10s"}, 15);
+        verify(clusterManager).removeJoinedNode(cluster, node);
+    }
+
+    /**
+     * The nodes of a NodePool that was deleted, or that UpdateClusterConfig dropped, go as Karpenter removes them:
+     * tainted as disrupted and drained, whatever they run, then deleted and terminated.
+     */
+    @Test
+    void aDeletedPoolsNodeIsDrainedAndRemoved() {
+        Instance node = joinedNode("i-node", "node-1");
+        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"node-1\"}, "
+                + "\"status\": {\"phase\": \"Running\"}}]}");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}}]}");
+        lists.put("nodepools", "{\"items\": []}");
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
+        InOrder order = inOrder(clusterManager, ec2);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "taint", "node",
+                "node-1", "karpenter.sh/disrupted:NoSchedule", "--overwrite"}, 15);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", DRAIN_NODE_1, 15);
+        order.verify(clusterManager).removeJoinedNode(cluster, node);
+        order.verify(ec2).terminateInstances(REGION, List.of("i-node"));
+    }
+
+    /**
+     * A pool's nodes that are already unavailable use up its disruption budget first, as Karpenter counts it: of two
+     * nodes, at 10% one may go, and with one not Ready the empty other stays; once it is Ready again, the empty one
+     * goes.
+     */
+    @Test
+    void aNotReadyNodeUsesUpThePoolsBudget() {
+        Instance empty = joinedNode("i-empty", "empty-node");
+        Instance sick = new Instance();
+        sick.setInstanceId("i-sick");
+        sick.setInstanceType("c7a.large");
+        sick.setLaunchTime(clock.instant());
+        sick.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
+        when(clusterManager.deriveInstanceNodeName(sick, REGION)).thenReturn("sick-node");
+        Reservation both = new Reservation();
+        both.setInstances(List.of(empty, sick));
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenReturn(List.of(both));
+        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"sick-node\"}, "
+                + "\"status\": {\"phase\": \"Running\"}}]}");
+        String nodes = "{\"items\": [{\"metadata\": {\"name\": \"empty-node\", \"labels\": {}}},"
+                + "{\"metadata\": {\"name\": \"sick-node\", \"labels\": {}}, \"status\": {\"conditions\": "
+                + "[{\"type\": \"Ready\", \"status\": \"%s\"}]}}]}";
+        lists.put("nodes", nodes.formatted("Unknown"));
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"0s\"}, \"template\""));
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+        verify(clusterManager, never()).removeJoinedNode(cluster, empty);
+
+        lists.put("nodes", nodes.formatted("True"));
+        compute.reconcile(cluster, REGION);
+        verify(clusterManager).removeJoinedNode(cluster, empty);
+        verify(clusterManager, never()).removeJoinedNode(cluster, sick);
+    }
+
+    /**
+     * A budget's percentage is of the pool's joined nodes: one still joining isn't counted, as Karpenter leaves out
+     * nodes that aren't initialized. Ten empty joined nodes and one joining, at 10%, lose one node a pass, not two.
+     */
+    @Test
+    void aBudgetsPercentageLeavesOutNodesStillJoining() {
+        List<Instance> instances = new ArrayList<>();
+        StringBuilder nodes = new StringBuilder("{\"items\": [");
+        for (int i = 0; i < 11; i++) {
+            Instance instance = new Instance();
+            instance.setInstanceId("i-" + i);
+            instance.setInstanceType("c7a.large");
+            instance.setLaunchTime(clock.instant());
+            instance.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
+            when(clusterManager.deriveInstanceNodeName(instance, REGION)).thenReturn("node-" + i);
+            instances.add(instance);
+            if (i < 10) {
+                nodes.append(i == 0 ? "" : ",").append("{\"metadata\": {\"name\": \"node-").append(i)
+                        .append("\", \"labels\": {}}}");
+            }
+        }
+        Reservation reservation = new Reservation();
+        reservation.setInstances(instances);
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenReturn(List.of(reservation));
+        CatalogInstanceType large = new CatalogInstanceType();
+        large.instanceType = "c7a.large";
+        large.vcpu = 2;
+        large.memoryMib = 4096;
+        large.supportedArchitectures = List.of("x86_64");
+        when(instanceTypes.find("c7a.large")).thenReturn(Optional.of(large));
+        lists.put("pods", "{\"items\": []}");
+        lists.put("nodes", nodes.append("]}").toString());
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"0s\", \"budgets\": [{\"nodes\": \"10%\"}]}, "
+                        + "\"template\""));
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
+        verify(clusterManager, times(1)).removeJoinedNode(eq(cluster), any());
+    }
+
+    @Test
+    void aPoolThatNeverConsolidatesKeepsItsEmptyNode() {
+        joinedNode("i-node", "node-1");
+        lists.put("pods", "{\"items\": []}");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}}]}");
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"Never\"}, \"template\""));
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+        clock.advance(Duration.ofHours(1));
+        compute.reconcile(cluster, REGION);
+
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
+    }
+
+    private Instance joinedNode(String id, String nodeName) {
+        Instance node = new Instance();
+        node.setInstanceId(id);
+        node.setInstanceType("c7a.large");
+        node.setLaunchTime(clock.instant());
+        node.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(node));
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenReturn(List.of(reservation));
+        when(clusterManager.deriveInstanceNodeName(node, REGION)).thenReturn(nodeName);
+        CatalogInstanceType large = new CatalogInstanceType();
+        large.instanceType = "c7a.large";
+        large.vcpu = 2;
+        large.memoryMib = 4096;
+        large.supportedArchitectures = List.of("x86_64");
+        when(instanceTypes.find("c7a.large")).thenReturn(Optional.of(large));
+        return node;
     }
 
     @Test
@@ -229,7 +568,7 @@ class EksAutoModeComputeTest {
         Instance joined = new Instance();
         joined.setInstanceId("i-joined");
         joined.setInstanceType("c7a.large");
-        joined.setLaunchTime(Instant.now());
+        joined.setLaunchTime(clock.instant());
         joined.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
         Reservation reservation = new Reservation();
         reservation.setInstances(List.of(joined));
@@ -269,7 +608,7 @@ class EksAutoModeComputeTest {
         Instance joined = new Instance();
         joined.setInstanceId("i-joined");
         joined.setInstanceType("c7a.large");
-        joined.setLaunchTime(Instant.now());
+        joined.setLaunchTime(clock.instant());
         joined.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
         Reservation reservation = new Reservation();
         reservation.setInstances(List.of(joined));
@@ -292,7 +631,7 @@ class EksAutoModeComputeTest {
                 any(), anyString(), anyBoolean(), any(), any(), any(), anyBoolean(), any(), any());
 
         // Still not ready once the registration wait is over, it has no room.
-        joined.setLaunchTime(Instant.now().minus(EksAutoModeCompute.REGISTRATION_WAIT).minusSeconds(1));
+        joined.setLaunchTime(clock.instant().minus(EksAutoModeCompute.REGISTRATION_WAIT).minusSeconds(1));
         compute.reconcile(cluster, REGION);
         verify(ec2).runInstances(anyString(), anyString(), anyString(), anyInt(), anyInt(), any(), anyList(),
                 anyString(), anyString(), anyList(), anyString(), anyString(), any(), any(), anyInt(), any(), any(),
