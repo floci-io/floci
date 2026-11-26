@@ -424,6 +424,42 @@ class EksAutoModeComputeTest {
         order.verify(ec2).terminateInstances(REGION, List.of("i-node"));
     }
 
+    /**
+     * A pool's nodes that are already unavailable use up its disruption budget first, as Karpenter counts it: of two
+     * nodes, at 10% one may go, and with one not Ready the empty other stays; once it is Ready again, the empty one
+     * goes.
+     */
+    @Test
+    void aNotReadyNodeUsesUpThePoolsBudget() {
+        Instance empty = joinedNode("i-empty", "empty-node");
+        Instance sick = new Instance();
+        sick.setInstanceId("i-sick");
+        sick.setInstanceType("c7a.large");
+        sick.setLaunchTime(clock.instant());
+        sick.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
+        when(clusterManager.deriveInstanceNodeName(sick, REGION)).thenReturn("sick-node");
+        Reservation both = new Reservation();
+        both.setInstances(List.of(empty, sick));
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenReturn(List.of(both));
+        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"sick-node\"}, "
+                + "\"status\": {\"phase\": \"Running\"}}]}");
+        String nodes = "{\"items\": [{\"metadata\": {\"name\": \"empty-node\", \"labels\": {}}},"
+                + "{\"metadata\": {\"name\": \"sick-node\", \"labels\": {}}, \"status\": {\"conditions\": "
+                + "[{\"type\": \"Ready\", \"status\": \"%s\"}]}}]}";
+        lists.put("nodes", nodes.formatted("Unknown"));
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"0s\"}, \"template\""));
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+        verify(clusterManager, never()).removeJoinedNode(cluster, empty);
+
+        lists.put("nodes", nodes.formatted("True"));
+        compute.reconcile(cluster, REGION);
+        verify(clusterManager).removeJoinedNode(cluster, empty);
+        verify(clusterManager, never()).removeJoinedNode(cluster, sick);
+    }
+
     @Test
     void aPoolThatNeverConsolidatesKeepsItsEmptyNode() {
         joinedNode("i-node", "node-1");

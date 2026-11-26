@@ -240,8 +240,8 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             int podSlots = allocatable.path("pods").asInt(EksAutoModeNodes.MAX_PODS);
             if (node == null) {
                 // A node still joining runs none of its DaemonSet pods yet; they take its room once it does.
-                long[] daemon = EksAutoModeNodes.daemonRequests(daemons,
-                        EksAutoModeNodes.labels(type.get(), pool, zone(instance)), pool.taints());
+                long[] daemon = EksAutoModeNodes.daemonRequests(daemons, EksAutoModeNodes.withRegion(
+                        EksAutoModeNodes.labels(type.get(), pool, zone(instance)), region), pool.taints());
                 cpu -= daemon[0];
                 memory -= daemon[1];
             }
@@ -293,7 +293,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         nodeClasses.forEach((name, spec) -> zonesByNodeClass.put(name, ids(spec.path("subnetSelectorTerms")).stream()
                 .map(subnetZones::get).filter(Objects::nonNull).distinct().toList()));
         for (Launch launch : EksAutoModeNodes.plan(List.copyOf(pools.values()), withoutRoom,
-                instanceTypes.instanceTypes(), zonesByNodeClass, daemons)) {
+                instanceTypes.instanceTypes(), zonesByNodeClass, daemons, region)) {
             try {
                 launch(cluster, region, launch, nodeClasses.get(launch.pool().nodeClass()), subnetZones);
             } catch (RuntimeException e) {
@@ -320,7 +320,14 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         since.keySet().removeIf(id -> !empty.containsKey(id) || counted.contains(id));
         Map<String, Integer> poolSizes = new HashMap<>();
         launched.forEach(instance -> poolSizes.merge(String.valueOf(tag(instance, POOL_TAG)), 1, Integer::sum));
+        // As Karpenter counts a budget: the pool's nodes already unavailable, not Ready or being deleted, use it up
+        // first. One this removal tainted before is the same removal tried again, not another.
         Map<String, Integer> removed = new HashMap<>();
+        for (Instance instance : launched) {
+            if (unavailable(nodesByName.get(clusterManager.deriveInstanceNodeName(instance, region)))) {
+                removed.merge(String.valueOf(tag(instance, POOL_TAG)), 1, Integer::sum);
+            }
+        }
         List<Instance> due = new ArrayList<>();
         empty.values().stream()
                 .filter(instance -> !counted.contains(instance.getInstanceId()))
@@ -534,6 +541,26 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             clusterManager.removeJoinedNode(cluster, instance);
         }
         ec2.terminateInstances(region, List.of(instance.getInstanceId()));
+    }
+
+    /**
+     * Whether a joined node doesn't serve pods: being deleted, or with a Ready condition that isn't true. One still
+     * joining, or without a Ready condition yet, as Floci's own Ready node has none between its creation and its
+     * status, isn't counted.
+     */
+    private static boolean unavailable(JsonNode node) {
+        if (node == null) {
+            return false;
+        }
+        if (!node.path("metadata").path("deletionTimestamp").isMissingNode()) {
+            return true;
+        }
+        for (JsonNode condition : node.path("status").path("conditions")) {
+            if ("Ready".equals(condition.path("type").asText())) {
+                return !"True".equals(condition.path("status").asText());
+            }
+        }
+        return false;
     }
 
     private static boolean disrupted(JsonNode node) {

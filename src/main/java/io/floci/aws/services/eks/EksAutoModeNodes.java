@@ -36,6 +36,8 @@ final class EksAutoModeNodes {
     static final int MAX_PODS = 110;
     /** The topology key of the pod anti-affinity a node's own pods decide. */
     static final String HOSTNAME_LABEL = "kubernetes.io/hostname";
+    /** The region label a joined node carries, which DaemonSets may select on. */
+    static final String REGION_LABEL = "topology.kubernetes.io/region";
     /** Instance family names: category letters, generation digits, then attribute letters, as in {@code c7gd}. */
     private static final Pattern FAMILY = Pattern.compile("^([a-z]+)(\\d+)([a-z-]*)$");
     private static final Pattern QUANTITY = Pattern.compile("^([0-9]*\\.?[0-9]+(?:[eE][+-]?[0-9]+)?)([a-zA-Z]*)$");
@@ -312,6 +314,12 @@ final class EksAutoModeNodes {
      */
     static List<Launch> plan(List<NodePool> pools, List<PendingPod> pods, List<CatalogInstanceType> types,
                              Map<String, List<String>> zonesByNodeClass, List<PendingPod> daemons) {
+        return plan(pools, pods, types, zonesByNodeClass, daemons, null);
+    }
+
+    /** As above; with the region the nodes join in, whose label DaemonSets may select on. */
+    static List<Launch> plan(List<NodePool> pools, List<PendingPod> pods, List<CatalogInstanceType> types,
+                             Map<String, List<String>> zonesByNodeClass, List<PendingPod> daemons, String region) {
         List<NodePool> ordered = pools.stream()
                 .sorted(Comparator.comparingInt(NodePool::weight).reversed().thenComparing(NodePool::name))
                 .toList();
@@ -324,7 +332,7 @@ final class EksAutoModeNodes {
         for (PendingPod pod : pods) {
             for (NodePool pool : ordered) {
                 if (candidate(pool, sized, zonesOf(pool, zonesByNodeClass), pod, pod.cpuMillis(), pod.memoryBytes(),
-                        daemons)
+                        daemons, region)
                         .isPresent()) {
                     byPool.computeIfAbsent(pool.name(), k -> new ArrayList<>()).add(pod);
                     break;
@@ -342,10 +350,10 @@ final class EksAutoModeNodes {
             PendingPod largest = group.stream().max(Comparator.comparingLong(PendingPod::cpuMillis)
                     .thenComparingLong(PendingPod::memoryBytes)).orElseThrow();
             List<String> placesIn = zonesOf(pool, zonesByNodeClass);
-            Optional<Placement> placement = candidate(pool, sized, placesIn, largest, cpu, memory, daemons)
+            Optional<Placement> placement = candidate(pool, sized, placesIn, largest, cpu, memory, daemons, region)
                     .filter(p -> group.stream().allMatch(pod -> pod.fits(labels(p.type(), pool, p.zone()), pool.taints())))
                     .or(() -> candidate(pool, sized, placesIn, largest, largest.cpuMillis(), largest.memoryBytes(),
-                            daemons));
+                            daemons, region));
             placement.ifPresent(p -> launches.add(new Launch(pool, p.type(), p.zone(),
                     labels(p.type(), pool, p.zone()), List.copyOf(group))));
         }
@@ -404,11 +412,11 @@ final class EksAutoModeNodes {
 
     private static Optional<Placement> candidate(NodePool pool, List<CatalogInstanceType> sized, List<String> zones,
                                                  PendingPod pod, long cpuMillis, long memoryBytes,
-                                                 List<PendingPod> daemons) {
+                                                 List<PendingPod> daemons, String region) {
         for (CatalogInstanceType type : sized) {
             for (String zone : zones) {
                 Map<String, String> labels = labels(type, pool, zone);
-                long[] daemon = daemonRequests(daemons, labels, pool.taints());
+                long[] daemon = daemonRequests(daemons, withRegion(labels, region), pool.taints());
                 if (type.vcpu * 1000L < cpuMillis + daemon[0]
                         || type.memoryMib * 1024L * 1024L < memoryBytes + daemon[1]) {
                     continue;
@@ -425,6 +433,16 @@ final class EksAutoModeNodes {
      * The CPU (millicores) and memory (bytes) the DaemonSet pods that would run on a node of {@code labels} and
      * {@code taints} request: those whose node selector, required node affinity and tolerations accept it.
      */
+    /** A node's labels with the {@code topology.kubernetes.io/region} it joins with, when the region is known. */
+    static Map<String, String> withRegion(Map<String, String> labels, String region) {
+        if (region == null) {
+            return labels;
+        }
+        Map<String, String> all = new LinkedHashMap<>(labels);
+        all.put(REGION_LABEL, region);
+        return all;
+    }
+
     static long[] daemonRequests(List<PendingPod> daemons, Map<String, String> labels, List<Taint> taints) {
         long[] total = new long[2];
         for (PendingPod daemon : daemons) {

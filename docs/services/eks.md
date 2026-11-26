@@ -477,7 +477,7 @@ launches nodes on AWS. Floci checks every 10 seconds.
   like) don't count in the 3 minutes after its launch, as Karpenter counts a starting node.
 - **Instance.** One node a pool and pass, of the smallest type in the instance type catalog with at least 2 vCPUs
   that fits all of the pool's waiting pods and the DaemonSet pods that would run on it (by their node selector,
-  required node affinity and tolerations), or else the largest of them. A node still joining has room for its
+  required node affinity and tolerations, against its labels and region), or else the largest of them. A node still joining has room for its
   DaemonSet pods taken too. AWS picked a 2-vCPU `c6a.large` for a pod of
   100m CPU. It is launched in a subnet of the pool's NodeClass, in the zone the pods ask for if they do, with its
   security groups, the instance
@@ -503,7 +503,7 @@ launches nodes on AWS. Floci checks every 10 seconds.
   pod's shutdown, evicted pods go at once), its node is taken out and its instance terminated. A node a removal
   that was called off or failed left with the taint, and that isn't being removed, has it taken off by the next pass. AWS removed an empty node within 90
   seconds. A pool whose `consolidateAfter` is `Never` keeps its nodes. Each pass removes no more of a pool's nodes
-  than its disruption budgets that cover emptiness allow (a percentage rounded up, 10% without a budget; one whose
+  than its disruption budgets that cover emptiness allow, less its nodes already not Ready or being deleted (a percentage rounded up, 10% without a budget; one whose
   `reasons` leave out `Empty` doesn't count); a budget with a `schedule` is
   left out, as Floci doesn't model its window. How long a node has been empty is kept in memory, so a restart starts
   the wait again.

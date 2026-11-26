@@ -91,6 +91,22 @@ class EksAutoModeNodesTest {
                 EksAutoModeNodes.labels(TYPES.get(2), pools().getFirst(), null), List.of())[0]);
     }
 
+    /** A DaemonSet selecting on the region, which a joined node carries, counts on a new node in that region. */
+    @Test
+    void aDaemonSetSelectingTheRegionCountsOnANodeThere() throws Exception {
+        String daemonSets = """
+                {"items": [{"metadata": {"namespace": "kube-system", "name": "regional"}, "spec": {"template": {"spec": {
+                  "nodeSelector": {"topology.kubernetes.io/region": "us-east-1"},
+                  "containers": [{"resources": {"requests": {"cpu": "300m"}}}]}}}}]}""";
+        List<PendingPod> daemons = EksAutoModeNodes.daemonPods(json(daemonSets));
+        PendingPod big = pod("big", "1900m", "64Mi");
+
+        assertEquals("c7a.xlarge", EksAutoModeNodes.plan(pools(), List.of(big), TYPES, Map.of(), daemons, "us-east-1")
+                .getFirst().instanceType().instanceType);
+        assertEquals("c7a.large", EksAutoModeNodes.plan(pools(), List.of(big), TYPES, Map.of(), daemons, "eu-west-1")
+                .getFirst().instanceType().instanceType);
+    }
+
     /**
      * A pod's required node affinity terms are alternatives: one pinned to a named node is no alternative for a new
      * node, but another the new node could match keeps the pod, with that term only.
