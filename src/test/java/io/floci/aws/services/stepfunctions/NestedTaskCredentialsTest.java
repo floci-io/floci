@@ -47,6 +47,12 @@ class NestedTaskCredentialsTest {
         assertFalse(NestedTaskCredentials.routes("arn:aws:states:::http:invoke"));
     }
 
+    /** An API Gateway task reaches only an API of the state machine's account, whose lookup stays there. */
+    @Test
+    void anApiGatewayTaskKeepsTheMachinesAccount() {
+        assertFalse(NestedTaskCredentials.routes("arn:aws:states:::apigateway:invoke"));
+    }
+
     @Test
     void theMachineInAnotherAccountKeepsItsNameRegionAndRole() {
         StateMachine machine = new StateMachine();

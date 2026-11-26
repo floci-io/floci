@@ -99,14 +99,15 @@ public class NestedTaskCredentials {
 
     /**
      * Whether a task with {@code resource} makes its calls as its {@code Credentials} role, in that role's account: a
-     * Lambda function or an AWS service integration, in any of its forms. Not an activity, nor an HTTP task.
+     * Lambda function or an AWS service integration, in any of its forms. Not an activity, nor an HTTP task, nor an
+     * API Gateway task, which reaches only an API of the state machine's account and signs as its role itself.
      */
     static boolean routes(String resource) {
         StatesIntegration integration = StatesIntegration.parse(resource).orElse(null);
         if (integration == null) {
             return isLambdaFunctionArn(resource);
         }
-        return !integration.isAnySuffix("http", "invoke");
+        return !integration.isAnySuffix("http", "invoke") && !integration.isAnySuffix("apigateway", "invoke");
     }
 
     /**

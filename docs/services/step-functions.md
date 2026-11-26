@@ -83,7 +83,9 @@ A Lambda or AWS service task whose `Credentials` name a role makes its calls as 
 role's account: a function, queue, table or other resource the task names without its account is the
 one of the role's account, and one named by an ARN or URL stays the one it names. Activities take no
 `Credentials`, and an HTTP task (`http:invoke`), for which AWS does not say, keeps the state machine's
-account. An `apigateway:invoke` task still reaches only an API of the state machine's account.
+account. An `apigateway:invoke` task keeps it too: it reaches only an API of the state machine's account,
+signed as the `Credentials` role. An `events:putEvents` entry whose `EventBusName` is the ARN of a bus of the
+state machine's account reaches that bus.
 Where a section below says a task reaches a resource in the state machine's account, a task with a
 `Credentials` role reaches it in the role's account. Parent history, subsequent states and
 cancellation checks keep the state machine's account.

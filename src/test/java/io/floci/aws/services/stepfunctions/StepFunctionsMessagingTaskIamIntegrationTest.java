@@ -438,13 +438,42 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
         String name = busName(target.resourceArn());
         events(OTHER_ACCOUNT, "CreateEventBus", Map.of("Name", name));
         cleanup.register(() -> events(OTHER_ACCOUNT, "DeleteEventBus", Map.of("Name", name)));
+        SqsTestQueue foreignSink = eventSink(OTHER_ACCOUNT, name, target.source());
         String executionRole = role(STATES_TRUST, ASSUME);
         String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole), PUBLISH_ANY);
 
         Response completed = terminal(start(machine(jsonPathTask(target, foreignRole), executionRole), "{}"));
 
         assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
+        JsonNode delivered = foreignSink.awaitJson(Duration.ofSeconds(5));
+        assertTrue(delivered.toString().contains("hello"), delivered.toString());
         assertNothingDelivered(target);
+    }
+
+    /**
+     * A bus named by its ARN is the one the ARN names, whichever account the task's calls run in: a foreign
+     * Credentials role allowed to send to the state machine's bus reaches that bus, not a same-named one of its own.
+     */
+    @Test
+    void aForeignCredentialsRoleSendsToTheBusItsArnNames() throws Exception {
+        Target target = target("events:putEvents");
+        String name = busName(target.resourceArn());
+        events(OTHER_ACCOUNT, "CreateEventBus", Map.of("Name", name));
+        cleanup.register(() -> events(OTHER_ACCOUNT, "DeleteEventBus", Map.of("Name", name)));
+        SqsTestQueue foreignSink = eventSink(OTHER_ACCOUNT, name, target.source());
+        String executionRole = role(STATES_TRUST, ASSUME);
+        String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole), PUBLISH_ANY);
+        events("PutPermission", Map.of("EventBusName", name, "StatementId", "s",
+                "Action", "events:PutEvents", "Principal", OTHER_ACCOUNT));
+        Map<String, Object> byArn = new LinkedHashMap<>(entry(target.resourceArn(), target.source()));
+        Map<String, Object> task = new LinkedHashMap<>(jsonPathTask(target, foreignRole));
+        task.put("Parameters", Map.of("Entries", List.of(byArn)));
+
+        Response completed = terminal(start(machine(task, executionRole), "{}"));
+
+        assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
+        assertDelivered(target);
+        assertEquals(0, foreignSink.receive().size());
     }
 
     @Test
@@ -669,14 +698,20 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
 
     /** A queue receiving the events of {@code source} on {@code bus}, through a rule removed with it. */
     private SqsTestQueue eventSink(String bus, String source) {
-        SqsTestQueue sink = queue();
+        return eventSink(ACCOUNT, bus, source);
+    }
+
+    /** As {@link #eventSink(String, String)}, for a bus, rule and queue of {@code account}. */
+    private SqsTestQueue eventSink(String account, String bus, String source) {
+        SqsTestQueue sink = sfn().queue(sqsService, account, REGION, "sfn-msg-iam-");
         String rule = "sfn-iam-" + UUID.randomUUID();
-        events("PutRule", Map.of("Name", rule, "EventBusName", bus,
+        events(account, "PutRule", Map.of("Name", rule, "EventBusName", bus,
                 "EventPattern", "{\"source\":[\"" + source + "\"]}"));
-        cleanup.register(() -> events("DeleteRule", Map.of("Name", rule, "EventBusName", bus)));
-        events("PutTargets", Map.of("Rule", rule, "EventBusName", bus,
+        cleanup.register(() -> events(account, "DeleteRule", Map.of("Name", rule, "EventBusName", bus)));
+        events(account, "PutTargets", Map.of("Rule", rule, "EventBusName", bus,
                 "Targets", List.of(Map.of("Id", "1", "Arn", sink.arn()))));
-        cleanup.register(() -> events("RemoveTargets", Map.of("Rule", rule, "EventBusName", bus, "Ids", List.of("1"))));
+        cleanup.register(() -> events(account, "RemoveTargets", Map.of("Rule", rule, "EventBusName", bus,
+                "Ids", List.of("1"))));
         return sink;
     }
 

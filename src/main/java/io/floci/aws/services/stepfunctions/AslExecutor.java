@@ -1636,7 +1636,7 @@ public class AslExecutor {
         // EventBridge optimized integration
         if (integration.is("events", "putEvents")) {
             String region = regionResolver.regionOf(sm.getStateMachineArn());
-            return invokeOptimizedPutEvents(input, region);
+            return invokeOptimizedPutEvents(input, region, AwsArnUtils.parse(sm.getStateMachineArn()).accountId());
         }
 
         // Nested state machine integration
@@ -1996,16 +1996,68 @@ public class AslExecutor {
      * {@code EventBridge.FailedEntry}, carrying the response as the cause so the caller can see
      * which entry it was.
      */
-    private JsonNode invokeOptimizedPutEvents(JsonNode input, String region) throws Exception {
+    private JsonNode invokeOptimizedPutEvents(JsonNode input, String region, String machineAccount) throws Exception {
+        JsonNode request = normalizeOptimizedPutEventsInput(input);
+        JsonNode entries = request.path("Entries");
+        Map<String, List<Integer>> byAccount = new LinkedHashMap<>();
+        if (entries.isArray()) {
+            for (int i = 0; i < entries.size(); i++) {
+                byAccount.computeIfAbsent(busAccount(entries.get(i), machineAccount), account -> new ArrayList<>())
+                        .add(i);
+            }
+        }
+        if (byAccount.size() < 2) {
+            String account = byAccount.isEmpty() ? null : byAccount.keySet().iterator().next();
+            return putEventsResult(RequestScopes.callAsChecked(account, () -> putEvents(request, region)));
+        }
+        // Entries reaching buses of different accounts: each account's go there, answered in request order.
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode resultEntries = objectMapper.createArrayNode();
+        JsonNode[] answered = new JsonNode[entries.size()];
+        int failed = 0;
+        for (Map.Entry<String, List<Integer>> group : byAccount.entrySet()) {
+            ObjectNode part = ((ObjectNode) request).deepCopy();
+            ArrayNode partEntries = part.putArray("Entries");
+            group.getValue().forEach(index -> partEntries.add(entries.get(index)));
+            JsonNode partResult = RequestScopes.callAsChecked(group.getKey(), () -> putEvents(part, region));
+            failed += partResult.path("FailedEntryCount").asInt();
+            for (int i = 0; i < group.getValue().size(); i++) {
+                answered[group.getValue().get(i)] = partResult.path("Entries").path(i);
+            }
+        }
+        for (JsonNode entry : answered) {
+            resultEntries.add(entry);
+        }
+        result.put("FailedEntryCount", failed);
+        result.set("Entries", resultEntries);
+        return putEventsResult(result);
+    }
+
+    /**
+     * The state machine's account for an entry whose {@code EventBusName} is an ARN of a bus of that account, which
+     * it reaches even when a {@code Credentials} role's account is the one the task's calls run in; null for any
+     * other entry, sent in the account the calls run in.
+     */
+    private static String busAccount(JsonNode entry, String machineAccount) {
+        String bus = entry.path("EventBusName").asText(null);
+        return AwsArnUtils.isArnFor(bus, "events") && machineAccount.equals(AwsArnUtils.parse(bus).accountId())
+                ? machineAccount : null;
+    }
+
+    private JsonNode putEvents(JsonNode request, String region) {
         Response response;
         try {
-            response = eventBridgeHandler.handle("PutEvents", normalizeOptimizedPutEventsInput(input), region);
+            response = eventBridgeHandler.handle("PutEvents", request, region);
         } catch (AwsException e) {
             throw new FailStateException(sdkExceptionName("EventBridge", e.getErrorCode()), e.getMessage());
         }
         if (!(response.getEntity() instanceof JsonNode result)) {
             throw new FailStateException("EventBridge.SdkClientException", "PutEvents returned no response body");
         }
+        return result;
+    }
+
+    private JsonNode putEventsResult(JsonNode result) throws JsonProcessingException {
         if (result.path("FailedEntryCount").asInt() > 0) {
             throw new FailStateException("EventBridge.FailedEntry", objectMapper.writeValueAsString(result));
         }
