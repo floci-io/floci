@@ -1,19 +1,12 @@
 package io.floci.aws.services.rds.integration;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
-import io.floci.aws.services.rds.RdsService;
-import io.floci.aws.services.rds.container.RdsContainerManager;
 import io.floci.aws.services.rds.integration.PostgresRedshiftTypes.MappedColumn;
-import io.floci.aws.services.rds.integration.PostgresRedshiftTypes.SourceColumn;
-import io.floci.aws.services.rds.model.DbCluster;
-import io.floci.aws.services.rds.model.DbInstance;
+import io.floci.aws.services.rds.integration.RdsIntegrationSource.Source;
+import io.floci.aws.services.rds.integration.RdsIntegrationSource.SourceTable;
 import io.floci.aws.services.rds.model.Integration;
 import io.floci.aws.services.redshiftdata.RedshiftZeroEtlWriter;
 import io.floci.aws.services.redshiftdata.RedshiftZeroEtlWriter.ReplicatedTable;
@@ -29,12 +22,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
-import java.util.TreeMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -54,39 +44,14 @@ public class RdsIntegrationLoader implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(RdsIntegrationLoader.class);
 
-    // Ordinary and partitioned tables, but not a partition on its own, since reading the parent reads
-    // its partitions. Temporary and unlogged tables are skipped, as for a snapshot export. "key" is the
-    // column's position in the primary key, 0 when it is not part of one.
-    static final String CATALOG_SQL = "SELECT json_build_object('schema', n.nspname, 'table', c.relname, "
-            + "'column', a.attname, 'type', t.typname, 'typtype', t.typtype, 'category', t.typcategory, "
-            + "'builtin', t.typnamespace = 'pg_catalog'::regnamespace, "
-            + "'element', e.typname, 'elementtype', e.typtype, "
-            + "'elementbuiltin', COALESCE(e.typnamespace = 'pg_catalog'::regnamespace, false), "
-            + "'formatted', format_type(a.atttypid, a.atttypmod), "
-            // indkey is an int2vector, whose subscripts start at 0, so the position is counted rather than read
-            // off the subscript. Limit to indnkeyatts so INCLUDE columns are not treated as primary-key columns.
-            + "'key', COALESCE((SELECT k.n FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS k(att, n) "
-            + "WHERE k.att = a.attnum AND k.n <= i.indnkeyatts), 0)) "
-            + "FROM pg_class c "
-            + "JOIN pg_namespace n ON n.oid = c.relnamespace "
-            + "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped "
-            + "JOIN pg_type t ON t.oid = a.atttypid "
-            + "LEFT JOIN pg_type e ON e.oid = t.typelem AND t.typcategory = 'A' "
-            + "LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary "
-            + "WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition AND c.relpersistence = 'p' "
-            + "AND n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\\_%' "
-            + "ORDER BY n.nspname, c.relname, a.attnum";
-
     // How long one table may take to read out of the source.
     static final int TABLE_READ_TIMEOUT_SECONDS = 3600;
     private static final int LOAD_ATTEMPTS = 5;
     private static final Duration RETRY_DELAY = Duration.ofSeconds(5);
 
     private final RdsIntegrationService integrations;
-    private final RdsService rdsService;
-    private final RdsContainerManager containerManager;
+    private final RdsIntegrationSource sources;
     private final RedshiftZeroEtlWriter writer;
-    private final ObjectMapper objectMapper;
     private final boolean mock;
     private final Executor workers;
     private final int attempts;
@@ -95,22 +60,18 @@ public class RdsIntegrationLoader implements Resettable {
     private final AtomicLong generation = new AtomicLong();
 
     @Inject
-    public RdsIntegrationLoader(RdsIntegrationService integrations, RdsService rdsService,
-                                RdsContainerManager containerManager, RedshiftZeroEtlWriter writer,
-                                ObjectMapper objectMapper, EmulatorConfig config) {
-        this(integrations, rdsService, containerManager, writer, objectMapper, config.services().rds().mock(),
+    public RdsIntegrationLoader(RdsIntegrationService integrations, RdsIntegrationSource sources,
+                                RedshiftZeroEtlWriter writer, EmulatorConfig config) {
+        this(integrations, sources, writer, config.services().rds().mock(),
                 task -> Thread.ofVirtual().name("rds-integration-load").start(task), LOAD_ATTEMPTS, RETRY_DELAY);
     }
 
-    RdsIntegrationLoader(RdsIntegrationService integrations, RdsService rdsService,
-                         RdsContainerManager containerManager, RedshiftZeroEtlWriter writer,
-                         ObjectMapper objectMapper, boolean mock, Executor workers, int attempts,
+    RdsIntegrationLoader(RdsIntegrationService integrations, RdsIntegrationSource sources,
+                         RedshiftZeroEtlWriter writer, boolean mock, Executor workers, int attempts,
                          Duration retryDelay) {
         this.integrations = integrations;
-        this.rdsService = rdsService;
-        this.containerManager = containerManager;
+        this.sources = sources;
         this.writer = writer;
-        this.objectMapper = objectMapper;
         this.mock = mock;
         this.workers = workers;
         this.attempts = attempts;
@@ -212,10 +173,10 @@ public class RdsIntegrationLoader implements Resettable {
     /** Returns empty when the load was stopped or superseded while running. */
     private Optional<List<String>> copyTables(Integration integration, String sourceDatabase, String databaseName,
                                               String loadId, long startedIn) {
-        Source source = source(integration);
+        Source source = sources.source(integration);
         IntegrationDataFilter filter = IntegrationDataFilter.parsePostgres(integration.getDataFilter());
         List<String> failedTables = new ArrayList<>();
-        for (SourceTable table : catalog(source, sourceDatabase)) {
+        for (SourceTable table : sources.catalog(source, sourceDatabase)) {
             if (!isCurrentLoad(integration, sourceDatabase, databaseName, loadId, startedIn)) {
                 LOG.infov("Integration {0} stopped loading {1}", integration.getIntegrationArn(), sourceDatabase);
                 return Optional.empty();
@@ -223,7 +184,7 @@ public class RdsIntegrationLoader implements Resettable {
             if (!filter.includes(sourceDatabase, table.schema(), table.table())) {
                 continue;
             }
-            Optional<List<MappedColumn>> columns = mappedColumns(table);
+            Optional<List<MappedColumn>> columns = RdsIntegrationSource.mappedColumns(table);
             if (table.primaryKey().isEmpty()) {
                 LOG.warnv("Integration {0} skips table {1}.{2}.{3}: it has no primary key",
                         integration.getIntegrationArn(), sourceDatabase, table.schema(), table.table());
@@ -275,8 +236,7 @@ public class RdsIntegrationLoader implements Resettable {
             staged = Files.createTempFile("floci-rds-integration-", ".csv");
             try (OutputStream out = Files.newOutputStream(staged)) {
                 try {
-                    containerManager.queryPostgres(source.containerId(), source.masterUsername(), sourceDatabase,
-                            select.toString(), out, TABLE_READ_TIMEOUT_SECONDS);
+                    sources.query(source, sourceDatabase, select.toString(), out, TABLE_READ_TIMEOUT_SECONDS);
                 } catch (RuntimeException e) {
                     throw new SourceUnavailableException("Could not read table " + table.schema() + "."
                             + table.table() + " from source: " + e.getMessage(), e);
@@ -312,82 +272,6 @@ public class RdsIntegrationLoader implements Resettable {
             LOG.warnv(e, "Could not delete the staged rows in {0}", staged);
         }
     }
-
-    private static Optional<List<MappedColumn>> mappedColumns(SourceTable table) {
-        List<MappedColumn> mapped = new ArrayList<>();
-        for (SourceColumn column : table.columns()) {
-            Optional<MappedColumn> one = PostgresRedshiftTypes.map(column);
-            if (one.isEmpty()) {
-                return Optional.empty();
-            }
-            mapped.add(one.get());
-        }
-        return Optional.of(mapped);
-    }
-
-    /** The source's tables, in schema and table order, each with its columns and its primary key in key order. */
-    List<SourceTable> catalog(Source source, String sourceDatabase) {
-        String output = containerManager.queryPostgres(source.containerId(), source.masterUsername(),
-                sourceDatabase, CATALOG_SQL);
-        Map<String, SourceTable> tables = new LinkedHashMap<>();
-        Map<String, TreeMap<Integer, String>> keys = new LinkedHashMap<>();
-        for (String line : output.split("\r?\n")) {
-            if (line.isBlank()) {
-                continue;
-            }
-            JsonNode row = parse(line);
-            String schema = row.path("schema").asText();
-            String name = row.path("table").asText();
-            String tableKey = schema + "\u0000" + name;
-            SourceTable table = tables.computeIfAbsent(tableKey,
-                    ignored -> new SourceTable(schema, name, new ArrayList<>(), new ArrayList<>()));
-            String column = row.path("column").asText();
-            table.columns().add(new SourceColumn(column, row.path("type").asText(), row.path("typtype").asText(),
-                    row.path("category").asText(), row.path("builtin").asBoolean(),
-                    row.path("element").isNull() ? null : row.path("element").asText(null),
-                    row.path("elementtype").asText(null), row.path("elementbuiltin").asBoolean(),
-                    row.path("formatted").asText()));
-            int keyPosition = row.path("key").asInt();
-            if (keyPosition > 0) {
-                keys.computeIfAbsent(tableKey, ignored -> new TreeMap<>()).put(keyPosition, column);
-            }
-        }
-        keys.forEach((tableKey, positions) -> tables.get(tableKey).primaryKey().addAll(positions.values()));
-        return new ArrayList<>(tables.values());
-    }
-
-    private JsonNode parse(String line) {
-        try {
-            return objectMapper.readTree(line);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Could not read the source's catalog: " + e.getOriginalMessage(), e);
-        }
-    }
-
-    /** The source's running database, started first when it was recorded without one. */
-    private Source source(Integration integration) {
-        AwsArnUtils.Arn arn = AwsArnUtils.parse(integration.getSourceArn());
-        String resource = arn.resource();
-        String identifier = resource.substring(resource.indexOf(':') + 1);
-        if (resource.startsWith("cluster:")) {
-            DbCluster cluster = rdsService.ensureClusterBackend(identifier, arn.region());
-            return requireRunning(cluster.getContainerId(), cluster.getMasterUsername(), integration);
-        }
-        DbInstance instance = rdsService.ensureInstanceBackend(identifier, arn.region());
-        return requireRunning(instance.getContainerId(), instance.getMasterUsername(), integration);
-    }
-
-    private static Source requireRunning(String containerId, String masterUsername, Integration integration) {
-        if (containerId == null || containerId.isBlank()) {
-            throw new IllegalStateException("The source " + integration.getSourceArn()
-                    + " has no running database to copy from.");
-        }
-        return new Source(containerId, masterUsername);
-    }
-
-    record Source(String containerId, String masterUsername) {}
-
-    record SourceTable(String schema, String table, List<SourceColumn> columns, List<String> primaryKey) {}
 
     @Override
     public void clear() {
