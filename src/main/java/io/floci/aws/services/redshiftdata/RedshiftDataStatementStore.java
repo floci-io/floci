@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonAutoDetect;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -43,24 +44,32 @@ class RedshiftDataStatementStore {
     private final Duration ttl;
     private final Clock clock;
     private final RedshiftDataIdempotencyStore idempotency;
+    private final RegionResolver regions;
     // Created by the CDI lifecycle in start(); the test constructor never starts it, so unit
     // tests that build the store directly drive sweep() by hand and spawn no background thread.
     private ScheduledExecutorService sweeper;
 
     @Inject
-    RedshiftDataStatementStore(StorageFactory storageFactory, EmulatorConfig config, RedshiftDataIdempotencyStore idempotency) {
+    RedshiftDataStatementStore(StorageFactory storageFactory, EmulatorConfig config, RedshiftDataIdempotencyStore idempotency,
+                               RegionResolver regions) {
         this.statements = storageFactory.create("redshift-data", "statements.json",
                 new TypeReference<Map<String, StoredStatement>>() {});
         this.ttl = Duration.ofHours(Math.max(1, config.services().redshiftData().resultTtlHours()));
         this.clock = Clock.systemUTC();
         this.idempotency = idempotency;
+        this.regions = regions;
     }
 
     RedshiftDataStatementStore(int resultTtlHours, Clock clock) {
+        this(resultTtlHours, clock, new RegionResolver("us-east-1", "000000000000"));
+    }
+
+    RedshiftDataStatementStore(int resultTtlHours, Clock clock, RegionResolver regions) {
         this.statements = AccountAwareStorageBackend.inMemory("000000000000");
         this.ttl = Duration.ofHours(Math.max(1, resultTtlHours));
         this.clock = clock;
         this.idempotency = null;
+        this.regions = regions;
     }
 
     @PostConstruct
@@ -114,20 +123,42 @@ class RedshiftDataStatementStore {
         return createdAt.plus(ttl);
     }
 
+    /**
+     * The statement {@code id} names in the request's account and Region, or null when it ran in another Region. A batch's
+     * sub-statement ({@code <batch id>:<n>}) belongs to its batch's Region.
+     */
     StoredStatement get(String id) {
-        return statements.get(id).map(StoredStatement::snapshot).orElse(null);
+        StoredStatement stored = statements.get(id).map(StoredStatement::snapshot).orElse(null);
+        if (stored == null) {
+            return null;
+        }
+        int childSuffix = id.indexOf(':');
+        StoredStatement owner = childSuffix < 0 ? stored : statements.get(id.substring(0, childSuffix)).orElse(null);
+        return owner != null && inRequestRegion(owner) ? stored : null;
     }
 
     StoredStatement getForAccount(String accountId, String id) {
         return statements.getForAccount(accountId, id).map(StoredStatement::snapshot).orElse(null);
     }
 
+    /** The request's account's statements that ran in the request's Region, batches' sub-statements left out. */
     List<StoredStatement> values() {
-        return statements.scan(k -> true).stream().map(StoredStatement::summary).toList();
+        return statements.scan(k -> k.indexOf(':') < 0).stream()
+                .filter(this::inRequestRegion)
+                .map(StoredStatement::summary).toList();
     }
 
     void clear() {
         statements.clear();
+    }
+
+    /**
+     * Statement ids are random, so a statement keeps its key and is placed by the Region it records. One stored before
+     * statements recorded a Region is the default Region's, as {@code RegionScopedStorage} reads a regionless key.
+     */
+    private boolean inRequestRegion(StoredStatement statement) {
+        String region = statement.region == null ? regions.getDefaultRegion() : statement.region;
+        return region.equals(regions.getRegion());
     }
 
     String accountId() {
