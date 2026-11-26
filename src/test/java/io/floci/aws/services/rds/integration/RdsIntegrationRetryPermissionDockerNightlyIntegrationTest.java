@@ -8,12 +8,16 @@ import io.floci.aws.services.redshift.spectrum.ExternalStatement;
 import io.floci.aws.services.redshift.spectrum.SpectrumSession;
 import io.floci.aws.services.redshift.spectrum.SpectrumSqlException;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.opentest4j.TestAbortedException;
 
 import java.io.InputStream;
@@ -45,7 +49,9 @@ import static org.mockito.Mockito.when;
  */
 @Tag("docker")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class RdsIntegrationRetryPermissionDockerIntegrationTest {
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
+class RdsIntegrationRetryPermissionDockerNightlyIntegrationTest {
 
     private static final String SUPERUSER_PASSWORD = "floci-test";
     private static final String ROLE_PASSWORD = "retry-test";
