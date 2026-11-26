@@ -309,6 +309,8 @@ byte-identical. The two gates split along the sources:
 - `--check` is offline and needs the pinned botocore. The file must be well-formed, and every
   operation's resources must be exactly what the rules give from botocore for the resource types and
   ARN formats the file records, so a hand-edited entry fails.
+  Its namespaces, the reasons it gives for those it does not read, and its other namespaces must be
+  the generator's, so a namespace taken out of `NAMESPACES` without the file regenerated fails.
 - `--verify` is online and stdlib-only. Every operation must still be checked as the action, on the
   resource types, the file records, and every type must still have its ARN format; every forwarded
   action must still act on the type, of the format and with the `ViaService` key, the file records,
@@ -348,6 +350,7 @@ from regen_iam_passed_roles import (
     _shown,
     load_models,
     namespace_of,
+    namespace_problems,
 )
 from regen_partitions import load_model as load_json_file
 from regen_partitions import resolve_botocore_data
@@ -4871,6 +4874,11 @@ def reads(operation: str) -> bool:
     return namespace_of(operation) in NAMESPACES
 
 
+def stale_namespaces(document: dict) -> list[str]:
+    """Where the file's namespaces part from `NAMESPACES` and `NOT_COVERED` (`namespace_problems`)."""
+    return namespace_problems(document, reads, NAMESPACES, NOT_COVERED)
+
+
 def _check_overrides(covered: dict[str, dict]) -> None:
     """Every operation `MEASURED` gives is one the file reads, and no namespace is in two places."""
     stale = [f"MEASURED gives {operation}, which the file does not read" for operation in MEASURED
@@ -5502,7 +5510,7 @@ def main(argv: list[str] | None = None) -> int:
         problems = validate(document)
         if not problems and args.check:
             data, _ = resolve_botocore_data(args.botocore_data)
-            problems = derive(document, data)
+            problems = stale_namespaces(document) + derive(document, data)
         for problem in problems:
             print(f"error: {problem}", file=sys.stderr)
         if problems:
