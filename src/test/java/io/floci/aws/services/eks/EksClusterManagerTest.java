@@ -5649,8 +5649,9 @@ class EksClusterManagerTest {
         }
 
         /**
-         * A removed node's instance is forgotten by the cluster too, so the readiness poller doesn't join it again
-         * while it shuts down; a node that can't be deleted keeps both.
+         * A removed node's instance is forgotten by the cluster too, and isn't joined again, so neither the readiness
+         * poller nor a join that waited for the removal brings its node back while it shuts down; a node that can't
+         * be deleted keeps both.
          */
         @Test
         void aRemovedNodesInstanceIsForgottenByTheCluster() {
@@ -5673,6 +5674,10 @@ class EksClusterManagerTest {
 
             assertEquals(Map.of(), cluster.getJoinedInstanceIds());
             assertFalse(manager.isInstanceJoined(cluster, inst.getInstanceId()));
+            // A join that was waiting while it was removed doesn't bring its node back.
+            manager.joinInstance(cluster, inst);
+            assertFalse(manager.isInstanceJoined(cluster, inst.getInstanceId()));
+            assertEquals(Map.of(), cluster.getJoinedInstanceIds());
         }
 
         @Test

@@ -261,6 +261,9 @@ public class EksClusterManager
     private final Map<String, Set<String>> programmedClusterRoutes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> clusterRouteLocks = new ConcurrentHashMap<>();
     private final StripedLocks podIdentityForwardLocks = new StripedLocks(256);
+    private final StripedLocks joinLocks = new StripedLocks(256);
+    /** Instances whose node was removed, never joined again: they are being terminated. */
+    private final Set<String> removedInstanceIds = ConcurrentHashMap.newKeySet();
     private record VpcLease(String accountId, String region, String vpcId, String subnetId, String address) {}
     private record ClusterVpcSubnet(String vpcId, String subnetId) {}
     private final Map<String, VpcLease> clusterVpcLeases = new ConcurrentHashMap<>();
@@ -4251,6 +4254,27 @@ public class EksClusterManager
         if (cluster == null || instance == null) {
             return;
         }
+        // One instance's join and removal run one at a time, so a join that was waiting doesn't bring back a node
+        // just removed.
+        boolean joined;
+        synchronized (joinLocks.lockFor(instance.getInstanceId())) {
+            joined = !removedInstanceIds.contains(instance.getInstanceId()) && joinHoldingLock(cluster, instance);
+        }
+        if (!joined) {
+            return;
+        }
+        for (Consumer<Instance> listener : nodeRegistrationListeners) {
+            try {
+                listener.accept(instance);
+            } catch (Exception e) {
+                LOG.warnv("Node registration listener failed for joined instance {0} on cluster {1}: {2}",
+                        instance.getInstanceId(), cluster.getName(), e.getMessage());
+            }
+        }
+    }
+
+    /** Joins the instance, holding its join lock; false when it was joined already. */
+    private boolean joinHoldingLock(Cluster cluster, Instance instance) {
         String clusterKey = clusterResourceName(cluster);
         synchronized (joinedClusterInstances) {
             for (Map.Entry<String, Map<String, Instance>> entry : joinedClusterInstances.entrySet()) {
@@ -4261,7 +4285,7 @@ public class EksClusterManager
             }
             Map<String, Instance> current = joinedClusterInstances.get(clusterKey);
             if (current != null && current.containsKey(instance.getInstanceId())) {
-                return;
+                return false;
             }
         }
 
@@ -4289,15 +4313,7 @@ public class EksClusterManager
                     .put(instance.getInstanceId(), instance);
         }
         recordJoinedInstanceId(cluster, instance);
-
-        for (Consumer<Instance> listener : nodeRegistrationListeners) {
-            try {
-                listener.accept(instance);
-            } catch (Exception e) {
-                LOG.warnv("Node registration listener failed for joined instance {0} on cluster {1}: {2}",
-                        instance.getInstanceId(), cluster.getName(), e.getMessage());
-            }
-        }
+        return true;
     }
 
     /**
@@ -4306,6 +4322,13 @@ public class EksClusterManager
      * joined, so the caller keeps it and can try again.
      */
     void removeJoinedNode(Cluster cluster, Instance instance) {
+        synchronized (joinLocks.lockFor(instance.getInstanceId())) {
+            removeJoinedNodeHoldingLock(cluster, instance);
+            removedInstanceIds.add(instance.getInstanceId());
+        }
+    }
+
+    private void removeJoinedNodeHoldingLock(Cluster cluster, Instance instance) {
         String region = instance.getRegion() != null ? instance.getRegion() : clusterRegion(cluster);
         String containerId = cluster.getContainerId();
         if (containerId != null && !containerId.isBlank()) {
