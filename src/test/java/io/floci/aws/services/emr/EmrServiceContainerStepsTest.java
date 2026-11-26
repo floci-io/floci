@@ -1101,6 +1101,7 @@ class EmrServiceContainerStepsTest {
 
     @Test
     void aClusterWithFlocisTrinoRunsItBesideTheMetastoreWhereItsStepsTrinoCliReachesIt() {
+        fixture.clusterStorage.ownNetwork = true;
         EmrService withTrino = fixture.withTrino();
         EmrStep query = sparkStep("query", "CONTINUE");
         List<String> args = List.of("trino-cli", "--execute", "SHOW CATALOGS");
@@ -1186,6 +1187,24 @@ class EmrServiceContainerStepsTest {
         assertEquals(Optional.empty(), service.trinoCluster(trinoId));
         fixture.clusterStorage.ownNetwork = false;
         assertEquals(Optional.empty(), withTrino.trinoCluster(trinoId));
+    }
+
+    @Test
+    void onANetworkItsStepsShareTheirTrinoCliIsGivenNoCoordinatorAsNoneRunsThere() {
+        // docker-network host, container:<id> or none: the primary node runs no metastore, so no Trino.
+        fixture.clusterStorage.ownNetwork = false;
+        EmrService withTrino = fixture.withTrino();
+        EmrStep query = sparkStep("query", "CONTINUE");
+        query.setArgs(List.of("trino-cli", "--execute", "SHOW CATALOGS"));
+        EmrCluster requested = cluster("trino", true, query);
+        requested.setApplications(TRINO);
+        withTrino.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        assertFalse(runner.jobs.get(0).environment().containsKey("FLOCI_TRINO_SERVER"));
+        // Nor does the cluster start one as it becomes ready.
+        assertEquals(0, fixture.stepThreadsWaiting());
     }
 
     @Test
