@@ -7,6 +7,7 @@ import com.github.dockerjava.core.DefaultDockerClientConfig;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.testing.ParallelLocks;
+import org.apache.hc.core5.http.ConnectionRequestTimeoutException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.ResourceAccessMode;
@@ -30,6 +31,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
+import static io.floci.aws.core.common.docker.DockerTestSupport.rootCause;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.*;
@@ -49,6 +51,7 @@ import static org.mockito.Mockito.when;
  * assertion failure, normalizeDockerHost method does not exist yet,
  * confirming the missing normalization logic).
  */
+@ResourceLock(value = ParallelLocks.DOCKER_ACTIVE_STREAMS, mode = ResourceAccessMode.READ)
 @ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class DockerClientProducerTest {
 
@@ -766,6 +769,7 @@ class DockerClientProducerTest {
     void dockerClient_opensAtMostMaxConnectionsToTheDaemon() throws Exception {
         try (ServerSocket daemon = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
             BlockingQueue<Socket> accepted = new LinkedBlockingQueue<>();
+            BlockingQueue<Throwable> failures = new LinkedBlockingQueue<>();
             Thread acceptor = new Thread(() -> {
                 try {
                     while (!daemon.isClosed()) {
@@ -784,7 +788,7 @@ class DockerClientProducerTest {
             when(docker.dockerHost()).thenReturn("tcp://127.0.0.1:" + daemon.getLocalPort());
             when(docker.dockerConfigPath()).thenReturn(Optional.empty());
             when(docker.maxConnections()).thenReturn(2);
-            when(docker.connectionRequestTimeoutSeconds()).thenReturn(30);
+            when(docker.connectionRequestTimeoutSeconds()).thenReturn(1);
             when(docker.apiTimeoutSeconds()).thenReturn(300);
 
             DockerClient client = new DockerClientProducer(config).dockerClient();
@@ -795,18 +799,21 @@ class DockerClientProducerTest {
                             .withFollowStream(true)
                             .exec(new ResultCallback.Adapter<Frame>() {
                                 @Override
-                                public void onError(Throwable ignored) {
-                                    // Expected once the client is closed under the pending streams.
+                                public void onError(Throwable failure) {
+                                    failures.add(failure);
                                 }
                             });
                 }
 
                 try (Socket first = accepted.poll(10, TimeUnit.SECONDS);
-                     Socket second = accepted.poll(10, TimeUnit.SECONDS);
-                     Socket third = accepted.poll(1, TimeUnit.SECONDS)) {
+                     Socket second = accepted.poll(10, TimeUnit.SECONDS)) {
                     assertNotNull(first, "first stream should connect");
                     assertNotNull(second, "second stream should connect");
-                    assertNull(third, "third stream should wait for a pooled connection instead of opening one");
+                    Throwable failure = failures.poll(10, TimeUnit.SECONDS);
+                    assertNotNull(failure, "the third stream must reach the pool lease deadline");
+                    assertInstanceOf(ConnectionRequestTimeoutException.class, rootCause(failure));
+                    assertNull(accepted.poll(),
+                            "third stream should wait for a pooled connection instead of opening one");
                 }
             } finally {
                 client.close();

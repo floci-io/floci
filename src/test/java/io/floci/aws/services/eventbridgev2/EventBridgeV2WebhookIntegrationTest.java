@@ -21,9 +21,12 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.eventbridgev2.EventBridgeV2Client;
 import software.amazon.awssdk.services.eventbridgev2.model.CreateEventSourceResponse;
 import software.amazon.awssdk.services.eventbridgev2.model.EventSourceConfiguration;
+import software.amazon.awssdk.services.eventbridgev2.model.InvalidInputException;
+import software.amazon.awssdk.services.eventbridgev2.model.RotateWebhookCredentialsResponse;
 import software.amazon.awssdk.services.eventbridgev2.model.TransformerType;
 import software.amazon.awssdk.services.eventbridgev2.model.WebhookAuthConfiguration;
 import software.amazon.awssdk.services.eventbridgev2.model.WebhookEventsSourceConfiguration;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.Message;
 import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
@@ -49,6 +52,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** A POST to the URL of a webhook event source becomes an event on its bus, read here from the queues of subscribers. */
@@ -255,6 +259,53 @@ class EventBridgeV2WebhookIntegrationTest {
         }
     }
 
+    @Test
+    void rotatedCredentialsReplaceTheSecretAndTheReplacedOnesStayValidOnlyForTheLastRotation() {
+        String suffix = suffix();
+        try (EventBridgeV2Client events = events(); SecretsManagerClient secrets = secrets()) {
+            String bus = events.createEventBus(request -> request.name("v2-rot-" + suffix)).eventBusArn();
+            CreateEventSourceResponse created = events.createEventSource(request -> request.name("rot-" + suffix)
+                    .eventBusArn(bus).configuration(EventSourceConfiguration.fromWebhookEventsConfiguration(
+                            configuration -> configuration.roleArn(ROLE)
+                                    .authConfiguration(staticToken("X-Token", "original-token")))));
+            URI url = URI.create(created.eventSourceDetails().webhookDetails().webhookUrl());
+            Endpoint endpoint = new Endpoint(created.eventSourceArn(), url.getAuthority(), url.getPath());
+            String secretArn = created.eventSourceDetails().webhookDetails().secretArn();
+
+            RotateWebhookCredentialsResponse supplied = events.rotateWebhookCredentials(request -> request
+                    .eventSourceArn(endpoint.arn()).clientToken("rotation-" + suffix)
+                    .credential(credential -> credential.staticTokenSecretValue("second-token")));
+
+            assertEquals(secretArn, supplied.secretArn());
+            assertEquals("second-token", secretValue(secrets, secretArn, null));
+            assertEquals("original-token", secretValue(secrets, secretArn, "AWSPREVIOUS"));
+            expect(post(endpoint, "{}", "X-Token", "second-token"), 200, "OK");
+            expect(post(endpoint, "{}", "X-Token", "original-token"), 200, "OK");
+
+            RotateWebhookCredentialsResponse replay = events.rotateWebhookCredentials(request -> request
+                    .eventSourceArn(endpoint.arn()).clientToken("rotation-" + suffix)
+                    .credential(credential -> credential.staticTokenSecretValue("second-token")));
+            assertEquals(secretArn, replay.secretArn());
+            assertEquals("original-token", secretValue(secrets, secretArn, "AWSPREVIOUS"));
+
+            events.rotateWebhookCredentials(request -> request.eventSourceArn(endpoint.arn()));
+            String generated = secretValue(secrets, secretArn, null);
+            assertEquals(44, generated.length());
+            expect(post(endpoint, "{}", "X-Token", generated), 200, "OK");
+            expect(post(endpoint, "{}", "X-Token", "second-token"), 200, "OK");
+            expect(post(endpoint, "{}", "X-Token", "original-token"), 403, "Forbidden");
+
+            InvalidInputException refused = assertThrows(InvalidInputException.class,
+                    () -> events.rotateWebhookCredentials(request -> request.eventSourceArn(endpoint.arn())
+                            .credential(credential -> credential.basicHttpPassword("second-pw"))));
+            assertEquals("Credential must set StaticTokenSecretValue, because the authentication type of this "
+                    + "EventSource is StaticTokenAuthConfiguration", refused.awsErrorDetails().errorMessage());
+
+            events.deleteEventSource(request -> request.eventSourceArn(endpoint.arn()));
+            events.deleteEventBus(request -> request.eventBusArn(bus));
+        }
+    }
+
     // ──────────────────────────── Fixtures ────────────────────────────
 
     private record Fixture(String bus, String metadataQueue, String rawQueue, String metadataSubscriber,
@@ -414,6 +465,14 @@ class EventBridgeV2WebhookIntegrationTest {
 
     private static EventBridgeV2Client events() {
         return AwsTestClients.create(EventBridgeV2Client.builder(), "000000000000", Region.US_EAST_1);
+    }
+
+    private static SecretsManagerClient secrets() {
+        return AwsTestClients.create(SecretsManagerClient.builder(), "000000000000", Region.US_EAST_1);
+    }
+
+    private static String secretValue(SecretsManagerClient secrets, String secretArn, String stage) {
+        return secrets.getSecretValue(request -> request.secretId(secretArn).versionStage(stage)).secretString();
     }
 
     private static SqsClient sqs() {

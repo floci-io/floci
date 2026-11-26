@@ -3,8 +3,10 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 
@@ -25,7 +27,10 @@ final class IamConditionKeys {
 
     private record Table(Map<String, Map<String, String>> members, Map<String, Map<String, String>> targets,
                          Map<String, Map<String, Resource>> resources,
-                         Map<String, Map<String, RequestTags>> requestTags) {}
+                         Map<String, Map<String, RequestTags>> requestTags,
+                         Map<String, Set<String>> unreadTagPrefixes) {}
+
+    private static final String TAG_KEY = "${TagKey}";
 
     private static final Table TABLE = VendoredResources.read(
             "aws/iam-condition-keys.json", "IAM condition keys", input -> {
@@ -37,7 +42,8 @@ final class IamConditionKeys {
                                 RequestResourceMembers.pattern(text(entry, "arn")))),
                         section(document.path("requestTags"), entry -> new RequestTags(text(entry, "member"),
                                 entry.has("keyMember") ? text(entry, "keyMember") : null,
-                                entry.has("keyMember") ? text(entry, "valueMember") : null)));
+                                entry.has("keyMember") ? text(entry, "valueMember") : null)),
+                        unreadTagPrefixes(document.path("notRead")));
             });
 
     private IamConditionKeys() {}
@@ -52,6 +58,25 @@ final class IamConditionKeys {
                     .put(text(entry, "key"), value.apply(entry));
         }
         byAction.replaceAll((action, keys) -> Map.copyOf(keys));
+        return Map.copyOf(byAction);
+    }
+
+    /**
+     * For each action, the prefixes of the tag keys the table does not read for it ({@code aws:ResourceTag/} for a
+     * {@code notRead} entry on {@code aws:ResourceTag/${TagKey}}).
+     */
+    private static Map<String, Set<String>> unreadTagPrefixes(JsonNode entries) {
+        Map<String, Set<String>> byAction = new LinkedHashMap<>();
+        if (entries.isArray()) {
+            for (JsonNode entry : entries) {
+                String key = text(entry, "key");
+                if (key.endsWith(TAG_KEY)) {
+                    byAction.computeIfAbsent(text(entry, "action"), action -> new HashSet<>())
+                            .add(key.substring(0, key.length() - TAG_KEY.length()));
+                }
+            }
+        }
+        byAction.replaceAll((action, prefixes) -> Set.copyOf(prefixes));
         return Map.copyOf(byAction);
     }
 
@@ -85,5 +110,14 @@ final class IamConditionKeys {
 
     static Map<String, RequestTags> requestTags(String action) {
         return TABLE.requestTags().getOrDefault(action, Map.of());
+    }
+
+    /**
+     * The prefixes of the tag keys ({@code aws:ResourceTag/}, {@code iam:ResourceTag/}) the table does not read for
+     * {@code action}: {@code iam:PassRole}'s resource-tag keys, AWS warning that ResourceTag conditions with PassRole
+     * "do not have reliable results". Empty when it reads them all.
+     */
+    static Set<String> unreadTagPrefixes(String action) {
+        return action == null ? Set.of() : TABLE.unreadTagPrefixes().getOrDefault(action, Set.of());
     }
 }

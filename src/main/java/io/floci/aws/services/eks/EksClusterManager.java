@@ -1,6 +1,7 @@
 package io.floci.aws.services.eks;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
@@ -131,6 +132,7 @@ public class EksClusterManager
         DnsRecordSource, DnsForwardingRuleSource {
 
     private static final Logger LOG = Logger.getLogger(EksClusterManager.class);
+    private static final ObjectMapper NODE_MAPPER = new ObjectMapper();
     private static final int K3S_API_SERVER_PORT = 6443;
     static final String DEFAULT_NODE_INSTANCE_TYPE = "m5.large";
     /** The tag naming the cluster, on the cluster's node and on its node groups' Auto Scaling groups. */
@@ -266,6 +268,9 @@ public class EksClusterManager
     private final Map<String, Set<String>> programmedClusterRoutes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> clusterRouteLocks = new ConcurrentHashMap<>();
     private final StripedLocks podIdentityForwardLocks = new StripedLocks(256);
+    private final StripedLocks joinLocks = new StripedLocks(256);
+    /** Instances whose node was removed, never joined again: they are being terminated. */
+    private final Set<String> removedInstanceIds = ConcurrentHashMap.newKeySet();
     private record VpcLease(String accountId, String region, String vpcId, String subnetId, String address) {}
     private record ClusterVpcSubnet(String vpcId, String subnetId) {}
     private final Map<String, VpcLease> clusterVpcLeases = new ConcurrentHashMap<>();
@@ -4277,6 +4282,27 @@ public class EksClusterManager
         if (cluster == null || instance == null) {
             return;
         }
+        // One instance's join and removal run one at a time, so a join that was waiting doesn't bring back a node
+        // just removed.
+        boolean joined;
+        synchronized (joinLocks.lockFor(instance.getInstanceId())) {
+            joined = !removedInstanceIds.contains(instance.getInstanceId()) && joinHoldingLock(cluster, instance);
+        }
+        if (!joined) {
+            return;
+        }
+        for (Consumer<Instance> listener : nodeRegistrationListeners) {
+            try {
+                listener.accept(instance);
+            } catch (Exception e) {
+                LOG.warnv("Node registration listener failed for joined instance {0} on cluster {1}: {2}",
+                        instance.getInstanceId(), cluster.getName(), e.getMessage());
+            }
+        }
+    }
+
+    /** Joins the instance, holding its join lock; false when it was joined already. */
+    private boolean joinHoldingLock(Cluster cluster, Instance instance) {
         String clusterKey = clusterResourceName(cluster);
         synchronized (joinedClusterInstances) {
             for (Map.Entry<String, Map<String, Instance>> entry : joinedClusterInstances.entrySet()) {
@@ -4287,7 +4313,7 @@ public class EksClusterManager
             }
             Map<String, Instance> current = joinedClusterInstances.get(clusterKey);
             if (current != null && current.containsKey(instance.getInstanceId())) {
-                return;
+                return false;
             }
         }
 
@@ -4315,14 +4341,39 @@ public class EksClusterManager
                     .put(instance.getInstanceId(), instance);
         }
         recordJoinedInstanceId(cluster, instance);
+        return true;
+    }
 
-        for (Consumer<Instance> listener : nodeRegistrationListeners) {
-            try {
-                listener.accept(instance);
-            } catch (Exception e) {
-                LOG.warnv("Node registration listener failed for joined instance {0} on cluster {1}: {2}",
-                        instance.getInstanceId(), cluster.getName(), e.getMessage());
+    /**
+     * Takes a joined instance out of the cluster before it is terminated: its node is deleted and it is no longer
+     * joined, and the cluster no longer records it. A node that can't be deleted throws and leaves the instance
+     * joined, so the caller keeps it and can try again.
+     */
+    void removeJoinedNode(Cluster cluster, Instance instance) {
+        synchronized (joinLocks.lockFor(instance.getInstanceId())) {
+            removeJoinedNodeHoldingLock(cluster, instance);
+            removedInstanceIds.add(instance.getInstanceId());
+        }
+    }
+
+    private void removeJoinedNodeHoldingLock(Cluster cluster, Instance instance) {
+        String region = instance.getRegion() != null ? instance.getRegion() : clusterRegion(cluster);
+        String containerId = cluster.getContainerId();
+        if (containerId != null && !containerId.isBlank()) {
+            String nodeName = deriveInstanceNodeName(instance, region);
+            ContainerExec.Result result = execInContainerForResult(containerId, new String[]{"kubectl", "delete",
+                    "node", nodeName, "--ignore-not-found=true", "--wait=false"}, 15);
+            if (result.exitCode() != 0) {
+                throw new IllegalStateException("kubectl delete node " + nodeName + " failed: " + result.summary());
             }
+        }
+        Map<String, Instance> joined = joinedClusterInstances.get(clusterResourceName(cluster));
+        if (joined != null) {
+            joined.remove(instance.getInstanceId());
+        }
+        // Forgotten as well, so the readiness poller doesn't join it again while its instance is shutting down.
+        if (cluster.getJoinedInstanceIds() != null) {
+            cluster.getJoinedInstanceIds().remove(instance.getInstanceId());
         }
     }
 
@@ -4409,12 +4460,22 @@ public class EksClusterManager
             String k8sArch = (rawArch != null && (rawArch.toLowerCase(Locale.ROOT).contains("arm64")
                     || rawArch.toLowerCase(Locale.ROOT).contains("aarch64"))) ? "arm64" : "amd64";
 
-            String nodeJson = String.format(Locale.ROOT,
-                    "{\"apiVersion\":\"v1\",\"kind\":\"Node\",\"metadata\":{\"name\":\"%s\","
-                    + "\"labels\":{\"topology.kubernetes.io/zone\":\"%s\",\"topology.kubernetes.io/region\":\"%s\","
-                    + "\"node.kubernetes.io/instance-type\":\"%s\",\"kubernetes.io/hostname\":\"%s\","
-                    + "\"kubernetes.io/os\":\"linux\",\"kubernetes.io/arch\":\"%s\"}},\"spec\":{\"providerID\":\"%s\"}}",
-                    nodeName, az, region, instanceType, nodeName, k8sArch, providerId);
+            // As a kubelet registers: the labels and taints its NodeConfig's flags name, under the node's own labels.
+            Map<String, String> labels = new LinkedHashMap<>(EksBootstrapUserData.nodeLabels(instance.getUserData()));
+            labels.put("topology.kubernetes.io/zone", az);
+            labels.put("topology.kubernetes.io/region", region);
+            labels.put("node.kubernetes.io/instance-type", instanceType);
+            labels.put("kubernetes.io/hostname", nodeName);
+            labels.put("kubernetes.io/os", "linux");
+            labels.put("kubernetes.io/arch", k8sArch);
+            Map<String, Object> spec = new LinkedHashMap<>();
+            spec.put("providerID", providerId);
+            List<Map<String, String>> taints = EksBootstrapUserData.registerWithTaints(instance.getUserData());
+            if (!taints.isEmpty()) {
+                spec.put("taints", taints);
+            }
+            String nodeJson = NODE_MAPPER.writeValueAsString(Map.of("apiVersion", "v1", "kind", "Node",
+                    "metadata", Map.of("name", nodeName, "labels", labels), "spec", spec));
 
             ContainerExec.Result applyRes = execInContainerForResult(containerId,
                     new String[]{"sh", "-c", "echo '" + nodeJson.replace("'", "'\\''") + "' | kubectl apply -f -"}, 15);

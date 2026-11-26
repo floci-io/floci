@@ -54,7 +54,7 @@ import java.util.concurrent.TimeUnit;
  * balancers serve TCP and HTTP only, and a Service with no TCP NodePort gets no load balancer.
  */
 @ApplicationScoped
-public class EksAutoModeLoadBalancers {
+public class EksAutoModeLoadBalancers implements EksAutoModeCleanup {
 
     private static final Logger LOG = Logger.getLogger(EksAutoModeLoadBalancers.class);
     static final String NLB_CLASS = "eks.amazonaws.com/nlb"; // partition-literal: a Kubernetes class name, not a host
@@ -167,6 +167,12 @@ public class EksAutoModeLoadBalancers {
         resources.loadBalancersOf(cluster, region, STACK_TAG, "", "network")
                 .forEach((stack, lb) -> delete(cluster, region, stack, lb));
         ingresses.deleteLoadBalancers(cluster, region);
+    }
+
+    /** The cluster's load balancers go with it, as the controller's go on AWS. */
+    @Override
+    public void clusterDeleted(Cluster cluster, String region) {
+        deleteLoadBalancers(cluster, region);
     }
 
     /**

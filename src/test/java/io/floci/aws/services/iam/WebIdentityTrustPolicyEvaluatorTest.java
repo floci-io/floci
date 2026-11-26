@@ -46,7 +46,25 @@ class WebIdentityTrustPolicyEvaluatorTest {
     }
 
     private boolean allows(String policy, Map<String, List<String>> claims) {
-        return evaluator.allows(policy, PROVIDER_ARN, PREFIX, claims, SESSION_NAME);
+        return evaluator.allows(policy, PROVIDER_ARN, PREFIX, claims, SESSION_NAME, Map.of());
+    }
+
+    /**
+     * The tags of the role being assumed, which a trust policy reads under the keys its type carries beside the
+     * token's claims: a tag key matched whatever its case, its value exactly, and a role without the tag not matching.
+     */
+    @Test
+    void readsTheTagsOfTheRoleBeingAssumed() {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                 "Principal":{"Federated":"%s"},"Action":"sts:AssumeRoleWithWebIdentity",
+                 "Condition":{"StringEquals":{"%s:sub":"%s","aws:ResourceTag/Team":"data"}}}]}"""
+                .formatted(PROVIDER_ARN, PREFIX, SUBJECT);
+        Map<String, List<String>> roleTags = Map.of("aws:ResourceTag/team", List.of("data"));
+        assertTrue(evaluator.allows(policy, PROVIDER_ARN, PREFIX, claims(SUBJECT), SESSION_NAME, roleTags));
+        assertFalse(evaluator.allows(policy, PROVIDER_ARN, PREFIX, claims(SUBJECT), SESSION_NAME,
+                Map.of("aws:ResourceTag/team", List.of("Data"))));
+        assertFalse(allows(policy, claims(SUBJECT)));
     }
 
     @Test
@@ -88,7 +106,7 @@ class WebIdentityTrustPolicyEvaluatorTest {
         String policy = irsaTrustPolicy(SUBJECT);
         assertFalse(evaluator.allows(policy,
                 "arn:aws:iam::000000000000:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/OTHER",
-                PREFIX, claims(SUBJECT), SESSION_NAME));
+                PREFIX, claims(SUBJECT), SESSION_NAME, Map.of()));
     }
 
     @Test
@@ -281,7 +299,7 @@ class WebIdentityTrustPolicyEvaluatorTest {
                 "%s:sub":"%s","sts:RoleSessionName":"%s"}}}]}"""
                 .formatted(PROVIDER_ARN, PREFIX, SUBJECT, SESSION_NAME);
         assertTrue(allows(policy, claims(SUBJECT)));
-        assertFalse(evaluator.allows(policy, PROVIDER_ARN, PREFIX, claims(SUBJECT), "other-session"));
+        assertFalse(evaluator.allows(policy, PROVIDER_ARN, PREFIX, claims(SUBJECT), "other-session", Map.of()));
         assertFalse(allows(policy, claims("system:serviceaccount:my-namespace:other")));
     }
 }

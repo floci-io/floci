@@ -110,6 +110,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -658,6 +659,30 @@ class Ec2ServiceTest {
         assertTrue(service.describeTags("us-east-1", Map.of("resource-id", List.of(rootId, dataId))).isEmpty());
         verify(devices, never()).deleteVolume(rootId);
         verify(devices).deleteVolume(dataId);
+    }
+
+    @Test
+    void launchAttachesTheVolumesItCreatesOnceTheInstanceRuns() {
+        Ec2VolumeBlockDeviceManager devices = mock(Ec2VolumeBlockDeviceManager.class);
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        doAnswer(invocation -> {
+            invocation.<Runnable>getArgument(7).run();
+            return null;
+        }).when(containerManager).launch(any(Instance.class), any(ResolvedAmiImage.class), any(), anyString(),
+                any(), anyList(), anyMap(), any(Runnable.class));
+        AmiImageResolver resolver = mock(AmiImageResolver.class);
+        when(resolver.resolveImage("ami-test")).thenReturn(ResolvedAmiImage.minimal("guest:latest"));
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager,
+                mock(Ec2PortForwardManager.class), resolver, mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(), null, null, devices);
+
+        Reservation launch = launchKeepingADataVolume(service);
+
+        Instance instance = launch.getInstances().getFirst();
+        String dataId = launch.getLaunchVolumeIds().stream()
+                .filter(id -> !id.equals(instance.getRootVolumeId())).findFirst().orElseThrow();
+        verify(devices).attachVolume(argThat(volume -> dataId.equals(volume.getVolumeId())), eq(instance),
+                eq("/dev/sdf"));
     }
 
     private static Reservation launchKeepingADataVolume(Ec2Service service) {
@@ -7520,6 +7545,52 @@ class Ec2ServiceTest {
         assertDoesNotThrow(() -> service.restoreAttachedVolumesForInstance("us-east-1", instance));
         assertEquals("in-use", stored.getState());
         assertEquals(1, stored.getAttachments().size());
+    }
+
+    @Test
+    void detachDuringARestoreRemovesTheDeviceAfterTheRestoreCreatesIt() throws Exception {
+        VolumeAttachmentFixture fixture = volumeAttachmentFixture();
+        Ec2VolumeBlockDeviceManager blockDevices = fixture.blockDevices();
+        Ec2Service service = fixture.service();
+        Instance instance = fixture.instance();
+        Volume volume = fixture.volume();
+        doReturn(Optional.of("/dev/xvdf")).when(blockDevices).attachVolume(any(), any(), anyString());
+        service.attachVolume("us-east-1", volume.getVolumeId(), instance.getInstanceId(), "/dev/xvdf");
+        List<String> events = new CopyOnWriteArrayList<>();
+        CountDownLatch restoring = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(blockDevices.attachVolume(any(), any(), anyString())).thenAnswer(invocation -> {
+            events.add("restore starts");
+            restoring.countDown();
+            assertTrue(release.await(10, TimeUnit.SECONDS));
+            events.add("restore ends");
+            return Optional.of("/dev/xvdf");
+        });
+        doAnswer(invocation -> {
+            events.add("detach");
+            return null;
+        }).when(blockDevices).detachVolume(any(), any(), anyString());
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<?> restore = executor.submit(() -> service.restoreAttachedVolumesForInstance("us-east-1", instance));
+            try {
+                assertTrue(restoring.await(10, TimeUnit.SECONDS));
+                AtomicReference<Thread> detacher = new AtomicReference<>();
+                Future<?> detach = executor.submit(() -> {
+                    detacher.set(Thread.currentThread());
+                    service.detachVolume("us-east-1", volume.getVolumeId(), instance.getInstanceId(),
+                            "/dev/xvdf", false);
+                });
+                awaitBlockedOrDone(detacher, detach);
+                assertFalse(detach.isDone(), "detach must wait for the restore");
+                release.countDown();
+                restore.get(10, TimeUnit.SECONDS);
+                detach.get(10, TimeUnit.SECONDS);
+            } finally {
+                release.countDown();
+            }
+        }
+
+        assertEquals(List.of("restore starts", "restore ends", "detach"), events);
     }
 
     @Test

@@ -484,6 +484,12 @@ public class Ec2ContainerManager {
     public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region,
                        Ec2PortForwardManager.DesiredPorts appPorts, List<SecurityGroup> groups,
                        Map<String, List<String>> prefixLists) {
+        launch(instance, image, publicKey, region, appPorts, groups, prefixLists, null);
+    }
+
+    public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region,
+                       Ec2PortForwardManager.DesiredPorts appPorts, List<SecurityGroup> groups,
+                       Map<String, List<String>> prefixLists, Runnable beforeRunning) {
         instance.setState(InstanceState.pending());
 
         // An instance record is metadata: id, addresses, tags and lifecycle state are all
@@ -597,6 +603,16 @@ public class Ec2ContainerManager {
                 // recorded. Private-subnet instances have no public IP/DNS, matching real EC2.
                 if (instance.getPublicIpAddress() != null || AutomaticPublicAddress.isDue(instance, false)) {
                     exposeReachablePublicAddress(instance);
+                }
+
+                // The launch's volumes are attached by the time a poller sees running, and before UserData.
+                if (beforeRunning != null) {
+                    try {
+                        beforeRunning.run();
+                    } catch (Exception e) {
+                        LOG.warnv("Error in before-running hook for instance {0}: {1}",
+                                instanceId, e.getMessage());
+                    }
                 }
 
                 // Published before the state flips, so a poller that sees running never sees it without the address.

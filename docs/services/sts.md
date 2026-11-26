@@ -590,13 +590,25 @@ absent, which is what the guide's own example policy tests with a `Null` conditi
 in the context of the caller's own identity-based policies, which is read from the generated
 `request-condition-keys.json`, and that file does not list the key for `sts:AssumeRole`.
 
+The role's own tags are its `aws:ResourceTag/<key>` and `iam:ResourceTag/<key>` in both evaluations
+of an `AssumeRole`: the caller's identity-based policies, checked on the role's ARN, and the role's
+trust policy, which the session tags page has reading them ("you can allow the principal to pass
+session tags only if the role they assume includes the specified tags"). The keys are the ones the
+generated `resourceTagKeys` table gives the `role` type, and the tags are read from the role the ARN
+names, in the account it names. A trust policy read for `AssumeRoleWithWebIdentity` or
+`AssumeRoleWithSAML` sees them too, under the same keys, beside the token's or the assertion's own:
+the role is the resource each of those actions acts on, which the Service Authorization Reference gives
+those keys, and `aws:ResourceTag` is in the request context "when the requested resource already has
+attached tags". So does the trust policy read when a service assumes the role on a caller's behalf (a
+Step Functions execution role, the role an EventBridge target or an AppSync data source runs as, a Lambda
+web adapter's execution role), beside the service's own principal and source keys.
+
 One rule of the chain is not implemented. Transitive tags "replace matching ResourceTag values after
 the evaluation of the role trust policy", so a chained session's tag shadows the assumed role's tag
-of that key. Floci publishes no `aws:ResourceTag/<key>` for the role in either evaluation, so there
-is no value for a transitive tag to replace: what has to come first is the role's own tags reaching
-those contexts. The guide's example also says a session tag naming the role tag of an earlier link
-fails, which does not follow from the published rule, that tag being nothing the earlier session
-passed down, so what is built here is the rule the API Reference states.
+of that key; Floci evaluates the role's own tag. The guide's example also says a session tag naming
+the role tag of an earlier link fails, which does not follow from the published rule, that tag
+being nothing the earlier session passed down, so what is built here is the rule the API Reference
+states.
 
 ### Known limitations
 

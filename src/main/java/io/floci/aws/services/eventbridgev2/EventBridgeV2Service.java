@@ -426,6 +426,10 @@ public class EventBridgeV2Service implements Resettable {
         return eventSources.update(request, region);
     }
 
+    public synchronized String rotateWebhookCredentials(JsonNode request, String region) {
+        return eventSources.rotateCredentials(request, region);
+    }
+
     public synchronized void deleteEventSource(JsonNode request, String region) {
         eventSources.delete(request, region);
     }

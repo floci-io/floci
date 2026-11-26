@@ -219,7 +219,7 @@ class RequestResourcesTest {
         for (String operation : List.of("ec2:CreateTags", "ec2:DeleteTags")) {
             List<String> expected = List.of(
                     "arn:aws-us-gov:ec2:us-gov-west-1:111111111111:network-interface/eni-11111111",
-                    "*");
+                    "arn:aws-us-gov:ec2:us-gov-west-1:111111111111:vpc-endpoint/vpce-22222222");
             assertEquals(expected, RequestResources.ofBody(operation,
                     new ObjectMapper().readTree("{\"Resources\":[\"eni-11111111\",\"vpce-22222222\"]}"),
                     "aws-us-gov", "us-gov-west-1", "111111111111", null));

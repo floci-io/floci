@@ -558,6 +558,10 @@ public class StsQueryHandler {
         if (!requestedTransitiveKeys.isEmpty()) {
             trustContext.put("sts:TransitiveTagKeys", requestedTransitiveKeys);
         }
+        // A trust policy reads the tags of its own role as aws:ResourceTag: "you can allow the principal
+        // to pass session tags only if the role they assume includes the specified tags".
+        trustContext = IamConditionContextResolver.withResourceTags(trustContext,
+                IamConditionContextResolver.resourceTagKeys(roleArn, role.getTags()));
         if (!trustPolicyEvaluator.allows(role.getAssumeRolePolicyDocument(), caller, callerAccount,
                 trustContext)) {
             return AwsQueryResponse.error("AccessDenied",
@@ -880,15 +884,16 @@ public class StsQueryHandler {
                 "sub", List.of(claims.subject()),
                 "aud", claims.audiences());
 
+        Map<String, List<String>> roleTags = roleTagKeys(role.get());
         if (!webIdentityTrustEvaluator.allows(role.get().getAssumeRolePolicyDocument(),
-                oidcProviderArn, issuerKeyPrefix, conditionClaims, sessionName)) {
+                oidcProviderArn, issuerKeyPrefix, conditionClaims, sessionName, roleTags)) {
             LOG.debugv("Trust policy on role {0} denies web identity subject {1}",
                     roleArn, claims.subject());
             return WebIdentityOutcome.deny(accessDenied("sts:AssumeRoleWithWebIdentity", roleArn));
         }
         if (!claims.principalTags().isEmpty()
                 && !webIdentityTrustEvaluator.allowsTagging(role.get().getAssumeRolePolicyDocument(),
-                        oidcProviderArn, issuerKeyPrefix, conditionClaims, sessionName)) {
+                        oidcProviderArn, issuerKeyPrefix, conditionClaims, sessionName, roleTags)) {
             LOG.debugv("Trust policy on role {0} does not permit tagging the session of subject {1}",
                     roleArn, claims.subject());
             return WebIdentityOutcome.deny(
@@ -915,6 +920,15 @@ public class StsQueryHandler {
             LOG.debugv("Cannot fetch the keys of OIDC issuer {0}: {1}", issuer, e.getMessage());
             return Optional.empty();
         }
+    }
+
+    /**
+     * The tags of the role being assumed under the keys the generated table gives its type, as a trust policy reads
+     * them on that role; empty for a role with none.
+     */
+    private static Map<String, List<String>> roleTagKeys(IamRole role) {
+        Map<String, List<String>> keys = IamConditionContextResolver.resourceTagKeys(role.getArn(), role.getTags());
+        return keys == null ? Map.of() : keys;
     }
 
     private static String assumedRoleId(IamRole role, String sessionName) {
@@ -991,13 +1005,14 @@ public class StsQueryHandler {
                 "iss", List.of(verified.issuer()),
                 "sub", List.of(verified.subject()),
                 "namequalifier", List.of(verified.nameQualifier()));
+        Map<String, List<String>> roleTags = roleTagKeys(role);
         if (!samlTrustEvaluator.allows(role.getAssumeRolePolicyDocument(), principalArn, assertionClaims,
-                verified.roleSessionName())) {
+                verified.roleSessionName(), roleTags)) {
             throw new AwsException("AccessDenied", "Not authorized to perform sts:AssumeRoleWithSAML on resource: " + roleArn, 403);
         }
         if (!verified.principalTags().isEmpty()
                 && !samlTrustEvaluator.allowsTagging(role.getAssumeRolePolicyDocument(), principalArn,
-                        assertionClaims, verified.roleSessionName())) {
+                        assertionClaims, verified.roleSessionName(), roleTags)) {
             throw new AwsException("AccessDenied", "Not authorized to perform "
                     + AssumeRolePolicyEvaluator.TAG_SESSION_ACTION + " on resource: " + roleArn, 403);
         }

@@ -50,13 +50,17 @@ public class WebIdentityTrustPolicyEvaluator {
      * <p>{@code claims} holds the OIDC condition context keyed <em>without</em> the provider
      * prefix — {@code sub}, {@code aud} — which this evaluator resolves against policy keys of the
      * form {@code <provider-host-and-path>:sub}. {@code roleSessionName} is the request's
-     * {@code RoleSessionName}, which a policy reads as {@code sts:RoleSessionName}. An explicit
+     * {@code RoleSessionName}, which a policy reads as {@code sts:RoleSessionName}. {@code roleTags} holds
+     * the tags of the role being assumed under the keys the generated table gives its type
+     * ({@code aws:ResourceTag/<key>}, {@code iam:ResourceTag/<key>}), which a policy reads on it as on the
+     * resource of the request, as AWS includes them when the resource already has tags. An explicit
      * {@code Deny} wins over any {@code Allow}, per AWS precedence.
      */
     public boolean allows(String trustPolicyDocument, String oidcProviderArn, String issuerKeyPrefix,
-                          Map<String, List<String>> claims, String roleSessionName) {
+                          Map<String, List<String>> claims, String roleSessionName,
+                          Map<String, List<String>> roleTags) {
         return allows(WEB_IDENTITY_ACTION, trustPolicyDocument, oidcProviderArn, issuerKeyPrefix, claims,
-                roleSessionName);
+                roleSessionName, roleTags);
     }
 
     /**
@@ -64,14 +68,15 @@ public class WebIdentityTrustPolicyEvaluator {
      * same document with the same principal and the same conditions as the assume itself.
      */
     public boolean allowsTagging(String trustPolicyDocument, String oidcProviderArn, String issuerKeyPrefix,
-                                 Map<String, List<String>> claims, String roleSessionName) {
+                                 Map<String, List<String>> claims, String roleSessionName,
+                                 Map<String, List<String>> roleTags) {
         return allows(TAG_SESSION_ACTION, trustPolicyDocument, oidcProviderArn, issuerKeyPrefix, claims,
-                roleSessionName);
+                roleSessionName, roleTags);
     }
 
     private boolean allows(String action, String trustPolicyDocument, String oidcProviderArn,
                            String issuerKeyPrefix, Map<String, List<String>> claims,
-                           String roleSessionName) {
+                           String roleSessionName, Map<String, List<String>> roleTags) {
         if (trustPolicyDocument == null || trustPolicyDocument.isBlank()) {
             return false;
         }
@@ -89,7 +94,7 @@ public class WebIdentityTrustPolicyEvaluator {
         boolean allow = false;
         if (statements.isArray()) {
             for (JsonNode stmt : statements) {
-                switch (evaluate(action, stmt, oidcProviderArn, issuerKeyPrefix, claims, roleSessionName)) {
+                switch (evaluate(action, stmt, oidcProviderArn, issuerKeyPrefix, claims, roleSessionName, roleTags)) {
                     case DENY -> { return false; }
                     case ALLOW -> allow = true;
                     case NO_MATCH -> { }
@@ -98,8 +103,8 @@ public class WebIdentityTrustPolicyEvaluator {
             return allow;
         }
         if (statements.isObject()) {
-            return evaluate(action, statements, oidcProviderArn, issuerKeyPrefix, claims, roleSessionName)
-                    == Match.ALLOW;
+            return evaluate(action, statements, oidcProviderArn, issuerKeyPrefix, claims, roleSessionName,
+                    roleTags) == Match.ALLOW;
         }
         return false;
     }
@@ -107,14 +112,15 @@ public class WebIdentityTrustPolicyEvaluator {
     private enum Match { ALLOW, DENY, NO_MATCH }
 
     private Match evaluate(String action, JsonNode stmt, String oidcProviderArn, String issuerKeyPrefix,
-                           Map<String, List<String>> claims, String roleSessionName) {
+                           Map<String, List<String>> claims, String roleSessionName,
+                           Map<String, List<String>> roleTags) {
         if (!actionApplies(stmt, action)) {
             return Match.NO_MATCH;
         }
         if (!matchesFederatedPrincipal(stmt.get("Principal"), oidcProviderArn)) {
             return Match.NO_MATCH;
         }
-        if (!conditionsSatisfied(stmt.get("Condition"), issuerKeyPrefix, claims, roleSessionName)) {
+        if (!conditionsSatisfied(stmt.get("Condition"), issuerKeyPrefix, claims, roleSessionName, roleTags)) {
             return Match.NO_MATCH;
         }
         return TrustPolicyStatements.denies(stmt) ? Match.DENY : Match.ALLOW;
@@ -192,7 +198,8 @@ public class WebIdentityTrustPolicyEvaluator {
      * using anything else does not match, which fails closed.
      */
     private boolean conditionsSatisfied(JsonNode conditionNode, String issuerKeyPrefix,
-                                        Map<String, List<String>> claims, String roleSessionName) {
+                                        Map<String, List<String>> claims, String roleSessionName,
+                                        Map<String, List<String>> roleTags) {
         if (conditionNode == null || conditionNode.isNull()) {
             // No condition constraints — the federated principal alone is enough.
             return true;
@@ -213,7 +220,7 @@ public class WebIdentityTrustPolicyEvaluator {
             while (keyIterator.hasNext()) {
                 Map.Entry<String, JsonNode> keyEntry = keyIterator.next();
                 if (!keySatisfied(operator, keyEntry.getKey(), keyEntry.getValue(),
-                        issuerKeyPrefix, claims, roleSessionName)) {
+                        issuerKeyPrefix, claims, roleSessionName, roleTags)) {
                     return false;
                 }
             }
@@ -223,10 +230,11 @@ public class WebIdentityTrustPolicyEvaluator {
 
     private boolean keySatisfied(String operator, String conditionKey, JsonNode expected,
                                  String issuerKeyPrefix, Map<String, List<String>> claims,
-                                 String roleSessionName) {
+                                 String roleSessionName, Map<String, List<String>> roleTags) {
         List<String> actual = ROLE_SESSION_NAME_KEY.equalsIgnoreCase(conditionKey)
                 ? (roleSessionName == null ? List.of() : List.of(roleSessionName))
-                : resolveClaim(conditionKey, issuerKeyPrefix, claims);
+                : TrustPolicyStatements.roleValues(conditionKey, roleTags)
+                        .orElseGet(() -> resolveClaim(conditionKey, issuerKeyPrefix, claims));
         List<String> expectedValues = textValues(expected);
         if (expectedValues.isEmpty()) {
             return false;

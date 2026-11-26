@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import java.security.KeyPairGenerator;
 import java.security.interfaces.RSAPublicKey;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -19,7 +20,8 @@ import static org.mockito.Mockito.when;
 
 /**
  * What IAM gives the request-resources table of its own resources: the ARN a name names, path included, the user a key
- * or a credential belongs to, the role a deletion task deleted and the user who signs a request.
+ * or a credential belongs to, the role a deletion task deleted, the user who signs a request and the tags of a user or
+ * a role.
  */
 class IamStoredResourceArnsTest {
 
@@ -59,6 +61,31 @@ class IamStoredResourceArnsTest {
                 stored.find("role", List.of("app"), ""));
         assertEquals(Optional.empty(), stored.find("user", List.of("alice"), ""));
         assertEquals(Optional.empty(), stored.find("policy", List.of("bob"), ""));
+    }
+
+    @Test
+    void aUserOrARoleGivesTheTagsItCarries() {
+        iam.createUser("bob", "/team/");
+        iam.tagUser("bob", Map.of("status", "terminated"));
+        iam.createRole("app", "/service-role/", TRUST_POLICY, null, 0, null);
+        iam.tagRole("app", Map.of("Project", "Alpha"));
+        assertEquals(Map.of("status", "terminated"), stored.storedTags("arn:aws:iam::000000000000:user/team/bob"));
+        assertEquals(Map.of("Project", "Alpha"), stored.storedTags("arn:aws:iam::000000000000:role/service-role/app"));
+        // A role's ARN in another partition names the same role, as STS takes it.
+        assertEquals(Map.of("Project", "Alpha"),
+                stored.storedTags("arn:aws-cn:iam::000000000000:role/service-role/app"));
+    }
+
+    @Test
+    void anArnNamingNoStoredUserOrRoleGivesNoTags() {
+        iam.createRole("app", "/service-role/", TRUST_POLICY, null, 0, null);
+        iam.tagRole("app", Map.of("Project", "Alpha"));
+        // Another path, another account and another type name none.
+        assertEquals(Map.of(), stored.storedTags("arn:aws:iam::000000000000:role/app"));
+        assertEquals(Map.of(), stored.storedTags("arn:aws:iam::111111111111:role/service-role/app"));
+        assertEquals(Map.of(), stored.storedTags("arn:aws:iam::000000000000:instance-profile/service-role/app"));
+        assertEquals(Map.of(), stored.storedTags("arn:aws:s3:::app"));
+        assertEquals(Map.of(), stored.storedTags("not-an-arn"));
     }
 
     @Test

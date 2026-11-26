@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.backup.model.BackupJob;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
+import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
@@ -39,6 +40,7 @@ class BackupIntegrationTest {
     @Inject ObjectMapper mapper;
 
     private static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/backup/aws4_request";
+    private static final String EU_AUTH = "AWS4-HMAC-SHA256 Credential=test/20260205/eu-west-1/backup/aws4_request";
     private static final String VAULT_NAME = "test-vault";
     private static final String IAM_ROLE = "arn:aws:iam::000000000000:role/backup-role";
     private static final String RESOURCE_ARN = "arn:aws:dynamodb:us-east-1:000000000000:table/my-table";
@@ -2039,5 +2041,92 @@ class BackupIntegrationTest {
                 .body("BackupPlan.Rules[0]", not(hasKey("TargetLogicallyAirGappedBackupVaultArn")))
                 .body("BackupPlan.Rules[1].TargetLogicallyAirGappedBackupVaultArn", equalTo(airGapped + "-2"));
         given().header("Authorization", AUTH).when().delete("/backup/plans/" + id);
+    }
+
+    @Test
+    void resourcesOfOneRegionAreInvisibleFromAnother() {
+        String vault = "region-scope-" + System.nanoTime();
+        String vaultArn = given().header("Authorization", AUTH).contentType("application/json").body("{}")
+                .when().put("/backup-vaults/" + vault).then().statusCode(200)
+                .extract().path("BackupVaultArn");
+        JsonPath plan = given().header("Authorization", AUTH).contentType("application/json")
+                .body("{\"BackupPlan\": {\"BackupPlanName\": \"%s\", \"Rules\": [{\"RuleName\": \"daily\", "
+                        .formatted(vault) + "\"TargetBackupVaultName\": \"" + vault + "\"}]}}")
+                .when().put("/backup/plans/").then().statusCode(200).extract().jsonPath();
+        String regionPlanId = plan.getString("BackupPlanId");
+        String planArn = plan.getString("BackupPlanArn");
+        String regionSelectionId = given().header("Authorization", AUTH).contentType("application/json")
+                .body("{\"BackupSelection\": {\"SelectionName\": \"sel\", \"IamRoleArn\": \"" + IAM_ROLE
+                        + "\", \"Resources\": [\"" + RESOURCE_ARN + "\"]}}")
+                .when().put("/backup/plans/" + regionPlanId + "/selections/").then().statusCode(200)
+                .extract().path("SelectionId");
+        String regionJobId = given().header("Authorization", AUTH).contentType("application/json")
+                .body("{\"BackupVaultName\": \"%s\", \"ResourceArn\": \"%s\", \"IamRoleArn\": \"%s\"}"
+                        .formatted(vault, RESOURCE_ARN, IAM_ROLE))
+                .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
+        awaitJobCompleted(regionJobId);
+        String point = given().header("Authorization", AUTH).when().get("/backup-jobs/" + regionJobId)
+                .then().statusCode(200).extract().path("RecoveryPointArn");
+        given().header("Authorization", EU_AUTH).contentType("application/json").body("{}")
+                .when().put("/backup-vaults/" + vault).then().statusCode(200);
+
+        assertNotFound(given().header("Authorization", EU_AUTH)
+                .when().get("/backup/plans/" + regionPlanId + "/").then());
+        assertNotFound(given().header("Authorization", EU_AUTH).contentType("application/json")
+                .body("{\"BackupPlan\": {\"BackupPlanName\": \"stolen\", \"Rules\": []}}")
+                .when().post("/backup/plans/" + regionPlanId).then());
+        assertNotFound(given().header("Authorization", EU_AUTH)
+                .when().delete("/backup/plans/" + regionPlanId).then());
+        given().header("Authorization", EU_AUTH).when().get("/backup/plans/")
+                .then().statusCode(200).body("BackupPlansList.BackupPlanId", not(hasItem(regionPlanId)));
+        assertNotFound(given().header("Authorization", EU_AUTH)
+                .when().get("/backup/plans/" + regionPlanId + "/selections/" + regionSelectionId).then());
+        assertNotFound(given().header("Authorization", EU_AUTH)
+                .when().delete("/backup/plans/" + regionPlanId + "/selections/" + regionSelectionId).then());
+        given().header("Authorization", EU_AUTH).when().get("/backup/plans/" + regionPlanId + "/selections/")
+                .then().statusCode(200).body("BackupSelectionsList", hasSize(0));
+        assertNotFound(given().header("Authorization", EU_AUTH)
+                .when().get("/backup-jobs/" + regionJobId).then());
+        assertNotFound(given().header("Authorization", EU_AUTH).contentType("application/json").body("{}")
+                .when().post("/backup-jobs/" + regionJobId).then());
+        given().header("Authorization", EU_AUTH).when().get("/backup-jobs/")
+                .then().statusCode(200).body("BackupJobs.BackupJobId", not(hasItem(regionJobId)));
+        given().header("Authorization", EU_AUTH).queryParam("byBackupVaultName", vault)
+                .when().get("/backup-jobs/").then().statusCode(200).body("BackupJobs", hasSize(0));
+        given().header("Authorization", EU_AUTH).when().get("/backup-vaults/" + vault + "/recovery-points/")
+                .then().statusCode(200).body("RecoveryPoints", hasSize(0));
+        assertNotFound(given().header("Authorization", EU_AUTH)
+                .when().get("/backup-vaults/" + vault + "/recovery-points/" + point).then());
+        for (String arn : List.of(vaultArn, planArn)) {
+            assertNotFound(given().header("Authorization", EU_AUTH).when().get("/tags/" + arn).then());
+            assertNotFound(given().header("Authorization", EU_AUTH).contentType("application/json")
+                    .body("{\"Tags\":{\"team\":\"eu\"}}").when().post("/tags/" + arn).then());
+            assertNotFound(given().header("Authorization", EU_AUTH).contentType("application/json")
+                    .body("{\"TagKeyList\":[\"team\"]}").when().post("/untag/" + arn).then());
+        }
+
+        given().header("Authorization", AUTH).when().get("/backup/plans/" + regionPlanId + "/")
+                .then().statusCode(200).body("BackupPlan.BackupPlanName", equalTo(vault));
+        given().header("Authorization", AUTH).when().get("/backup/plans/" + regionPlanId + "/selections/")
+                .then().statusCode(200).body("BackupSelectionsList.SelectionId", hasItem(regionSelectionId));
+        given().header("Authorization", AUTH).queryParam("byBackupVaultName", vault)
+                .when().get("/backup-jobs/").then().statusCode(200).body("BackupJobs", hasSize(1));
+        given().header("Authorization", AUTH).when().get("/backup-vaults/" + vault + "/recovery-points/")
+                .then().statusCode(200).body("RecoveryPoints", hasSize(1));
+        given().header("Authorization", AUTH).contentType("application/json").body("{\"Tags\":{\"team\":\"us\"}}")
+                .when().post("/tags/" + vaultArn).then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+                .when().delete("/backup-vaults/" + vault + "/recovery-points/" + point).then().statusCode(204);
+        given().header("Authorization", AUTH)
+                .when().delete("/backup/plans/" + regionPlanId + "/selections/" + regionSelectionId)
+                .then().statusCode(204);
+        given().header("Authorization", AUTH).when().delete("/backup/plans/" + regionPlanId).then().statusCode(200);
+        given().header("Authorization", AUTH).when().delete("/backup-vaults/" + vault).then().statusCode(204);
+        given().header("Authorization", EU_AUTH).when().delete("/backup-vaults/" + vault).then().statusCode(204);
+    }
+
+    private static void assertNotFound(ValidatableResponse response) {
+        response.statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
     }
 }

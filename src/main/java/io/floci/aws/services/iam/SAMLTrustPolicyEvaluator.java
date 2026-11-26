@@ -23,11 +23,13 @@ public class SAMLTrustPolicyEvaluator {
 
     /**
      * {@code roleSessionName} is the assertion's {@code RoleSessionName} attribute, which a policy
-     * reads as {@code sts:RoleSessionName}, or null when the assertion carries none.
+     * reads as {@code sts:RoleSessionName}, or null when the assertion carries none. {@code roleTags}
+     * holds the tags of the role being assumed under the keys the generated table gives its type
+     * ({@code aws:ResourceTag/<key>}, {@code iam:ResourceTag/<key>}), which a policy reads on it.
      */
     public boolean allows(String document, String providerArn, Map<String, List<String>> claims,
-                          String roleSessionName) {
-        return allows(SAML_ACTION, document, providerArn, claims, roleSessionName);
+                          String roleSessionName, Map<String, List<String>> roleTags) {
+        return allows(SAML_ACTION, document, providerArn, claims, roleSessionName, roleTags);
     }
 
     /**
@@ -35,13 +37,14 @@ public class SAMLTrustPolicyEvaluator {
      * the same document with the same principal and the same conditions as the assume itself.
      */
     public boolean allowsTagging(String document, String providerArn, Map<String, List<String>> claims,
-                                 String roleSessionName) {
+                                 String roleSessionName, Map<String, List<String>> roleTags) {
         return allows(AssumeRolePolicyEvaluator.TAG_SESSION_ACTION, document, providerArn, claims,
-                roleSessionName);
+                roleSessionName, roleTags);
     }
 
     private boolean allows(String action, String document, String providerArn,
-                           Map<String, List<String>> claims, String roleSessionName) {
+                           Map<String, List<String>> claims, String roleSessionName,
+                           Map<String, List<String>> roleTags) {
         try {
             JsonNode statements = mapper.readTree(document).path("Statement");
             if (!TrustPolicyStatements.wellFormed(statements)) {
@@ -50,7 +53,7 @@ public class SAMLTrustPolicyEvaluator {
             if (statements.isArray()) {
                 boolean allowed = false;
                 for (JsonNode statement : statements) {
-                    int result = evaluate(action, statement, providerArn, claims, roleSessionName);
+                    int result = evaluate(action, statement, providerArn, claims, roleSessionName, roleTags);
                     if (result < 0) {
                         return false;
                     }
@@ -61,23 +64,24 @@ public class SAMLTrustPolicyEvaluator {
                 return allowed;
             }
             return statements.isObject()
-                    && evaluate(action, statements, providerArn, claims, roleSessionName) > 0;
+                    && evaluate(action, statements, providerArn, claims, roleSessionName, roleTags) > 0;
         } catch (Exception e) {
             return false;
         }
     }
 
     private int evaluate(String action, JsonNode statement, String providerArn,
-                         Map<String, List<String>> claims, String roleSessionName) {
+                         Map<String, List<String>> claims, String roleSessionName,
+                         Map<String, List<String>> roleTags) {
         if (!actionApplies(statement, action) || !principal(statement.path("Principal"), providerArn)
-                || !conditionsSatisfied(statement.get("Condition"), claims, roleSessionName)) {
+                || !conditionsSatisfied(statement.get("Condition"), claims, roleSessionName, roleTags)) {
             return 0;
         }
         return TrustPolicyStatements.denies(statement) ? -1 : 1;
     }
 
     private boolean conditionsSatisfied(JsonNode condition, Map<String, List<String>> claims,
-                                        String roleSessionName) {
+                                        String roleSessionName, Map<String, List<String>> roleTags) {
         if (condition == null || condition.isNull()) {
             return true;
         }
@@ -93,7 +97,8 @@ public class SAMLTrustPolicyEvaluator {
             Iterator<Map.Entry<String, JsonNode>> entries = operator.getValue().fields();
             while (entries.hasNext()) {
                 Map.Entry<String, JsonNode> entry = entries.next();
-                List<String> actual = conditionValues(entry.getKey(), claims, roleSessionName);
+                List<String> actual = TrustPolicyStatements.roleValues(entry.getKey(), roleTags)
+                        .orElseGet(() -> conditionValues(entry.getKey(), claims, roleSessionName));
                 List<String> expected = entry.getValue().isArray()
                         ? StreamSupport.stream(entry.getValue().spliterator(), false)
                                 .filter(JsonNode::isTextual).map(JsonNode::asText).toList()

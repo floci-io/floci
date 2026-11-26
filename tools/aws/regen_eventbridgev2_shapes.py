@@ -15,7 +15,7 @@ MODEL = Path("eventbridgev2/2025-05-15")
 OUTPUT = request_shapes.REPO_ROOT / "src/main/resources/aws/eventbridgev2-request-shapes.json"
 
 OPERATIONS = ("CreateEventSource", "DeleteEventSource", "DescribeEventSource", "ListEventSources",
-              "UpdateEventSource")
+              "RotateWebhookCredentials", "UpdateEventSource")
 
 # The order AWS lists the values of a violated enum in. It follows no rule, so each is measured.
 ENUM_ORDER = {

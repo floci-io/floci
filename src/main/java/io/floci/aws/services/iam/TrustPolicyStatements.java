@@ -2,6 +2,10 @@ package io.floci.aws.services.iam;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
 /**
  * How a role's trust policy statements are read, the same way on every path that assumes the role:
  * {@code sts:AssumeRole}, {@code sts:AssumeRoleWithWebIdentity} and {@code sts:AssumeRoleWithSAML}.
@@ -30,6 +34,19 @@ final class TrustPolicyStatements {
             return true;
         }
         return validStatement(statements);
+    }
+
+    /**
+     * The values a condition key reads from the role being assumed: its tags, given under the keys the generated table
+     * gives the role's type ({@code aws:ResourceTag/<key>}, {@code iam:ResourceTag/<key>}), a key matched whatever its
+     * case, as AWS matches a tag key; empty for a key the role gives no value under.
+     */
+    static Optional<List<String>> roleValues(String conditionKey, Map<String, List<String>> roleTags) {
+        if (conditionKey == null || roleTags == null) {
+            return Optional.empty();
+        }
+        return roleTags.entrySet().stream().filter(entry -> entry.getKey().equalsIgnoreCase(conditionKey))
+                .map(Map.Entry::getValue).findFirst();
     }
 
     /** True when a statement of a {@linkplain #wellFormed well-formed} document is a {@code Deny}. */

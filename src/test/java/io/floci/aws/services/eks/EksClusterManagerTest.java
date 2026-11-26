@@ -5653,6 +5653,61 @@ class EksClusterManagerTest {
             assertTrue(patchCmd[7].contains("10.0.1.50") && patchCmd[7].contains("KubeletReady"));
         }
 
+        /** As a kubelet does: the node registers with the labels and taints its NodeConfig's kubelet flags name. */
+        @Test
+        void aSyntheticNodeRegistersWithItsNodeConfigsLabelsAndTaints() {
+            Cluster cluster = clusterNamed("flags-cluster", "flags-container");
+            Instance inst = createInstance("i-0flags1234567890a", "us-east-1a", "t3.medium", "x86_64", "10.0.1.70");
+            inst.setUserData("apiVersion: node.eks.aws/v1alpha1\nkind: NodeConfig\nspec:\n  cluster:\n"
+                    + "    name: flags-cluster\n  kubelet:\n    flags:\n"
+                    + "    - --node-labels=karpenter.sh/nodepool=system,kubernetes.io/arch=arm64\n"
+                    + "    - --register-with-taints=CriticalAddonsOnly:NoSchedule\n");
+            ArgumentCaptor<String[]> cmdCaptor = ArgumentCaptor.forClass(String[].class);
+            doReturn(new ContainerExec.Result(0L, "", "", false)).when(manager)
+                    .execInContainerForResult(eq("flags-container"), cmdCaptor.capture(), anyInt());
+
+            manager.joinInstance(cluster, inst);
+
+            String applyScript = cmdCaptor.getAllValues().getFirst()[2];
+            assertTrue(applyScript.contains("\"karpenter.sh/nodepool\":\"system\""), applyScript);
+            assertTrue(applyScript.contains(
+                    "\"taints\":[{\"key\":\"CriticalAddonsOnly\",\"value\":\"\",\"effect\":\"NoSchedule\"}]"), applyScript);
+            // The node's own labels stay what the instance is, whatever the flags say.
+            assertTrue(applyScript.contains("\"kubernetes.io/arch\":\"amd64\""), applyScript);
+        }
+
+        /**
+         * A removed node's instance is forgotten by the cluster too, and isn't joined again, so neither the readiness
+         * poller nor a join that waited for the removal brings its node back while it shuts down; a node that can't
+         * be deleted keeps both.
+         */
+        @Test
+        void aRemovedNodesInstanceIsForgottenByTheCluster() {
+            Cluster cluster = clusterNamed("remove-cluster", "remove-container");
+            Instance inst = createInstance("i-0remove123456789a", "us-east-1a", "t3.medium", "x86_64", "10.0.1.71");
+            doReturn(new ContainerExec.Result(0L, "", "", false)).when(manager)
+                    .execInContainerForResult(eq("remove-container"), any(), anyInt());
+            manager.joinInstance(cluster, inst);
+            manager.recordJoinedInstanceId(cluster, inst);
+            doReturn(new ContainerExec.Result(1L, "", "refused", false)).when(manager)
+                    .execInContainerForResult(eq("remove-container"), any(), anyInt());
+
+            assertThrows(IllegalStateException.class, () -> manager.removeJoinedNode(cluster, inst));
+            assertEquals(Map.of(inst.getInstanceId(), "us-east-1"), cluster.getJoinedInstanceIds());
+            assertTrue(manager.isInstanceJoined(cluster, inst.getInstanceId()));
+
+            doReturn(new ContainerExec.Result(0L, "", "", false)).when(manager)
+                    .execInContainerForResult(eq("remove-container"), any(), anyInt());
+            manager.removeJoinedNode(cluster, inst);
+
+            assertEquals(Map.of(), cluster.getJoinedInstanceIds());
+            assertFalse(manager.isInstanceJoined(cluster, inst.getInstanceId()));
+            // A join that was waiting while it was removed doesn't bring its node back.
+            manager.joinInstance(cluster, inst);
+            assertFalse(manager.isInstanceJoined(cluster, inst.getInstanceId()));
+            assertEquals(Map.of(), cluster.getJoinedInstanceIds());
+        }
+
         @Test
         void joinArmInstanceRegistersWithArm64Label() {
             Cluster cluster = clusterNamed("arm-cluster", "arm-container-123");

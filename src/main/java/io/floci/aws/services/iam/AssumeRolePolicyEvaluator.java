@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.IamConditionContextResolver;
 import io.floci.aws.core.common.ServicePrincipals;
+import io.floci.aws.services.iam.model.IamRole;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -296,6 +297,22 @@ public class AssumeRolePolicyEvaluator {
      */
     public boolean allowsService(String trustPolicyDocument, String servicePrincipal,
                                  String sourceArn, String sourceAccount) {
+        return allowsService(trustPolicyDocument, servicePrincipal, sourceArn, sourceAccount, null);
+    }
+
+    /**
+     * As {@link #allowsService(String, String, String, String)}, for the role the service assumes: its trust policy,
+     * read with the role's tags under the keys the generated table gives its type ({@code aws:ResourceTag/<key>},
+     * {@code iam:ResourceTag/<key>}), as every assume of the role reads them, the role being the resource
+     * {@code sts:AssumeRole} acts on.
+     */
+    public boolean allowsService(IamRole role, String servicePrincipal, String sourceArn, String sourceAccount) {
+        return allowsService(role.getAssumeRolePolicyDocument(), servicePrincipal, sourceArn, sourceAccount,
+                IamConditionContextResolver.resourceTagKeys(role.getArn(), role.getTags()));
+    }
+
+    private boolean allowsService(String trustPolicyDocument, String servicePrincipal, String sourceArn,
+                                  String sourceAccount, Map<String, List<String>> roleTags) {
         if (trustPolicyDocument == null || trustPolicyDocument.isBlank()) {
             return false;
         }
@@ -311,8 +328,9 @@ public class AssumeRolePolicyEvaluator {
             return false;
         }
         String version = root.path("Version").asText(null);
-        Map<String, List<String>> context = IamConditionContextResolver.serviceCallContext(
-                servicePrincipal, null, null, sourceArn, sourceAccount);
+        Map<String, List<String>> context = IamConditionContextResolver.withResourceTags(
+                IamConditionContextResolver.serviceCallContext(servicePrincipal, null, null, sourceArn, sourceAccount),
+                roleTags);
         boolean allow = false;
         if (statements.isArray()) {
             for (JsonNode statement : statements) {
