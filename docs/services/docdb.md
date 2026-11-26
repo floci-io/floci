@@ -75,6 +75,24 @@ create or restore that fails leaves no volume behind. A cluster created again un
 identifier starts on a new, empty volume. In `memory`
 mode a cluster's data lasts only as long as its container.
 
+### Restarts
+
+With a persistent storage mode, Floci's shutdown removes each cluster's MongoDB container and keeps
+its volume, and the next start brings the container back. While it starts again in the background,
+the cluster reports `maintenance` and its instances `starting`. The new container runs on the
+cluster's volume with the cluster's master password, so the data is there and snapshots keep
+working. The cluster and its instances then report the new container's port and `available`. With
+no Docker daemon reachable they come back `available` with no container, as a cluster created then
+does. A cluster whose container does not start is left with none and its instances `failed`, and is
+tried again at the next start. A `DeleteDBCluster` during the restore leaves the cluster `deleting`
+until its container has started, and removes it then. `CreateDBInstance` is refused with
+`InvalidDBClusterStateFault` for a cluster that is not `available`, as for RDS.
+
+A cluster created by a Floci that did not keep its master password reads it from the container it
+left, if one is still there. With none left there is no password to start a container with, so the
+cluster comes back without one, its instances `failed`: delete it and create it again. A cluster
+whose data was not kept in a volume gets a new, empty one.
+
 ### Docker Compose
 
 DocumentDB needs the Docker socket so it can launch MongoDB containers. Each cluster's container is published on a dynamically assigned host port, returned by `DescribeDBClusters`.

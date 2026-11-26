@@ -194,6 +194,8 @@ if grep -q '/neptune/' "$SHARD_FILE"; then
     configured_image neptune default-neo4j-image
     configured_image neptune default-image
 fi
+# DocDbClusterRestartDockerNightlyIntegrationTest restarts clusters on the configured MongoDB image.
+starts DocDbClusterRestartDockerNightlyIntegrationTest && configured_image docdb default-image
 grep -q '/elasticache/' "$SHARD_FILE" && { pull valkey/valkey:8; pull memcached:1.6; }
 grep -q '/memorydb/'    "$SHARD_FILE" && pull valkey/valkey:8
 grep -q '/ecr/'         "$SHARD_FILE" && pull registry:2
