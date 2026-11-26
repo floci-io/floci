@@ -2570,7 +2570,7 @@ class Ec2ServiceTest {
             Instance launched = invocation.getArgument(0);
             behaviorsAtLaunch.add(launched.getInstanceInitiatedShutdownBehavior());
             return null;
-        }).when(containerManager).launch(any(), any(ResolvedAmiImage.class), any(), any(), any(), any(), any());
+        }).when(containerManager).launch(any(), any(ResolvedAmiImage.class), any(), any(), any(), any(), any(), any());
         AmiImageResolver images = mock(AmiImageResolver.class);
         when(images.resolveImage(any())).thenReturn(ResolvedAmiImage.minimal("floci/base:latest"));
         Ec2Service service = new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class),
