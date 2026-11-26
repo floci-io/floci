@@ -31,7 +31,20 @@ public class RestApi {
      * default) or {@code AUTHORIZER} (the {@code usageIdentifierKey} a Lambda authorizer returns).
      */
     private String apiKeySource = API_KEY_SOURCE_HEADER;
+    /**
+     * The smallest payload, in bytes, that compression applies to: 0 to 10485760, or null when
+     * compression is off, which is AWS's default.
+     */
+    private Integer minimumCompressionSize;
     private List<String> warnings = new ArrayList<>();
+
+    public Integer getMinimumCompressionSize() {
+        return minimumCompressionSize;
+    }
+
+    public void setMinimumCompressionSize(Integer minimumCompressionSize) {
+        this.minimumCompressionSize = minimumCompressionSize;
+    }
 
     public String getApiKeySource() {
         return apiKeySource;
