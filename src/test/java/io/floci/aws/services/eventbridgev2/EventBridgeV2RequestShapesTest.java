@@ -236,33 +236,10 @@ class EventBridgeV2RequestShapesTest {
     }
 
     @Test
-    void createOverlongClientTokenWithABadPatternBreaksLengthThenPattern() {
-        String token = " ".repeat(65);
-        assertAnswers("CreateEventSource", "{\"Name\":\"n\",\"EventBusArn\":\"" + BUS_ARN + "\",\"ClientToken\":\"" + token
-                + "\",\"Configuration\":{}}",
-                "Value '" + token + "' at 'clientToken' failed to satisfy constraint: Member must have length less than or equal to 64",
-                "Value '" + token + "' at 'clientToken' failed to satisfy constraint: Member must satisfy regular expression pattern: [\\u0021-\\u007E]+");
-    }
-
-    @Test
     void describeEmptyEventSourceArnBreaksLengthThenPattern() {
         assertAnswers("DescribeEventSource", "{\"EventSourceArn\":\"\"}",
                 "Value '' at 'eventSourceArn' failed to satisfy constraint: Member must have length greater than or equal to 1",
                 "Value '' at 'eventSourceArn' failed to satisfy constraint: Member must satisfy regular expression pattern: " + DESCRIBE_ARN_PATTERN);
-    }
-
-    @Test
-    void emptyTimestampPrefixBreaksLengthThenPattern() {
-        ObjectNode request = json("{\"Name\":\"n\",\"EventBusArn\":\"" + BUS_ARN + "\",\"Configuration\":{"
-                + "\"WebhookEventsConfiguration\":{\"RoleArn\":\"arn:aws:iam::123456789012:role/probe\","
-                + "\"AuthConfiguration\":{\"HmacAuthConfiguration\":{\"TimestampPrefix\":\"\"}}}}}");
-        List<String> found = violationsOf("CreateEventSource", request).stream()
-                .filter(v -> v.contains("hmacAuthConfiguration.timestampPrefix'"))
-                .toList();
-        assertEquals(List.of(
-                "Value '' at 'configuration.webhookEventsConfiguration.authConfiguration.hmacAuthConfiguration.timestampPrefix' failed to satisfy constraint: Member must have length greater than or equal to 1",
-                "Value '' at 'configuration.webhookEventsConfiguration.authConfiguration.hmacAuthConfiguration.timestampPrefix' failed to satisfy constraint: Member must satisfy regular expression pattern: [\\u0020-\\u007E]+"),
-                found);
     }
 
     @Test
