@@ -51,14 +51,7 @@ class ParallelLocksInventoryTest {
 
     @Test
     void everyPlainFlociDockerStreamConsumerDeclaresItsLock() {
-        Map<String, String> sources = sources();
-        Set<String> missing = new TreeSet<>();
-        sources.forEach((name, source) -> {
-            if (isTestClass(name) && USES_FLOCI_DOCKER_STREAMS.matcher(source).find()
-                    && !isQuarkus(name, sources, new TreeSet<>()) && !DOCKER_ACTIVE_STREAMS_LOCK.matcher(source).find()) {
-                missing.add(name);
-            }
-        });
+        Set<String> missing = missingLocks(USES_FLOCI_DOCKER_STREAMS, DOCKER_ACTIVE_STREAMS_LOCK);
         assertTrue(missing.isEmpty(), "Plain Floci Docker stream consumers without "
                 + "@ResourceLock(ParallelLocks.DOCKER_ACTIVE_STREAMS): " + missing);
     }
@@ -81,16 +74,21 @@ class ParallelLocksInventoryTest {
 
     @Test
     void everyPlainClassThatBuildsTheConfigMappingDeclaresItsLock() {
+        Set<String> missing = missingLocks(BUILDS_THE_CONFIG_MAPPING, CONFIG_MAPPING_LOCK);
+        assertTrue(missing.isEmpty(), "Plain test classes that build the EmulatorConfig mapping without "
+                + "@ResourceLock(ParallelLocks.CONFIG_MAPPING): " + missing);
+    }
+
+    private static Set<String> missingLocks(Pattern usage, Pattern lock) {
         Map<String, String> sources = sources();
         Set<String> missing = new TreeSet<>();
         sources.forEach((name, source) -> {
-            if (isTestClass(name) && BUILDS_THE_CONFIG_MAPPING.matcher(source).find()
-                    && !isQuarkus(name, sources, new TreeSet<>()) && !CONFIG_MAPPING_LOCK.matcher(source).find()) {
+            if (isTestClass(name) && usage.matcher(source).find()
+                    && !isQuarkus(name, sources, new TreeSet<>()) && !lock.matcher(source).find()) {
                 missing.add(name);
             }
         });
-        assertTrue(missing.isEmpty(), "Plain test classes that build the EmulatorConfig mapping without "
-                + "@ResourceLock(ParallelLocks.CONFIG_MAPPING): " + missing);
+        return missing;
     }
 
     /**
