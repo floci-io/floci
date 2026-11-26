@@ -1610,7 +1610,8 @@ public class CloudFormationService implements ResourceProvider {
                     return;
                 }
                 boolean recreates = recreates(resourceType, logicalId, property, oldDef, newDef)
-                        || anyCreateOnlyValue(resourceType, props, property, subtree -> !reads.apply(subtree).isEmpty());
+                        || anyCreateOnlyValue(resourceType, props, property,
+                                subtree -> !reads.apply(subtree).isEmpty());
                 boolean tags = "Tags".equals(property);
                 for (ResourceRead cause : causes) {
                     details.add(new ChangeDetail(tags ? "Tags" : "Properties", tags ? null : property,
@@ -1849,8 +1850,9 @@ public class CloudFormationService implements ResourceProvider {
 
     /**
      * One change of a resource. {@code scope} and {@code details} are those of {@code
-     * DescribeChangeSet}: filled for a Modify, whether the template diff found it or the resource reads a replaced
-     * resource or a changed attribute, empty for an Add, a Remove and a nested stack.
+     * DescribeChangeSet}, built on the describe path only: for a Modify, one detail per property or attribute
+     * the template diff found and, from the dependency pass, one per property that reads a replaced resource or an
+     * attribute changed in place; empty for an Add and a Remove, and for a nested stack nothing of which differs.
      */
     public record ResourceChange(String action, String logicalResourceId, String physicalResourceId,
                                  String resourceType, String replacement,
@@ -1888,8 +1890,9 @@ public class CloudFormationService implements ResourceProvider {
 
     /**
      * The details of a resource the template diff found modified: one entry per property and per
-     * resource-level attribute that differs, in the forms the diff compared ({@code comparedOld} and {@code comparedNew}, null when the
-     * template did not resolve and the definitions as written were diffed). See {@link #addDetails}.
+     * resource-level attribute that differs, in the forms the diff compared ({@code comparedOld} and
+     * {@code comparedNew}, null when the template did not resolve and the definitions as written were diffed).
+     * See {@link #addDetails}.
      * {@code RequiresRecreation} is {@code Always} when the replacement decision's rule for the create-only
      * pointers at and under the property says the update recreates, and {@code Never} otherwise.
      * {@code Conditionally} is not produced: floci's create-only table records no conditional replacement,
