@@ -159,7 +159,8 @@ final class SpaceDelimitedPattern extends FilterPattern {
 
     @Override
     public FilterMatch match(String message) {
-        List<String> values = split(message == null ? "" : message, ellipsis ? -1 : before.size());
+        List<String> values = SpaceDelimitedTokenizer.split(
+                message == null ? "" : message, ellipsis ? -1 : before.size());
         if (!hasCompatibleFieldCount(values.size())) {
             return FilterMatch.NONE;
         }
@@ -204,14 +205,11 @@ final class SpaceDelimitedPattern extends FilterPattern {
     }
 
     private boolean matchesAllConditions(Fields fields) {
-        for (Entry entry : before) {
-            if (entry.condition() != null && !entry.condition().test(fields)) {
-                return false;
-            }
-        }
-        for (Entry entry : after) {
-            if (entry.condition() != null && !entry.condition().test(fields)) {
-                return false;
+        for (List<Entry> entries : List.of(before, after)) {
+            for (Entry entry : entries) {
+                if (entry.condition() != null && !entry.condition().test(fields)) {
+                    return false;
+                }
             }
         }
         return true;
@@ -234,15 +232,6 @@ final class SpaceDelimitedPattern extends FilterPattern {
             // Digits exceed Integer.MAX_VALUE; treat as an invalid positional reference.
             return null;
         }
-    }
-
-    /**
-     * Splits a message into fields on whitespace, keeping text between double quotes or square
-     * brackets together without the delimiters. With {@code limit} above zero, the field at that
-     * position takes the rest of the line as written.
-     */
-    static List<String> split(String message, int limit) {
-        return SpaceDelimitedTokenizer.split(message, limit);
     }
 
     @Override
