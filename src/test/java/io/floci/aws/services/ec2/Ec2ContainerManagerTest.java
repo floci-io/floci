@@ -1138,6 +1138,7 @@ class Ec2ContainerManagerTest {
         // Count the submitted work across both entry points without observing unrelated callers.
         // API decoding and guest execution share a budget of at most four active decompressions.
         int concurrentLaunches = 12;
+        CountDownLatch firstFourDecompressions = new CountDownLatch(4);
         AtomicInteger totalDecompressions = new AtomicInteger(0);
         AtomicInteger active = new AtomicInteger(0);
         AtomicInteger peakActive = new AtomicInteger(0);
@@ -1155,9 +1156,12 @@ class Ec2ContainerManagerTest {
             int now = active.incrementAndGet();
             peakActive.accumulateAndGet(now, Math::max);
             try {
-                Thread.sleep(75);
+                firstFourDecompressions.countDown();
+                assertTrue(firstFourDecompressions.await(10, TimeUnit.SECONDS),
+                        "four decompressions did not enter the shared budget concurrently");
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
+                throw new AssertionError("interrupted while waiting for concurrent decompressions", ie);
             } finally {
                 active.decrementAndGet();
             }
