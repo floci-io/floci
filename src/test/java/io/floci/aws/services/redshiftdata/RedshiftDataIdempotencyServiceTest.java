@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageFactory;
@@ -530,7 +531,7 @@ class RedshiftDataIdempotencyServiceTest {
                 .thenReturn(new AccountAwareStorageBackend<>(delegate, null, "000000000000"));
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().redshiftData().resultTtlHours()).thenReturn(24);
-        return new RedshiftDataStatementStore(factory, config, receipts);
+        return new RedshiftDataStatementStore(factory, config, receipts, new RegionResolver("us-east-1", "000000000000"));
     }
 
     private static final class Fixture implements AutoCloseable {

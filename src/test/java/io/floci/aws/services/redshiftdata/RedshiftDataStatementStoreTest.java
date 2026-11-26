@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import org.junit.jupiter.api.Test;
@@ -44,7 +45,8 @@ class RedshiftDataStatementStoreTest {
             doThrow(new UncheckedIOException(new IOException("receipt replacement failed")))
                     .when(receipts).sweep();
         }
-        RedshiftDataStatementStore store = new RedshiftDataStatementStore(factory, config, receipts);
+        RedshiftDataStatementStore store = new RedshiftDataStatementStore(factory, config, receipts,
+                new RegionResolver("us-east-1", "000000000000"));
         Instant now = Instant.now();
         store.putForAccount("111111111111", statement("same-id", now.minus(Duration.ofHours(48))));
         store.putForAccount("222222222222", statement("same-id", now.minus(Duration.ofHours(1))));
@@ -107,6 +109,30 @@ class RedshiftDataStatementStoreTest {
         s.updatedAt = createdAt;
         s.status = RedshiftDataStatementStore.Status.FINISHED;
         return s;
+    }
+
+    @Test
+    void aStatementIsReadAndListedOnlyInTheRegionItRanInAndALegacyOneInTheDefaultRegion() {
+        RegionResolver regions = mock(RegionResolver.class);
+        when(regions.getDefaultRegion()).thenReturn("us-east-1");
+        RedshiftDataStatementStore store = new RedshiftDataStatementStore(24, Clock.systemUTC(), regions);
+        RedshiftDataStatementStore.StoredStatement batch = statement("batch", Instant.now());
+        batch.region = "eu-west-1";
+        store.put(batch);
+        store.put(statement("batch:1", Instant.now()));
+        store.put(statement("legacy", Instant.now()));
+
+        when(regions.getRegion()).thenReturn("eu-west-1");
+        assertNotNull(store.get("batch"));
+        assertNotNull(store.get("batch:1"));
+        assertNull(store.get("legacy"));
+        assertEquals(List.of("batch"), store.values().stream().map(s -> s.id).toList());
+
+        when(regions.getRegion()).thenReturn("us-east-1");
+        assertNull(store.get("batch"));
+        assertNull(store.get("batch:1"));
+        assertNotNull(store.get("legacy"));
+        assertEquals(List.of("legacy"), store.values().stream().map(s -> s.id).toList());
     }
 
     @Test
