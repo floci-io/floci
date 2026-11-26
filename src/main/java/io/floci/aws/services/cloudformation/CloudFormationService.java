@@ -1319,7 +1319,7 @@ public class CloudFormationService implements ResourceProvider {
                         newResolvedParams, physicalIds, Map.of(), newConditions, Map.of(), objectMapper, null);
 
                 List<String> sortedLogicalIds = topologicalSort(newResources, newConditions);
-                Map<String, Set<ChangeDetail>> dependencyDetails = comparedProperties == null ? new HashMap<>() : null;
+                Set<String> dependencyDetailIds = new HashSet<>();
                 boolean anyNewChange = true;
                 while (anyNewChange) {
                     anyNewChange = false;
@@ -1369,12 +1369,8 @@ public class CloudFormationService implements ResourceProvider {
                                                     newConditions, dependencyEngine)));
                             String replacementState = replacement ? REPLACEMENT_TRUE
                                     : conditional ? REPLACEMENT_CONDITIONAL : REPLACEMENT_FALSE;
-                            if (dependencyDetails != null && oldDef != null && !typeChanged) {
-                                // Rebuild on each visit: a newly replaced dependency can raise Never to Always.
-                                dependencyDetails.put(logicalId, replacementDecider.dependencyDetails(resourceType,
-                                        logicalId, oldDef, newDef, subtree -> changedResourceReads(subtree,
-                                                replacedResourceIds, inPlaceChangedAttributes, newConditions,
-                                                dependencyEngine)));
+                            if (comparedProperties == null && oldDef != null && !typeChanged) {
+                                dependencyDetailIds.add(logicalId);
                             }
                             if (replacement && replacedResourceIds.add(logicalId)) {
                                 anyNewChange = true;
@@ -1394,9 +1390,23 @@ public class CloudFormationService implements ResourceProvider {
                         }
                     }
                 }
-                if (dependencyDetails != null) {
-                    changes.replaceAll(change -> change.withDependencyDetails(
-                            dependencyDetails.get(change.logicalResourceId())));
+                if (!dependencyDetailIds.isEmpty()) {
+                    Map<String, String> replacementStates = new HashMap<>();
+                    for (ResourceChange change : changes) {
+                        if (replacementRank(change.replacement()) > 0) {
+                            replacementStates.put(change.logicalResourceId(), change.replacement());
+                        }
+                    }
+                    changes.replaceAll(change -> {
+                        String logicalId = change.logicalResourceId();
+                        if (!dependencyDetailIds.contains(logicalId)) {
+                            return change;
+                        }
+                        return change.withDependencyDetails(replacementDecider.dependencyDetails(
+                                change.resourceType(), logicalId, oldResources.get(logicalId), newResources.get(logicalId),
+                                subtree -> changedResourceReads(subtree, replacementStates, inPlaceChangedAttributes,
+                                        newConditions, dependencyEngine)));
+                    });
                 }
             }
             return changes;
@@ -1615,7 +1625,7 @@ public class CloudFormationService implements ResourceProvider {
                 boolean tags = "Tags".equals(property);
                 for (ResourceRead cause : causes) {
                     details.add(new ChangeDetail(tags ? "Tags" : "Properties", tags ? null : property,
-                            recreates ? "Always" : "Never", "Dynamic", cause.source(), cause.entity()));
+                            recreates ? "Always" : "Never", cause.evaluation(), cause.source(), cause.entity()));
                 }
             });
             return details;
@@ -6339,8 +6349,10 @@ public class CloudFormationService implements ResourceProvider {
         } else if (sub.isArray() && sub.size() >= 1) {
             template = sub.get(0).asText();
             if (sub.size() >= 2 && sub.get(1).isObject()) {
-                sub.get(1).fieldNames().forEachRemaining(explicitVars::add);
-                visitResourceReads(sub.get(1), conditions, bothIfUnknown, read);
+                sub.get(1).fields().forEachRemaining(entry -> {
+                    explicitVars.add(entry.getKey());
+                    visitResourceReads(entry.getValue(), conditions, bothIfUnknown, read);
+                });
             }
         } else {
             return;
@@ -6358,7 +6370,7 @@ public class CloudFormationService implements ResourceProvider {
         }
     }
 
-    private record ResourceRead(String logicalId, String attribute) {
+    private record ResourceRead(String logicalId, String attribute, String evaluation) {
         String source() {
             return attribute == null ? "ResourceReference" : "ResourceAttribute";
         }
@@ -6368,17 +6380,19 @@ public class CloudFormationService implements ResourceProvider {
         }
     }
 
-    private Set<ResourceRead> changedResourceReads(JsonNode node, Set<String> replacedIds,
+    private Set<ResourceRead> changedResourceReads(JsonNode node, Map<String, String> replacementStates,
                                                    Map<String, Set<String>> changedAttributes,
                                                    Map<String, Boolean> conditions,
                                                    CloudFormationTemplateEngine engine) {
         Set<ResourceRead> reads = new LinkedHashSet<>();
-        if (!replacedIds.isEmpty()) {
+        if (!replacementStates.isEmpty()) {
             visitResourceReads(node, conditions, false, (id, getAtt, subAttribute) -> {
-                if (replacedIds.contains(id)) {
+                String replacement = replacementStates.get(id);
+                if (replacement != null) {
                     String name = readAttribute(getAtt, subAttribute, engine);
                     if (name == null || !name.isEmpty()) {
-                        reads.add(new ResourceRead(id, name));
+                        String evaluation = REPLACEMENT_TRUE.equals(replacement) ? "Static" : "Dynamic";
+                        reads.add(new ResourceRead(id, name, evaluation));
                     }
                 }
             });
@@ -6387,7 +6401,8 @@ public class CloudFormationService implements ResourceProvider {
             visitResourceReads(node, conditions, true, (id, getAtt, subAttribute) -> {
                 String name = readAttribute(getAtt, subAttribute, engine);
                 if (name != null && changedAttributes.getOrDefault(id, Set.of()).contains(name)) {
-                    reads.add(new ResourceRead(id, name));
+                    String evaluation = REPLACEMENT_TRUE.equals(replacementStates.get(id)) ? "Static" : "Dynamic";
+                    reads.add(new ResourceRead(id, name, evaluation));
                 }
             });
         }
