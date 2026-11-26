@@ -1399,6 +1399,7 @@ def test_verify_fails_on_an_action_type_or_format_aws_does_not_give_and_reports_
 def test_the_vendored_file_is_well_formed():
     document = json.loads(r.OUTPUT.read_text(encoding="utf-8"))
     assert r.validate(document) == []
+    assert r.stale_namespaces(document) == []
     operations = document["operations"]
     assert operations["elasticloadbalancing:CreateTargetGroup"]["resources"] == [
         {"type": "targetgroup", "fill": {"TargetGroupName": "Name"}}]

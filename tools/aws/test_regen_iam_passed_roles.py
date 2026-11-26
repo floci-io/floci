@@ -316,8 +316,66 @@ def test_verify_fails_when_aws_lists_an_operation_for_a_client_the_file_does_not
 def test_the_vendored_file_is_well_formed():
     document = json.loads(r.OUTPUT.read_text(encoding="utf-8"))
     assert r.validate(document) == []
+    assert r.stale_namespaces(document) == []
     assert document["operations"]["athena:CreateWorkGroup"]["roles"] == [
         {"member": "Configuration.ExecutionRole", "passedTo": "athena"}]
     assert document["operations"]["budgets:CreateBudgetAction"]["roles"] == [
         {"member": "ExecutionRoleArn", "passedTo": "budgets"}]
     assert document["operations"]["ec2:RunInstances"].get("byHand")
+
+
+# --------------------------------------------------------------------------- #
+# The file against its generator's namespaces
+# --------------------------------------------------------------------------- #
+def namespaced(namespaces: list[str], operations: list[str], not_covered: dict[str, str],
+               others: tuple[str, ...] = ()) -> dict:
+    return {"namespaces": {namespace: [namespace] for namespace in namespaces}, "notCovered": dict(not_covered),
+            "otherNamespaces": list(others), "operations": {operation: {} for operation in operations}}
+
+
+def reads_svc(operation: str) -> bool:
+    return r.namespace_of(operation) == "svc"
+
+
+def test_a_file_holding_its_generators_namespaces_has_no_namespace_problem():
+    document = namespaced(["svc"], ["svc:A"], {"gone": "not read yet"}, ("elsewhere",))
+    assert r.namespace_problems(document, reads_svc, ["svc"], {"gone": "not read yet"}) == []
+
+
+def test_a_namespace_taken_out_of_the_generator_but_left_in_the_file_is_a_problem():
+    document = namespaced(["svc", "old"], ["svc:A", "old:B"], {})
+    assert r.namespace_problems(document, reads_svc, ["svc"], {"old": "not read yet"}) == [
+        "old:B is in the file, but its generator does not read it",
+        "the file's namespaces are not its generator's: the file alone has ['old'], the generator alone reads []; "
+        "regenerate it",
+        "the file's reasons for the namespaces it does not read are not its generator's, for ['old']; regenerate it"]
+
+
+def test_a_namespace_the_generator_reads_that_the_file_leaves_out_is_a_problem():
+    assert r.namespace_problems(namespaced([], [], {}), reads_svc, ["svc"], {}) == [
+        "the file's namespaces are not its generator's: the file alone has [], the generator alone reads ['svc']; "
+        "regenerate it"]
+
+
+def test_a_reason_changed_in_the_generator_alone_is_a_problem():
+    document = namespaced(["svc"], [], {"x": "the old reason"})
+    assert r.namespace_problems(document, reads_svc, ["svc"], {"x": "the new reason"}) == [
+        "the file's reasons for the namespaces it does not read are not its generator's, for ['x']; regenerate it"]
+
+
+def test_another_namespace_the_generator_reads_or_names_as_not_read_is_a_problem():
+    document = namespaced(["svc"], [], {"x": "not read yet"}, ("svc", "x", "y"))
+    assert r.namespace_problems(document, reads_svc, ["svc"], {"x": "not read yet"}) == [
+        "the file's other namespaces include ['svc', 'x'], which its generator reads or names as not read"]
+
+
+def test_check_fails_a_file_its_generators_namespaces_no_longer_match(corrections, tmp_path, capsys):
+    corrections.setattr(r, "derive", lambda document, data: [])
+    corrections.setattr(r, "resolve_botocore_data", lambda data: (tmp_path, "botocore test"))
+    output = tmp_path / "iam-passed-roles.json"
+    output.write_text(json.dumps({**good_document(), "notCovered": {}, "otherNamespaces": []}), encoding="utf-8")
+    corrections.setattr(r, "NOT_COVERED", {})
+    assert r.main(["--check", "--output", str(output)]) == 0
+    corrections.setattr(r, "NOT_COVERED", {"gone": "not read yet"})
+    assert r.main(["--check", "--output", str(output)]) == 1
+    assert "for ['gone']; regenerate it" in capsys.readouterr().err

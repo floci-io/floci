@@ -72,6 +72,8 @@ byte-identical. The two gates split along the sources:
 - `--check` is offline and needs the pinned botocore. The file must be well-formed, and every
   operation's members and model-derived `notRead` verdict must be exactly what the rule and the
   corrections give from botocore for the models the file names, so a stale verdict fails.
+  Its namespaces, the reasons it gives for those it does not read, and its other namespaces must be
+  the generator's, so a namespace taken out of `NAMESPACES` without the file regenerated fails.
 - `--verify` is online and stdlib-only. Every operation the file carries must still list the same
   tagging actions, with the same `createAction` and `requestTags`, for the same SDK clients, and
   every resource type in `resourceArns` must still have its ARN. An operation AWS has added
@@ -95,7 +97,7 @@ from pathlib import Path
 
 from regen_iam_authorized_actions import fetch_references
 from regen_iam_passed_roles import (BODY_LOCATIONS, MEMBER_PATH_RE, NAMESPACE_RE, OPERATION_RE, _shown, load_models,
-                                    namespace_of)
+                                    namespace_of, namespace_problems)
 from regen_partitions import resolve_botocore_data
 from regen_rest_routes import MODELS as REST_MODELS
 
@@ -515,6 +517,12 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
     }
 
 
+def stale_namespaces(document: dict) -> list[str]:
+    """Where the file's namespaces part from `NAMESPACES` and `NOT_COVERED` (`namespace_problems`)."""
+    return namespace_problems(document, lambda operation: namespace_of(operation) in NAMESPACES, NAMESPACES,
+                              NOT_COVERED)
+
+
 def _unmatched_exclusions(covered: dict[str, dict], namespaces: dict[str, list[str]], data: Path) -> list[str]:
     """An exclusion that its operation's request does not have, so none outlives its member."""
     problems = []
@@ -700,7 +708,7 @@ def main(argv: list[str] | None = None) -> int:
         problems = validate(document)
         if not problems and args.check:
             data, _ = resolve_botocore_data(args.botocore_data)
-            problems = derive(document, data)
+            problems = stale_namespaces(document) + derive(document, data)
         for problem in problems:
             print(f"error: {problem}", file=sys.stderr)
         if problems:
