@@ -10336,6 +10336,112 @@ class Ec2ServiceTest {
         assertEquals(List.of(), ipv6Egress(groupNamed(service, vpc.getVpcId(), "changed")));
     }
 
+    @Test
+    void ipv6AssociationDoesNotRestoreEgressRevokedBeforeItsGroupUpdate() throws Exception {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        Method lockFor = Ec2Service.class.getDeclaredMethod("lockFor", String.class);
+        lockFor.setAccessible(true);
+        Object topologyLock = lockFor.invoke(service, region + "::transit-gateway-attachments");
+        Vpc selectedVpc = null;
+        SecurityGroup selectedGroup = null;
+        Object selectedLock = null;
+        for (int attempt = 0; attempt < 32; attempt++) {
+            Vpc candidate = service.createVpc(region, "10.234.0.0/16", false);
+            SecurityGroup group = groupNamed(service, candidate.getVpcId(), "default");
+            Object groupLock = lockFor.invoke(service, region + "::" + group.getGroupId());
+            Object vpcLock = lockFor.invoke(service, region + "::" + candidate.getVpcId());
+            if (groupLock != topologyLock && groupLock != vpcLock) {
+                selectedVpc = candidate;
+                selectedGroup = group;
+                selectedLock = groupLock;
+                break;
+            }
+        }
+        assertNotNull(selectedVpc, "The group lock must be distinct from earlier topology and VPC locks");
+        Vpc vpc = selectedVpc;
+        SecurityGroup group = selectedGroup;
+        Object groupLock = selectedLock;
+        AtomicReference<Thread> associating = new AtomicReference<>();
+        ExecutorService workers = Executors.newSingleThreadExecutor();
+        Future<?> association;
+        try {
+            synchronized (groupLock) {
+                association = workers.submit(() -> {
+                    associating.set(Thread.currentThread());
+                    service.associateAmazonProvidedIpv6CidrBlock(region, vpc.getVpcId());
+                });
+                awaitBlockedOrDone(associating, association);
+                assertFalse(association.isDone());
+                ThreadInfo blocked = ManagementFactory.getThreadMXBean().getThreadInfo(associating.get().threadId());
+                assertNotNull(blocked.getLockInfo());
+                assertEquals(System.identityHashCode(groupLock), blocked.getLockInfo().getIdentityHashCode());
+                service.revokeSecurityGroupEgress(region, group.getGroupId(),
+                        new ArrayList<>(group.getIpPermissionsEgress()));
+            }
+            association.get(5, TimeUnit.SECONDS);
+            assertTrue(groupNamed(service, vpc.getVpcId(), "default").getIpPermissionsEgress().isEmpty(),
+                    "Association must not restore outbound access after the original rule was revoked");
+        } finally {
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void ipv6AssociationRefreshesAllGroupsOnlyOnce() {
+        Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
+        Ec2Service service = enforcingIpv6Service(manager);
+        Vpc vpc = service.createVpc("us-east-1", "10.235.0.0/16", false);
+        service.createSecurityGroup("us-east-1", "first", "first", vpc.getVpcId());
+        service.createSecurityGroup("us-east-1", "second", "second", vpc.getVpcId());
+        clearInvocations(manager);
+
+        service.associateAmazonProvidedIpv6CidrBlock("us-east-1", vpc.getVpcId());
+
+        verify(manager, times(1)).refreshSecurityGroups(eq("us-east-1"), anyMap(), anyMap());
+        for (String name : List.of("default", "first", "second")) {
+            assertEquals(List.of("::/0"), ipv6Egress(groupNamed(service, vpc.getVpcId(), name)));
+        }
+    }
+
+    @Test
+    void ipv6AssociationRetryRefreshesEveryGroupAfterFirewallFailure() {
+        Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
+        Ec2Service service = enforcingIpv6Service(manager);
+        Vpc vpc = service.createVpc("us-east-1", "10.236.0.0/16", false);
+        service.createSecurityGroup("us-east-1", "first", "first", vpc.getVpcId());
+        service.createSecurityGroup("us-east-1", "second", "second", vpc.getVpcId());
+        clearInvocations(manager);
+        doThrow(new IllegalStateException("firewall unavailable")).doNothing().when(manager)
+                .refreshSecurityGroups(eq("us-east-1"), anyMap(), anyMap());
+
+        assertThrows(IllegalStateException.class,
+                () -> service.associateAmazonProvidedIpv6CidrBlock("us-east-1", vpc.getVpcId()));
+        for (String name : List.of("default", "first", "second")) {
+            assertEquals(List.of("::/0"), ipv6Egress(groupNamed(service, vpc.getVpcId(), name)),
+                    "A failed firewall refresh must not leave later groups without their default rule");
+        }
+        assertDoesNotThrow(() -> service.associateAmazonProvidedIpv6CidrBlock("us-east-1", vpc.getVpcId()));
+        verify(manager, times(2)).refreshSecurityGroups(eq("us-east-1"), anyMap(), anyMap());
+        for (String name : List.of("default", "first", "second")) {
+            SecurityGroup group = groupNamed(service, vpc.getVpcId(), name);
+            assertEquals(1, service.describeSecurityGroupRules("us-east-1", List.of(group.getGroupId()), List.of())
+                    .stream().filter(rule -> rule.isEgress() && "::/0".equals(rule.getCidrIpv6())).count());
+        }
+    }
+
+    private static Ec2Service enforcingIpv6Service(Ec2ContainerManager manager) {
+        EmulatorConfig config = mockConfig(false);
+        EmulatorConfig.NetworkConfig network = mock(EmulatorConfig.NetworkConfig.class);
+        EmulatorConfig.SecurityGroupEnforcementConfig enforcement = mock(EmulatorConfig.SecurityGroupEnforcementConfig.class);
+        when(config.network()).thenReturn(network);
+        when(network.securityGroupEnforcement()).thenReturn(enforcement);
+        when(enforcement.enabled()).thenReturn(true);
+        return new Ec2Service(config, manager, mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class),
+                mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+    }
+
     private static List<String> ipv6Egress(SecurityGroup group) {
         return group.getIpPermissionsEgress().stream().flatMap(permission -> permission.getIpv6Ranges().stream())
                 .map(Ipv6Range::getCidrIpv6).toList();

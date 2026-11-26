@@ -7664,22 +7664,37 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     vpcs.put(key(region, vpcId), vpc);
                 }
             }
-        }
-        if (first) {
-            for (SecurityGroup group : securityGroups.scan(k -> true)) {
-                synchronized (attachmentTopologyLock(region)) {
-                    SecurityGroup current = securityGroups.get(key(region, group.getGroupId())).orElse(null);
-                    if (current != null && region.equals(current.getRegion()) && vpcId.equals(current.getVpcId())
-                            && hasOnlyOriginalIpv4Egress(current)) {
-                        IpPermission ipv6All = new IpPermission();
-                        ipv6All.setIpProtocol("-1");
-                        ipv6All.getIpv6Ranges().add(new Ipv6Range("::/0"));
-                        authorizeSecurityGroupEgress(region, current.getGroupId(), List.of(ipv6All));
-                    }
-                }
+            if (first) {
+                addDefaultIpv6Egress(region, vpcId);
             }
         }
+        // Store every group's rule before refreshing firewalls. A retry must refresh them even
+        // when a previous refresh failed after the association and its rules were saved.
+        reconcileFirewallPolicies(region);
         return association;
+    }
+
+    private void addDefaultIpv6Egress(String region, String vpcId) {
+        for (SecurityGroup group : securityGroups.scan(k -> k.startsWith(region + "::"))) {
+            if (!vpcId.equals(group.getVpcId())) {
+                continue;
+            }
+            synchronized (lockFor(key(region, group.getGroupId()))) {
+                SecurityGroup current = securityGroups.get(key(region, group.getGroupId())).orElse(null);
+                if (current == null || !region.equals(current.getRegion())
+                        || !vpcId.equals(current.getVpcId()) || !hasOnlyOriginalIpv4Egress(current)) {
+                    continue;
+                }
+                IpPermission ipv6All = new IpPermission();
+                ipv6All.setIpProtocol("-1");
+                ipv6All.getIpv6Ranges().add(new Ipv6Range("::/0"));
+                List<IpPermission> next = new ArrayList<>(current.getIpPermissionsEgress());
+                next.add(ipv6All);
+                createRules(region, current.getGroupId(), ipv6All, true);
+                current.setIpPermissionsEgress(next);
+                securityGroups.put(key(region, current.getGroupId()), current);
+            }
+        }
     }
 
     /**
