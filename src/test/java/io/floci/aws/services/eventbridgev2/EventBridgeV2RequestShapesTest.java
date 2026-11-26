@@ -645,6 +645,54 @@ class EventBridgeV2RequestShapesTest {
                         + "\"Credential\":{\"StaticTokenSecretValue\":\"abcdef\",\"HmacSecretValue\":null}}")));
     }
 
+    private static final String REVOKE_ARN_PATTERN = "arn:aws(-[a-z0-9]+)*:events:[a-z][a-z0-9]*(-[a-z0-9]+)*:"
+            + "([0-9]{12}):(subscriber|event-sourcev2\\/(aws\\.service|aws\\.partner|webhook))"
+            + "\\/[A-Za-z0-9][\\.\\-_A-Za-z0-9]{0,255}\\/[a-z0-9]{25}";
+
+    @Test
+    void revokeResourceAnEmptyArnFailsLengthBeforePattern() {
+        assertAnswers("RevokeResource", "{\"Arn\":\"\"}",
+                "Value '' at 'arn' failed to satisfy constraint: Member must have length greater than or equal to 1",
+                "Value '' at 'arn' failed to satisfy constraint: Member must satisfy regular expression pattern: "
+                        + REVOKE_ARN_PATTERN);
+    }
+
+    @Test
+    void revokeResourceATooLongArnFailsTheLengthOnly() {
+        String arn = "arn:aws:events:us-east-1:123456789012:subscriber/" + "a".repeat(1000) + "/abcdefghijklmnopqrstuvwxy";
+
+        assertAnswers("RevokeResource", "{\"Arn\":\"" + arn + "\"}",
+                "Value '" + arn + "' at 'arn' failed to satisfy constraint: "
+                        + "Member must have length less than or equal to 1011",
+                "Value '" + arn + "' at 'arn' failed to satisfy constraint: "
+                        + "Member must satisfy regular expression pattern: " + REVOKE_ARN_PATTERN);
+    }
+
+    @Test
+    void revokeResourceABusArnFailsThePattern() {
+        assertAnswers("RevokeResource", "{\"Arn\":\"" + BUS_ARN + "\"}",
+                "Value '" + BUS_ARN + "' at 'arn' failed to satisfy constraint: "
+                        + "Member must satisfy regular expression pattern: " + REVOKE_ARN_PATTERN);
+    }
+
+    @Test
+    void revokeResourceAMissingArnIsRefusedAsNullAndANumberIsASerializationException() {
+        assertAnswers("RevokeResource", "{}",
+                "Value null at 'arn' failed to satisfy constraint: Member must not be null");
+        assertSerializationException("RevokeResource", "{\"Arn\":1}");
+    }
+
+    @Test
+    void revokeResourceAcceptsSourceAndSubscriberArnsOfEveryPartitionAndType() {
+        for (String arn : List.of(
+                "arn:aws:events:us-east-1:123456789012:event-sourcev2/webhook/x/abcdefghijklmnopqrstuvwxy",
+                "arn:aws:events:us-east-1:123456789012:event-sourcev2/aws.service/x/abcdefghijklmnopqrstuvwxy",
+                "arn:aws:events:us-east-1:123456789012:event-sourcev2/aws.partner/x/abcdefghijklmnopqrstuvwxy",
+                "arn:aws-us-gov:events:us-gov-west-1:123456789012:subscriber/x/abcdefghijklmnopqrstuvwxy")) {
+            assertDoesNotThrow(() -> EventBridgeV2RequestShapes.check("RevokeResource", json("{\"Arn\":\"" + arn + "\"}")));
+        }
+    }
+
     private static void assertAnswers(String operation, String request, String... violations) {
         assertAnswers(operation, json(request), violations);
     }

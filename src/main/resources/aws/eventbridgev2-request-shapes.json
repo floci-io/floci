@@ -8,6 +8,7 @@
     "DeleteEventSource": "DeleteEventSourceRequest",
     "DescribeEventSource": "DescribeEventSourceRequest",
     "ListEventSources": "ListEventSourcesRequest",
+    "RevokeResource": "RevokeResourceRequest",
     "RotateWebhookCredentials": "RotateWebhookCredentialsRequest",
     "UpdateEventSource": "UpdateEventSourceRequest"
   },
@@ -189,6 +190,21 @@
       "min": 0,
       "max": 3753,
       "sensitive": true
+    },
+    "RevocableResourceArn": {
+      "type": "string",
+      "min": 1,
+      "max": 1011,
+      "pattern": "arn:aws(-[a-z0-9]+)*:events:[a-z][a-z0-9]*(-[a-z0-9]+)*:([0-9]{12}):(subscriber|event-sourcev2\\/(aws\\.service|aws\\.partner|webhook))\\/[A-Za-z0-9][\\.\\-_A-Za-z0-9]{0,255}\\/[a-z0-9]{25}"
+    },
+    "RevokeResourceRequest": {
+      "type": "structure",
+      "required": [
+        "Arn"
+      ],
+      "members": {
+        "Arn": "RevocableResourceArn"
+      }
     },
     "RoleArn": {
       "type": "string",

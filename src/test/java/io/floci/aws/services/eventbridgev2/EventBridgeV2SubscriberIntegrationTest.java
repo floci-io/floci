@@ -29,6 +29,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -152,7 +153,7 @@ class EventBridgeV2SubscriberIntegrationTest {
             assertEquals("all orders", described.description());
             assertEquals("{\"source\":[\"com.shop\"]}", described.filterConfiguration().filters().getFirst().pattern());
             assertEquals(SubscriberState.RUNNING, described.state());
-            assertEquals(Boolean.FALSE, described.revoked());
+            assertNull(described.revoked());
             // The SDK decodes these only from CBOR timestamps.
             assertNotNull(described.creationTime());
             assertNotNull(described.lastModifiedTime());

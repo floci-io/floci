@@ -167,6 +167,8 @@ public class EventBridgeV2EventSources implements Resettable {
                 configuration, WebhookEventsConfigurations.authType(
                         source.getConfiguration().get(WebhookEventsConfigurations.WEBHOOK)));
 
+        requireNotRevoked(source, "EventSource is revoked and cannot be updated");
+
         EventSourceV2 changed = copyOf(source);
         changed.setDescription(request.hasNonNull("Description") ? request.get("Description").textValue()
                 : source.getDescription());
@@ -217,6 +219,7 @@ public class EventBridgeV2EventSources implements Resettable {
             }
             return source.getSecretArn();
         }
+        requireNotRevoked(source, "EventSource is revoked and its credentials cannot be rotated");
         requireSecretUsable(source, region);
 
         String current = secrets.getSecretValue(source.getSecretArn(), null, null, region).getSecretString();
@@ -288,6 +291,7 @@ public class EventBridgeV2EventSources implements Resettable {
         copy.setWebhookHostId(source.getWebhookHostId());
         copy.setWebhookToken(source.getWebhookToken());
         copy.setSecretArn(source.getSecretArn());
+        copy.setRevoked(source.isRevoked());
         copy.setRotationRequests(new LinkedHashMap<>(source.getRotationRequests()));
         return copy;
     }
@@ -367,7 +371,8 @@ public class EventBridgeV2EventSources implements Resettable {
     }
 
     boolean hasSourcesOn(String eventBusArn, String region) {
-        return inRegion(region).stream().anyMatch(source -> eventBusArn.equals(source.getEventBusArn()));
+        return inRegion(region).stream()
+                .anyMatch(source -> eventBusArn.equals(source.getEventBusArn()) && !source.isRevoked());
     }
 
     /** The URL a source receives its events at, in the scheme of Floci's own base URL. */
@@ -454,19 +459,53 @@ public class EventBridgeV2EventSources implements Resettable {
         return EventBridgeV2Service.invalidInput("Invalid nextToken");
     }
 
-    private void checkArn(String eventSourceArn, String region) {
-        requireEndpointRegion(eventSourceArn, region, "EventSourceArn");
-        requireOwnAccount(eventSourceArn);
+    /** Refuses an ARN of another Region, partition or account. {@code member} names the request member in the error. */
+    void checkArn(String arn, String region, String member) {
+        requireEndpointRegion(arn, region, member);
+        requireOwnAccount(arn);
     }
 
-    private EventSourceV2 require(String eventSourceArn, String region) {
+    private void checkArn(String eventSourceArn, String region) {
+        checkArn(eventSourceArn, region, "EventSourceArn");
+    }
+
+    private Optional<EventSourceV2> lookup(String eventSourceArn, String region) {
         String[] resource = AwsArnUtils.parse(eventSourceArn).resource().split("/");
-        Optional<EventSourceV2> found = resource.length == 4 && "event-sourcev2".equals(resource[0])
+        return resource.length == 4 && "event-sourcev2".equals(resource[0])
                 ? sources.get(EventBridgeV2Service.storageKey(region, resource[2]))
                         .filter(source -> eventSourceArn.equals(source.getArn()))
                 : Optional.empty();
-        return found.orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                "EventSource not found: " + eventSourceArn, 404));
+    }
+
+    private EventSourceV2 require(String eventSourceArn, String region) {
+        return lookup(eventSourceArn, region).orElseThrow(() -> notFound(eventSourceArn));
+    }
+
+    private static AwsException notFound(String eventSourceArn) {
+        return new AwsException("ResourceNotFoundException", "EventSource not found: " + eventSourceArn, 404);
+    }
+
+    private static void requireNotRevoked(EventSourceV2 source, String message) {
+        if (source.isRevoked()) {
+            throw new AwsException("InvalidStateException", message, 409);
+        }
+    }
+
+    /**
+     * Revokes the source {@code eventSourceArn} names. A webhook source that does not exist is answered as access
+     * denied, and any other source type as not found.
+     */
+    void revoke(String eventSourceArn, String region) {
+        boolean webhook = "webhook".equals(AwsArnUtils.parse(eventSourceArn).resource().split("/")[1]);
+        EventSourceV2 source = lookup(eventSourceArn, region)
+                .orElseThrow(() -> webhook ? accessDenied() : notFound(eventSourceArn));
+        if (source.isRevoked()) {
+            return;
+        }
+        EventSourceV2 revoked = copyOf(source);
+        revoked.setRevoked(true);
+        revoked.setLastModifiedTime(clock.instant());
+        sources.put(EventBridgeV2Service.storageKey(region, source.getName()), revoked);
     }
 
     private void requireEndpointRegion(String arn, String region, String member) {
@@ -479,8 +518,12 @@ public class EventBridgeV2EventSources implements Resettable {
 
     private void requireOwnAccount(String arn) {
         if (AwsArnUtils.isForeignAccount(AwsArnUtils.parse(arn), regionResolver.getAccountId())) {
-            throw new AwsException("AccessDeniedException", "Access denied.", 403);
+            throw accessDenied();
         }
+    }
+
+    static AwsException accessDenied() {
+        return new AwsException("AccessDeniedException", "Access denied.", 403);
     }
 
     private List<EventSourceV2> inRegion(String region) {

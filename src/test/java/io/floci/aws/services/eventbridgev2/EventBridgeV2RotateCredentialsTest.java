@@ -32,6 +32,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 
+import static io.floci.aws.services.eventbridgev2.WebhookSourceFixture.HMAC_AUTH;
+import static io.floci.aws.services.eventbridgev2.WebhookSourceFixture.MAPPER;
+import static io.floci.aws.services.eventbridgev2.WebhookSourceFixture.NOW;
+import static io.floci.aws.services.eventbridgev2.WebhookSourceFixture.REGION;
+import static io.floci.aws.services.eventbridgev2.WebhookSourceFixture.STATIC_AUTH;
+import static io.floci.aws.services.eventbridgev2.WebhookSourceFixture.json;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -47,18 +53,8 @@ import static org.mockito.Mockito.when;
  * checks as measured on AWS.
  */
 class EventBridgeV2RotateCredentialsTest {
-    private static final String REGION = "us-east-1";
-    private static final String ACCOUNT = "000000000000";
-    private static final Instant NOW = Instant.parse("2026-11-25T06:00:00Z");
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String ROLE = "arn:aws:iam::000000000000:role/Hook";
-    private static final String STATIC_AUTH = "{\"StaticTokenAuthConfiguration\":{\"TokenHttpHeader\":\"X-Tok\","
-            + "\"SecretValue\":\"original-token\"}}";
     private static final String BASIC_AUTH = "{\"BasicHttpAuthConfiguration\":{\"Username\":\"alice\","
             + "\"Password\":\"original-pw\"}}";
-    private static final String HMAC_AUTH = "{\"HmacAuthConfiguration\":{\"Algorithm\":\"SHA256\","
-            + "\"Encoding\":\"HEX\",\"SignatureHttpHeader\":\"X-Sig\",\"SignedMessageComposition\":\"BODY\","
-            + "\"SecretValue\":\"0123456789abcdef\"}}";
     private static final String HMAC_BASE64_AUTH = "{\"HmacAuthConfiguration\":{\"Algorithm\":\"SHA256\","
             + "\"Encoding\":\"HEX\",\"SignatureHttpHeader\":\"X-Sig\",\"SignedMessageComposition\":\"BODY\","
             + "\"SecretEncoding\":\"BASE64\",\"SecretValue\":\"MDEyMzQ1Njc4OWFiY2RlZg==\"}}";
@@ -71,6 +67,7 @@ class EventBridgeV2RotateCredentialsTest {
     private static final String HMAC_BASE64_MESSAGE = "Credential.HmacSecretValue must be standard Base64 when the "
             + "SecretEncoding of the EventSource is BASE64";
 
+    private WebhookSourceFixture fixture;
     private SecretsManagerService secrets;
     private EventBridgeV2Service service;
     private EventBridgeV2Webhooks webhooks;
@@ -80,28 +77,19 @@ class EventBridgeV2RotateCredentialsTest {
 
     @BeforeEach
     void setUp() {
-        StorageFactory factory = mock(StorageFactory.class);
-        when(factory.create(eq("secretsmanager"), any(), any(TypeReference.class)))
-                .thenAnswer(call -> AccountAwareStorageBackend.<Secret>inMemory(ACCOUNT));
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().secretsmanager().defaultRecoveryWindowDays()).thenReturn(30);
-        RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
-        secrets = new SecretsManagerService(factory, config, regionResolver, null, MAPPER, null);
-        clock = new ManualClock(NOW);
-        EventBridgeV2EventSources sources = new EventBridgeV2EventSources(
-                AccountAwareStorageBackend.inMemory(ACCOUNT), secrets, regionResolver, clock, "http://floci.test:4566");
-        service = new EventBridgeV2Service(AccountAwareStorageBackend.inMemory(ACCOUNT),
-                AccountAwareStorageBackend.inMemory(ACCOUNT), regionResolver, mock(EventBridgeV2Delivery.class),
-                sources, clock, true);
-        webhooks = new EventBridgeV2Webhooks(service, sources, secrets, clock);
-        bus = service.createEventBus(json("{\"Name\":\"orders\"}"), REGION).getArn();
+        fixture = new WebhookSourceFixture(mock(EventBridgeV2Delivery.class));
+        secrets = fixture.secrets;
+        service = fixture.service;
+        webhooks = fixture.webhooks;
+        clock = fixture.clock;
+        bus = fixture.bus;
     }
 
     // ──────────────────────────── The secret ────────────────────────────
 
     @Test
     void aSuppliedStaticTokenReplacesTheSecretAndKeepsTheOldOneAsPrevious() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         String first = versionOf(source, "AWSCURRENT");
 
         String secretArn = rotate(source, "{\"StaticTokenSecretValue\":\"second-token\"}");
@@ -115,7 +103,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aSecondRotationLeavesOnlyTheNewestTwoVersionsStaged() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         String first = versionOf(source, "AWSCURRENT");
         rotate(source, "{\"StaticTokenSecretValue\":\"second-token\"}");
         String second = versionOf(source, "AWSCURRENT");
@@ -131,7 +119,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void noCredentialGeneratesA44CharacterValue() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
 
         rotate(source, null);
 
@@ -143,7 +131,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aNullCredentialAndAKnownMemberWithANullOneAreAccepted() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
 
         service.rotateWebhookCredentials(json("{\"EventSourceArn\":\"" + source.getArn()
                 + "\",\"ClientToken\":\"t-null\",\"Credential\":null}"), REGION);
@@ -155,7 +143,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void basicKeepsItsUsernameWhetherThePasswordIsSuppliedOrGenerated() throws Exception {
-        EventSourceV2 source = source("hook", BASIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", BASIC_AUTH);
 
         rotate(source, "{\"BasicHttpPassword\":\"pass:with:colon é\"}");
         JsonNode supplied = MAPPER.readTree(valueOf(source, "AWSCURRENT"));
@@ -172,7 +160,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void basicWithAGeneratedUsernameKeepsTheGeneratedOne() throws Exception {
-        EventSourceV2 source = source("hook", "{\"BasicHttpAuthConfiguration\":{}}");
+        EventSourceV2 source = fixture.source("hook", "{\"BasicHttpAuthConfiguration\":{}}");
         String username = MAPPER.readTree(valueOf(source, "AWSCURRENT")).get("username").textValue();
 
         rotate(source, "{\"BasicHttpPassword\":\"new-password\"}");
@@ -182,7 +170,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aRawHmacSecretIsStoredAsGivenWithItsPrefix() {
-        EventSourceV2 source = source("hook", HMAC_AUTH);
+        EventSourceV2 source = fixture.source("hook", HMAC_AUTH);
 
         rotate(source, "{\"HmacSecretValue\":\"whsec_aaaaaaaaaa\"}");
         assertEquals("whsec_aaaaaaaaaa", valueOf(source, "AWSCURRENT"));
@@ -196,7 +184,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aRawHmacSecretOutsideSixteenToFiveHundredTwelveBytesIsRefused() {
-        EventSourceV2 source = source("hook", HMAC_AUTH);
+        EventSourceV2 source = fixture.source("hook", HMAC_AUTH);
 
         assertRefused(source, "{\"HmacSecretValue\":\"aaaaaaaaaaaaaaa\"}", HMAC_RANGE_MESSAGE);
         assertRefused(source, "{\"HmacSecretValue\":\"" + "é".repeat(257) + "\"}", HMAC_RANGE_MESSAGE);
@@ -206,7 +194,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aBase64HmacSecretLosesItsPrefixAndKeepsItsPadding() {
-        EventSourceV2 source = source("hook", HMAC_BASE64_AUTH);
+        EventSourceV2 source = fixture.source("hook", HMAC_BASE64_AUTH);
 
         rotate(source, "{\"HmacSecretValue\":\"whsec_a2tra2tra2tra2tra2traw==\"}");
         assertEquals("a2tra2tra2tra2tra2traw==", valueOf(source, "AWSCURRENT"));
@@ -217,7 +205,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aBase64HmacSecretMustBeStandardBase64OfEnoughBytes() {
-        EventSourceV2 source = source("hook", HMAC_BASE64_AUTH);
+        EventSourceV2 source = fixture.source("hook", HMAC_BASE64_AUTH);
 
         assertRefused(source, "{\"HmacSecretValue\":\"a2tra2tra2tra2tra2tr_w==\"}", HMAC_BASE64_MESSAGE);
         assertRefused(source, "{\"HmacSecretValue\":\"a2tra2tra2tra2tra2tr\\naw==\"}", HMAC_BASE64_MESSAGE);
@@ -230,7 +218,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aGeneratedHmacSecretIs44Characters() {
-        EventSourceV2 source = source("hook", HMAC_BASE64_AUTH);
+        EventSourceV2 source = fixture.source("hook", HMAC_BASE64_AUTH);
 
         rotate(source, null);
 
@@ -239,7 +227,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void rotatingToTheValueThatIsAlreadyCurrentWritesNoVersion() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         Map<String, List<String>> before = secrets.listSecretVersionIds(source.getSecretArn(), REGION);
 
         rotate(source, "{\"StaticTokenSecretValue\":\"original-token\"}");
@@ -249,7 +237,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void rotatingBasicToTheCurrentPasswordWritesNoVersion() {
-        EventSourceV2 source = source("hook", BASIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", BASIC_AUTH);
         Map<String, List<String>> before = secrets.listSecretVersionIds(source.getSecretArn(), REGION);
 
         rotate(source, "{\"BasicHttpPassword\":\"original-pw\"}");
@@ -259,7 +247,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void rotatingHmacToTheCurrentValueWithItsPrefixWritesNoVersion() {
-        EventSourceV2 source = source("hook", HMAC_BASE64_AUTH);
+        EventSourceV2 source = fixture.source("hook", HMAC_BASE64_AUTH);
         Map<String, List<String>> before = secrets.listSecretVersionIds(source.getSecretArn(), REGION);
 
         rotate(source, "{\"HmacSecretValue\":\"whsec_MDEyMzQ1Njc4OWFiY2RlZg==\"}");
@@ -269,7 +257,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void theSourceKeepsItsModifiedTimeUrlAndSecret() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         String url = service.webhookUrl(source);
         clock.advance(Duration.ofMinutes(5));
 
@@ -284,7 +272,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void anUpdateKeepsTheRememberedTokens() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         rotate(source, "{\"StaticTokenSecretValue\":\"second-token\"}");
 
         EventSourceV2 updated = service.updateEventSource(json("{\"EventSourceArn\":\"" + source.getArn()
@@ -306,7 +294,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void anyCountOfMembersButOneIsRefused() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
 
         assertRefused(source, "{}", UNION_MESSAGE);
         assertRefused(source, "{\"StaticTokenSecretValue\":null}", UNION_MESSAGE);
@@ -318,9 +306,9 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void theMemberMustBeTheOneOfTheAuthenticationType() {
-        EventSourceV2 staticSource = source("tok", STATIC_AUTH);
-        EventSourceV2 basicSource = source("bas", BASIC_AUTH);
-        EventSourceV2 hmacSource = source("hmc", HMAC_AUTH);
+        EventSourceV2 staticSource = fixture.source("tok", STATIC_AUTH);
+        EventSourceV2 basicSource = fixture.source("bas", BASIC_AUTH);
+        EventSourceV2 hmacSource = fixture.source("hmc", HMAC_AUTH);
 
         assertRefused(staticSource, "{\"BasicHttpPassword\":\"second-pw\"}",
                 "Credential must set StaticTokenSecretValue, because the authentication type of this EventSource is "
@@ -382,7 +370,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void theMemberCheckComesBeforeTheValueRules() {
-        EventSourceV2 source = source("hook", HMAC_AUTH);
+        EventSourceV2 source = fixture.source("hook", HMAC_AUTH);
 
         assertRefused(source, "{\"StaticTokenSecretValue\":\"short1\"}", "Credential must set HmacSecretValue, "
                 + "because the authentication type of this EventSource is HmacAuthConfiguration");
@@ -390,7 +378,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void theValueRulesComeBeforeTheClientTokenReplay() {
-        EventSourceV2 source = source("hook", HMAC_AUTH);
+        EventSourceV2 source = fixture.source("hook", HMAC_AUTH);
         rotate(source, "t-replay", "{\"HmacSecretValue\":\"aaaaaaaaaaaaaaaa\"}");
 
         AwsException e = assertThrows(AwsException.class,
@@ -402,7 +390,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aRefusedRotationChangesNothing() {
-        EventSourceV2 source = source("hook", HMAC_AUTH);
+        EventSourceV2 source = fixture.source("hook", HMAC_AUTH);
         Map<String, List<String>> before = secrets.listSecretVersionIds(source.getSecretArn(), REGION);
 
         assertRefused(source, "{\"HmacSecretValue\":\"short\"}", "1 validation error detected: Value at "
@@ -419,7 +407,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aReplayWithTheSameRequestAnswersTheArnAndWritesNothing() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         rotate(source, "t-one", "{\"StaticTokenSecretValue\":\"second-token\"}");
         Map<String, List<String>> before = secrets.listSecretVersionIds(source.getSecretArn(), REGION);
 
@@ -431,7 +419,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aReplayStaysAReplayAfterLaterRotations() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         rotate(source, "t-one", "{\"StaticTokenSecretValue\":\"second-token\"}");
         rotate(source, "t-two", "{\"StaticTokenSecretValue\":\"third-token\"}");
 
@@ -443,7 +431,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aReplayOfAGeneratedRotationKeepsTheGeneratedValue() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         rotate(source, "t-gen", null);
         String generated = valueOf(source, "AWSCURRENT");
         Map<String, List<String>> before = secrets.listSecretVersionIds(source.getSecretArn(), REGION);
@@ -456,7 +444,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aReplayWithAnotherRequestIsAConflict() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         rotate(source, "t-one", "{\"StaticTokenSecretValue\":\"second-token\"}");
         rotate(source, "t-gen", null);
 
@@ -473,8 +461,8 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aTokenOfAnotherSourceRotatesThisOne() {
-        EventSourceV2 one = source("one", STATIC_AUTH);
-        EventSourceV2 two = source("two", STATIC_AUTH);
+        EventSourceV2 one = fixture.source("one", STATIC_AUTH);
+        EventSourceV2 two = fixture.source("two", STATIC_AUTH);
         rotate(one, "t-shared", "{\"StaticTokenSecretValue\":\"second-token\"}");
 
         rotate(two, "t-shared", "{\"StaticTokenSecretValue\":\"second-token\"}");
@@ -485,7 +473,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aRotationToTheCurrentValueStillRemembersItsToken() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         rotate(source, "t-same", "{\"StaticTokenSecretValue\":\"original-token\"}");
 
         AwsException e = assertThrows(AwsException.class,
@@ -496,7 +484,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aTokenIsRememberedForJustUnderEightHours() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         rotate(source, "t-1", "{\"StaticTokenSecretValue\":\"second-token\"}");
         clock.advance(Duration.ofHours(8).minusSeconds(1));
 
@@ -510,7 +498,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aTokenIsForgottenAtExactlyEightHoursAndTheSameRequestRotatesAgain() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         rotate(source, "t-1", null);
         String first = versionOf(source, "AWSCURRENT");
         clock.advance(Duration.ofHours(8));
@@ -524,7 +512,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aForgottenTokenRotatesAgainWithADifferentRequest() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         rotate(source, "t-1", "{\"StaticTokenSecretValue\":\"second-token\"}");
         clock.advance(Duration.ofHours(8));
 
@@ -536,7 +524,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aRotationDropsTheTokensItForgot() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         rotate(source, "t-old", "{\"StaticTokenSecretValue\":\"second-token\"}");
         clock.advance(Duration.ofHours(4));
         rotate(source, "t-mid", "{\"StaticTokenSecretValue\":\"third-token\"}");
@@ -554,7 +542,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aSecretScheduledForDeletionAnswersInvalidState() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         secrets.deleteSecret(source.getSecretArn(), null, false, REGION);
 
         AwsException e = assertThrows(AwsException.class,
@@ -568,7 +556,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aDeletedSecretAnswersInvalidState() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         secrets.deleteSecret(source.getSecretArn(), null, true, REGION);
 
         AwsException e = assertThrows(AwsException.class,
@@ -581,7 +569,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aRememberedTokenStillReplaysWhenTheSecretIsScheduledForDeletion() {
-        EventSourceV2 source = source("hook", STATIC_AUTH);
+        EventSourceV2 source = fixture.source("hook", STATIC_AUTH);
         rotate(source, "t-1", "{\"StaticTokenSecretValue\":\"second-token\"}");
         secrets.deleteSecret(source.getSecretArn(), null, false, REGION);
 
@@ -592,7 +580,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aReplacedStaticTokenIsAcceptedUntilFifteenMinutesAfterTheRotation() {
-        Target target = target(source("hook", STATIC_AUTH));
+        Target target = target(fixture.source("hook", STATIC_AUTH));
         assertEquals(EventBridgeV2Webhooks.OK, post(target, Map.of("x-tok", "original-token"), "{}"));
 
         rotate(target.source(), "{\"StaticTokenSecretValue\":\"second-token\"}");
@@ -609,7 +597,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aReplacedBasicCredentialIsAcceptedUntilFifteenMinutesAfterTheRotation() {
-        Target target = target(source("hook", BASIC_AUTH));
+        Target target = target(fixture.source("hook", BASIC_AUTH));
         rotate(target.source(), "{\"BasicHttpPassword\":\"second-pw\"}");
         stampCurrentVersion(target.source());
 
@@ -627,7 +615,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aReplacedHmacSecretIsAcceptedUntilFifteenMinutesAfterTheRotation() throws Exception {
-        Target target = target(source("hook", HMAC_AUTH));
+        Target target = target(fixture.source("hook", HMAC_AUTH));
         rotate(target.source(), "{\"HmacSecretValue\":\"fedcba9876543210\"}");
         stampCurrentVersion(target.source());
         String body = "{\"a\":1}";
@@ -645,7 +633,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void onlyTheCredentialTheLastRotationReplacedIsAccepted() {
-        Target target = target(source("hook", STATIC_AUTH));
+        Target target = target(fixture.source("hook", STATIC_AUTH));
         rotate(target.source(), "{\"StaticTokenSecretValue\":\"second-token\"}");
         rotate(target.source(), "{\"StaticTokenSecretValue\":\"third-token\"}");
         stampCurrentVersion(target.source());
@@ -657,7 +645,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aSourceThatWasNeverRotatedAcceptsNothingButItsCurrentCredential() {
-        Target target = target(source("hook", STATIC_AUTH));
+        Target target = target(fixture.source("hook", STATIC_AUTH));
 
         assertEquals(EventBridgeV2Webhooks.OK, post(target, Map.of("x-tok", "original-token"), "{}"));
         assertEquals(EventBridgeV2Webhooks.FORBIDDEN, post(target, Map.of("x-tok", "other-token"), "{}"));
@@ -666,7 +654,7 @@ class EventBridgeV2RotateCredentialsTest {
 
     @Test
     void aRotationToTheCurrentValueDoesNotStartAGracePeriodForAnythingElse() {
-        Target target = target(source("hook", STATIC_AUTH));
+        Target target = target(fixture.source("hook", STATIC_AUTH));
         rotate(target.source(), "{\"StaticTokenSecretValue\":\"original-token\"}");
 
         assertEquals(EventBridgeV2Webhooks.FORBIDDEN, post(target, Map.of("x-tok", "other-token"), "{}"));
@@ -704,12 +692,6 @@ class EventBridgeV2RotateCredentialsTest {
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
         return HexFormat.of().formatHex(mac.doFinal(body.getBytes(StandardCharsets.UTF_8)));
-    }
-
-    private EventSourceV2 source(String name, String auth) {
-        return service.createEventSource(json("{\"ClientToken\":\"" + name + "-token\",\"Name\":\"" + name
-                + "\",\"EventBusArn\":\"" + bus + "\",\"Configuration\":{\"WebhookEventsConfiguration\":"
-                + "{\"AuthConfiguration\":" + auth + ",\"RoleArn\":\"" + ROLE + "\"}}}"), REGION);
     }
 
     private String rotate(EventSourceV2 source, String credential) {
@@ -750,13 +732,5 @@ class EventBridgeV2RotateCredentialsTest {
         secrets.listSecretVersionIds(source.getSecretArn(), REGION)
                 .forEach((versionId, stages) -> stages.forEach(stage -> found.put(stage, versionId)));
         return found;
-    }
-
-    private static JsonNode json(String json) {
-        try {
-            return MAPPER.readTree(json);
-        } catch (Exception e) {
-            throw new IllegalArgumentException(json, e);
-        }
     }
 }
