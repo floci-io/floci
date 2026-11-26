@@ -2580,7 +2580,7 @@ AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Acce
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
 Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, AWS Fault Injection Service, AWS Resource
 Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, AWS Account Management, AWS Control
-Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes, Aurora DSQL, STS, Amazon EKS, AWS Resource Groups, Amazon CloudWatch Logs, Amazon CloudWatch, Amazon Comprehend, AWS Config, AWS DMS, Amazon ElastiCache, AWS Identity Store, Amazon MemoryDB, Amazon Route 53 Resolver, Amazon SageMaker, Amazon Transcribe, AWS Transfer Family, Amazon EFS and Amazon SES they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes, Aurora DSQL, STS, Amazon EKS, AWS Resource Groups, Amazon CloudWatch Logs, Amazon CloudWatch, Amazon Comprehend, AWS Config, AWS DMS, Amazon ElastiCache, AWS Identity Store, Amazon MemoryDB, Amazon Route 53 Resolver, Amazon SageMaker, Amazon Transcribe, AWS Transfer Family, Amazon EFS, Amazon SES, AWS AppConfig, AWS CodeArtifact and Amazon CodeGuru Reviewer they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. Nothing in it is
@@ -2604,8 +2604,19 @@ JSON `X-Amz-Target`, or the operation in a Smithy RPC v2 path), so an `X-Amz-Tar
 request also carries names nothing, and as its handler reads them: a list only from a list, so
 `DescribeRepositories` with a single name for `repositoryNames`, which ECR's handler reads as none
 and answers with every repository, names no repository, and a number or a null as its text. A
-member whose botocore shape is an account id gives the account the type is in: ECR's `registryId`
-selects the registry its handler acts in, so `repository/<name>` is checked in that account, and a
+member whose botocore shape is an account id, in the body or in a REST request's path or query, gives the account
+the type is in: ECR's `registryId` selects the registry its handler acts in, so `repository/<name>` is checked in that
+account, as CodeArtifact's `domain-owner` is the account of the domain and what is in it. A resource that member
+puts in another account than the caller's is checked as an ARN of another account is, as the caller's resource of that
+name too, unless its service acts on it in that account: CodeArtifact, ECR, Redshift and Signer do, for the domain, the
+repository, the snapshot and the profile or job a request names by its owner, so those are checked on that account's
+resource, as AWS checks them, and read there. A request reaching another account's CodeArtifact domain, repository or
+package, or Signer profile or job, needs the owner's grant beside the caller's own policy, as AWS requires of a
+cross-account request: the domain's or repository's policy, or a profile permission `AddProfilePermission` adds,
+each of which CodeArtifact and Signer give IAM as the resource's policy. A resource a request names by another
+spelling than the one its service stores it under is checked as the service reads it: an AppConfig environment or
+configuration profile named by its name by its id, a CodeArtifact PyPI or NuGet package by its normalized name, as
+AWS writes it in the ARN, and a package group by the ARN CodeArtifact stores for it, however its pattern is encoded. A
 `registryId` that is no account id names no repository, while a null one is the caller's, as ECR
 reads it. Step Functions Local's `<stateMachineArn>#<test case>`, which `StartExecution` and
 `StartSyncExecution` take and run the machine before the `#` of, is checked as given: it is no ARN AWS has,
@@ -2899,7 +2910,30 @@ and Amazon Pinpoint Email's routes are checked by their routes, on the resources
 requests are by their `Action`. Two `GET` routes an SDK built before botocore moved `ListConfigurationSets` and
 `ListEmailIdentities` to `POST /v2/email/list-configuration-sets` and `POST /v2/email/list-identities` still sends,
 `GET /v2/email/configuration-sets` and `GET /v2/email/identities`, are served but match no route of the model, so
-they are not checked. API Gateway's
+they are not checked.
+AWS AppConfig (with its data plane),
+AWS CodeArtifact and Amazon CodeGuru Reviewer are checked by their routes on the resources the table of request
+resources reads. Nine of AppConfig's operations act on a type the Service Authorization Reference marks required that
+the table reads no member for (a deployment, a hosted configuration version, an experiment run, a configuration
+profile named as `Configuration`), so those are checked on the types it does read. AppConfig Data's
+`GetLatestConfiguration` is checked on the configuration of the session its `ConfigurationToken` names, the token
+`StartConfigurationSession` answers, which AppConfig Data finds; `StartConfigurationSession` is checked on the
+application its `ApplicationIdentifier` names by its id or its name, from a measured entry quoting AWS's own refusal
+of it on `application/<app_id>`. A request Floci serves under `appconfigdata`, the model's own name, is checked as one
+signed `appconfig`, the signing name botocore gives that model, as is any request signed with the name of a vendored
+model the routes do not route (`sesv2` as `ses`). A tagged create is checked for tagging on what it makes, which
+botocore's response gives where its name does not: `CreateEnvironment` answers an `Environment` whose `Id` is the
+new environment's, so its tags go on `application/<app>/environment/*`, and `AssociateRepository` answers the
+`RepositoryAssociation` whose `AssociationArn` is the association it makes, `association:*`. A CodeArtifact request
+is checked in the account its `domain-owner` names, where its handler looks the domain up. `CopyPackageVersions` is
+checked as the CodeArtifact user guide says, which its own script vendors (`tools/aws/fetch_codeartifact_permissions.py`):
+`codeartifact:ReadFromRepository` on its source repository and `codeartifact:CopyPackageVersions` on its destination
+repository. A package a request names with no `namespace` is checked with its namespace empty, as the guide writes
+such an ARN (`package/my_domain/my_repo/npm//react`), and a package group by its pattern percent-encoded as
+CodeArtifact writes it into the group's ARN (`/npm/team/*` is `/npm/team/%2a`): a variable the reference names
+`Encoded` and a botocore shape's name is filled from the member of that shape and encoded as its service encodes it.
+A condition on `aws:ResourceTag` reads the tags AppConfig keeps on an application, CodeArtifact on a domain,
+repository or package group, and CodeGuru Reviewer on an association. CodeArtifact's package endpoints are Floci's own paths, not botocore routes, and are not changed. API Gateway's
 routes are checked by their routes alone too, on the path Floci builds the ARN from, and the authorized
 actions list the operations AWS checks as the action their HTTP method names (above). A route whose action AWS checks on a
 resource Floci neither builds nor reads would not be checked, since checked on `*` a grant scoped to

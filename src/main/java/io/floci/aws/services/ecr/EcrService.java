@@ -1860,6 +1860,20 @@ public class EcrService implements ResourceProvider, Resettable {
      * The tags of the repository stored under {@code arn} in the account and Region it names, a pre-multi-account one
      * of the default account read in place, matched on the whole ARN; empty for an ARN naming nothing stored.
      */
+    /**
+     * Whether the repository {@code arn} names is another account's than {@code accountId} in the request's Region,
+     * which ECR acts on there, in the registry a request's {@code registryId} selects or as its tag handlers keep an
+     * ARN's account, and never as the caller's repository of that name.
+     */
+    public boolean actsInItsAccount(String arn, String accountId) {
+        if (!AwsArnUtils.isArnFor(arn, "ecr")) {
+            return false;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return !parsed.accountId().isEmpty() && !parsed.accountId().equals(accountId)
+                && parsed.region().equals(regionResolver.getRegion()) && parsed.resource().startsWith(REPOSITORY_RESOURCE);
+    }
+
     public Map<String, String> storedTags(String arn) {
         if (!AwsArnUtils.isArnFor(arn, "ecr")) {
             return Map.of();

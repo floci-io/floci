@@ -76,6 +76,11 @@ and domain quotas: `CreateDomain` caps a single account at 10 domains per Region
 `CreateRepository` caps a single domain at 1,000 repositories, both returning
 `ServiceQuotaExceededException` with the offending `resourceId`/`resourceType` once reached.
 
+A package group's ARN holds its pattern percent-encoded with lower-case hex digits, its `/` kept, as
+AWS writes it: the group `/npm/team/*` is `package-group/<domain>/npm/team/%2a`, and a pattern
+ending `$` ends `%24`. `TagResource`, `UntagResource` and `ListTagsForResource` read such an ARN
+back to its pattern.
+
 `AssociateExternalConnection` accepts the same fixed set of AWS-hosted public upstreams
 documented for real CodeArtifact (`public:npmjs`, `public:pypi`, `public:maven-central`, etc.) and
 enforces the one-external-connection-per-repository limit AWS enforces. A repository can have
@@ -331,10 +336,11 @@ state.
 - **`DeleteRepository` does not check whether other repositories still reference it as an
   upstream.** Deleting a repository leaves any repository that named it as an upstream pointing at
   one that no longer exists.
-- **Cross-account `domainOwner` addressing has no authorization check.** Passing a `domainOwner`
-  that is not the caller's own account looks up that account's domain/repository with no
-  trust-policy or permissions-policy enforcement, consistent with Floci's IAM enforcement being
-  opt-in elsewhere, but worth knowing if you rely on domain-sharing semantics.
+- **Cross-account `domainOwner` addressing needs the owner's grant.** Passing a `domainOwner`
+  that is not the caller's own account looks up that account's domain/repository. Under IAM
+  enforcement the request is checked on the resource in that account, as AWS checks it: the
+  caller's own policy and the owner's domain or repository policy must both allow it (either
+  policy may, for a repository or a package in it).
 - **The native per-format download routes don't consult a container-backed version's status
   override, for Maven, npm, pypi, and nuget.** `GetPackageVersionAsset` correctly blocks an
   Archived/Disposed version, but a plain `mvn`/`npm install`/`pip install`/`nuget` fetch against

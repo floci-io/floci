@@ -54,6 +54,7 @@ public class SignerService implements Resettable, TagHandler, StoredResourceArns
 
     private static final Pattern PROFILE_NAME = Pattern.compile("[0-9a-zA-Z_]{2,64}");
     private static final Pattern PROFILE_VERSION = Pattern.compile("[0-9a-zA-Z]{10}");
+    private static final Pattern ACCOUNT_ID = Pattern.compile("[0-9]{12}");
     private static final Pattern TAG_KEY = Pattern.compile("^(?!aws:)[a-zA-Z+-=._:/]+$");
     private static final Pattern STATEMENT_ID = Pattern.compile("[a-zA-Z0-9_-]{1,64}");
     private static final Pattern CERTIFICATE_ARN = Pattern.compile(
@@ -193,8 +194,13 @@ public class SignerService implements Resettable, TagHandler, StoredResourceArns
     }
 
     public SigningProfile getSigningProfile(String profileName, String region) {
+        return getSigningProfile(profileName, null, region);
+    }
+
+    /** The profile of that name, in the account {@code profileOwner} names when the request gives one. */
+    public SigningProfile getSigningProfile(String profileName, String profileOwner, String region) {
         validateProfileName(profileName);
-        return requireProfile(profileName, region);
+        return requireProfile(profileName, ownerAccount("profileOwner", profileOwner), region);
     }
 
     public Page<SigningProfile> listSigningProfiles(String region, String platformId,
@@ -385,7 +391,8 @@ public class SignerService implements Resettable, TagHandler, StoredResourceArns
                 return existing;
             }
         }
-        SigningProfile profile = requireProfile(profileName, region);
+        SigningProfile profile = requireProfile(profileName,
+                ownerAccount("profileOwner", optionalText(request, "profileOwner")), region);
         if (!"Active".equals(profile.getStatus())) {
             throw validation("Signing profile " + profileName
                     + " is " + profile.getStatus() + " and cannot start a signing job.");
@@ -475,7 +482,8 @@ public class SignerService implements Resettable, TagHandler, StoredResourceArns
 
     public SigningJob revokeSignature(String jobId, JsonNode request, String region) {
         requireObject(request, "Request payload");
-        SigningJob job = requireJob(jobId, region);
+        String owner = ownerAccount("jobOwner", optionalText(request, "jobOwner"));
+        SigningJob job = requireJob(jobId, owner, region);
         String reason = requiredText(request, "reason");
         SignerPlatforms.Platform platform = platformOf(job.getPlatformId());
         if (!platform.revocationSupported()) {
@@ -493,7 +501,8 @@ public class SignerService implements Resettable, TagHandler, StoredResourceArns
         job.setRevocationReason(reason);
         job.setRevokedAt(Instant.now().getEpochSecond());
         job.setRevokedBy(jobs.accountId());
-        jobs.put(storageKey(region, jobId), job);
+        // Saved where it was read: another account's job stays that account's, revoked by the caller.
+        jobs.putForAccount(owner, storageKey(region, jobId), job);
         return job;
     }
 
@@ -595,8 +604,68 @@ public class SignerService implements Resettable, TagHandler, StoredResourceArns
     }
 
     /**
-     * The tags of the signing profile whose ARN is {@code arn}, in the request's account, where the tag handlers read:
-     * an ARN of another account names none. Read in place under the Region the ARN names and the profile's name, a
+     * The cross-account permissions on the resource an ARN names in the ARN's account, which AWS requires of a request
+     * reaching another account's profile or job beside the caller's own policy: those AddProfilePermission grants on
+     * the profile, or on the profile a job was signed with, a permission of one profile version only for that
+     * version: the profile's own for the profile, the one that signed the job for a job; none for another ARN, a
+     * resource that account does not hold, or one granting nothing.
+     */
+    public List<SigningProfile.ProfilePermission> permissionsOn(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, SERVICE)) {
+            return List.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String resource = parsed.resource().startsWith("/") ? parsed.resource() : "/" + parsed.resource();
+        if (resource.startsWith(PROFILE_RESOURCE)) {
+            return permissionsOfVersion(parsed, resource.substring(PROFILE_RESOURCE.length()), null);
+        }
+        if (resource.startsWith(JOB_RESOURCE)) {
+            // A job was signed with one version of its profile, so the grants of that version are the job's.
+            return AccountAwareStorageBackend.readInAccount(jobs, parsed.accountId(),
+                            storageKey(parsed.region(), resource.substring(JOB_RESOURCE.length())))
+                    .map(job -> permissionsOfVersion(parsed, job.getProfileName(), job.getProfileVersion()))
+                    .orElse(List.of());
+        }
+        return List.of();
+    }
+
+    /**
+     * The permissions of the profile of that name in the ARN's account that hold for {@code version}, the profile's
+     * own version when it is null: those of no version and those of that one.
+     */
+    private List<SigningProfile.ProfilePermission> permissionsOfVersion(AwsArnUtils.Arn arn, String profileName,
+                                                                         String version) {
+        if (profileName == null || profileName.isEmpty() || profileName.contains("*")) {
+            return List.of();
+        }
+        return AccountAwareStorageBackend.readInAccount(profiles, arn.accountId(),
+                        storageKey(arn.region(), profileName))
+                .map(profile -> {
+                    String held = version != null ? version : profile.getProfileVersion();
+                    return profile.getPermissions().stream()
+                            .filter(permission -> permission.getProfileVersion() == null
+                                    || permission.getProfileVersion().equals(held))
+                            .toList();
+                })
+                .orElse(List.of());
+    }
+
+    /**
+     * A profile or job another account owns, which Signer reads in that account as a request's {@code profileOwner} or
+     * {@code jobOwner} names it, and never as the caller's of that name: an ARN of another account names none here.
+     */
+    @Override
+    public boolean reachedInItsAccount(String arn, String accountId) {
+        if (!AwsArnUtils.isArnFor(arn, SERVICE)) {
+            return false;
+        }
+        String owner = AwsArnUtils.parse(arn).accountId();
+        return !owner.isEmpty() && !owner.equals(accountId);
+    }
+
+    /**
+     * The tags of the signing profile whose ARN is {@code arn}, in the ARN's account, which a request naming the
+     * profile's {@code profileOwner} reads it in; the tag handlers themselves refuse an ARN of another account. Read in place under the Region the ARN names and the profile's name, a
      * profile stored before storage was account-aware included, and matched on the whole ARN. Tag writes give the
      * profile a new map, so the read is of one whole set.
      */
@@ -606,7 +675,7 @@ public class SignerService implements Resettable, TagHandler, StoredResourceArns
             return Map.of();
         }
         AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
-        if (!parsed.accountId().equals(profiles.accountId()) || !parsed.resource().startsWith(PROFILE_RESOURCE)) {
+        if (parsed.accountId().isEmpty() || !parsed.resource().startsWith(PROFILE_RESOURCE)) {
             return Map.of();
         }
         Map<String, String> tags = AccountAwareStorageBackend.readInAccount(profiles, parsed.accountId(),
@@ -622,6 +691,39 @@ public class SignerService implements Resettable, TagHandler, StoredResourceArns
     private SigningProfile requireProfile(String profileName, String region) {
         return profiles.get(storageKey(region, profileName))
                 .orElseThrow(() -> notFound("Signing profile " + profileName + " does not exist."));
+    }
+
+    /**
+     * The profile of that name in {@code account}, which AWS reads a request naming the profile's owner in: the
+     * caller's own profile of that name is never the one another account's is.
+     */
+    private SigningProfile requireProfile(String profileName, String account, String region) {
+        if (account.equals(profiles.accountId())) {
+            return requireProfile(profileName, region);
+        }
+        return profiles.getForAccount(account, storageKey(region, profileName))
+                .orElseThrow(() -> notFound("Signing profile " + profileName + " does not exist in account "
+                        + account + "."));
+    }
+
+    /** The job of that id in {@code account}, which AWS reads a request naming the job's owner in. */
+    private SigningJob requireJob(String jobId, String account, String region) {
+        if (account.equals(jobs.accountId())) {
+            return requireJob(jobId, region);
+        }
+        return jobs.getForAccount(account, storageKey(region, jobId))
+                .orElseThrow(() -> notFound("Signing job " + jobId + " does not exist in account " + account + "."));
+    }
+
+    /** The account a request's owner member names, the caller's when it names none; one of no account id is refused. */
+    private String ownerAccount(String member, String owner) {
+        if (owner == null || owner.isEmpty()) {
+            return profiles.accountId();
+        }
+        if (!ACCOUNT_ID.matcher(owner).matches()) {
+            throw validation(member + " must be a 12-digit account ID, got " + owner + ".");
+        }
+        return owner;
     }
 
     private SigningProfile requireProfileFromArn(String region, String arn) {

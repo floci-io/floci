@@ -8,7 +8,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-/** What IAM asks ECR of the resources a request names: the tags of the repository an ARN names. */
+/**
+ * What IAM asks ECR of the resources a request names: the tags of the repository an ARN names, and whether one of
+ * another account is acted on there.
+ */
 @ApplicationScoped
 public class EcrStoredResourceArns implements StoredResourceArns {
 
@@ -33,5 +36,11 @@ public class EcrStoredResourceArns implements StoredResourceArns {
     @Override
     public Map<String, String> storedTags(String arn) {
         return ecr.storedTags(arn);
+    }
+
+    /** A repository of another account in the request's Region, which ECR acts on in that account's registry. */
+    @Override
+    public boolean reachedInItsAccount(String arn, String accountId) {
+        return ecr.actsInItsAccount(arn, accountId);
     }
 }

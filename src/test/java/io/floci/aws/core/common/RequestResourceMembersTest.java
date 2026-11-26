@@ -17,6 +17,7 @@ import org.junit.jupiter.api.TestFactory;
 import java.io.ByteArrayInputStream;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -392,15 +393,17 @@ class RequestResourceMembersTest {
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A.Name\"}}"))
                         .operations().get("a:Op"));
         assertEquals("A.Name", field.path());
-        // A variable fixed to the one value its handler uses, and one fixed that is no variable, that a member fills,
-        // or to no value.
+        // A variable fixed to the one value its handler uses, or to the empty value AWS writes for one a request
+        // leaves out (a CodeArtifact package's namespace), and one fixed that is no variable, that a member fills, or
+        // to no text.
         String owned = "\"arnFormats\":{\"a\":{\"thing\":\"arn:${Partition}:a:${Region}:${Account}:thing/${Owner}/${ThingName}\"}}";
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Name", false)), Map.of(),
                 Map.of(), Map.of(), null, Map.of("Owner", "Custom"), false, null)),
                 parseUnchecked(document(owned, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},"
                         + "\"fixed\":{\"Owner\":\"Custom\"}}")).operations().get("a:Op"));
-        for (String bad : List.of("{\"Other\":\"Custom\"}", "{\"ThingName\":\"Custom\"}", "{\"Owner\":\"\"}",
-                "{\"Owner\":1}")) {
+        assertEquals(Map.of("Owner", ""), parseUnchecked(document(owned, "{\"type\":\"thing\",\"fill\":"
+                + "{\"ThingName\":\"Name\"},\"fixed\":{\"Owner\":\"\"}}")).operations().get("a:Op").getFirst().fixed());
+        for (String bad : List.of("{\"Other\":\"Custom\"}", "{\"ThingName\":\"Custom\"}", "{\"Owner\":1}")) {
             assertThrows(IllegalStateException.class, () -> parse(document(owned,
                     "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},\"fixed\":" + bad + "}")), bad);
         }
@@ -604,10 +607,13 @@ class RequestResourceMembersTest {
                                     && other.when().equals(resource.when()) && other.unless().equals(resource.unless()))
                                     && (other.endpoint() == null || resource.endpoint() == null
                                     || other.endpoint().equals(resource.endpoint())))
-                            .flatMap(other -> other == resource ? inTheRequestsRegionToo(expected, resource).stream()
+                            .flatMap(other -> other == resource
+                                    ? withTheCallersToo(inTheRequestsRegionToo(expected, resource), resource).stream()
                                     : other.signer() ? Stream.of(arn)
-                                    : Stream.of(expected(table.formats().get(namespace).get(other.types().getFirst())
-                                    .format(), other, "000000000000", given.keySet())))
+                                    : withTheCallersToo(List.of(ownArnGiven(table.formats().get(namespace)
+                                    .get(other.types().getFirst()), other, given).orElseGet(() -> expected(table
+                                    .formats().get(namespace).get(other.types().getFirst()).format(), other,
+                                    accountGiven(other, given), given.keySet()))), other).stream())
                             .distinct().toList();
                     StoredResourceArns stored = runningOn(namespace, arn, resource.byDefault());
                     assertEquals(named, RequestResources.of(operation.getKey(),
@@ -634,23 +640,29 @@ class RequestResourceMembersTest {
             Resource made = operation.getValue().getFirst();
             ObjectNode body = MAPPER.createObjectNode();
             Map<String, String> labels = new LinkedHashMap<>();
+            MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
             Map<String, String> located = table.located().getOrDefault(operation.getKey(), Map.of());
+            // A member the table locates in a REST request's path or query goes there (CodeArtifact's CreateDomain
+            // names its domain in ?domain), where the reader takes it from.
             made.fill().values().forEach(member -> {
                 String where = located.get(member.name());
                 if (where != null && where.startsWith("{")) {
                     labels.put(where.substring(1, where.length() - 1), "x");
+                } else if (where != null) {
+                    query.add(where.substring(1), "x");
                 } else {
                     put(body, member, "x");
                 }
             });
             String expected = expected(table.formats().get(namespace).get(made.types().getFirst()).format(), made,
                     "000000000000");
-            assertEquals(List.of(expected), RequestResources.created(operation.getKey(), null, json(body.toString()),
-                    "aws", "us-east-1", "000000000000", labels), body + " " + labels);
+            assertEquals(List.of(expected), RequestResources.created(operation.getKey(), null,
+                    sentWith(json(body.toString()), query), "aws", "us-east-1", "000000000000", labels),
+                    body + " " + labels + " " + query);
             if (table.types().getOrDefault(operation.getKey(), List.of()).isEmpty()
                     && table.operations().getOrDefault(operation.getKey(), List.of()).isEmpty()) {
-                assertEquals(List.of(), RequestResources.of(operation.getKey(), json(body.toString()), "aws",
-                        "us-east-1", "000000000000", null, labels));
+                assertEquals(List.of(), RequestResources.of(operation.getKey(), sentWith(json(body.toString()), query),
+                        "aws", "us-east-1", "000000000000", null, labels));
             }
         }));
     }
@@ -688,6 +700,49 @@ class RequestResourceMembersTest {
                     assertTrue(RequestResources.created(operation.getKey(), form(form), "aws", "us-east-1",
                             "000000000000").contains(expected), form);
                 })));
+    }
+
+    /**
+     * The ARNs a resource in another account by its account member names, each followed by the caller's
+     * resource of that name, which the reader names too, as it names an ARN of another account, the test's services
+     * acting on none of them in that account.
+     */
+    private static List<String> withTheCallersToo(List<String> arns, Resource resource) {
+        if (resource.account() == null || !resource.find().isEmpty()) {
+            return arns;
+        }
+        List<String> named = new ArrayList<>();
+        for (String arn : arns) {
+            named.add(arn);
+            if (AwsArnUtils.isArn(arn)) {
+                AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+                if (!parsed.accountId().isEmpty() && !"000000000000".equals(parsed.accountId())) {
+                    named.add(new AwsArnUtils.Arn(parsed.partition(), parsed.service(), parsed.region(),
+                            "000000000000", parsed.resource()).toString());
+                }
+            }
+        }
+        return named;
+    }
+
+    /**
+     * The account another resource the request names is in: the one its account member is given (CodeArtifact's
+     * {@code domainOwner}, the account of both the package and the repository a copy names), else the caller's.
+     */
+    private static String accountGiven(Resource resource, Map<Member, String> given) {
+        return resource.account() != null && given.containsKey(resource.account()) ? given.get(resource.account())
+                : "000000000000";
+    }
+
+    /**
+     * The type's own ARN a request gives the one member a resource is filled from, which names that resource as it is,
+     * every variable of it given (AppConfig's {@code ExtensionIdentifier}, an extension's id or its ARN of two
+     * variables); empty for another value, or a resource filled from several members.
+     */
+    private static Optional<String> ownArnGiven(ArnFormat format, Resource resource, Map<Member, String> given) {
+        return resource.fill().size() != 1 ? Optional.empty()
+                : Optional.ofNullable(given.get(resource.fill().values().iterator().next()))
+                        .filter(value -> format.pattern().matcher(value).matches());
     }
 
     /**

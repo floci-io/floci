@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 
 import static io.restassured.RestAssured.given;
@@ -473,8 +474,8 @@ class AppConfigIntegrationTest {
     @Test @Order(17)
     void listTagsOnNewApplicationIsEmpty() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId;
-        given()
-                .when().get("/tags/" + arn)
+        given().urlEncodingEnabled(false)
+                .when().get(tagsPath(arn))
                 .then()
                 .statusCode(200)
                 .body("Tags", anEmptyMap());
@@ -483,10 +484,10 @@ class AppConfigIntegrationTest {
     @Test @Order(18)
     void tagApplication() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId;
-        given()
+        given().urlEncodingEnabled(false)
                 .contentType(ContentType.JSON)
                 .body("{\"Tags\": {\"env\": \"local\", \"team\": \"platform\"}}")
-                .when().post("/tags/" + arn)
+                .when().post(tagsPath(arn))
                 .then()
                 .statusCode(204);
     }
@@ -494,8 +495,8 @@ class AppConfigIntegrationTest {
     @Test @Order(19)
     void listTagsAfterTagging() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId;
-        given()
-                .when().get("/tags/" + arn)
+        given().urlEncodingEnabled(false)
+                .when().get(tagsPath(arn))
                 .then()
                 .statusCode(200)
                 .body("Tags.env", equalTo("local"))
@@ -505,8 +506,8 @@ class AppConfigIntegrationTest {
     @Test @Order(20)
     void untagApplication() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId;
-        given()
-                .when().delete("/tags/" + arn + "?tagKeys=env")
+        given().urlEncodingEnabled(false)
+                .when().delete(tagsPath(arn) + "?tagKeys=env")
                 .then()
                 .statusCode(204);
     }
@@ -514,8 +515,8 @@ class AppConfigIntegrationTest {
     @Test @Order(21)
     void listTagsAfterUntagging() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId;
-        given()
-                .when().get("/tags/" + arn)
+        given().urlEncodingEnabled(false)
+                .when().get(tagsPath(arn))
                 .then()
                 .statusCode(200)
                 .body("Tags", not(hasKey("env")))
@@ -527,8 +528,8 @@ class AppConfigIntegrationTest {
     @Test @Order(22)
     void listTagsForEnvironmentArnReturnsEmpty() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId + "/environment/" + envId;
-        given()
-                .when().get("/tags/" + arn)
+        given().urlEncodingEnabled(false)
+                .when().get(tagsPath(arn))
                 .then()
                 .statusCode(200)
                 .body("Tags", anEmptyMap());
@@ -537,8 +538,8 @@ class AppConfigIntegrationTest {
     @Test @Order(23)
     void listTagsForDeploymentArnReturnsEmpty() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId + "/environment/" + envId + "/deployment/1";
-        given()
-                .when().get("/tags/" + arn)
+        given().urlEncodingEnabled(false)
+                .when().get(tagsPath(arn))
                 .then()
                 .statusCode(200)
                 .body("Tags", anEmptyMap());
@@ -554,8 +555,8 @@ class AppConfigIntegrationTest {
     @Test @Order(24)
     void listTagsForDeploymentStrategyArnIsAcceptedNotRejected() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:deploymentstrategy/" + strategyId;
-        given()
-                .when().get("/tags/" + arn)
+        given().urlEncodingEnabled(false)
+                .when().get(tagsPath(arn))
                 .then()
                 .statusCode(200)
                 .body("Tags", anEmptyMap());
@@ -564,10 +565,10 @@ class AppConfigIntegrationTest {
     @Test @Order(25)
     void tagDeploymentStrategyArnIsAcceptedNotRejected() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:deploymentstrategy/" + strategyId;
-        given()
+        given().urlEncodingEnabled(false)
                 .contentType(ContentType.JSON)
                 .body("{\"Tags\": {\"env\": \"local\"}}")
-                .when().post("/tags/" + arn)
+                .when().post(tagsPath(arn))
                 .then()
                 .statusCode(204);
     }
@@ -576,13 +577,13 @@ class AppConfigIntegrationTest {
     void listTagsForExtensionAndExtensionAssociationArnsIsAcceptedNotRejected() {
         String extensionArn = "arn:aws:appconfig:us-east-1:000000000000:extension/some-extension-id";
         String associationArn = "arn:aws:appconfig:us-east-1:000000000000:extensionassociation/some-association-id";
-        given()
-                .when().get("/tags/" + extensionArn)
+        given().urlEncodingEnabled(false)
+                .when().get(tagsPath(extensionArn))
                 .then()
                 .statusCode(200)
                 .body("Tags", anEmptyMap());
-        given()
-                .when().get("/tags/" + associationArn)
+        given().urlEncodingEnabled(false)
+                .when().get(tagsPath(associationArn))
                 .then()
                 .statusCode(200)
                 .body("Tags", anEmptyMap());
@@ -1279,5 +1280,10 @@ class AppConfigIntegrationTest {
 
         return "{\"ApplicationIdentifier\":\"" + app + "\",\"EnvironmentIdentifier\":\"" + env + "\","
                 + "\"ConfigurationProfileIdentifier\":\"" + profile + "\"}";
+    }
+
+    /** The modeled {@code /tags/{ResourceArn}} for an ARN, encoded as one path segment as an SDK sends it. */
+    private static String tagsPath(String arn) {
+        return "/tags/" + URLEncoder.encode(arn, StandardCharsets.UTF_8);
     }
 }

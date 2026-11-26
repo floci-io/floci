@@ -1,5 +1,9 @@
 package io.floci.aws.services.iam;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AccountResolver;
 import io.floci.aws.core.common.AwsArnUtils;
 
@@ -30,6 +34,30 @@ public interface ResourcePolicyProvider {
             return Optional.empty();
         }
         return Optional.of(arn);
+    }
+
+    /**
+     * The policy with {@code resourceArn} as the {@code Resource} of each statement that names none. A resource
+     * policy is attached to its one resource, and AWS's own examples leave {@code Resource} out (a Redshift
+     * Serverless {@code PutResourcePolicy}'s; a CodeArtifact repository policy's, "Because the resource is
+     * implied"), which the evaluator would read as a statement that matches nothing. The document as it is when it
+     * is no JSON the mapper reads, which a policy stored as a JSON object is not expected to be.
+     */
+    static String withResource(ObjectMapper objectMapper, String document, String resourceArn) {
+        try {
+            JsonNode root = objectMapper.readTree(document);
+            JsonNode statements = root.path("Statement");
+            boolean changed = false;
+            for (JsonNode statement : statements.isArray() ? statements : List.of(statements)) {
+                if (statement instanceof ObjectNode object && !object.has("Resource") && !object.has("NotResource")) {
+                    object.put("Resource", resourceArn);
+                    changed = true;
+                }
+            }
+            return changed ? objectMapper.writeValueAsString(root) : document;
+        } catch (JsonProcessingException e) {
+            return document;
+        }
     }
 
     /**

@@ -55,6 +55,8 @@ public final class RequestResources {
     private static final String WITHOUT_LEADING_SLASH = "WithoutLeadingSlash";
     /** A variable whose value the format holds URL-encoded: API Gateway's {@code /tags/${UrlEncodedResourceARN}}. */
     private static final String URL_ENCODED = "UrlEncoded";
+    /** The prefix of a variable whose value its service writes into its ARNs encoded ({@link StoredResourceArns#encoded}). */
+    private static final String ENCODED = "Encoded";
 
     /** Values for a type's variables, and the ARN whose account and Region the resource they name is in, if any. */
     private record Filling(Map<String, String> variables, AwsArnUtils.Arn from) {
@@ -939,9 +941,11 @@ public final class RequestResources {
      * in the same list their own, as a handler taking a name or an ARN for each reads them (CodeBuild's
      * {@code BatchGetProjects}); for a type of several variables it also gives the variable it fills its own value
      * there, beside what the request's other members fill, as a handler may read the one or the other (an ECS
-     * service ARN of another cluster than the request's names that service and the one of its name in that cluster). They are in the account the resource's account member gives, which its handler
-     * acts in, and none when that member holds no account id; in the request's without one, or with a JSON null for
-     * it. An ARN given for a name puts the
+     * service ARN of another cluster than the request's names that service and the one of its name in that cluster). They are in the account the resource's account member gives, and none when that
+     * member holds no account id; in the request's without one, or with a JSON null for it. A resource that member
+     * puts in another account than the caller's is named as an ARN the request gives is ({@link #addNamed}): as the
+     * caller's resource of that name too, whichever its handler acts on, unless {@code stored} says its service acts
+     * on it in that account. An ARN given for a name puts the
      * resource in that ARN's account and Region, the caller's and the request's where it leaves them empty, as its
      * handler then acts on the caller's resource of that name, and it is named as an ARN the request gives is; for
      * a member naming one resource for each of a list's structures, each in the account and Region of the ARN its
@@ -976,6 +980,10 @@ public final class RequestResources {
                     .map(value -> variable.getKey().endsWith(WITHOUT_LEADING_SLASH)
                             ? asVariable(variable.getKey(), value)
                             : withoutTypePath(value, resource.types().getFirst()))
+                    // A variable named Encoded and the shape its member holds is in the ARN as its service encodes it.
+                    .map(value -> !variable.getKey().startsWith(ENCODED) ? value
+                            : stored != null ? stored.encoded(variable.getKey(), value)
+                            : StoredResourceArns.percentEncoded(value, false))
                     .map(value -> resource.partialArn() ? completed(value, variable.getValue(), resource, formats,
                             format, partition, region, accountId) : value)
                     .toList();
@@ -1038,11 +1046,15 @@ public final class RequestResources {
         }
         for (Filling filling : fillings) {
             AwsArnUtils.Arn from = filling.from();
-            if (from == null) {
+            if (from == null && account.equals(accountId)) {
                 arns.add(withId(format.checked(render(format.format(), filling.variables(), partition, region,
-                        account)), format,
-                        resource.types().getFirst(), filling.variables(), account.equals(accountId) ? stored : null,
-                        region));
+                        account)), format, resource.types().getFirst(), filling.variables(), stored, region));
+            } else if (from == null) {
+                // Another account's resource the account member names is named as an ARN the request gives is: in
+                // that account and as the caller's of that name, whichever its handler acts on.
+                addNamed(arns, withId(format.checked(render(format.format(), filling.variables(), partition, region,
+                        account)), format, resource.types().getFirst(), filling.variables(), null, region),
+                        format.awsOwned(), partition, region, accountId, stored);
             } else {
                 addNamed(arns, withId(format.checked(render(format.format(), filling.variables(), from.partition(),
                         from.region().isEmpty() ? region : from.region(),
@@ -1303,9 +1315,13 @@ public final class RequestResources {
      *
      * <p>The service is asked for every type of the namespace, not only for the ones whose ARN carries an id it
      * mints, so a service may answer for a type whose ARN it does not mint: a key an alias names is the key the
-     * alias points at. A type whose service follows its name with an id it mints has that id open when the service
-     * stores none, one whose service follows it with characters it mints those characters open (a secret's
-     * {@code -??????}, as a create names the secret it makes), and any other type's is as rendered.
+     * alias points at. Any type's ARN, of one variable or several, is the one the service reads it as when it
+     * resolves it to a resource it stores under another spelling ({@link StoredResourceArns#resolveStoredArn}): an
+     * AppConfig environment a name names is that environment's id, a CodeArtifact PyPI package a name names is its
+     * normalized name, as AWS writes it in the ARN. A type whose service follows its name with an id it mints has
+     * that id open when the service stores none, one whose service follows it with characters it mints those
+     * characters open (a secret's {@code -??????}, as a create names the secret it makes), and any other type's is
+     * as rendered.
      */
     private static String withId(String arn, RequestResourceMembers.ArnFormat format, String type,
                                  Map<String, String> filling, StoredResourceArns stored, String region) {
@@ -1313,6 +1329,12 @@ public final class RequestResources {
             Optional<String> found = stored.find(type, List.of(filling.values().iterator().next()), region);
             if (found.isPresent()) {
                 return found.get();
+            }
+        }
+        if (stored != null) {
+            Optional<String> resolved = stored.resolveStoredArn(arn);
+            if (resolved.isPresent()) {
+                return resolved.get();
             }
         }
         if (format.minted()) {
