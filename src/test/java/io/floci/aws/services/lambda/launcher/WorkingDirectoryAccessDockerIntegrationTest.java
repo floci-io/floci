@@ -13,6 +13,7 @@ import io.floci.aws.testing.TestImages;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
 import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.ByteArrayInputStream;
@@ -26,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /** Reads the working directory's permissions from a created, unstarted container of a real image. */
+@ResourceLock(value = ParallelLocks.DOCKER_ACTIVE_STREAMS, mode = ResourceAccessMode.READ)
 @ResourceLock(ParallelLocks.CONFIG_MAPPING)
 class WorkingDirectoryAccessDockerIntegrationTest {
 

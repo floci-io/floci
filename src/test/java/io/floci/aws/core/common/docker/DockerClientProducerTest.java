@@ -31,6 +31,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
+import static io.floci.aws.core.common.docker.DockerTestSupport.rootCause;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.*;
@@ -50,6 +51,7 @@ import static org.mockito.Mockito.when;
  * assertion failure, normalizeDockerHost method does not exist yet,
  * confirming the missing normalization logic).
  */
+@ResourceLock(value = ParallelLocks.DOCKER_ACTIVE_STREAMS, mode = ResourceAccessMode.READ)
 @ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class DockerClientProducerTest {
 
@@ -809,10 +811,7 @@ class DockerClientProducerTest {
                     assertNotNull(second, "second stream should connect");
                     Throwable failure = failures.poll(10, TimeUnit.SECONDS);
                     assertNotNull(failure, "the third stream must reach the pool lease deadline");
-                    while (failure.getCause() != null) {
-                        failure = failure.getCause();
-                    }
-                    assertInstanceOf(ConnectionRequestTimeoutException.class, failure);
+                    assertInstanceOf(ConnectionRequestTimeoutException.class, rootCause(failure));
                     assertNull(accepted.poll(),
                             "third stream should wait for a pooled connection instead of opening one");
                 }

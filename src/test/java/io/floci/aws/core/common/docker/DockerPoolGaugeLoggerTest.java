@@ -7,7 +7,6 @@ import com.github.dockerjava.core.DefaultDockerClientConfig;
 import com.github.dockerjava.transport.DockerHttpClient;
 import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.parallel.Isolated;
 import org.junit.jupiter.api.parallel.ResourceAccessMode;
 import org.junit.jupiter.api.parallel.ResourceLock;
 
@@ -24,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-@Isolated("Observes the process-wide Docker stream counter")
+@ResourceLock(ParallelLocks.DOCKER_ACTIVE_STREAMS)
 @ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class DockerPoolGaugeLoggerTest {
 
@@ -106,13 +105,8 @@ class DockerPoolGaugeLoggerTest {
         };
         DefaultDockerClientConfig config = DefaultDockerClientConfig.createDefaultConfigBuilder()
                 .withDockerHost("tcp://127.0.0.1:2375").build();
-        // Closing another test's client wakes its callbacks, which can retire after that test returns.
-        // Isolation prevents new producers; wait for the old callbacks before taking an exact baseline.
-        long idleDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (DockerPoolGaugeLogger.countStreamThreads() != 0 && System.nanoTime() < idleDeadline) {
-            Thread.sleep(1);
-        }
-        assertEquals(0, DockerPoolGaugeLogger.countStreamThreads(), "earlier stream callbacks should retire");
+        // Earlier clients can close before their callbacks retire; the lock prevents new producers.
+        awaitStreamCount(0, "earlier stream callbacks should retire");
         int before = DockerPoolGaugeLogger.countStreamThreads();
 
         try (DockerClient client = DockerClientProducer.newDockerClient(config, transport);
@@ -136,10 +130,14 @@ class DockerPoolGaugeLoggerTest {
             release.countDown();
             assertTrue(callback.awaitCompletion(5, TimeUnit.SECONDS));
         }
+        awaitStreamCount(before, "an ended stream is no longer counted");
+    }
+
+    private static void awaitStreamCount(int expected, String message) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (DockerPoolGaugeLogger.countStreamThreads() != before && System.nanoTime() < deadline) {
-            Thread.onSpinWait();
+        while (DockerPoolGaugeLogger.countStreamThreads() != expected && System.nanoTime() < deadline) {
+            Thread.sleep(1);
         }
-        assertEquals(before, DockerPoolGaugeLogger.countStreamThreads(), "an ended stream is no longer counted");
+        assertEquals(expected, DockerPoolGaugeLogger.countStreamThreads(), message);
     }
 }

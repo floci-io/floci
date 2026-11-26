@@ -22,6 +22,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
 import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.Closeable;
@@ -35,6 +36,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
+import static io.floci.aws.core.common.docker.DockerTestSupport.rootCause;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -60,6 +62,7 @@ import static org.junit.jupiter.api.Assertions.fail;
  * three-minute bound fits the default on a hosted runner, so a much larger ramp needs it raised too.
  */
 @EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
+@ResourceLock(value = ParallelLocks.DOCKER_ACTIVE_STREAMS, mode = ResourceAccessMode.READ)
 @ResourceLock(ParallelLocks.CONFIG_MAPPING)
 class DockerPoolSaturationNightlyIntegrationTest {
 
@@ -269,14 +272,6 @@ class DockerPoolSaturationNightlyIntegrationTest {
         List<Long> sorted = new ArrayList<>(values);
         Collections.sort(sorted);
         return sorted.get(sorted.size() / 2);
-    }
-
-    private static Throwable rootCause(Throwable error) {
-        Throwable cause = error;
-        while (cause.getCause() != null && cause.getCause() != cause) {
-            cause = cause.getCause();
-        }
-        return cause;
     }
 
     private void removeLeftovers() {
