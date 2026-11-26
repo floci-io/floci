@@ -320,12 +320,15 @@ class EksAutoModeComputeTest {
         dead.setInstanceId("i-dead");
         Instance reused = new Instance();
         reused.setInstanceId("i-old");
+        Instance replaced = new Instance();
+        replaced.setInstanceId("i-gone");
         when(clusterManager.deriveInstanceNodeName(dead, REGION)).thenReturn("stray");
         when(clusterManager.deriveInstanceNodeName(reused, REGION)).thenReturn("node-1");
+        when(clusterManager.deriveInstanceNodeName(replaced, REGION)).thenReturn("taken");
         Reservation liveReservation = new Reservation();
         liveReservation.setInstances(List.of(live));
         Reservation deadReservation = new Reservation();
-        deadReservation.setInstances(List.of(dead, reused));
+        deadReservation.setInstances(List.of(dead, reused, replaced));
         when(ec2.describeInstances(eq(REGION), anyList(), any())).thenAnswer(inv -> {
             Map<String, List<String>> filters = inv.getArgument(2);
             return filters.get("instance-state-name").contains("terminated") ? List.of(deadReservation)
@@ -334,9 +337,15 @@ class EksAutoModeComputeTest {
         lists.put("pods", "{\"items\": []}");
         String autoLabels = "{\"karpenter.sh/nodepool\": \"general-purpose\", "
                 + "\"eks.amazonaws.com/compute-type\": \"auto\"}";
+        // A node group's worker joined under the name of a terminated Auto Mode instance's node: its provider ID is
+        // its own.
         lists.put("nodes", "{\"items\": ["
-                + "{\"metadata\": {\"name\": \"node-1\", \"labels\": " + autoLabels + "}},"
-                + "{\"metadata\": {\"name\": \"stray\", \"labels\": " + autoLabels + "}},"
+                + "{\"metadata\": {\"name\": \"node-1\", \"labels\": " + autoLabels + "}, "
+                + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-node\"}},"
+                + "{\"metadata\": {\"name\": \"stray\", \"labels\": " + autoLabels + "}, "
+                + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-dead\"}},"
+                + "{\"metadata\": {\"name\": \"taken\", \"labels\": {}}, "
+                + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-worker\"}},"
                 + "{\"metadata\": {\"name\": \"cluster-node\", \"labels\": " + autoLabels + "}}]}");
         lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
                 "\"spec\": {\"disruption\": {\"consolidateAfter\": \"Never\"}, \"template\""));
@@ -350,6 +359,8 @@ class EksAutoModeComputeTest {
                 "node-1", "--ignore-not-found=true", "--wait=false"}, 15);
         verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
                 "cluster-node", "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
+                "taken", "--ignore-not-found=true", "--wait=false"}, 15);
     }
 
     /**
@@ -367,7 +378,8 @@ class EksAutoModeComputeTest {
             Map<String, List<String>> filters = inv.getArgument(2);
             return filters.get("instance-state-name").contains("terminated") ? List.of(dead) : List.of();
         });
-        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"late-node\", \"labels\": {}}}]}");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"late-node\", \"labels\": {}}, "
+                + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-late\"}}]}");
         Cluster cluster = cluster("prod");
         cluster.setComputeConfig(new ComputeConfig(false, List.of(), null));
 
