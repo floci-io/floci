@@ -66,6 +66,12 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime, ContainerTeardown
      * Adoption compares this and replaces the container when it differs.
      */
     private static final String SCRIPT_LABEL = "io.floci.appsync.js-runtime.script";
+    /**
+     * Label marking a container started under Docker's init process. The script digest cannot tell a
+     * sidecar from before the init process apart, and one adopted without it waits out the whole stop
+     * timeout on every reset and shutdown, so adoption replaces a container without this label.
+     */
+    private static final String INIT_LABEL = "io.floci.appsync.js-runtime.init";
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -166,8 +172,13 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime, ContainerTeardown
                     .withEntrypoint(List.of("sh", "-c"))
                     .withCmd(List.of(startCommand()))
                     .withLabel(SCRIPT_LABEL, scriptDigest())
+                    .withLabel(INIT_LABEL, "true")
                     .withDockerNetwork(jsRuntimeConfig().dockerNetwork())
-                    .withLogRotation();
+                    .withLogRotation()
+                    // The server script installs no SIGTERM handler, and node exec'd as PID 1
+                    // ignores the stop request, so every reset and shutdown would wait out the
+                    // whole stop timeout before Docker sends SIGKILL.
+                    .withInit();
             int configuredPort = jsRuntimeConfig().port();
             if (configuredPort > 0) {
                 specBuilder.withPortBinding(CONTAINER_INTERNAL_PORT, configuredPort);
@@ -211,6 +222,10 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime, ContainerTeardown
         if (!scriptDigest().equals(ranWith)) {
             LOG.infov("Existing AppSync JS runtime sidecar was started from a different server "
                     + "script ({0}); replacing it", ranWith == null ? "unlabelled" : ranWith);
+            return false;
+        }
+        if (!"true".equals(labels.get(INIT_LABEL))) {
+            LOG.info("Existing AppSync JS runtime sidecar was started without an init process; replacing it");
             return false;
         }
         try {

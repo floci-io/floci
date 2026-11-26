@@ -179,6 +179,11 @@ public class KellnrSidecarManager implements ContainerTeardown {
                 .withDockerNetwork(config.services().dockerNetwork())
                 .withEmbeddedDns()
                 .withLogRotation()
+                // The image's entrypoint is `sh -c "update-ca-certificates && ./kellnr"`, and
+                // Kellnr installs no SIGTERM handler. As PID 1 it ignores the stop request, so
+                // every reset, repository delete and shutdown would wait out the whole stop
+                // timeout for each repository's container.
+                .withInit()
                 .build();
         String containerId = lifecycleManager.create(spec);
         try {

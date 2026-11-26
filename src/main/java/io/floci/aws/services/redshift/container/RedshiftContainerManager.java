@@ -38,6 +38,8 @@ public class RedshiftContainerManager {
     private static final String DEFAULT_DATABASE = "dev";
     static final int DEFAULT_MAX_CONNECTIONS = 500;
     static final int LARGE_CLUSTER_MAX_CONNECTIONS = 2000;
+    private static final long READINESS_TIMEOUT_SECONDS = 60;
+    private static final long READINESS_POLL_MILLIS = 200;
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -571,7 +573,8 @@ public class RedshiftContainerManager {
 
     private void execUntilSuccess(String containerName, String containerId, String[] cmd, String description) {
         String lastOutput = "";
-        for (int attempt = 1; attempt <= 60; attempt++) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(READINESS_TIMEOUT_SECONDS);
+        do {
             try {
                 ContainerExec.Result result = execInContainer(containerId, cmd, 5);
                 lastOutput = result.stderr();
@@ -583,12 +586,12 @@ public class RedshiftContainerManager {
                 lastOutput = e.getMessage();
             }
             try {
-                TimeUnit.SECONDS.sleep(1);
+                TimeUnit.MILLISECONDS.sleep(READINESS_POLL_MILLIS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("Interrupted initializing " + description + " in " + containerName, e);
             }
-        }
+        } while (System.nanoTime() < deadline);
         throw new IllegalStateException("Timed out initializing " + description + " in " + containerName + ": " + lastOutput);
     }
 
