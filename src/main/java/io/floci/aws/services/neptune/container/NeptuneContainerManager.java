@@ -71,6 +71,7 @@ public class NeptuneContainerManager {
     private final RegionResolver regionResolver;
     private final Map<String, NeptuneContainerHandle> activeContainers = new ConcurrentHashMap<>();
     private volatile boolean dockerUnavailableLogged;
+    private volatile boolean shuttingDown;
 
     @Inject
     public NeptuneContainerManager(ContainerBuilder containerBuilder,
@@ -133,12 +134,17 @@ public class NeptuneContainerManager {
      */
     public NeptuneContainerHandle start(String clusterId, String image, NeptuneDbType dbType,
                                         String accountId, String region, String volumeId) {
+        if (shuttingDown) {
+            throw new IllegalStateException("Neptune is shutting down");
+        }
         LOG.infov("Starting Neptune backend container ({0}) for cluster: {1}", dbType, clusterId);
 
         int backendPort = dbType.backendPort();
         String identity = resourceIdentity(accountId, region, clusterId);
         String containerName = containerName(identity);
-        lifecycleManager.removeIfExists(containerName);
+        // A container left under the name, by a Floci that exited without stopping it, stops as shutdown stops one,
+        // so Gremlin Server saves its graph to the volume the new container opens rather than losing it.
+        lifecycleManager.stopAndRemove(containerName, null, STOP_TIMEOUT_SECONDS);
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
@@ -194,6 +200,10 @@ public class NeptuneContainerManager {
         handle.setLogStream(logHandle);
 
         waitForBackendReady(clusterId, dbType, endpoint.host(), endpoint.port());
+        if (shuttingDown) {
+            throw new IllegalStateException("Neptune shut down while the container for cluster " + clusterId
+                    + " was starting");
+        }
 
         return handle;
     }
@@ -286,7 +296,17 @@ public class NeptuneContainerManager {
         return ContainerStorageHelper.resourceName(config, "neptune", null, clusterId);
     }
 
+    /** Whether shutdown has begun, after which no container starts. */
+    public boolean isShuttingDown() {
+        return shuttingDown;
+    }
+
+    /**
+     * Stops every container, at shutdown. No container starts after this begins, and a start already running
+     * fails when it finishes, its container left for {@link #stopByClusterId} to remove.
+     */
     public void stopAll() {
+        shuttingDown = true;
         List<NeptuneContainerHandle> handles = new ArrayList<>(activeContainers.values());
         if (!handles.isEmpty()) {
             LOG.infov("Stopping {0} Neptune container(s) on shutdown", handles.size());

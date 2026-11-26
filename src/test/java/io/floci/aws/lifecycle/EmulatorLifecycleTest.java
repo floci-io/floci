@@ -39,6 +39,7 @@ import io.floci.aws.services.memorydb.MemoryDbService;
 import io.floci.aws.services.memorydb.container.MemoryDbContainerManager;
 import io.floci.aws.services.memorydb.proxy.MemoryDbProxyManager;
 import io.floci.aws.services.mwaa.MwaaService;
+import io.floci.aws.services.neptune.NeptuneService;
 import io.floci.aws.services.neptune.container.NeptuneContainerManager;
 import io.floci.aws.services.neptune.proxy.NeptuneProxyManager;
 import io.floci.aws.services.opensearch.OpenSearchService;
@@ -120,6 +121,8 @@ class EmulatorLifecycleTest {
     @Mock private DocDbContainerManager docDbContainerManager;
     @Mock private NeptuneContainerManager neptuneContainerManager;
     @Mock private NeptuneProxyManager neptuneProxyManager;
+    @Mock private NeptuneService neptuneService;
+    @Mock private EmulatorConfig.NeptuneServiceConfig neptuneServiceConfig;
     @Mock private RabbitMqManager rabbitMqManager;
     @Mock private FlinkContainerManager flinkContainerManager;
     @Mock private RdsService rdsService;
@@ -195,6 +198,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(servicesConfig.mwaa()).thenReturn(mwaaServiceConfig);
         Mockito.lenient().when(mwaaServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.docdb()).thenReturn(docDbServiceConfig);
+        Mockito.lenient().when(servicesConfig.neptune()).thenReturn(neptuneServiceConfig);
+        Mockito.lenient().when(neptuneServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(docDbServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.amazonmq()).thenReturn(amazonMqServiceConfig);
         Mockito.lenient().when(amazonMqServiceConfig.enabled()).thenReturn(false);
@@ -214,7 +219,7 @@ class EmulatorLifecycleTest {
                 elastiCacheContainerManager, elastiCacheMemcachedContainerManager,
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
                 memoryDbContainerManager, memoryDbProxyManager, memoryDbService,
-                docDbContainerManager, docDbService, neptuneContainerManager, neptuneProxyManager,
+                docDbContainerManager, docDbService, neptuneContainerManager, neptuneProxyManager, neptuneService,
                 rabbitMqManager, amazonMqService, flinkContainerManager, kinesisAnalyticsService,
                 openSearchService, mwaaService,
                 sageMakerService, rdsService, timestreamInfluxDbService,
@@ -690,6 +695,48 @@ class EmulatorLifecycleTest {
 
         verify(elbV2Service).restorePersistedRuntime();
         verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void restoresPersistedNeptuneClustersAfterStorageLoad() {
+        stubStorageConfig();
+        when(neptuneServiceConfig.enabled()).thenReturn(true);
+        when(neptuneService.restorePersistedRuntime()).thenReturn(CompletableFuture.completedFuture(null));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, neptuneService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(neptuneService).restorePersistedRuntime();
+    }
+
+    @Test
+    void aFailedNeptuneRestoreDoesNotStopTheOtherRestores() {
+        stubStorageConfig();
+        when(neptuneServiceConfig.enabled()).thenReturn(true);
+        when(elbv2ServiceConfig.enabled()).thenReturn(true);
+        when(neptuneService.restorePersistedRuntime()).thenReturn(CompletableFuture.failedFuture(
+                new IllegalStateException("Could not restore Neptune cluster demo")));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(elbV2Service).restorePersistedRuntime();
+        verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void leavesNeptuneClustersUntouchedWhenNeptuneIsDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(neptuneService, never()).restorePersistedRuntime();
     }
 
     @Test

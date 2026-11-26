@@ -105,6 +105,25 @@ create that fails leaves no volume behind. A cluster created again under a delet
 starts on a new, empty volume. In `memory` mode a cluster's graph lasts only as long as its
 container.
 
+### Restarts
+
+When Neptune's records are kept, Floci's shutdown stops each cluster's proxy and container and
+keeps its volume, and the next start brings them back. Each cluster's port is held for it at once,
+so a cluster created meanwhile is never handed it. While its container starts again in the
+background, the cluster reports `maintenance` and its instances `starting`. The new container runs
+in the engine the cluster's graph was kept in, on its volume, so the graph is there. Its proxy then
+listens on the same port again, so clients reconnect to the endpoint they had, and the cluster and
+its instances report `available`. With no Docker daemon reachable they come back `available` with
+no container, as a cluster created then does. A cluster whose container or proxy does not start is
+left with none and its instances `failed`, and is tried again at the next start. A
+`DeleteDBCluster` during the restore leaves the cluster `deleting` until its container has started,
+and removes it then. `CreateDBInstance` is refused with `InvalidDBClusterStateFault` for a cluster
+that is not `available`.
+
+A cluster whose stored port another cluster already holds moves to a free one. A cluster created by
+a Floci that did not record its engine comes back in the configured `db-type`, and one whose graph
+was not kept in a volume gets a new, empty one.
+
 ### Docker Compose
 
 Neptune requires the Docker socket and the Gremlin proxy port range to be exposed. The first cluster claims `PROXY_BASE_PORT`; each additional cluster increments the port.

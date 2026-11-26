@@ -200,8 +200,9 @@ if grep -q '/neptune/' "$SHARD_FILE"; then
     configured_image neptune default-neo4j-image
     configured_image neptune default-image
 fi
-# NeptuneGraphVolumeDockerNightlyIntegrationTest keeps a graph across containers on both engines' configured images.
-if starts NeptuneGraphVolumeDockerNightlyIntegrationTest; then
+# NeptuneGraphVolumeDockerNightlyIntegrationTest keeps a graph across containers on both engines' configured images,
+# and NeptuneClusterRestartDockerNightlyIntegrationTest restarts clusters on the Gremlin one.
+if starts NeptuneGraphVolumeDockerNightlyIntegrationTest NeptuneClusterRestartDockerNightlyIntegrationTest; then
     configured_image neptune default-image
     configured_image neptune default-neo4j-image
 fi
