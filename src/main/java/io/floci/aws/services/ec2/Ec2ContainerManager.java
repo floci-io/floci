@@ -1912,7 +1912,9 @@ public class Ec2ContainerManager {
         if (containerId == null) {
             return;
         }
-        executor.submit(() -> {
+        // Queued behind the container's other lifecycle operations, so one reboot's re-armed watch
+        // never sees the next reboot's restart.
+        submitLifecycleOperation(containerId, () -> {
             flociStoppedContainers.add(containerId);
             try {
                 dockerClient.restartContainerCmd(containerId).exec();

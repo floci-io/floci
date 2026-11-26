@@ -1781,6 +1781,37 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void aRebootRequestedWhileAnotherRunsIsNotReportedAsAGuestShutdown() throws Exception {
+        LaunchHarness harness = launchHarness();
+        List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        harness.manager.setGuestShutdownHandler(shutDown::add);
+        Instance instance = launchRunningInstance(harness, "i-tworeboots", exitWatches);
+        RestartContainerCmd restart = mock(RestartContainerCmd.class, RETURNS_SELF);
+        when(harness.dockerClient.restartContainerCmd(TEST_CONTAINER_ID)).thenReturn(restart);
+        CountDownLatch secondRestartBegun = new CountDownLatch(1);
+        AtomicInteger restarts = new AtomicInteger();
+        when(restart.exec()).thenAnswer(invocation -> {
+            if (restarts.incrementAndGet() == 1) {
+                secondRestartBegun.await(2, TimeUnit.SECONDS);
+                return null;
+            }
+            secondRestartBegun.countDown();
+            awaitUntil(() -> exitWatches.size() >= 2, Duration.ofSeconds(5));
+            when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
+            exitWatches.getLast().onNext(exitStatus(0));
+            when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.RUNNING);
+            return null;
+        });
+
+        harness.manager.reboot(instance);
+        harness.manager.reboot(instance);
+        awaitUntil(() -> exitWatches.size() == 3, Duration.ofSeconds(10));
+
+        assertEquals(List.of(), shutDown);
+    }
+
+    @Test
     void anExitAfterAStopThroughFlociIsNotReportedAsAGuestShutdown() throws Exception {
         LaunchHarness harness = launchHarness();
         List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
