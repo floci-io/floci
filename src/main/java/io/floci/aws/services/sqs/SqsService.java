@@ -71,7 +71,6 @@ public class SqsService implements Resettable, ResourceProvider {
     private static final int MAX_RECEIVE_WAIT_TIME_SECONDS = 20;
     private static final int MAX_DELAY_SECONDS = 900;
     private static final int MAX_BATCH_ENTRIES = 10;
-    private static final int MAX_BATCH_PAYLOAD_BYTES = 1048576;
     private static final int MAX_LIST_QUEUES_RESULTS = 1000;
     private static final String LIST_QUEUES_TOKEN_NAMESPACE = "sqs-list-queues";
     private static final int MAX_TERMINAL_MOVE_TASKS = 10;
@@ -1360,8 +1359,8 @@ public class SqsService implements Resettable, ResourceProvider {
 
     /**
      * Validate that the combined payload of a {@code SendMessageBatch} call fits within
-     * the fixed 1 MiB batch limit, independent of the queue's {@code MaximumMessageSize}
-     * (which bounds each entry). AWS counts the batch limit as the sum of
+     * the 1 MiB batch limit (or the raised configured maximum), independent of the queue's
+     * {@code MaximumMessageSize}, which bounds each entry. AWS counts the batch limit as the sum of
      * all entries (body + attributes) and returns {@code BatchRequestTooLong} as a
      * top-level error -- not as per-entry failures -- when the total exceeds the limit.
      */
@@ -1370,9 +1369,9 @@ public class SqsService implements Resettable, ResourceProvider {
         getQueueByUrl(storageKey, queueUrl)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
-        if (totalBytes > MAX_BATCH_PAYLOAD_BYTES) {
+        if (totalBytes > maxAllowedMessageSize) {
             throw new AwsException("BatchRequestTooLong",
-                    "Batch requests cannot be longer than " + MAX_BATCH_PAYLOAD_BYTES + " bytes. "
+                    "Batch requests cannot be longer than " + maxAllowedMessageSize + " bytes. "
                             + "You have sent " + totalBytes + " bytes.", 400);
         }
     }
