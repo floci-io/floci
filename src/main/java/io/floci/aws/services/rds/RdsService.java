@@ -4719,6 +4719,12 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidDBInstanceState",
                     "DB instance " + id + " is not in stopped state.", 400);
         }
+        if (isDsqlReservedPort(instance.getProxyPort())) {
+            int port = allocateProxyPort();
+            instance.setProxyPort(port);
+            instance.setEndpoint(advertised(proxyEndpoint(port), instance.getRequestedPort()));
+        }
+        refreshManagedMasterUserSecret(instance, effectiveRegion);
         instance.setStatus(DbInstanceStatus.STARTING);
         putInstanceForScope(accountId, effectiveRegion, id, instance);
         DbInstance response = RESPONSE_COPIER.convertValue(instance, DbInstance.class);
@@ -4858,6 +4864,14 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidDBClusterStateFault",
                     "DB cluster " + id + " is not in stopped state.", 400);
         }
+        if (isDsqlReservedPort(cluster.getProxyPort())) {
+            int port = allocateProxyPort();
+            cluster.setProxyPort(port);
+            DbEndpoint endpoint = advertised(proxyEndpoint(port), cluster.getRequestedPort());
+            cluster.setEndpoint(endpoint);
+            cluster.setReaderEndpoint(endpoint);
+        }
+        refreshManagedMasterUserSecret(cluster, effectiveRegion);
         cluster.setStatus(DbInstanceStatus.STARTING);
         putClusterForScope(accountId, effectiveRegion, id, cluster);
         DbCluster response = RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
@@ -9299,11 +9313,12 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     private boolean reserveAvailableProxyPort(int port) {
+        return !isDsqlReservedPort(port) && usedPorts.add(port);
+    }
+
+    private boolean isDsqlReservedPort(int port) {
         EmulatorConfig.DsqlServiceConfig dsql = config.services().dsql();
-        if (dsql != null && dsql.enabled() && !dsql.mock() && dsql.port() == port) {
-            return false;
-        }
-        return usedPorts.add(port);
+        return dsql != null && dsql.enabled() && !dsql.mock() && dsql.port() == port;
     }
 
     private void releaseProxyPort(int port) {
@@ -10027,15 +10042,25 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private void refreshManagedMasterUserSecret(DbInstance instance, String region) {
         synchronized (instance) {
-            refreshManagedMasterUserSecret(instance.getMasterUserSecretArn(), instance.getEndpoint(),
-                    connectablePort(instance), accountIdFromArn(instance.getDbInstanceArn()), region);
+            try {
+                refreshManagedMasterUserSecret(instance.getMasterUserSecretArn(), instance.getEndpoint(),
+                        connectablePort(instance), accountIdFromArn(instance.getDbInstanceArn()), region);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Failed to refresh managed secret endpoint for RDS instance {0}",
+                        instance.getDbInstanceIdentifier());
+            }
         }
     }
 
     private void refreshManagedMasterUserSecret(DbCluster cluster, String region) {
         synchronized (cluster) {
-            refreshManagedMasterUserSecret(cluster.getMasterUserSecretArn(), cluster.getEndpoint(),
-                    connectablePort(cluster), accountIdFromArn(cluster.getDbClusterArn()), region);
+            try {
+                refreshManagedMasterUserSecret(cluster.getMasterUserSecretArn(), cluster.getEndpoint(),
+                        connectablePort(cluster), accountIdFromArn(cluster.getDbClusterArn()), region);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Failed to refresh managed secret endpoint for RDS cluster {0}",
+                        cluster.getDbClusterIdentifier());
+            }
         }
     }
 

@@ -303,6 +303,127 @@ class RdsServiceTest {
     }
 
     @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void stoppedDatabaseReassignsReservedPortWhenCapacityReturns(boolean clusterCase) {
+        when(rdsConfig.mock()).thenReturn(true);
+        when(rdsConfig.proxyMaxPort()).thenReturn(7001);
+        StorageBackend<String, DbInstance> instances = new InMemoryStorage<>();
+        StorageBackend<String, DbCluster> clusters = new InMemoryStorage<>();
+        RdsService initial = newService(containerManager, proxyManager, instances, clusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        if (clusterCase) {
+            DbCluster stopped = initial.createDbCluster("stopped", "aurora-mysql", "8.0", "admin",
+                    "password", "dbname", false, null);
+            stopped.setStatus(DbInstanceStatus.STOPPED);
+            clusters.put("us-east-1::stopped", stopped);
+        } else {
+            DbInstance stopped = initial.createDbInstance("stopped", "postgres", "13", "admin", "password",
+                    "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                    Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, 5432);
+            stopped.setStatus(DbInstanceStatus.STOPPED);
+            instances.put("us-east-1::stopped", stopped);
+        }
+        initial.createDbInstance("healthy", "postgres", "13", "admin", "password",
+                "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, 5432);
+        configureDsqlPort(7000, true, false);
+        RdsService restored = newService(containerManager, proxyManager, instances, clusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        restored.restorePersistedRuntime();
+        when(rdsConfig.mock()).thenReturn(false);
+        clearInvocations(containerManager, proxyManager);
+
+        AwsException exhausted = assertThrows(AwsException.class, () -> {
+            if (clusterCase) {
+                restored.startDbCluster("stopped", "us-east-1");
+            } else {
+                restored.startDbInstance("stopped");
+            }
+        });
+        assertEquals("InsufficientDBInstanceCapacity", exhausted.getErrorCode());
+        assertEquals(DbInstanceStatus.STOPPED, clusterCase
+                ? restored.getDbCluster("stopped").getStatus() : restored.getDbInstance("stopped").getStatus());
+        verifyNoInteractions(containerManager, proxyManager);
+
+        restored.deleteDbInstance("healthy");
+        clearInvocations(containerManager, proxyManager);
+        if (clusterCase) {
+            restored.startDbCluster("stopped", "us-east-1");
+            assertEquals(7001, restored.getDbCluster("stopped").getProxyPort());
+            assertEquals(7001, restored.getDbCluster("stopped").getEndpoint().port());
+            assertEquals(DbInstanceStatus.AVAILABLE, restored.getDbCluster("stopped").getStatus());
+        } else {
+            restored.startDbInstance("stopped");
+            assertEquals(7001, restored.getDbInstance("stopped").getProxyPort());
+            assertEquals(7001, restored.getDbInstance("stopped").getEndpoint().port());
+            assertEquals(DbInstanceStatus.AVAILABLE, restored.getDbInstance("stopped").getStatus());
+        }
+        verify(containerManager).tryStart(any(), eq("stopped"), any(), any(), any(), any(), any(), any(),
+                any(), any());
+        verify(proxyManager).startProxy(any(), any(), any(), anyBoolean(), eq(7001), any(), anyInt(), any(),
+                any(), any(), any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false,false", "false,false,true", "false,true,false", "false,true,true",
+            "true,false,false", "true,false,true", "true,true,false", "true,true,true"})
+    void secretFailureDoesNotPreventBackendRecovery(boolean clusterCase, boolean migratePort,
+                                                     boolean missingSecret) throws Exception {
+        when(rdsConfig.mock()).thenReturn(true);
+        SecretsManagerService secrets = spy(realSecretsForOptOut());
+        StorageBackend<String, DbInstance> instances = new InMemoryStorage<>();
+        StorageBackend<String, DbCluster> clusters = new InMemoryStorage<>();
+        RdsService initial = newService(containerManager, proxyManager, instances, clusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), secrets);
+        DbInstance instance = null;
+        DbCluster cluster = null;
+        if (clusterCase) {
+            cluster = initial.createDbCluster("managed", "aurora-mysql", "8.0", "admin", "password",
+                    "dbname", false, null);
+        } else {
+            instance = initial.createDbInstance("managed", "postgres", "13", "admin", "password",
+                    "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                    Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, 5432);
+        }
+        int oldPort = clusterCase ? cluster.getProxyPort() : instance.getProxyPort();
+        Secret secret = secrets.createSecret("broken-endpoint", "{}", null, null, null, List.of(),
+                "rds", "us-east-1");
+        if (clusterCase) {
+            cluster.setMasterUserSecretArn(secret.getArn());
+            clusters.put("us-east-1::managed", cluster);
+        } else {
+            instance.setMasterUserSecretArn(secret.getArn());
+            instances.put("us-east-1::managed", instance);
+        }
+        if (missingSecret) {
+            doThrow(new AwsException("ResourceNotFoundException", "Secret not found", 400))
+                    .when(secrets).getSecretValue(eq(secret.getArn()), isNull(), isNull(), eq("us-east-1"));
+        } else {
+            doThrow(new IllegalStateException("temporary write failure")).when(secrets)
+                    .putSecretValue(eq(secret.getArn()), anyString(), isNull(), isNull(), eq("us-east-1"), isNull());
+        }
+        if (migratePort) {
+            configureDsqlPort(oldPort, true, false);
+        }
+        when(rdsConfig.mock()).thenReturn(false);
+        clearInvocations(containerManager, proxyManager);
+        RdsService restored = newService(containerManager, proxyManager, instances, clusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), secrets);
+
+        assertDoesNotThrow(restored::restorePersistedRuntime);
+
+        int actualPort = clusterCase ? restored.getDbCluster("managed").getProxyPort()
+                : restored.getDbInstance("managed").getProxyPort();
+        assertEquals(migratePort ? oldPort + 1 : oldPort, actualPort);
+        assertEquals(DbInstanceStatus.AVAILABLE, clusterCase
+                ? restored.getDbCluster("managed").getStatus() : restored.getDbInstance("managed").getStatus());
+        verify(containerManager).tryStart(any(), eq("managed"), any(), any(), any(), any(), any(), any(),
+                any(), any());
+        verify(proxyManager).startProxy(any(), any(), any(), anyBoolean(), eq(actualPort), any(), anyInt(), any(),
+                any(), any(), any(), any(), any());
+    }
+
+    @ParameterizedTest
     @CsvSource({"false,false,false", "false,true,false", "true,false,false", "true,true,false",
             "false,false,true", "false,true,true", "true,false,true", "true,true,true"})
     void migratedManagedSecretKeepsItsPasswordAndTracksTheConnectablePort(boolean clusterCase,
