@@ -42,8 +42,9 @@ public class Ec2StoredResourceArns implements StoredResourceArns {
             return Map.of();
         }
         String account = arn.accountId().isEmpty() ? regionResolver.getAccountId() : arn.accountId();
+        String region = arn.region().isEmpty() ? regionResolver.getRegion() : arn.region();
         Map<String, String> tags = new LinkedHashMap<>();
-        for (Tag tag : ec2.resourceTags(account, arn.region(), parts[1])) {
+        for (Tag tag : ec2.resourceTags(account, region, parts[1])) {
             tags.put(tag.getKey(), tag.getValue() == null ? "" : tag.getValue());
         }
         return tags;
