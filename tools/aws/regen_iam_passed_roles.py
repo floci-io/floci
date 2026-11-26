@@ -45,6 +45,8 @@ byte-identical. The two gates split along the sources:
 - `--check` is offline and needs the pinned botocore. The file must be well-formed, and every
   operation's members must be exactly what the rule and the corrections give from botocore for the
   models the file names, so a hand-edited member fails.
+  Its namespaces, the reasons it gives for those it does not read, and its other namespaces must be
+  the generator's, so a namespace taken out of `NAMESPACES` without the file regenerated fails.
 - `--verify` is online and stdlib-only. Every operation the file carries must still list
   `iam:PassRole`, to the same services, for the same SDK clients. An operation AWS has added is
   reported without failing: until the next sync it passes roles unchecked, which is where it was
@@ -62,6 +64,7 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -577,6 +580,39 @@ def namespace_of(operation: str) -> str:
     return operation.split(":", 1)[0]
 
 
+def namespace_problems(document: dict, reads: Callable[[str], bool], read: Iterable[str],
+                       not_covered: dict[str, str]) -> list[str]:
+    """Where a vendored table's namespaces part from its generator's, offline: an operation the generator no longer
+    reads, a namespace it reads that the table leaves out or one the table holds that it does not read, a reason a
+    namespace is not read that differs, and another namespace the generator reads or names as not read. `--check`
+    re-derives only what the table holds, so a namespace taken out of `NAMESPACES`, or moved into `NOT_COVERED`,
+    without the table regenerated would otherwise pass it."""
+    operations = document["operations"]
+    problems = [f"{operation} is in the file, but its generator does not read it"
+                for operation in sorted(operations) if not reads(operation)]
+    expected = set(read) | {namespace_of(operation) for operation in operations if reads(operation)}
+    held = set(document["namespaces"])
+    if held != expected:
+        problems.append(f"the file's namespaces are not its generator's: the file alone has {sorted(held - expected)}, "
+                        f"the generator alone reads {sorted(expected - held)}; regenerate it")
+    reasons = document.get("notCovered", {})
+    differing = sorted(namespace for namespace in set(reasons) | set(not_covered)
+                       if reasons.get(namespace) != not_covered.get(namespace))
+    if differing:
+        problems.append(f"the file's reasons for the namespaces it does not read are not its generator's, for "
+                        f"{differing}; regenerate it")
+    named = sorted(set(document.get("otherNamespaces", [])) & (expected | set(not_covered)))
+    if named:
+        problems.append(f"the file's other namespaces include {named}, which its generator reads or names as not read")
+    return problems
+
+
+def stale_namespaces(document: dict) -> list[str]:
+    """Where the file's namespaces part from `NAMESPACES` and `NOT_COVERED` (`namespace_problems`)."""
+    return namespace_problems(document, lambda operation: namespace_of(operation) in NAMESPACES, NAMESPACES,
+                              NOT_COVERED)
+
+
 def _overrides_for(table: dict, operation: str) -> dict:
     merged = dict(table.get(namespace_of(operation) + ":*", {}))
     merged.update(table.get(operation, {}))
@@ -830,7 +866,7 @@ def main(argv: list[str] | None = None) -> int:
         problems = validate(document)
         if not problems and args.check:
             data, _ = resolve_botocore_data(args.botocore_data)
-            problems = derive(document, data)
+            problems = stale_namespaces(document) + derive(document, data)
         for problem in problems:
             print(f"error: {problem}", file=sys.stderr)
         if problems:

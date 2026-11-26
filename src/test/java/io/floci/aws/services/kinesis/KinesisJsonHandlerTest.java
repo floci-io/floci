@@ -227,6 +227,25 @@ class KinesisJsonHandlerTest {
     }
 
     @Test
+    void getShardIteratorSequenceTypesWithoutStartingSequenceNumberReturnInvalidArgument() {
+        createStream("test-stream");
+        String shardId = firstShardId("test-stream");
+        for (String type : new String[] {"AT_SEQUENCE_NUMBER", "AFTER_SEQUENCE_NUMBER"}) {
+            ObjectNode iterReq = MAPPER.createObjectNode();
+            iterReq.put("StreamName", "test-stream");
+            iterReq.put("ShardId", shardId);
+            iterReq.put("ShardIteratorType", type);
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> handler.handle("GetShardIterator", iterReq, REGION));
+            assertEquals("InvalidArgumentException", ex.getErrorCode(), type);
+            assertEquals(400, ex.getHttpStatus(), type);
+            assertEquals("Must either specify (1) AT_SEQUENCE_NUMBER or AFTER_SEQUENCE_NUMBER and "
+                    + "StartingSequenceNumber or (2) TRIM_HORIZON or LATEST and no StartingSequenceNumber. "
+                    + "Request specified " + type + " and no StartingSequenceNumber.", ex.getMessage());
+        }
+    }
+
+    @Test
     void resourceTagsRejectForeignAndMissingResources() {
         createStream("test-stream");
         String consumerArn = service.registerStreamConsumer(STREAM_ARN, "tagged-consumer", REGION)
@@ -429,6 +448,13 @@ class KinesisJsonHandlerTest {
 
     private ObjectNode responseEntity(Response response) {
         return (ObjectNode) response.getEntity();
+    }
+
+    private String firstShardId(String streamName) {
+        ObjectNode descReq = MAPPER.createObjectNode();
+        descReq.put("StreamName", streamName);
+        return responseEntity(handler.handle("DescribeStream", descReq, REGION))
+                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
     }
 
     @ParameterizedTest
@@ -1238,10 +1264,7 @@ class KinesisJsonHandlerTest {
         assertEquals("InvalidArgumentException", ex.getErrorCode());
 
         // The valid first record must not have landed either
-        ObjectNode descReq = MAPPER.createObjectNode();
-        descReq.put("StreamName", "test-stream");
-        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
-                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+        String shardId = firstShardId("test-stream");
 
         ObjectNode iterReq = MAPPER.createObjectNode();
         iterReq.put("StreamName", "test-stream");
@@ -1489,10 +1512,7 @@ class KinesisJsonHandlerTest {
         putReq.put("PartitionKey", "pk1");
         handler.handle("PutRecord", putReq, REGION);
 
-        ObjectNode descReq = MAPPER.createObjectNode();
-        descReq.put("StreamName", "test-stream");
-        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
-                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+        String shardId = firstShardId("test-stream");
 
         // A fixed, realistic (2020s-era) arrival timestamp - Instant.now() would also trigger
         // the bug, but a fixed value makes the expected serialized decimal assertable exactly.
@@ -1531,10 +1551,7 @@ class KinesisJsonHandlerTest {
         putReq.put("PartitionKey", "pk1");
         handler.handle("PutRecord", putReq, REGION);
 
-        ObjectNode descReq = MAPPER.createObjectNode();
-        descReq.put("StreamName", "test-stream");
-        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
-                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+        String shardId = firstShardId("test-stream");
 
         service.describeStream("test-stream", REGION).getShards().get(0).getRecords().get(0)
                 .setApproximateArrivalTimestamp(Instant.ofEpochMilli(1_786_959_659_000L));
@@ -1570,10 +1587,7 @@ class KinesisJsonHandlerTest {
         putReq.put("PartitionKey", "pk1");
         handler.handle("PutRecord", putReq, REGION);
 
-        ObjectNode descReq = MAPPER.createObjectNode();
-        descReq.put("StreamName", "test-stream");
-        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
-                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+        String shardId = firstShardId("test-stream");
 
         service.describeStream("test-stream", REGION).getShards().get(0).getRecords().get(0)
                 .setApproximateArrivalTimestamp(null);
@@ -1596,10 +1610,7 @@ class KinesisJsonHandlerTest {
     }
 
     private ArrayNode readAllRecords(String streamName) {
-        ObjectNode descReq = MAPPER.createObjectNode();
-        descReq.put("StreamName", streamName);
-        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
-                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+        String shardId = firstShardId(streamName);
 
         ObjectNode iterReq = MAPPER.createObjectNode();
         iterReq.put("StreamName", streamName);

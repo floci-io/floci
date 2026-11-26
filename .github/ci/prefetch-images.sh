@@ -54,9 +54,19 @@ starts() {
 # The image a test constant pins, or empty (and a log line) when the constant cannot be read.
 # TestImages is found by name rather than by its package path, which a package rename changes.
 TEST_IMAGES="$(find src/test/java -path '*/testing/TestImages.java' -print -quit)"
+if starts SsmSessionManagerDockerNightlyIntegrationTest; then
+    pull debian:bookworm-slim
+    pull postgres:17
+fi
 if starts Ec2PublishedConnectionNightlyIntegrationTest; then
     ecr public.ecr.aws/docker/library/alpine:latest
     pull alpine/socat
+fi
+# Ec2GuestShutdownDockerNightlyIntegrationTest launches ami-alpine and attaches a volume through the
+# volume helper (floci.services.ec2.volume-helper-image).
+if starts Ec2GuestShutdownDockerNightlyIntegrationTest; then
+    ecr public.ecr.aws/docker/library/alpine:latest
+    pull alpine:3.21
 fi
 test_image() {
     image="$(grep -oE "$1 *= *\"[^\"]+\"" "${TEST_IMAGES:-/dev/null}" | grep -oE '"[^"]+"' | tr -d '"')"
@@ -190,6 +200,8 @@ if grep -q '/neptune/' "$SHARD_FILE"; then
     configured_image neptune default-neo4j-image
     configured_image neptune default-image
 fi
+# DocDbClusterRestartDockerNightlyIntegrationTest restarts clusters on the configured MongoDB image.
+starts DocDbClusterRestartDockerNightlyIntegrationTest && configured_image docdb default-image
 grep -q '/elasticache/' "$SHARD_FILE" && { pull valkey/valkey:8; pull memcached:1.6; }
 grep -q '/memorydb/'    "$SHARD_FILE" && pull valkey/valkey:8
 grep -q '/ecr/'         "$SHARD_FILE" && pull registry:2

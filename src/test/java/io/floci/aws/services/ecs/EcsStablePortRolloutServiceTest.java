@@ -31,17 +31,25 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
+import static io.floci.aws.services.ecs.EcsTestExecutors.inlineExecutor;
+import static io.floci.aws.services.ecs.EcsTestExecutors.queuedExecutor;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -377,9 +385,13 @@ class EcsStablePortRolloutServiceTest {
         }
     }
 
-    @Test
-    void daemonStillReplacesItsTaskAfterStoppingItWithoutHostPublishing() {
-        try (Harness harness = new Harness(PublicationMode.PRIVATE_AWSVPC)) {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void daemonStillReplacesItsTaskAfterStoppingItWithoutHostPublishing(boolean stopDuringReconciliation)
+            throws InterruptedException {
+        Queue<Runnable> stops = new ArrayDeque<>();
+        ExecutorService stopper = stopDuringReconciliation ? inlineExecutor() : queuedExecutor(stops);
+        try (Harness harness = new Harness(PublicationMode.PRIVATE_AWSVPC, stopper)) {
             harness.ecs.registerContainerInstance(CLUSTER, null, List.of(), REGION);
             harness.createService("web", Map.of("minimumHealthyPercent", 0), "DAEMON");
             harness.ecs.reconcileServices();
@@ -388,13 +400,21 @@ class EcsStablePortRolloutServiceTest {
             harness.forceDeployment("web");
             harness.ecs.reconcileServices();
             assertEquals("STOPPED", original.getDesiredStatus());
-            assertEquals(0, harness.runningTasks("web").size());
-            await().atMost(TIMEOUT).until(() -> "STOPPED".equals(original.getLastStatus()));
+            if (!stopDuringReconciliation) {
+                assertEquals("STOPPING", original.getLastStatus());
+                assertEquals(0, harness.runningTasks("web").size());
+                verify(harness.manager, times(1)).startTask(any(), any(), any(), anyString());
+                assertEquals(1, stops.size());
+                stops.remove().run();
+            }
+            assertEquals("STOPPED", original.getLastStatus());
             harness.ecs.reconcileServices();
 
+            assertEquals(1, harness.runningTasks("web").size());
             EcsTask replacement = harness.runningTasks("web").getFirst();
             assertNotEquals(original.getTaskArn(), replacement.getTaskArn());
             assertEquals(original.getContainerInstanceArn(), replacement.getContainerInstanceArn());
+            verify(harness.manager, times(2)).startTask(any(), any(), any(), anyString());
         }
     }
 
@@ -445,6 +465,10 @@ class EcsStablePortRolloutServiceTest {
         }
 
         private Harness(PublicationMode publication) {
+            this(publication, null);
+        }
+
+        private Harness(PublicationMode publication, ExecutorService stopper) {
             networkMode = switch (publication) {
                 case BRIDGE_FIXED, BRIDGE_DYNAMIC -> NetworkMode.bridge;
                 case HOST_FIXED -> NetworkMode.host;
@@ -467,8 +491,15 @@ class EcsStablePortRolloutServiceTest {
                 handle.recordContainerRemoved("app");
                 return Map.of("app", 0);
             });
-            ecs = new EcsService(new RegionResolver(REGION, "000000000000"), manager, config,
-                    mock(EcsLoadBalancerRegistrar.class), new InMemoryStorageFactory("000000000000"), null);
+            if (stopper == null) {
+                ecs = new EcsService(new RegionResolver(REGION, "000000000000"), manager, config,
+                        mock(EcsLoadBalancerRegistrar.class), new InMemoryStorageFactory("000000000000"), null);
+            } else {
+                ecs = new EcsService(new RegionResolver(REGION, "000000000000"), manager, config,
+                        mock(EcsLoadBalancerRegistrar.class), new InMemoryStorageFactory("000000000000"),
+                        null, null, null, null, Clock.systemUTC(),
+                        Executors.newVirtualThreadPerTaskExecutor(), stopper);
+            }
             ecs.initializeStorage();
             ecs.createCluster(CLUSTER, REGION);
             registerTaskDefinition(publication == PublicationMode.BRIDGE_DYNAMIC

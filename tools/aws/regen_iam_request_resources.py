@@ -309,6 +309,8 @@ byte-identical. The two gates split along the sources:
 - `--check` is offline and needs the pinned botocore. The file must be well-formed, and every
   operation's resources must be exactly what the rules give from botocore for the resource types and
   ARN formats the file records, so a hand-edited entry fails.
+  Its namespaces, the reasons it gives for those it does not read, and its other namespaces must be
+  the generator's, so a namespace taken out of `NAMESPACES` without the file regenerated fails.
 - `--verify` is online and stdlib-only. Every operation must still be checked as the action, on the
   resource types, the file records, and every type must still have its ARN format; every forwarded
   action must still act on the type, of the format and with the `ViaService` key, the file records,
@@ -339,6 +341,7 @@ import fetch_ec2_id_examples
 import fetch_iam_identifiers
 import fetch_kms_api_permissions
 import fetch_required_resource_types
+import fetch_ssm_session_permissions
 from regen_iam_authorized_actions import (ROUTES as ROUTES_FILE, authorized_actions, fetch_references,
                                           load_s3_required, s3_query_parameters, s3_version_choices,
                                           vendored_sections)
@@ -348,6 +351,7 @@ from regen_iam_passed_roles import (
     _shown,
     load_models,
     namespace_of,
+    namespace_problems,
 )
 from regen_partitions import load_model as load_json_file
 from regen_partitions import resolve_botocore_data
@@ -547,7 +551,8 @@ PATH_SOURCES: dict[str, Path] = {
 # an operation acts on where its request does not say ("If you do not specify a user name, IAM determines the user name
 # implicitly based on the AWS access key ID used to sign the request to this operation"; "must have permission to
 # change the role group with the old name and the new name"); tools/aws/fetch_iam_identifiers.py vendors those pages
-# and `with_paths`, `with_renames`, `with_signing_user`, `with_same_as_arn` and `with_formats` read them. Each file is
+# and `with_paths`, `with_renames`, `with_signing_user`, `with_same_as_arn` and `with_formats` read them. For SSM,
+# the Session Manager guide and API examples identify the EC2 target and implicit shell document. Each file is
 # written by its own script from the pages, unchanged, and the generator only reads it: nothing about an operation is
 # stated here.
 # ---------------------------------------------------------------------------------------------------------------------
@@ -555,12 +560,14 @@ PERMISSION_SOURCES: dict[str, Path] = {
     "kms": REPO_ROOT / "tools/aws/sources/kms-api-permissions.json",
     "dynamodb": REPO_ROOT / "tools/aws/sources/dynamodb-permissions.json",
     "iam": REPO_ROOT / "tools/aws/sources/iam-identifiers.json",
+    "ssm": REPO_ROOT / "tools/aws/sources/ssm-session-permissions.json",
 }
 # The script that writes each namespace's permission source, whose pages `verify_sources` reads it against.
 PERMISSION_FETCHERS = {
     "kms": fetch_kms_api_permissions,
     "dynamodb": fetch_dynamodb_permissions,
     "iam": fetch_iam_identifiers,
+    "ssm": fetch_ssm_session_permissions,
 }
 
 # Fetched API response examples supplement the identifier prefixes in botocore.
@@ -653,6 +660,7 @@ NOT_COVERED: dict[str, str] = {
                       "named in the path",
     "ses": _LATER,
     "signin": _REST,
+    "ssmmessages": "channel routes authorise agent and client resources directly rather than through generated request mappings",
     "sso-oauth": _REST,
     "swf": "not read yet: the Service Reference gives a domain's ARN no Region, `swf::<account>:/domain/<name>`, "
            "while the SWF Developer Guide gives it as arn:aws:swf:Region:AccountID:/domain/DomainName, as Floci mints "
@@ -2951,6 +2959,8 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
             resources = with_signing_user(resources, operation, types, of_operation("signingUser"), models)
             resources = with_same_as_arn(resources, operation, types, of_operation("sameAsArn"), formats, models)
             resources = with_formats(resources, operation, types, of_operation("formats"), models)
+        if namespace_of(operation) == "ssm" and source is not None:
+            resources = session_permissions(resources, operation, source, types, formats, models)
     uses = MEASURED.get(operation, (None, ""))[0]
     # An entry naming only another action AWS checks gives the operation no resources of its own.
     if uses is not None and not (uses and all("action" in use for use in uses)):
@@ -3465,6 +3475,82 @@ def _held_shapes(models: dict[str, dict], member: str) -> set[str]:
     """The botocore shapes the service's structures hold a member of that name in (KMS's `KeyId`, a `KeyIdType`)."""
     return {held["shape"] for model in models.values() for shape in model["shapes"].values()
             if shape.get("type") == "structure" for name, held in shape.get("members", {}).items() if name == member}
+
+
+def session_permissions(resources: list[dict], operation: str, source: dict, types: list[str],
+                        formats: dict[str, str], models: dict[str, dict]) -> list[dict]:
+    """Join the EC2 CLI and policy examples to the scalar API member the two sample requests share."""
+    requests = source.get("sessionRequests", {})
+    if requests.keys() != fetch_ssm_session_permissions.API_PAGES.keys():
+        raise ValueError("SSM Session Manager evidence is missing an API sample request")
+    name = operation.split(":", 1)[1]
+    if name not in requests:
+        return resources
+
+    # The reader handles EC2 IDs. The guide distinguishes hybrid IDs and the ECS command has a composite target.
+    prefixes = source.get("managedNodePrefixes", "")
+    if not re.search(r'distinguished from Amazon EC2 instances with the prefix "[a-z]+-"\. '
+                     r'Amazon EC2 instance IDs use the prefix "i-"\.', prefixes) \
+            or not re.search(r"--target ecs:<[^>]+>_<[^>]+>_<[^>]+>", source.get("ecsCommand", "")):
+        raise ValueError(f"{operation}: the SSM guide no longer distinguishes EC2, hybrid and ECS targets")
+    cli = re.fullmatch(r"aws ssm ([a-z-]+)\s+--([a-z-]+) (i-[A-Za-z0-9]+)",
+                       source.get("defaultCommand", "").replace("\\\n", ""))
+    if cli is None:
+        raise ValueError(f"{operation}: the SSM default shell command must name only an EC2 target")
+    start = "".join(word.title() for word in cli[1].split("-"))
+    if start not in requests:
+        raise ValueError(f"{operation}: the SSM default shell command has no API sample")
+    candidates = [member for member, value in requests[start].items() if member.lower() == cli[2]
+                  and value == cli[3]]
+    if len(candidates) != 1:
+        raise ValueError(f"{operation}: the SSM CLI target does not match its API sample")
+    target = candidates[0]
+    target_shape = _request_shapes(models, start).get(target)
+    sample_target = requests[name].get(target)
+    if not target_shape or _request_shapes(models, name).get(target) != target_shape \
+            or any(model["shapes"].get(target_shape, {}).get("type") != "string" for model in models.values()) \
+            or target in optional_members(models, name) \
+            or not isinstance(sample_target, str) or not re.fullmatch(r"i-[A-Za-z0-9]+", sample_target):
+        raise ValueError(f"{operation}: the SSM API sample has no EC2 target of the shared scalar shape")
+
+    action = f"ssm:{start}"
+    arns = {arn for statement in source.get("defaultPolicy", {}).get("Statement", [])
+            if statement.get("Effect") == "Allow" and set(statement.get("Action", [])) == {action}
+            and "Condition" not in statement for arn in statement.get("Resource", [])}
+    instances = [example_type(arn, formats, action)[0] for arn in arns
+                 if re.fullmatch(r"arn:[^:]+:ec2:[^:]+:[0-9]{12}:instance/[^:/]+", arn)]
+    if len(instances) != 1 or instances[0] not in types:
+        raise ValueError(f"{operation}: the SSM policy example has no single EC2 type allowed by the reference")
+    target_rule = {"types": instances, "through": target}
+    if name != start:
+        return [*resources, target_rule]
+    return [*with_session_default(resources, operation, source, types, formats, models, requests[name], arns),
+            target_rule]
+
+
+def with_session_default(resources: list[dict], operation: str, source: dict, types: list[str],
+                         formats: dict[str, str], models: dict[str, dict], request: dict[str, object],
+                         arns: set[str]) -> list[dict]:
+    """Mark the omitted document member whose account-owned default appears in the policy example."""
+    default = re.search(r"called ([A-Za-z0-9_-]+)\. This is the default session document\.",
+                        source.get("defaultDescription", ""))
+    if default is None or "default session document when a user starts a session by using an AWS CLI command" \
+            not in source.get("defaultUse", "") or "must specify the default session document in the IAM policy" \
+            not in source.get("defaultPermission", ""):
+        raise ValueError(f"{operation}: the SSM guide no longer identifies a required default document")
+    documents = [example_type(arn, formats, operation) for arn in arns
+                 if re.fullmatch(r"arn:[^:]+:ssm:[^:]+:[0-9]{12}:document/" + re.escape(default[1]), arn)]
+    if len(documents) != 1 or documents[0][0] not in types:
+        raise ValueError(f"{operation}: the SSM policy example has no account-owned default document")
+    kind, variables = documents[0]
+    optional = optional_members(models, operation.split(":", 1)[1])
+    defaulted = {member: kind for resource in resources if resource.get("type") == kind
+                 for variable, member in resource.get("fill", {}).items()
+                 if variable in variables and member in optional and member not in request}
+    with_defaults = with_documented_defaults(resources, formats, defaulted)
+    if len(defaulted) != 1 or with_defaults == resources:
+        raise ValueError(f"{operation}: the default document does not match an omitted request member")
+    return with_defaults
 
 
 def permission_resources(operation: str, checked_as: str, resources: list[dict], row: dict | None,
@@ -4871,6 +4957,11 @@ def reads(operation: str) -> bool:
     return namespace_of(operation) in NAMESPACES
 
 
+def stale_namespaces(document: dict) -> list[str]:
+    """Where the file's namespaces part from `NAMESPACES` and `NOT_COVERED` (`namespace_problems`)."""
+    return namespace_problems(document, reads, NAMESPACES, NOT_COVERED)
+
+
 def _check_overrides(covered: dict[str, dict]) -> None:
     """Every operation `MEASURED` gives is one the file reads, and no namespace is in two places."""
     stale = [f"MEASURED gives {operation}, which the file does not read" for operation in MEASURED
@@ -5502,7 +5593,7 @@ def main(argv: list[str] | None = None) -> int:
         problems = validate(document)
         if not problems and args.check:
             data, _ = resolve_botocore_data(args.botocore_data)
-            problems = derive(document, data)
+            problems = stale_namespaces(document) + derive(document, data)
         for problem in problems:
             print(f"error: {problem}", file=sys.stderr)
         if problems:

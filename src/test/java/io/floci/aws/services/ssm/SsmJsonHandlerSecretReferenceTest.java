@@ -35,15 +35,15 @@ class SsmJsonHandlerSecretReferenceTest {
         when(ssmService.getParameters(List.of(NAME), true, REGION)).thenReturn(List.of(replacement));
         doThrow(new AwsException("AccessDenied", "denied", 403)).when(iamEnforcementFilter)
             .authorizeAdditionalResource("auth", "secretsmanager:GetSecretValue", REPLACEMENT_ARN);
-        SsmJsonHandler handler = new SsmJsonHandler(ssmService, null, objectMapper, iamEnforcementFilter);
+        SsmJsonHandler handler = new SsmJsonHandler(ssmService, null, objectMapper, iamEnforcementFilter, null);
 
         ObjectNode getParameter = objectMapper.createObjectNode().put("Name", NAME).put("WithDecryption", true);
         ObjectNode getParameters = objectMapper.createObjectNode().put("WithDecryption", true);
         getParameters.putArray("Names").add(NAME);
 
         assertEquals("An error occurred while calling one AWS dependency service.", assertThrows(AwsException.class,
-            () -> handler.handle("GetParameter", getParameter, REGION, "auth")).getMessage());
+            () -> handler.handle("GetParameter", getParameter, REGION, "auth", null)).getMessage());
         assertEquals("An error occurred while calling one AWS dependency service.", assertThrows(AwsException.class,
-            () -> handler.handle("GetParameters", getParameters, REGION, "auth")).getMessage());
+            () -> handler.handle("GetParameters", getParameters, REGION, "auth", null)).getMessage());
     }
 }

@@ -1,6 +1,6 @@
 package io.floci.aws.services.docdb.container;
 
-
+import com.github.dockerjava.api.exception.NotFoundException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
@@ -45,6 +45,7 @@ public class DocDbContainerManager {
     private final RegionResolver regionResolver;
     private final Map<String, DocDbContainerHandle> activeContainers = new ConcurrentHashMap<>();
     private volatile boolean dockerUnavailableLogged;
+    private volatile boolean shuttingDown;
 
     @Inject
     public DocDbContainerManager(ContainerBuilder containerBuilder,
@@ -106,6 +107,9 @@ public class DocDbContainerManager {
      */
     public DocDbContainerHandle start(String clusterId, String image, String masterUsername, String masterPassword,
                                       String region, String volumeId) {
+        if (shuttingDown) {
+            throw new IllegalStateException("DocumentDB is shutting down");
+        }
         LOG.infov("Starting DocumentDB container for cluster: {0}", clusterId);
 
         String accountId = regionResolver.getAccountId();
@@ -169,6 +173,10 @@ public class DocDbContainerManager {
             handle.setLogStream(logHandle);
 
             waitForBackendReady(clusterId, endpoint.host(), endpoint.port());
+            if (shuttingDown) {
+                throw new IllegalStateException("DocumentDB shut down while the container for cluster "
+                        + clusterId + " was starting");
+            }
 
             return handle;
         } catch (RuntimeException e) {
@@ -213,7 +221,17 @@ public class DocDbContainerManager {
         return ContainerStorageHelper.dockerName(config, "docdb-" + volumeId);
     }
 
+    /** Whether shutdown has begun, after which no container starts. */
+    public boolean isShuttingDown() {
+        return shuttingDown;
+    }
+
+    /**
+     * Stops every container, at shutdown. No container starts after this begins, and one already starting removes
+     * itself when it finishes, so none outlives it.
+     */
     public void stopAll() {
+        shuttingDown = true;
         List<DocDbContainerHandle> handles = new ArrayList<>(activeContainers.values());
         if (!handles.isEmpty()) {
             LOG.infov("Stopping {0} DocumentDB container(s) on shutdown", handles.size());
@@ -238,6 +256,21 @@ public class DocDbContainerManager {
             }
         }
         return null;
+    }
+
+    /**
+     * The master password a container left behind was started with, or null when no container of that ID is left. A
+     * cluster recorded before Floci kept the password has nowhere else to read it from.
+     */
+    public String survivingMasterPassword(String containerId) {
+        if (containerId == null) {
+            return null;
+        }
+        try {
+            return masterPassword(containerId);
+        } catch (NotFoundException e) {
+            return null;
+        }
     }
 
     /**

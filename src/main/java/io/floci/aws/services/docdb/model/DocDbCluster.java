@@ -41,6 +41,11 @@ public class DocDbCluster {
     private int containerPort;
     /** Names the cluster's data volume; null for a cluster whose data is not kept, in memory mode or mock mode. */
     private String volumeId;
+    /**
+     * Kept so a container started again after a restart takes the credentials its data was set up with, which a
+     * snapshot authenticates with; never returned by the API.
+     */
+    private String masterPassword;
 
     public DocDbCluster (){}
 
@@ -114,6 +119,9 @@ public class DocDbCluster {
 
     public String getVolumeId() { return volumeId; }
     public void setVolumeId(String volumeId) { this.volumeId = volumeId; }
+
+    public String getMasterPassword() { return masterPassword; }
+    public void setMasterPassword(String masterPassword) { this.masterPassword = masterPassword; }
 
     public Map<String, String> getTags() { return tags; }
 

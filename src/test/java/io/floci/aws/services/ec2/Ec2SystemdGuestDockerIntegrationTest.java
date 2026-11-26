@@ -35,8 +35,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
@@ -263,6 +265,82 @@ class Ec2SystemdGuestDockerIntegrationTest {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+        }
+    }
+
+    @Test
+    void aGuestThatPowersOffIsReported() {
+        Ec2ContainerManager manager = guestShutdownManager();
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        manager.setGuestShutdownHandler(shutDown::add);
+        Instance instance = launchSystemdGuest(manager, "i-halt");
+        try {
+            powerOff(instance.getDockerContainerId());
+
+            await().atMost(Duration.ofSeconds(30)).until(() -> !shutDown.isEmpty());
+            assertEquals(List.of(instance), shutDown);
+        } finally {
+            terminate(manager, instance);
+        }
+    }
+
+    @Test
+    void aRebootIsNotReportedButAPowerOffAfterItIs() {
+        Ec2ContainerManager manager = guestShutdownManager();
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        manager.setGuestShutdownHandler(shutDown::add);
+        Instance instance = launchSystemdGuest(manager, "i-reboot");
+        try {
+            String containerId = instance.getDockerContainerId();
+            String bootedAt = docker.inspectContainerCmd(containerId).exec().getState().getStartedAt();
+
+            manager.reboot(instance);
+            await().atMost(Duration.ofSeconds(60)).until(() -> {
+                InspectContainerResponse.ContainerState state = docker.inspectContainerCmd(containerId).exec().getState();
+                return Boolean.TRUE.equals(state.getRunning()) && !bootedAt.equals(state.getStartedAt());
+            });
+            assertEquals(List.of(), shutDown, "a reboot is not the guest shutting down");
+            powerOff(containerId);
+
+            await().atMost(Duration.ofSeconds(30)).until(() -> !shutDown.isEmpty());
+            assertEquals(List.of(instance), shutDown);
+        } finally {
+            terminate(manager, instance);
+        }
+    }
+
+    private Ec2ContainerManager guestShutdownManager() {
+        return new Ec2ContainerManager(containerBuilder, lifecycleManager,
+                mock(ContainerLogStreamer.class), mock(ContainerDetector.class), dockerHostResolver, docker,
+                portAllocator, config, mock(Ec2MetadataServer.class), mock(Ec2PortForwardManager.class),
+                regionResolver, mock(ContainerNetworkReachability.class), mock(VpcNetworkManager.class),
+                reachableEndpoint);
+    }
+
+    private static Instance launchSystemdGuest(Ec2ContainerManager manager, String idPrefix) {
+        Instance instance = new Instance();
+        instance.setInstanceId(idPrefix + UUID.randomUUID().toString().replace("-", "").substring(0, 8));
+        instance.setRegion(REGION);
+        manager.launch(instance,
+                new ResolvedAmiImage(TestImages.PYTHON_ALPINE, ResolvedAmiImage.SYSTEMD_RUNTIME, false, null),
+                null, REGION);
+        await().atMost(Duration.ofSeconds(60)).until(() -> "running".equals(instance.getState().getName()));
+        return instance;
+    }
+
+    /** Busybox's poweroff asks its init, PID 1 of the guest, to end, which exits the container. */
+    private void powerOff(String containerId) {
+        String poweroff = docker.execCreateCmd(containerId).withCmd("poweroff").exec().getId();
+        docker.execStartCmd(poweroff).withDetach(true).exec(new ResultCallback.Adapter<>());
+    }
+
+    private static void terminate(Ec2ContainerManager manager, Instance instance) {
+        CountDownLatch tornDown = new CountDownLatch(1);
+        manager.terminate(instance, tornDown::countDown);
+        try {
+            tornDown.await(60, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 }

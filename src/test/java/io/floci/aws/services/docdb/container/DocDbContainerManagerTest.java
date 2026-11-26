@@ -1,5 +1,10 @@
 package io.floci.aws.services.docdb.container;
 
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.InspectContainerCmd;
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.ContainerConfig;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
@@ -25,6 +30,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -274,6 +280,64 @@ class DocDbContainerManagerTest {
             verify(lifecycle, times(1)).stopAndRemove(anyString(), any());
             verify(lifecycle, never()).removeVolume(anyString());
         }
+    }
+
+    @Test
+    void noContainerStartsOnceShutdownHasBegun() {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        DocDbContainerManager manager = newManager(lifecycle);
+
+        manager.stopAll();
+
+        assertTrue(manager.isShuttingDown());
+        assertThrows(IllegalStateException.class,
+                () -> manager.start("cluster1", "mongo:7.0", "admin", "secret", "us-east-1", null));
+        verify(lifecycle, never()).createAndStart(any());
+    }
+
+    @Test
+    void aStartThatShutdownOvertakesRemovesItsContainer() throws IOException {
+        try (ServerSocket backend = new ServerSocket(0)) {
+            ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+            AtomicReference<DocDbContainerManager> shutDownBy = new AtomicReference<>();
+            when(lifecycle.createAndStart(any())).thenAnswer(call -> {
+                shutDownBy.get().stopAll();
+                return new ContainerLifecycleManager.ContainerInfo("container-id", Map.of(27017,
+                        new ContainerLifecycleManager.EndpointInfo("127.0.0.1", backend.getLocalPort())));
+            });
+            DocDbContainerManager manager = newManager(lifecycle);
+            shutDownBy.set(manager);
+
+            assertThrows(IllegalStateException.class,
+                    () -> manager.start("cluster1", "mongo:7.0", "admin", "secret", "us-east-1", null));
+
+            verify(lifecycle).stopAndRemove(eq("container-id"), any());
+            manager.stopAll();
+            verify(lifecycle, times(1)).stopAndRemove(anyString(), any());
+        }
+    }
+
+    @Test
+    void aSurvivingContainersPasswordIsReadFromItsEnvironment() {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        DockerClient docker = mock(DockerClient.class);
+        when(lifecycle.getDockerClient()).thenReturn(docker);
+        InspectContainerCmd left = mock(InspectContainerCmd.class);
+        InspectContainerResponse response = mock(InspectContainerResponse.class);
+        ContainerConfig containerConfig = mock(ContainerConfig.class);
+        when(docker.inspectContainerCmd("left")).thenReturn(left);
+        when(left.exec()).thenReturn(response);
+        when(response.getConfig()).thenReturn(containerConfig);
+        when(containerConfig.getEnv()).thenReturn(new String[] {
+                "MONGO_INITDB_ROOT_USERNAME=admin", "MONGO_INITDB_ROOT_PASSWORD=kept"});
+        InspectContainerCmd gone = mock(InspectContainerCmd.class);
+        when(docker.inspectContainerCmd("gone")).thenReturn(gone);
+        when(gone.exec()).thenThrow(new NotFoundException("No such container: gone"));
+        DocDbContainerManager manager = newManager(lifecycle);
+
+        assertEquals("kept", manager.survivingMasterPassword("left"));
+        assertNull(manager.survivingMasterPassword("gone"));
+        assertNull(manager.survivingMasterPassword(null));
     }
 
     @Test
