@@ -520,6 +520,58 @@ class SqsIntegrationTest {
     }
 
     @Test
+    void sendMessageBatch_queryProtocol_fifoEntryWithDelaySecondsRejectsWholeBatch() {
+        String queueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "batch-delay-query.fifo")
+            .formParam("Attribute.1.Name", "FifoQueue")
+            .formParam("Attribute.1.Value", "true")
+            .formParam("Attribute.2.Name", "ContentBasedDeduplication")
+            .formParam("Attribute.2.Value", "true")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessageBatch")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("SendMessageBatchRequestEntry.1.Id", "plain")
+                .formParam("SendMessageBatchRequestEntry.1.MessageBody", "a")
+                .formParam("SendMessageBatchRequestEntry.1.MessageGroupId", "g")
+                .formParam("SendMessageBatchRequestEntry.2.Id", "delayed")
+                .formParam("SendMessageBatchRequestEntry.2.MessageBody", "b")
+                .formParam("SendMessageBatchRequestEntry.2.MessageGroupId", "g")
+                .formParam("SendMessageBatchRequestEntry.2.DelaySeconds", "5")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
+                .body("ErrorResponse.Error.Message", equalTo("Value 5 for parameter DelaySeconds is invalid. "
+                        + "Reason: The request include parameter that is not valid for this queue type."));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("MaxNumberOfMessages", "10")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(not(containsString("<Message>")));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", queueUrl)
+            .when().post("/");
+        }
+    }
+
+    @Test
     void sendMessageBatch_queryProtocol_oversizedBatchReturnsBatchRequestTooLong() {
         String queueName = "batch-oversize-query-queue";
         String queueUrl = given()

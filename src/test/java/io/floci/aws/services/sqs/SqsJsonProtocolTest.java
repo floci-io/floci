@@ -1132,6 +1132,47 @@ class SqsJsonProtocolTest {
     }
 
     @Test
+    void fifoQueueRejectsWholeBatchWhenAnEntryHasPerMessageDelaySeconds() {
+        String fifoUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-fifo-delay.fifo\",\"Attributes\":{\"FifoQueue\":\"true\","
+                    + "\"ContentBasedDeduplication\":\"true\"}}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessage")
+            .body("{\"QueueUrl\":\"" + fifoUrl + "\",\"MessageBody\":\"x\",\"MessageGroupId\":\"g\","
+                    + "\"DelaySeconds\":5}")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+            .body("{\"QueueUrl\":\"" + fifoUrl + "\",\"Entries\":["
+                    + "{\"Id\":\"delayed\",\"MessageBody\":\"a\",\"MessageGroupId\":\"g\",\"DelaySeconds\":5},"
+                    + "{\"Id\":\"zero\",\"MessageBody\":\"b\",\"MessageGroupId\":\"g\",\"DelaySeconds\":0},"
+                    + "{\"Id\":\"plain\",\"MessageBody\":\"c\",\"MessageGroupId\":\"g\"}]}")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"))
+            .body("message", equalTo("Value 5 for parameter DelaySeconds is invalid. "
+                    + "Reason: The request include parameter that is not valid for this queue type."));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+            .body("{\"QueueUrl\":\"" + fifoUrl + "\",\"MaxNumberOfMessages\":10}")
+        .when().post("/").then()
+            .statusCode(200)
+            .body("Messages", anyOf(nullValue(), empty()));
+    }
+
+    @Test
     void malformedMessageAttributeValuesAreRejected() {
         String attributeQueueUrl = given()
             .contentType(CONTENT_TYPE)
