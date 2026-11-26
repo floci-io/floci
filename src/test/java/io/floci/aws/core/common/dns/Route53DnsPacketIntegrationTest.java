@@ -1,5 +1,6 @@
 package io.floci.aws.core.common.dns;
 
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.route53.Route53DnsRecordSource;
 import io.floci.aws.services.route53.Route53Service;
 import io.floci.aws.services.route53.model.AliasTarget;
@@ -25,6 +26,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -43,6 +45,8 @@ class Route53DnsPacketIntegrationTest {
     Route53DnsRecordSource source;
     @Inject
     Vertx vertx;
+    @Inject
+    EmulatorConfig config;
 
     private final List<String> zoneIds = new ArrayList<>();
 
@@ -57,7 +61,7 @@ class Route53DnsPacketIntegrationTest {
                 "20 0 8080 first." + zone + ".", "10 100 65535 second." + zone));
 
         byte[] request = DnsTestQuery.query(name, 33, 0x1234);
-        byte[] response = query(request);
+        byte[] response = query(request, "vpc-srv");
         assertPrivateHeader(response, 0, 2);
         ByteBuffer packet = ByteBuffer.wrap(response);
         packet.position(request.length);
@@ -78,9 +82,9 @@ class Route53DnsPacketIntegrationTest {
         assertEquals(List.of("10 100 65535 second." + zone, "20 0 8080 first." + zone),
                 values.stream().sorted().toList());
 
-        assertPrivateHeader(query(DnsTestQuery.query(name, 1, 0x1234)), 0, 0);
-        assertPrivateHeader(query(DnsTestQuery.query("_tcp." + zone, 33, 0x1234)), 0, 0);
-        assertPrivateHeader(query(DnsTestQuery.query("absent." + zone, 33, 0x1234)), 3, 0);
+        assertPrivateHeader(query(DnsTestQuery.query(name, 1, 0x1234), "vpc-srv"), 0, 0);
+        assertPrivateHeader(query(DnsTestQuery.query("_tcp." + zone, 33, 0x1234), "vpc-srv"), 0, 0);
+        assertPrivateHeader(query(DnsTestQuery.query("absent." + zone, 33, 0x1234), "vpc-srv"), 3, 0);
     }
 
     @ParameterizedTest
@@ -96,23 +100,23 @@ class Route53DnsPacketIntegrationTest {
             change(id, "CREATE", record("alias" + hop + "." + name, "CNAME", 30, target + "."));
         }
 
-        assertEquals(3, ByteBuffer.wrap(query(DnsTestQuery.query(missing, type, 0x1234))).getShort(2) & 15);
-        byte[] response = query(DnsTestQuery.query("alias0." + name, type, 0x1234));
+        assertEquals(3, ByteBuffer.wrap(query(DnsTestQuery.query(missing, type, 0x1234), "vpc-cname-negative")).getShort(2) & 15);
+        byte[] response = query(DnsTestQuery.query("alias0." + name, type, 0x1234), "vpc-cname-negative");
         assertEquals(3, ByteBuffer.wrap(response).getShort(2) & 15,
                 "A private CNAME must preserve its target's NXDOMAIN response");
         assertEquals(0, ByteBuffer.wrap(response).getShort(6));
 
         ResourceRecordSet text = record(missing, "TXT", 60, "\"present\"");
         change(id, "CREATE", text);
-        byte[] noData = query(DnsTestQuery.query("alias0." + name, type, 0x1234));
+        byte[] noData = query(DnsTestQuery.query("alias0." + name, type, 0x1234), "vpc-cname-negative");
         assertEquals(0, ByteBuffer.wrap(noData).getShort(2) & 15);
         assertEquals(0, ByteBuffer.wrap(noData).getShort(6));
         change(id, "DELETE", text);
-        assertEquals(3, ByteBuffer.wrap(query(DnsTestQuery.query("alias0." + name, type, 0x1234))).getShort(2) & 15);
+        assertEquals(3, ByteBuffer.wrap(query(DnsTestQuery.query("alias0." + name, type, 0x1234), "vpc-cname-negative")).getShort(2) & 15);
 
         change(id, "CREATE", record(missing, "A", 600, "192.0.2.17"));
         byte[] request = DnsTestQuery.query("alias0." + name, 1, 0x1234);
-        byte[] restored = query(request);
+        byte[] restored = query(request, "vpc-cname-negative");
         assertEquals(0, ByteBuffer.wrap(restored).getShort(2) & 15);
         assertEquals(1, ByteBuffer.wrap(restored).getShort(6));
         assertEquals(30, ByteBuffer.wrap(restored).getInt(request.length + 6));
@@ -336,8 +340,10 @@ class Route53DnsPacketIntegrationTest {
                 new VpcAssociation("vpc-dns-packet", "us-east-1")).zone().getId();
         zoneIds.add(privateId);
         change(privateId, "CREATE", record("address." + name, "A", 60, "192.0.2.9"));
-        assertEquals(List.of("192.0.2.9"), source.resolve("address." + name, 1).orElseThrow().addresses());
-        assertFalse(source.resolve("marker." + name, 16).orElseThrow().isPublicAuthorityAnswer());
+        DnsClientVpcSource.ClientVpc origin = new DnsClientVpcSource.ClientVpc(
+                config.defaultAccountId(), "us-east-1", "vpc-dns-packet");
+        assertEquals(List.of("192.0.2.9"), source.resolve("address." + name, 1, origin).orElseThrow().addresses());
+        assertFalse(source.resolve("marker." + name, 16, origin).orElseThrow().isPublicAuthorityAnswer());
     }
 
     @Test
@@ -454,7 +460,14 @@ class Route53DnsPacketIntegrationTest {
     }
 
     private byte[] query(byte[] request) throws Exception {
-        EmbeddedDnsServer dns = new EmbeddedDnsServer(List.of("amazonaws.com"), List.of(source));
+        return query(request, null);
+    }
+
+    private byte[] query(byte[] request, String vpcId) throws Exception {
+        List<DnsClientVpcSource> origins = vpcId == null ? List.of()
+                : List.of(address -> Optional.of(new DnsClientVpcSource.ClientVpc(
+                        config.defaultAccountId(), "us-east-1", vpcId)));
+        EmbeddedDnsServer dns = new EmbeddedDnsServer(List.of("amazonaws.com"), List.of(source), List.of(), origins);
         DatagramSocket server = vertx.createDatagramSocket(new DatagramSocketOptions().setIpV6(false));
         DatagramSocket client = vertx.createDatagramSocket(new DatagramSocketOptions().setIpV6(false));
         try {
