@@ -59,7 +59,6 @@ class GlueRedshiftCrawlerDockerNightlyIntegrationTest {
             statement.execute("CREATE TABLE sales.invoices (id bigint, issued_on date)");
             statement.execute("CREATE VIEW public.recent_orders AS SELECT id FROM public.orders");
         }
-        call("CreateDatabase", "{\"DatabaseInput\": {\"Name\": \"rs_lake\"}}").statusCode(200);
     }
 
     @AfterAll
@@ -80,11 +79,17 @@ class GlueRedshiftCrawlerDockerNightlyIntegrationTest {
                 """.formatted(name, URL, password)).statusCode(200);
     }
 
-    private static void crawl(String crawler, String connection, String path, String exclusions) {
+    /**
+     * Creates the crawler's Data Catalog database here rather than in {@code @BeforeAll}: RestAssured has no
+     * port for the Quarkus application until a test runs.
+     */
+    private static void crawl(String crawler, String database, String connection, String path,
+                              String exclusions) {
+        call("CreateDatabase", "{\"DatabaseInput\": {\"Name\": \"" + database + "\"}}").statusCode(200);
         call("CreateCrawler", """
-                {"Name": "%s", "Role": "arn:aws:iam::000000000000:role/glue", "DatabaseName": "rs_lake",
+                {"Name": "%s", "Role": "arn:aws:iam::000000000000:role/glue", "DatabaseName": "%s",
                  "Targets": {"JdbcTargets": [{"ConnectionName": "%s", "Path": "%s", "Exclusions": [%s]}]}}
-                """.formatted(crawler, connection, path, exclusions)).statusCode(200);
+                """.formatted(crawler, database, connection, path, exclusions)).statusCode(200);
         call("StartCrawler", "{\"Name\": \"" + crawler + "\"}").statusCode(200);
         Awaitility.await()
                 .atMost(Duration.ofSeconds(60))
@@ -97,7 +102,7 @@ class GlueRedshiftCrawlerDockerNightlyIntegrationTest {
     void crawlsTheTablesAndViewsOfTheIncludePathIntoTheCatalog() {
         createConnection("rs-good", "Secret123");
 
-        crawl("rs-crawler", "rs-good", "dev/%", "\"**_tmp\"");
+        crawl("rs-crawler", "rs_lake", "rs-good", "dev/%", "\"**_tmp\"");
 
         call("GetCrawler", "{\"Name\": \"rs-crawler\"}")
                 .body("Crawler.LastCrawl.Status", equalTo("SUCCEEDED"));
@@ -121,7 +126,7 @@ class GlueRedshiftCrawlerDockerNightlyIntegrationTest {
     void aWrongPasswordFailsTheCrawlWithTheSignInError() {
         createConnection("rs-bad", "not-the-password");
 
-        crawl("rs-bad-crawler", "rs-bad", "dev/public/%", "");
+        crawl("rs-bad-crawler", "rs_lake_bad", "rs-bad", "dev/public/%", "");
 
         call("GetCrawler", "{\"Name\": \"rs-bad-crawler\"}")
                 .body("Crawler.LastCrawl.Status", equalTo("FAILED"))

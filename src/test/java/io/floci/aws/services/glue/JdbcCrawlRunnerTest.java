@@ -15,6 +15,7 @@ import io.floci.aws.services.glue.model.Database;
 import io.floci.aws.services.glue.model.JdbcTarget;
 import io.floci.aws.services.glue.model.S3Target;
 import io.floci.aws.services.glue.model.SchemaChangePolicy;
+import io.floci.aws.services.glue.model.StorageDescriptor;
 import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.floci.aws.services.kms.KmsService;
@@ -54,7 +55,7 @@ class JdbcCrawlRunnerTest {
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT_ID = "000000000000";
     private static final String URL = "jdbc:redshift://analytics.abc123.us-east-1.redshift.amazonaws.com:5439/dev";
-    private static final String SESSION_URL = "jdbc:postgresql://127.0.0.1:15439/dev?preferQueryMode=simple";
+    private static final String SESSION_URL = "jdbc:postgresql://rs-backend:15439/dev?preferQueryMode=simple";
 
     private GlueService glueService;
     private RedshiftJdbcTargets jdbcTargets;
@@ -72,7 +73,7 @@ class JdbcCrawlRunnerTest {
                 regionResolver, new ResourceGroupsTaggingService(storageFactory), kmsService);
         jdbcTargets = mock(RedshiftJdbcTargets.class);
         when(jdbcTargets.resolve(eq(ACCOUNT_ID), eq(REGION), any(RedshiftJdbcUrl.class)))
-                .thenReturn(new RedshiftJdbcTargets.Backend("cluster analytics", "127.0.0.1", 15439, "dev", "admin"));
+                .thenReturn(new RedshiftJdbcTargets.Backend("cluster analytics", "rs-backend", 15439, "dev", "admin"));
         sessions = new ArrayList<>();
         tables = new ArrayList<>();
         JdbcCatalogReader reader = (jdbcUrl, user, password) -> {
@@ -471,5 +472,22 @@ class JdbcCrawlRunnerTest {
         Column id = table.getStorageDescriptor().getColumns().getFirst();
         assertEquals("primary key", id.getComment());
         assertThat(id.getParameters(), hasEntry("pii", "false"));
+    }
+
+    @Test
+    void aStoredColumnWithoutATypeIsReplacedByTheCrawledSchema() {
+        passwordConnection("analytics");
+        create(crawler("orders", target("analytics", "dev/public/%")));
+        tables.add(table("public", "orders", column("id", "integer")));
+        crawl("orders");
+        Table untyped = glueService.getTable("lake", "dev_public_orders");
+        StorageDescriptor descriptor = untyped.getStorageDescriptor();
+        descriptor.setColumns(List.of(new Column("id", null)));
+        glueService.updateTable("lake", untyped, null, false);
+
+        CrawlOutcome outcome = crawl("orders");
+
+        assertEquals(CrawlOutcome.succeeded(0, 1, 0), outcome);
+        assertThat(columnsOf(glueService.getTable("lake", "dev_public_orders")), contains("id:int"));
     }
 }

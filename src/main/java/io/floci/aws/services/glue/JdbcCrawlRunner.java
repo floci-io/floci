@@ -22,6 +22,7 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -342,7 +343,8 @@ public class JdbcCrawlRunner implements CrawlRunner {
         List<List<Object>> columns = new ArrayList<>();
         if (descriptor.getColumns() != null) {
             for (Column column : descriptor.getColumns()) {
-                columns.add(List.of(column.getName(), column.getType(),
+                // A stored column may have no Type, and List.of refuses nulls.
+                columns.add(Arrays.asList(column.getName(), column.getType(),
                         crawlerOwned(column.getParameters(), CRAWLER_COLUMN_PARAMETERS)));
             }
         }
