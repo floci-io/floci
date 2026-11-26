@@ -1253,10 +1253,14 @@ public class CognitoService implements ResourceProvider, StoredResourceArns {
         }
         // Same lock as the provider mutations: a create or update that interleaves with
         // this cascade would otherwise reinstate a provider for a pool that is going away.
-        synchronized (identityProviderLock) {
-            identityProviderStore.scan(k -> k.startsWith(prefix))
-                    .forEach(p -> identityProviderStore.delete(identityProviderKey(id, p.getProviderName())));
-            poolStore.delete(id);
+        // The pool lock as well: a first use generating the pool's signing key pair writes the stored
+        // pool back under it, and must not reinstate a pool deleted while the key pair was made.
+        synchronized (poolLock(id)) {
+            synchronized (identityProviderLock) {
+                identityProviderStore.scan(k -> k.startsWith(prefix))
+                        .forEach(p -> identityProviderStore.delete(identityProviderKey(id, p.getProviderName())));
+                poolStore.delete(id);
+            }
         }
     }
 

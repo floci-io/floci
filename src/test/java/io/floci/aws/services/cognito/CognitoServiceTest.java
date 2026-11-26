@@ -492,6 +492,37 @@ class CognitoServiceTest {
         }
     }
 
+    @Test
+    void aFirstUseRacingDeleteUserPoolNeverBringsThePoolBack() throws Exception {
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            for (int round = 0; round < 5; round++) {
+                UserPool pool = service.createUserPool(Map.of("PoolName", "deleted-" + round), "us-east-1");
+                CountDownLatch start = new CountDownLatch(1);
+                Future<?> firstUse = executor.submit(() -> {
+                    start.await();
+                    return service.getSigningPublicKey(service.describeUserPool(pool.getId()));
+                });
+                Future<?> delete = executor.submit(() -> {
+                    start.await();
+                    service.deleteUserPool(pool.getId());
+                    return null;
+                });
+                start.countDown();
+                delete.get(30, TimeUnit.SECONDS);
+                try {
+                    firstUse.get(30, TimeUnit.SECONDS);
+                } catch (ExecutionException expected) {
+                    // The delete may land first, and the first use then finds no pool: that is fine.
+                }
+                AwsException gone = assertThrows(AwsException.class, () -> service.describeUserPool(pool.getId()));
+                assertEquals("ResourceNotFoundException", gone.getErrorCode(), "round " + round);
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
     private static boolean signatureVerifies(String jwt, RSAPublicKey key) throws Exception {
         int lastDot = jwt.lastIndexOf('.');
         Signature verifier = Signature.getInstance("SHA256withRSA");
