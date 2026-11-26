@@ -54,6 +54,10 @@ starts() {
 # The image a test constant pins, or empty (and a log line) when the constant cannot be read.
 # TestImages is found by name rather than by its package path, which a package rename changes.
 TEST_IMAGES="$(find src/test/java -path '*/testing/TestImages.java' -print -quit)"
+if starts SsmSessionManagerDockerNightlyIntegrationTest; then
+    pull debian:bookworm-slim
+    pull postgres:17
+fi
 if starts Ec2PublishedConnectionNightlyIntegrationTest; then
     ecr public.ecr.aws/docker/library/alpine:latest
     pull alpine/socat

@@ -1,0 +1,53 @@
+{
+  "_source": {
+    "pages": [
+      "https://docs.aws.amazon.com/systems-manager/latest/userguide/getting-started-default-session-document.html",
+      "https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-hybrid-multicloud.html",
+      "https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-sessions-start.html",
+      "https://docs.aws.amazon.com/systems-manager/latest/APIReference/API_StartSession.html",
+      "https://docs.aws.amazon.com/systems-manager/latest/APIReference/API_GetConnectionStatus.html"
+    ],
+    "fetcher": "tools/aws/fetch_ssm_session_permissions.py",
+    "retrieved": "2026-11-25",
+    "note": "The default session document description, CLI and IAM policy examples, managed node ID prefixes, an ECS CLI example and the API reference sample request bodies."
+  },
+  "defaultDescription": "When you configure Session Manager for your AWS account or when you change session preferences in the Systems Manager console, the system creates an SSM session document called SSM-SessionManagerRunShell. This is the default session document. Session Manager uses this document to store your session preferences, which include information like the following:",
+  "defaultUse": "By default, Session Manager uses the default session document when a user starts a session from the AWS Management Console. This applies to either Fleet Manager or Session Manager in the Systems Manager console, or EC2 Connect in the Amazon EC2 console. Session Manager also uses the default session document when a user starts a session by using an AWS CLI command like the following example:",
+  "defaultPermission": "To start a default shell session, you must specify the default session document in the IAM policy, as shown in the following example.",
+  "defaultCommand": "aws ssm start-session \\\n    --target i-02573cafcfEXAMPLE",
+  "defaultPolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "EnableSSMSession",
+        "Effect": "Allow",
+        "Action": [
+          "ssm:StartSession"
+        ],
+        "Resource": [
+          "arn:aws:ec2:us-east-1:111122223333:instance/instance-id",
+          "arn:aws:ssm:us-east-1:111122223333:document/SSM-SessionManagerRunShell"
+        ]
+      },
+      {
+        "Effect": "Allow",
+        "Action": [
+          "ssmmessages:OpenDataChannel"
+        ],
+        "Resource": [
+          "*"
+        ]
+      }
+    ]
+  },
+  "managedNodePrefixes": "After you finish configuring your non-EC2 machines for Systems Manager as described in this section, your hybrid-activated machines are listed in the AWS Management Console and described as managed nodes. In the console, the IDs of your hybrid-activated managed nodes are distinguished from Amazon EC2 instances with the prefix \"mi-\". Amazon EC2 instance IDs use the prefix \"i-\".",
+  "ecsCommand": "aws ssm start-session \\\n    --target ecs:<ECS_cluster_name>_<ECS_container_ID>_<container_runtime_ID> \\\n    --document-name AWS-StartPortForwardingSessionToRemoteHost \\\n    --parameters '{\"host\":[\"URL\"],\"portNumber\":[\"port_number\"], \"localPortNumber\":[\"port_number\"]}'",
+  "sessionRequests": {
+    "StartSession": {
+      "Target": "i-02573cafcfEXAMPLE"
+    },
+    "GetConnectionStatus": {
+      "Target": "i-02573cafcfEXAMPLE"
+    }
+  }
+}
