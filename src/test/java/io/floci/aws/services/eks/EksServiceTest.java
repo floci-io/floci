@@ -806,20 +806,53 @@ class EksServiceTest {
         verify(clusterManager, never()).detachCluster(any(Cluster.class));
     }
 
+    /** Each Auto Mode capability's own resources go with the cluster, even when another's cleanup fails. */
     @Test
-    void aDeletedClustersAutoModeLoadBalancersGoWithIt() {
+    void aDeletedClustersAutoModeResourcesGoWithIt() {
         Cluster cluster = activeCluster();
-        EksAutoModeLoadBalancers loadBalancers = mock(EksAutoModeLoadBalancers.class);
+        EksAutoModeCleanup loadBalancers = mock(EksAutoModeCleanup.class);
+        EksAutoModeCleanup compute = mock(EksAutoModeCleanup.class);
+        doThrow(new IllegalStateException("ELBv2 refused")).doNothing().when(loadBalancers).clusterDeleted(any(), any());
+        // Fully qualified: the CDI lookup's Instance clashes with the EC2 Instance this class imports.
         @SuppressWarnings("unchecked")
-        jakarta.enterprise.inject.Instance<EksAutoModeLoadBalancers> lookup =
-                mock(jakarta.enterprise.inject.Instance.class);
-        when(lookup.isResolvable()).thenReturn(true);
-        when(lookup.get()).thenReturn(loadBalancers);
+        jakarta.enterprise.inject.Instance<EksAutoModeCleanup> lookup = mock(jakarta.enterprise.inject.Instance.class);
+        when(lookup.iterator()).thenAnswer(inv -> List.of(loadBalancers, compute).iterator());
         EksService service = serviceWithCluster(cluster, mock(EksClusterManager.class), false, lookup);
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> service.deleteCluster("running-cluster"));
+
+        assertEquals("ELBv2 refused", failure.getMessage());
+        verify(compute).clusterDeleted(cluster, service.clusterRegion(cluster));
+        // The record stays, so a retried delete finishes the cleanup and deletes the cluster.
+        assertEquals("running-cluster", service.describeCluster("running-cluster").getName());
 
         service.deleteCluster("running-cluster");
 
-        verify(loadBalancers).deleteLoadBalancers(cluster, service.clusterRegion(cluster));
+        verify(loadBalancers, times(2)).clusterDeleted(cluster, service.clusterRegion(cluster));
+        assertThrows(AwsException.class, () -> service.describeCluster("running-cluster"));
+    }
+
+    /** Auto Mode's instances hold the cluster security group, so they go before EC2 is asked to delete it. */
+    @Test
+    void aDeletedClustersAutoModeInstancesGoBeforeItsSecurityGroup() {
+        Cluster cluster = activeCluster();
+        ResourcesVpcConfig vpc = new ResourcesVpcConfig();
+        vpc.setClusterSecurityGroupId("sg-cluster");
+        cluster.setResourcesVpcConfig(vpc);
+        EksAutoModeCleanup compute = mock(EksAutoModeCleanup.class);
+        // Fully qualified: the CDI lookup's Instance clashes with the EC2 Instance this class imports.
+        @SuppressWarnings("unchecked")
+        jakarta.enterprise.inject.Instance<EksAutoModeCleanup> lookup = mock(jakarta.enterprise.inject.Instance.class);
+        when(lookup.iterator()).thenAnswer(inv -> List.of(compute).iterator());
+        Ec2Service ec2 = mock(Ec2Service.class);
+        EksService service = serviceWithCluster(cluster, mock(EksClusterManager.class), false, lookup, ec2);
+
+        service.deleteCluster("running-cluster");
+
+        InOrder order = inOrder(compute, ec2);
+        order.verify(compute).clusterDeleted(cluster, service.clusterRegion(cluster));
+        order.verify(ec2).deleteSecurityGroup(service.clusterRegion(cluster), "sg-cluster");
     }
 
     @Test
@@ -916,18 +949,25 @@ class EksServiceTest {
         return serviceWithCluster(cluster, clusterManager, keepRunningOnShutdown, null);
     }
 
+    // The overloads below name the CDI lookup's Instance fully qualified: it clashes with the EC2 Instance imported here.
     private EksService serviceWithCluster(Cluster cluster, EksClusterManager clusterManager,
             boolean keepRunningOnShutdown,
-            jakarta.enterprise.inject.Instance<EksAutoModeLoadBalancers> autoModeLoadBalancers) {
+            jakarta.enterprise.inject.Instance<EksAutoModeCleanup> autoModeCleanups) {
+        return serviceWithCluster(cluster, clusterManager, keepRunningOnShutdown, autoModeCleanups, null);
+    }
+
+    private EksService serviceWithCluster(Cluster cluster, EksClusterManager clusterManager,
+            boolean keepRunningOnShutdown,
+            jakarta.enterprise.inject.Instance<EksAutoModeCleanup> autoModeCleanups, Ec2Service ec2) {
         AccountAwareStorageBackend<Cluster> clusterStore =
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
         clusterStore.putForAccount("000000000000", EksService.clusterKey(
                 AwsArnUtils.regionOrDefault(cluster.getArn(), "us-east-1"), cluster.getName()), cluster);
         return new EksService(fixedStorageFactory(clusterStore), testConfig(false, keepRunningOnShutdown),
-                new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
+                new RegionResolver("us-east-1", "000000000000"), clusterManager, ec2,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
                         new ObjectMapper()), mock(EksAccessEntryService.class), null, null, null,
-                autoModeLoadBalancers);
+                autoModeCleanups);
     }
 
     private StorageFactory fixedStorageFactory(StorageBackend<String, ?> backend) {
