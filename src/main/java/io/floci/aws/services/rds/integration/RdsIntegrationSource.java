@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.services.rds.RdsService;
 import io.floci.aws.services.rds.container.RdsContainerManager;
@@ -16,9 +17,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -172,16 +170,7 @@ public class RdsIntegrationSource {
         if (id.length() > 40) {
             id = id.substring(0, 40);
         }
-        return "zetl_" + id + "_" + digest(sourceDatabase);
-    }
-
-    private static String digest(String value) {
-        try {
-            byte[] hash = MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(hash, 0, 4);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 is not available", e);
-        }
+        return "zetl_" + id + "_" + Digests.sha256Hex(sourceDatabase).substring(0, 8);
     }
 
     /** Whether the source runs with {@code wal_level=logical}, which {@code rds.logical_replication=1} turns on. */
