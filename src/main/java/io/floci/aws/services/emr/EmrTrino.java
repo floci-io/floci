@@ -36,6 +36,11 @@ final class EmrTrino {
     static final String CONNECTOR_PREFIX = "trino-connector-";
     /** The classification that changes Trino's {@code config.properties}. */
     static final String CONFIG_CLASSIFICATION = "trino-config";
+    /** The classifications that change Trino's {@code node.properties} and {@code log.properties}. */
+    static final String NODE_CLASSIFICATION = "trino-node";
+    static final String LOG_CLASSIFICATION = "trino-log";
+    /** The classification whose nested {@code export} gives Trino's environment, Trino's {@code trino-env.sh}. */
+    static final String ENV_CLASSIFICATION = "trino-env";
     /** The catalog every Trino cluster has. */
     static final String HIVE = "hive";
     /**
@@ -74,20 +79,29 @@ final class EmrTrino {
             done
             exec "$java" -jar %1$s --server "${%2$s:-localhost:%3$d}" "$@"
             """.formatted(CLI, SERVER_VARIABLE, PORT);
-    /** The variable the Trino container's entrypoint writes its {@code config.properties} from. */
+    /** The variables the Trino container's entrypoint writes its configuration, node and log properties from. */
     static final String CONFIG_VARIABLE = "FLOCI_TRINO_CONFIG";
+    static final String NODE_VARIABLE = "FLOCI_TRINO_NODE";
+    static final String LOG_VARIABLE = "FLOCI_TRINO_LOG";
     /** The prefix of the variables it writes its catalogs from, one each, the rest of whose name names it. */
     static final String CATALOG_PREFIX = "FLOCI_TRINO_CATALOG_";
     /**
-     * The Trino container's entrypoint: its configuration, and the catalogs Floci gives it alone, as EMR's Trino has
-     * the catalogs the cluster configures, then Trino, as its image starts it. Its image names the node after its host,
-     * which is the primary node's, whose dots Trino refuses in a node's id, so the node is named with hyphens instead.
+     * The Trino container's entrypoint: its configuration; the cluster's node and log properties after those of its
+     * image's own files, which a property given twice takes the later of, so an image of the cluster's own keeps its
+     * settings; and the catalogs Floci gives it alone, as EMR's Trino has the catalogs the cluster configures; then
+     * Trino, as its image starts it. Where {@code node.properties} gives the node no id, its image names it after its
+     * host, the primary node's, whose dots Trino refuses in a node's id, so Floci names it with hyphens instead.
      */
     static final String ENTRYPOINT = "printf '%s\\n' \"$" + CONFIG_VARIABLE + "\" > /etc/trino/config.properties"
+            + " && { [ -z \"$" + NODE_VARIABLE + "\" ] || printf '\\n%s\\n' \"$" + NODE_VARIABLE + "\""
+            + " >> /etc/trino/node.properties; }"
+            + " && { [ -z \"$" + LOG_VARIABLE + "\" ] || printf '\\n%s\\n' \"$" + LOG_VARIABLE + "\""
+            + " >> /etc/trino/log.properties; }"
             + " && rm -f /etc/trino/catalog/*.properties"
             + " && for catalog in ${!" + CATALOG_PREFIX + "@}; do printf '%s\\n' \"${!catalog}\""
             + " > \"/etc/trino/catalog/${catalog#" + CATALOG_PREFIX + "}.properties\" || exit; done"
-            + " && printf 'node.id=%s\\n' \"${HOSTNAME//./-}\" >> /etc/trino/node.properties"
+            + " && { grep -q '^node\\.id=' /etc/trino/node.properties"
+            + " || printf '\\nnode.id=%s\\n' \"${HOSTNAME//./-}\" >> /etc/trino/node.properties; }"
             + " && exec /usr/lib/trino/bin/run-trino";
 
     private static final String GLUE = "glue";

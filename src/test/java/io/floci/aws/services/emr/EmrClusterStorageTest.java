@@ -127,7 +127,8 @@ class EmrClusterStorageTest {
     // The same with Trino beside it, from the image of emr-7.5.0's Trino.
     private static final ClusterStorage.HiveMetastore TRINO_METASTORE =
             new ClusterStorage.HiveMetastore("arn:aws:iam::123456789012:role/r", Map.of(),
-                    new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of(), Map.of()));
+                    new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of(), Map.of(), Map.of(), Map.of(),
+                            Map.of()));
 
     private final EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
     private final DockerClient docker = mock(DockerClient.class);
@@ -2006,6 +2007,8 @@ class EmrClusterStorageTest {
         verify(trinoSpec).withMemoryMb(2048);
         verify(trinoSpec).withEnv(List.of("AWS_ACCESS_KEY_ID=ASIATRINO"));
         verify(trinoSpec).withEnv(EmrTrino.CONFIG_VARIABLE, EmrTrino.properties(EmrTrino.config(Map.of())));
+        verify(trinoSpec).withEnv(EmrTrino.NODE_VARIABLE, "");
+        verify(trinoSpec).withEnv(EmrTrino.LOG_VARIABLE, "");
         verify(trinoSpec).withEnv(EmrTrino.CATALOG_PREFIX + "hive", EmrTrino.properties(EmrTrino.catalog("hive",
                 Map.of(), "http://host.docker.internal:4566", "us-east-1")));
         verify(trinoSpec).withEntrypoint(List.of("/bin/bash", "-c", EmrTrino.ENTRYPOINT));
@@ -2052,6 +2055,29 @@ class EmrClusterStorageTest {
         ticking.remove("j-1");
 
         assertTrue(ticking.trinoInterface("j-1", 8889).isEmpty());
+    }
+
+    @Test
+    void trinosEnvironmentIsTheClustersTrinoEnvExportsAfterFlocisAwsSettingsAndBeforeItsOwnFiles() {
+        String trinoName = ContainerStorageHelper.dockerName(config, "emr-j-1-trino");
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-6", Map.of()),
+                new ContainerLifecycleManager.ContainerInfo("t-1", Map.of()));
+        ContainerBuilder.Builder trinoSpec = trinoStarts(trinoName).spec();
+        ClusterStorage.HiveMetastore metastore = new ClusterStorage.HiveMetastore("arn:aws:iam::123456789012:role/r",
+                Map.of(), new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of(), Map.of(),
+                        Map.of("node.environment", "production"), Map.of("io.trino", "DEBUG"),
+                        Map.of("DB_PASSWORD", "s3cret")));
+
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", metastore, null, NOT_STOPPED);
+
+        // Docker keeps the last of a variable given twice: an export may change Floci's AWS settings, as its
+        // trino-env.sh would, but not the files Floci writes.
+        InOrder order = inOrder(trinoSpec);
+        order.verify(trinoSpec).withEnv(List.of("AWS_ACCESS_KEY_ID=ASIATRINO"));
+        order.verify(trinoSpec).withEnv(List.of("DB_PASSWORD=s3cret"));
+        order.verify(trinoSpec).withEnv(EmrTrino.CONFIG_VARIABLE, EmrTrino.properties(EmrTrino.config(Map.of())));
+        order.verify(trinoSpec).withEnv(EmrTrino.NODE_VARIABLE, "node.environment=production");
+        order.verify(trinoSpec).withEnv(EmrTrino.LOG_VARIABLE, "io.trino=DEBUG");
     }
 
     @Test

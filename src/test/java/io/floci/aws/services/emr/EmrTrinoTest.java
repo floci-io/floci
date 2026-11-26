@@ -157,27 +157,17 @@ class EmrTrinoTest {
     }
 
     @Test
-    void theEntrypointWritesTheConfigurationTheCatalogsFlociGivesAloneAndANodeIdTrinoTakes(@TempDir Path etc)
+    void theEntrypointWritesTheConfigurationNodeLogAndCatalogsFlociGivesAloneAndANodeIdTrinoTakes(@TempDir Path etc)
             throws Exception {
-        Files.createDirectories(etc.resolve("catalog"));
-        Files.writeString(etc.resolve("catalog/tpcds.properties"), "connector.name=tpcds\n");
-        Files.writeString(etc.resolve("node.properties"), "node.environment=docker\n");
-        // The image's /etc/trino here, and its Trino left out.
-        String entrypoint = EmrTrino.ENTRYPOINT.replace("/etc/trino", etc.toString())
-                .replace("exec /usr/lib/trino/bin/run-trino", "true");
-        assertTrue(EmrTrino.ENTRYPOINT.endsWith("exec /usr/lib/trino/bin/run-trino"));
-        ProcessBuilder builder = new ProcessBuilder("bash", "-c", entrypoint).redirectErrorStream(true);
         String config = EmrTrino.properties(EmrTrino.config(Map.of()));
-        builder.environment().put(EmrTrino.CONFIG_VARIABLE, config);
-        builder.environment().put(EmrTrino.CATALOG_PREFIX + "hive", "connector.name=hive");
-        builder.environment().put(EmrTrino.CATALOG_PREFIX + "iceberg",
-                "connector.name=iceberg\niceberg.catalog.type=glue");
-        // The primary node's host name, which the container shares.
-        builder.environment().put("HOSTNAME", "ip-10-0-0-1.ec2.internal");
-        Process process = builder.start();
-        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        assertTrue(process.waitFor(30, TimeUnit.SECONDS));
-        assertEquals(0, process.exitValue(), output);
+        Map<String, String> environment = new LinkedHashMap<>();
+        environment.put(EmrTrino.CONFIG_VARIABLE, config);
+        environment.put(EmrTrino.NODE_VARIABLE, "node.environment=production");
+        environment.put(EmrTrino.LOG_VARIABLE, "io.trino=DEBUG");
+        environment.put(EmrTrino.CATALOG_PREFIX + "hive", "connector.name=hive");
+        environment.put(EmrTrino.CATALOG_PREFIX + "iceberg", "connector.name=iceberg\niceberg.catalog.type=glue");
+
+        runEntrypoint(etc, environment);
 
         assertEquals(config + "\n", Files.readString(etc.resolve("config.properties")));
         try (Stream<Path> catalogs = Files.list(etc.resolve("catalog"))) {
@@ -187,10 +177,60 @@ class EmrTrinoTest {
         assertEquals("connector.name=hive\n", Files.readString(etc.resolve("catalog/hive.properties")));
         assertEquals("connector.name=iceberg\niceberg.catalog.type=glue\n",
                 Files.readString(etc.resolve("catalog/iceberg.properties")));
-        // Trino takes letters, digits, hyphens and underscores in a node's id, and the image's run-trino names none
-        // once node.properties does.
-        assertEquals("node.environment=docker\nnode.id=ip-10-0-0-1-ec2-internal\n",
+        // The image's node and log properties, the classification's after them, which Trino takes the later of,
+        // and an id Trino takes: letters, digits, hyphens and underscores, as the image's run-trino names none once
+        // node.properties does.
+        assertEquals("node.environment=docker\nnode.data-dir=/data/trino\n\nnode.environment=production\n"
+                + "\nnode.id=ip-10-0-0-1-ec2-internal\n", Files.readString(etc.resolve("node.properties")));
+        assertEquals("# Enable verbose logging from Trino\n#io.trino=DEBUG\n\nio.trino=DEBUG\n",
+                Files.readString(etc.resolve("log.properties")));
+    }
+
+    @Test
+    void aNodeIdTheClusterGivesIsTrinosOwn(@TempDir Path etc) throws Exception {
+        runEntrypoint(etc, Map.of(EmrTrino.NODE_VARIABLE, "node.id=coordinator-1"));
+
+        assertEquals("node.environment=docker\nnode.data-dir=/data/trino\n\nnode.id=coordinator-1\n",
                 Files.readString(etc.resolve("node.properties")));
+    }
+
+    @Test
+    void anImageOfTheClustersOwnKeepsItsNodeAndLogSettingsWhereTheClusterGivesNone(@TempDir Path etc)
+            throws Exception {
+        // trino.image may name an image whose files differ from the Trino project's.
+        Files.writeString(etc.resolve("node.properties"), "node.environment=staging\nnode.data-dir=/var/lib/trino");
+        Files.writeString(etc.resolve("log.properties"), "io.trino=WARN\n");
+
+        runEntrypoint(etc, Map.of(EmrTrino.NODE_VARIABLE, "", EmrTrino.LOG_VARIABLE, ""));
+
+        // Its last line had no newline of its own.
+        assertEquals("node.environment=staging\nnode.data-dir=/var/lib/trino\nnode.id=ip-10-0-0-1-ec2-internal\n",
+                Files.readString(etc.resolve("node.properties")));
+        assertEquals("io.trino=WARN\n", Files.readString(etc.resolve("log.properties")));
+    }
+
+    // Runs the Trino container's entrypoint with environment, over an /etc/trino here as the Trino project's image
+    // ships it, unless the test wrote its own files, its Trino left out, on the primary node's host name, which the
+    // container shares.
+    private static void runEntrypoint(Path etc, Map<String, String> environment) throws Exception {
+        Files.createDirectories(etc.resolve("catalog"));
+        Files.writeString(etc.resolve("catalog/tpcds.properties"), "connector.name=tpcds\n");
+        if (!Files.exists(etc.resolve("node.properties"))) {
+            Files.writeString(etc.resolve("node.properties"), "node.environment=docker\nnode.data-dir=/data/trino\n");
+        }
+        if (!Files.exists(etc.resolve("log.properties"))) {
+            Files.writeString(etc.resolve("log.properties"), "# Enable verbose logging from Trino\n#io.trino=DEBUG\n");
+        }
+        String entrypoint = EmrTrino.ENTRYPOINT.replace("/etc/trino", etc.toString())
+                .replace("exec /usr/lib/trino/bin/run-trino", "true");
+        assertTrue(EmrTrino.ENTRYPOINT.endsWith("exec /usr/lib/trino/bin/run-trino"));
+        ProcessBuilder builder = new ProcessBuilder("bash", "-c", entrypoint).redirectErrorStream(true);
+        builder.environment().putAll(environment);
+        builder.environment().put("HOSTNAME", "ip-10-0-0-1.ec2.internal");
+        Process process = builder.start();
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        assertTrue(process.waitFor(30, TimeUnit.SECONDS));
+        assertEquals(0, process.exitValue(), output);
     }
 
     @Test

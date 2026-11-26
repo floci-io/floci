@@ -306,6 +306,24 @@ final class EmrSparkSteps {
         return properties(configurations, objectMapper, EmrTrino.CONFIG_CLASSIFICATION);
     }
 
+    /** The properties of a cluster's {@code trino-node}, which its Trino's {@code node.properties} gets. */
+    static Map<String, String> trinoNode(String configurations, ObjectMapper objectMapper) {
+        return properties(configurations, objectMapper, EmrTrino.NODE_CLASSIFICATION);
+    }
+
+    /** The properties of a cluster's {@code trino-log}, which make its Trino's {@code log.properties}. */
+    static Map<String, String> trinoLog(String configurations, ObjectMapper objectMapper) {
+        return properties(configurations, objectMapper, EmrTrino.LOG_CLASSIFICATION);
+    }
+
+    /**
+     * The variables a cluster's {@code trino-env} exports, its nested {@code export} classification's properties, as
+     * "If any classification ends in env, use the export sub-classification", which its Trino's environment gets.
+     */
+    static Map<String, String> trinoEnvironment(String configurations, ObjectMapper objectMapper) {
+        return exports(configurations, objectMapper, EmrTrino.ENV_CLASSIFICATION);
+    }
+
     // Whether a cluster's Applications name any of names, in any case, unless its release is of the AWS runtime for
     // Apache Spark, which installs none of Hive, HCatalog, Pig and Trino.
     private static boolean installs(String releaseLabel, String applications, ObjectMapper objectMapper,
