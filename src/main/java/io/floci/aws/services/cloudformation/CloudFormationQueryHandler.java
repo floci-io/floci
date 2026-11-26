@@ -406,13 +406,15 @@ public class CloudFormationQueryHandler {
         }
         xml.start("Details");
         for (CloudFormationService.ChangeDetail detail : change.details()) {
-            xml.start("member")
-               .start("Target")
-               .elem("Attribute", detail.attribute())
-               .elem("Name", detail.name())
-               .elem("RequiresRecreation", detail.requiresRecreation())
-               .end("Target")
-               .elem("Evaluation", detail.evaluation())
+            xml.start("member");
+            if (detail.attribute() != null) {
+                xml.start("Target")
+                   .elem("Attribute", detail.attribute())
+                   .elem("Name", detail.name())
+                   .elem("RequiresRecreation", detail.requiresRecreation())
+                   .end("Target");
+            }
+            xml.elem("Evaluation", detail.evaluation())
                .elem("ChangeSource", detail.changeSource())
                .elem("CausingEntity", detail.causingEntity())
                .end("member");

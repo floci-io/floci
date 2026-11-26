@@ -96,8 +96,14 @@ public final class CfnCreateOnlyProperties {
      * element's subtree.
      */
     public static boolean createOnlyValueChanged(String resourceType, JsonNode oldProps, JsonNode newProps) {
+        return createOnlyValueChanged(resourceType, oldProps, newProps, null);
+    }
+
+    /** As above, only the pointers at and under {@code property}; null means every property. */
+    public static boolean createOnlyValueChanged(String resourceType, JsonNode oldProps, JsonNode newProps,
+                                                 String property) {
         for (String pointer : replacementPointers(resourceType)) {
-            if (createOnlyPointerChanged(pointer, oldProps, newProps)) {
+            if (isUnder(pointer, property) && createOnlyPointerChanged(pointer, oldProps, newProps)) {
                 return true;
             }
         }
