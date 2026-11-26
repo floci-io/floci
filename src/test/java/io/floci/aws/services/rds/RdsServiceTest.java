@@ -115,6 +115,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.LogRecord;
@@ -252,6 +253,46 @@ class RdsServiceTest {
                         .map(securityGroups::get)
                         .filter(Objects::nonNull)
                         .toList());
+    }
+
+    @Test
+    void startingAnInstanceWaitsForItsLockWithoutHoldingTheServiceLock() throws Exception {
+        when(rdsConfig.mock()).thenReturn(true);
+        rdsService.createDbInstance("lock-order", "postgres", "13", "admin", "password",
+                "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, 5432);
+        rdsService.stopDbInstance("lock-order", "us-east-1");
+        DbInstance instance = rdsService.getDbInstance("lock-order");
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        AtomicReference<Thread> startingThread = new AtomicReference<>();
+        try {
+            Future<DbInstance> started;
+            synchronized (instance) {
+                started = executor.submit(() -> {
+                    startingThread.set(Thread.currentThread());
+                    return rdsService.startDbInstance("lock-order");
+                });
+                awaitBlockedOrDone(startingThread, started);
+                assertFalse(started.isDone(), "Start must wait for the instance publication lock");
+                Future<Boolean> serviceAvailable = executor.submit(() -> {
+                    synchronized (rdsService) {
+                        return true;
+                    }
+                });
+                boolean acquired;
+                try {
+                    acquired = serviceAvailable.get(2, TimeUnit.SECONDS);
+                } catch (TimeoutException expected) {
+                    acquired = false;
+                }
+                assertTrue(acquired, "An instance lock waiter must not hold the service lock");
+            }
+            started.get(5, TimeUnit.SECONDS);
+            assertEquals(DbInstanceStatus.AVAILABLE, rdsService.getDbInstance("lock-order").getStatus());
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
     }
 
     @ParameterizedTest

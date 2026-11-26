@@ -4699,9 +4699,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     public DbInstance startDbInstance(String id, String region) {
         try {
-            synchronized (this) {
-                return doStartDbInstance(id, region);
-            }
+            return withInstancePublication(id, region, () -> doStartDbInstance(id, region));
         } finally {
             publishLifecycleEvents();
         }
