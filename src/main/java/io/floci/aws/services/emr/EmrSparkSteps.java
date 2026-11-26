@@ -278,9 +278,32 @@ final class EmrSparkSteps {
         return installs(releaseLabel, applications, objectMapper, EmrTrino.APPLICATION);
     }
 
-    /** The properties of a cluster's {@code trino-connector-hive}, which its Trino's {@code hive} catalog gets. */
-    static Map<String, String> trinoHiveConnector(String configurations, ObjectMapper objectMapper) {
-        return properties(configurations, objectMapper, EmrTrino.HIVE_CONNECTOR);
+    /**
+     * The properties of a cluster's {@code trino-connector-<catalog>} classifications by catalog, in the order they
+     * come, a later configuration's winning, each of which changes "Trino's {@code <catalog>.properties} file". One
+     * whose catalog is not a name Trino takes ({@link EmrTrino#CATALOG_NAME}) names none.
+     */
+    static Map<String, Map<String, String>> trinoConnectors(String configurations, ObjectMapper objectMapper) {
+        Map<String, Map<String, String>> connectors = new LinkedHashMap<>();
+        for (JsonNode configuration : stored(configurations, objectMapper)) {
+            String classification = configuration.path("Classification").asText();
+            if (!classification.startsWith(EmrTrino.CONNECTOR_PREFIX)) {
+                continue;
+            }
+            String catalog = classification.substring(EmrTrino.CONNECTOR_PREFIX.length());
+            if (!EmrTrino.CATALOG_NAME.matcher(catalog).matches()) {
+                continue;
+            }
+            Map<String, String> properties = connectors.computeIfAbsent(catalog, name -> new LinkedHashMap<>());
+            configuration.path("Properties").properties()
+                    .forEach(property -> properties.put(property.getKey(), property.getValue().asText()));
+        }
+        return connectors;
+    }
+
+    /** The properties of a cluster's {@code trino-config}, which its Trino's {@code config.properties} gets. */
+    static Map<String, String> trinoConfig(String configurations, ObjectMapper objectMapper) {
+        return properties(configurations, objectMapper, EmrTrino.CONFIG_CLASSIFICATION);
     }
 
     // Whether a cluster's Applications name any of names, in any case, unless its release is of the AWS runtime for

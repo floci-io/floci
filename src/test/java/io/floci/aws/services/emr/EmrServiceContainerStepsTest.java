@@ -1108,7 +1108,8 @@ class EmrServiceContainerStepsTest {
         EmrCluster requested = cluster("trino", true, query);
         requested.setApplications(TRINO);
         requested.setConfigurations("[{\"Classification\": \"trino-connector-hive\", \"Properties\": "
-                + "{\"hive.metastore\": \"glue\"}}]");
+                + "{\"hive.metastore\": \"glue\"}}, {\"Classification\": \"trino-connector-tpch\"}, "
+                + "{\"Classification\": \"trino-config\", \"Properties\": {\"http-server.http.port\": \"8890\"}}]");
         withTrino.runJobFlow(requested, REGION);
 
         fixture.runStepThread();
@@ -1119,12 +1120,14 @@ class EmrServiceContainerStepsTest {
                 "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", "true", "false")),
                 fixture.releaseImages.asked);
         assertEquals(List.of("trinodb/trino:446"), fixture.releaseImages.trinoImages);
-        assertEquals(new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of("hive.metastore", "glue")),
+        assertEquals(new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of("hive", Map.of("hive.metastore",
+                "glue"), "tpch", Map.of()), Map.of("http-server.http.port", "8890")),
                 fixture.clusterStorage.metastores.get(0).trino());
         SparkJobRunner.Job job = runner.jobs.get(0);
         assertEquals(args, job.command());
         String host = fixture.clusterStorage.hdfs.get(0).get(1);
-        assertEquals("http://" + host + ":8889", job.environment().get("FLOCI_TRINO_SERVER"));
+        // On the port its trino-config names.
+        assertEquals("http://" + host + ":8890", job.environment().get("FLOCI_TRINO_SERVER"));
     }
 
     @Test
