@@ -1361,6 +1361,14 @@ public interface EmulatorConfig {
 
         @WithDefault("floci/floci-sidecar-cedar:1.1.0")
         String cedarImage();
+
+        /**
+         * Requests accepted in one BatchIsAuthorized or BatchIsAuthorizedWithToken call. AWS allows 30
+         * unless the account's quota has been raised.
+         * Env: FLOCI_SERVICES_VERIFIEDPERMISSIONS_BATCH_IS_AUTHORIZED_MAX_REQUESTS
+         */
+        @WithDefault("30")
+        int batchIsAuthorizedMaxRequests();
     }
 
     interface RamServiceConfig {
