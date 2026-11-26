@@ -399,6 +399,49 @@ class EksAutoModeNodesTest {
         assertEquals(disruptable, pool.disruptable(nodes));
     }
 
+    /** A pool's limits: cpu, memory and nodes; one it doesn't name is unlimited. */
+    @Test
+    void aPoolsLimitsAreRead() throws Exception {
+        String pools = """
+                {"items": [{"metadata": {"name": "limited"}, "spec": {"limits": {"cpu": "4", "memory": "16Gi"},
+                  "template": {"spec": {}}}},
+                 {"metadata": {"name": "free"}, "spec": {"template": {"spec": {}}}}]}""";
+
+        List<NodePool> read = EksAutoModeNodes.nodePools(json(pools));
+
+        assertEquals(new EksAutoModeNodes.Capacity(4000, 16L << 30, Long.MAX_VALUE), read.getFirst().limits());
+        assertEquals(EksAutoModeNodes.Capacity.UNLIMITED, read.get(1).limits());
+    }
+
+    /**
+     * No pool gets a node that would take its nodes past its limits, as AWS stopped at two 2-vCPU nodes for a pool
+     * limited to 4 vCPUs; a smaller type that stays within is chosen, and a pod a pool can't take any more goes to
+     * the next pool that can.
+     */
+    @Test
+    void aPoolsLimitsStopItsLaunchesAndAPodGoesToTheNextPool() throws Exception {
+        NodePool limited = new NodePool("limited", "default", List.of(), List.of(), Map.of(), 10, null, List.of(),
+                new EksAutoModeNodes.Capacity(4000, Long.MAX_VALUE, Long.MAX_VALUE));
+        NodePool fallback = new NodePool("fallback", "default", List.of(), List.of(), Map.of(), 0, null, List.of());
+        PendingPod web = new PendingPod("default", "web", 900, 64L << 20, Map.of(), List.of(), List.of());
+        PendingPod big = new PendingPod("default", "big", 2500, 64L << 20, Map.of(), List.of(), List.of());
+
+        // Half used: a 2-vCPU node fits the limit, a 4-vCPU one doesn't, so a 2500m pod goes to the other pool.
+        Map<String, EksAutoModeNodes.Capacity> half = Map.of("limited",
+                new EksAutoModeNodes.Capacity(2000, 4096L << 20, 1));
+        assertEquals("limited", EksAutoModeNodes.plan(List.of(limited), List.of(web), TYPES, Map.of(), List.of(),
+                null, half).getFirst().pool().name());
+        assertEquals("fallback", EksAutoModeNodes.plan(List.of(limited, fallback), List.of(big), TYPES, Map.of(),
+                List.of(), null, half).getFirst().pool().name());
+        // At the limit: nothing more from that pool.
+        Map<String, EksAutoModeNodes.Capacity> full = Map.of("limited",
+                new EksAutoModeNodes.Capacity(4000, 8192L << 20, 2));
+        assertEquals(List.of(), EksAutoModeNodes.plan(List.of(limited), List.of(web), TYPES, Map.of(), List.of(),
+                null, full));
+        assertEquals("fallback", EksAutoModeNodes.plan(List.of(limited, fallback), List.of(web), TYPES, Map.of(),
+                List.of(), null, full).getFirst().pool().name());
+    }
+
     @Test
     void consolidateAfterAndBudgetsAreReadFromThePoolScheduledAndOtherReasonsBudgetsLeftOut() throws Exception {
         String pools = """
