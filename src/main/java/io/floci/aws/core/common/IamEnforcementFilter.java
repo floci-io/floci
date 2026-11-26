@@ -25,7 +25,6 @@ import io.floci.aws.services.iam.ResourcePolicyProvider;
 import io.floci.aws.services.iam.ResourcePolicyProviders;
 import io.floci.aws.services.iam.ScpProvider;
 import io.floci.aws.services.iam.model.CallerContext;
-import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.s3.S3ObjectActions;
 import io.floci.aws.services.s3.S3ScratchSpace;
 import io.floci.aws.services.s3.S3Service;
@@ -1116,87 +1115,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     /** What {@link PassedRoles} looks up, in the request's account and Region. */
     private PassedRoles.Lookups lookupsFor(String accountId, String region) {
-        return new PassedRoles.Lookups() {
-            @Override
-            public List<String> instanceProfileRoleArns(String profileName, String profileArn) {
-                return IamEnforcementFilter.this.instanceProfileRoleArns(accountId, profileName, profileArn);
-            }
-
-            @Override
-            public List<String> taskDefinitionRoles(String reference) {
-                List<String> roles = new ArrayList<>();
-                for (PassedRoleLookup lookup : roleLookups()) {
-                    roles.addAll(lookup.taskDefinitionRoles(reference, region));
-                }
-                return roles;
-            }
-
-            @Override
-            public Optional<String> stackSetPermissionModel(String stackSetName) {
-                return firstFound(lookup -> lookup.stackSetPermissionModel(stackSetName));
-            }
-
-            @Override
-            public Optional<String> launchTemplateInstanceProfile(String templateId, String templateName,
-                                                                  String version) {
-                return firstFound(lookup -> lookup.launchTemplateInstanceProfile(templateId, templateName, version,
-                        region));
-            }
-
-            @Override
-            public Optional<String> launchConfigurationInstanceProfile(String instanceId) {
-                return firstFound(lookup -> lookup.launchConfigurationInstanceProfile(instanceId, region));
-            }
-
-            @Override
-            public Optional<String> instanceRefreshInstanceProfile(String groupName, String templateId,
-                                                                   String templateName, String version) {
-                return firstFound(lookup -> lookup.instanceRefreshInstanceProfile(groupName, templateId, templateName,
-                        version, region));
-            }
-
-            @Override
-            public String roleArn(String roleName) {
-                return AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "role/" + roleName).toString();
-            }
-
-            @Override
-            public Optional<String> heldRoleArn(String roleName) {
-                return iamService.findRole(accountId, roleName).map(IamRole::getArn);
-            }
-
-            @Override
-            public Optional<String> serviceCatalogConstraintType(String constraintId) {
-                return firstFound(lookup -> lookup.serviceCatalogConstraintType(constraintId));
-            }
-        };
+        return new PassedRoleLookups(iamService, roleLookups()).in(requestPartition(), accountId, region);
     }
 
     private Iterable<PassedRoleLookup> roleLookups() {
         return passedRoleLookups == null || passedRoleLookups.isUnsatisfied() ? List.of() : passedRoleLookups;
-    }
-
-    /** The first answer a {@link PassedRoleLookup} gives, each answering only for what its service owns. */
-    private Optional<String> firstFound(Function<PassedRoleLookup, Optional<String>> question) {
-        for (PassedRoleLookup lookup : roleLookups()) {
-            Optional<String> answer = question.apply(lookup);
-            if (answer.isPresent()) {
-                return answer;
-            }
-        }
-        return Optional.empty();
-    }
-
-    /** The ARNs of the roles the instance profile, named by {@code name} or {@code arn}, holds. */
-    private List<String> instanceProfileRoleArns(String accountId, String name, String arn) {
-        String profileName = arn != null ? arn.substring(arn.lastIndexOf('/') + 1) : name;
-        return iamService.findInstanceProfile(accountId, profileName)
-                .filter(profile -> arn == null || arn.equals(profile.getArn()))
-                .map(profile -> profile.getRoleNames().stream()
-                        .flatMap(roleName -> iamService.findRole(accountId, roleName).stream())
-                        .map(IamRole::getArn)
-                        .toList())
-                .orElse(List.of());
     }
 
     /**

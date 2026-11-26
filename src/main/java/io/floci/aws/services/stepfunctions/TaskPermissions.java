@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PassedRoleLookups;
 import io.floci.aws.core.common.RequestChecks;
 import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.common.StoredResourceArns;
@@ -104,6 +105,17 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
                            StoredResourceArns states, StoredResourceArns scheduler) {
     }
 
+    /**
+     * What finds the roles a task's request passes, as a direct request's are found, reading only.
+     *
+     * @param roles the roles IAM holds by name, an instance profile's roles and an ECS task definition's; without it
+     *              a role given by name is the account's of that name and a resource holding roles holds none
+     */
+    record RequestLookups(PassedRoleLookups roles) {
+
+        static final RequestLookups NONE = new RequestLookups(null);
+    }
+
     /** The permissions of a mapped integration, or nothing for one that is not checked. */
     static Optional<TaskPermissions> of(StatesIntegration integration, JsonNode input, StateMachine machine) {
         return of(integration, input, machine, null);
@@ -150,12 +162,30 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     static Optional<TaskPermissions> of(StatesIntegration integration, JsonNode input, StateMachine machine,
                                         StoredResourceArns redshiftData, StoredResourceArns ecs, boolean callback,
                                         ControlServices control) {
+        return of(integration, input, machine, redshiftData, ecs, callback, control, RequestLookups.NONE);
+    }
+
+    /**
+     * The permissions of a mapped integration, or nothing for one that is not checked.
+     *
+     * @param redshiftData finds the workgroup or the session target a Data API request names; without it a
+     *                     workgroup is any workgroup and a session names nothing
+     * @param ecs          finds the task definition revision a reference resolves to and the default cluster, reading
+     *                     only; without it a family names any revision and a request naming no cluster any cluster
+     * @param callback     whether the state's resource ended in {@code .waitForTaskToken}, which {@code integration}
+     *                     no longer shows: EMR and EMR Serverless have no such form, so theirs stays unsupported
+     * @param control      finds what a control task's request names
+     * @param lookups      finds what a request names beyond its resources
+     */
+    static Optional<TaskPermissions> of(StatesIntegration integration, JsonNode input, StateMachine machine,
+                                        StoredResourceArns redshiftData, StoredResourceArns ecs, boolean callback,
+                                        ControlServices control, RequestLookups lookups) {
         if (integration.isSdkService("scheduler") && SCHEDULER.contains(integration.api())) {
-            return Optional.of(scheduler(integration.api(), input, machine, control.scheduler()));
+            return Optional.of(scheduler(integration.api(), input, machine, control.scheduler(), lookups));
         }
         if (integration.isSdkService("cloudformation") && servedByCloudFormation(integration.api())) {
             return Optional.of(cloudFormation(AslExecutor.capitalizeFirst(integration.api()), input, machine,
-                    control.cloudFormation()));
+                    control.cloudFormation(), lookups));
         }
         if (integration.is("http", "invoke")) {
             return Optional.of(httpInvoke(input, machine));
@@ -178,18 +208,18 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
         }
         if (integration.isAnySuffix("ecs", "runTask")
                 && (integration.suffix().isEmpty() || ".sync".equals(integration.suffix()))) {
-            return Optional.of(accessDenied(ECS_OPTIMIZED_PREFIX, ecs("RunTask", input, machine, ecs)));
+            return Optional.of(accessDenied(ECS_OPTIMIZED_PREFIX, ecs("RunTask", input, machine, ecs, lookups)));
         }
         if (integration.isSdkService("ecs") && SdkManagementTaskInvoker.supports(integration)) {
             return Optional.of(accessDenied(ECS_SDK_PREFIX,
-                    ecs(AslExecutor.capitalizeFirst(integration.api()), input, machine, ecs)));
+                    ecs(AslExecutor.capitalizeFirst(integration.api()), input, machine, ecs, lookups)));
         }
         if (!callback && integration.isOptimizedService("elasticmapreduce") && EmrTaskInvoker.serves(integration)) {
-            return Optional.of(emr(integration.api(), input, machine));
+            return Optional.of(emr(integration.api(), input, machine, lookups));
         }
         if (!callback && integration.isOptimizedService("emr-serverless")
                 && EmrServerlessTaskInvoker.serves(integration)) {
-            return Optional.of(emrServerless(integration.api(), input, machine));
+            return Optional.of(emrServerless(integration.api(), input, machine, lookups));
         }
         if (integration.is("sqs", "sendMessage")) {
             return Optional.of(sqsSendMessage("SQS.", input, machine));
@@ -444,11 +474,33 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
      * its request names, its members read in either casing as the integration recases them: {@code RunTask} on the
      * revision ECS resolves its task definition to, a family alone being its latest, and a service on the cluster the
      * request names, or the default one. {@code ListServices} acts on no resource type. A request that is no object is
-     * answered by the service.
+     * answered by the service. The roles the call passes need {@code iam:PassRole}, as the same call's made directly
+     * do: a task definition's task role and execution role, and a role override, which the CDK grants for a
+     * {@code RunTask} task as well.
      */
     private static List<Permission> ecs(String operation, JsonNode input, StateMachine machine,
-                                        StoredResourceArns ecs) {
-        return requestPermissions("ecs", operation, AslExecutor.recaseKeys(MAPPER, input, false), machine, ecs);
+                                        StoredResourceArns ecs, RequestLookups lookups) {
+        JsonNode request = AslExecutor.recaseKeys(MAPPER, input, false);
+        return withPassedRoles(requestPermissions("ecs", operation, request, machine, ecs), "ecs", operation, request,
+                machine, lookups);
+    }
+
+    /**
+     * {@code permissions} and, when they are any, {@code iam:PassRole} on each role the request passes, as the same
+     * request made directly is checked ({@link RequestChecks#passedRoles}). A request needing no permission is left
+     * to its service, whatever roles it names.
+     */
+    private static List<Permission> withPassedRoles(List<Permission> permissions, String namespace, String operation,
+                                                    JsonNode request, StateMachine machine, RequestLookups lookups) {
+        if (permissions.isEmpty() || !request.isObject()) {
+            return permissions;
+        }
+        AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
+        List<Permission> checked = new ArrayList<>(permissions);
+        RequestChecks.passedRoles(IamAuthorizedActions.actionFor(namespace, operation), request, owner.partition(),
+                        owner.region(), owner.accountId(), lookups.roles())
+                .forEach(check -> checked.add(new Permission(check.action(), check.resource(), check.context())));
+        return checked;
     }
 
     /**
@@ -475,10 +527,11 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     /**
      * The EMR calls the API's {@code start} makes, each checked as the vendored request resources check the same
      * call made directly: the integration finds the cluster by {@code ClusterId} alone, and hands it to each call
-     * in the member that call names it by. {@code RunJobFlow} acts on no resource type. A request naming no cluster
-     * is refused by the integration.
+     * in the member that call names it by. {@code RunJobFlow} acts on no resource type, and passes the cluster's roles,
+     * which need {@code iam:PassRole}, as the CDK grants it on the service role, the cluster role and the auto scaling
+     * role. A request naming no cluster is refused by the integration.
      */
-    private static TaskPermissions emr(String api, JsonNode input, StateMachine machine) {
+    private static TaskPermissions emr(String api, JsonNode input, StateMachine machine, RequestLookups lookups) {
         String clusterId = text(input.path("ClusterId"));
         AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
         List<Permission> permissions = new ArrayList<>();
@@ -497,7 +550,9 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
                 permissions.add(new Permission(action, resource));
             }
         }
-        return accessDenied(EMR_PREFIX, permissions);
+        return accessDenied(EMR_PREFIX, "createCluster".equals(api)
+                ? withPassedRoles(permissions, "elasticmapreduce", "RunJobFlow", input, machine, lookups)
+                : permissions);
     }
 
     /**
@@ -528,7 +583,8 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
      * create or a job run tags, with the tags as condition keys of both. A request missing an id the integration
      * requires is refused by it.
      */
-    private static TaskPermissions emrServerless(String api, JsonNode input, StateMachine machine) {
+    private static TaskPermissions emrServerless(String api, JsonNode input, StateMachine machine,
+                                                 RequestLookups lookups) {
         ObjectNode request = EmrServerlessTaskInvoker.apiRequest(api, input);
         if (!"createApplication".equals(api) && !request.has("applicationId")
                 || "cancelJobRun".equals(api) && !request.has("jobRunId")) {
@@ -536,27 +592,28 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
         }
         AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
         return accessDenied(EMR_SERVERLESS_PREFIX, RequestChecks.of("emr-serverless:" + AslExecutor.capitalizeFirst(api),
-                        request, owner.partition(), owner.region(), owner.accountId(), null).stream()
+                        request, owner.partition(), owner.region(), owner.accountId(), null, lookups.roles()).stream()
                 .map(check -> new Permission(check.action(), check.resource(), check.context())).toList());
     }
 
     /**
      * The action on the schedule the request names, as the request-resources table reads it for a direct Scheduler
-     * request: its name and group, a group left out being the one {@code stored} gives as Scheduler's default. A request
-     * naming no schedule is refused by Scheduler.
+     * request: its name and group, a group left out being the one {@code stored} gives as Scheduler's default, and
+     * {@code iam:PassRole} on the role its target runs as, which the CDK grants. A request naming no schedule is
+     * refused by Scheduler.
      */
     private static TaskPermissions scheduler(String api, JsonNode input, StateMachine machine,
-                                             StoredResourceArns stored) {
+                                             StoredResourceArns stored, RequestLookups lookups) {
         if (text(input.path("Name")) == null) {
             return accessDenied(SCHEDULER_PREFIX, List.of());
         }
         String operation = AslExecutor.capitalizeFirst(api);
         String action = IamAuthorizedActions.actionFor("scheduler", operation);
         AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
-        return accessDenied(SCHEDULER_PREFIX, RequestResources.ofBody("scheduler:" + operation, input,
+        return accessDenied(SCHEDULER_PREFIX, withPassedRoles(RequestResources.ofBody("scheduler:" + operation, input,
                         owner.partition(), owner.region(), owner.accountId(), stored).stream()
                 .map(resource -> new Permission(action, resource))
-                .toList());
+                .toList(), "scheduler", operation, input, machine, lookups));
     }
 
     /**
@@ -570,14 +627,15 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     /**
      * The check the vendored request resources give the same call made directly ({@link #requestPermissions}),
      * {@code stored} finding the stack or the stack set a name names; on any resource when the request names none,
-     * whatever its input is, as a direct request naming none is checked.
+     * whatever its input is, as a direct request naming none is checked. The service role a stack operation names and
+     * a StackSet's administration role need {@code iam:PassRole}, as they do made directly.
      */
     private static TaskPermissions cloudFormation(String operation, JsonNode input, StateMachine machine,
-                                                  StoredResourceArns stored) {
+                                                  StoredResourceArns stored, RequestLookups lookups) {
         List<Permission> permissions = requestPermissions("cloudformation", operation, input, machine, stored);
-        return accessDenied(CLOUDFORMATION_PREFIX, permissions.isEmpty()
+        return accessDenied(CLOUDFORMATION_PREFIX, withPassedRoles(permissions.isEmpty()
                 ? List.of(new Permission(IamAuthorizedActions.actionFor("cloudformation", operation), ANY_RESOURCE))
-                : permissions);
+                : permissions, "cloudformation", operation, input, machine, lookups));
     }
 
     /**

@@ -3,7 +3,12 @@ package io.floci.aws.services.stepfunctions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PassedRoleLookups;
 import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.PassedRoleLookup;
+import io.floci.aws.services.iam.model.IamRole;
+import io.floci.aws.services.iam.model.InstanceProfile;
 import io.floci.aws.services.stepfunctions.LambdaTaskAuthorizer.Permission;
 import io.floci.aws.services.stepfunctions.model.StateMachine;
 import io.floci.aws.testing.ParallelLocks;
@@ -650,6 +655,120 @@ class TaskPermissionsTest {
                         .orElseThrow().permissions());
     }
 
+    private static final String TASK_ROLE = "arn:aws:iam::111122223333:role/task";
+    private static final String EXECUTION_ROLE = "arn:aws:iam::111122223333:role/execution";
+    private static final Map<String, List<String>> TO_ECS_TASKS =
+            Map.of("iam:PassedToService", List.of("ecs-tasks.amazonaws.com"));
+
+    /**
+     * RunTask passes its task definition's task role and execution role and a role override, as a direct RunTask
+     * does, a role given by name being the account's of that name.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"ecs:runTask", "ecs:runTask.sync"})
+    void runTaskNeedsPassRoleOnTheTaskDefinitionsRolesAndAnOverride(String tail) throws Exception {
+        assertEquals(List.of(new Permission("ecs:RunTask", TASK_DEFINITION),
+                        new Permission("iam:PassRole", TASK_ROLE, TO_ECS_TASKS),
+                        new Permission("iam:PassRole", EXECUTION_ROLE, TO_ECS_TASKS),
+                        new Permission("iam:PassRole", "arn:aws:iam::111122223333:role/override", TO_ECS_TASKS)),
+                TaskPermissions.of(integration(tail),
+                        json("{\"TaskDefinition\":\"orders\",\"Overrides\":{\"TaskRoleArn\":\"override\"}}"),
+                        machine("aws"), null, ecs(), false, new TaskPermissions.ControlServices(null, null, null, null),
+                        roles()).orElseThrow().permissions());
+    }
+
+    /** A request ECS answers needs nothing, whatever roles it names. */
+    @Test
+    void aRunTaskNamingNoDefinitionNeedsNoPassRole() throws Exception {
+        assertEquals(List.of(), TaskPermissions.of(integration("ecs:runTask"),
+                json("{\"Overrides\":{\"TaskRoleArn\":\"override\"}}"), machine("aws"), null, ecs(), false,
+                new TaskPermissions.ControlServices(null, null, null, null), roles()).orElseThrow().permissions());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"createSchedule", "updateSchedule"})
+    void aScheduleNeedsPassRoleOnItsTargetsRole(String api) throws Exception {
+        String role = "arn:aws:iam::111122223333:role/scheduler";
+        List<Permission> permissions = control("aws-sdk:scheduler:" + api,
+                "{\"Name\":\"n\",\"Target\":{\"Arn\":\"q\",\"RoleArn\":\"" + role + "\"}}").permissions();
+
+        assertEquals(new Permission("iam:PassRole", role, Map.of("iam:PassedToService",
+                List.of("scheduler.amazonaws.com"))), permissions.getLast());
+        assertEquals(2, permissions.size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"createStack", "updateStack", "deleteStack", "createChangeSet", "continueUpdateRollback"})
+    void aStackOperationNeedsPassRoleOnTheServiceRoleItNames(String api) throws Exception {
+        String role = "arn:aws:iam::111122223333:role/deployer";
+        assertEquals(List.of(new Permission("iam:PassRole", role,
+                        Map.of("iam:PassedToService", List.of("cloudformation.amazonaws.com")))),
+                passedRoles(control("aws-sdk:cloudformation:" + api,
+                        "{\"StackName\":\"s\",\"ChangeSetName\":\"c\",\"RoleARN\":\"" + role + "\"}",
+                        stacks(), null, null, false)));
+    }
+
+    /** A self-managed StackSet naming no administration role passes the default one, as a direct create does. */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "{\"StackSetName\":\"n\"}|arn:aws:iam::111122223333:role/AWSCloudFormationStackSetAdministrationRole",
+            "{\"StackSetName\":\"n\",\"AdministrationRoleARN\":\"arn:aws:iam::111122223333:role/admin\"}"
+                    + "|arn:aws:iam::111122223333:role/admin",
+            "{\"StackSetName\":\"n\",\"PermissionModel\":\"SERVICE_MANAGED\"}|"})
+    void aStackSetPassesItsAdministrationRole(String request, String role) throws Exception {
+        assertEquals(role == null ? List.of() : List.of(new Permission("iam:PassRole", role,
+                        Map.of("iam:PassedToService", List.of("cloudformation.amazonaws.com")))),
+                passedRoles(control("aws-sdk:cloudformation:createStackSet", request)));
+    }
+
+    /**
+     * A cluster passes its service role, its instance profile's role and its auto scaling role, each to the service
+     * AWS's managed EMR policy passes it to, a role given by name being the one IAM holds under it.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"elasticmapreduce:createCluster", "elasticmapreduce:createCluster.sync"})
+    void createClusterNeedsPassRoleOnTheClustersRoles(String tail) throws Exception {
+        assertEquals(List.of(new Permission("elasticmapreduce:RunJobFlow", "*"),
+                        new Permission("iam:PassRole", "arn:aws:iam::111122223333:role/emr/service",
+                                Map.of("iam:PassedToService", List.of("elasticmapreduce.amazonaws.com"))),
+                        new Permission("iam:PassRole", "arn:aws:iam::111122223333:role/cluster",
+                                Map.of("iam:PassedToService", List.of("ec2.amazonaws.com"))),
+                        new Permission("iam:PassRole", "arn:aws:iam::111122223333:role/scaling",
+                                Map.of("iam:PassedToService", List.of("application-autoscaling.amazonaws.com")))),
+                TaskPermissions.of(integration(tail), json("""
+                                {"Name":"c","ServiceRole":"service","JobFlowRole":"cluster-profile",
+                                 "AutoScalingRole":"arn:aws:iam::111122223333:role/scaling"}"""), machine("aws"), null,
+                        null, false, new TaskPermissions.ControlServices(null, null, null, null), roles())
+                        .orElseThrow().permissions());
+    }
+
+    /** IAM's role {@code service}, under a path, and the profile holding {@code cluster}; ECS's roles of {@code orders}. */
+    private static TaskPermissions.RequestLookups roles() {
+        IamService iam = mock(IamService.class);
+        IamRole service = new IamRole();
+        service.setArn("arn:aws:iam::111122223333:role/emr/service");
+        when(iam.findRole(ACCOUNT, "service")).thenReturn(Optional.of(service));
+        IamRole cluster = new IamRole();
+        cluster.setArn("arn:aws:iam::111122223333:role/cluster");
+        when(iam.findRole(ACCOUNT, "cluster")).thenReturn(Optional.of(cluster));
+        InstanceProfile profile = new InstanceProfile();
+        profile.setRoleNames(List.of("cluster"));
+        when(iam.findInstanceProfile(ACCOUNT, "cluster-profile")).thenReturn(Optional.of(profile));
+        PassedRoleLookup taskDefinitions = new PassedRoleLookup() {
+            @Override
+            public List<String> taskDefinitionRoles(String reference, String region) {
+                return "orders".equals(reference) && "eu-west-1".equals(region)
+                        ? List.of(TASK_ROLE, EXECUTION_ROLE) : List.of();
+            }
+        };
+        return new TaskPermissions.RequestLookups(new PassedRoleLookups(iam, List.of(taskDefinitions)));
+    }
+
+    private static List<Permission> passedRoles(TaskPermissions permissions) {
+        return permissions.permissions().stream().filter(permission -> "iam:PassRole".equals(permission.action()))
+                .toList();
+    }
+
     private static final String STACK = "arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stack/s/id";
     private static final String STACK_SET = "arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stackset/ss:id";
 
@@ -762,8 +881,10 @@ class TaskPermissionsTest {
     @ValueSource(strings = {"validateTemplate", "listStacks", "listExports", "describeOrganizationsAccess",
             "activateOrganizationsAccess", "createStackSet", "listStackSets"})
     void aCloudFormationActionWithNoResourceTypeIsOnAnyResource(String api) throws Exception {
-        assertEquals(List.of(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api), "*")),
-                control("aws-sdk:cloudformation:" + api, "{}").permissions());
+        assertEquals(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api), "*"),
+                control("aws-sdk:cloudformation:" + api, "{}").permissions().getFirst());
+        assertEquals(List.of(), passedRoles(control("aws-sdk:cloudformation:" + api,
+                "{\"PermissionModel\":\"SERVICE_MANAGED\"}")));
     }
 
     /** A task whose input is no object still needs its action, on any resource, as a direct request naming none. */
