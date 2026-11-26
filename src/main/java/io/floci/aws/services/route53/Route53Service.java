@@ -810,43 +810,11 @@ public class Route53Service implements Resettable, RequestConditionSpelling {
                 .toList();
     }
 
-    public boolean isCoveredByPrivateZone(String qname) {
-        if (qname == null || qname.isBlank()) {
-            return false;
-        }
-        String normalizedQname = normalizeName(qname).toLowerCase();
-        if (privateZoneNameCounts.isEmpty()
-                || privateZoneNameCounts.keySet().stream().noneMatch(z -> DomainNames.isWithin(normalizedQname, z))) {
-            return false;
-        }
-        for (OwnedZone owned : allHostedZonesAcrossAccounts()) {
-            HostedZone zone = owned.zone();
-            if (!zone.isPrivateZone()) {
-                continue;
-            }
-            String zoneName = normalizeName(zone.getName()).toLowerCase();
-            if (DomainNames.isWithin(normalizedQname, zoneName)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    public List<ResourceRecordSet> findPrivateRecordsForName(String qname) {
-        if (qname == null || qname.isBlank()) {
-            return List.of();
-        }
-        return findRecordsForName(normalizeName(qname).toLowerCase(),
-                mostSpecificZones(normalizeName(qname).toLowerCase(), true).stream()
-                        .map(owned -> getRecordsForZoneAcrossAccounts(owned.accountId(), owned.zone().getId()))
-                        .toList());
-    }
-
     public boolean isCoveredByPrivateZone(String qname, ClientVpc origin) {
         return !privateDnsZones(qname, origin).isEmpty();
     }
 
-    /** Includes only the most specific private zones associated with the querying VPC. */
+    /** Selects the most specific private zones, filtering associations when the caller VPC is known. */
     public Set<String> privateDnsZoneIds(String qname, ClientVpc origin) {
         return privateDnsZones(qname, origin).stream()
                 .map(owned -> owned.zone().getId()).collect(Collectors.toSet());
@@ -871,11 +839,11 @@ public class Route53Service implements Resettable, RequestConditionSpelling {
     }
 
     private List<OwnedZone> privateDnsZones(String qname, ClientVpc origin) {
-        if (origin == null || qname == null || qname.isBlank()) {
+        if (qname == null || qname.isBlank()) {
             return List.of();
         }
-        return mostSpecificZones(normalizeName(qname).toLowerCase(), true, owned ->
-                owned.zone().getVpcAssociations().stream().anyMatch(association ->
+        return mostSpecificZones(normalizeName(qname).toLowerCase(), true, owned -> origin == null
+                || owned.zone().getVpcAssociations().stream().anyMatch(association ->
                         origin.vpcId().equals(association.getVpcId())
                                 && origin.region().equals(association.getVpcRegion())
                                 && origin.accountId().equals(association.getOwnerAccountId() != null
@@ -943,26 +911,6 @@ public class Route53Service implements Resettable, RequestConditionSpelling {
             }
         }
         return shared;
-    }
-
-    /**
-     * Whether a private zone holds records beneath {@code qname} although none at it: an empty
-     * non-terminal, which exists in DNS and so answers NOERROR rather than NXDOMAIN.
-     */
-    public boolean hasPrivateRecordsBeneath(String qname) {
-        if (qname == null || qname.isBlank()) {
-            return false;
-        }
-        String normalizedQname = normalizeName(qname).toLowerCase();
-        String suffix = "." + normalizedQname;
-        for (OwnedZone owned : mostSpecificZones(normalizedQname, true)) {
-            for (ResourceRecordSet rrs : getRecordsForZoneAcrossAccounts(owned.accountId(), owned.zone().getId())) {
-                if (normalizeName(rrs.getName()).toLowerCase().endsWith(suffix)) {
-                    return true;
-                }
-            }
-        }
-        return false;
     }
 
     record PublicDnsZone(String name, List<ResourceRecordSet> matchingRecords, List<ResourceRecordSet> records) {}

@@ -112,12 +112,12 @@ class PrivateHostedZoneVpcScopeIntegrationTest {
     }
 
     @Test
-    void unknownCallerCannotSuppressThePublicAnswerWithAnUnrelatedPrivateZone() {
+    void unknownCallerRetainsPrivateAnswerAheadOfPublicRecords() {
         String name = uniqueName();
         addAddress(zone(name, firstVpc), "api." + name, "10.73.1.7");
         addAddress(zone(name, null), "api." + name, "203.0.113.7");
 
-        assertEquals(List.of("203.0.113.7"), answer("api." + name, null).orElseThrow().addresses());
+        assertEquals(List.of("10.73.1.7"), answer("api." + name, null).orElseThrow().addresses());
     }
 
     @Test
@@ -186,7 +186,7 @@ class PrivateHostedZoneVpcScopeIntegrationTest {
             assertEquals(List.of("10.73.1.7"),
                     answer("api." + name, "192.0.2.10", sources).orElseThrow().addresses());
             assertTrue(answer("api." + name, "192.0.2.20", sources).isEmpty());
-            assertTrue(answer("api." + name, null, sources).isEmpty());
+            assertEquals(List.of("10.73.1.7"), answer("api." + name, null, sources).map(DnsAnswer::addresses).orElse(List.of()));
         }
 
         String backingZone = cloudMap.getNamespace(namespace).getHostedZoneId();

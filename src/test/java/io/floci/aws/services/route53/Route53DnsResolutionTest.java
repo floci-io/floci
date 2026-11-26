@@ -541,12 +541,17 @@ class Route53DnsResolutionTest {
     }
 
     @Test
-    void unknownCallerDoesNotReadPrivateRecords() {
+    void unknownCallerRetainsPrivateRecords() {
         String zone = uniqueZone();
-        addRecord(createPrivateZone(zone), "api." + zone, "A", "10.0.1.100");
+        String id = createPrivateZone(zone);
+        addRecord(id, "api." + zone, "A", "10.0.1.100");
+        addRecord(id, "leaf.branch." + zone, "A", "10.0.1.101");
 
-        assertTrue(dnsRecordSource.resolveIpv4("api." + zone).isEmpty());
-        assertTrue(dnsRecordSource.resolve("api." + zone, 1, null).isEmpty());
+        assertEquals(List.of("10.0.1.100"), dnsRecordSource.resolveIpv4("api." + zone).map(DnsAnswer::addresses).orElse(List.of()));
+        assertEquals(List.of("10.0.1.100"), dnsRecordSource.resolve("api." + zone, 1, null).orElseThrow().addresses());
+        assertEquals(DnsAnswer.noData(), dnsRecordSource.resolve("api." + zone, 28, null).orElseThrow());
+        assertEquals(DnsAnswer.noData(), dnsRecordSource.resolve("branch." + zone, 1, null).orElseThrow());
+        assertEquals(DnsAnswer.nxDomain(), dnsRecordSource.resolve("absent." + zone, 1, null).orElseThrow());
     }
 
     @ParameterizedTest

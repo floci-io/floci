@@ -85,7 +85,7 @@ class Route53DnsPacketIntegrationTest {
         List<DnsClientVpcSource> runtimeOrigins = origins.stream().toList();
         byte[] request = DnsTestQuery.query(name, 1, 0x1234);
         try {
-            assertRuntimeAddress(queryWithOrigins(request, runtimeOrigins), "203.0.113.17");
+            assertRuntimeAddress(queryWithOrigins(request, runtimeOrigins), "192.0.2.17");
             metadata.registerContainer("127.0.0.1", instance.getInstanceId(), instance);
             byte[] allowed = queryWithOrigins(request, runtimeOrigins);
             assertPrivateHeader(allowed, 0, 1);
@@ -93,7 +93,7 @@ class Route53DnsPacketIntegrationTest {
             assertArrayEquals(new DnsRecord.Address(1, "192.0.2.17").data(),
                     Arrays.copyOfRange(allowed, allowed.length - 4, allowed.length));
             metadata.reconcileContainerAddresses(Set.of("192.0.2.99"), instance);
-            assertRuntimeAddress(queryWithOrigins(request, runtimeOrigins), "203.0.113.17");
+            assertRuntimeAddress(queryWithOrigins(request, runtimeOrigins), "192.0.2.17");
             metadata.reconcileContainerAddresses(Set.of("127.0.0.1"), instance);
             assertPrivateHeader(queryWithOrigins(request, runtimeOrigins), 0, 1);
             instance.setRegion("us-west-2");
@@ -106,7 +106,7 @@ class Route53DnsPacketIntegrationTest {
             assertRuntimeAddress(queryWithOrigins(request, runtimeOrigins), "203.0.113.17");
             instance.setVpcId("vpc-ec2-dns");
             metadata.unregisterInstance(instance);
-            assertRuntimeAddress(queryWithOrigins(request, runtimeOrigins), "203.0.113.17");
+            assertRuntimeAddress(queryWithOrigins(request, runtimeOrigins), "192.0.2.17");
         } finally {
             metadata.unregisterInstance(instance);
         }

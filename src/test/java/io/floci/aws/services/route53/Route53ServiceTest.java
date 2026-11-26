@@ -673,12 +673,12 @@ class Route53ServiceTest {
         service.changeResourceRecordSets(zoneId,
                 List.of(change("CREATE", aRecord("app.corp.internal.", 300, "10.0.0.1"))), null);
 
-        List<ResourceRecordSet> beforeClear = service.findPrivateRecordsForName("app.corp.internal.");
+        List<ResourceRecordSet> beforeClear = service.findPrivateRecordsForName("app.corp.internal.", null);
         assertThat(beforeClear, hasSize(1));
 
         service.clear();
 
-        List<ResourceRecordSet> afterClear = service.findPrivateRecordsForName("app.corp.internal.");
+        List<ResourceRecordSet> afterClear = service.findPrivateRecordsForName("app.corp.internal.", null);
         assertThat(afterClear, empty());
     }
 
@@ -689,12 +689,12 @@ class Route53ServiceTest {
                 new VpcAssociation("vpc-123", "us-east-1"));
         service.createHostedZone("public.com.", "ref-public", null, null);
 
-        assertTrue(service.isCoveredByPrivateZone("corp.internal"));
-        assertTrue(service.isCoveredByPrivateZone("app.corp.internal."));
-        assertTrue(service.isCoveredByPrivateZone("sub.service.corp.internal"));
-        assertFalse(service.isCoveredByPrivateZone("public.com"));
-        assertFalse(service.isCoveredByPrivateZone("othercorp.internal"));
-        assertFalse(service.isCoveredByPrivateZone("example.org"));
+        assertTrue(service.isCoveredByPrivateZone("corp.internal", null));
+        assertTrue(service.isCoveredByPrivateZone("app.corp.internal.", null));
+        assertTrue(service.isCoveredByPrivateZone("sub.service.corp.internal", null));
+        assertFalse(service.isCoveredByPrivateZone("public.com", null));
+        assertFalse(service.isCoveredByPrivateZone("othercorp.internal", null));
+        assertFalse(service.isCoveredByPrivateZone("example.org", null));
     }
 
     private static HealthCheckConfig httpsCheck(String path) {

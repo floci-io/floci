@@ -73,6 +73,26 @@ class CloudMapDnsPacketIntegrationTest {
                 Arrays.copyOfRange(response, request.length + 12, request.length + 16));
     }
 
+    @Test
+    void unknownCallerRetainsPrivateCloudMapAnswersAcrossTheWire() throws Exception {
+        String namespace = uniqueNamespace();
+        String namespaceId = privateDnsNamespace(namespace);
+        Service service = cloudMapService.createService("api", namespaceId, null, null,
+                "{\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":15}]}", null, null, null, Map.of(), REGION);
+        cloudMapService.registerInstance(service.getId(), "task-1", null,
+                Map.of("AWS_INSTANCE_IPV4", "172.31.0.6"), REGION);
+        byte[] request = DnsTestQuery.query("api." + namespace, 1, 0x1234);
+        for (List<DnsRecordSource> sources : List.of(
+                List.of(route53DnsRecordSource, cloudMapDnsRecordSource),
+                List.of(cloudMapDnsRecordSource, route53DnsRecordSource))) {
+            byte[] response = query(new EmbeddedDnsServer(List.of(), sources, List.of(), List.of()), request);
+            assertEquals(0, ByteBuffer.wrap(response).getShort(2) & 15);
+            assertEquals(1, ByteBuffer.wrap(response).getShort(6));
+            assertArrayEquals(new byte[]{(byte) 172, 31, 0, 6},
+                    Arrays.copyOfRange(response, response.length - 4, response.length));
+        }
+    }
+
     /**
      * The namespace's Route 53 zone covers the same names, and answers NXDOMAIN for a name it
      * has no record for, or NOERROR/NODATA for a name holding only another type (the TXT below).
