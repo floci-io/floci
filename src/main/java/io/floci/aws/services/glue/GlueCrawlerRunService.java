@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.storage.RegionScopedStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -24,13 +25,18 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Glue crawler runs. A crawl follows the crawler state machine (READY, RUNNING, back to READY with a
  * LastCrawl status) and settles lazily when read, asking the {@link CrawlRunner} how it ended. With the
  * default {@code crawler-run-duration-seconds} of 0 a crawl finishes as soon as it starts; a positive
- * duration keeps the crawler RUNNING for that long. The default runner crawls no data store and
- * writes no table.
+ * duration keeps the crawler RUNNING for that long. A crawl that reads a data store (a JDBC target)
+ * reads it in the background and stays RUNNING until the read has finished as well; what it found is
+ * written when the crawl settles, and discarded when the crawl was stopped first.
  *
  * <p>Every public method is synchronized. Starting and stopping a crawl, and the crawler mutations
  * AWS refuses while a crawl runs (UpdateCrawler, DeleteCrawler), check the crawl state and act on
@@ -60,15 +66,31 @@ public class GlueCrawlerRunService {
     private final int runDurationSeconds;
     private final Clock clock;
     private final CrawlRunner crawlRunner;
+    private final Executor readExecutor;
+    // Crawl id to the background read of its data stores. In memory: a crawl still reading when Floci
+    // stopped has none after a restart, and its next settle reads again.
+    private final Map<String, CompletableFuture<CrawlRunner.CatalogWrite>> reads = new ConcurrentHashMap<>();
 
     @Inject
     public GlueCrawlerRunService(StorageFactory storageFactory, GlueService glueService, EmulatorConfig config,
-                                 RegionResolver regionResolver) {
+                                 RegionResolver regionResolver, JdbcCrawlRunner jdbcCrawlRunner) {
         this(new RegionScopedStorage<>(storageFactory, regionResolver, "glue", "crawler_runs.json", new TypeReference<>() {}),
                 new RegionScopedStorage<>(storageFactory, regionResolver,
                         "glue", "workflow_run_crawls.json", new TypeReference<>() {}),
                 glueService, config.services().glue().crawlerRunDurationSeconds(), Clock.systemUTC(),
-                CrawlRunner.NO_DATA_STORE);
+                jdbcCrawlRunner, readerThreads(regionResolver));
+    }
+
+    /**
+     * A read runs on its own thread, in the account and Region of the request that started it, since the
+     * stores it reads are scoped to them.
+     */
+    private static Executor readerThreads(RegionResolver regionResolver) {
+        return task -> {
+            String accountId = regionResolver.getAccountId();
+            String region = regionResolver.getRegion();
+            Thread.ofVirtual().name("glue-crawl-read").start(() -> RequestScopes.runAs(accountId, region, task));
+        };
     }
 
     GlueCrawlerRunService(StorageBackend<String, CrawlerRunRecord> recordStore,
@@ -80,6 +102,14 @@ public class GlueCrawlerRunService {
     GlueCrawlerRunService(StorageBackend<String, CrawlerRunRecord> recordStore,
                           StorageBackend<String, List<FinishedCrawl>> workflowCrawlStore, GlueService glueService,
                           int runDurationSeconds, Clock clock, CrawlRunner crawlRunner) {
+        // Only for a runner that reads no data store, which never hands a read to the executor.
+        this(recordStore, workflowCrawlStore, glueService, runDurationSeconds, clock, crawlRunner, Runnable::run);
+    }
+
+    /** {@code readExecutor} must run each task after the call that hands it over has returned. */
+    GlueCrawlerRunService(StorageBackend<String, CrawlerRunRecord> recordStore,
+                          StorageBackend<String, List<FinishedCrawl>> workflowCrawlStore, GlueService glueService,
+                          int runDurationSeconds, Clock clock, CrawlRunner crawlRunner, Executor readExecutor) {
         if (runDurationSeconds < 0) {
             throw new IllegalArgumentException(
                     "floci.services.glue.crawler-run-duration-seconds must not be negative: " + runDurationSeconds);
@@ -90,6 +120,7 @@ public class GlueCrawlerRunService {
         this.runDurationSeconds = runDurationSeconds;
         this.clock = clock;
         this.crawlRunner = crawlRunner;
+        this.readExecutor = readExecutor;
     }
 
     public synchronized String startCrawler(String name) {
@@ -115,6 +146,9 @@ public class GlueCrawlerRunService {
         record.setCurrentWorkflowRunId(workflowRunId);
         recordStore.put(name, record);
         LOG.infov("Started Glue crawler {0}", name);
+        if (crawlRunner.readsDataStore(name)) {
+            startRead(name, crawlId);
+        }
         settle(record);
         return crawlId;
     }
@@ -125,6 +159,7 @@ public class GlueCrawlerRunService {
         if (record.getCurrentStart() == null) {
             throw new AwsException("CrawlerNotRunningException", "Crawler with name " + name + " isn't running", 400);
         }
+        reads.remove(record.getCurrentCrawlId());
         finish(record, clock.instant(), CrawlOutcome.cancelled());
         LOG.infov("Stopped Glue crawler {0}", name);
     }
@@ -348,8 +383,69 @@ public class GlueCrawlerRunService {
             return;
         }
         Instant finishesAt = record.getCurrentStart().plusSeconds(runDurationSeconds);
-        if (!clock.instant().isBefore(finishesAt)) {
-            finish(record, finishesAt, runCrawl(record.getCrawlerName()));
+        if (clock.instant().isBefore(finishesAt)) {
+            return;
+        }
+        String name = record.getCrawlerName();
+        if (!crawlRunner.readsDataStore(name)) {
+            finish(record, finishesAt, runCrawl(name));
+            return;
+        }
+        String crawlId = record.getCurrentCrawlId();
+        CompletableFuture<CrawlRunner.CatalogWrite> read = reads.get(crawlId);
+        if (read == null) {
+            startRead(name, crawlId);
+            return;
+        }
+        if (!read.isDone()) {
+            return;
+        }
+        reads.remove(crawlId);
+        // A read that outlasts the run duration ends the crawl when it finishes, not when the duration ran out.
+        Instant now = clock.instant();
+        finish(record, finishesAt.isAfter(now) ? finishesAt : now, write(name, read.join()));
+    }
+
+    private void startRead(String name, String crawlId) {
+        CompletableFuture<CrawlRunner.CatalogWrite> read = new CompletableFuture<>();
+        reads.put(crawlId, read);
+        try {
+            readExecutor.execute(() -> {
+                read.complete(readDataStores(name));
+                readFinished(name, crawlId);
+            });
+        } catch (RejectedExecutionException e) {
+            LOG.warnv(e, "Glue crawler {0} could not start reading its data stores", name);
+            read.complete(() -> CrawlOutcome.failed("Floci is shutting down"));
+        }
+    }
+
+    private CrawlRunner.CatalogWrite readDataStores(String name) {
+        try {
+            return crawlRunner.read(name);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Glue crawler {0} could not read its data stores: {1}", name, e.getMessage());
+            String message = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            return () -> CrawlOutcome.failed(message);
+        }
+    }
+
+    /** Settles the crawl a background read belonged to, so what it found is written without waiting for a read. */
+    private synchronized void readFinished(String name, String crawlId) {
+        CrawlerRunRecord record = recordStore.get(name).orElse(null);
+        if (record == null || !crawlId.equals(record.getCurrentCrawlId())) {
+            reads.remove(crawlId);
+            return;
+        }
+        settle(record);
+    }
+
+    private CrawlOutcome write(String name, CrawlRunner.CatalogWrite write) {
+        try {
+            return write.apply();
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Glue crawler {0} could not write what it found: {1}", name, e.getMessage());
+            return CrawlOutcome.failed(e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
         }
     }
 
