@@ -469,6 +469,8 @@ private gateway lifecycles are not modelled.
 
 ### Security Groups
 
+New security groups in a VPC with an IPv6 CIDR block include the default `::/0` outbound rule alongside `0.0.0.0/0`. Associating the first IPv6 CIDR block also adds IPv6 outbound access to existing groups whose outbound permissions still consist only of the original IPv4 rule; groups with customized outbound permissions retain them. Both `DescribeSecurityGroups` and `DescribeSecurityGroupRules` expose the added rules.
+
 | Action | Description |
 |--------|-------------|
 | CreateSecurityGroup | Creates a security group in a VPC, the default VPC when `VpcId` is absent or empty. `DryRun=true` is answered with `DryRunOperation` and creates nothing. A tag specification error or a missing `GroupName`, `GroupDescription` or VPC keeps its own error; a taken group name is checked only without `DryRun`. |
