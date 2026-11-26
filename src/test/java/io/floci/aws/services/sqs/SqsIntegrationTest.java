@@ -481,6 +481,45 @@ class SqsIntegrationTest {
     }
 
     @Test
+    void sendMessageBatch_queryProtocol_smallMaximumMessageSizeQueueUsesFixedBatchLimit() {
+        String queueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "batch-small-max-query-queue")
+            .formParam("Attribute.1.Name", "MaximumMessageSize")
+            .formParam("Attribute.1.Value", "1024")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            String body1000 = "x".repeat(1000);
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessageBatch")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("SendMessageBatchRequestEntry.1.Id", "a")
+                .formParam("SendMessageBatchRequestEntry.1.MessageBody", body1000)
+                .formParam("SendMessageBatchRequestEntry.2.Id", "b")
+                .formParam("SendMessageBatchRequestEntry.2.MessageBody", body1000)
+                .formParam("SendMessageBatchRequestEntry.3.Id", "c")
+                .formParam("SendMessageBatchRequestEntry.3.MessageBody", body1000)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("SendMessageBatchResponse.SendMessageBatchResult.SendMessageBatchResultEntry.size()",
+                        equalTo(3))
+                .body(not(containsString("BatchResultErrorEntry")));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", queueUrl)
+            .when().post("/");
+        }
+    }
+
+    @Test
     void sendMessageBatch_queryProtocol_oversizedBatchReturnsBatchRequestTooLong() {
         String queueName = "batch-oversize-query-queue";
         String queueUrl = given()

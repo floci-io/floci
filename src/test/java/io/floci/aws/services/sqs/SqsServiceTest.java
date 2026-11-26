@@ -2592,6 +2592,27 @@ class SqsServiceTest {
     }
 
     @Test
+    void validateBatchPayloadSize_smallQueueMaximumMessageSize_usesFixedBatchLimit() {
+        Queue queue = sqsService.createQueue("batch-small-q",
+                Map.of("MaximumMessageSize", "1024"), "us-east-1");
+        sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 3_000);
+        sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 1_048_576);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 1_048_577));
+        assertEquals("BatchRequestTooLong", ex.getErrorCode());
+    }
+
+    @Test
+    void validateBatchPayloadSize_raisedConfiguredMaxMessageSize_raisesBatchLimit() {
+        SqsService raised = new SqsService(new InMemoryStorage<>(), 30, 2_097_152, BASE_URL, clock);
+        Queue queue = raised.createQueue("batch-raised-q", null, "us-east-1");
+        raised.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 1_572_864);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                raised.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 2_097_153));
+        assertEquals("BatchRequestTooLong", ex.getErrorCode());
+    }
+
+    @Test
     void sendMessage_withAwsTraceHeader_isStoredAndReturnedOnReceive() {
         Queue q = sqsService.createQueue("traced", null, "us-east-1");
         sqsService.sendMessage(q.getQueueUrl(), "hi", 0, null, null, null,
