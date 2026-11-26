@@ -6,6 +6,19 @@
 This page covers the Bedrock control plane. Model invocation is a separate service
 that shares the same signing name: see [Bedrock Runtime](bedrock-runtime.md).
 
+## Account-level guardrail configurations
+
+`PUT /enforcedGuardrailsConfiguration` creates a configuration, or replaces the
+configuration named by `configId`. It references an existing numerical guardrail
+version and records the caller identity. `GET /enforcedGuardrailsConfiguration`
+returns one configuration per page, with an opaque `nextToken` when another page
+exists. `DELETE /enforcedGuardrailsConfiguration/{configId}` removes it.
+
+Configuration storage is scoped to the calling account and Region. These are
+control-plane records: inference-time enforcement is not implemented. Model ID
+patterns, conflicts between multiple configurations in one Region, and cascading
+or refusing deletion of a referenced guardrail version are not implemented.
+
 ## Supported Actions
 
 <!-- floci:actions:start -->
@@ -26,6 +39,9 @@ that shares the same signing name: see [Bedrock Runtime](bedrock-runtime.md).
 | `PutResourcePolicy` | Attach a resource-based policy to a guardrail or a guardrail profile (`POST /resource-policy`) |
 | `GetResourcePolicy` | Read the resource-based policy of a guardrail or a guardrail profile |
 | `DeleteResourcePolicy` | Remove the resource-based policy of a guardrail or a guardrail profile |
+| `PutEnforcedGuardrailConfiguration` | Create or replace an account and Region configuration referencing a numerical guardrail version |
+| `ListEnforcedGuardrailsConfiguration` | List the calling account and Region's configurations, one per page |
+| `DeleteEnforcedGuardrailConfiguration` | Delete a configuration by its `configId` |
 | `TagResource` | Tag a guardrail or application inference profile (`POST /tagResource`) |
 | `UntagResource` | Remove tags from a guardrail or application inference profile (`POST /untagResource`) |
 | `ListTagsForResource` | List a guardrail's or application inference profile's tags (`POST /listTagsForResource`) |

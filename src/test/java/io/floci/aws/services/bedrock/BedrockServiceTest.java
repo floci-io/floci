@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.services.bedrock.model.EnforcedGuardrailConfiguration;
 import io.floci.aws.services.bedrock.model.Guardrail;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.kms.model.KmsKey;
@@ -18,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -40,7 +42,7 @@ class BedrockServiceTest {
     @BeforeEach
     void setUp() {
         kmsService = mock(KmsService.class);
-        service = new BedrockService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+        service = new BedrockService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver(REGION, ACCOUNT), mapper, kmsService);
     }
 
@@ -645,5 +647,154 @@ class BedrockServiceTest {
                     rootPolicy(arn, "bedrock:ApplyGuardrail"), REGION));
             assertEquals("ResourceNotFoundException", put.getErrorCode(), arn);
         }
+    }
+    private static final String CALLER = "arn:aws:iam::" + ACCOUNT + ":user/admin";
+
+    private ObjectNode enforcedConfigRequest(String guardrailIdentifier, String version) {
+        return BedrockEnforcedGuardrailFixtures.request(mapper, guardrailIdentifier, version);
+    }
+
+    private Guardrail publishedGuardrail(String name) {
+        return BedrockEnforcedGuardrailFixtures.publish(service, REGION, createRequest(name));
+    }
+
+    @Test
+    void enforcedConfigurationRecordsTheGuardrailVersionAndCaller() {
+        Guardrail version = publishedGuardrail("enforced");
+        ObjectNode request = enforcedConfigRequest(version.getGuardrailId(), "1");
+        ObjectNode inferenceConfig = (ObjectNode) request.get("guardrailInferenceConfig");
+        inferenceConfig.putObject("selectiveContentGuarding").put("system", "SELECTIVE").put("messages", "COMPREHENSIVE");
+        ObjectNode modelEnforcement = inferenceConfig.putObject("modelEnforcement");
+        modelEnforcement.putArray("includedModels").add("ALL");
+        modelEnforcement.putArray("excludedModels").add("anthropic.claude-v2");
+
+        EnforcedGuardrailConfiguration created = service.putEnforcedGuardrailConfiguration(request, CALLER, REGION);
+
+        assertTrue(created.getConfigId().matches("[a-z0-9]+"), created.getConfigId());
+        List<EnforcedGuardrailConfiguration> listed = service.listEnforcedGuardrailConfigurations(null, REGION).items();
+        assertEquals(1, listed.size());
+        EnforcedGuardrailConfiguration stored = listed.get(0);
+        assertEquals(created.getConfigId(), stored.getConfigId());
+        assertEquals(version.getGuardrailId(), stored.getGuardrailId());
+        assertEquals(version.getGuardrailArn(), stored.getGuardrailArn());
+        assertEquals("1", stored.getGuardrailVersion());
+        assertEquals("SELECTIVE", stored.getSelectiveContentGuarding().get("system").asText());
+        assertEquals("ALL", stored.getModelEnforcement().get("includedModels").get(0).asText());
+        assertEquals(CALLER, stored.getCreatedBy());
+        assertEquals(CALLER, stored.getUpdatedBy());
+        assertNotNull(stored.getCreatedAt());
+    }
+
+    @Test
+    void enforcedConfigurationAcceptsTheGuardrailArnAsIdentifier() {
+        Guardrail version = publishedGuardrail("enforced-by-arn");
+
+        EnforcedGuardrailConfiguration created = service.putEnforcedGuardrailConfiguration(
+                enforcedConfigRequest(version.getGuardrailArn(), "1"), CALLER, REGION);
+
+        assertEquals(version.getGuardrailId(), created.getGuardrailId());
+    }
+
+    @Test
+    void putWithAConfigIdReplacesThatConfigurationAndKeepsItsCreator() {
+        Guardrail version = publishedGuardrail("enforced-update");
+        service.createGuardrailVersion(version.getGuardrailId(), null, REGION);
+        EnforcedGuardrailConfiguration created = service.putEnforcedGuardrailConfiguration(
+                enforcedConfigRequest(version.getGuardrailId(), "1"), CALLER, REGION);
+
+        ObjectNode update = enforcedConfigRequest(version.getGuardrailId(), "2");
+        update.put("configId", created.getConfigId());
+        String otherCaller = "arn:aws:iam::" + ACCOUNT + ":role/ops";
+        service.putEnforcedGuardrailConfiguration(update, otherCaller, REGION);
+
+        List<EnforcedGuardrailConfiguration> listed = service.listEnforcedGuardrailConfigurations(null, REGION).items();
+        assertEquals(1, listed.size());
+        assertEquals("2", listed.get(0).getGuardrailVersion());
+        assertEquals(CALLER, listed.get(0).getCreatedBy());
+        assertEquals(otherCaller, listed.get(0).getUpdatedBy());
+    }
+
+    @Test
+    void enforcedConfigurationRejectsTheDraftVersion() {
+        Guardrail draft = create("enforced-draft");
+
+        AwsException e = assertThrows(AwsException.class, () -> service.putEnforcedGuardrailConfiguration(
+                enforcedConfigRequest(draft.getGuardrailId(), BedrockService.DRAFT_VERSION), CALLER, REGION));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void enforcedConfigurationRejectsAVersionTheGuardrailDoesNotHold() {
+        Guardrail version = publishedGuardrail("enforced-missing-version");
+
+        AwsException e = assertThrows(AwsException.class, () -> service.putEnforcedGuardrailConfiguration(
+                enforcedConfigRequest(version.getGuardrailId(), "7"), CALLER, REGION));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void putWithAnUnknownConfigIdIsNotFound() {
+        Guardrail version = publishedGuardrail("enforced-unknown-config");
+        ObjectNode request = enforcedConfigRequest(version.getGuardrailId(), "1");
+        request.put("configId", "doesnotexist");
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.putEnforcedGuardrailConfiguration(request, CALLER, REGION));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void enforcedConfigurationRejectsAnIncompleteModelEnforcementAndAnUnknownGuardingMode() {
+        Guardrail version = publishedGuardrail("enforced-invalid");
+        ObjectNode noIncludedModels = enforcedConfigRequest(version.getGuardrailId(), "1");
+        ((ObjectNode) noIncludedModels.get("guardrailInferenceConfig")).putObject("modelEnforcement")
+                .putArray("excludedModels");
+        ObjectNode unknownMode = enforcedConfigRequest(version.getGuardrailId(), "1");
+        ((ObjectNode) unknownMode.get("guardrailInferenceConfig")).putObject("selectiveContentGuarding")
+                .put("system", "SOMETIMES");
+
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.putEnforcedGuardrailConfiguration(noIncludedModels, CALLER, REGION)).getErrorCode());
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.putEnforcedGuardrailConfiguration(unknownMode, CALLER, REGION)).getErrorCode());
+    }
+
+    @Test
+    void enforcedConfigurationsAreScopedToTheirRegion() {
+        Guardrail version = publishedGuardrail("enforced-regional");
+        service.putEnforcedGuardrailConfiguration(enforcedConfigRequest(version.getGuardrailId(), "1"), CALLER, REGION);
+
+        assertTrue(service.listEnforcedGuardrailConfigurations(null, "eu-west-1").items().isEmpty());
+    }
+
+    @Test
+    void enforcedConfigurationsAreListedOnePerPage() {
+        Guardrail version = publishedGuardrail("enforced-paged");
+        service.putEnforcedGuardrailConfiguration(enforcedConfigRequest(version.getGuardrailId(), "1"), CALLER, REGION);
+        service.putEnforcedGuardrailConfiguration(enforcedConfigRequest(version.getGuardrailId(), "1"), CALLER, REGION);
+
+        PaginatedResult<EnforcedGuardrailConfiguration> first = service.listEnforcedGuardrailConfigurations(null, REGION);
+        PaginatedResult<EnforcedGuardrailConfiguration> second =
+                service.listEnforcedGuardrailConfigurations(first.nextToken(), REGION);
+
+        assertEquals(1, first.items().size());
+        assertNotNull(first.nextToken());
+        assertEquals(1, second.items().size());
+        assertNull(second.nextToken());
+        assertNotEquals(first.items().get(0).getConfigId(), second.items().get(0).getConfigId());
+    }
+
+    @Test
+    void deletingAnEnforcedConfigurationRemovesItOnce() {
+        Guardrail version = publishedGuardrail("enforced-delete");
+        String configId = service.putEnforcedGuardrailConfiguration(
+                enforcedConfigRequest(version.getGuardrailId(), "1"), CALLER, REGION).getConfigId();
+
+        service.deleteEnforcedGuardrailConfiguration(configId, REGION);
+
+        assertTrue(service.listEnforcedGuardrailConfigurations(null, REGION).items().isEmpty());
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.deleteEnforcedGuardrailConfiguration(configId, REGION));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
     }
 }
