@@ -117,8 +117,9 @@ public class DataSyncService implements StoredResourceArns {
 
     public DataSyncAgent getAgent(String agentArn) {
         requireArn(agentArn, "AgentArn");
-        return agents.get(agentArn).filter(agent -> inRequestRegion(agentArn)).orElseThrow(() -> new AwsException("InvalidRequestException",
-                "Agent " + agentArn + " is not found.", 400));
+        return agents.get(agentArn).filter(agent -> regionResolver.inRequestRegion(agentArn))
+                .orElseThrow(() -> new AwsException("InvalidRequestException",
+                        "Agent " + agentArn + " is not found.", 400));
     }
 
     public DataSyncAgent updateAgent(String agentArn, String name) {
@@ -137,7 +138,7 @@ public class DataSyncService implements StoredResourceArns {
     }
 
     public Page<DataSyncAgent> listAgents(String nextToken, int maxResults) {
-        List<DataSyncAgent> all = agents.scan(this::inRequestRegion);
+        List<DataSyncAgent> all = agents.scan(regionResolver::inRequestRegion);
         all.sort(Comparator.comparing(DataSyncAgent::getAgentArn));
         return paginate(all, DataSyncAgent::getAgentArn, nextToken, maxResults);
     }
@@ -177,8 +178,9 @@ public class DataSyncService implements StoredResourceArns {
 
     public DataSyncLocation getLocation(String locationArn) {
         requireArn(locationArn, "LocationArn");
-        return locations.get(locationArn).filter(location -> inRequestRegion(locationArn)).orElseThrow(() -> new AwsException("InvalidRequestException",
-                "Location " + locationArn + " is not found.", 400));
+        return locations.get(locationArn).filter(location -> regionResolver.inRequestRegion(locationArn))
+                .orElseThrow(() -> new AwsException("InvalidRequestException",
+                        "Location " + locationArn + " is not found.", 400));
     }
 
     public DataSyncLocation getLocation(String locationArn, DataSyncLocationType expected) {
@@ -219,7 +221,7 @@ public class DataSyncService implements StoredResourceArns {
 
     public Page<DataSyncLocation> listLocations(JsonNode filters, String nextToken, int maxResults) {
         List<DataSyncLocation> all = new ArrayList<>();
-        for (DataSyncLocation location : locations.scan(this::inRequestRegion)) {
+        for (DataSyncLocation location : locations.scan(regionResolver::inRequestRegion)) {
             if (matchesLocationFilters(location, filters)) {
                 all.add(location);
             }
@@ -261,8 +263,9 @@ public class DataSyncService implements StoredResourceArns {
 
     public DataSyncTask getTask(String taskArn) {
         requireArn(taskArn, "TaskArn");
-        return tasks.get(taskArn).filter(task -> inRequestRegion(taskArn)).orElseThrow(() -> new AwsException("InvalidRequestException",
-                "Task " + taskArn + " is not found.", 400));
+        return tasks.get(taskArn).filter(task -> regionResolver.inRequestRegion(taskArn))
+                .orElseThrow(() -> new AwsException("InvalidRequestException",
+                        "Task " + taskArn + " is not found.", 400));
     }
 
     public DataSyncTask updateTask(JsonNode request) {
@@ -307,7 +310,7 @@ public class DataSyncService implements StoredResourceArns {
 
     public Page<DataSyncTask> listTasks(JsonNode filters, String nextToken, int maxResults) {
         List<DataSyncTask> all = new ArrayList<>();
-        for (DataSyncTask task : tasks.scan(this::inRequestRegion)) {
+        for (DataSyncTask task : tasks.scan(regionResolver::inRequestRegion)) {
             if (matchesTaskFilters(task, filters)) {
                 all.add(task);
             }
@@ -379,12 +382,10 @@ public class DataSyncService implements StoredResourceArns {
 
     private DataSyncTaggable findTaggable(String resourceArn) {
         requireArn(resourceArn, "ResourceArn");
-        if (!inRequestRegion(resourceArn)) {
-            throw new AwsException("InvalidRequestException", "Resource " + resourceArn + " is not found.", 400);
-        }
         return agents.get(resourceArn).<DataSyncTaggable>map(agent -> agent)
                 .or(() -> locations.get(resourceArn).map(location -> location))
                 .or(() -> tasks.get(resourceArn).map(task -> task))
+                .filter(resource -> regionResolver.inRequestRegion(resourceArn))
                 .orElseThrow(() -> new AwsException("InvalidRequestException",
                         "Resource " + resourceArn + " is not found.", 400));
     }
@@ -760,14 +761,6 @@ public class DataSyncService implements StoredResourceArns {
 
     private static String optionalText(JsonNode request, String member) {
         return request.hasNonNull(member) ? request.get(member).asText() : null;
-    }
-
-    /**
-     * Whether {@code arn}, the key an agent, a location or a task is stored under, names one of the request's Region.
-     * The ARN carries its Region, so each resource is Regional without a key of its own, those stored before included.
-     */
-    private boolean inRequestRegion(String arn) {
-        return AwsArnUtils.isArn(arn) && AwsArnUtils.parse(arn).region().equals(regionResolver.getRegion());
     }
 
     private static void requireArn(String arn, String member) {
