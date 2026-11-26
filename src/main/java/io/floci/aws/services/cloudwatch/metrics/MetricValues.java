@@ -19,15 +19,14 @@ final class MetricValues {
         List<Double> values = jsonNumbers(input.get("Values"), "Values");
         List<Double> counts = jsonNumbers(input.get("Counts"), "Counts");
         return normalize(datum, memberPath + ".", values, counts,
-                input.hasNonNull("Value") || input.hasNonNull("StatisticValues"));
+                input.hasNonNull("Value"));
     }
 
     /** Parse fields indexed for one datum, so a batch never rescans the entire request per sample. */
     static List<MetricDatum> fromQuery(Map<String, List<String>> input, String prefix, MetricDatum datum) {
         List<Double> values = queryNumbers(input, prefix + "Values");
         List<Double> counts = queryNumbers(input, prefix + "Counts");
-        boolean otherFormat = input.containsKey(prefix + "Value")
-                || input.keySet().stream().anyMatch(key -> key.startsWith(prefix + "StatisticValues."));
+        boolean otherFormat = input.containsKey(prefix + "Value");
         return normalize(datum, prefix, values, counts, otherFormat);
     }
 
@@ -83,6 +82,10 @@ final class MetricValues {
         return new ArrayList<>(numbers.values());
     }
 
+    /**
+     * StatisticValues accompanying Values summarizes the same distribution. Keep the weighted samples
+     * without counting that summary again; scalar Value and Values remain alternative forms.
+     */
     private static List<MetricDatum> normalize(MetricDatum template, String memberPrefix, List<Double> values,
                                                List<Double> counts, boolean otherFormat) {
         if (values == null) {
@@ -92,8 +95,7 @@ final class MetricValues {
             return List.of(template);
         }
         if (otherFormat) {
-            throw CloudWatchMetricsException.invalidParameterCombination(
-                    "Values cannot be combined with Value or StatisticValues.");
+            throw CloudWatchMetricsException.invalidParameterCombination("Values cannot be combined with Value.");
         }
         if (counts != null && counts.size() != values.size()) {
             throw CloudWatchMetricsException.invalidParameterValue("The parameters " + memberPrefix
