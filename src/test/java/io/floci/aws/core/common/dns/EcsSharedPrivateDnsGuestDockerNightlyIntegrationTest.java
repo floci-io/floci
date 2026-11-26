@@ -8,18 +8,18 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import java.util.Map;
 
 @QuarkusTest
-@TestProfile(EcsProtectedPrivateDnsGuestIntegrationTest.ProtectedGuestProfile.class)
+@TestProfile(EcsSharedPrivateDnsGuestDockerNightlyIntegrationTest.SharedGuestProfile.class)
 @EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
-class EcsProtectedPrivateDnsGuestIntegrationTest extends EcsPrivateDnsGuestIntegrationTest {
+class EcsSharedPrivateDnsGuestDockerNightlyIntegrationTest extends EcsPrivateDnsGuestDockerNightlyIntegrationTest {
 
-    public static final class ProtectedGuestProfile implements QuarkusTestProfile {
+    public static final class SharedGuestProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
             return Map.of("floci.services.ecs.mock", "false",
                     "floci.services.ecs.shared-task-network", "true",
-                    "floci.network.security-group-enforcement.enabled", "true",
+                    "floci.network.security-group-enforcement.enabled", "false",
                     "floci.services.ec2.vpc-networks.enabled", "false",
-                    "floci.docker.resource-namespace", "ecs-protected-private-dns-guest-it");
+                    "floci.docker.resource-namespace", "ecs-shared-private-dns-guest-it");
         }
     }
 

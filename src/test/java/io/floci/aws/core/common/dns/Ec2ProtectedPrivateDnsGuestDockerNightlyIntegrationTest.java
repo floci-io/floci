@@ -13,9 +13,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
-@TestProfile(Ec2ProtectedPrivateDnsGuestIntegrationTest.ProtectedGuestProfile.class)
+@TestProfile(Ec2ProtectedPrivateDnsGuestDockerNightlyIntegrationTest.ProtectedGuestProfile.class)
 @EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
-class Ec2ProtectedPrivateDnsGuestIntegrationTest extends Ec2PrivateDnsGuestIntegrationTest {
+class Ec2ProtectedPrivateDnsGuestDockerNightlyIntegrationTest extends Ec2PrivateDnsGuestDockerNightlyIntegrationTest {
 
     public static final class ProtectedGuestProfile implements QuarkusTestProfile {
         @Override

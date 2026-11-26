@@ -128,6 +128,14 @@ starts EcsImagePullDockerIntegrationTest && [ -n "$REGISTRY_IMAGE" ] && pull "$R
 PYTHON_ALPINE_IMAGE="$(test_image PYTHON_ALPINE)"
 starts ContainerCaBundleDockerIntegrationTest EcsCredentialsProxyDockerNightlyIntegrationTest SageMakerDockerNightlyIntegrationTest \
     && [ -n "$PYTHON_ALPINE_IMAGE" ] && pull "$PYTHON_ALPINE_IMAGE"
+# DNS lifecycle guests use Python, including inherited protected/shared checks. Their network helpers build
+# from alpine:3.21 locally, so prefetch the base rather than pulling the locally built helper image.
+if starts EcsPrivateDnsGuestDockerNightlyIntegrationTest EcsSharedPrivateDnsGuestDockerNightlyIntegrationTest \
+          EcsProtectedPrivateDnsGuestDockerNightlyIntegrationTest Ec2PrivateDnsGuestDockerNightlyIntegrationTest \
+          Ec2ProtectedPrivateDnsGuestDockerNightlyIntegrationTest; then
+    [ -n "$PYTHON_ALPINE_IMAGE" ] && pull "$PYTHON_ALPINE_IMAGE"
+    pull alpine:3.21
+fi
 CORRETTO_8_IMAGE="$(test_image CORRETTO_8)"
 starts ContainerCaBundleDockerIntegrationTest && [ -n "$CORRETTO_8_IMAGE" ] && pull "$CORRETTO_8_IMAGE"
 # The Firelens test names the log router image itself rather than taking it from config.

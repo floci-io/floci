@@ -53,9 +53,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 @QuarkusTest
-@TestProfile(EcsPrivateDnsGuestIntegrationTest.GuestProfile.class)
+@TestProfile(EcsPrivateDnsGuestDockerNightlyIntegrationTest.GuestProfile.class)
 @EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
-class EcsPrivateDnsGuestIntegrationTest {
+class EcsPrivateDnsGuestDockerNightlyIntegrationTest {
 
     private static final String REGION = "us-east-1";
 

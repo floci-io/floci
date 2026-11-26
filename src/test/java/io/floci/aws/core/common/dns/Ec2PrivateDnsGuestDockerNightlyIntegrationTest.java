@@ -45,9 +45,9 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
 @QuarkusTest
-@TestProfile(Ec2PrivateDnsGuestIntegrationTest.GuestProfile.class)
+@TestProfile(Ec2PrivateDnsGuestDockerNightlyIntegrationTest.GuestProfile.class)
 @EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
-class Ec2PrivateDnsGuestIntegrationTest {
+class Ec2PrivateDnsGuestDockerNightlyIntegrationTest {
 
     private static final String REGION = "us-east-1";
 
