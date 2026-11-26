@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -61,6 +62,8 @@ class DocDbRestartTest {
     private volatile String requestRegion = "us-east-1";
     /** Fails every write of an available instance, once set. */
     private final AtomicBoolean refuseAvailableInstances = new AtomicBoolean();
+    /** An instance and status, {@code id:status}, the instance store refuses to write once. */
+    private volatile String refuseInstance;
     /** Runs once, inside the next read of instance {@code c-1}. */
     private volatile Runnable onInstanceRead;
     /** The cluster whose marking for the restore the cluster store refuses to write. */
@@ -530,6 +533,110 @@ class DocDbRestartTest {
     }
 
     @Test
+    void aDeleteLeftDeletingWithNoRestoreRunningIsRetriedAtOnce() {
+        DocDbCluster cluster = service.createDbCluster("c", null, "admin", "secret", false);
+        cluster.setStatus("deleting");
+
+        service.deleteDbCluster("c");
+
+        assertFalse(service.hasCluster("c"));
+        verify(containers).removeStorage(cluster.getVolumeId());
+    }
+
+    @Test
+    void aClusterWhoseInstancesCannotBeMarkedLeavesLaterDeletesToRemoveItAtOnce() {
+        service.createDbCluster("c", null, "admin", "secret", false);
+        service.createDbInstance("c-1", "c", null, null, false);
+        refuseInstance = "c-1:starting";
+        clearInvocations(containers);
+
+        assertThrows(CompletionException.class, () -> service.restorePersistedRuntime().join());
+        service.deleteDbInstance("c-1");
+        service.deleteDbCluster("c");
+
+        assertFalse(service.hasCluster("c"));
+        verify(containers, never()).tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), any());
+    }
+
+    @Test
+    void aClusterGoneDuringItsRestoreAndCreatedAgainIsDeletedAtOnce() throws Exception {
+        service.createDbCluster("c", null, "admin", "secret", false);
+        CountDownLatch starting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        blockStarts(starting, release);
+
+        CompletableFuture<Void> restore = service.restorePersistedRuntime();
+        assertTrue(starting.await(10, TimeUnit.SECONDS));
+        clusterStore.delete("us-east-1::c");
+        release.countDown();
+        restore.join();
+        startsContainers();
+        service.createDbCluster("c", null, "admin", "secret", false);
+        service.deleteDbCluster("c");
+
+        assertFalse(service.hasCluster("c"));
+    }
+
+    @Test
+    void aShutdownDuringTheRestoreLeavesLaterDeletesToRemoveTheClustersAtOnce() {
+        service.createDbCluster("first", null, "admin", "secret", false);
+        service.createDbCluster("second", null, "admin", "secret", false);
+        doAnswer(inv -> {
+            shuttingDown.set(true);
+            throw new IllegalStateException("DocumentDB is shutting down");
+        }).when(containers).tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), any());
+
+        service.restorePersistedRuntime().join();
+        service.deleteDbCluster("first");
+        service.deleteDbCluster("second");
+
+        assertFalse(service.hasCluster("first"));
+        assertFalse(service.hasCluster("second"));
+    }
+
+    @Test
+    void aClusterGoneBeforeItsStartAndCreatedAgainIsDeletedAtOnce() throws Exception {
+        service.createDbCluster("a", null, "admin", "secret", false);
+        service.createDbCluster("b", null, "admin", "secret", false);
+        CountDownLatch starting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        List<String> startedFirst = new CopyOnWriteArrayList<>();
+        doAnswer(inv -> {
+            startedFirst.add(inv.getArgument(0));
+            starting.countDown();
+            assertTrue(release.await(10, TimeUnit.SECONDS));
+            int n = started.incrementAndGet();
+            return new DocDbContainerHandle("container-" + n, inv.getArgument(0), "localhost", 40000 + n);
+        }).when(containers).tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), any());
+
+        CompletableFuture<Void> restore = service.restorePersistedRuntime();
+        assertTrue(starting.await(10, TimeUnit.SECONDS));
+        String other = "a".equals(startedFirst.getFirst()) ? "b" : "a";
+        clusterStore.delete("us-east-1::" + other);
+        release.countDown();
+        restore.join();
+        startsContainers();
+        service.createDbCluster(other, null, "admin", "secret", false);
+        service.deleteDbCluster(other);
+
+        assertFalse(service.hasCluster(other));
+    }
+
+    @Test
+    void aShutdownDuringTheLastClustersStartLeavesALaterDeleteToRemoveItAtOnce() {
+        service.createDbCluster("only", null, "admin", "secret", false);
+        doAnswer(inv -> {
+            shuttingDown.set(true);
+            throw new IllegalStateException("DocumentDB is shutting down");
+        }).when(containers).tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), any());
+
+        service.restorePersistedRuntime().join();
+        service.deleteDbCluster("only");
+
+        assertFalse(service.hasCluster("only"));
+    }
+
+    @Test
     void aDeleteAfterTheRestoreRemovesTheClusterAtOnce() {
         service.createDbCluster("c", null, "admin", "secret", false);
         service.restorePersistedRuntime().join();
@@ -602,6 +709,10 @@ class DocDbRestartTest {
     private final class InstanceStore extends InMemoryStorage<String, DocDbInstance> {
         @Override
         public synchronized void put(String key, DocDbInstance value) {
+            if ((value.getDbInstanceIdentifier() + ":" + value.getStatus()).equals(refuseInstance)) {
+                refuseInstance = null;
+                throw new IllegalStateException("the instance store refused the write");
+            }
             if (refuseAvailableInstances.get() && "available".equals(value.getStatus())) {
                 throw new IllegalStateException("the instance store refused the write");
             }

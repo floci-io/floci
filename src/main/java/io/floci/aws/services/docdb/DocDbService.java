@@ -36,6 +36,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -83,6 +84,8 @@ public class DocDbService {
      * writes that can outlive a delete check the record under the key is still theirs.
      */
     private final ConcurrentHashMap<String, Object> writeLocks = new ConcurrentHashMap<>();
+    /** The clusters whose containers the startup restore is bringing back, by account and storage key. */
+    private final Set<String> restoringClusters = ConcurrentHashMap.newKeySet();
 
     /**
      * Storage key for a record: AWS scopes these identifiers per region, so the region is part of
@@ -627,10 +630,8 @@ public class DocDbService {
                 throw new AwsException("InvalidDBClusterStateFault",
                         "Cannot delete DocDB cluster " + id + " — it still has DB instances.", 400);
             }
-            if ("maintenance".equals(cluster.getStatus()) || "deleting".equals(cluster.getStatus())) {
-                // Only the startup restore reports maintenance, while the cluster's container starts again, and a
-                // stored cluster reads deleting only while a delete waits on that restore, which removes the cluster
-                // once the container has started.
+            if (restoringClusters.contains(regionResolver.getAccountId() + "/" + key(region, id))) {
+                // Its container is starting again after a restart: the restore removes the cluster once it has.
                 cluster.setStatus("deleting");
                 clusters.put(key(region, id), cluster);
                 LOG.infov("DocDB cluster {0} is deleted once its container has started", id);
@@ -717,7 +718,9 @@ public class DocDbService {
             List<RuntimeException> failures = new ArrayList<>(prepareFailures);
             for (RestoringCluster restoring : pending) {
                 if (containerManager.isShuttingDown()) {
-                    // Clusters not reached yet stay as they are, which the next start restores.
+                    // Clusters not reached yet stay as they are, which the next start restores; a delete meanwhile
+                    // removes one at once, as no container of it is starting.
+                    pending.forEach(left -> restoringClusters.remove(left.restoringKey()));
                     break;
                 }
                 try {
@@ -775,6 +778,9 @@ public class DocDbService {
             clusters.put(key, cluster);
         }
         updateInstances(region, candidate.id(), members, "starting", null, 0);
+        // Owned by the restore only once nothing here can fail, so one that did leaves no delete waiting on a restore
+        // that never runs. Nothing is started before the restore runs, so a delete before this removes the cluster.
+        restoringClusters.add(restoring.restoringKey());
         return restoring;
     }
 
@@ -793,6 +799,7 @@ public class DocDbService {
         try {
             DocDbCluster cluster = restoreTarget(restoring);
             if (cluster == null) {
+                restoringClusters.remove(restoring.restoringKey());
                 return;
             }
             String password = cluster.getMasterPassword() != null ? cluster.getMasterPassword()
@@ -819,6 +826,7 @@ public class DocDbService {
             }
             if (containerManager.isShuttingDown()) {
                 // Left as it is, which the next start restores.
+                restoringClusters.remove(restoring.restoringKey());
                 LOG.debugv("DocDB cluster {0} not restored: {1}", restoring.id(), e.getMessage());
                 return;
             }
@@ -841,6 +849,8 @@ public class DocDbService {
         DocDbCluster cluster;
         List<String> members;
         synchronized (lockFor("cluster:" + key)) {
+            // The restore ends here: from now on a delete removes the cluster itself.
+            restoringClusters.remove(restoring.restoringKey());
             cluster = restoreTarget(restoring);
             if (cluster == null) {
                 if (handle != null) {
@@ -888,6 +898,7 @@ public class DocDbService {
         DocDbCluster cluster;
         List<String> members;
         synchronized (lockFor("cluster:" + key)) {
+            restoringClusters.remove(restoring.restoringKey());
             cluster = restoreTarget(restoring);
             if (cluster == null) {
                 return;
@@ -950,6 +961,10 @@ public class DocDbService {
      */
     private record RestoringCluster(String accountId, String region, String id, String resourceId,
                                     boolean deleting) {
+        /** The key a cluster's restore owns it under, its account's and storage key. */
+        String restoringKey() {
+            return accountId + "/" + DocDbService.key(region, id);
+        }
     }
 
     // ── Cluster snapshots ─────────────────────────────────────────────────────
