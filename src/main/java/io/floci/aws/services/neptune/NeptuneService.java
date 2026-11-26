@@ -5,7 +5,9 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.AccountAwareStorageBackend.AccountEntry;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.neptune.container.NeptuneContainerHandle;
@@ -27,9 +29,11 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
@@ -45,8 +49,17 @@ public class NeptuneService {
     private final RegionResolver regionResolver;
     private final NeptuneContainerManager containerManager;
     private final NeptuneProxyManager proxyManager;
-    private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
+    /** The proxy ports handed out, each to the identity of the cluster that holds it. */
+    private final ConcurrentHashMap<Integer, String> portOwners = new ConcurrentHashMap<>();
     private final Set<String> provisioningClusterNames = ConcurrentHashMap.newKeySet();
+    /**
+     * One monitor per cluster and per instance, by identity: a cluster's is taken by its delete, its instances'
+     * creation and deletion and its restore, and an instance's by its creation, its deletion and the restore's
+     * status writes, always before its cluster's.
+     */
+    private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
+    /** The identities of the clusters whose containers the startup restore is bringing back. */
+    private final Set<String> restoringClusters = ConcurrentHashMap.newKeySet();
 
     @Inject
     public NeptuneService(EmulatorConfig config,
@@ -96,7 +109,7 @@ public class NeptuneService {
         }
 
         // Open the try immediately after reserving the port so config reads below can't leak it.
-        int proxyPort = allocateProxyPort(settings.port());
+        int proxyPort = allocateProxyPort(settings.port(), resourceIdentity(currentAccount(), currentRegion(), id));
         NeptuneContainerHandle handle = null;
         String volumeId = null;
         boolean provisioned = false;
@@ -141,6 +154,7 @@ public class NeptuneService {
             cluster.setDbClusterMembers(new ArrayList<>());
             cluster.setProxyPort(proxyPort);
             cluster.setVolumeId(volumeId);
+            cluster.setDbType(dbType);
             settings.applyTo(cluster);
             if (tags != null && !tags.isEmpty()) {
                 cluster.setTags(tags);
@@ -202,7 +216,7 @@ public class NeptuneService {
         } finally {
             // Always release the port — even if a cleanup step throws a non-RuntimeException
             // (e.g. an Error) — since leaking the port is the exact failure this rollback prevents.
-            releaseProxyPort(proxyPort);
+            releaseProxyPort(proxyPort, identity);
         }
     }
 
@@ -273,19 +287,37 @@ public class NeptuneService {
     }
 
     public void deleteDbCluster(String id) {
-        NeptuneCluster cluster = getStoredCluster(id).orElseThrow(() ->
-                new AwsException("DBClusterNotFoundFault",
-                        "Neptune cluster " + id + " not found.", 404));
+        String identity = resourceIdentity(currentAccount(), currentRegion(), id);
+        synchronized (clusterLock(identity)) {
+            NeptuneCluster cluster = getStoredCluster(id).orElseThrow(() ->
+                    new AwsException("DBClusterNotFoundFault",
+                            "Neptune cluster " + id + " not found.", 404));
 
-        if (cluster.isDeletionProtection()) {
-            throw new AwsException("InvalidParameterCombination",
-                    "Cannot delete protected Cluster, please disable deletion protection and try again.", 400);
-        }
-        if (cluster.getDbClusterMembers() != null && !cluster.getDbClusterMembers().isEmpty()) {
-            throw new AwsException("InvalidDBClusterStateFault",
-                    "Cannot delete Neptune cluster " + id + " — it still has DB instances.", 400);
-        }
+            if (cluster.isDeletionProtection()) {
+                throw new AwsException("InvalidParameterCombination",
+                        "Cannot delete protected Cluster, please disable deletion protection and try again.", 400);
+            }
+            if (cluster.getDbClusterMembers() != null && !cluster.getDbClusterMembers().isEmpty()) {
+                throw new AwsException("InvalidDBClusterStateFault",
+                        "Cannot delete Neptune cluster " + id + ": it still has DB instances.", 400);
+            }
+            if (restoringClusters.contains(identity)) {
+                // Its container is starting again after a restart: the restore removes the cluster once it has.
+                cluster.setStatus("deleting");
+                putCluster(cluster);
+                LOG.infov("Neptune cluster {0} is deleted once its container has started", id);
+                return;
+            }
 
+            removeCluster(cluster);
+        }
+    }
+
+    /**
+     * Stops a cluster's proxy and container and removes its record and port, and its volume as the storage policy
+     * says; the caller holds the cluster's lock.
+     */
+    private void removeCluster(NeptuneCluster cluster) {
         cluster.setStatus("deleting");
         putCluster(cluster);
 
@@ -299,9 +331,307 @@ public class NeptuneService {
         }
 
         containerManager.removeStorage(cluster.getVolumeId());
-        releaseProxyPort(cluster.getProxyPort());
+        releaseProxyPort(cluster.getProxyPort(), identity);
         deleteCluster(cluster);
-        LOG.infov("Neptune cluster {0} deleted", id);
+        LOG.infov("Neptune cluster {0} deleted", cluster.getDbClusterIdentifier());
+    }
+
+    // ── Restart ───────────────────────────────────────────────────────────────
+
+    /**
+     * Brings the stored clusters' graph database containers back after Floci restarts. Shutdown removes them and
+     * their proxies and keeps their volumes, so a cluster read back from storage reported itself available with
+     * nothing behind its port. Each cluster reports {@code maintenance}, and its instances {@code starting}, at once,
+     * with its proxy port held for it, and its container comes back in the background on its volume, in the engine
+     * its graph was kept in, so Floci does not wait for Docker or an image pull. Its proxy then listens on its port
+     * again, and the cluster and its instances report {@code available}. With no Docker daemon reachable they report
+     * {@code available} with no container, as a cluster created then does.
+     *
+     * <p>A cluster whose port another cluster already holds gets a new one. A cluster recorded before its graph was
+     * kept in a volume gets a volume now, and one recorded before its engine was kept is taken to be in the
+     * configured one. A cluster whose container or proxy does not start is left with none and its instances
+     * {@code failed}, and is tried again at the next start; one still {@code deleting} at startup is removed then. A
+     * cluster deleted during its restore is {@code deleting} until its container has started, and goes then. Every
+     * cluster is tried, and the ones that could not be restored fail the returned future together. A shutdown during
+     * the restore leaves the clusters not started yet as they are, for the next start.
+     */
+    public CompletableFuture<Void> restorePersistedRuntime() {
+        if (!(clusters instanceof AccountAwareStorageBackend<NeptuneCluster> aware)) {
+            return CompletableFuture.completedFuture(null);
+        }
+        Map<String, RestoringCluster> stored = new LinkedHashMap<>();
+        for (AccountEntry<NeptuneCluster> entry : aware.scanAllAccountEntries(storedKey -> true)) {
+            NeptuneCluster cluster = entry.value();
+            String account = arnAccount(cluster.getDbClusterArn());
+            String region = arnRegion(cluster.getDbClusterArn());
+            if (account.isEmpty() || region.isEmpty()) {
+                account = entry.accountId();
+                region = regionResolver.getDefaultRegion();
+            }
+            String id = cluster.getDbClusterIdentifier();
+            stored.putIfAbsent(resourceIdentity(account, region, id),
+                    new RestoringCluster(account, region, id, null, false));
+        }
+        List<RestoringCluster> pending = new ArrayList<>();
+        List<RuntimeException> prepareFailures = new ArrayList<>();
+        // Marking calls no Docker, so it runs before startup goes on; the Docker work is all in the background.
+        for (RestoringCluster candidate : stored.values()) {
+            try {
+                RestoringCluster restoring = RequestScopes.callAs(candidate.accountId(), candidate.region(),
+                        () -> prepareRestore(candidate));
+                if (restoring != null) {
+                    pending.add(restoring);
+                }
+            } catch (RuntimeException e) {
+                prepareFailures.add(restoreFailure(candidate, e));
+            }
+        }
+        return CompletableFuture.runAsync(() -> {
+            List<RuntimeException> failures = new ArrayList<>(prepareFailures);
+            for (RestoringCluster restoring : pending) {
+                if (containerManager.isShuttingDown()) {
+                    // Clusters not reached yet stay as they are, which the next start restores; a delete meanwhile
+                    // removes one at once, as no container of it is starting.
+                    pending.forEach(left -> restoringClusters.remove(
+                            resourceIdentity(left.accountId(), left.region(), left.id())));
+                    break;
+                }
+                try {
+                    RequestScopes.runAs(restoring.accountId(), restoring.region(), () -> {
+                        if (restoring.deleting()) {
+                            finishDelete(restoring);
+                        } else {
+                            restoreCluster(restoring);
+                        }
+                    });
+                } catch (RuntimeException e) {
+                    failures.add(restoreFailure(restoring, e));
+                }
+            }
+            if (!failures.isEmpty()) {
+                RuntimeException failure = failures.getFirst();
+                failures.subList(1, failures.size()).forEach(failure::addSuppressed);
+                throw failure;
+            }
+        });
+    }
+
+    private static RuntimeException restoreFailure(RestoringCluster restoring, RuntimeException cause) {
+        return new IllegalStateException("Could not restore Neptune cluster " + restoring.id() + " of account "
+                + restoring.accountId() + " in " + restoring.region(), cause);
+    }
+
+    /**
+     * Marks a stored cluster as being restored, under its lock, holding its proxy port for it, or, for a delete
+     * Floci did not live to finish, as one to remove; null for one gone meanwhile. A cluster recorded before its
+     * graph was kept in a volume is given one here, and one recorded before its engine was kept the configured
+     * one, both kept before any Docker call.
+     */
+    private RestoringCluster prepareRestore(RestoringCluster candidate) {
+        String identity = resourceIdentity(candidate.accountId(), candidate.region(), candidate.id());
+        RestoringCluster restoring;
+        List<String> members;
+        int port;
+        synchronized (clusterLock(identity)) {
+            // Read as DescribeDBClusters reads it, which moves a record stored under a legacy key onto its key.
+            NeptuneCluster cluster = getStoredCluster(candidate.id()).orElse(null);
+            if (cluster == null) {
+                return null;
+            }
+            // Held at once, whatever happens next: a cluster created now must not be handed this cluster's port.
+            String owner = portOwners.putIfAbsent(cluster.getProxyPort(), identity);
+            if (owner != null && !owner.equals(identity)) {
+                int taken = cluster.getProxyPort();
+                cluster.setProxyPort(allocateProxyPort(null, identity));
+                cluster.setPort(cluster.getProxyPort());
+                LOG.warnv("Neptune cluster {0} moves from port {1}, which another cluster holds, to {2}",
+                        candidate.id(), String.valueOf(taken), String.valueOf(cluster.getProxyPort()));
+            }
+            boolean deleting = "deleting".equals(cluster.getStatus());
+            restoring = new RestoringCluster(candidate.accountId(), candidate.region(), candidate.id(),
+                    cluster.getDbClusterResourceId(), deleting);
+            if (deleting) {
+                return restoring;
+            }
+            members = List.copyOf(cluster.getDbClusterMembers());
+            if (cluster.getVolumeId() == null && keepsClusters()) {
+                cluster.setVolumeId(UUID.randomUUID().toString());
+            }
+            if (cluster.getDbType() == null) {
+                cluster.setDbType(configuredDbType());
+            }
+            cluster.setStatus("maintenance");
+            putCluster(cluster);
+            port = cluster.getProxyPort();
+        }
+        updateInstances(members, candidate.id(), "starting", port);
+        // Owned by the restore only once nothing here can fail, so one that did leaves no delete waiting on a restore
+        // that never runs. Nothing is started before the restore runs, so a delete before this removes the cluster.
+        restoringClusters.add(identity);
+        return restoring;
+    }
+
+    /** Removes a cluster a delete Floci did not live to finish left behind, its container and volume with it. */
+    private void finishDelete(RestoringCluster restoring) {
+        synchronized (clusterLock(resourceIdentity(restoring.accountId(), restoring.region(), restoring.id()))) {
+            NeptuneCluster cluster = restoreTarget(restoring);
+            if (cluster != null) {
+                removeCluster(cluster);
+            }
+        }
+    }
+
+    private void restoreCluster(RestoringCluster restoring) {
+        String identity = resourceIdentity(restoring.accountId(), restoring.region(), restoring.id());
+        NeptuneContainerHandle handle = null;
+        try {
+            NeptuneCluster cluster = restoreTarget(restoring);
+            if (cluster == null) {
+                restoringClusters.remove(identity);
+                return;
+            }
+            NeptuneDbType dbType = cluster.getDbType();
+            String image = switch (dbType) {
+                case GREMLIN -> config.services().neptune().defaultImage();
+                case NEO4J -> config.services().neptune().defaultNeo4jImage();
+            };
+            handle = containerManager.tryStart(restoring.id(), image, dbType, restoring.accountId(),
+                    restoring.region(), cluster.getVolumeId());
+            finishRestore(restoring, handle);
+        } catch (RuntimeException e) {
+            try {
+                proxyManager.stopProxy(identity);
+                // By identity, not handle: a start that fails after its container exists returns no handle.
+                containerManager.stopByClusterId(identity);
+            } catch (RuntimeException cleanup) {
+                e.addSuppressed(cleanup);
+            }
+            if (containerManager.isShuttingDown()) {
+                // Left as it is, which the next start restores.
+                restoringClusters.remove(identity);
+                LOG.debugv("Neptune cluster {0} not restored: {1}", restoring.id(), e.getMessage());
+                return;
+            }
+            try {
+                failRestore(restoring);
+            } catch (RuntimeException recordFailure) {
+                e.addSuppressed(recordFailure);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Puts the cluster's proxy in front of the container started for it, or leaves it with none when no Docker
+     * daemon is reachable, and makes it and its instances available; a cluster deleted while it started is
+     * removed now.
+     */
+    private void finishRestore(RestoringCluster restoring, NeptuneContainerHandle handle) {
+        String identity = resourceIdentity(restoring.accountId(), restoring.region(), restoring.id());
+        NeptuneCluster cluster;
+        List<String> members;
+        synchronized (clusterLock(identity)) {
+            // The restore ends here: from now on a delete removes the cluster itself.
+            restoringClusters.remove(identity);
+            cluster = restoreTarget(restoring);
+            if (cluster == null) {
+                if (handle != null) {
+                    containerManager.stop(handle);
+                }
+                return;
+            }
+            if (handle != null) {
+                cluster.setContainerId(handle.getContainerId());
+                cluster.setContainerHost(handle.getHost());
+                cluster.setContainerPort(handle.getPort());
+                if (!"deleting".equals(cluster.getStatus())) {
+                    proxyManager.startProxy(identity, cluster.getProxyPort(), handle.getHost(), handle.getPort());
+                }
+            } else {
+                clearContainer(cluster);
+            }
+            if ("deleting".equals(cluster.getStatus())) {
+                removeCluster(cluster);
+                return;
+            }
+            cluster.setStatus("available");
+            putCluster(cluster);
+            members = List.copyOf(cluster.getDbClusterMembers());
+        }
+        updateInstances(members, restoring.id(), "available", cluster.getProxyPort());
+    }
+
+    /** Leaves a cluster whose container or proxy did not start with none, its instances failed, for the next start. */
+    private void failRestore(RestoringCluster restoring) {
+        NeptuneCluster cluster;
+        List<String> members;
+        String identity = resourceIdentity(restoring.accountId(), restoring.region(), restoring.id());
+        synchronized (clusterLock(identity)) {
+            restoringClusters.remove(identity);
+            cluster = restoreTarget(restoring);
+            if (cluster == null) {
+                return;
+            }
+            if ("deleting".equals(cluster.getStatus())) {
+                removeCluster(cluster);
+                return;
+            }
+            clearContainer(cluster);
+            cluster.setStatus("available");
+            putCluster(cluster);
+            members = List.copyOf(cluster.getDbClusterMembers());
+        }
+        updateInstances(members, restoring.id(), "failed", cluster.getProxyPort());
+    }
+
+    /** The cluster the restore is for, or null when it is gone or another cluster has taken its identifier. */
+    private NeptuneCluster restoreTarget(RestoringCluster restoring) {
+        return getStoredCluster(restoring.id())
+                .filter(cluster -> Objects.equals(cluster.getDbClusterResourceId(), restoring.resourceId()))
+                .orElse(null);
+    }
+
+    private static void clearContainer(NeptuneCluster cluster) {
+        cluster.setContainerId(null);
+        cluster.setContainerHost(null);
+        cluster.setContainerPort(0);
+    }
+
+    /** Sets the status of a cluster's instances, and the port they report, which is the cluster's proxy port. */
+    private void updateInstances(List<String> members, String clusterId, String status, int port) {
+        for (String instanceId : members) {
+            // Under the instance's lock, which its deletion and creation take, so a write never puts back an
+            // instance deleted since it was read, nor overwrites one created again under its name.
+            synchronized (instanceLock(resourceIdentity(currentAccount(), currentRegion(), instanceId))) {
+                getStoredInstance(instanceId)
+                        .filter(instance -> clusterId.equals(instance.getDbClusterIdentifier()))
+                        .ifPresent(instance -> {
+                            instance.setStatus(status);
+                            instance.setPort(port);
+                            putInstance(instance);
+                        });
+            }
+        }
+    }
+
+    private NeptuneDbType configuredDbType() {
+        return NeptuneDbType.fromConfig(config.services().neptune().dbType()).orElse(NeptuneDbType.GREMLIN);
+    }
+
+    private Object clusterLock(String identity) {
+        return locks.computeIfAbsent("cluster:" + identity, ignored -> new Object());
+    }
+
+    private Object instanceLock(String identity) {
+        return locks.computeIfAbsent("instance:" + identity, ignored -> new Object());
+    }
+
+    /**
+     * A cluster the startup restore brings back, or removes when {@code deleting}, by the account and Region it is
+     * stored in and the resource ID it had when marked.
+     */
+    private record RestoringCluster(String accountId, String region, String id, String resourceId,
+                                    boolean deleting) {
     }
 
     public NeptuneCluster addRoleToDbCluster(String id, String roleArn) {
@@ -367,38 +697,47 @@ public class NeptuneService {
                                             boolean iamEnabled, NeptuneInstanceSettings settings,
                                             Map<String, String> tags) {
         settings.validate();
-        if (getStoredInstance(id).isPresent()) {
-            throw new AwsException("DBInstanceAlreadyExists",
-                    "Neptune instance " + id + " already exists.", 400);
-        }
-
-        NeptuneCluster cluster = getDbCluster(dbClusterIdentifier);
         String region = currentRegion();
+        // The instance's lock before its cluster's, the one order every path that holds both uses.
+        synchronized (instanceLock(resourceIdentity(currentAccount(), region, id))) {
+            if (getStoredInstance(id).isPresent()) {
+                throw new AwsException("DBInstanceAlreadyExists",
+                        "Neptune instance " + id + " already exists.", 400);
+            }
 
-        NeptuneInstance instance = new NeptuneInstance();
-        instance.setDbInstanceIdentifier(id);
-        instance.setDbClusterIdentifier(dbClusterIdentifier);
-        instance.setDbInstanceClass(dbInstanceClass != null ? dbInstanceClass : "db.r5.large");
-        instance.setEngineVersion(engineVersion != null ? engineVersion : cluster.getEngineVersion());
-        instance.setStatus("available");
-        instance.setEndpoint(cluster.getEndpoint());
-        instance.setPort(cluster.getPort());
-        instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
-        instance.setDbInstanceArn(regionResolver.buildArn("neptune", region, "db:" + id));
-        instance.setDbiResourceId("db-" + UUID.randomUUID().toString()
-                .replace("-", "").substring(0, 24).toUpperCase());
-        instance.setCreatedAt(Instant.now());
-        settings.applyTo(instance);
-        if (tags != null && !tags.isEmpty()) {
-            instance.setTags(tags);
+            synchronized (clusterLock(resourceIdentity(currentAccount(), region, dbClusterIdentifier))) {
+                NeptuneCluster cluster = getDbCluster(dbClusterIdentifier);
+                if (cluster.getStatus() != null && !"available".equals(cluster.getStatus())) {
+                    throw new AwsException("InvalidDBClusterStateFault",
+                            "DB cluster is not available for member creation.", 400);
+                }
+
+                NeptuneInstance instance = new NeptuneInstance();
+                instance.setDbInstanceIdentifier(id);
+                instance.setDbClusterIdentifier(dbClusterIdentifier);
+                instance.setDbInstanceClass(dbInstanceClass != null ? dbInstanceClass : "db.r5.large");
+                instance.setEngineVersion(engineVersion != null ? engineVersion : cluster.getEngineVersion());
+                instance.setStatus("available");
+                instance.setEndpoint(cluster.getEndpoint());
+                instance.setPort(cluster.getPort());
+                instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
+                instance.setDbInstanceArn(regionResolver.buildArn("neptune", region, "db:" + id));
+                instance.setDbiResourceId("db-" + UUID.randomUUID().toString()
+                        .replace("-", "").substring(0, 24).toUpperCase());
+                instance.setCreatedAt(Instant.now());
+                settings.applyTo(instance);
+                if (tags != null && !tags.isEmpty()) {
+                    instance.setTags(tags);
+                }
+
+                cluster.getDbClusterMembers().add(id);
+                putCluster(cluster);
+
+                putInstance(instance);
+                LOG.infov("Neptune instance {0} created in cluster {1}", id, dbClusterIdentifier);
+                return instance;
+            }
         }
-
-        cluster.getDbClusterMembers().add(id);
-        putCluster(cluster);
-
-        putInstance(instance);
-        LOG.infov("Neptune instance {0} created in cluster {1}", id, dbClusterIdentifier);
-        return instance;
     }
 
     public Optional<NeptuneCluster> findDbCluster(String id) {
@@ -446,19 +785,24 @@ public class NeptuneService {
     }
 
     public void deleteDbInstance(String id) {
-        NeptuneInstance instance = getStoredInstance(id).orElseThrow(() ->
-                new AwsException("DBInstanceNotFound",
-                        "Neptune instance " + id + " not found.", 404));
+        String region = currentRegion();
+        synchronized (instanceLock(resourceIdentity(currentAccount(), region, id))) {
+            NeptuneInstance instance = getStoredInstance(id).orElseThrow(() ->
+                    new AwsException("DBInstanceNotFound",
+                            "Neptune instance " + id + " not found.", 404));
 
-        String clusterId = instance.getDbClusterIdentifier();
-        NeptuneCluster cluster = getStoredCluster(clusterId).orElse(null);
-        if (cluster != null) {
-            cluster.getDbClusterMembers().remove(id);
-            putCluster(cluster);
+            String clusterId = instance.getDbClusterIdentifier();
+            synchronized (clusterLock(resourceIdentity(currentAccount(), region, clusterId))) {
+                NeptuneCluster cluster = getStoredCluster(clusterId).orElse(null);
+                if (cluster != null) {
+                    cluster.getDbClusterMembers().remove(id);
+                    putCluster(cluster);
+                }
+            }
+
+            deleteInstance(instance);
+            LOG.infov("Neptune instance {0} deleted", id);
         }
-
-        deleteInstance(instance);
-        LOG.infov("Neptune instance {0} deleted", id);
     }
 
     // ── Tags ──────────────────────────────────────────────────────────────────
@@ -730,10 +1074,11 @@ public class NeptuneService {
         return config.hostname().orElse("localhost");
     }
 
-    private int allocateProxyPort(Integer requested) {
+    private int allocateProxyPort(Integer requested, String owner) {
         int base = config.services().neptune().proxyBasePort();
         int max = config.services().neptune().proxyMaxPort();
-        if (requested != null && requested >= base && requested <= max && usedPorts.add(requested)) {
+        if (requested != null && requested >= base && requested <= max
+                && portOwners.putIfAbsent(requested, owner) == null) {
             return requested;
         }
         if (requested != null) {
@@ -742,7 +1087,7 @@ public class NeptuneService {
                     String.valueOf(requested), String.valueOf(base), String.valueOf(max));
         }
         for (int port = base; port <= max; port++) {
-            if (usedPorts.add(port)) {
+            if (portOwners.putIfAbsent(port, owner) == null) {
                 return port;
             }
         }
@@ -753,7 +1098,7 @@ public class NeptuneService {
                 "No available proxy ports in range " + base + "-" + max, 400);
     }
 
-    private void releaseProxyPort(int port) {
-        usedPorts.remove(port);
+    private void releaseProxyPort(int port, String owner) {
+        portOwners.remove(port, owner);
     }
 }

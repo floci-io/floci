@@ -1,5 +1,7 @@
 package io.floci.aws.services.neptune.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.util.Optional;
 
 /**
@@ -15,8 +17,10 @@ import java.util.Optional;
  * </ul>
  *
  * <p>The engine is selected globally via {@code FLOCI_SERVICES_NEPTUNE_DB_TYPE}, mirroring
- * LocalStack's {@code NEPTUNE_DB_TYPE} toggle.
+ * LocalStack's {@code NEPTUNE_DB_TYPE} toggle. A cluster keeps the engine it was created in, which
+ * its record names, since its graph is that engine's data.
  */
+@RegisterForReflection
 public enum NeptuneDbType {
 
     GREMLIN(8182),

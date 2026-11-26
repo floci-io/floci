@@ -19,6 +19,7 @@ import org.junit.jupiter.api.parallel.ResourceAccessMode;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
+import org.mockito.InOrder;
 import org.mockito.Mockito;
 
 import java.io.IOException;
@@ -31,6 +32,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -40,6 +42,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -310,6 +313,56 @@ class NeptuneContainerManagerTest {
             verify(lifecycle).createAndStart(any(ContainerSpec.class));
             verify(lifecycle, never()).createAndStart(any(ContainerSpec.class),
                     ArgumentMatchers.<Consumer<String>>any());
+        }
+    }
+
+    @Test
+    void noContainerStartsOnceShutdownHasBegun() {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        NeptuneContainerManager manager = newManager(lifecycle);
+
+        manager.stopAll();
+
+        assertTrue(manager.isShuttingDown());
+        assertThrows(IllegalStateException.class, () -> manager.start("cluster1", "tinkerpop/gremlin-server:3.7.3",
+                NeptuneDbType.GREMLIN, "000000000000", "us-east-1", null));
+        verify(lifecycle, never()).createAndStart(any(ContainerSpec.class));
+    }
+
+    @Test
+    void aStartThatShutdownOvertakesFailsWithItsContainerLeftToRemoveByIdentity() throws IOException {
+        try (ServerSocket backend = backend(GREMLIN_REPLY)) {
+            ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+            AtomicReference<NeptuneContainerManager> shutDownBy = new AtomicReference<>();
+            when(lifecycle.createAndStart(any(ContainerSpec.class))).thenAnswer(call -> {
+                shutDownBy.get().stopAll();
+                return info(backend, 8182);
+            });
+            NeptuneContainerManager manager = newManager(lifecycle);
+            shutDownBy.set(manager);
+
+            assertThrows(IllegalStateException.class, () -> manager.start("cluster1",
+                    "tinkerpop/gremlin-server:3.7.3", NeptuneDbType.GREMLIN, "000000000000", "us-east-1", null));
+            manager.stopByClusterId("000000000000-us-east-1-cluster1");
+
+            verify(lifecycle).stopAndRemove(eq("container-id"), any(), eq(30));
+        }
+    }
+
+    @Test
+    void aContainerLeftUnderTheNameStopsCleanlyBeforeTheNewOneStarts() throws IOException {
+        try (ServerSocket backend = backend(GREMLIN_REPLY)) {
+            ContainerLifecycleManager lifecycle = startsOn(backend, 8182);
+            NeptuneContainerManager manager = newManager(lifecycle, mock(ContainerBuilder.Builder.class,
+                    Mockito.RETURNS_SELF), storage("persistent", null, false));
+
+            manager.start("cluster1", "tinkerpop/gremlin-server:3.7.3", NeptuneDbType.GREMLIN, "000000000000",
+                    "us-east-1", null);
+
+            InOrder order = Mockito.inOrder(lifecycle);
+            order.verify(lifecycle).stopAndRemove("floci-aws-neptune-000000000000-us-east-1-cluster1", null, 30);
+            order.verify(lifecycle).createAndStart(any(ContainerSpec.class));
+            verify(lifecycle, never()).removeIfExists(anyString());
         }
     }
 
