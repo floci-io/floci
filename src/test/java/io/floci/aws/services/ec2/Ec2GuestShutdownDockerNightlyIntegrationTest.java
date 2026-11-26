@@ -57,6 +57,9 @@ class Ec2GuestShutdownDockerNightlyIntegrationTest {
             dockerClient.stopContainerCmd(instance.getDockerContainerId()).withTimeout(5).exec();
 
             await().atMost(Duration.ofSeconds(60)).until(() -> "stopped".equals(state(instance)));
+            assertEquals("Client.InstanceInitiatedShutdown", ec2Service.describeInstances(REGION,
+                    List.of(instance.getInstanceId()), Map.of()).getFirst().getInstances().getFirst()
+                    .getStateReasonCode());
         } finally {
             ec2Service.terminateInstances(REGION, List.of(instance.getInstanceId()));
         }

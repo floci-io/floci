@@ -5968,12 +5968,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             InstanceState prev = inst.getState();
             synchronized (capacityReservationLock) {
                 if ("stopped".equals(prev.getName()) || "stopping".equals(prev.getName())) {
+                    String prevReasonCode = inst.getStateReasonCode();
+                    String prevReasonMessage = inst.getStateReasonMessage();
                     inst.setState(InstanceState.pending());
+                    inst.setStateReasonCode(null);
+                    inst.setStateReasonMessage(null);
                     try {
                         instances.put(key(region, id), inst);
                         acquireCapacity(region, List.of(inst));
                     } catch (RuntimeException failure) {
                         inst.setState(prev);
+                        inst.setStateReasonCode(prevReasonCode);
+                        inst.setStateReasonMessage(prevReasonMessage);
                         instances.put(key(region, id), inst);
                         throw failure;
                     }
@@ -6519,6 +6525,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         String owner = instance.getOwnerId() != null ? instance.getOwnerId() : defaultAccountId;
         RequestScopes.runAs(owner, region, () -> {
             Instance stored = instances.get(key(region, instance.getInstanceId())).orElse(instance);
+            stored.setStateReasonCode("Client.InstanceInitiatedShutdown");
+            stored.setStateReasonMessage("Client.InstanceInitiatedShutdown: Instance initiated shutdown");
+            storeInstance(region, stored);
             if ("terminate".equals(stored.getInstanceInitiatedShutdownBehavior())) {
                 terminateInstances(region, ids);
             } else {
