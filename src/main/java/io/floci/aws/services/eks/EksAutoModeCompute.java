@@ -511,8 +511,14 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
      */
     private void retire(Cluster cluster, String region, Instance instance, String nodeName, boolean joined) {
         if (joined) {
-            exec(cluster, List.of("kubectl", "drain", nodeName, "--ignore-daemonsets", "--delete-emptydir-data",
-                    "--force", "--timeout=10s"), "drain node " + nodeName);
+            List<String> drain = new ArrayList<>(List.of("kubectl", "drain", nodeName, "--ignore-daemonsets",
+                    "--delete-emptydir-data", "--force", "--timeout=10s"));
+            if (!clusterManager.kubeletRegistersNode(instance)) {
+                // Floci's own Ready node has no kubelet to finish a pod's graceful shutdown, so its evicted pods
+                // would stay terminating for good: they go at once, their disruption budgets still kept.
+                drain.add("--grace-period=0");
+            }
+            exec(cluster, drain, "drain node " + nodeName);
             clusterManager.removeJoinedNode(cluster, instance);
         }
         ec2.terminateInstances(region, List.of(instance.getInstanceId()));

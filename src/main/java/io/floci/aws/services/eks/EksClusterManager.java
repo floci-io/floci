@@ -4437,9 +4437,14 @@ public class EksClusterManager
         }
     }
 
+    /** Whether the instance's image runs a kubelet that registers its node, rather than Floci registering it. */
+    boolean kubeletRegistersNode(Instance instance) {
+        return imageCatalog.findByIdOrAlias(instance.getImageId())
+                .map(image -> Boolean.TRUE.equals(image.kubeletRegistersNode)).orElse(false);
+    }
+
     private void registerNodeInCluster(Cluster cluster, String containerId, Instance instance) {
-        if (imageCatalog.findByIdOrAlias(instance.getImageId())
-                .map(image -> Boolean.TRUE.equals(image.kubeletRegistersNode)).orElse(false)) {
+        if (kubeletRegistersNode(instance)) {
             // Do not race the guest kubelet with a status-less Node or synthetic Ready status.
             return;
         }

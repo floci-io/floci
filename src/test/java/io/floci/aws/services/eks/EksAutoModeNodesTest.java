@@ -329,11 +329,13 @@ class EksAutoModeNodesTest {
     }
 
     @Test
-    void consolidateAfterAndBudgetsAreReadFromThePoolScheduledBudgetsLeftOut() throws Exception {
+    void consolidateAfterAndBudgetsAreReadFromThePoolScheduledAndOtherReasonsBudgetsLeftOut() throws Exception {
         String pools = """
                 {"items": [{"metadata": {"name": "batch"}, "spec": {
                   "disruption": {"consolidateAfter": "1m30s",
-                                 "budgets": [{"nodes": "50%"}, {"nodes": "0", "schedule": "@daily", "duration": "1h"}]},
+                                 "budgets": [{"nodes": "50%"}, {"nodes": "0", "schedule": "@daily", "duration": "1h"},
+                                             {"nodes": "0", "reasons": ["Underutilized"]},
+                                             {"nodes": "2", "reasons": ["Drifted", "Empty"]}]},
                   "template": {"spec": {}}}},
                  {"metadata": {"name": "pinned"}, "spec": {"disruption": {"consolidateAfter": "Never"},
                   "template": {"spec": {}}}}]}""";
@@ -341,7 +343,8 @@ class EksAutoModeNodesTest {
         List<NodePool> read = EksAutoModeNodes.nodePools(json(pools));
 
         assertEquals(Duration.ofSeconds(90), read.getFirst().consolidateAfter());
-        assertEquals(List.of("50%"), read.getFirst().budgets());
+        // A budget for other reasons than emptiness doesn't hold empty nodes back.
+        assertEquals(List.of("50%", "2"), read.getFirst().budgets());
         assertNull(read.get(1).consolidateAfter());
     }
 

@@ -53,8 +53,9 @@ import static org.mockito.Mockito.when;
 class EksAutoModeComputeTest {
 
     private static final String REGION = "us-east-1";
+    /** The drain of Floci's own Ready node, which has no kubelet to finish a pod's graceful shutdown. */
     private static final String[] DRAIN_NODE_1 = {"kubectl", "drain", "node-1", "--ignore-daemonsets",
-        "--delete-emptydir-data", "--force", "--timeout=10s"};
+        "--delete-emptydir-data", "--force", "--timeout=10s", "--grace-period=0"};
     private static final String PENDING_POD = """
             {"items": [{"metadata": {"namespace": "default", "name": "web"},
               "spec": {"nodeSelector": {"karpenter.sh/nodepool": "general-purpose"},
@@ -374,6 +375,23 @@ class EksAutoModeComputeTest {
         verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
                 "late-node", "--ignore-not-found=true", "--wait=false"}, 15);
         verify(ec2, never()).terminateInstances(anyString(), anyList());
+    }
+
+    /** A node whose kubelet runs keeps its pods' graceful shutdown: the drain gives them their grace period. */
+    @Test
+    void aKubeletsNodeIsDrainedWithItsPodsGracePeriod() {
+        Instance node = joinedNode("i-node", "node-1");
+        when(clusterManager.kubeletRegistersNode(node)).thenReturn(true);
+        lists.put("pods", "{\"items\": []}");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}}]}");
+        lists.put("nodepools", "{\"items\": []}");
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "drain", "node-1",
+                "--ignore-daemonsets", "--delete-emptydir-data", "--force", "--timeout=10s"}, 15);
+        verify(clusterManager).removeJoinedNode(cluster, node);
     }
 
     @Test

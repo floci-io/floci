@@ -418,8 +418,13 @@ final class EksAutoModeNodes {
             JsonNode disruption = item.path("spec").path("disruption");
             List<String> budgets = new ArrayList<>();
             // A budget with a schedule applies only in its window, which Floci doesn't model; the others always do.
+            // A budget naming reasons covers only those; one without covers every reason, emptiness among them.
             disruption.path("budgets").forEach(b -> {
-                if (b.path("schedule").asText("").isEmpty() && !b.path("nodes").asText("").isEmpty()) {
+                boolean coversEmpty = !b.has("reasons") || b.path("reasons").isEmpty();
+                for (JsonNode reason : b.path("reasons")) {
+                    coversEmpty |= "Empty".equals(reason.asText());
+                }
+                if (coversEmpty && b.path("schedule").asText("").isEmpty() && !b.path("nodes").asText("").isEmpty()) {
                     budgets.add(b.path("nodes").asText());
                 }
             });
