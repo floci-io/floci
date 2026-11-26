@@ -288,6 +288,36 @@ class WebhookEventsConfigurationsTest {
     }
 
     @Test
+    void hmacSecretIsBoundedAbove512Bytes() {
+        String tooLong = SIGNED_MESSAGE_ID_ERROR + "SecretValue must be at most 512 bytes (for BASE64, after decoding)";
+        String toleranceWithoutHeader = SIGNED_MESSAGE_ID_ERROR
+                + "TimestampToleranceInSeconds requires TimestampHttpHeader to be set";
+        String tolerance = ",\"TimestampToleranceInSeconds\":5";
+
+        assertEquals(tooLong, hmacRefusal("\"SecretValue\":\"" + "é".repeat(256) + "k\"" + tolerance));
+        assertEquals(tooLong, hmacRefusal("\"SecretValue\":\"" + "é".repeat(257) + "\""));
+        assertEquals(toleranceWithoutHeader, hmacRefusal("\"SecretValue\":\"" + "é".repeat(256) + "\"" + tolerance));
+        assertEquals(tooLong, hmacRefusal("\"SecretValue\":\"" + "😀".repeat(129) + "\"" + tolerance));
+        assertEquals(toleranceWithoutHeader,
+                hmacRefusal("\"SecretValue\":\"" + "😀".repeat(128) + "\"" + tolerance));
+    }
+
+    @Test
+    void hmacSecretBoundCountsWhsecPrefixForRawOnly() {
+        String tooLong = SIGNED_MESSAGE_ID_ERROR + "SecretValue must be at most 512 bytes (for BASE64, after decoding)";
+        String toleranceWithoutHeader = SIGNED_MESSAGE_ID_ERROR
+                + "TimestampToleranceInSeconds requires TimestampHttpHeader to be set";
+        String tolerance = ",\"TimestampToleranceInSeconds\":5";
+
+        assertEquals(toleranceWithoutHeader,
+                hmacRefusal("\"SecretValue\":\"whsec_" + "é".repeat(253) + "\"" + tolerance));
+        assertEquals(tooLong, hmacRefusal("\"SecretValue\":\"whsec_" + "é".repeat(254) + "\"" + tolerance));
+        assertEquals("WebhookEventsConfiguration.AuthConfiguration.HmacAuthConfiguration.SecretValue must be "
+                + "standard Base64 when SecretEncoding is BASE64",
+                hmacRefusal("\"SecretEncoding\":\"BASE64\",\"SecretValue\":\"" + "é".repeat(257) + "\""));
+    }
+
+    @Test
     void hmacAcceptsTheCombinationsAwsAccepts() {
         for (String extra : List.of(
                 "\"MessageIdHttpHeader\":\"X-Id\",\"Delimiter\":\",\",\"TimestampPrefix\":\"t=\"",
