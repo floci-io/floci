@@ -248,11 +248,21 @@ public class DocDbService {
             } else {
                 String image = config.services().docdb().defaultImage();
                 LOG.infov("Creating DocDB cluster {0}, image={1}", id, image);
+                if (!"memory".equals(config.storage().mode())) {
+                    cluster.setVolumeId(UUID.randomUUID().toString());
+                }
                 // A cluster record is metadata: its identifier, ARN and tags need no Docker, so the
                 // cluster is created and reaches 'available' even when no daemon is reachable. Only
                 // connecting to the database needs the container.
-                DocDbContainerHandle handle = containerManager.tryStart(id, image, masterUsername, masterPassword,
-                        region);
+                DocDbContainerHandle handle;
+                try {
+                    handle = containerManager.tryStart(id, image, masterUsername, masterPassword,
+                            region, cluster.getVolumeId());
+                } catch (RuntimeException e) {
+                    // The cluster is not created, so the volume made for it goes too.
+                    containerManager.discardStorage(cluster.getVolumeId());
+                    throw e;
+                }
                 if (handle != null) {
                     cluster.setEndpoint(handle.getHost());
                     cluster.setReaderEndpoint(handle.getHost());
@@ -614,12 +624,16 @@ public class DocDbService {
                         "Cannot delete DocDB cluster " + id + " — it still has DB instances.", 400);
             }
 
-            removeCluster(region, cluster);
+            removeCluster(region, cluster, false);
         }
     }
 
-    /** Stops a cluster's container and removes its record; the caller holds the cluster's lock. */
-    private void removeCluster(String region, DocDbCluster cluster) {
+    /**
+     * Stops a cluster's container and removes its record and its data volume; the caller holds the
+     * cluster's lock. A deleted cluster's volume stays when the storage policy keeps volumes on
+     * delete; a discarded one's, which never reached the caller, goes whatever the policy.
+     */
+    private void removeCluster(String region, DocDbCluster cluster, boolean discarded) {
         String id = cluster.getDbClusterIdentifier();
         cluster.setStatus("deleting");
         clusters.put(key(region, id), cluster);
@@ -628,6 +642,11 @@ public class DocDbService {
             containerManager.stop(new DocDbContainerHandle(
                     cluster.getContainerId(), id,
                     cluster.getContainerHost(), cluster.getContainerPort()));
+        }
+        if (discarded) {
+            containerManager.discardStorage(cluster.getVolumeId());
+        } else {
+            containerManager.removeStorage(cluster.getVolumeId());
         }
 
         clusters.delete(key(region, id));
@@ -883,7 +902,7 @@ public class DocDbService {
     private void discardRestoredCluster(String id) {
         String region = regionResolver.getRegion();
         synchronized (lockFor("cluster:" + key(region, id))) {
-            findCluster(region, id).ifPresent(cluster -> removeCluster(region, cluster));
+            findCluster(region, id).ifPresent(cluster -> removeCluster(region, cluster, true));
         }
     }
 

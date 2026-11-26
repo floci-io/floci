@@ -32,6 +32,7 @@ public class DocDbContainerManager {
 
     private static final Logger LOG = Logger.getLogger(DocDbContainerManager.class);
     private static final int MONGO_PORT = 27017;
+    private static final String DATA_PATH = "/data/db";
     private static final int BACKEND_READY_DEADLINE_MS = 60_000;
     private static final int BACKEND_READY_RETRY_MS = 200;
     private static final int BACKEND_PROBE_CONNECT_MS = 2_000;
@@ -70,9 +71,9 @@ public class DocDbContainerManager {
      * @return the container handle, or {@code null} when no Docker daemon is reachable
      */
     public DocDbContainerHandle tryStart(String clusterId, String image, String masterUsername, String masterPassword,
-                                         String region) {
+                                         String region, String volumeId) {
         try {
-            DocDbContainerHandle handle = start(clusterId, image, masterUsername, masterPassword, region);
+            DocDbContainerHandle handle = start(clusterId, image, masterUsername, masterPassword, region, volumeId);
             dockerUnavailableLogged = false;
             return handle;
         } catch (RuntimeException e) {
@@ -98,8 +99,13 @@ public class DocDbContainerManager {
         return lifecycleManager.isDockerReachable();
     }
 
+    /**
+     * Starts the cluster's MongoDB container. With a {@code volumeId} its data directory is the
+     * cluster's own volume, or its directory under the host persistent path, which outlives the
+     * container; without one the data goes when the container does.
+     */
     public DocDbContainerHandle start(String clusterId, String image, String masterUsername, String masterPassword,
-                                      String region) {
+                                      String region, String volumeId) {
         LOG.infov("Starting DocumentDB container for cluster: {0}", clusterId);
 
         String accountId = regionResolver.getAccountId();
@@ -121,6 +127,17 @@ public class DocDbContainerManager {
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "docdb", clusterId, accountId, region));
 
+        if (volumeId != null) {
+            if (ContainerStorageHelper.isNamedVolumeMode(config)) {
+                ContainerStorageHelper.applyNamedVolume(specBuilder, lifecycleManager,
+                        volumeName(volumeId), DATA_PATH);
+            } else {
+                String path = ContainerStorageHelper.hostResourcePath(config, "docdb", volumeId).toString();
+                ContainerStorageHelper.ensureHostDir(containerDetector, path);
+                specBuilder.withBind(path, DATA_PATH);
+            }
+        }
+
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(MONGO_PORT);
         } else {
@@ -130,28 +147,40 @@ public class DocDbContainerManager {
 
         ContainerSpec spec = specBuilder.build();
         ContainerInfo info = lifecycleManager.createAndStart(spec);
-        EndpointInfo endpoint = info.getEndpoint(MONGO_PORT);
+        DocDbContainerHandle handle = null;
+        try {
+            EndpointInfo endpoint = info.getEndpoint(MONGO_PORT);
 
-        LOG.infov("DocumentDB container for cluster {0}: {1}", clusterId, endpoint);
+            LOG.infov("DocumentDB container for cluster {0}: {1}", clusterId, endpoint);
 
-        DocDbContainerHandle handle = new DocDbContainerHandle(
-                info.containerId(), clusterId, endpoint.host(), endpoint.port());
-        // Docker IDs remain unique across accounts, regions, and same-named cluster replacements.
-        activeContainers.put(info.containerId(), handle);
+            handle = new DocDbContainerHandle(
+                    info.containerId(), clusterId, endpoint.host(), endpoint.port());
+            // Docker IDs remain unique across accounts, regions, and same-named cluster replacements.
+            activeContainers.put(info.containerId(), handle);
 
-        String shortId = info.containerId().length() >= 8
-                ? info.containerId().substring(0, 8)
-                : info.containerId();
-        String logGroup = "/aws/docdb/cluster/" + clusterId + "/audit";
-        String logStream = logStreamer.generateLogStreamName(shortId);
+            String shortId = info.containerId().length() >= 8
+                    ? info.containerId().substring(0, 8)
+                    : info.containerId();
+            String logGroup = "/aws/docdb/cluster/" + clusterId + "/audit";
+            String logStream = logStreamer.generateLogStreamName(shortId);
 
-        Closeable logHandle = logStreamer.attachPolled(
-                info.containerId(), logGroup, logStream, region, "docdb:" + clusterId);
-        handle.setLogStream(logHandle);
+            Closeable logHandle = logStreamer.attachPolled(
+                    info.containerId(), logGroup, logStream, region, "docdb:" + clusterId);
+            handle.setLogStream(logHandle);
 
-        waitForBackendReady(clusterId, endpoint.host(), endpoint.port());
+            waitForBackendReady(clusterId, endpoint.host(), endpoint.port());
 
-        return handle;
+            return handle;
+        } catch (RuntimeException e) {
+            // The caller gets no container, so the one started goes, and with it its hold on the volume.
+            activeContainers.remove(info.containerId());
+            try {
+                lifecycleManager.stopAndRemove(info.containerId(), handle != null ? handle.getLogStream() : null);
+            } catch (RuntimeException cleanup) {
+                e.addSuppressed(cleanup);
+            }
+            throw e;
+        }
     }
 
     public void stop(DocDbContainerHandle handle) {
@@ -161,6 +190,27 @@ public class DocDbContainerManager {
         DocDbContainerHandle active = activeContainers.remove(handle.getContainerId());
         lifecycleManager.stopAndRemove(handle.getContainerId(),
                 active == null ? handle.getLogStream() : active.getLogStream());
+    }
+
+    /**
+     * Removes a deleted cluster's data volume, unless the storage policy keeps volumes on delete.
+     * A directory under the host persistent path is left in place.
+     */
+    public void removeStorage(String volumeId) {
+        if (volumeId != null && ContainerStorageHelper.isNamedVolumeMode(config)) {
+            ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, volumeName(volumeId));
+        }
+    }
+
+    /** Removes the data volume of a cluster that never reached its caller, whatever the storage policy. */
+    public void discardStorage(String volumeId) {
+        if (volumeId != null && ContainerStorageHelper.isNamedVolumeMode(config)) {
+            lifecycleManager.removeVolume(volumeName(volumeId));
+        }
+    }
+
+    private String volumeName(String volumeId) {
+        return ContainerStorageHelper.dockerName(config, "docdb-" + volumeId);
     }
 
     public void stopAll() {

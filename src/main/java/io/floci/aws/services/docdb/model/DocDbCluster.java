@@ -39,6 +39,8 @@ public class DocDbCluster {
     private String containerId;
     private String containerHost;
     private int containerPort;
+    /** Names the cluster's data volume; null for a cluster whose data is not kept, in memory mode or mock mode. */
+    private String volumeId;
 
     public DocDbCluster (){}
 
@@ -109,6 +111,9 @@ public class DocDbCluster {
 
     public int getContainerPort() { return containerPort; }
     public void setContainerPort(int containerPort) { this.containerPort = containerPort; }
+
+    public String getVolumeId() { return volumeId; }
+    public void setVolumeId(String volumeId) { this.volumeId = volumeId; }
 
     public Map<String, String> getTags() { return tags; }
 
