@@ -582,8 +582,13 @@ Both APIs are checked on the resources their request names, in the ARN formats o
 so a policy can limit an action to one identity, configuration set, template, contact list, custom
 verification email template, dedicated IP pool, export or import job, or tenant. A tenant's ARN ends in
 the id SES minted for it, which a request naming the tenant does not carry: it is checked on the ARN
-stored for it. An operation whose action has no resource type, or whose request names none, is checked
-on `*`. The other actions the service reference lists for some operations are checked too:
+stored for it. A send that gives no identity ARN for an address (`SourceArn`, `FromArn`,
+`FromEmailAddressIdentityArn`, `ReturnPathArn`, `FeedbackForwardingEmailAddressIdentityArn`) is checked on
+the verified identity that address sends as: the address itself, else its domain or a parent domain, so a
+policy on `identity/example.com` lets `sender@example.com` send and one on the address's own ARN does not
+(probed). A raw send without `Source` is checked on the identity of its first `From` header address; a v2
+raw send without `FromEmailAddress` is not checked on an identity. An operation whose action has no
+resource type, or whose request names none, is checked on `*`. The other actions the service reference lists for some operations are checked too:
 `ses:TagResource` for a create that tags what it makes, and `iam:PassRole` (with `iam:PassedToService`
 `ses.amazonaws.com`) for creating or updating an event destination that delivers through a role. A
 v2 `SendEmail` is authorized as `ses:SendEmail` whatever its content: `ses:SendRawEmail` is a v1 action.

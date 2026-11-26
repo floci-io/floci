@@ -123,6 +123,36 @@ def test_an_optional_arn_member_of_a_type_with_variables_names_its_services_defa
     assert r.with_account([default], FORMATS, ["registryId"]) == [default]
 
 
+def test_an_arn_member_documented_as_permitting_an_address_finds_its_resource_by_that_address_when_absent():
+    # SES's SourceArn is "the ARN of the identity that is associated with the sending authorization policy that
+    # permits you to send for the email address specified in the Source parameter".
+    said = ("<p>It is the ARN of the {kind} that is associated with the sending authorization policy that permits you "
+            "to {what}.</p>")
+    service = {"metadata": {"protocol": "query", "protocols": ["query"]},
+               "operations": {"SendThing": {"input": {"shape": "SendThingIn"}}},
+               "shapes": {"String": {"type": "string"}, "Blob": {"type": "blob"},
+                          "Raw": {"type": "structure", "members": {"Data": {"shape": "Blob"}}},
+                          "SendThingIn": {"type": "structure", "required": ["Raw"], "members": {
+                              "Source": {"shape": "String"},
+                              "SourceArn": {"shape": "String", "documentation": said.format(
+                                  kind="thing", what="send for the email address specified in the Source parameter")},
+                              "FromArn": {"shape": "String", "documentation": said.format(
+                                  kind="thing", what="specify a particular \"From\" address in the header of the raw "
+                                                     "email")},
+                              "OtherArn": {"shape": "String", "documentation": "<p>The ARN of the thing.</p>"},
+                              "Raw": {"shape": "Raw"}}}}}
+    addressed = r.address_arn_members({"svc": service}, "SendThing")
+    assert addressed == {"SourceArn": ("thing", "Source"), "FromArn": ("thing", "Raw.Data")}
+    named = [{"types": ["thing", "pool"], "arn": "SourceArn"}, {"types": ["thing", "pool"], "arn": "FromArn"},
+             {"type": "thing", "fill": {}, "when": {"SourceArn": [None]}, "default": True}]
+    assert r.with_address_arns(named, FORMATS, addressed) == named[:2] + [
+        {"type": "thing", "fill": {}, "find": ["Source"], "when": {"SourceArn": [None]}},
+        {"type": "thing", "fill": {}, "find": ["Raw.Data"], "when": {"FromArn": [None]}}]
+    # A type the member's ARN cannot be is not found by its address.
+    assert r.with_address_arns([{"types": ["pool"], "arn": "SourceArn"}], FORMATS, addressed) == [
+        {"types": ["pool"], "arn": "SourceArn"}]
+
+
 VIEWS = {"view": "arn:${Partition}:svc:${Region}:${Account}:view/${ViewName}/${ViewUuid}",
          "managed-view": "arn:${Partition}:svc:${Region}:${Account}:managed-view/${ManagedViewName}/${ManagedViewUuid}",
          "index": "arn:${Partition}:svc:${Region}:${Account}:index/${IndexUuid}",

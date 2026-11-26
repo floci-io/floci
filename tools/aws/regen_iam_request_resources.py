@@ -4014,6 +4014,7 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
     resources = with_minted_names(operation, resources, formats, models)
     optional = optional_members(models, name)
     resources = with_absent_arn(resources, formats, optional)
+    resources = with_address_arns(resources, formats, address_arn_members(models, name))
     resources = with_absent_account(resources, formats, account_members(models, name), optional)
     resources = with_map_fields(resources, types, formats, map_fields(models, name))
     resources = with_account_variables(resources, formats, account_members(models, name), region_members(models, name))
@@ -4386,6 +4387,61 @@ def with_documented_defaults(resources: list[dict], formats: dict[str, str], def
         found.append(dict(resource, defaults=dict(sorted(defaults.items()))) if defaults and "type" in resource
                      and not {"when", "unless", "find", "default", "whenDefault", "unlessDefault"} & set(resource)
                      else resource)
+    return found
+
+
+DOC_ADDRESS_ARN_RE = re.compile(r"\bthe arn of the ([a-z][a-z -]*?) that is associated with the [a-z ]+? policy that "
+                                r"permits you to (?:[a-z ]+? the (?:email )?address specified in the ([a-z0-9]+) "
+                                r"parameter|specify a particular \"from\" address in the header of the raw email)\b")
+
+
+def address_arn_members(models: dict[str, dict], operation: str) -> dict[str, tuple[str, str]]:
+    """The optional top-level ARN members of the operation's request whose documentation says the ARN is of the
+    resource a policy on which permits the request to use an address another member gives, by their name, each with the
+    word it names that resource's type by and the path of the member giving the address: SES's `SourceArn`, "the ARN of
+    the identity that is associated with the sending authorization policy that permits you to send for the email
+    address specified in the Source parameter", and `FromArn`, whose address is the "From" header of the raw email, the
+    one blob of the structure the request carries it in (`RawMessage.Data`)."""
+    found: dict[str, tuple[str, str]] = {}
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec is None or "input" not in spec or _reading(model) != "all":
+            continue
+        shape = model["shapes"][spec["input"]["shape"]]
+        members = shape.get("members", {})
+        for name, member in members.items():
+            said = DOC_ADDRESS_ARN_RE.search(_lead_text(member.get("documentation")))
+            if name in shape.get("required", []) or said is None:
+                continue
+            if said.group(2) is not None:
+                path = next((other for other in members if other.lower() == said.group(2)), None)
+            else:
+                path = next((f"{other}.{blob}" for other, ref in members.items()
+                             for blob, inner in model["shapes"][ref["shape"]].get("members", {}).items()
+                             if model["shapes"][ref["shape"]].get("type") == "structure"
+                             and model["shapes"][inner["shape"]].get("type") == "blob"), None)
+            if path is not None:
+                found.setdefault(name, (said.group(1).replace(" ", "-"), path))
+    return found
+
+
+def with_address_arns(resources: list[dict], formats: dict[str, str],
+                      addressed: dict[str, tuple[str, str]]) -> list[dict]:
+    """The resources, and for each ARN member a request may leave out whose documentation names the address its
+    resource permits the request to use (`address_arn_members`), that resource found by the address for a request
+    leaving the ARN out, in place of the default the type would otherwise take: SES checks a send without `SourceArn`
+    on the identity its `Source` resolves to, which its service finds."""
+    found = [resource for resource in resources
+             if not (resource.get("default") and set(resource.get("when", {})) & set(addressed))]
+    for resource in resources:
+        member = resource.get("arn")
+        if member not in addressed or "types" not in resource:
+            continue
+        kind, path = addressed[member]
+        if kind in formats and kind in resource["types"]:
+            entry = {"type": kind, "fill": {}, "find": [path], "when": {member: [None]}}
+            if entry not in found:
+                found.append(entry)
     return found
 
 

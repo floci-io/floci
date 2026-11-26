@@ -19,6 +19,8 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -201,6 +203,96 @@ class SesIamIntegrationTest {
                 "iam:PassRole");
         send(caller.owner(), "GET", "/v2/email/configuration-sets/" + set + "/event-destinations", null).then()
                 .statusCode(200).body("EventDestinations.size()", equalTo(0));
+    }
+
+    // Probed in us-east-1: a send from an address of a verified domain is checked on the domain's identity, an allow
+    // on the address's own ARN does not reach it, and an allow on the configuration set alone does not either.
+    @Test
+    void aV2SendIsCheckedOnTheIdentityItsSenderSendsAs() throws Exception {
+        String domain = "d-" + suffix() + ".example.com";
+        String set = "send-" + suffix();
+        Caller caller = caller("[\"ses:SendEmail\"]", "identity/" + domain);
+        verifiedDomain(caller, domain);
+        send(caller.owner(), "POST", "/v2/email/configuration-sets", "{\"ConfigurationSetName\":\"" + set + "\"}")
+                .then().statusCode(200);
+
+        send(caller.signer(), "POST", "/v2/email/outbound-emails", v2Send("sender@" + domain, null))
+                .then().statusCode(200);
+        denied(send(caller.withPolicy("[\"ses:SendEmail\"]", caller.arn("identity/sender@" + domain)).signer(),
+                "POST", "/v2/email/outbound-emails", v2Send("sender@" + domain, null)), "ses:SendEmail");
+        denied(send(caller.withPolicy("[\"ses:SendEmail\"]", caller.arn("configuration-set/" + set)).signer(),
+                "POST", "/v2/email/outbound-emails", v2Send("sender@" + domain, set)), "ses:SendEmail");
+        send(caller.withPolicy("[\"ses:SendEmail\"]", "*").signer(), "POST", "/v2/email/outbound-emails",
+                v2Send("sender@" + domain, set)).then().statusCode(200);
+    }
+
+    @Test
+    void aV1SendIsCheckedOnTheIdentityItsSourceSendsAs() throws Exception {
+        String domain = "d-" + suffix() + ".example.com";
+        Caller caller = caller("[\"ses:SendEmail\"]", "identity/" + domain);
+        verifiedDomain(caller, domain);
+        String form = "Action=SendEmail&Source=sender%40" + domain
+                + "&Destination.ToAddresses.member.1=success%40simulator.amazonses.com"
+                + "&Message.Subject.Data=s&Message.Body.Text.Data=b";
+
+        query(caller.signer(), form).then().statusCode(200);
+        denied(query(caller.withPolicy("[\"ses:SendEmail\"]", caller.arn("identity/other.example.com")).signer(),
+                form), "ses:SendEmail");
+    }
+
+    // Probed in us-east-1: a raw send with no Source is checked on the identity of its "From" header.
+    @Test
+    void aV1RawSendWithoutSourceIsCheckedOnTheIdentityOfItsFromHeader() throws Exception {
+        String domain = "d-" + suffix() + ".example.com";
+        Caller caller = caller("[\"ses:SendRawEmail\"]", "identity/" + domain);
+        verifiedDomain(caller, domain);
+        String message = "From: sender@" + domain + "\r\nTo: success@simulator.amazonses.com\r\nSubject: s\r\n\r\nb\r\n";
+        String form = "Action=SendRawEmail&Destinations.member.1=success%40simulator.amazonses.com&RawMessage.Data="
+                + URLEncoder.encode(Base64.getEncoder().encodeToString(message.getBytes(StandardCharsets.UTF_8)),
+                        StandardCharsets.UTF_8);
+
+        query(caller.signer(), form).then().statusCode(200);
+        denied(query(caller.withPolicy("[\"ses:SendRawEmail\"]", caller.arn("identity/other.example.com")).signer(),
+                form), "ses:SendRawEmail");
+    }
+
+    /**
+     * A domain identity of the caller's account SES has verified: its DKIM records published in a hosted zone of that
+     * account, which SES looks them up in.
+     */
+    private void verifiedDomain(Caller caller, String domain) throws Exception {
+        List<String> tokens = send(caller.owner(), "POST", "/v2/email/identities",
+                "{\"EmailIdentity\":\"" + domain + "\"}").then().statusCode(200)
+                .extract().jsonPath().getList("DkimAttributes.Tokens", String.class);
+        AccessKey dns = SignedIamUsers.createUser(iam, cleanup, caller.account(), "dns-owner-" + suffix(), "access",
+                allow("\"route53:*\"", "*"));
+        AwsRequestSigner route53 = AwsRequestSigner.signedAs(dns.getAccessKeyId(), dns.getSecretAccessKey(), "route53");
+        String location = SignedRestRequests.send(endpoint, route53, "POST", "/2013-04-01/hostedzone",
+                "<CreateHostedZoneRequest xmlns=\"https://route53.amazonaws.com/doc/2013-04-01/\"><Name>" + domain
+                        + "</Name><CallerReference>" + suffix() + "</CallerReference></CreateHostedZoneRequest>",
+                "application/xml").then().statusCode(201).extract().header("Location");
+        StringBuilder changes = new StringBuilder();
+        for (String token : tokens) {
+            changes.append("<Change><Action>CREATE</Action><ResourceRecordSet><Name>").append(token)
+                    .append("._domainkey.").append(domain).append(".</Name><Type>CNAME</Type><TTL>300</TTL>")
+                    .append("<ResourceRecords><ResourceRecord><Value>").append(token)
+                    .append(".dkim.amazonses.com.</Value></ResourceRecord></ResourceRecords></ResourceRecordSet>")
+                    .append("</Change>");
+        }
+        SignedRestRequests.send(endpoint, route53, "POST",
+                "/2013-04-01/hostedzone/" + location.substring(location.lastIndexOf('/') + 1) + "/rrset",
+                "<ChangeResourceRecordSetsRequest xmlns=\"https://route53.amazonaws.com/doc/2013-04-01/\"><ChangeBatch>"
+                        + "<Changes>" + changes + "</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>",
+                "application/xml").then().statusCode(200);
+        send(caller.owner(), "GET", "/v2/email/identities/" + domain, null).then().statusCode(200)
+                .body("VerifiedForSendingStatus", equalTo(true));
+    }
+
+    private static String v2Send(String from, String configurationSet) {
+        return "{\"FromEmailAddress\":\"" + from + "\","
+                + (configurationSet == null ? "" : "\"ConfigurationSetName\":\"" + configurationSet + "\",")
+                + "\"Destination\":{\"ToAddresses\":[\"success@simulator.amazonses.com\"]},"
+                + "\"Content\":{\"Simple\":{\"Subject\":{\"Data\":\"s\"},\"Body\":{\"Text\":{\"Data\":\"b\"}}}}}";
     }
 
     /** IAM let the request through to SES, which refused it for naming nothing it holds. */

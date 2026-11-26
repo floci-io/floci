@@ -184,24 +184,34 @@ public class SesIdentityService implements SesTaggable {
      * The walk stops before a bare top-level domain.
      */
     public boolean isVerifiedSender(String fromEmail, String region) {
+        return verifiedIdentityOf(fromEmail, region).isPresent();
+    }
+
+    /**
+     * The verified identity an address sends as, the walk {@link #isVerifiedSender} makes: the address itself, then
+     * its domain and that domain's parents. Under IAM enforcement a send is checked on this identity (probed: a
+     * policy on {@code identity/example.com} lets an address of that domain send, one on the address's own ARN does
+     * not).
+     */
+    public Optional<String> verifiedIdentityOf(String fromEmail, String region) {
         if (fromEmail == null) {
-            return false;
+            return Optional.empty();
         }
         if (isIdentityVerified(fromEmail, region)) {
-            return true;
+            return Optional.of(fromEmail);
         }
         int at = fromEmail.indexOf('@');
         if (at < 0 || at == fromEmail.length() - 1) {
-            return false;
+            return Optional.empty();
         }
         String domain = fromEmail.substring(at + 1);
         while (true) {
             if (isIdentityVerified(domain, region)) {
-                return true;
+                return Optional.of(domain);
             }
             int dot = domain.indexOf('.');
             if (dot < 0 || domain.indexOf('.', dot + 1) < 0) {
-                return false;
+                return Optional.empty();
             }
             domain = domain.substring(dot + 1);
         }
