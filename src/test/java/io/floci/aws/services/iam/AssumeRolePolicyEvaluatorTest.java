@@ -2,6 +2,7 @@ package io.floci.aws.services.iam;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.iam.AssumeRolePolicyEvaluator.TrustDecision;
+import io.floci.aws.services.iam.model.IamRole;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -450,6 +451,24 @@ class AssumeRolePolicyEvaluatorTest {
                 "lambda.amazonaws.com", null, null));
         assertFalse(evaluator.allowsService(serviceTrust("{\"Null\":{\"aws:PrincipalServiceName\":\"true\"}}"),
                 "lambda.amazonaws.com", null, null));
+    }
+
+    /**
+     * The tags of the role a service assumes, the resource {@code sts:AssumeRole} acts on, which its trust policy reads
+     * under the keys the generated table gives the role type: a tag key matched whatever its case, its value exactly.
+     * Read from the document alone, with no role, they are absent.
+     */
+    @Test
+    void serviceTrustReadsTheTagsOfTheRoleTheServiceAssumes() {
+        IamRole role = new IamRole("id", "tagged", "/", "arn:aws:iam::000000000000:role/tagged",
+                serviceTrust("{\"StringEquals\":{\"aws:ResourceTag/Team\":\"data\"}}"));
+        role.setTags(Map.of("team", "data"));
+        assertTrue(evaluator.allowsService(role, "lambda.amazonaws.com", null, null));
+        assertFalse(evaluator.allowsService(role.getAssumeRolePolicyDocument(), "lambda.amazonaws.com", null, null));
+        role.setTags(Map.of("team", "Data"));
+        assertFalse(evaluator.allowsService(role, "lambda.amazonaws.com", null, null));
+        role.setAssumeRolePolicyDocument(serviceTrust("{\"StringEquals\":{\"iam:ResourceTag/team\":\"Data\"}}"));
+        assertTrue(evaluator.allowsService(role, "lambda.amazonaws.com", null, null));
     }
 
     private static String serviceTrust(String condition) {

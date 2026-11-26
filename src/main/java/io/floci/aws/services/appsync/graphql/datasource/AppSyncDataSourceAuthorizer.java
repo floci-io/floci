@@ -95,8 +95,7 @@ public class AppSyncDataSourceAuthorizer {
             throw denied(dataSource, "service role does not exist");
         }
         String servicePrincipal = ServicePrincipals.of("appsync");
-        if (!trustEvaluator.allowsService(role.get().getAssumeRolePolicyDocument(),
-                servicePrincipal, sourceArn, sourceAccount)) {
+        if (!trustEvaluator.allowsService(role.get(), servicePrincipal, sourceArn, sourceAccount)) {
             throw denied(dataSource, "service role does not trust " + servicePrincipal);
         }
 
