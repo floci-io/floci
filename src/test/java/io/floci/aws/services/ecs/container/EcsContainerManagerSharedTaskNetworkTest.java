@@ -7,6 +7,7 @@ import com.github.dockerjava.api.command.InspectVolumeResponse;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.dns.DnsClientVpcSource.ClientVpc;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
@@ -126,6 +127,24 @@ class EcsContainerManagerSharedTaskNetworkTest {
                 ecrRegistryManager, mock(HostVolumePolicy.class),
                 ec2Service, firewallManager, taskRoleCredentials, mock(EcsCredentialsProxy.class),
                 linkLocalAddresses);
+    }
+
+    @Test
+    void sharedNamespacePublishesDnsBeforeWorkloadStartsAndRevokesOnCleanup() {
+        Subnet subnet = new Subnet();
+        subnet.setVpcId("vpc-dns");
+        when(ec2Service.describeSubnets(eq("us-east-1"), eq(List.of("subnet-1")), any()))
+                .thenReturn(List.of(subnet));
+        ClientVpc expected = new ClientVpc("000000000000", "us-east-1", "vpc-dns");
+        when(lifecycleManager.createAndStartEphemeral(any(), any())).thenAnswer(invocation -> {
+            assertEquals(Optional.of(expected), manager.vpcForClient("172.18.0.9"));
+            return new ContainerInfo("docker-id", Map.of());
+        });
+        EcsTaskHandle handle = manager.startTask(awsvpcTask(), taskDef(null, container("web", 80)),
+                List.of(), "us-east-1");
+        assertEquals(Optional.of(expected), manager.vpcForClient("172.18.0.9"));
+        manager.cleanupStoppedTask(handle);
+        assertTrue(manager.vpcForClient("172.18.0.9").isEmpty());
     }
 
     @Test

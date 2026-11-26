@@ -6,6 +6,7 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.HostConfig;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.dns.DnsClientVpcSource.ClientVpc;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
@@ -15,6 +16,8 @@ import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.SecurityGroupFirewallManager;
 import io.floci.aws.services.ec2.model.GroupIdentifier;
+import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.ec2.model.InstanceState;
 import io.floci.aws.services.ec2.model.NetworkInterface;
 import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.model.Subnet;
@@ -42,14 +45,18 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -109,6 +116,120 @@ class EcsContainerManagerTaskAddressTest {
                 new EcsTaskLinkLocalAddresses());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"bridge", "host"})
+    void registeredHostVpcScopesTaskAddresses(String mode) {
+        dnsAttachments("sidecar-id", "172.17.0.5", "2001:db8::5");
+        EcsTask task = taskWithEni();
+        task.setNetworkInterfaceId(null);
+        ClientVpc origin = new ClientVpc("000000000000", REGION, "vpc-host");
+        EcsTaskHandle handle = manager.startTask(task, taskDefinition(NetworkMode.valueOf(mode),
+                container("web", List.of())), List.of(), REGION, origin);
+        assertEquals(Optional.of(origin), manager.vpcForClient("172.17.0.5"));
+        manager.cleanupStoppedTask(handle);
+        assertTrue(manager.vpcForClient("172.17.0.5").isEmpty());
+    }
+
+    @Test
+    void registeredHostLookupRequiresMatchingAccountRegionAndVpc() {
+        Instance instance = new Instance();
+        instance.setOwnerId("111111111111");
+        instance.setState(InstanceState.running());
+        instance.setRegion(REGION);
+        instance.setVpcId("vpc-host");
+        when(ec2Service.findInstanceForAccount("111111111111", REGION, "i-host"))
+                .thenReturn(Optional.of(instance));
+        assertEquals(Optional.of(new ClientVpc("111111111111", REGION, "vpc-host")),
+                manager.vpcForInstance("111111111111", REGION, "i-host"));
+        assertTrue(manager.vpcForInstance("222222222222", REGION, "i-host").isEmpty());
+        instance.setState(InstanceState.stopped());
+        assertTrue(manager.vpcForInstance("111111111111", REGION, "i-host").isEmpty());
+        instance.setState(InstanceState.running());
+        instance.setRegion("us-west-2");
+        assertTrue(manager.vpcForInstance("111111111111", REGION, "i-host").isEmpty());
+        instance.setRegion(REGION);
+        instance.setVpcId(null);
+        assertTrue(manager.vpcForInstance("111111111111", REGION, "i-host").isEmpty());
+    }
+
+    @Test
+    void foreignHostContextCannotGiveATaskPrivateDnsAccess() {
+        dnsAttachments("sidecar-id", "172.17.0.5", "2001:db8::5");
+        EcsTask task = taskWithEni();
+        task.setNetworkInterfaceId(null);
+        manager.startTask(task, taskDefinition(NetworkMode.bridge, container("web", List.of())), List.of(), REGION,
+                new ClientVpc("222222222222", REGION, "vpc-host"));
+        assertTrue(manager.vpcForClient("172.17.0.5").isEmpty());
+    }
+
+    @Test
+    void awsvpcDnsUsesActualAttachmentsAndRevokesOnCleanup() {
+        dnsAttachments("sidecar-id", "172.17.0.5", "2001:db8::5");
+        dnsAttachments("web-id", "172.17.0.6", "2001:db8::6");
+        EcsTask task = taskWithEni();
+        EcsTaskHandle handle = manager.startTask(task, taskDefinition(NetworkMode.awsvpc,
+                container("sidecar", List.of()), container("web", List.of())), List.of(), REGION);
+        ClientVpc expected = new ClientVpc("000000000000", REGION, "vpc-1");
+        clearInvocations(dockerClient);
+        for (String address : List.of("172.17.0.5", "172.17.0.6", "2001:db8::5", "2001:db8::6")) {
+            assertEquals(Optional.of(expected), manager.vpcForClient(address));
+        }
+        assertTrue(manager.vpcForClient("10.0.0.10").isEmpty(), "An ENI address is not proof of a Docker attachment");
+        assertTrue(manager.vpcForClient(null).isEmpty());
+        verifyNoInteractions(dockerClient);
+        manager.cleanupStoppedTask(handle);
+        assertTrue(manager.vpcForClient("172.17.0.5").isEmpty());
+        assertTrue(manager.vpcForClient("2001:db8::6").isEmpty());
+    }
+
+    @Test
+    void failedLaunchRevokesAlreadyRegisteredDnsAddresses() {
+        dnsAttachments("sidecar-id", "172.17.0.5", "2001:db8::5");
+        when(lifecycleManager.createAndStartEphemeral(any(), any()))
+                .thenReturn(new ContainerInfo("sidecar-id", Map.of()))
+                .thenThrow(new IllegalStateException("second container failed"));
+        assertThrows(RuntimeException.class, () -> manager.startTask(taskWithEni(),
+                taskDefinition(NetworkMode.awsvpc, container("sidecar", List.of()), container("web", List.of())),
+                List.of(), REGION));
+        assertTrue(manager.vpcForClient("172.17.0.5").isEmpty());
+        assertTrue(manager.vpcForClient("2001:db8::5").isEmpty());
+    }
+
+    @Test
+    void ambiguousTaskAddressDoesNotChooseAnotherVpcAndCleanupPreservesTheOtherTask() {
+        dnsAttachments("sidecar-id", "172.17.0.5", "2001:db8::5");
+        dnsAttachments("web-id", "172.17.0.5", "2001:db8::5");
+        EcsTask first = taskWithEni();
+        manager.startTask(first, taskDefinition(NetworkMode.awsvpc, container("web", List.of())), List.of(), REGION);
+        EcsTask second = taskWithEni();
+        second.setTaskArn("arn:aws:ecs:us-east-1:222222222222:task/test-cluster/second");
+        manager.startTask(second, taskDefinition(NetworkMode.awsvpc, container("web", List.of())), List.of(), REGION);
+        assertTrue(manager.vpcForClient("172.17.0.5").isEmpty());
+        manager.releaseTaskNetwork(first, REGION);
+        assertEquals(Optional.of(new ClientVpc("222222222222", REGION, "vpc-1")),
+                manager.vpcForClient("172.17.0.5"));
+        manager.releaseTaskNetwork(second, REGION);
+        assertTrue(manager.vpcForClient("172.17.0.5").isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"bridge", "host", "none"})
+    void nonVpcNetworkDoesNotBorrowAnUnusedAwsvpcConfiguration(String mode) {
+        dnsAttachments("sidecar-id", "172.17.0.5", "2001:db8::5");
+        manager.startTask(taskWithEni(), taskDefinition(NetworkMode.valueOf(mode), container("web", List.of())),
+                List.of(), REGION);
+        assertTrue(manager.vpcForClient("172.17.0.5").isEmpty());
+    }
+
+    private void dnsAttachments(String dockerId, String ipv4, String ipv6) {
+        InspectContainerResponse inspect = mock(InspectContainerResponse.class, RETURNS_DEEP_STUBS);
+        ContainerNetwork network = mock(ContainerNetwork.class);
+        when(network.getIpAddress()).thenReturn(ipv4);
+        when(network.getGlobalIPv6Address()).thenReturn(ipv6);
+        when(inspect.getNetworkSettings().getNetworks()).thenReturn(Map.of("floci-net", network));
+        when(dockerClient.inspectContainerCmd(dockerId).exec()).thenReturn(inspect);
+    }
+
     @Test
     void awsvpcTaskGivesItsEniAddressToTheFirstContainerThatMapsAPort() {
         manager.startTask(taskWithEni(), taskDefinition(NetworkMode.awsvpc,
@@ -159,6 +280,10 @@ class EcsContainerManagerTaskAddressTest {
                 container("web", List.of(new PortMapping(80, 80, "tcp")))), List.of(), REGION);
 
         assertEquals("eni-1", task.getNetworkInterfaceId());
+        assertEquals(Optional.of(new ClientVpc("000000000000", REGION, "vpc-1")),
+                manager.vpcForClient("10.0.0.5"));
+        manager.releaseTaskNetwork(task, REGION);
+        assertTrue(manager.vpcForClient("10.0.0.5").isEmpty());
         verify(ec2Service, never()).attachContainerToVpc(any(), any(), any(), any(), any(), any());
     }
 

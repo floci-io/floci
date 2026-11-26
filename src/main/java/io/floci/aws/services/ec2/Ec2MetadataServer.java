@@ -3,6 +3,7 @@ package io.floci.aws.services.ec2;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsRegions;
+import io.floci.aws.core.common.dns.DnsClientVpcSource;
 import io.floci.aws.services.ec2.model.GroupIdentifier;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.InstanceNetworkInterface;
@@ -51,7 +52,7 @@ import java.util.function.Function;
  * to obtain temporary credentials backed by the instance's IAM instance profile.
  */
 @ApplicationScoped
-public class Ec2MetadataServer {
+public class Ec2MetadataServer implements DnsClientVpcSource {
 
     private static final Logger LOG = Logger.getLogger(Ec2MetadataServer.class);
     private static final DateTimeFormatter ISO = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
@@ -169,6 +170,20 @@ public class Ec2MetadataServer {
             tokens.values().removeIf(token -> token.instance() == instance);
             containerIpToInstance.entrySet().removeIf(entry -> entry.getValue() == instance);
         }
+    }
+
+    @Override
+    public Optional<ClientVpc> vpcForClient(String clientAddress) {
+        if (clientAddress == null || clientAddress.isBlank()) {
+            return Optional.empty();
+        }
+        Instance instance = containerIpToInstance.get(clientAddress);
+        if (instance == null || instance.getOwnerId() == null || instance.getOwnerId().isBlank()
+                || instance.getRegion() == null || instance.getRegion().isBlank()
+                || instance.getVpcId() == null || instance.getVpcId().isBlank()) {
+            return Optional.empty();
+        }
+        return Optional.of(new ClientVpc(instance.getOwnerId(), instance.getRegion(), instance.getVpcId()));
     }
 
     Optional<Instance> registeredContainer(String containerIp) {

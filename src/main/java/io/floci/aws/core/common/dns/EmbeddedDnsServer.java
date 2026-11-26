@@ -513,19 +513,24 @@ public class EmbeddedDnsServer {
         if (clientVpcSources == null || clientAddress == null || clientAddress.isBlank()) {
             return Optional.empty();
         }
+        DnsClientVpcSource.ClientVpc result = null;
         for (DnsClientVpcSource source : clientVpcSources) {
             try {
                 Optional<DnsClientVpcSource.ClientVpc> clientVpc =
                         source.vpcForClient(clientAddress.trim());
                 if (clientVpc != null && clientVpc.isPresent() && isUsableOrigin(clientVpc.orElseThrow())) {
-                    return clientVpc;
+                    DnsClientVpcSource.ClientVpc found = clientVpc.orElseThrow();
+                    if (result != null && !result.equals(found)) {
+                        return Optional.empty();
+                    }
+                    result = found;
                 }
             } catch (Exception e) {
                 LOG.debugv("DNS client VPC source {0} failed for {1}: {2}",
                         source.getClass().getSimpleName(), clientAddress, e.getMessage());
             }
         }
-        return Optional.empty();
+        return Optional.ofNullable(result);
     }
 
     private static boolean isUsableOrigin(DnsClientVpcSource.ClientVpc clientVpc) {

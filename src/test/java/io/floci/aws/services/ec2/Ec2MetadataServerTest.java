@@ -1,5 +1,6 @@
 package io.floci.aws.services.ec2;
 
+import io.floci.aws.core.common.dns.DnsClientVpcSource.ClientVpc;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.InstanceNetworkInterface;
 import io.floci.aws.services.ec2.model.Placement;
@@ -9,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -33,6 +35,61 @@ class Ec2MetadataServerTest {
         server.unregisterInstance(first);
         assertTrue(server.registeredContainer("192.0.2.4").isEmpty());
         assertEquals(second, server.registeredContainer("192.0.2.3").orElseThrow());
+    }
+
+    @Test
+    void dnsOriginFollowsAddressReconciliationAndInstanceRemoval() {
+        Ec2MetadataServer server = new Ec2MetadataServer(null, null, null, (InstanceConnectKeys) null);
+        Instance instance = dnsInstance("111111111111", "us-west-2", "vpc-one");
+        ClientVpc expected = new ClientVpc("111111111111", "us-west-2", "vpc-one");
+        server.reconcileContainerAddresses(Set.of("192.0.2.1", "2001:db8::1"), instance);
+        assertEquals(Optional.of(expected), server.vpcForClient("192.0.2.1"));
+        assertEquals(Optional.of(expected), server.vpcForClient("2001:db8::1"));
+        server.reconcileContainerAddresses(Set.of("192.0.2.2"), instance);
+        assertTrue(server.vpcForClient("192.0.2.1").isEmpty());
+        assertTrue(server.vpcForClient("2001:db8::1").isEmpty());
+        assertEquals(Optional.of(expected), server.vpcForClient("192.0.2.2"));
+        server.unregisterInstance(instance);
+        assertTrue(server.vpcForClient("192.0.2.2").isEmpty());
+    }
+
+    @Test
+    void dnsOriginPreservesReplacementOwnerWhenOldInstanceCleansUp() {
+        Ec2MetadataServer server = new Ec2MetadataServer(null, null, null, (InstanceConnectKeys) null);
+        Instance first = dnsInstance("111111111111", "us-west-2", "vpc-one");
+        Instance replacement = dnsInstance("222222222222", "us-east-1", "vpc-two");
+        server.registerContainer("192.0.2.1", "first", first);
+        server.registerContainer("192.0.2.1", "replacement", replacement);
+        server.unregisterContainer("192.0.2.1", first);
+        server.unregisterInstance(first);
+        assertEquals(Optional.of(new ClientVpc("222222222222", "us-east-1", "vpc-two")),
+                server.vpcForClient("192.0.2.1"));
+        server.rollbackContainerRegistration("192.0.2.1", replacement);
+        assertTrue(server.vpcForClient("192.0.2.1").isEmpty());
+    }
+
+    @Test
+    void dnsOriginDoesNotInferMissingIdentityOrTrustAMetadataRelay() {
+        Ec2MetadataServer server = new Ec2MetadataServer(null, null, null, (InstanceConnectKeys) null);
+        server.trustForwarder("192.0.2.1");
+        assertTrue(server.vpcForClient("192.0.2.1").isEmpty());
+        assertTrue(server.vpcForClient(null).isEmpty());
+        assertTrue(server.vpcForClient("").isEmpty());
+        for (Instance incomplete : List.of(dnsInstance(null, "us-east-1", "vpc-one"),
+                dnsInstance("111111111111", "", "vpc-one"),
+                dnsInstance("111111111111", "us-east-1", null))) {
+            server.registerContainer("192.0.2.1", "incomplete", incomplete);
+            assertTrue(server.vpcForClient("192.0.2.1").isEmpty());
+        }
+    }
+
+    private static Instance dnsInstance(String owner, String region, String vpc) {
+        Instance instance = new Instance();
+        instance.setInstanceId("i-dns");
+        instance.setOwnerId(owner);
+        instance.setRegion(region);
+        instance.setVpcId(vpc);
+        return instance;
     }
 
     @Test
