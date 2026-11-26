@@ -32,6 +32,7 @@ import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -327,8 +328,10 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
             }
         }
 
-        version.setLastAccessedDate(Instant.now());
-        secret.setLastAccessedDate(Instant.now());
+        // AWS records the access as the UTC day, truncated to midnight.
+        Instant accessedDay = Instant.now().truncatedTo(ChronoUnit.DAYS);
+        version.setLastAccessedDate(accessedDay);
+        secret.setLastAccessedDate(accessedDay);
         // Deliberately not persist(): reading a secret is not a change to replicate, and pushing
         // the primary out to every replica on each read would rebuild them constantly and
         // clobber each replica's own last-accessed bookkeeping.

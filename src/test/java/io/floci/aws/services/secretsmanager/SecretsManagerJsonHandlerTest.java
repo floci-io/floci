@@ -12,6 +12,8 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.function.Consumer;
 
@@ -168,9 +170,13 @@ class SecretsManagerJsonHandlerTest {
         createSecret("read-secret");
         ObjectNode getReq = MAPPER.createObjectNode();
         getReq.put("SecretId", "read-secret");
+        long before = Instant.now().truncatedTo(ChronoUnit.DAYS).getEpochSecond();
         handler.handle("GetSecretValue", getReq, REGION);
+        long after = Instant.now().truncatedTo(ChronoUnit.DAYS).getEpochSecond();
 
-        assertThat(describe("read-secret").has("LastAccessedDate"), is(true));
+        // AWS stamps the UTC day, truncated to midnight, not the read time.
+        double accessed = describe("read-secret").get("LastAccessedDate").asDouble();
+        assertThat(accessed == before || accessed == after, is(true));
     }
 
     @Test
