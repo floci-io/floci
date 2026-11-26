@@ -10298,6 +10298,55 @@ class Ec2ServiceTest {
                 region, List.of(selected.getGroupId()), List.of(), Map.of()).getFirst().getGroupId());
     }
 
+    @Test
+    void aGroupInAVpcWithAnIpv6BlockStartsWithTheIpv6OutboundRule() {
+        // AWS: the default group "allows all outbound IPv6 traffic ... only if your VPC has an associated IPv6 CIDR
+        // block", and a VPC's groups get that rule when the block is associated. Without it, security-group
+        // enforcement drops every outgoing IPv6 packet of a dual-stack guest, neighbor discovery included.
+        Ec2Service service = mockModeService();
+        Vpc dual = service.createVpc("us-east-1", "10.231.0.0/16", false, true);
+        Vpc ipv4 = service.createVpc("us-east-1", "10.232.0.0/16", false, false);
+        SecurityGroup inDual = service.createSecurityGroup("us-east-1", "dual-stack", "d", dual.getVpcId());
+        SecurityGroup inIpv4 = service.createSecurityGroup("us-east-1", "ipv4-only", "v", ipv4.getVpcId());
+        assertEquals(List.of("::/0"), ipv6Egress(inDual));
+        assertEquals(List.of(), ipv6Egress(inIpv4));
+        assertEquals(List.of("::/0"), ipv6Egress(groupNamed(service, dual.getVpcId(), "default")));
+        assertEquals(List.of(), ipv6Egress(groupNamed(service, ipv4.getVpcId(), "default")));
+        assertTrue(service.describeSecurityGroupRules("us-east-1", List.of(inDual.getGroupId()), List.of()).stream()
+                .anyMatch(rule -> rule.isEgress() && "::/0".equals(rule.getCidrIpv6())));
+    }
+
+    @Test
+    void associatingAnIpv6BlockAddsTheIpv6OutboundRuleOnlyToGroupsWithTheirOriginalOutboundRule() {
+        Ec2Service service = mockModeService();
+        Vpc vpc = service.createVpc("us-east-1", "10.233.0.0/16", false, false);
+        service.createSecurityGroup("us-east-1", "untouched", "u", vpc.getVpcId());
+        SecurityGroup changed = service.createSecurityGroup("us-east-1", "changed", "c", vpc.getVpcId());
+        IpPermission https = new IpPermission();
+        https.setIpProtocol("tcp");
+        https.setFromPort(443);
+        https.setToPort(443);
+        https.getIpRanges().add(new IpRange("10.0.0.0/8"));
+        service.authorizeSecurityGroupEgress("us-east-1", changed.getGroupId(), List.of(https));
+
+        service.associateAmazonProvidedIpv6CidrBlock("us-east-1", vpc.getVpcId());
+
+        assertEquals(List.of("::/0"), ipv6Egress(groupNamed(service, vpc.getVpcId(), "untouched")));
+        assertEquals(List.of("::/0"), ipv6Egress(groupNamed(service, vpc.getVpcId(), "default")));
+        assertEquals(List.of(), ipv6Egress(groupNamed(service, vpc.getVpcId(), "changed")));
+    }
+
+    private static List<String> ipv6Egress(SecurityGroup group) {
+        return group.getIpPermissionsEgress().stream().flatMap(permission -> permission.getIpv6Ranges().stream())
+                .map(Ipv6Range::getCidrIpv6).toList();
+    }
+
+    private static SecurityGroup groupNamed(Ec2Service service, String vpcId, String name) {
+        return service.describeSecurityGroups("us-east-1", List.of(), List.of(), Map.of()).stream()
+                .filter(group -> vpcId.equals(group.getVpcId()) && name.equals(group.getGroupName()))
+                .findFirst().orElseThrow();
+    }
+
     private static Ec2Service mockModeService() {
         return mockModeService(mockConfig(true));
     }

@@ -145,6 +145,43 @@ class Ec2SecurityGroupPublicationRaceTest {
         assertEquals(1, service.describeSecurityGroupRules(region, List.of(retry.getGroupId()), List.of()).size());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedIpv6DefaultRulePublicationRemovesBothRules(boolean afterWrite) {
+        TestStores factory = new TestStores();
+        InMemoryStorage<String, SecurityGroupRule> rules = spy(new InMemoryStorage<>());
+        factory.storage.withStore("ec2-security-group-rules.json", rules);
+        Ec2Service service = service(factory);
+        String region = "us-east-1";
+        String vpc = service.createVpc(region, "10.0.0.0/16", false, true).getVpcId();
+        List<String> beforeGroups = service.describeSecurityGroups(region, List.of(), List.of(), Map.of())
+                .stream().map(SecurityGroup::getGroupId).sorted().toList();
+        List<String> beforeRules = service.describeSecurityGroupRules(region, List.of(), List.of())
+                .stream().map(SecurityGroupRule::getSecurityGroupRuleId).sorted().toList();
+        IllegalStateException failure = new IllegalStateException("IPv6 rule publication failed");
+        doAnswer(call -> {
+            SecurityGroupRule rule = call.getArgument(1);
+            if (rule.getCidrIpv6() == null || afterWrite) {
+                call.callRealMethod();
+            }
+            if (rule.getCidrIpv6() != null) {
+                throw failure;
+            }
+            return null;
+        }).when(rules).put(anyString(), any(SecurityGroupRule.class));
+
+        assertSame(failure, assertThrows(IllegalStateException.class,
+                () -> service.createSecurityGroup(region, "failed", "failed", vpc)));
+
+        assertEquals(beforeGroups, service.describeSecurityGroups(region, List.of(), List.of(), Map.of())
+                .stream().map(SecurityGroup::getGroupId).sorted().toList());
+        assertEquals(beforeRules, service.describeSecurityGroupRules(region, List.of(), List.of())
+                .stream().map(SecurityGroupRule::getSecurityGroupRuleId).sorted().toList());
+        reset(rules);
+        SecurityGroup retry = service.createSecurityGroup(region, "failed", "retry", vpc);
+        assertEquals(2, service.describeSecurityGroupRules(region, List.of(retry.getGroupId()), List.of()).size());
+    }
+
     @Test
     void failedCreationRetainsOriginalFailureAndAttemptsBothCleanupWrites() {
         TestStores factory = new TestStores();
