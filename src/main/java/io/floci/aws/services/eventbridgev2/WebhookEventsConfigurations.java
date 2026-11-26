@@ -175,6 +175,9 @@ final class WebhookEventsConfigurations {
         if (secret != null && secretBytes < MIN_HMAC_SECRET_BYTES) {
             throw hmacInvalid("SecretValue must be at least 16 bytes (for BASE64, after decoding)");
         }
+        if (secret != null && secretBytes > MAX_HMAC_SECRET_BYTES) {
+            throw hmacInvalid("SecretValue must be at most 512 bytes (for BASE64, after decoding)");
+        }
         if (hmac.hasNonNull("TimestampToleranceInSeconds") && timestamp == null) {
             throw hmacInvalid("TimestampToleranceInSeconds requires TimestampHttpHeader to be set");
         }
