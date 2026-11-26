@@ -8,6 +8,7 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.docdb.container.DocDbContainerHandle;
 import io.floci.aws.services.docdb.container.DocDbContainerManager;
 import io.floci.aws.services.docdb.model.DocDbCluster;
 import io.floci.aws.services.docdb.model.DocDbClusterSettings;
@@ -21,6 +22,7 @@ import io.floci.aws.services.rds.model.DbClusterParameterGroup;
 import io.floci.aws.services.rds.model.DbSubnetGroup;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.util.List;
@@ -31,6 +33,7 @@ import java.util.Set;
 import static io.floci.aws.testing.Ec2ServiceFixtures.securityGroup;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -39,6 +42,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -114,7 +118,7 @@ class DocDbServiceTest {
         assertEquals(27017, cluster.getPort());
         assertTrue(cluster.getDbClusterArn().contains("mock-cluster"));
 
-        verify(containerManager, never()).start(anyString(), anyString(), anyString(), anyString(), any());
+        verify(containerManager, never()).start(anyString(), anyString(), anyString(), anyString(), any(), any());
     }
 
     @Test
@@ -183,24 +187,10 @@ class DocDbServiceTest {
         // tryStart() returns null when no Docker daemon is reachable. The cluster record is
         // metadata, so the create still succeeds and the cluster reaches 'available' on the
         // first describe (what SDK/Terraform waiters poll).
-        StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
-        when(storageFactory.create(anyString(), anyString(), any()))
-                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
-        EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
-        EmulatorConfig.ServicesConfig servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
-        EmulatorConfig.DocDbServiceConfig docdbConfig = Mockito.mock(EmulatorConfig.DocDbServiceConfig.class);
-        when(config.services()).thenReturn(servicesConfig);
-        when(servicesConfig.docdb()).thenReturn(docdbConfig);
-        when(docdbConfig.mock()).thenReturn(false);
-        when(docdbConfig.defaultImage()).thenReturn("mongo:7.0");
-        when(config.hostname()).thenReturn(Optional.of("localhost"));
-
         DocDbContainerManager noDaemonContainerManager = Mockito.mock(DocDbContainerManager.class);
-        when(noDaemonContainerManager.tryStart(anyString(), anyString(), anyString(), anyString(), any()))
+        when(noDaemonContainerManager.tryStart(anyString(), anyString(), anyString(), anyString(), any(), any()))
                 .thenReturn(null);
-        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
-        DocDbService noDaemonService = new DocDbService(config, regionResolver, noDaemonContainerManager, storageFactory,
-                rdsService, ec2Service, kmsService);
+        DocDbService noDaemonService = containerBackedService("memory", noDaemonContainerManager);
 
         DocDbCluster created = noDaemonService.createDbCluster(
                 "no-docker-cluster", null, "admin", "secret", false);
@@ -215,6 +205,78 @@ class DocDbServiceTest {
         // Delete must not reach for a container that was never created.
         noDaemonService.deleteDbCluster("no-docker-cluster");
         verify(noDaemonContainerManager, never()).stop(any());
+    }
+
+    @Test
+    void aClusterKeepsItsDataInAVolumeOfItsOwnWhenStorageIsPersistent() {
+        DocDbContainerManager manager = Mockito.mock(DocDbContainerManager.class);
+        when(manager.tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), any()))
+                .thenAnswer(inv -> new DocDbContainerHandle("container-" + inv.getArgument(0),
+                        inv.getArgument(0), "localhost", 27017));
+        DocDbService service = containerBackedService("persistent", manager);
+
+        String first = service.createDbCluster("first", null, "admin", "secret", false).getVolumeId();
+        String second = service.createDbCluster("second", null, "admin", "secret", false).getVolumeId();
+
+        assertNotNull(first);
+        assertNotEquals(first, second);
+        assertEquals(first, service.getDbCluster("first").getVolumeId());
+        verify(manager).tryStart(eq("first"), anyString(), eq("admin"), eq("secret"), eq("us-east-1"), eq(first));
+
+        service.deleteDbCluster("first");
+        verify(manager).removeStorage(first);
+        verify(manager, never()).discardStorage(any());
+        String recreated = service.createDbCluster("first", null, "admin", "secret", false).getVolumeId();
+        assertNotNull(recreated);
+        assertNotEquals(first, recreated);
+    }
+
+    @Test
+    void aFailedCreateDiscardsTheVolumeMadeForIt() {
+        DocDbContainerManager manager = Mockito.mock(DocDbContainerManager.class);
+        when(manager.tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), any()))
+                .thenThrow(new IllegalStateException("no such image: mongo:7.0"));
+        DocDbService service = containerBackedService("persistent", manager);
+
+        assertThrows(IllegalStateException.class,
+                () -> service.createDbCluster("c", null, "admin", "secret", false));
+
+        ArgumentCaptor<String> volume = ArgumentCaptor.forClass(String.class);
+        verify(manager).tryStart(eq("c"), anyString(), anyString(), anyString(), anyString(), volume.capture());
+        assertNotNull(volume.getValue());
+        verify(manager).discardStorage(volume.getValue());
+        assertThrows(AwsException.class, () -> service.getDbCluster("c"));
+    }
+
+    @Test
+    void aClusterHasNoDataVolumeInMemoryMode() {
+        DocDbContainerManager manager = Mockito.mock(DocDbContainerManager.class);
+        when(manager.tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), any()))
+                .thenAnswer(inv -> new DocDbContainerHandle("container-" + inv.getArgument(0),
+                        inv.getArgument(0), "localhost", 27017));
+        DocDbService service = containerBackedService("memory", manager);
+
+        assertNull(service.createDbCluster("c", null, "admin", "secret", false).getVolumeId());
+        verify(manager).tryStart(eq("c"), anyString(), eq("admin"), eq("secret"), eq("us-east-1"), isNull());
+    }
+
+    private DocDbService containerBackedService(String storageMode, DocDbContainerManager manager) {
+        StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.DocDbServiceConfig docdbConfig = Mockito.mock(EmulatorConfig.DocDbServiceConfig.class);
+        EmulatorConfig.StorageConfig storageConfig = Mockito.mock(EmulatorConfig.StorageConfig.class);
+        when(config.services()).thenReturn(servicesConfig);
+        when(servicesConfig.docdb()).thenReturn(docdbConfig);
+        when(docdbConfig.mock()).thenReturn(false);
+        when(docdbConfig.defaultImage()).thenReturn("mongo:7.0");
+        when(config.hostname()).thenReturn(Optional.of("localhost"));
+        when(config.storage()).thenReturn(storageConfig);
+        when(storageConfig.mode()).thenReturn(storageMode);
+        return new DocDbService(config, new RegionResolver("us-east-1", "000000000000"), manager, storageFactory,
+                rdsService, ec2Service, kmsService);
     }
 
     @Test
@@ -549,7 +611,7 @@ class DocDbServiceTest {
         e = refused(new DocDbClusterSettings(null, null, null, null, null, null, "02:00-02:30", "tue:02:15-tue:02:45", null));
         assertEquals("The backup window and maintenance window must not overlap.", e.getMessage());
         assertThrows(AwsException.class, () -> docDbService.getDbCluster("c1"));
-        verify(containerManager, never()).tryStart(any(), any(), any(), any(), any());
+        verify(containerManager, never()).tryStart(any(), any(), any(), any(), any(), any());
 
         // a window given alone is paired with a default clear of it
         docDbService.createDbCluster("alone", "5.0.0", "u", "pw", false,

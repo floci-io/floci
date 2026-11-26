@@ -10,6 +10,7 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.testing.ParallelLocks;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.ResourceAccessMode;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Mockito;
@@ -18,6 +19,8 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -55,7 +59,7 @@ class DocDbContainerManagerTest {
         DocDbContainerManager manager = newManager(lifecycleManager);
 
         for (int attempt = 0; attempt < 3; attempt++) {
-            assertNull(manager.tryStart("cluster1", "mongo:7.0", "admin", "secret", "us-east-1"),
+            assertNull(manager.tryStart("cluster1", "mongo:7.0", "admin", "secret", "us-east-1", null),
                     "attempt " + attempt + " should report unavailable");
         }
         assertFalse(manager.isDockerReachable());
@@ -73,7 +77,7 @@ class DocDbContainerManagerTest {
         DocDbContainerManager manager = newManager(lifecycleManager);
 
         RuntimeException failure = assertThrows(RuntimeException.class,
-                () -> manager.tryStart("cluster1", "mongo:7.0", "admin", "secret", "us-east-1"));
+                () -> manager.tryStart("cluster1", "mongo:7.0", "admin", "secret", "us-east-1", null));
         assertEquals("no such image: mongo:7.0", failure.getMessage());
     }
 
@@ -100,7 +104,7 @@ class DocDbContainerManagerTest {
 
             DocDbContainerManager manager = newManager(lifecycleManager);
 
-            DocDbContainerHandle handle = manager.tryStart("cluster1", "mongo:7.0", "admin", "secret", "us-east-1");
+            DocDbContainerHandle handle = manager.tryStart("cluster1", "mongo:7.0", "admin", "secret", "us-east-1", null);
 
             assertEquals("container-id", handle.getContainerId());
             assertEquals(serverSocket.getLocalPort(), handle.getPort());
@@ -146,7 +150,7 @@ class DocDbContainerManagerTest {
                     logStreamer, mock(ContainerDetector.class), config,
                     new RegionResolver("us-east-1", "000000000000"));
 
-            manager.start("cluster1", "mongo:7.0", "admin", "secret", "eu-west-1");
+            manager.start("cluster1", "mongo:7.0", "admin", "secret", "eu-west-1", null);
 
             verify(builder).withLabels(Map.of(
                     "io.floci", "aws",
@@ -175,7 +179,7 @@ class DocDbContainerManagerTest {
             for (String account : List.of("111111111111", "222222222222")) {
                 when(resolver.getAccountId()).thenReturn(account);
                 for (String region : List.of("us-east-1", "eu-west-1")) {
-                    handles.add(manager.start("shared", "mongo:7.0", "admin", "secret", region));
+                    handles.add(manager.start("shared", "mongo:7.0", "admin", "secret", region, null));
                 }
             }
             assertEquals(4, names.stream().distinct().count());
@@ -191,13 +195,169 @@ class DocDbContainerManagerTest {
         }
     }
 
+    @Test
+    void aClusterWithAVolumeKeepsItsDataInANamedVolumeOfItsOwn() throws IOException {
+        try (ServerSocket backend = new ServerSocket(0)) {
+            ContainerLifecycleManager lifecycle = backedBy(backend);
+            ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+            DocDbContainerManager manager = newManager(lifecycle, builder, storage("persistent", null, false));
+
+            manager.start("cluster1", "mongo:7.0", "admin", "secret", "us-east-1", "vol-1");
+
+            verify(lifecycle).ensureVolume("floci-aws-docdb-vol-1");
+            verify(builder).withNamedVolume("floci-aws-docdb-vol-1", "/data/db");
+            verify(builder, never()).withBind(anyString(), anyString());
+        }
+    }
+
+    @Test
+    void aClusterWithAVolumeKeepsItsDataUnderTheHostPersistentPath(@TempDir Path hostPath) throws IOException {
+        try (ServerSocket backend = new ServerSocket(0)) {
+            ContainerLifecycleManager lifecycle = backedBy(backend);
+            ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+            DocDbContainerManager manager = newManager(lifecycle, builder,
+                    storage("persistent", hostPath.toString(), false));
+
+            manager.start("cluster1", "mongo:7.0", "admin", "secret", "us-east-1", "vol-1");
+
+            Path dataDir = hostPath.resolve("docdb").resolve("vol-1");
+            verify(builder).withBind(dataDir.toString(), "/data/db");
+            assertTrue(Files.isDirectory(dataDir));
+            verify(builder, never()).withNamedVolume(anyString(), anyString());
+            verify(lifecycle, never()).ensureVolume(anyString());
+        }
+    }
+
+    @Test
+    void aClusterWithoutAVolumeMountsNothing() throws IOException {
+        try (ServerSocket backend = new ServerSocket(0)) {
+            ContainerLifecycleManager lifecycle = backedBy(backend);
+            ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+            DocDbContainerManager manager = newManager(lifecycle, builder, storage("memory", null, false));
+
+            manager.start("cluster1", "mongo:7.0", "admin", "secret", "us-east-1", null);
+
+            verify(builder, never()).withNamedVolume(anyString(), anyString());
+            verify(builder, never()).withBind(anyString(), anyString());
+            verify(lifecycle, never()).ensureVolume(anyString());
+        }
+    }
+
+    @Test
+    void aStartThatCannotFinishRemovesTheContainerItStarted() throws IOException {
+        try (ServerSocket backend = new ServerSocket(0)) {
+            ContainerLifecycleManager lifecycle = backedBy(backend);
+            ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
+            ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+            when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
+            ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+            when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+            when(logStreamer.attachPolled(anyString(), anyString(), anyString(), anyString(), anyString()))
+                    .thenThrow(new IllegalStateException("log stream refused"));
+            EmulatorConfig config = mock(EmulatorConfig.class);
+            EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+            EmulatorConfig.DocDbServiceConfig docdb = mock(EmulatorConfig.DocDbServiceConfig.class);
+            when(config.services()).thenReturn(services);
+            when(services.docdb()).thenReturn(docdb);
+            when(docdb.dockerNetwork()).thenReturn(Optional.empty());
+            EmulatorConfig.StorageConfig storage = storage("persistent", null, false);
+            when(config.storage()).thenReturn(storage);
+            DocDbContainerManager manager = new DocDbContainerManager(containerBuilder, lifecycle, logStreamer,
+                    mock(ContainerDetector.class), config, new RegionResolver("us-east-1", "000000000000"));
+
+            assertThrows(IllegalStateException.class,
+                    () -> manager.start("cluster1", "mongo:7.0", "admin", "secret", "us-east-1", "vol-1"));
+
+            verify(lifecycle).stopAndRemove("container-id", null);
+            manager.stopAll();
+            verify(lifecycle, times(1)).stopAndRemove(anyString(), any());
+            verify(lifecycle, never()).removeVolume(anyString());
+        }
+    }
+
+    @Test
+    void removingStorageDropsTheVolumeWhenVolumesArePrunedOnDelete() {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        DocDbContainerManager manager = newManager(lifecycle, mock(ContainerBuilder.Builder.class),
+                storage("persistent", null, true));
+
+        manager.removeStorage("vol-1");
+
+        verify(lifecycle).removeVolume("floci-aws-docdb-vol-1");
+    }
+
+    @Test
+    void removingStorageKeepsTheVolumeWhenAPersistentModeRetainsVolumes() {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        DocDbContainerManager manager = newManager(lifecycle, mock(ContainerBuilder.Builder.class),
+                storage("persistent", null, false));
+
+        manager.removeStorage("vol-1");
+
+        verify(lifecycle, never()).removeVolume(anyString());
+    }
+
+    @Test
+    void removingStorageLeavesAHostDirectoryAndAClusterWithoutAVolumeAlone(@TempDir Path hostPath) {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        newManager(lifecycle, mock(ContainerBuilder.Builder.class), storage("persistent", hostPath.toString(), true))
+                .removeStorage("vol-1");
+        newManager(lifecycle, mock(ContainerBuilder.Builder.class), storage("persistent", null, true))
+                .removeStorage(null);
+
+        verify(lifecycle, never()).removeVolume(anyString());
+    }
+
+    @Test
+    void discardingStorageDropsTheVolumeEvenWhenThePolicyRetainsVolumes(@TempDir Path hostPath) {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        DocDbContainerManager manager = newManager(lifecycle, mock(ContainerBuilder.Builder.class),
+                storage("persistent", null, false));
+
+        manager.discardStorage("vol-1");
+        manager.discardStorage(null);
+        newManager(lifecycle, mock(ContainerBuilder.Builder.class), storage("persistent", hostPath.toString(), false))
+                .discardStorage("vol-2");
+
+        verify(lifecycle).removeVolume("floci-aws-docdb-vol-1");
+        verify(lifecycle, times(1)).removeVolume(anyString());
+    }
+
+    private static ContainerLifecycleManager backedBy(ServerSocket backend) {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
+                "container-id", Map.of(27017, new ContainerLifecycleManager.EndpointInfo(
+                        "127.0.0.1", backend.getLocalPort()))));
+        return lifecycle;
+    }
+
+    private static EmulatorConfig.StorageConfig storage(String mode, String hostPersistentPath, boolean prune) {
+        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
+        when(storage.mode()).thenReturn(mode);
+        when(storage.hostPersistentPath()).thenReturn(hostPersistentPath);
+        when(storage.pruneVolumesOnDelete()).thenReturn(prune);
+        return storage;
+    }
+
     private DocDbContainerManager newManager(ContainerLifecycleManager lifecycleManager) {
         return newManager(lifecycleManager, new RegionResolver("us-east-1", "000000000000"));
     }
 
     private DocDbContainerManager newManager(ContainerLifecycleManager lifecycleManager, RegionResolver resolver) {
+        return newManager(lifecycleManager, resolver, mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF), null);
+    }
+
+    private DocDbContainerManager newManager(ContainerLifecycleManager lifecycleManager,
+                                             ContainerBuilder.Builder builder,
+                                             EmulatorConfig.StorageConfig storage) {
+        return newManager(lifecycleManager, new RegionResolver("us-east-1", "000000000000"), builder, storage);
+    }
+
+    private DocDbContainerManager newManager(ContainerLifecycleManager lifecycleManager, RegionResolver resolver,
+                                             ContainerBuilder.Builder builder,
+                                             EmulatorConfig.StorageConfig storage) {
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
-        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
         when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
@@ -212,6 +372,7 @@ class DocDbContainerManagerTest {
         when(config.services()).thenReturn(services);
         when(services.docdb()).thenReturn(docdb);
         when(docdb.dockerNetwork()).thenReturn(Optional.empty());
+        when(config.storage()).thenReturn(storage);
 
         return new DocDbContainerManager(containerBuilder, lifecycleManager, logStreamer,
                 mock(ContainerDetector.class), config, resolver);

@@ -62,6 +62,19 @@ is refused with `Cannot find version X for docdb`, on create and on modify.
 
 Mock mode is useful for control-plane tests that do not need a live database; the cluster reports `localhost:27017` and no container is started.
 
+### Cluster data
+
+With `FLOCI_STORAGE_MODE` set to `persistent`, `hybrid` or `wal`, each cluster keeps its MongoDB
+data in a Docker volume of its own, `floci-aws-docdb-<volume-id>` (`floci-aws-<namespace>-docdb-<volume-id>`
+when `FLOCI_DOCKER_RESOURCE_NAMESPACE` is set), so the data outlives the cluster's container. When
+`FLOCI_STORAGE_HOST_PERSISTENT_PATH` is an absolute path, the data goes in
+`<host-path>/[<namespace>/]docdb/<volume-id>` on the Docker host instead. Deleting the cluster keeps
+its volume, for you to remove with `docker volume rm`, unless
+`FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`; a directory under the host path is always kept. A
+create or restore that fails leaves no volume behind. A cluster created again under a deleted one's
+identifier starts on a new, empty volume. In `memory`
+mode a cluster's data lasts only as long as its container.
+
 ### Docker Compose
 
 DocumentDB needs the Docker socket so it can launch MongoDB containers. Each cluster's container is published on a dynamically assigned host port, returned by `DescribeDBClusters`.
