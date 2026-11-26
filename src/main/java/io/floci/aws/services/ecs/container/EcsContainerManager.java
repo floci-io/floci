@@ -8,6 +8,7 @@ import com.github.dockerjava.api.command.ListVolumesResponse;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.StatsCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.exception.NotModifiedException;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.LogConfig;
@@ -134,7 +135,7 @@ public class EcsContainerManager implements DnsClientVpcSource {
     /** The {@code FLUENT_HOST} the ECS agent gives an {@code awsvpc} task, whose containers share one namespace. */
     private static final String FLUENT_AWSVPC_HOST = "127.0.0.1";
 
-    private final Map<String, Map<String, ClientVpc>> dnsOrigins = new ConcurrentHashMap<>();
+    private final Map<String, Map<DnsOwner, ClientVpc>> dnsOrigins = new ConcurrentHashMap<>();
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -416,8 +417,9 @@ public class EcsContainerManager implements DnsClientVpcSource {
             ClientVpc dnsVpc = taskDef.getNetworkMode() == NetworkMode.awsvpc
                     ? taskDnsVpc(task, region) : taskHostVpc(task, taskDef, region, hostVpc);
             if (namespace != null && dnsVpc != null) {
-                registerDnsAddress(task.getTaskArn(), dnsVpc, namespace.transportAddress());
-                registerDnsAddress(task.getTaskArn(), dnsVpc, namespace.transportIpv6Address());
+                DnsOwner namespaceOwner = new DnsOwner(task.getTaskArn(), namespace.helperId());
+                registerDnsAddress(namespaceOwner, dnsVpc, namespace.transportAddress());
+                registerDnsAddress(namespaceOwner, dnsVpc, namespace.transportIpv6Address());
                 registerContainerDnsAddresses(task.getTaskArn(), dnsVpc, namespace.helperId());
             }
             for (ContainerDefinition def : launchOrder) {
@@ -1191,7 +1193,7 @@ public class EcsContainerManager implements DnsClientVpcSource {
         if (clientAddress == null) {
             return Optional.empty();
         }
-        Map<String, ClientVpc> owners = dnsOrigins.get(clientAddress);
+        Map<DnsOwner, ClientVpc> owners = dnsOrigins.get(clientAddress);
         if (owners == null) {
             return Optional.empty();
         }
@@ -1236,29 +1238,31 @@ public class EcsContainerManager implements DnsClientVpcSource {
                 return;
             }
             for (ContainerNetwork network : inspect.getNetworkSettings().getNetworks().values()) {
-                registerDnsAddress(taskArn, vpc, network.getIpAddress());
-                registerDnsAddress(taskArn, vpc, network.getGlobalIPv6Address());
+                registerDnsAddress(new DnsOwner(taskArn, dockerId), vpc, network.getIpAddress());
+                registerDnsAddress(new DnsOwner(taskArn, dockerId), vpc, network.getGlobalIPv6Address());
             }
         } catch (RuntimeException e) {
             LOG.warnv("Could not register DNS addresses of ECS container {0}: {1}", dockerId, e.getMessage());
         }
     }
 
-    private void registerDnsAddress(String taskArn, ClientVpc vpc, String address) {
+    private void registerDnsAddress(DnsOwner owner, ClientVpc vpc, String address) {
         if (address != null && !address.isBlank()) {
             dnsOrigins.compute(address, (key, previous) -> {
-                Map<String, ClientVpc> owners = new LinkedHashMap<>(previous == null ? Map.of() : previous);
-                owners.put(taskArn, vpc);
+                Map<DnsOwner, ClientVpc> owners = new LinkedHashMap<>(previous == null ? Map.of() : previous);
+                owners.put(owner, vpc);
                 return Map.copyOf(owners);
             });
         }
     }
 
-    private void unregisterTaskDns(String taskArn) {
+    private record DnsOwner(String taskArn, String containerId) {}
+
+    private void unregisterContainerDns(String taskArn, String containerId) {
         for (String address : dnsOrigins.keySet()) {
             dnsOrigins.computeIfPresent(address, (key, previous) -> {
-                Map<String, ClientVpc> owners = new LinkedHashMap<>(previous);
-                owners.remove(taskArn);
+                Map<DnsOwner, ClientVpc> owners = new LinkedHashMap<>(previous);
+                owners.remove(new DnsOwner(taskArn, containerId));
                 return owners.isEmpty() ? null : Map.copyOf(owners);
             });
         }
@@ -1337,7 +1341,11 @@ public class EcsContainerManager implements DnsClientVpcSource {
      * Idempotent: the status is flipped first, so a second teardown path does nothing.
      */
     public void releaseTaskNetwork(EcsTask task, String region) {
-        unregisterTaskDns(task.getTaskArn());
+        // A failed stop/removal can leave a workload or its namespace alive even after model teardown.
+        if (dnsOrigins.values().stream().anyMatch(owners -> owners.keySet().stream()
+                .anyMatch(owner -> owner.taskArn().equals(task.getTaskArn())))) {
+            return;
+        }
         String eniId = task.getNetworkInterfaceId();
         if (eniId == null || ec2Service == null || ATTACHMENT_DELETED.equals(task.getAttachmentStatus())) {
             return;
@@ -1602,6 +1610,13 @@ public class EcsContainerManager implements DnsClientVpcSource {
                     firewallManager.removeProtectedNamespaceStrict(taskId);
                 }
             }
+            for (Map<DnsOwner, ClientVpc> owners : dnsOrigins.values()) {
+                for (DnsOwner owner : owners.keySet()) {
+                    if (owner.taskArn().equals(handle.getTaskArn())) {
+                        unregisterContainerDns(owner.taskArn(), owner.containerId());
+                    }
+                }
+            }
             handle.recordNamespaceHelperPending(false);
         } catch (RuntimeException e) {
             handle.recordNamespaceHelperPending(true);
@@ -1678,18 +1693,21 @@ public class EcsContainerManager implements DnsClientVpcSource {
         if (handle == null) {
             return;
         }
-        unregisterTaskDns(handle.getTaskArn());
         boolean allRemoved = true;
         for (Map.Entry<String, String> entry : handle.getContainerIds().entrySet()) {
             // A container that survived removal still holds its link-local address, which must not
             // go to the next task.
-            if (lifecycleManager.stopAndConfirmRemoved(entry.getValue(), null, 5, true)) {
+            if (lifecycleManager.stopAndConfirmRemoved(entry.getValue(), null, 5, true,
+                    () -> unregisterContainerDns(handle.getTaskArn(), entry.getValue()))) {
                 handle.recordContainerRemoved(entry.getKey());
+                unregisterContainerDns(handle.getTaskArn(), entry.getValue());
             } else {
+                if (getExitCodeIfStopped(entry.getValue()) != null) {
+                    unregisterContainerDns(handle.getTaskArn(), entry.getValue());
+                }
                 allRemoved = false;
             }
         }
-        cleanupProtectedNetwork(handle);
         new ArrayList<>(handle.getLogStreamsByContainerId().keySet())
                 .forEach(dockerId -> finalizeLogStream(handle, dockerId));
         revokeTaskRoleCredentials(handle.getTaskArn());
@@ -1697,6 +1715,7 @@ public class EcsContainerManager implements DnsClientVpcSource {
             removeTaskVolumes(handle);
             try {
                 removeNamespaceHelper(handle);
+                cleanupProtectedNetwork(handle);
             } catch (RuntimeException e) {
                 // The handle now says the helper is pending, so the caller keeps it and the removal is
                 // retried; its address stays reserved until then, the cheaper mistake.
@@ -1718,7 +1737,6 @@ public class EcsContainerManager implements DnsClientVpcSource {
             return exitCodes;
         }
 
-        unregisterTaskDns(handle.getTaskArn());
         // Phase 1: stop all containers (no-op for those already exited), each given the grace
         // period its container definition asked for.
         Set<String> terminatedContainerIds = new HashSet<>();
@@ -1731,12 +1749,19 @@ public class EcsContainerManager implements DnsClientVpcSource {
                 lifecycleManager.getDockerClient().stopContainerCmd(dockerId)
                         .withTimeout(handle.stopTimeoutFor(entry.getKey())).exec();
                 terminatedContainerIds.add(dockerId);
-            } catch (NotFoundException ignored) {
+            } catch (NotFoundException | NotModifiedException ignored) {
                 terminatedContainerIds.add(dockerId);
             } catch (Exception e) {
                 LOG.warnv("Error stopping ECS container {0}: {1}", dockerId, e.getMessage());
             }
+            boolean stopConfirmed = terminatedContainerIds.contains(dockerId);
+            if (stopConfirmed) {
+                unregisterContainerDns(handle.getTaskArn(), dockerId);
+            }
             killIfStillRunning(dockerId);
+            if (!stopConfirmed && getExitCodeIfStopped(dockerId) != null) {
+                unregisterContainerDns(handle.getTaskArn(), dockerId);
+            }
         }
 
         // Phase 2: inspect exit codes, then remove.
@@ -1762,9 +1787,11 @@ public class EcsContainerManager implements DnsClientVpcSource {
                 remove.exec();
                 terminatedContainerIds.add(dockerId);
                 handle.recordContainerRemoved(name);
+                unregisterContainerDns(handle.getTaskArn(), dockerId);
             } catch (NotFoundException ignored) {
                 terminatedContainerIds.add(dockerId);
                 handle.recordContainerRemoved(name);
+                unregisterContainerDns(handle.getTaskArn(), dockerId);
             } catch (Exception e) {
                 LOG.warnv("Error removing ECS container {0}: {1}", dockerId, e.getMessage());
                 exitCodes.put(name, null);

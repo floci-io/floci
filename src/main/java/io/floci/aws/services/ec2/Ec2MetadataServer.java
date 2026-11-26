@@ -32,12 +32,14 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.WeakHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiFunction;
@@ -71,6 +73,10 @@ public class Ec2MetadataServer implements DnsClientVpcSource {
     private final Map<String, SessionToken> tokens = new ConcurrentHashMap<>();
     /** IMDSv1 fallback: container bridge IP → Instance */
     private final Map<String, Instance> containerIpToInstance = new ConcurrentHashMap<>();
+    /** IMDS registrations may survive a stopped workload in a retained helper namespace. */
+    // Keep revocation visible to in-flight restarts without retaining discarded instances.
+    private final Map<Instance, DnsSuspension> dnsSuspendedInstances =
+            Collections.synchronizedMap(new WeakHashMap<>());
     /** Cluster nodes whose instance-profile identity their registrar synthesizes rather than IAM holding it. */
     private final Set<Instance> synthesizedProfiles = ConcurrentHashMap.newKeySet();
     /** The addresses of the relays that name each caller in X-Forwarded-For, which is read from them alone. */
@@ -165,10 +171,43 @@ public class Ec2MetadataServer implements DnsClientVpcSource {
 
     public void unregisterInstance(Instance instance) {
         if (instance != null) {
+            suspendDns(instance);
+            containerIpToInstance.entrySet().removeIf(entry -> entry.getValue() == instance);
             synthesizedProfiles.remove(instance);
             credentials.unregister(instance);
             tokens.values().removeIf(token -> token.instance() == instance);
-            containerIpToInstance.entrySet().removeIf(entry -> entry.getValue() == instance);
+        }
+    }
+
+    static final class DnsSuspension {
+    }
+
+    DnsSuspension suspendDns(Instance instance) {
+        DnsSuspension suspension = new DnsSuspension();
+        dnsSuspendedInstances.put(instance, suspension);
+        return suspension;
+    }
+
+    void suspendContainerDns(String containerId) {
+        if (containerId == null || containerId.isBlank()) {
+            return;
+        }
+        for (Instance instance : containerIpToInstance.values()) {
+            synchronized (instance) {
+                if (containerId.equals(instance.getDockerContainerId())) {
+                    suspendDns(instance);
+                }
+            }
+        }
+    }
+
+    DnsSuspension dnsSuspension(Instance instance) {
+        return dnsSuspendedInstances.get(instance);
+    }
+
+    void resumeDns(Instance instance, DnsSuspension suspension) {
+        if (suspension != null) {
+            dnsSuspendedInstances.remove(instance, suspension);
         }
     }
 
@@ -178,12 +217,16 @@ public class Ec2MetadataServer implements DnsClientVpcSource {
             return Optional.empty();
         }
         Instance instance = containerIpToInstance.get(clientAddress);
-        if (instance == null || instance.getOwnerId() == null || instance.getOwnerId().isBlank()
+        if (instance == null || dnsSuspendedInstances.containsKey(instance) || instance.getOwnerId() == null || instance.getOwnerId().isBlank()
                 || instance.getRegion() == null || instance.getRegion().isBlank()
                 || instance.getVpcId() == null || instance.getVpcId().isBlank()) {
             return Optional.empty();
         }
-        return Optional.of(new ClientVpc(instance.getOwnerId(), instance.getRegion(), instance.getVpcId()));
+        ClientVpc origin = new ClientVpc(instance.getOwnerId(), instance.getRegion(), instance.getVpcId());
+        if (dnsSuspendedInstances.containsKey(instance) || containerIpToInstance.get(clientAddress) != instance) {
+            return Optional.empty();
+        }
+        return Optional.of(origin);
     }
 
     Optional<Instance> registeredContainer(String containerIp) {
@@ -284,6 +327,7 @@ public class Ec2MetadataServer implements DnsClientVpcSource {
         credentials.clear();
         tokens.clear();
         containerIpToInstance.clear();
+        dnsSuspendedInstances.clear();
         synthesizedProfiles.clear();
         forwarders.clear();
         if (httpServer != null) {
