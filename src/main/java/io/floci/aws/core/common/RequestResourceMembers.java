@@ -42,15 +42,13 @@ final class RequestResourceMembers {
     /** An ARN may be nested in structures, array elements or map values. */
     private static final Pattern ARN_MEMBER = Pattern.compile(
             "[A-Za-z][A-Za-z0-9_]*(\\[])?(\\.[A-Za-z][A-Za-z0-9_]*(\\[])?)?"
-                    + "|[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*){2}"
                     + "|[A-Za-z][A-Za-z0-9_]*\\{\\}(\\.[A-Za-z][A-Za-z0-9_]*){1,2}");
     /**
-     * A member filling a variable may also be a field of a structure or of a structure inside one, or of each of a
-     * list's structures, or of a field of each of them, or of a map's structure values, one value for each, or a map's
-     * keys ({@code Name{}}).
+     * A member filling a variable may also be a field of a structure, or of each of a list's structures, or of a field
+     * of each of them, or of a map's structure values, one value for each, or a map's keys ({@code Name{}}).
      */
     private static final Pattern FILL_MEMBER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\[]|\\[]\\.[A-Za-z][A-Za-z0-9_]*"
-            + "(\\.[A-Za-z][A-Za-z0-9_]*)?|\\{}|\\{}\\.[A-Za-z][A-Za-z0-9_]*|(\\.[A-Za-z][A-Za-z0-9_]*){1,2})?");
+            + "(\\.[A-Za-z][A-Za-z0-9_]*)?|\\{}|\\{}\\.[A-Za-z][A-Za-z0-9_]*|\\.[A-Za-z][A-Za-z0-9_]*)?");
     /**
      * A member a service finds a resource by: one list, or a value at any depth of structures, as a lookup's request
      * gives it ({@code AlternateIdentifier.ExternalId.Id}).
@@ -77,6 +75,8 @@ final class RequestResourceMembers {
     private static final Pattern APPENDED_ID = Pattern.compile("[/:]\\$\\{\\w+}");
     /** A word of a child type's own and one id, which its format appends to its parent's whole resource. */
     private static final Pattern NESTED_ID = Pattern.compile("[/:][A-Za-z][A-Za-z0-9-]*[/:]\\$\\{\\w+}");
+    /** An API a row is read for: a protocol botocore gives a client and its API version ({@code query/2010-12-01}). */
+    private static final Pattern API = Pattern.compile("[a-z0-9-]+/\\d{4}-\\d{2}-\\d{2}");
     /** The keys a resource found by members does not take: it is read no other way. */
     private static final List<String> FOUND_ONLY = List.of("arnOf", "fixed");
     /** The keys of a resource read from a member holding its ARN. */
@@ -93,8 +93,6 @@ final class RequestResourceMembers {
     private static final Set<String> STATEMENT_KEYS = Set.of("types", "statement", "verb", "names");
     /** The keys of a resource its service acts on for a request naming none of it: it is read no other way. */
     private static final Set<String> DEFAULT_KEYS = Set.of("type", "fill", "when", "default", "endpoint");
-    /** The protocols of a request a resource may apply to alone, as botocore names them. */
-    private static final Set<String> TAGGED_PROTOCOLS = Set.of("query", "json", "rest-json", "rest-xml");
     /** The keys of the user who signs a request, which an operation acts on: it is read no other way. */
     private static final Set<String> SIGNER_KEYS = Set.of("types", "signer", "when");
 
@@ -242,10 +240,8 @@ final class RequestResourceMembers {
      * and read no other way, in the caller's account (a scalable target by its service namespace, resource id and
      * scalable dimension). A resource with an {@code endpoint} applies only to a request the service of that endpoint
      * prefix serves, where two APIs share the operation's name and nothing in a request tells them apart
-     * (EventBridge's {@code events} and EventBridge V2's {@code eventsv2}); null for every request. One with a
-     * {@code protocol} applies only to a request of that protocol, where two APIs share the operation's name and
-     * endpoint prefix but each speaks its own (SES's Query and REST-JSON APIs); null for every request. A resource
-     * of one of {@code types} may be named {@code through} a member naming, by each of its values, a resource of its
+     * (EventBridge's {@code events} and EventBridge V2's {@code eventsv2}); null for every request. A resource of one
+     * of {@code types} may be named {@code through} a member naming, by each of its values, a resource of its
      * service's own that runs on it, is in it or reaches it (a Data API session, by its {@code SessionId}; an EMR
      * instance group, by its {@code InstanceGroups[].InstanceGroupId}), {@code when} the request gives the values it
      * names, and read no other way. A resource {@code byDefault} is the one of its type its service acts on for a
@@ -268,14 +264,17 @@ final class RequestResourceMembers {
      * {@code renames} is the resource the member it names gives, as its service holds it, with the name and the path
      * the request gives each in place of its own (UpdateUser's {@code UserName}, renamed {@code NewUserName}, moved
      * {@code NewPath}). A {@code signer} resource is the user whose access key signs the request, which its service
-     * gives, {@code when} the request leaves out the members that would name another.
+     * gives, {@code when} the request leaves out the members that would name another. Each resource names the
+     * {@code apis} it is read for, each a protocol botocore gives a client of the operation with its API version
+     * ({@code query/2010-12-01}): one some of the operation's clients read applies to the requests of their APIs alone
+     * (SES v1's {@code SourceArn}, which no v2 request has); none for every request.
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
                     Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
                     boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault,
                     Map<String, String> defaults, boolean partialArn, Member statement, String verb,
-                    Map<String, String> names, Member path, Member renames, boolean signer, String protocol) {
+                    Map<String, String> names, Member path, Member renames, boolean signer, List<String> apis) {
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                  Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
@@ -285,14 +284,14 @@ final class RequestResourceMembers {
                  Map<String, String> names, Member path, Member renames, boolean signer) {
             this(types, arn, fill, when, unless, arnOf, account, fixed, made, find, endpoint, through, byDefault,
                     whenDefault, unlessDefault, defaults, partialArn, statement, verb, names, path, renames, signer,
-                    null);
+                    List.of());
         }
 
-        /** This resource, applying only to a request of the {@code protocol}. */
-        Resource withProtocol(String protocol) {
+        /** This resource, read for those APIs alone. */
+        Resource withApis(List<String> read) {
             return new Resource(types, arn, fill, when, unless, arnOf, account, fixed, made, find, endpoint, through,
                     byDefault, whenDefault, unlessDefault, defaults, partialArn, statement, verb, names, path, renames,
-                    signer, protocol);
+                    signer, List.copyOf(read));
         }
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
@@ -555,7 +554,7 @@ final class RequestResourceMembers {
                     throw new IllegalStateException(RESOURCE_NAME + " checks a resource of " + operation.getKey()
                             + " as " + action + ", none of the actions it records for the operation");
                 }
-                (action == null ? resources : byAction.get(action)).add(resource(operation.getKey(),
+                (action == null ? resources : byAction.get(action)).add(readRow(operation.getKey(),
                         action == null ? resource : ((ObjectNode) resource.deepCopy()).without("action"),
                         formats.getOrDefault(namespace, Map.of())));
             }
@@ -807,21 +806,22 @@ final class RequestResourceMembers {
         return Set.copyOf(list.valueStream().map(JsonNode::asText).toList());
     }
 
-    private static Resource resource(String operation, JsonNode resource, Map<String, ArnFormat> formats) {
-        if (!resource.has("protocol")) {
-            return untaggedResource(operation, resource, formats);
+    /** A row of the resources an operation reads, with the APIs it names it is read for ({@code apis}), if any. */
+    private static Resource readRow(String operation, JsonNode row, Map<String, ArnFormat> formats) {
+        if (!row.has("apis")) {
+            return resource(operation, row, formats);
         }
-        String protocol = resource.path("protocol").asText("");
-        if (!TAGGED_PROTOCOLS.contains(protocol) || resource.has("endpoint")
-                || !(resource.has("arn") || resource.has("fill") || resource.has("through"))) {
-            throw new IllegalStateException(RESOURCE_NAME + " reads a resource of " + operation + " for requests of "
-                    + resource.path("protocol") + ", which is no protocol of a client, or beside an endpoint");
+        JsonNode apis = row.path("apis");
+        if (!apis.isArray() || apis.isEmpty()
+                || !apis.valueStream().allMatch(api -> api.isTextual() && API.matcher(api.asText()).matches())) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads a resource of " + operation + " for " + apis
+                    + ", which is no list of protocols with their API versions");
         }
-        return untaggedResource(operation, ((ObjectNode) resource.deepCopy()).without("protocol"), formats)
-                .withProtocol(protocol);
+        return resource(operation, ((ObjectNode) row.deepCopy()).without("apis"), formats)
+                .withApis(apis.valueStream().map(JsonNode::asText).toList());
     }
 
-    private static Resource untaggedResource(String operation, JsonNode resource, Map<String, ArnFormat> formats) {
+    private static Resource resource(String operation, JsonNode resource, Map<String, ArnFormat> formats) {
         if (resource.has("made") && !(resource.path("made").isBoolean() && resource.path("made").booleanValue())) {
             throw new IllegalStateException(RESOURCE_NAME + " marks a resource of " + operation + " made by "
                     + resource.path("made") + ", which is not true");

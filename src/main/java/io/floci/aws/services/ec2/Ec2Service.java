@@ -1206,6 +1206,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         if (containerManager != null) {
             containerManager.setPersister(persister);
+            containerManager.setGuestShutdownHandler(this::applyGuestShutdown);
         }
         stampUntimedTerminatedRecords();
         if (config.services().ec2().mock()) {
@@ -1916,15 +1917,40 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         defaultSg.setOwnerId(callerAccountId());
         defaultSg.setRegion(region);
 
-        // Default egress: all traffic
-        IpPermission egressAll = new IpPermission();
-        egressAll.setIpProtocol("-1");
-        egressAll.getIpRanges().add(new IpRange("0.0.0.0/0"));
+        IpPermission egressAll = defaultEgress(vpcs.get(key(region, vpcId)).orElse(null));
         defaultSg.getIpPermissionsEgress().add(egressAll);
         securityGroups.put(key(region, securityGroupId), defaultSg);
         // Persist the default egress rule as a SecurityGroupRule so that
         // DescribeSecurityGroupRules can find it immediately (#1093).
         createRules(region, securityGroupId, egressAll, true);
+    }
+
+    /**
+     * A new group's outbound rule: all IPv4 traffic and, when its VPC has an IPv6 block, all IPv6 traffic. AWS adds the
+     * IPv6 half "only if your VPC has an associated IPv6 CIDR block" (VPC User Guide, default security groups).
+     */
+    private static IpPermission defaultEgress(Vpc vpc) {
+        IpPermission egressAll = new IpPermission();
+        egressAll.setIpProtocol("-1");
+        egressAll.getIpRanges().add(new IpRange("0.0.0.0/0"));
+        if (vpc != null && vpc.getIpv6CidrBlockAssociationSet() != null && !vpc.getIpv6CidrBlockAssociationSet().isEmpty()) {
+            egressAll.getIpv6Ranges().add(new Ipv6Range("::/0"));
+        }
+        return egressAll;
+    }
+
+    /** Only the IPv4 half of the original outbound rule: a group whose outbound rules were never changed. */
+    private static boolean hasOnlyOriginalIpv4Egress(SecurityGroup group) {
+        List<IpPermission> egress = group.getIpPermissionsEgress();
+        if (egress == null || egress.size() != 1) {
+            return false;
+        }
+        IpPermission only = egress.get(0);
+        return "-1".equals(only.getIpProtocol()) && only.getIpRanges().size() == 1
+                && "0.0.0.0/0".equals(only.getIpRanges().get(0).getCidrIp())
+                && (only.getIpv6Ranges() == null || only.getIpv6Ranges().isEmpty())
+                && (only.getUserIdGroupPairs() == null || only.getUserIdGroupPairs().isEmpty())
+                && (only.getPrefixListIds() == null || only.getPrefixListIds().isEmpty());
     }
 
     private String createMainRouteTable(String region, Vpc vpc, String routeTableId, String associationId) {
@@ -4420,6 +4446,33 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                     List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings, boolean spot,
                                     String privateIpAddress,
                                     LaunchTemplateData.CapacityReservationSpecification capacitySpecification) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, availabilityZone,
+                metadataOptions, creditSpecificationCpuCredits, encodedUserData, dryRun, hostId, tenancy,
+                blockDeviceMappings, spot, privateIpAddress, capacitySpecification, null);
+    }
+
+    /**
+     * @param instanceInitiatedShutdownBehavior InstanceInitiatedShutdownBehavior, or null for the
+     *                                          default, stop. Set before any container launches, so a
+     *                                          guest that powers off at once already finds it.
+     */
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp, String networkInterfaceId,
+                                    int networkInterfaceDeviceIndex, String availabilityZone,
+                                    LaunchTemplateData.MetadataOptions metadataOptions,
+                                    String creditSpecificationCpuCredits, String encodedUserData, boolean dryRun,
+                                    String hostId, String tenancy,
+                                    List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings, boolean spot,
+                                    String privateIpAddress,
+                                    LaunchTemplateData.CapacityReservationSpecification capacitySpecification,
+                                    String instanceInitiatedShutdownBehavior) {
+        requireShutdownBehavior(instanceInitiatedShutdownBehavior);
         String capacityPreference = capacitySpecification == null
                 || capacitySpecification.getCapacityReservationPreference() == null ? "open"
                 : capacitySpecification.getCapacityReservationPreference();
@@ -4685,6 +4738,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             inst.setRegion(region);
                             inst.setUserData(userData);
                             inst.setEncodedUserData(encodedUserData);
+                            inst.setInstanceInitiatedShutdownBehavior(instanceInitiatedShutdownBehavior);
                             inst.setIamInstanceProfileArn(iamInstanceProfileArn);
                             if (launchProfile != null) {
                                 inst.setIamInstanceProfileId(launchProfile.getInstanceProfileId());
@@ -5939,12 +5993,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             InstanceState prev = inst.getState();
             synchronized (capacityReservationLock) {
                 if ("stopped".equals(prev.getName()) || "stopping".equals(prev.getName())) {
+                    String prevReasonCode = inst.getStateReasonCode();
+                    String prevReasonMessage = inst.getStateReasonMessage();
                     inst.setState(InstanceState.pending());
+                    inst.setStateReasonCode(null);
+                    inst.setStateReasonMessage(null);
                     try {
                         instances.put(key(region, id), inst);
                         acquireCapacity(region, List.of(inst));
                     } catch (RuntimeException failure) {
                         inst.setState(prev);
+                        inst.setStateReasonCode(prevReasonCode);
+                        inst.setStateReasonMessage(prevReasonMessage);
                         instances.put(key(region, id), inst);
                         throw failure;
                     }
@@ -6464,8 +6524,41 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 inst.setSourceDestCheck(Boolean.parseBoolean(value));
             }
             case "ebsOptimized" -> inst.setEbsOptimized(Boolean.parseBoolean(value));
+            case "instanceInitiatedShutdownBehavior" -> {
+                requireShutdownBehavior(value);
+                inst.setInstanceInitiatedShutdownBehavior(value);
+            }
         }
         storeInstance(region, inst);
+    }
+
+    private static void requireShutdownBehavior(String behavior) {
+        if (behavior != null && !"stop".equals(behavior) && !"terminate".equals(behavior)) {
+            throw new AwsException("InvalidParameterValue", "Value (" + behavior
+                    + ") for parameter instanceInitiatedShutdownBehavior is invalid. Valid values are 'stop' and 'terminate'.",
+                    400);
+        }
+    }
+
+    /**
+     * A guest that powered itself off: the instance stops, as on EC2, or terminates when launched with
+     * {@code InstanceInitiatedShutdownBehavior=terminate}. Runs off a request, as the instance's account.
+     */
+    void applyGuestShutdown(Instance instance) {
+        String region = instance.getRegion();
+        List<String> ids = List.of(instance.getInstanceId());
+        String owner = instance.getOwnerId() != null ? instance.getOwnerId() : defaultAccountId;
+        RequestScopes.runAs(owner, region, () -> {
+            Instance stored = instances.get(key(region, instance.getInstanceId())).orElse(instance);
+            stored.setStateReasonCode("Client.InstanceInitiatedShutdown");
+            stored.setStateReasonMessage("Client.InstanceInitiatedShutdown: Instance initiated shutdown");
+            storeInstance(region, stored);
+            if ("terminate".equals(stored.getInstanceInitiatedShutdownBehavior())) {
+                terminateInstances(region, ids);
+            } else {
+                stopInstances(region, ids);
+            }
+        });
     }
 
     public record InstanceBlockDeviceMappingChange(String deviceName, String volumeId, boolean deleteOnTermination) {}
@@ -7627,15 +7720,47 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     public VpcIpv6CidrBlockAssociation associateAmazonProvidedIpv6CidrBlock(String region, String vpcId) {
         ensureDefaultResources(region);
+        VpcIpv6CidrBlockAssociation association;
+        boolean first;
         synchronized (attachmentTopologyLock(region)) {
             synchronized (lockFor(key(region, vpcId))) {
                 Vpc vpc = getRequiredVpc(region, vpcId);
                 synchronized (amazonProvidedIpv6AllocationLock) {
-                    VpcIpv6CidrBlockAssociation assoc = amazonProvidedIpv6Association(region);
-                    vpc.getIpv6CidrBlockAssociationSet().add(assoc);
+                    first = vpc.getIpv6CidrBlockAssociationSet().isEmpty();
+                    association = amazonProvidedIpv6Association(region);
+                    vpc.getIpv6CidrBlockAssociationSet().add(association);
                     vpcs.put(key(region, vpcId), vpc);
-                    return assoc;
                 }
+            }
+            if (first) {
+                addDefaultIpv6Egress(region, vpcId);
+            }
+        }
+        // Store every group's rule before refreshing firewalls. A retry must refresh them even
+        // when a previous refresh failed after the association and its rules were saved.
+        reconcileFirewallPolicies(region);
+        return association;
+    }
+
+    private void addDefaultIpv6Egress(String region, String vpcId) {
+        for (SecurityGroup group : securityGroups.scan(k -> k.startsWith(region + "::"))) {
+            if (!vpcId.equals(group.getVpcId())) {
+                continue;
+            }
+            synchronized (lockFor(key(region, group.getGroupId()))) {
+                SecurityGroup current = securityGroups.get(key(region, group.getGroupId())).orElse(null);
+                if (current == null || !region.equals(current.getRegion())
+                        || !vpcId.equals(current.getVpcId()) || !hasOnlyOriginalIpv4Egress(current)) {
+                    continue;
+                }
+                IpPermission ipv6All = new IpPermission();
+                ipv6All.setIpProtocol("-1");
+                ipv6All.getIpv6Ranges().add(new Ipv6Range("::/0"));
+                IpPermission dualStack = copyPermissionSources(current.getIpPermissionsEgress().getFirst());
+                dualStack.getIpv6Ranges().addAll(ipv6All.getIpv6Ranges());
+                createRules(region, current.getGroupId(), ipv6All, true);
+                current.setIpPermissionsEgress(new ArrayList<>(List.of(dualStack)));
+                securityGroups.put(key(region, current.getGroupId()), current);
             }
         }
     }
@@ -8745,13 +8870,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         sg.setVpcId(vpcId);
         sg.setOwnerId(callerAccountId());
         sg.setRegion(region);
-        // Default egress all
-        IpPermission egressAll = new IpPermission();
-        egressAll.setIpProtocol("-1");
-        egressAll.getIpRanges().add(new IpRange("0.0.0.0/0"));
-        sg.getIpPermissionsEgress().add(egressAll);
         synchronized (attachmentTopologyLock(region)) {
-            getRequiredVpc(region, sg.getVpcId());
+            Vpc groupVpc = getRequiredVpc(region, sg.getVpcId());
+            IpPermission egressAll = defaultEgress(groupVpc);
+            sg.getIpPermissionsEgress().add(egressAll);
             boolean exists = securityGroups.scan(k -> true).stream()
                     .anyMatch(existing -> existing.getRegion().equals(region)
                             && Objects.equals(existing.getGroupName(), groupName)
@@ -8760,28 +8882,39 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 throw new AwsException("InvalidGroup.Duplicate",
                         "The security group '" + groupName + "' already exists", 400);
             }
-            SecurityGroupRule defaultRule = newRule(sgId, egressAll, true);
-            defaultRule.setCidrIpv4("0.0.0.0/0");
+            List<SecurityGroupRule> defaultRules = new ArrayList<>();
+            SecurityGroupRule ipv4Rule = newRule(sgId, egressAll, true);
+            ipv4Rule.setCidrIpv4("0.0.0.0/0");
+            defaultRules.add(ipv4Rule);
+            if (!egressAll.getIpv6Ranges().isEmpty()) {
+                SecurityGroupRule ipv6Rule = newRule(sgId, egressAll, true);
+                ipv6Rule.setCidrIpv6("::/0");
+                defaultRules.add(ipv6Rule);
+            }
             try {
                 securityGroups.put(key(region, sgId), sg);
-                // Publish the default rule before a concurrent delete can remove this group.
-                securityGroupRules.put(key(region, defaultRule.getSecurityGroupRuleId()), defaultRule);
+                // Publish the default rules before a concurrent delete can remove this group.
+                for (SecurityGroupRule rule : defaultRules) {
+                    securityGroupRules.put(key(region, rule.getSecurityGroupRuleId()), rule);
+                }
             } catch (RuntimeException failure) {
-                rollbackSecurityGroupCreation(region, sgId, defaultRule.getSecurityGroupRuleId(), failure);
+                rollbackSecurityGroupCreation(region, sgId, defaultRules, failure);
                 throw failure;
             }
         }
         return sg;
     }
 
-    private void rollbackSecurityGroupCreation(String region, String groupId, String ruleId,
+    private void rollbackSecurityGroupCreation(String region, String groupId, List<SecurityGroupRule> rules,
                                                RuntimeException failure) {
-        try {
-            securityGroupRules.delete(key(region, ruleId));
-        } catch (RuntimeException cleanupFailure) {
-            failure.addSuppressed(cleanupFailure);
-            LOG.errorv(cleanupFailure, "Failed to remove default rule {0} after group creation failed in {1}",
-                    ruleId, region);
+        for (SecurityGroupRule rule : rules) {
+            try {
+                securityGroupRules.delete(key(region, rule.getSecurityGroupRuleId()));
+            } catch (RuntimeException cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+                LOG.errorv(cleanupFailure, "Failed to remove default rule {0} after group creation failed in {1}",
+                        rule.getSecurityGroupRuleId(), region);
+            }
         }
         try {
             securityGroups.delete(key(region, groupId));

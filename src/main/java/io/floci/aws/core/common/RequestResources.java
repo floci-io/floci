@@ -190,7 +190,7 @@ public final class RequestResources {
         }
         // An operation the table does not read, an unread one among them, names nothing from it.
         List<RequestResourceMembers.Resource> resources = !readable(table, operation) ? null
-                : served(table.operations().get(operation), ctx);
+                : served(operation, table.operations().get(operation), ctx);
         if (resources == null) {
             return List.of();
         }
@@ -251,7 +251,7 @@ public final class RequestResources {
         JsonNode body = sent.isEmpty() ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null;
         Map<String, String> form = ec2Query(table, operation, located(table, operation, sent, ctx, labels));
         Map<String, List<RequestResourceMembers.Resource>> served = new LinkedHashMap<>();
-        actions.forEach((action, resources) -> served.put(action, served(resources, ctx)));
+        actions.forEach((action, resources) -> served.put(action, served(operation, resources, ctx)));
         return targets(operation, served, formats(table, operation), form, body, partition, region, accountId, stored);
     }
 
@@ -570,7 +570,7 @@ public final class RequestResources {
     public static List<String> created(String operation, String tagging, ContainerRequestContext ctx, String partition,
                                        String region, String accountId, Map<String, String> labels) {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
-        return created(table, operation, tagging, resources -> served(resources, ctx),
+        return created(table, operation, tagging, resources -> served(operation, resources, ctx),
                 () -> ec2Query(table, operation,
                         located(table, operation, IamConditionContextResolver.formParameters(ctx), ctx, labels)),
                 () -> IamConditionContextResolver.formParameters(ctx).isEmpty()
@@ -721,35 +721,83 @@ public final class RequestResources {
      * The resources that apply to a request of the service serving it: one with an {@code endpoint} applies only to
      * a request the service of that endpoint prefix serves, read from the claim of the service whose handler runs it
      * and never from the request's members, which a caller could add to a request of the other API. A request no
-     * service is known to serve keeps them all, which can only check it on more. One with a {@code protocol} applies
-     * only to a request of that protocol, the one its claim gives, or a REST one for a request no RPC protocol
-     * claims: a member of one API a caller adds to a request of the other, which its service ignores, names nothing.
+     * service is known to serve keeps them all, which can only check it on more.
      */
-    private static List<RequestResourceMembers.Resource> served(List<RequestResourceMembers.Resource> resources,
+    /**
+     * The resources that apply to a request of the operation: those of the service serving it
+     * ({@link #served(List, ContainerRequestContext)}), and of them, where the request's API is known and some resource
+     * names it, those read for it ({@code apis}), so a request of one API is never read for a member only another
+     * API's request has (SES v1's {@code SourceArn} in an SES v2 request). The API is the one the request reached the
+     * service by, never a member a caller could add: the {@code Version} a Query request's handler dispatches it by,
+     * its form's on a POST, or the version of the vendored model whose route a REST request matched. A request whose API neither gives,
+     * or one no resource names, keeps them all.
+     */
+    private static List<RequestResourceMembers.Resource> served(String operation,
+                                                                List<RequestResourceMembers.Resource> resources,
                                                                 ContainerRequestContext ctx) {
-        ProtocolClaim claim = ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim found
-                ? found : null;
-        String endpoint = claim != null && claim.service() != null ? claim.service().externalKey() : null;
-        if (resources == null) {
-            return null;
+        List<RequestResourceMembers.Resource> served = served(resources, ctx);
+        Api api = served == null ? null : requestApi(operation, ctx);
+        if (api == null || served.stream().noneMatch(resource -> resource.apis().stream().anyMatch(api::reads))) {
+            return served;
         }
-        String protocol = protocolOf(claim == null ? WireProtocol.REST : claim.protocol());
-        return resources.stream()
-                .filter(resource -> endpoint == null || resource.endpoint() == null
-                        || resource.endpoint().equals(endpoint))
-                .filter(resource -> resource.protocol() == null || resource.protocol().equals(protocol)
-                        || WireProtocol.REST.name().equals(protocol) && resource.protocol().startsWith("rest-"))
-                .toList();
+        return served.stream().filter(resource -> resource.apis().isEmpty()
+                || resource.apis().stream().anyMatch(api::reads)).toList();
     }
 
-    /** The protocol a request speaks, as botocore names it, or {@code REST} for either REST protocol. */
-    private static String protocolOf(WireProtocol protocol) {
-        return switch (protocol) {
-            case AWS_QUERY -> "query";
-            case AWS_JSON_1_0, AWS_JSON_1_1 -> "json";
-            case REST -> WireProtocol.REST.name();
-            case RPCV2_CBOR, RPCV2_JSON, AWS_CBOR_TARGET -> protocol.name();
+    /** A request's API: its protocol's family and the API version it names. */
+    private record Api(String family, String version) {
+
+        /** Whether a resource read for {@code api}, a protocol and its API version, is read for this one. */
+        boolean reads(String api) {
+            int slash = api.indexOf('/');
+            return slash > 0 && family(api.substring(0, slash)).equals(family)
+                    && api.substring(slash + 1).equals(version);
+        }
+
+        /** A protocol botocore gives a model, as the family a request's wire protocol is one of. */
+        static String family(String protocol) {
+            return switch (protocol) {
+                case "query", "ec2" -> "query";
+                case "rest-json", "rest-xml" -> "rest";
+                default -> protocol;
+            };
+        }
+    }
+
+    /** The API a request of the operation reached its service by, null where its wire protocol does not give one. */
+    private static Api requestApi(String operation, ContainerRequestContext ctx) {
+        if (!(ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim)
+                || claim.protocol() == null) {
+            return null;
+        }
+        String version = switch (claim.protocol()) {
+            case AWS_QUERY -> queryVersion(ctx);
+            case REST -> IamActionRegistry.routeMembers(operation, ctx).apiVersion();
+            default -> null;
         };
+        if (version == null) {
+            return null;
+        }
+        return new Api(claim.protocol() == WireProtocol.AWS_QUERY ? "query" : "rest", version);
+    }
+
+    /**
+     * The {@code Version} a Query request's handler dispatches it by, read as {@link AwsQueryController} reads it: a
+     * POST's from its form alone, never its URL, and a GET's from its query string, each its first value.
+     */
+    private static String queryVersion(ContainerRequestContext ctx) {
+        return IamConditionContextResolver.formParameters(ctx).get("Version");
+    }
+
+    private static List<RequestResourceMembers.Resource> served(List<RequestResourceMembers.Resource> resources,
+                                                                ContainerRequestContext ctx) {
+        String endpoint = ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
+                && claim.service() != null ? claim.service().externalKey() : null;
+        if (resources == null || endpoint == null) {
+            return resources;
+        }
+        return resources.stream().filter(resource -> resource.endpoint() == null
+                || resource.endpoint().equals(endpoint)).toList();
     }
 
     /**

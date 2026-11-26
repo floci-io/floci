@@ -103,7 +103,7 @@ grep -vE "$RUNNER|$DOCKER_E2E" "$work/selected.txt" > "$work/standard.txt" || tr
 # Timeouts in minutes: each group's checks run one after another, plus about twenty minutes for compilation, the image
 # and the prefetch (see nightly-checks.yml). docker-e2e's tests took about 23 minutes in the shards on 2026-11-23.
 matrix='[]'
-for entry in standard:359 docker-runner:214 docker-e2e:60; do
+for entry in standard:359 docker-runner:221 docker-e2e:60; do
     group="${entry%%:*}"
     timeout="${entry##*:}"
     count=$(wc -l < "$work/$group.txt" | tr -d ' ')

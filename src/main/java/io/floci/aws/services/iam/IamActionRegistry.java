@@ -370,13 +370,6 @@ public class IamActionRegistry {
         rule("eks", "POST",   "^/tags(/.+)?$",                                           "eks:TagResource"),
         rule("eks", "DELETE", "^/tags(/.+)?$",                                           "eks:UntagResource"),
 
-        // ── SES v2 ─────────────────────────────────────────────────────────────
-        // Every other SES v2 operation is checked through its generated route. ListConfigurationSets and
-        // ListEmailIdentities keep the GET routes earlier models gave them next to the POST ones the model
-        // moved them to, since older SDKs, and Floci's own routes, still use them.
-        rule("ses", "GET",   "^/v2/email/configuration-sets/?$", "ses:ListConfigurationSets"),
-        rule("ses", "GET",   "^/v2/email/identities/?$",         "ses:ListEmailIdentities"),
-
         // ── Resource Groups ─────────────────────────────────────────────────────
         rule("resource-groups", "POST", "^/_rg/groups/?$", "resource-groups:CreateGroup"),
         rule("resource-groups", "POST", "^/_rg/get-group/?$", "resource-groups:GetGroup"),
@@ -588,10 +581,11 @@ public class IamActionRegistry {
     /**
      * The vendored route a request of an operation matched: the member locations of a generated alternative route
      * ({@code located}; absent entries keep the operation's model locations) and the botocore model whose route it is
-     * ({@code model}), which tells apart the clients of an operation several serve.
+     * ({@code model}), which tells apart the clients of an operation several serve, with that model's API version
+     * ({@code apiVersion}), which the rows of the generated table read for its API alone name.
      */
-    public record RouteMembers(Map<String, String> located, String model) {
-        static final RouteMembers NONE = new RouteMembers(Map.of(), null);
+    public record RouteMembers(Map<String, String> located, String model, String apiVersion) {
+        static final RouteMembers NONE = new RouteMembers(Map.of(), null, null);
     }
 
     /**
@@ -621,7 +615,9 @@ public class IamActionRegistry {
                         withoutInternalPrefix(ctx, routedPath(ctx)), ctx.getUriInfo().getQueryParameters(),
                         movedUnderPrefix(ctx), ctx.getHeaders())
                 .filter(match -> match.operation().equals(operation.substring(separator + 1)))
-                .map(match -> new RouteMembers(match.located(), match.model())).orElse(RouteMembers.NONE);
+                .map(match -> new RouteMembers(match.located(), match.model(),
+                        IamRestRoutes.vendored().apiVersion(match.model())))
+                .orElse(RouteMembers.NONE);
     }
 
     /**

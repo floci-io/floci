@@ -226,7 +226,8 @@ subject is signed and outlives the call, so a session that has already gone does
 naming the account root. An unknown long-term key keeps the stand-in.
 
 The claim layout is the one the IAM User Guide publishes. The standard OIDC claims sit at the top
-level, `iss`, `aud`, `sub`, `iat`, `exp` and `jti`, with the caller's ARN as the subject, and the
+level, `iss`, `aud`, `sub`, `iat`, `exp` and `jti`, with the caller's ARN as the subject (for a role
+session, the role's ARN, path included, rather than the assumed-role session ARN), and the
 custom claims are nested under the `https://sts.amazonaws.com/` namespace: `aws_account` for the
 account the token was asked for, `source_region` for the region it was asked from, and the
 request's tags under `request_tags`. The guide notes that "all these claims may not be present in

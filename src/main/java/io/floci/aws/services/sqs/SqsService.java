@@ -1074,7 +1074,7 @@ public class SqsService implements Resettable, ResourceProvider {
             String dedupId = messageDeduplicationId;
             if (dedupId == null || dedupId.isEmpty()) {
                 if ("true".equalsIgnoreCase(queue.getAttributes().get("ContentBasedDeduplication"))) {
-                    dedupId = Digests.md5Hex(body.getBytes(StandardCharsets.UTF_8));
+                    dedupId = Digests.sha256Hex(body);
                 } else {
                     throw new AwsException("InvalidParameterValue",
                             "The queue should either have ContentBasedDeduplication enabled or " +

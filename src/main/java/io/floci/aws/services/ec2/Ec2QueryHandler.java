@@ -970,12 +970,16 @@ public class Ec2QueryHandler {
                     "You can specify true for DeleteOnTermination only when creating a new network interface.", 400);
         }
 
+        String shutdownBehavior = p.getFirst("InstanceInitiatedShutdownBehavior");
+        if (shutdownBehavior == null && launchTemplateData != null) {
+            shutdownBehavior = launchTemplateData.getInstanceInitiatedShutdownBehavior();
+        }
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
                 creditSpecificationCpuCredits, userDataEncoded, dryRun(p),
                 p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), blockDeviceMappings,
-                "spot".equals(marketType), privateIpAddress, capacitySpecification);
+                "spot".equals(marketType), privateIpAddress, capacitySpecification, shutdownBehavior);
 
         // Apply an explicit NetworkInterface.1.DeleteOnTermination to the launched instance.
         if (explicitDeleteOnTermination != null) {
@@ -1692,6 +1696,11 @@ public class Ec2QueryHandler {
             xml.start("disableApiStop").elem("value", String.valueOf(inst.isDisableApiStop())).end("disableApiStop");
         } else if ("disableApiTermination".equals(attribute)) {
             xml.start("disableApiTermination").elem("value", String.valueOf(inst.isDisableApiTermination())).end("disableApiTermination");
+        } else if ("instanceInitiatedShutdownBehavior".equals(attribute)) {
+            xml.start("instanceInitiatedShutdownBehavior")
+                    .elem("value", inst.getInstanceInitiatedShutdownBehavior() == null
+                            ? "stop" : inst.getInstanceInitiatedShutdownBehavior())
+                    .end("instanceInitiatedShutdownBehavior");
         } else if ("groupSet".equals(attribute)) {
             xml.start("groupSet");
             for (GroupIdentifier gi : inst.getSecurityGroups()) {
@@ -1718,7 +1727,8 @@ public class Ec2QueryHandler {
         // Find which attribute is being modified
         String attrName = null;
         String attrValue = null;
-        for (String attr : List.of("InstanceType.Value", "SourceDestCheck.Value", "EbsOptimized.Value")) {
+        for (String attr : List.of("InstanceType.Value", "SourceDestCheck.Value", "EbsOptimized.Value",
+                "InstanceInitiatedShutdownBehavior.Value")) {
             String val = p.getFirst(attr);
             if (val != null) {
                 attrName = attr.replace(".Value", "");

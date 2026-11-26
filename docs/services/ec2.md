@@ -60,6 +60,8 @@ A systemd guest gets a private cgroup namespace, as kind runs its nodes, so its 
 | `running → shutting-down → terminated` | `docker rm -f` |
 | Reboot | `docker restart` |
 
+A guest that shuts itself down (`shutdown -h now` or `poweroff` under the `systemd` guest runtime) exits its container. Floci then applies the instance's `InstanceInitiatedShutdownBehavior`, from `RunInstances`, its launch template or `ModifyInstanceAttribute`: `stop` (the default) moves it to `stopped`, and `terminate` to `terminated`, deleting its `DeleteOnTermination` volumes as `TerminateInstances` does. Either way `DescribeInstances` reports the state reason `Client.InstanceInitiatedShutdown`, until the instance is started again. An instance launched through CloudFormation, Auto Scaling or `CreateFleet` always stops, whatever shutdown behavior it was given. A reboot, or Floci stopping its containers when it shuts down, is not a guest shutdown. An instance whose container kept running across a Floci restart is watched again once it is next started.
+
 Terminated instances remain queryable for 1 hour (matching real EC2 tombstone behavior) before being pruned. A sweep that runs every minute removes the expired ones, with their tags, for every account.
 
 Every state change the container manager makes in the background is written to the store as it happens, so a Floci process that is killed or restarted never restores a record stuck in a transitional state. On startup Floci settles any it still finds:
@@ -466,6 +468,8 @@ private gateway lifecycles are not modelled.
 | ModifySubnetAttribute | Updates supported subnet attributes. |
 
 ### Security Groups
+
+New security groups in a VPC with an IPv6 CIDR block include the default `::/0` outbound rule alongside `0.0.0.0/0`. Associating the first IPv6 CIDR block also adds IPv6 outbound access to existing groups whose outbound permissions still consist only of the original IPv4 rule; groups with customized outbound permissions retain them. Both `DescribeSecurityGroups` and `DescribeSecurityGroupRules` expose the added rules.
 
 | Action | Description |
 |--------|-------------|

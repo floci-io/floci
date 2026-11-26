@@ -319,6 +319,21 @@ class LambdaWebServiceTest {
     }
 
     @Test
+    void revisionAcceptsNodejs26AndStillRejectsNodejs22() {
+        LambdaWebService service = service();
+        service.createFunction(REGION, createRequest("app"));
+        ObjectNode node26 = revisionConfig(30);
+        ((ObjectNode) node26.path("buildConfig").path("runtimeConfig")).put("runtime", "nodejs26.x");
+        assertEquals("nodejs26.x", service.createRevision(REGION, "app", node26).buildConfig.runtime);
+
+        ObjectNode node22 = revisionConfig(30);
+        ((ObjectNode) node22.path("buildConfig").path("runtimeConfig")).put("runtime", "nodejs22.x");
+        AwsException rejected = error(() -> service.createRevision(REGION, "app", node22));
+        assertEquals("ValidationException", rejected.getErrorCode());
+        assertEquals("The runtime nodejs22.x is invalid.", rejected.getMessage());
+    }
+
+    @Test
     void requestRulesRunBeforeTheFunctionLookup() {
         LambdaWebService service = service();
         ObjectNode reserved = revisionConfig(30);

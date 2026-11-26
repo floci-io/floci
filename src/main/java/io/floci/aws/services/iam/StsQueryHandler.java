@@ -1487,7 +1487,9 @@ public class StsQueryHandler {
                             + " lifetime of a session beyond what was granted when the session was"
                             + " originally created.", AwsNamespaces.STS, 403);
         }
-        String subject = iamService.resolveCallerArn(accessKeyId).orElseGet(() ->
+        // "For a role session, this is the ARN of the role": the principal's ARN, path included,
+        // rather than the assumed-role session ARN
+        String subject = iamService.resolvePrincipalArn(accessKeyId).orElseGet(() ->
                 regionResolver.buildGlobalArn("iam", regionResolver.getAccountId(), "root"));
         String token = tokenIssuer.mint(
                 WebIdentityTokenIssuer.Algorithm.valueOf(params.getFirst("SigningAlgorithm")),

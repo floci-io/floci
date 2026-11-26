@@ -155,6 +155,10 @@ Beyond the members' names, botocore's shapes and documentation say what a member
   only to requests of its `endpoint` prefix (EventBridge's `events` and EventBridge V2's `eventsv2`), or to every
   request where they share one; a client takes the type its ARN patterns name of two it names by the same members,
   a versioned twin (`event-busv2`) for one they do not;
+- every row names the APIs it is read for (`apis`), each a protocol botocore gives a client of the operation with
+  its API version: one only some of the clients read names theirs, so clients sharing an endpoint prefix are still
+  told apart by the API a request reached them by (SES v1's `SourceArn` is `query/2010-12-01`, which no SES v2
+  request is), and every other row names every client's;
 - a variable no member fills is `fixed` to the one value of an enum named after it that the operation's name gives
   (CodePipeline's `CreateCustomActionType` makes an action type whose `ActionOwner` is `Custom`);
 - a type named only by an optional member documented as holding what the operation is about ("the cluster to which
@@ -371,9 +375,9 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "firehose", "fis", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "oam",
               "payment-cryptography", "quicksight", "ram", "rds", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "s3tables", "s3vectors", "servicediscovery",
-              "servicequotas", "ses", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer",
-              "xray", "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
-              "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs", "cloudwatch",
+              "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
+              "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
+              "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs", "ses", "cloudwatch",
               "comprehend", "config", "dms", "elasticache", "identitystore", "memorydb", "route53resolver",
               "sagemaker", "transcribe", "transfer", "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms",
               "dynamodb", "iam")
@@ -611,13 +615,6 @@ ONE_VARIABLE_SEGMENT_RE = re.compile(r"\$\{(?P<variable>\w+)}")
 # The guide's variables for the partition, Region and account, which the Service Reference writes as its own.
 GUIDE_VARIABLES = {"partition": "Partition", "region": "Region", "account-id": "Account"}
 
-# SDK clients the Service Reference lists for a namespace read here that Floci does not serve, and why: an operation
-# is read for its other clients alone, as a client whose routes are not vendored could not tell where its request
-# carries a member.
-UNSERVED_CLIENTS: dict[str, str] = {
-    "pinpoint-email": "the Amazon Pinpoint Email API under /v1/email, which SES v2 replaced; Floci serves SES v2 alone",
-}
-
 _LATER ="not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
 _REST = ("REST: its requests name their resources in the path, which RequestResources reads from the route a request "
          "matched in the vendored REST routes (regen_rest_routes.MODELS), which do not have its model yet")
@@ -692,6 +689,8 @@ ID_TARGETS = {"ec2": ("instance", "network-acl", "network-interface", "route-tab
 # An ARN format's account given as `${AccountId}`, the account `${Account}` gives in every other format.
 ACCOUNT_ID_SLOT_RE = re.compile(r"^(arn:[^:]*:[^:]*:[^:]*:)\$\{AccountId}:")
 VARIABLE_RE = re.compile(r"\$\{(\w+)}")
+# An API a request reaching an operation is one of: a protocol botocore gives a client's model and its API version.
+API_RE = re.compile(r"[a-z0-9-]+/\d{4}-\d{2}-\d{2}")
 # A resource-tag condition key the reference gives a type, named after the tag key it compares, which it writes as the
 # variable `${TagKey}` or as `tag-key`, as the IAM User Guide writes `aws:ResourceTag/tag-key` ("There is one context
 # key for each tag key-value pair"): Secrets Manager's `secretsmanager:ResourceTag/tag-key`. SSM spells the word
@@ -812,8 +811,7 @@ def checked_actions(documents: list[dict]) -> dict[str, dict]:
             found[f"{namespace}:{name}"] = {
                 "action": f"{namespace}:{action['Name']}" if action else f"{namespace}:{action_name}",
                 "types": None if action is None else [resource["Name"] for resource in action.get("Resources") or []],
-                "clients": sorted({sdk["Name"] for sdk in operation.get("SDK", [])
-                                   if sdk.get("Package") == "Boto3" and sdk["Name"] not in UNSERVED_CLIENTS}),
+                "clients": sorted({sdk["Name"] for sdk in operation.get("SDK", []) if sdk.get("Package") == "Boto3"}),
             }
     return found
 
@@ -2213,52 +2211,6 @@ def with_structure_names(resources: list[dict], formats: dict[str, str], names: 
             found.append(dict(resource, fill={variables[0]: names[kind]}))
         else:
             found.append(resource)
-    return found
-
-
-def nested_type_selectors(models: dict[str, dict], operation: str, types: list[str]) -> dict[str, dict[str, str]]:
-    """By type, the members selecting it in a structure named after the type that a top-level structure of the
-    operation's request holds, the one ending `Name` and the one ending `Arn` named after the type too, each by its
-    kind: SES v2 `SendEmail` names its template in `Content.Template.TemplateName` or `Content.Template.TemplateArn`.
-    A type two such structures name is left out."""
-    found: dict[str, set[tuple[str, str]]] = {}
-    for model in models.values():
-        spec = model["operations"].get(operation)
-        if spec is None or "input" not in spec or not READ_PROTOCOLS & _protocols(model):
-            continue
-        for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
-            shape = model["shapes"][member["shape"]]
-            if member.get("location") not in BODY_LOCATIONS or shape["type"] != "structure":
-                continue
-            for field, ref in shape.get("members", {}).items():
-                inner = model["shapes"][ref["shape"]]
-                kinds = [kind for kind in types if stem(field) == stem(kind)]
-                if inner["type"] != "structure" or len(kinds) != 1:
-                    continue
-                selectors = tuple(sorted((suffix, f"{name}.{field}.{sub}")
-                                         for sub, nested in inner.get("members", {}).items()
-                                         for suffix in ("Name", "Arn")
-                                         if sub == field + suffix
-                                         and model["shapes"][nested["shape"]]["type"] == "string"))
-                if selectors:
-                    found.setdefault(kinds[0], set()).add(selectors)
-    return {kind: dict(next(iter(paths))) for kind, paths in sorted(found.items()) if len(paths) == 1}
-
-
-def with_nested_type_selectors(resources: list[dict], types: list[str], formats: dict[str, str],
-                               selectors: dict[str, dict[str, str]]) -> list[dict]:
-    """The resources, and each type `nested_type_selectors` finds selected in a nested structure: its ARN from the
-    member ending `Arn`, and its format's one name variable filled from the member ending `Name`."""
-    found = list(resources)
-    for kind, paths in selectors.items():
-        variables = [variable for variable in VARIABLE_RE.findall(formats.get(kind, "")) if variable.endswith("Name")
-                     and variable not in KNOWN_VARIABLES]
-        entries = []
-        if "Arn" in paths:
-            entries.append({"types": types, "arn": paths["Arn"]})
-        if "Name" in paths and len(variables) == 1:
-            entries.append({"type": kind, "fill": {variables[0]: paths["Name"]}})
-        found += [entry for entry in entries if entry not in found]
     return found
 
 
@@ -4066,7 +4018,6 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
     resources = with_account(resources, formats, account_members(models, name))
     resources = with_structure_account(resources, formats, structure_account_members(models, name, types))
     resources = with_structure_names(resources, formats, structure_name_fields(models, name, types))
-    resources = with_nested_type_selectors(resources, types, formats, nested_type_selectors(models, name, types))
     resources = with_change_lists(resources, types, formats, members)
     resources = with_type_named_members(resources, types, formats, members, stem(SUBJECT_RE.sub("", name)))
     resources = with_arn_of(resources, formats, name_or_arn_members(models, name),
@@ -4279,17 +4230,11 @@ def client_words(model: dict) -> set[str]:
                          if shape.get("type") == "string"))
 
 
-# The protocols a resource only one client reads is tagged with, where clients sharing an endpoint prefix each speak
-# their own: the request's protocol tells its client, which its members cannot.
-TAGGED_PROTOCOLS = {"query", "json", "rest-json", "rest-xml"}
-
-
 def by_client(operation: str, models: dict[str, dict], read, formats: dict[str, str] | None = None) -> list[dict]:
     """The resources read from every client of the namespace whose model has the operation, each read apart when
     they disagree: a resource every client names stays as it is, and one only some name applies to the requests of
-    their endpoint prefix (EventBridge's `events` and EventBridge V2's `eventsv2`), to the requests of their protocol
-    where the clients share one but each speaks its own (SES's Query `ses` and REST-JSON `sesv2`), or to every
-    request where the clients share one and a protocol (Elastic Load Balancing's classic and v2 APIs). Where a client's ARN patterns name one of two
+    their endpoint prefix (EventBridge's `events` and EventBridge V2's `eventsv2`), or to every request where the
+    clients share one (Elastic Load Balancing's classic and v2 APIs). Where a client's ARN patterns name one of two
     types its request names by the same members, that client's request names that one: EventBridge V2's
     `CreateEventBus` makes an `event-busv2`."""
     name = operation.split(":", 1)[1]
@@ -4303,9 +4248,6 @@ def by_client(operation: str, models: dict[str, dict], read, formats: dict[str, 
         return merged
     prefixes = {client: models[client]["metadata"].get("endpointPrefix") for client in clients}
     shared = len(set(prefixes.values())) < len(clients)
-    protocols = {client: models[client]["metadata"].get("protocol") for client in clients}
-    by_protocol = shared and len(set(protocols.values())) == len(clients) \
-        and set(protocols.values()) <= TAGGED_PROTOCOLS
     # Clients serving one endpoint cannot be told apart by a request, so an ARN member of theirs keeps every type the
     # action acts on, each ARN read by its format: Lambda's `lambda` and `lambda-microvms` both tag on
     # `/2017-03-31/tags/{Resource}`.
@@ -4313,14 +4255,42 @@ def by_client(operation: str, models: dict[str, dict], read, formats: dict[str, 
         apart[client] = narrowed(apart[client], client_words(models[client]), models[client], name, formats,
                                  arn_types=not shared)
     resources: list[dict] = []
+    readers: list[set[str]] = []
     for client in clients:
         for resource in apart[client]:
             everywhere = all(resource in apart[other] for other in clients)
-            tagged = resource if everywhere else dict(resource, protocol=protocols[client]) if by_protocol \
-                else resource if shared else dict(resource, endpoint=prefixes[client])
+            tagged = resource if everywhere or shared else dict(resource, endpoint=prefixes[client])
             if tagged not in resources:
                 resources.append(tagged)
-    return resources
+                readers.append(set())
+            readers[resources.index(tagged)].add(client)
+    # A row some of the clients read applies to the requests of their APIs alone; the rest, every client's, are read
+    # for every API of the operation (`with_read_apis`).
+    return [resource if named == set(clients) else dict(resource, apis=apis_of(models, sorted(named)))
+            for resource, named in zip(resources, readers, strict=True)]
+
+
+def apis_of(models: dict[str, dict], clients: list[str]) -> list[str]:
+    """The APIs of the clients, each a protocol botocore gives the client's model with its API version
+    (`query/2010-12-01` for SES v1, `rest-json/2019-09-27` for SES v2), which a request reaching the operation is
+    one of: a row read for some of an operation's clients applies to the requests of their APIs alone."""
+    return sorted({f"{protocol}/{models[client]['metadata']['apiVersion']}" for client in clients
+                   for protocol in models[client]["metadata"].get("protocols")
+                   or [models[client]["metadata"]["protocol"]]})
+
+
+def with_apis(resources: list[dict], apis: list[str]) -> list[dict]:
+    """The resources, each not yet read for some APIs read for `apis`."""
+    return [resource if "apis" in resource else dict(resource, apis=apis) for resource in resources]
+
+
+def with_read_apis(entry: dict, operation: str, models: dict[str, dict]) -> dict:
+    """The entry, each of its rows naming the APIs it is read for: one only some clients read was given theirs
+    (`by_client`), and every other row is read for every API of the clients whose model has the operation, or of the
+    namespace's clients where none does."""
+    name = operation.split(":", 1)[1]
+    clients = sorted(client for client, model in models.items() if name in model["operations"]) or sorted(models)
+    return {**entry, "resources": with_apis(entry["resources"], apis_of(models, clients))}
 
 
 def narrowed(resources: list[dict], words: set[str], model: dict, operation: str,
@@ -4853,9 +4823,9 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
         models = load_models(data, set(namespaces[namespace_of(operation)]))
         if namespace_of(operation) in permission_actions:
             value = {**value, "actions": permission_actions[namespace_of(operation)]}
-        operations[operation] = entry_for(operation, value, {**formats.get(namespace_of(operation), {}),
-                                                             **path_formats.get(namespace_of(operation), {})}, models,
-                                          prefixes.get(namespace_of(operation)), forwarded, routed.get(operation))
+        operations[operation] = with_read_apis(entry_for(
+            operation, value, {**formats.get(namespace_of(operation), {}), **path_formats.get(namespace_of(operation), {})},
+            models, prefixes.get(namespace_of(operation)), forwarded, routed.get(operation)), operation, models)
     unqualified = unqualified_types(formats, operations, namespaces, data)
     return {
         "_source": {
@@ -5062,13 +5032,12 @@ PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?$")
 FIND_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[]|(\.[A-Za-z][A-Za-z0-9_]*)*)$")
 # A member of a request's body at any depth, as `body_only_identifiers` writes it: `Delete.Objects[].Key`.
 BODY_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_]*(\[])?)*$")
-# A member filling a variable may also be a field of a structure, or of a structure inside one, or of each element of
-# a list of structures, one value for each.
+# A member filling a variable may also be a field of a structure, or of each element of a list of structures, one
+# value for each.
 FILL_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[]|\[]\.[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)?|\{}"
-                          r"|\{}\.[A-Za-z][A-Za-z0-9_]*|(\.[A-Za-z][A-Za-z0-9_]*){1,2})?$")
+                          r"|\{}\.[A-Za-z][A-Za-z0-9_]*|\.[A-Za-z][A-Za-z0-9_]*)?$")
 # ARN paths can traverse structures, array elements ([]) and map values ({}).
 ARN_PATH_RE = re.compile(r"^(?:[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_]*(\[])?)?"
-                         r"|[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*){2}"
                          r"|[A-Za-z][A-Za-z0-9_]*\{\}(\.[A-Za-z][A-Za-z0-9_]*){1,2})$")
 # A format's resource that is a literal and one variable, at its end.
 ONE_VARIABLE_RE = re.compile(r"^[^$]*\$\{\w+}$")
@@ -5218,6 +5187,9 @@ def validate(document: dict) -> list[str]:
             # A route authorized by its method names the type of its path, which its action may not list (`--check`
             # says whether it is the one its path is).
             routed = set(formats.get(namespace, {})) if namespace in PATH_SOURCES else set()
+            problems += _apis_problems(operation, resource)
+            if isinstance(resource, dict):
+                resource = {key: value for key, value in resource.items() if key != "apis"}
             problems += _resource_problems(operation, resource, acting | measured | routed,
                                            formats.get(namespace, {}))
         for created in entry.get("creates", []) if isinstance(entry.get("creates", []), list) else [None]:
@@ -5283,13 +5255,16 @@ def validate(document: dict) -> list[str]:
     return problems
 
 
+def _apis_problems(operation: str, resource: object) -> list[str]:
+    """A row that names no APIs it is read for, each a protocol and an API version, sorted and once each."""
+    apis = resource.get("apis") if isinstance(resource, dict) else None
+    if not isinstance(apis, list) or not apis or apis != sorted(set(apis)) \
+            or not all(isinstance(api, str) and API_RE.fullmatch(api) for api in apis):
+        return [f"{operation} reads {resource!r} for no protocol and API version it names (`apis`)"]
+    return []
+
+
 def _resource_problems(operation: str, resource: object, types: set[str], formats: dict[str, str]) -> list[str]:
-    if isinstance(resource, dict) and "protocol" in resource:
-        if resource["protocol"] not in TAGGED_PROTOCOLS or "endpoint" in resource \
-                or not {"arn", "fill", "through"} & set(resource):
-            return [f"{operation} reads {resource!r} for requests of {resource['protocol']!r}, which is no protocol "
-                    f"of a client, or beside an endpoint"]
-        resource = {key: value for key, value in resource.items() if key != "protocol"}
     if isinstance(resource, dict) and "statement" in resource:
         kinds = _kinds(resource)
         names = resource.get("names")
@@ -5518,10 +5493,11 @@ def derive(document: dict, data: Path) -> list[str]:
     for operation, entry in document["operations"].items():
         namespace = namespace_of(operation)
         models = load_models(data, set(document["namespaces"][namespace]))
-        expected = entry_for(operation, {"action": entry["action"], "types": entry["types"],
-                                         **({"actions": entry["actions"]} if "actions" in entry else {})},
-                             {**document["arnFormats"].get(namespace, {}), **path_formats.get(namespace, {})}, models,
-                             prefixes.get(namespace), document["forwardedActions"], routed.get(operation))
+        expected = with_read_apis(entry_for(
+            operation, {"action": entry["action"], "types": entry["types"],
+                        **({"actions": entry["actions"]} if "actions" in entry else {})},
+            {**document["arnFormats"].get(namespace, {}), **path_formats.get(namespace, {})}, models,
+            prefixes.get(namespace), document["forwardedActions"], routed.get(operation)), operation, models)
         if expected != entry:
             problems.append(f"{operation}: the file has {json.dumps(entry)}, botocore gives {json.dumps(expected)}")
     return problems

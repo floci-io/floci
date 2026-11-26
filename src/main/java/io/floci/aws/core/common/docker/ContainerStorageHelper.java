@@ -389,7 +389,19 @@ public final class ContainerStorageHelper {
             EmulatorConfig config,
             ContainerLifecycleManager lifecycleManager,
             String volumeName) {
-        boolean isMemory = "memory".equals(config.storage().mode());
+        removeNamedVolume(config, lifecycleManager, volumeName, config.storage().mode());
+    }
+
+    /**
+     * {@link #removeNamedVolume(EmulatorConfig, ContainerLifecycleManager, String)} for a service whose own storage
+     * mode, {@code storageMode}, is the one its records are kept under, rather than the global mode.
+     */
+    public static void removeNamedVolume(
+            EmulatorConfig config,
+            ContainerLifecycleManager lifecycleManager,
+            String volumeName,
+            String storageMode) {
+        boolean isMemory = "memory".equals(storageMode);
         if (isMemory || config.storage().pruneVolumesOnDelete()) {
             lifecycleManager.removeVolume(volumeName);
         } else {

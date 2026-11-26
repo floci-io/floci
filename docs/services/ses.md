@@ -574,31 +574,18 @@ See the [AWS receipt-rule resource reference](https://docs.aws.amazon.com/AWSClo
 ### IAM enforcement
 
 With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, every SES operation is authorized as the `ses:`
-action AWS's service reference lists for it, which is always `ses:<Operation>`, in the `ses` namespace
-v1 and v2 share: a v1 call by its `Action`, a v2 call by the route of the SES v2 model it matches. The
-v2 `ListConfigurationSets` and `ListEmailIdentities` are also served on the `GET` routes older SDKs use.
-Both APIs are checked on the resources their request names, in the ARN formats of the
-[Service Authorization Reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_sesv2.html),
-so a policy can limit an action to one identity, configuration set, template, contact list, custom
-verification email template, dedicated IP pool, export or import job, or tenant. A tenant's ARN ends in
-the id SES minted for it, which a request naming the tenant does not carry: it is checked on the ARN
-stored for it. A send is checked on the identity ARNs it gives (`SourceArn`, `FromArn`,
-`FromEmailAddressIdentityArn`, `ReturnPathArn`, `FeedbackForwardingEmailAddressIdentityArn`), not on the
-identity its sender address sends as. AWS checks a send without them on that verified identity, the
-address's domain for an address that is not itself an identity, and on the `From` header's for a raw send
-without `Source` (probed). Here such a send is checked only on the other resources it names, so an allow
-on `identity/example.com` alone does not let `sender@example.com` send, and an allow on a configuration
-set alone lets it send from any identity. A v2 templated send is also checked on the template its
-`Content.Template` (or `DefaultContent.Template` for `SendBulkEmail`) names by `TemplateName` or
-`TemplateArn`; one with inline `TemplateContent` names no template. A member only one API has is read
-from requests of that API alone, so a v1 request carrying a v2 `Content.Template`, which SES ignores, is
-not checked on that template. `CreateConfigurationSet` is not
-checked on the dedicated IP pool its `DeliveryOptions.SendingPoolName` names, which AWS lists among the
-resources the action acts on; `PutConfigurationSetDeliveryOptions` is. An operation whose action has no
-resource type, or whose request names none, is checked on `*`. The other actions the service reference lists for some operations are checked too:
-`ses:TagResource` for a create that tags what it makes, and `iam:PassRole` (with `iam:PassedToService`
-`ses.amazonaws.com`) for creating or updating an event destination that delivers through a role. A
-v2 `SendEmail` is authorized as `ses:SendEmail` whatever its content: `ses:SendRawEmail` is a v1 action.
+action AWS's Service Reference lists for it, in the `ses` namespace v1 and v2 share: a v2 request by the
+route botocore's model gives its operation, a v1 request by its `Action`. Each is checked on the resources
+the generated table of request resources reads from the request, as for every namespace that table reads:
+an identity by its name (`identity/<name>`), a configuration set, a template or a contact list by theirs,
+an ARN member by the ARN it holds; an operation naming none of the types its action acts on is checked on
+`*`. A create that carries tags also needs `ses:TagResource`, and an event destination or a receipt rule
+that names a role `iam:PassRole` for it. A v2 `SendEmail` is authorized as `ses:SendEmail` whatever its
+content: `ses:SendRawEmail` is a v1 action. v1 and v2 share the operation in that table, and a request is read
+for its own API's members alone: a v1 `SendEmail` names its identity by its `SourceArn`, a v2 one by its
+`FromEmailAddressIdentityArn`, and neither is read for the other's. `ListConfigurationSets` and `ListEmailIdentities` are
+`POST /v2/email/list-configuration-sets` and `POST /v2/email/list-identities` in the model; the `GET` routes
+an SDK built before that still sends are served but match no route of the model, so they are not checked.
 
 SES publishes to an SNS topic as `ses.amazonaws.com`, so the topic's policy decides whether it may,
 whatever the sender's own SNS permissions: an event destination's events with the configuration set's

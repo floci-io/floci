@@ -77,8 +77,8 @@ jobs:
     # EmrClusterShrinkNightlyIntegrationTest's sixteen-minute method and two-minute setup, and
     # EmrContainersSparkNightlyIntegrationTest's three six-minute methods, eleven-minute method, two-minute setup before
     # each and 21-minute image pull, EmrContainersGatewayNightlyIntegrationTest's twenty-four-minute, seven-minute and
-    # eighteen-minute methods and 21-minute image pull, and EmrTrinoNightlyIntegrationTest's two seven-minute methods
-    # and ten-minute image pull, 194 minutes. docker-e2e holds the *DockerNightlyIntegrationTest
+    # eighteen-minute methods and 21-minute image pull, and EmrTrinoNightlyIntegrationTest's three seven-minute
+    # methods and ten-minute image pull, 201 minutes. docker-e2e holds the *DockerNightlyIntegrationTest
     # classes, about 23 minutes of tests on 2026-11-23 when they still ran in the shards. A check added, or a bound
     # raised, raises its group's timeout with it, so a slow check fails with its own message.
     strategy:

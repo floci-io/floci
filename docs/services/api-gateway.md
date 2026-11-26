@@ -312,6 +312,9 @@ and [response contract](https://docs.aws.amazon.com/apigateway/latest/developerg
 
 ### Custom Domain Names
 
+`GetDomainNames` accepts the `resourceOwner` values `SELF` and `OTHER_ACCOUNTS`.
+Other supplied values, including an empty value, return `ValidationException`.
+
 A domain created with `CreateDomainName` is `AVAILABLE` at once. Its `regionalDomainName` is
 `<domain>.regional.local`, and a request whose `Host` header is either that name or the domain
 itself is routed through the domain's base path mappings to the mapped REST API stage. An

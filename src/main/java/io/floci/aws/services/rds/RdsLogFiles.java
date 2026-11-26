@@ -1,6 +1,7 @@
 package io.floci.aws.services.rds;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.Utf8;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -169,7 +170,7 @@ final class RdsLogFiles {
             }
             if (lineBytes > MAX_BYTES) {
                 // A single line over 1 MB is cut there, as the API reference says the block is.
-                line = truncateUtf8(lines.get(end), MAX_BYTES - 1) + "\n";
+                line = Utf8.truncate(lines.get(end), MAX_BYTES - 1) + "\n";
                 lineBytes = line.getBytes(StandardCharsets.UTF_8).length;
             }
             data.append(line);
@@ -177,21 +178,5 @@ final class RdsLogFiles {
             end++;
         }
         return new Portion(data.toString(), Integer.toString(end), end < lines.size());
-    }
-
-    /** The longest prefix of {@code text} that is at most {@code maxBytes} in UTF-8, cut between characters. */
-    static String truncateUtf8(String text, int maxBytes) {
-        int bytes = 0;
-        int i = 0;
-        while (i < text.length()) {
-            int codePoint = text.codePointAt(i);
-            int size = codePoint < 0x80 ? 1 : codePoint < 0x800 ? 2 : codePoint < 0x10000 ? 3 : 4;
-            if (bytes + size > maxBytes) {
-                break;
-            }
-            bytes += size;
-            i += Character.charCount(codePoint);
-        }
-        return text.substring(0, i);
     }
 }

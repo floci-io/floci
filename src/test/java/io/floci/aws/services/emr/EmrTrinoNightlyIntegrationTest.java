@@ -32,6 +32,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -49,7 +50,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * cluster whose {@code Applications} name Trino runs its coordinator on its primary node, and a step runs EMR's
  * {@code trino-cli} against it, as the Release Guide's "Connect to the primary node for the Amazon EMR cluster and run
  * queries" does, over a CSV in Floci's S3. Its {@code hive} catalog is the cluster's Hive metastore, or, with
- * {@code trino-connector-hive} setting {@code hive.metastore} to {@code glue}, Floci's Glue Data Catalog.
+ * {@code trino-connector-hive} setting {@code hive.metastore} to {@code glue}, Floci's Glue Data Catalog. The
+ * cluster's other {@code trino-connector-<catalog>} classifications add catalogs, Iceberg's on Glue as the Release
+ * Guide's "Use an Iceberg cluster with Trino" has it, and its {@code trino-config} moves Trino to another port.
  *
  * <p>A nightly check: it pulls the Trino image of {@code emr-7.5.0}'s Trino, 446, about 1 GB, and the release's Spark
  * and Hive images.
@@ -158,6 +161,39 @@ class EmrTrinoNightlyIntegrationTest {
         assertTrue(logs(step).contains("\"apple\",\"10\"\n\"pear\",\"5\""), () -> logs(step));
         assertEquals(List.of("sales", "totals"), glue.getTables(request -> request.databaseName(schema)).tableList()
                 .stream().map(Table::name).sorted().toList());
+    }
+
+    @Test
+    @Timeout(value = 7, unit = TimeUnit.MINUTES)
+    void trinoConnectorClassificationsAddCatalogsAndTrinoConfigMovesTheCoordinatorsPort() {
+        String schema = bucket.replace('-', '_');
+        GlueClient glue = AwsTestClients.create(GlueClient.builder(), "000000000000", Region.US_EAST_1);
+        cleanup.register(glue::close);
+        cleanup.register(() -> {
+            for (Table table : glue.getTables(request -> request.databaseName(schema)).tableList()) {
+                glue.deleteTable(request -> request.databaseName(schema).name(table.name()));
+            }
+            glue.deleteDatabase(request -> request.name(schema));
+        });
+        // The Release Guide's Iceberg catalog on the Glue Data Catalog, a TPC-H one, and another port.
+        startCluster("""
+                [{"Classification": "trino-connector-iceberg",
+                  "Properties": {"connector.name": "iceberg", "iceberg.catalog.type": "glue"}},
+                 {"Classification": "trino-connector-tpch", "Properties": {}},
+                 {"Classification": "trino-config", "Properties": {"http-server.http.port": "8890"}}]""");
+
+        String step = trinoStep("SHOW CATALOGS; CREATE SCHEMA iceberg." + schema + " WITH (location = '"
+                + s3Uri("iceberg/") + "'); CREATE TABLE iceberg." + schema + ".nation AS SELECT nationkey, name FROM "
+                + "tpch.tiny.nation; SELECT count(*) FROM iceberg." + schema + ".nation");
+
+        assertEquals("COMPLETED", state(step), () -> logs(step));
+        String logs = logs(step);
+        assertTrue(logs.contains("\"hive\"\n\"iceberg\"\n\"system\"\n\"tpch\""), logs);
+        assertTrue(logs.contains("\"25\""), logs);
+        // An Iceberg table, in Floci's Glue, its files in the schema's folder of Floci's S3.
+        assertEquals("ICEBERG", glue.getTable(request -> request.databaseName(schema).name("nation")).table()
+                .parameters().get("table_type").toUpperCase(Locale.ROOT));
+        assertFalse(s3.listObjectsV2(request -> request.bucket(bucket).prefix("iceberg/")).contents().isEmpty());
     }
 
     // A schema in the bucket's warehouse folder, an external table over the CSV, a table of each item's sum, then the

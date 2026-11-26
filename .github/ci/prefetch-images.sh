@@ -62,6 +62,12 @@ if starts Ec2PublishedConnectionNightlyIntegrationTest; then
     ecr public.ecr.aws/docker/library/alpine:latest
     pull alpine/socat
 fi
+# Ec2GuestShutdownDockerNightlyIntegrationTest launches ami-alpine and attaches a volume through the
+# volume helper (floci.services.ec2.volume-helper-image).
+if starts Ec2GuestShutdownDockerNightlyIntegrationTest; then
+    ecr public.ecr.aws/docker/library/alpine:latest
+    pull alpine:3.21
+fi
 test_image() {
     image="$(grep -oE "$1 *= *\"[^\"]+\"" "${TEST_IMAGES:-/dev/null}" | grep -oE '"[^"]+"' | tr -d '"')"
     [ -n "$image" ] || echo "$(date -u +%H:%M:%S) prefetch skipped: TestImages.$1 not readable" >> "$PREFETCH_LOG"
@@ -193,6 +199,12 @@ configured_image() {
 if grep -q '/neptune/' "$SHARD_FILE"; then
     configured_image neptune default-neo4j-image
     configured_image neptune default-image
+fi
+# NeptuneGraphVolumeDockerNightlyIntegrationTest keeps a graph across containers on both engines' configured images,
+# and NeptuneClusterRestartDockerNightlyIntegrationTest restarts clusters on the Gremlin one.
+if starts NeptuneGraphVolumeDockerNightlyIntegrationTest NeptuneClusterRestartDockerNightlyIntegrationTest; then
+    configured_image neptune default-image
+    configured_image neptune default-neo4j-image
 fi
 # DocDbClusterRestartDockerNightlyIntegrationTest restarts clusters on the configured MongoDB image.
 starts DocDbClusterRestartDockerNightlyIntegrationTest && configured_image docdb default-image

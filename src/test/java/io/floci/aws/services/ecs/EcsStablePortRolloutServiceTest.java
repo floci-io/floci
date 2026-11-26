@@ -48,6 +48,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
+import static io.floci.aws.services.ecs.EcsTestExecutors.inlineExecutor;
+import static io.floci.aws.services.ecs.EcsTestExecutors.queuedExecutor;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -385,18 +387,10 @@ class EcsStablePortRolloutServiceTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void daemonStillReplacesItsTaskAfterStoppingItWithoutHostPublishing(boolean stopDuringReconciliation) {
+    void daemonStillReplacesItsTaskAfterStoppingItWithoutHostPublishing(boolean stopDuringReconciliation)
+            throws InterruptedException {
         Queue<Runnable> stops = new ArrayDeque<>();
-        ExecutorService stopper = mock(ExecutorService.class);
-        doAnswer(invocation -> {
-            Runnable stop = invocation.getArgument(0);
-            if (stopDuringReconciliation) {
-                stop.run();
-            } else {
-                stops.add(stop);
-            }
-            return null;
-        }).when(stopper).execute(any(Runnable.class));
+        ExecutorService stopper = stopDuringReconciliation ? inlineExecutor() : queuedExecutor(stops);
         try (Harness harness = new Harness(PublicationMode.PRIVATE_AWSVPC, stopper)) {
             harness.ecs.registerContainerInstance(CLUSTER, null, List.of(), REGION);
             harness.createService("web", Map.of("minimumHealthyPercent", 0), "DAEMON");
