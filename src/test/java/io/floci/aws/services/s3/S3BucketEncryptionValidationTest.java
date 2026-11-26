@@ -13,6 +13,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The body {@code PutBucketEncryption} stores: AWS refuses one that is not well-formed XML or holds
@@ -90,11 +91,13 @@ class S3BucketEncryptionValidationTest {
 
     @Test
     void aValidKmsConfigurationWithAKeyArnIsStored() {
-        String body = configuration("aws:kms", KMS_KEY);
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
 
-        s3Service.putBucketEncryption(BUCKET, body);
-
-        assertEquals(body, s3Service.getBucketEncryption(BUCKET));
+        // Since #9414 the read augments the stored rule with BlockedEncryptionTypes, so the
+        // stored default elements are asserted rather than the whole document.
+        String returned = s3Service.getBucketEncryption(BUCKET);
+        assertTrue(returned.contains("<SSEAlgorithm>aws:kms</SSEAlgorithm>"));
+        assertTrue(returned.contains("<KMSMasterKeyID>" + KMS_KEY + "</KMSMasterKeyID>"));
     }
 
     @Test
