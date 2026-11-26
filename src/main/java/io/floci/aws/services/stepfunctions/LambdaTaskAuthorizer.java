@@ -129,7 +129,7 @@ public class LambdaTaskAuthorizer {
             IamRole executionRole = access.role(machine.getRoleArn()).orElseThrow(
                     () -> new AslExecutor.FailStateException("States.Permissions",
                             "The execution role " + machine.getRoleArn() + " does not exist."));
-            if (!trustEvaluator.allowsService(executionRole.getAssumeRolePolicyDocument(),
+            if (!trustEvaluator.allowsService(executionRole,
                     ServicePrincipals.of("states"), machine.getStateMachineArn(), owner.accountId())) {
                 throw new AslExecutor.FailStateException("States.Permissions",
                         "The execution role " + machine.getRoleArn() + " does not trust Step Functions.");

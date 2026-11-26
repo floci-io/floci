@@ -1140,9 +1140,11 @@ class StsQueryHandlerTest {
         OidcIssuerKeyLookup keys = mock(OidcIssuerKeyLookup.class);
         when(keys.findVerificationKey(issuer)).thenReturn(Optional.of(mock(RSAPublicKey.class)));
         WebIdentityTrustPolicyEvaluator trust = mock(WebIdentityTrustPolicyEvaluator.class);
-        when(trust.allows(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap(), eq("app"))).thenReturn(true);
+        when(trust.allows(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap(), eq("app"), anyMap()))
+                .thenReturn(true);
         // The token passes a session tag, which the trust policy has to permit as well.
-        when(trust.allowsTagging(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap(), eq("app")))
+        when(trust.allowsTagging(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap(), eq("app"),
+                anyMap()))
                 .thenReturn(true);
 
         StsQueryHandler handler = new StsQueryHandler(iamService, mock(AccountResolver.class),
@@ -1158,7 +1160,7 @@ class StsQueryHandlerTest {
         Response response = handler.handle("AssumeRoleWithWebIdentity", params);
 
         assertEquals(200, response.getStatus(), (String) response.getEntity());
-        verify(trust).allows(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap(), eq("app"));
+        verify(trust).allows(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap(), eq("app"), anyMap());
         assertEquals("arn:aws-cn:sts::000000000000:assumed-role/web-role/app",
                 extract(ARN, (String) response.getEntity()));
         // The token's own transitive key is recorded with its tags, so a session assumed from this

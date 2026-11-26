@@ -10,6 +10,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -56,10 +57,11 @@ class ServiceRoleAuthorizerTest {
                 new AssumeRolePolicyEvaluator(new ObjectMapper(), evaluator), scpProvider);
     }
 
-    private void role(String trust, String... policies) {
+    private IamRole role(String trust, String... policies) {
         IamRole role = new IamRole("id", "service-role", "/", ROLE_ARN, trust);
         when(iamService.findRole(ACCOUNT_ID, "service-role")).thenReturn(Optional.of(role));
         when(iamService.resolvePrincipalContext(ROLE_ARN)).thenReturn(CallerContext.of(List.of(policies)));
+        return role;
     }
 
     @Test
@@ -167,6 +169,24 @@ class ServiceRoleAuthorizerTest {
         assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, SERVICE_PRINCIPAL, SOURCE_ARN,
                 List.of(PERMISSION)).isEmpty());
         assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, SERVICE_PRINCIPAL, "arn:aws:events:us-east-1:123456789012:rule/other",
+                List.of(PERMISSION)).isPresent());
+    }
+
+    /** The role's own tags are in its trust policy's context, as for every assume of the role. */
+    @Test
+    void roleTagTrustConditionIsEvaluated() {
+        String conditionalTrust = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                "Principal":{"Service":"events.amazonaws.com"},"Action":"sts:AssumeRole",
+                "Condition":{"StringEquals":{"aws:ResourceTag/team":"%s"}}}]}""";
+        role(conditionalTrust.formatted("data"), ALLOW).setTags(Map.of("team", "data"));
+
+        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, SERVICE_PRINCIPAL, SOURCE_ARN,
+                List.of(PERMISSION)).isEmpty());
+
+        role(conditionalTrust.formatted("other"), ALLOW).setTags(Map.of("team", "data"));
+
+        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, SERVICE_PRINCIPAL, SOURCE_ARN,
                 List.of(PERMISSION)).isPresent());
     }
 

@@ -29,7 +29,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code sts:RoleSessionName} in an {@code AssumeRoleWithWebIdentity} trust policy, which the
  * Service Authorization Reference lists for the action and which holds the {@code RoleSessionName}
  * the request passes: "Your administrator might require that you specify your user name as the
- * session name when you assume the role. For more information, see sts:RoleSessionName."
+ * session name when you assume the role. For more information, see sts:RoleSessionName." And the
+ * tags of the role being assumed, the resource of the request, which the reference gives the
+ * {@code role} type as {@code aws:ResourceTag/${TagKey}} and {@code iam:ResourceTag/${TagKey}}.
  */
 @QuarkusTest
 class WebIdentityRoleSessionNameIntegrationTest {
@@ -123,6 +125,26 @@ class WebIdentityRoleSessionNameIntegrationTest {
         Role role = role(sessionNameCondition("deploy-42"));
 
         StsException error = assertThrows(StsException.class, () -> assume(role, "deploy-43"));
+
+        assertEquals("AccessDenied", error.awsErrorDetails().errorCode());
+        assertEquals(403, error.statusCode());
+    }
+
+    @Test
+    void trustPolicyReadingTheRolesOwnTagAllowsTheRoleCarryingIt() {
+        // Tag keys are not case-sensitive: the role carries `team`.
+        Role role = role("{\"StringEquals\":{\"aws:ResourceTag/Team\":\"federated\"}}");
+
+        AssumeRoleWithWebIdentityResponse response = assume(role, "tagged");
+
+        FederatedSessionAssertions.assertIdentity(endpoint, iamService, role, "tagged", response);
+    }
+
+    @Test
+    void trustPolicyReadingAnotherValueOfTheRolesTagRefusesIt() {
+        Role role = role("{\"StringEquals\":{\"iam:ResourceTag/team\":\"other\"}}");
+
+        StsException error = assertThrows(StsException.class, () -> assume(role, "tagged"));
 
         assertEquals("AccessDenied", error.awsErrorDetails().errorCode());
         assertEquals(403, error.statusCode());
