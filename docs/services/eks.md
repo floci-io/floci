@@ -518,8 +518,9 @@ launches nodes on AWS. Floci checks every 10 seconds.
   cluster security group deleted next (one that doesn't fails the delete, which can be retried), and deletes the
   instance profiles made for it.
 
-On AWS, a node is named after its instance ID and is a managed instance a plain `DescribeInstances` doesn't list.
-In Floci it is named as other joined instances are, after its private DNS name, and `DescribeInstances` lists it.
+Each node is a managed instance, as on AWS: its `Operator` names `eks.amazonaws.com`, and a plain
+`DescribeInstances` or `DescribeInstanceStatus` leaves it out (see [EC2](ec2.md#managed-instances)). On AWS a node is
+named after its instance ID; in Floci it is named as other joined instances are, after its private DNS name.
 Floci makes no `NodeClaim` objects, and doesn't replace underutilized nodes with smaller ones.
 
 ### Auto Mode load balancing for Services

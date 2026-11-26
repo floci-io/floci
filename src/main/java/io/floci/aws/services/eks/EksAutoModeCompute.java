@@ -5,11 +5,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.ec2.Ec2InstanceTypeCatalog;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.ec2.model.InstanceOperator;
 import io.floci.aws.services.ec2.model.Reservation;
 import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.ec2.model.Tag;
@@ -83,6 +85,8 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
     static final String NODE_CLASS_TAG = "eks:kubernetes-node-class-name";
     static final String MANAGED_LAUNCH_TAG = "aws:ec2:managed-launch";
     static final String MANAGED_LAUNCH = "eks-auto";
+    /** The principal that manages Auto Mode's instances (measured). */
+    static final String MANAGED_BY = ServicePrincipals.of("eks");
     /** How long a launched node may take to register before its pool may get another. */
     static final Duration REGISTRATION_WAIT = Duration.ofMinutes(3);
     /** How long a deleted cluster waits for its Auto Mode instances to finish terminating, which EC2 does after. */
@@ -426,6 +430,8 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                 Base64.getEncoder().encodeToString(userData.getBytes(StandardCharsets.UTF_8)), false, null, null,
                 null, false, null, null);
         String instanceId = reservation.getInstances().getFirst().getInstanceId();
+        // As on AWS, Auto Mode's node is a managed instance, hidden from list and filter calls by default.
+        ec2.setInstanceOperator(region, instanceId, new InstanceOperator(true, MANAGED_BY, true));
         if (!stillRunning(cluster)) {
             // Deleted while this launch ran: what the deletion missed goes now. Its security group is gone already,
             // so nothing waits for the instance to end.

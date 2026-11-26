@@ -1481,7 +1481,8 @@ public class Ec2QueryHandler {
     private Response handleDescribeInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
-        List<Reservation> reservations = service.describeInstances(region, ids, filters);
+        List<Reservation> reservations = service.describeInstances(region, ids, filters,
+                includeManagedResources(p));
 
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeInstancesResponse", AwsNamespaces.EC2)
@@ -1607,7 +1608,8 @@ public class Ec2QueryHandler {
 
     private Response handleDescribeInstanceStatus(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
-        List<Instance> runningInstances = service.describeInstanceStatus(region, ids);
+        List<Instance> runningInstances = service.describeInstanceStatus(region, ids,
+                includeManagedResources(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeInstanceStatusResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2485,12 +2487,22 @@ public class Ec2QueryHandler {
     }
 
     /** The request's DryRun flag. A blank or non-boolean value is refused rather than read as false. */
+    /** {@code IncludeManagedResources}: whether a list or filter call also returns hidden managed resources. */
+    private static boolean includeManagedResources(MultivaluedMap<String, String> params) {
+        return flag(params, "IncludeManagedResources");
+    }
+
     static boolean dryRun(MultivaluedMap<String, String> params) {
-        String value = params.getFirst("DryRun");
+        return flag(params, "DryRun");
+    }
+
+    /** An optional boolean parameter, false when absent; a blank value, or one that isn't a boolean, is refused. */
+    private static boolean flag(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
         if (value != null && value.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "DryRun is not a valid boolean.", 400);
+            throw new AwsException("InvalidParameterValue", name + " is not a valid boolean.", 400);
         }
-        return Boolean.TRUE.equals(parseOptionalBoolean(value, "DryRun"));
+        return Boolean.TRUE.equals(parseOptionalBoolean(value, name));
     }
 
     private Response handleModifyIpam(MultivaluedMap<String, String> p, String region) {
@@ -5873,6 +5885,13 @@ public class Ec2QueryHandler {
 
         if (inst.isSpot()) {
             xml.elem("instanceLifecycle", "spot");
+        }
+        if (inst.getOperator() != null) {
+            xml.start("operator")
+                    .elem("managed", String.valueOf(inst.getOperator().isManaged()))
+                    .elem("principal", inst.getOperator().getPrincipal())
+                    .elem("hiddenByDefault", String.valueOf(inst.getOperator().isHiddenByDefault()))
+                    .end("operator");
         }
 
         if (inst.getPlacement() != null) {

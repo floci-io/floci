@@ -745,7 +745,7 @@ class Ec2QueryHandlerTest {
         node.getNetworkInterfaces().add(eni);
         Reservation reservation = new Reservation();
         reservation.setInstances(List.of(node));
-        when(service.describeInstances(eq("us-east-1"), anyList(), anyList())).thenReturn(List.of(reservation));
+        when(service.describeInstances(eq("us-east-1"), anyList(), anyList(), anyBoolean())).thenReturn(List.of(reservation));
 
         String prefixSet = "<ipv4PrefixSet><item><ipv4Prefix>10.60.0.224/28</ipv4Prefix></item>"
                 + "<item><ipv4Prefix>10.60.0.208/28</ipv4Prefix></item></ipv4PrefixSet>";

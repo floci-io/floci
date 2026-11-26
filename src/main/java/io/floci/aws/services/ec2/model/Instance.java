@@ -59,6 +59,7 @@ public class Instance {
     private String ownerId;
     private String reservationId;
     private List<Tag> tags = new ArrayList<>();
+    private InstanceOperator operator;
 
     private String rootVolumeId;
 
@@ -254,6 +255,10 @@ public class Instance {
 
     public String getOwnerId() { return ownerId; }
     public void setOwnerId(String ownerId) { this.ownerId = ownerId; }
+
+    /** The service provider that manages the instance, or null for an instance the account manages itself. */
+    public InstanceOperator getOperator() { return operator; }
+    public void setOperator(InstanceOperator operator) { this.operator = operator; }
 
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags; }
