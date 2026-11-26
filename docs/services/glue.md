@@ -110,7 +110,7 @@ reference does not say whether the flag covers them, so Floci does not guess. Th
 catalog's `ConnectionPasswordEncryption` setting produces (see Encryption settings below).
 
 `TestConnection` is asynchronous on AWS and returns nothing; Floci checks the request's shape and accepts it
-without opening a socket to the data store, since no job or crawler runs against a connection yet.
+without opening a socket to the data store. A crawler's JDBC target does use the connection (see Crawlers).
 
 #### Resource policy
 
@@ -212,12 +212,35 @@ the run is `FAILED`.
 | StartCrawlerSchedule | Sets a crawler's schedule to `SCHEDULED`. |
 | StopCrawlerSchedule | Sets a crawler's schedule to `NOT_SCHEDULED`. |
 
-Crawls do not read the data store or write tables. A crawl follows the crawler's state machine:
-`GetCrawler` reports `RUNNING` with `CrawlElapsedTime` while it runs, then `READY` with a `LastCrawl`
-of `SUCCEEDED` (or `CANCELLED` after `StopCrawler`). With the default `crawler-run-duration-seconds` of
-0 a crawl finishes as soon as it starts; a positive value keeps the crawler `RUNNING` that long.
-`GetCrawlerMetrics` reports zero tables created, updated and deleted. Schedules are stored and their
-state can be switched, but a schedule never starts a crawl on its own.
+A crawl follows the crawler's state machine: `GetCrawler` reports `RUNNING` with `CrawlElapsedTime` while
+it runs, then `READY` with a `LastCrawl` of `SUCCEEDED`, `FAILED` with an `ErrorMessage`, or `CANCELLED`
+after `StopCrawler`. With the default `crawler-run-duration-seconds` of 0 a crawl finishes as soon as it
+starts; a positive value keeps the crawler `RUNNING` that long. Schedules are stored and their state can be
+switched, but a schedule never starts a crawl on its own.
+
+S3 and the other non-JDBC targets are not read: their crawls succeed with zero tables created, updated and
+deleted. A `JdbcTarget` whose connection's `JDBC_CONNECTION_URL` names a Redshift cluster or workgroup
+(`jdbc:redshift://<cluster-or-workgroup>.<...>.redshift[-serverless].<...>:<port>/<database>`) is crawled:
+
+- The crawl signs in with the secret in the connection's `AuthenticationConfiguration.SecretArn` or
+  `SECRET_ID` property, otherwise with its `USERNAME` and `PASSWORD` (or `ENCRYPTED_PASSWORD`).
+- `Path` is `database/schema/table` or `database/schema`. `%` stands for any run of characters in the
+  schema or the table, never in the database, and the path is case-sensitive. `Exclusions` are globs
+  matched against the object path relative to the include path: the table name for `dev/public/%`,
+  `schema/table` for `dev/%`.
+- Each table or view the signed-in user can select from becomes a Data Catalog table named
+  `<TablePrefix><database>_<schema>_<table>` (lowercased, other characters replaced by `_`) in the
+  crawler's `DatabaseName`, with `Location` `database.schema.table`, columns mapped to Hive types, and the
+  `classification` (`redshift`), `connectionName` and `typeOfData` (`table` or `view`) parameters.
+  `EnableAdditionalMetadata` adds `aws:RawType` (`RAWTYPES`) and the comment parameters (`COMMENTS`).
+- A table already in the catalog is updated when its schema changed, unless
+  `SchemaChangePolicy.UpdateBehavior` is `LOG`. Tables are never deleted, so `TablesDeleted` stays 0.
+- The data store is read in the background, and the crawler stays `RUNNING` until the read finishes. A
+  missing connection or database, an unreachable endpoint, or refused credentials ends the crawl `FAILED`
+  with nothing written. A crawl stopped while it reads writes nothing.
+
+`GetCrawlerMetrics` reports the tables the last crawl created and updated. Other JDBC engines, partitions,
+custom classifiers and `RecrawlPolicy` are not implemented.
 
 #### Triggers
 
