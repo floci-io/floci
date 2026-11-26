@@ -8794,19 +8794,20 @@ public class S3Service implements Resettable, ResourceProvider {
             metadata.putAll(effectiveOptions.getReplacementMetadata());
         }
 
-        String effectiveContentType = replaceMetadata && effectiveOptions.getContentType() != null
+        // REPLACE takes these headers from the request only; an omitted one is not carried over.
+        String effectiveContentType = replaceMetadata
                 ? effectiveOptions.getContentType()
                 : source.getContentType();
         String effectiveStorageClass = effectiveOptions.getStorageClass() != null
                 ? effectiveOptions.getStorageClass()
                 : source.getStorageClass();
-        String effectiveContentEncoding = replaceMetadata && effectiveOptions.getContentEncoding() != null
+        String effectiveContentEncoding = replaceMetadata
                 ? effectiveOptions.getContentEncoding()
                 : source.getContentEncoding();
-        String effectiveContentDisposition = replaceMetadata && effectiveOptions.getContentDisposition() != null
+        String effectiveContentDisposition = replaceMetadata
                 ? effectiveOptions.getContentDisposition()
                 : source.getContentDisposition();
-        String effectiveCacheControl = replaceMetadata && effectiveOptions.getCacheControl() != null
+        String effectiveCacheControl = replaceMetadata
                 ? effectiveOptions.getCacheControl()
                 : source.getCacheControl();
         String effectiveSseKmsKeyId = new ObjectEncryption(normalizedServerSideEncryption,
