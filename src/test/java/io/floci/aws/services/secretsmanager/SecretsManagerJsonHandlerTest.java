@@ -1785,6 +1785,23 @@ class SecretsManagerJsonHandlerTest {
     }
 
     @Test
+    void listSecretVersionIdsOmitsValuelessPendingVersionButDescribeSecretKeepsIt() {
+        // AWS: "ListSecretVersionIds only returns versions that contain a secret value."
+        createSecret("rotating");
+        String pendingToken = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        service.putSecretValue("rotating", null, null, pendingToken, REGION, List.of("AWSPENDING"));
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("SecretId", "rotating");
+        req.put("IncludeDeprecated", true);
+        ObjectNode body = (ObjectNode) handler.handle("ListSecretVersionIds", req, REGION).getEntity();
+
+        assertThat(body.get("Versions").size(), is(1));
+        assertThat(body.get("Versions").get(0).get("VersionId").asText(), is(not(pendingToken)));
+        assertThat(describe("rotating").get("VersionIdsToStages").has(pendingToken), is(true));
+    }
+
+    @Test
     void listSecretVersionIdsPaginates() {
         createSecret("versioned");
         for (int i = 1; i <= 3; i++) {
