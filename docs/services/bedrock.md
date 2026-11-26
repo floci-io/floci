@@ -17,7 +17,9 @@ exists. `DELETE /enforcedGuardrailsConfiguration/{configId}` removes it.
 Configuration storage is scoped to the calling account and Region. These are
 control-plane records: inference-time enforcement is not implemented. Model ID
 patterns, conflicts between multiple configurations in one Region, and cascading
-or refusing deletion of a referenced guardrail version are not implemented.
+deletion of a referenced guardrail version are not implemented. Deleting a referenced
+guardrail version, or its whole guardrail, is rejected until callers remove or replace
+every configuration that references it.
 
 ## Supported Actions
 
