@@ -12321,7 +12321,7 @@ class RdsServiceTest {
         return new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
                 instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups,
                 null, null, null, new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), null, kmsService, eventPublisher);
+                new InMemoryStorage<>(), null, kmsService, eventPublisher, null);
     }
 
     private RdsService newService(RdsContainerManager containerManager,
@@ -12334,7 +12334,7 @@ class RdsServiceTest {
         return new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
                 instances, clusters, parameterGroups, clusterParameterGroups, new InMemoryStorage<>(),
                 secretsManager, null, null, new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), null, kmsService, eventPublisher);
+                new InMemoryStorage<>(), null, kmsService, eventPublisher, null);
     }
 
     private RdsService proxyStoreService(

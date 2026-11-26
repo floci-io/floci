@@ -59,6 +59,32 @@ public class CurrentContainerNetworkResolver {
         return resolve().map(CurrentContainerNetwork::ipAddress);
     }
 
+    /**
+     * Floci's own address on {@code network}, empty when Floci is not in a container, is not on that network or its
+     * container cannot be inspected. Unlike {@link #resolveContainerIp} it is not cached: Floci joins networks as it
+     * runs, an EC2 VPC's among them.
+     */
+    public Optional<String> resolveContainerIpOn(String network) {
+        if (!containerDetector.isRunningInContainer()) {
+            return Optional.empty();
+        }
+        String containerId = currentContainerId();
+        if (containerId.isBlank()) {
+            return Optional.empty();
+        }
+        try {
+            Map<String, ContainerNetwork> networks = dockerClient.inspectContainerCmd(containerId).exec()
+                    .getNetworkSettings().getNetworks();
+            return Optional.ofNullable(networks == null ? null : networks.get(network))
+                    .filter(this::isUsable)
+                    .map(ContainerNetwork::getIpAddress);
+        } catch (Exception e) {
+            LOG.debugv("Could not inspect current Docker container {0} for its address on {1}: {2}", containerId,
+                    network, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
     public OptionalInt resolvePublishedPort(int containerPort) {
         OptionalInt cachedPublishedPort = cachedPublishedPorts.get(containerPort);
         if (cachedPublishedPort != null) {

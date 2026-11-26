@@ -348,6 +348,7 @@ they belong to, as the model requires. An omitted `Enabled` activates the subscr
 | `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7001` | First host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_PORT` | `7099` | Last host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT` | `false` | `true` = `Describe*` reports the requested `Port` instead of the proxy port; connect via the proxy port |
+| `FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC` | `false` | `true` = a standalone instance serves its `Port` at its own address in its VPC, under its RDS endpoint name; see [Endpoints in a VPC](#endpoints-in-a-vpc) |
 | `FLOCI_SERVICES_RDS_ENDPOINT_HOST` | _(auto-detected)_ | Hostname advertised in RDS endpoints; when set in Docker, Floci advertises each proxy's published host port |
 | `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING` | `true` | Refuse a PostgreSQL IAM auth token generated for another hostname, port or region than the endpoint publishes, as RDS does; set `false` to accept such tokens. MySQL and MariaDB always refuse them |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
@@ -373,6 +374,9 @@ rejected. This differs from AWS because Floci's local proxy must use a published
 host port; for example, requesting `5432` with the default
 `7001`-`7099` range returns a port in that range. Ports outside AWS's valid
 `1150`-`65535` interval are rejected.
+
+Set `FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC=true` for a standalone instance to serve its requested `Port` for real, at
+its own address in its VPC; see [Endpoints in a VPC](#endpoints-in-a-vpc).
 
 Set `FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT=true` to make `Describe*` report the requested `Port`
 instead (for example so Terraform's `port` does not show a diff). The proxy still listens in the proxy
@@ -568,6 +572,57 @@ VPC's default group for an instance that keeps none otherwise, such as a member 
 no groups or an instance stored before these defaults, and `sg-00000000` only when its VPC is unknown. A CloudFormation update checks its groups against the VPC it leaves the instance in
 before it changes anything, and a rollback leaves the groups of an instance the update moved to
 another VPC, which it does not move back.
+
+## Endpoints in a VPC
+
+With `FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC=true`, a standalone DB instance gets its own address in its VPC, as on RDS,
+instead of sharing Floci's address on a proxy port:
+
+- The instance is served in the subnet of its DB subnet group in its Availability Zone, or the group's first subnet
+  when none is in it, at an address EC2 leases from that subnet. An instance created without a DB subnet group is in
+  the default VPC.
+- It serves the `Port` it was created with, or its engine's default (5432 for PostgreSQL, 3306 for MySQL and
+  MariaDB, 1433 for SQL Server), so two instances can both serve 5432, or any other port, the proxy range's
+  included. Without a `Port` of its own, a snapshot or point in time restore serves its original instance's port, a
+  read replica its source's, and the green instance of a blue/green deployment its blue instance's, as the API
+  reference gives those defaults.
+- `DescribeDBInstances` reports that port and the name RDS gives the instance,
+  `<instance>.<identifier>.<region>.rds.amazonaws.com`. The identifier is twelve letters and digits, the same for
+  every instance of an account in a Region, as the RDS user guide describes it. Floci's DNS server answers the name
+  with the instance's address while it runs, and with no address while it is stopped. In the China Regions the name
+  ends in `amazonaws.com.cn`: AWS publishes no China example, so that shape is Floci's reading.
+- A relay container at the address forwards each connection to the instance's auth proxy, so IAM authentication,
+  TLS and the master login work as they do on the proxy port. The relay is on the VPC's network and on RDS's Docker
+  network (`FLOCI_SERVICES_RDS_DOCKER_NETWORK`, else `FLOCI_SERVICES_DOCKER_NETWORK`, else Floci's own), and reaches
+  Floci there: with Floci in a container, at its address on that network, which Floci is on as RDS's database
+  containers need it to be. IAM authentication tokens bind to the name and port,
+  and the managed master-user secret carries them.
+- A stop removes the relay and a start serves the instance again at the address it had; a restart of Floci does the
+  same. A `ModifyDBInstance` that names another `DBSubnetGroupName` serves the instance in a subnet of that group;
+  a running instance keeps its old address until the new subnet serves it, and keeps it when that subnet has no
+  address to give, until the next start, restart of Floci or backend retry makes the move.
+  After a blue/green switchover the new production instance answers on the blue name and address.
+- While a relay holds an address, `DeleteSubnet` and `DeleteVpc` refuse to remove its subnet and VPC, as they do for
+  a subnet a network interface is in.
+- A `DeleteDBInstance` whose relays Docker does not confirm removed, its current one or one a subnet move left,
+  fails, and the instance keeps its proxy port, so a relay never forwards to another database; a retry removes them.
+  A `StopDBInstance` stops all the same, and the next start, a delete or a restart removes the relay. Until a relay
+  is confirmed removed, no other database is given the proxy port it forwards to, and one a restart cannot remove
+  keeps its address and its subnet in use.
+
+The address is on the VPC's Docker network, so the containers Floci runs in that VPC (EC2 instances, ECS tasks,
+Lambda functions, EKS pods) reach it, and so does a host whose container addresses are routable, such as Linux. They
+resolve the name through Floci's DNS server. A client that cannot reach the address, such as one on a Docker Desktop
+host, still connects through the proxy port, which keeps listening in the proxy range; its IAM token is generated for
+the name and port `DescribeDBInstances` reports.
+
+The name resolves to the private address alone: `PubliclyAccessible` changes nothing, and the address is IPv4 only.
+A state reset removes the relays with the instances.
+
+The setting needs Docker-backed VPC networks (`FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED`, on by default) and does
+nothing in mock mode. The relay runs EC2's socat image (`FLOCI_SERVICES_EC2_SOCAT_IMAGE`). An instance's VPC security
+groups do not filter traffic to its address, even with security-group enforcement on. Aurora and Multi-AZ DB
+clusters, their member instances and DB proxies keep the proxy endpoint on Floci's address.
 
 ## Modifying a DB instance
 
