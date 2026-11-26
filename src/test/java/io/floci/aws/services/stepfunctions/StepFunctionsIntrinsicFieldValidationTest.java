@@ -1,6 +1,8 @@
 package io.floci.aws.services.stepfunctions;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -26,9 +28,12 @@ import static org.mockito.Mockito.when;
 
 /**
  * Which values a {@code .$} field of a JSONPath payload template accepts: a JSONPath reference or
- * one Intrinsic Function call, with nothing but whitespace after the {@code )} that closes its
- * argument list. A string literal is skipped when that {@code )} is found, with a backslash
- * escaping the next character, so a quoted {@code \'} does not end it. Over a real service with
+ * one Intrinsic Function call, a name followed by its argument list in parentheses, with nothing
+ * but whitespace after the {@code )} that closes it. A string literal is skipped when that
+ * {@code )} is found, with a backslash escaping the next character, so a quoted {@code \'} does
+ * not end it. A refused value is reported at the template carrying the field, not at the field,
+ * and the walk also covers the {@code Assign} of every Catch and Choices entry, which the
+ * executor resolves too. Over a real service with
  * in-memory stores, a mocked {@link AslExecutor} and a mocked publisher, through
  * {@link StepFunctionsService#validateStateMachineDefinition}, which serves create, update and
  * validate alike.
@@ -51,8 +56,9 @@ class StepFunctionsIntrinsicFieldValidationTest {
     }
 
     static Stream<String> refusedValues() {
-        return Stream.of("foo", "States.StringToJson($.payload).status", "States.Array($.a, $.b)[0]",
-                "States.Format('don\\'t', $.a) extra", "", "States.Array('literal').x");
+        return Stream.of("foo", "()", " (foo)", "States.StringToJson($.payload).status",
+                "States.Array($.a, $.b)[0]", "States.Format('don\\'t', $.a) extra", "",
+                "States.Array('literal').x");
     }
 
     @ParameterizedTest
@@ -66,7 +72,7 @@ class StepFunctionsIntrinsicFieldValidationTest {
         assertEquals("SCHEMA_VALIDATION_FAILED", diagnostic.code());
         assertEquals("The value for the field 'x.$' must be a valid JSONPath"
                 + " or a valid intrinsic function call", diagnostic.message());
-        assertEquals("/States/S/Parameters/x.$", diagnostic.location());
+        assertEquals("/States/S/Parameters", diagnostic.location());
     }
 
     @Test
@@ -87,7 +93,7 @@ class StepFunctionsIntrinsicFieldValidationTest {
     }
 
     @Test
-    void nestedRefusedValueIsReportedAtItsOwnPath() {
+    void nestedRefusedValueIsReportedAtItsContainingTemplate() {
         ObjectNode parameters = MAPPER.createObjectNode();
         parameters.putArray("ContainerOverrides").addObject()
                 .putArray("Environment").addObject()
@@ -96,7 +102,7 @@ class StepFunctionsIntrinsicFieldValidationTest {
         StepFunctionsService.Diagnostic diagnostic = onlyDiagnostic(definitionWith("Parameters", parameters));
         assertEquals("The value for the field 'Value.$' must be a valid JSONPath"
                 + " or a valid intrinsic function call", diagnostic.message());
-        assertEquals("/States/S/Parameters/ContainerOverrides[0]/Environment[0]/Value.$",
+        assertEquals("/States/S/Parameters/ContainerOverrides[0]/Environment[0]",
                 diagnostic.location());
     }
 
@@ -106,7 +112,7 @@ class StepFunctionsIntrinsicFieldValidationTest {
         selector.put("r.$", "States.StringToJson($.payload).status");
 
         StepFunctionsService.Diagnostic diagnostic = onlyDiagnostic(definitionWith("ResultSelector", selector));
-        assertEquals("/States/T/ResultSelector/r.$", diagnostic.location());
+        assertEquals("/States/T/ResultSelector", diagnostic.location());
     }
 
     @Test
@@ -122,7 +128,75 @@ class StepFunctionsIntrinsicFieldValidationTest {
         StepFunctionsService.Diagnostic diagnostic = onlyDiagnostic(root.toString());
         assertEquals("The value for the field 'b.$' must be a valid JSONPath"
                 + " or a valid intrinsic function call", diagnostic.message());
-        assertEquals("/States/M/ItemBatcher/BatchInput/b.$", diagnostic.location());
+        assertEquals("/States/M/ItemBatcher/BatchInput", diagnostic.location());
+    }
+
+    @Test
+    void refusedCatchAssignValueIsReportedAtItsTemplate() {
+        ObjectNode catcher = MAPPER.createObjectNode();
+        catcher.putArray("ErrorEquals").add("States.ALL");
+        catcher.put("Next", "T");
+        catcher.putObject("Assign").put("v.$", "States.Array('literal').x");
+
+        StepFunctionsService.Diagnostic diagnostic = onlyDiagnostic(definitionWith("Catch", arrayWith(catcher)));
+        assertEquals("The value for the field 'v.$' must be a valid JSONPath"
+                + " or a valid intrinsic function call", diagnostic.message());
+        assertEquals("/States/T/Catch[0]/Assign", diagnostic.location());
+    }
+
+    @Test
+    void catchAssignValueThatIsAPathIsAccepted() {
+        ObjectNode catcher = MAPPER.createObjectNode();
+        catcher.putArray("ErrorEquals").add("States.ALL");
+        catcher.put("Next", "T");
+        catcher.putObject("Assign").put("v.$", "$.x");
+
+        StepFunctionsService.ValidationResult result = validate(definitionWith("Catch", arrayWith(catcher)));
+        assertTrue(result.valid(), "expected OK, got " + result.diagnostics());
+        assertEquals(List.of(), result.diagnostics());
+    }
+
+    @Test
+    void refusedChoiceAssignValueIsReportedAtItsTemplate() {
+        ObjectNode rule = MAPPER.createObjectNode();
+        rule.put("Variable", "$.a");
+        rule.put("StringEquals", "x");
+        rule.put("Next", "C");
+        rule.putObject("Assign").put("v.$", "States.Array('literal').x");
+
+        StepFunctionsService.Diagnostic diagnostic = onlyDiagnostic(choiceDefinitionWith(arrayWith(rule)));
+        assertEquals("The value for the field 'v.$' must be a valid JSONPath"
+                + " or a valid intrinsic function call", diagnostic.message());
+        assertEquals("/States/C/Choices[0]/Assign", diagnostic.location());
+    }
+
+    @Test
+    void choiceAssignValueThatIsAPathIsAccepted() {
+        ObjectNode rule = MAPPER.createObjectNode();
+        rule.put("Variable", "$.a");
+        rule.put("StringEquals", "x");
+        rule.put("Next", "C");
+        rule.putObject("Assign").put("v.$", "$.x");
+
+        StepFunctionsService.ValidationResult result = validate(choiceDefinitionWith(arrayWith(rule)));
+        assertTrue(result.valid(), "expected OK, got " + result.diagnostics());
+        assertEquals(List.of(), result.diagnostics());
+    }
+
+    private static ArrayNode arrayWith(JsonNode entry) {
+        return MAPPER.createArrayNode().add(entry);
+    }
+
+    private static String choiceDefinitionWith(ArrayNode choices) {
+        ObjectNode root = MAPPER.createObjectNode();
+        root.put("StartAt", "C");
+        ObjectNode states = root.putObject("States");
+        states.putObject("C")
+                .put("Type", "Choice")
+                .put("Default", "D")
+                .set("Choices", choices);
+        states.putObject("D").put("Type", "Pass").put("End", true);
+        return root.toString();
     }
 
     private static StepFunctionsService.Diagnostic onlyDiagnostic(String definition) {
@@ -141,7 +215,7 @@ class StepFunctionsIntrinsicFieldValidationTest {
         return definitionWith("Parameters", parameters);
     }
 
-    private static String definitionWith(String templateField, ObjectNode template) {
+    private static String definitionWith(String templateField, JsonNode template) {
         boolean passState = "Parameters".equals(templateField);
         ObjectNode root = MAPPER.createObjectNode();
         root.put("StartAt", passState ? "S" : "T");

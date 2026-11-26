@@ -149,6 +149,8 @@ public class StepFunctionsService implements Resettable, ResourceProvider, Store
     // The payload templates AslExecutor.resolveParameters evaluates on a JSONPath state. Every
     // field of one whose name ends with '.$' must begin with '$' or be a single Intrinsic Function
     // call, so the validator walks each of these from the state, nested objects and arrays included.
+    // The Assign of every Catch and Choices entry is resolved through applyJsonPathAssign too and
+    // is walked by validatePayloadTemplateFields on top of the state-level Assign listed here.
     private static final List<String> JSONPATH_PAYLOAD_TEMPLATES = List.of(
             "Parameters", "ResultSelector", "ItemSelector", "Assign", "Credentials",
             "ItemBatcher/BatchInput", "ItemReader/Parameters", "ResultWriter/Parameters");
@@ -2856,8 +2858,12 @@ public class StepFunctionsService implements Resettable, ResourceProvider, Store
      * not begin with {@code $}) nor a single Intrinsic Function call: a name, its argument list in
      * parentheses, and nothing but whitespace after the {@code )} that closes that list. AWS
      * reports such a value as a definition error, while the executor drops what follows and
-     * succeeds. Reported at the field itself, nested objects and arrays included, matching the
-     * depth the executor resolves them at.
+     * succeeds. Reported at the template carrying the field, the state path plus the template
+     * field path, nested objects and arrays included, matching the depth the executor resolves
+     * them at. {@code Assign} is additionally carried by every entry of a Catch and a Choices
+     * list, which the executor resolves through {@link AslExecutor#applyJsonPathAssign} when the
+     * state fails or a rule matches; a state-level {@code Assign} is the Default path's and is
+     * covered by the plain field above.
      */
     private static void validatePayloadTemplateFields(String statePath, JsonNode stateDef,
                                                       List<String> errors) {
@@ -2867,6 +2873,16 @@ public class StepFunctionsService implements Resettable, ResourceProvider, Store
                 template = template.path(segment);
             }
             validatePayloadTemplate(statePath, templatePath, template, errors);
+        }
+        for (String listField : List.of("Catch", "Choices")) {
+            JsonNode entries = stateDef.path(listField);
+            if (!entries.isArray()) {
+                continue;
+            }
+            for (int i = 0; i < entries.size(); i++) {
+                validatePayloadTemplate(statePath, listField + "[" + i + "]/Assign",
+                        entries.get(i).path("Assign"), errors);
+            }
         }
     }
 
@@ -2882,7 +2898,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider, Store
                         && !isValidPayloadTemplateValue(value.asText())) {
                     errors.add(EXPLICIT_LOCATION_MARKER + "The value for the field '" + key
                             + "' must be a valid JSONPath or a valid intrinsic function call"
-                            + MARKER_PAYLOAD_SEPARATOR + statePath + "/" + templatePath + "/" + key);
+                            + MARKER_PAYLOAD_SEPARATOR + statePath + "/" + templatePath);
                 } else if (value.isObject() || value.isArray()) {
                     validatePayloadTemplate(statePath, templatePath + "/" + key, value, errors);
                 }
@@ -2897,7 +2913,9 @@ public class StepFunctionsService implements Resettable, ResourceProvider, Store
 
     /**
      * Whether one {@code .$} field value is a JSONPath reference ({@code $} or {@code $$} first)
-     * or a single Intrinsic Function call. The {@code )} closing the argument list is found with
+     * or a single Intrinsic Function call: a name, at least one non-whitespace character of it
+     * before the {@code (} that opens the argument list, and nothing but whitespace after the
+     * {@code )} that closes it. The {@code )} closing the argument list is found with
      * string literals skipped, a literal running from one {@code '} to its matching {@code '} with
      * a backslash escaping the next character, so a quoted {@code \'} does not end it; anything
      * after that {@code )}, including an index suffix, is not part of a call.
@@ -2907,7 +2925,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider, Store
             return true;
         }
         int open = value.indexOf('(');
-        if (open < 0) {
+        if (open < 0 || value.substring(0, open).isBlank()) {
             return false;
         }
         int depth = 0;

@@ -2001,7 +2001,7 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                 .body("diagnostics[0].message", equalTo(
                         "The value for the field 'x.$' must be a valid JSONPath"
                                 + " or a valid intrinsic function call"))
-                .body("diagnostics[0].location", equalTo("/States/S/Parameters/x.$"));
+                .body("diagnostics[0].location", equalTo("/States/S/Parameters"));
     }
 
     @Test
