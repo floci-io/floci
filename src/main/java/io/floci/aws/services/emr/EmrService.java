@@ -3144,7 +3144,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 EmrSparkSteps.trinoConfig(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                 EmrSparkSteps.trinoNode(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                 EmrSparkSteps.trinoLog(cluster.getConfigurations(), SNAPSHOT_MAPPER),
-                EmrSparkSteps.trinoEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER));
+                EmrSparkSteps.trinoEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                EmrSparkSteps.trinoExchangeManager(cluster.getConfigurations(), SNAPSHOT_MAPPER));
         ClusterStorage.HiveMetastore hiveMetastore = withHiveImage(cluster)
                 ? new ClusterStorage.HiveMetastore(instanceProfileRole(cluster, accountId),
                         EmrSparkSteps.hiveMetastoreSettings(cluster.getConfigurations(), SNAPSHOT_MAPPER), trino)

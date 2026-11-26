@@ -128,7 +128,7 @@ class EmrClusterStorageTest {
     private static final ClusterStorage.HiveMetastore TRINO_METASTORE =
             new ClusterStorage.HiveMetastore("arn:aws:iam::123456789012:role/r", Map.of(),
                     new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of(), Map.of(), Map.of(), Map.of(),
-                            Map.of()));
+                            Map.of(), null));
 
     private final EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
     private final DockerClient docker = mock(DockerClient.class);
@@ -2009,6 +2009,8 @@ class EmrClusterStorageTest {
         verify(trinoSpec).withEnv(EmrTrino.CONFIG_VARIABLE, EmrTrino.properties(EmrTrino.config(Map.of())));
         verify(trinoSpec).withEnv(EmrTrino.NODE_VARIABLE, "");
         verify(trinoSpec).withEnv(EmrTrino.LOG_VARIABLE, "");
+        // No trino-exchange-manager, so no exchange manager, as on EMR.
+        verify(trinoSpec, never()).withEnv(eq(EmrTrino.EXCHANGE_VARIABLE), anyString());
         verify(trinoSpec).withEnv(EmrTrino.CATALOG_PREFIX + "hive", EmrTrino.properties(EmrTrino.catalog("hive",
                 Map.of(), "http://host.docker.internal:4566", "us-east-1")));
         verify(trinoSpec).withEntrypoint(List.of("/bin/bash", "-c", EmrTrino.ENTRYPOINT));
@@ -2066,7 +2068,7 @@ class EmrClusterStorageTest {
         ClusterStorage.HiveMetastore metastore = new ClusterStorage.HiveMetastore("arn:aws:iam::123456789012:role/r",
                 Map.of(), new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of(), Map.of(),
                         Map.of("node.environment", "production"), Map.of("io.trino", "DEBUG"),
-                        Map.of("DB_PASSWORD", "s3cret")));
+                        Map.of("DB_PASSWORD", "s3cret"), Map.of("exchange.base-directories", "s3://spool/exchange")));
 
         ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", metastore, null, NOT_STOPPED);
 
@@ -2078,6 +2080,11 @@ class EmrClusterStorageTest {
         order.verify(trinoSpec).withEnv(EmrTrino.CONFIG_VARIABLE, EmrTrino.properties(EmrTrino.config(Map.of())));
         order.verify(trinoSpec).withEnv(EmrTrino.NODE_VARIABLE, "node.environment=production");
         order.verify(trinoSpec).withEnv(EmrTrino.LOG_VARIABLE, "io.trino=DEBUG");
+        // Its exchange manager's spool in Floci's S3.
+        verify(trinoSpec).withEnv(EmrTrino.EXCHANGE_VARIABLE, "exchange-manager.name=filesystem\n"
+                + "exchange.base-directories=s3://spool/exchange\n"
+                + "exchange.s3.endpoint=http://host.docker.internal:4566\n"
+                + "exchange.s3.region=us-east-1\nexchange.s3.path-style-access=true");
     }
 
     @Test

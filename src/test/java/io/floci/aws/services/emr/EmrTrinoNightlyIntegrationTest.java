@@ -63,7 +63,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code trino-connector-hive} setting {@code hive.metastore} to {@code glue}, Floci's Glue Data Catalog. The
  * cluster's other {@code trino-connector-<catalog>} classifications add catalogs, Iceberg's on Glue as the Release
  * Guide's "Use an Iceberg cluster with Trino" has it, its {@code trino-config} moves Trino to another port, and its
- * {@code trino-node}, {@code trino-log} and {@code trino-env} reach Trino's node, log and environment. A
+ * {@code trino-node}, {@code trino-log} and {@code trino-env} reach Trino's node, log and environment, and its
+ * {@code trino-exchange-manager} spools a fault-tolerant query in the cluster's HDFS. A
  * cluster with no step starts its Trino as it becomes ready, and a client outside the cluster queries it through Floci
  * on the cluster's own host.
  *
@@ -188,13 +189,17 @@ class EmrTrinoNightlyIntegrationTest {
             }
             glue.deleteDatabase(request -> request.name(schema));
         });
-        // The Release Guide's Iceberg catalog on the Glue Data Catalog, a TPC-H one, and another port; and the node's
-        // environment, a logger, and a variable trino-env exports, which the Iceberg catalog's file format names.
+        // The Release Guide's Iceberg catalog on the Glue Data Catalog, a TPC-H one, and another port; the node's
+        // environment, a logger, and a variable trino-env exports, which the Iceberg catalog's file format names; and
+        // fault-tolerant execution, its exchange manager at EMR's defaults, spooling in the cluster's HDFS, without
+        // which Trino refuses a query under a TASK retry policy.
         startCluster("""
                 [{"Classification": "trino-connector-iceberg", "Properties": {"connector.name": "iceberg",
                   "iceberg.catalog.type": "glue", "iceberg.file-format": "${ENV:ICEBERG_FORMAT}"}},
                  {"Classification": "trino-connector-tpch", "Properties": {}},
-                 {"Classification": "trino-config", "Properties": {"http-server.http.port": "8890"}},
+                 {"Classification": "trino-config",
+                  "Properties": {"http-server.http.port": "8890", "retry-policy": "TASK"}},
+                 {"Classification": "trino-exchange-manager"},
                  {"Classification": "trino-node", "Properties": {"node.environment": "production"}},
                  {"Classification": "trino-log", "Properties": {"io.trino": "INFO"}},
                  {"Classification": "trino-env",
