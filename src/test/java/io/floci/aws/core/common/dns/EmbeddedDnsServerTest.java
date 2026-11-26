@@ -323,9 +323,10 @@ class EmbeddedDnsServerTest {
             DnsClientVpcSource conflicting = address -> Optional.of(other);
             for (List<DnsClientVpcSource> sources : List.of(List.of(clientVpc("vpc-a"), conflicting),
                     List.of(conflicting, clientVpc("vpc-a")))) {
-                EmbeddedDnsServer server = new EmbeddedDnsServer(List.of(), List.of(),
+                EmbeddedDnsServer server = new EmbeddedDnsServer(List.of(),
+                        List.of(source("db.corp.internal", List.of("192.0.2.17"))),
                         List.of(rules("vpc-a", forward("corp.internal", "10.1.0.53"))), sources);
-                assertEquals(EmbeddedDnsServer.QueryPlan.UPSTREAM,
+                assertEquals(EmbeddedDnsServer.QueryPlan.answering(DnsAnswer.refused()),
                         server.planQuery("db.corp.internal", CLIENT, MY_IP, 1));
             }
         }

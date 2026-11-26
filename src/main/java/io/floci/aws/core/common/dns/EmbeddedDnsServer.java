@@ -446,7 +446,11 @@ public class EmbeddedDnsServer {
      * than one question, a class other than IN, or a non-standard opcode or flag.
      */
     QueryPlan planQuery(String name, String clientAddress, String myIp, int type, boolean standardQuery) {
-        DnsClientVpcSource.ClientVpc origin = vpcForClient(clientAddress).orElse(null);
+        ClientOrigin clientOrigin = originForClient(clientAddress);
+        if (clientOrigin.conflicting()) {
+            return QueryPlan.answering(DnsAnswer.refused());
+        }
+        DnsClientVpcSource.ClientVpc origin = clientOrigin.vpc();
         Optional<DnsAnswer> stored = resolveFromRecordSources(name, type, true, myIp, origin);
         Optional<DnsAnswer> emulatorName = resolveEmulatorName(name, myIp, type);
         if (emulatorName.isPresent() && stored.isEmpty()) {
@@ -482,7 +486,7 @@ public class EmbeddedDnsServer {
      * than allowed to fail the query, which is how {@link #resolveFromRecordSources} treats one too.
      */
     Optional<DnsForwardingRule> matchingRule(String name, String clientAddress) {
-        return matchingRule(name, vpcForClient(clientAddress).orElse(null));
+        return matchingRule(name, originForClient(clientAddress).vpc());
     }
 
     private Optional<DnsForwardingRule> matchingRule(String name, DnsClientVpcSource.ClientVpc origin) {
@@ -509,9 +513,12 @@ public class EmbeddedDnsServer {
         return Optional.ofNullable(best);
     }
 
-    private Optional<DnsClientVpcSource.ClientVpc> vpcForClient(String clientAddress) {
+    private record ClientOrigin(DnsClientVpcSource.ClientVpc vpc, boolean conflicting) {
+    }
+
+    private ClientOrigin originForClient(String clientAddress) {
         if (clientVpcSources == null || clientAddress == null || clientAddress.isBlank()) {
-            return Optional.empty();
+            return new ClientOrigin(null, false);
         }
         DnsClientVpcSource.ClientVpc result = null;
         for (DnsClientVpcSource source : clientVpcSources) {
@@ -521,7 +528,7 @@ public class EmbeddedDnsServer {
                 if (clientVpc != null && clientVpc.isPresent() && isUsableOrigin(clientVpc.orElseThrow())) {
                     DnsClientVpcSource.ClientVpc found = clientVpc.orElseThrow();
                     if (result != null && !result.equals(found)) {
-                        return Optional.empty();
+                        return new ClientOrigin(null, true);
                     }
                     result = found;
                 }
@@ -530,7 +537,7 @@ public class EmbeddedDnsServer {
                         source.getClass().getSimpleName(), clientAddress, e.getMessage());
             }
         }
-        return Optional.ofNullable(result);
+        return new ClientOrigin(result, false);
     }
 
     private static boolean isUsableOrigin(DnsClientVpcSource.ClientVpc clientVpc) {

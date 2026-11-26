@@ -61,6 +61,35 @@ class Route53DnsPacketIntegrationTest {
     private final List<String> zoneIds = new ArrayList<>();
 
     @Test
+    void conflictingRuntimeOriginsRefusePrivateRecordsAcrossTheWire() throws Exception {
+        String zone = uniqueName() + ".example";
+        String id;
+        try (Route53Client client = AwsTestClients.create(Route53Client.builder(), "test", Region.US_EAST_1)) {
+            id = client.createHostedZone(request -> request.name(zone).callerReference(UUID.randomUUID().toString())
+                    .vpc(vpc -> vpc.vpcId("vpc-conflict").vpcRegion("us-east-1"))).hostedZone().id();
+            zoneIds.add(id);
+        }
+        String name = "service." + zone;
+        change(id, "CREATE", record(name, "A", 17, "192.0.2.17"));
+        DnsClientVpcSource known = address -> Optional.of(new DnsClientVpcSource.ClientVpc(
+                config.defaultAccountId(), "us-east-1", "vpc-conflict"));
+        byte[] request = DnsTestQuery.query(name, 1, 0x1234);
+        for (DnsClientVpcSource.ClientVpc other : List.of(
+                new DnsClientVpcSource.ClientVpc("111111111111", "us-east-1", "vpc-conflict"),
+                new DnsClientVpcSource.ClientVpc(config.defaultAccountId(), "us-west-2", "vpc-conflict"),
+                new DnsClientVpcSource.ClientVpc(config.defaultAccountId(), "us-east-1", "vpc-other"))) {
+            DnsClientVpcSource conflicting = address -> Optional.of(other);
+            for (List<DnsClientVpcSource> providers : List.of(List.of(known, conflicting), List.of(conflicting, known))) {
+                ByteBuffer response = ByteBuffer.wrap(queryWithOrigins(request, providers));
+                assertEquals(5, response.getShort(2) & 15);
+                assertEquals(0, response.getShort(6));
+            }
+        }
+        assertRuntimeAddress(queryWithOrigins(request, List.of(known, known)), "192.0.2.17");
+        assertRuntimeAddress(queryWithOrigins(request, List.of()), "192.0.2.17");
+    }
+
+    @Test
     @ResourceLock(ParallelLocks.PORTS)
     void ec2RuntimeOriginReconcilesPrivateDnsAccessAcrossTheWire() throws Exception {
         String zone = uniqueName() + ".example";

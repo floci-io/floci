@@ -54,6 +54,30 @@ class CloudMapDnsPacketIntegrationTest {
     EmulatorConfig config;
 
     @Test
+    void conflictingRuntimeOriginsRefuseCloudMapRecordsAcrossTheWire() throws Exception {
+        String namespace = uniqueNamespace();
+        String namespaceId = privateDnsNamespace(namespace);
+        Service service = cloudMapService.createService("api", namespaceId, null, null,
+                "{\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":15}]}", null, null, null, Map.of(), REGION);
+        cloudMapService.registerInstance(service.getId(), "task-1", null,
+                Map.of("AWS_INSTANCE_IPV4", "172.31.0.6"), REGION);
+        DnsClientVpcSource first = address -> Optional.of(new DnsClientVpcSource.ClientVpc(
+                config.defaultAccountId(), REGION, "vpc-first"));
+        DnsClientVpcSource second = address -> Optional.of(new DnsClientVpcSource.ClientVpc(
+                config.defaultAccountId(), REGION, "vpc-second"));
+        byte[] request = DnsTestQuery.query("api." + namespace, 1, 0x1234);
+        for (List<DnsRecordSource> sources : List.of(
+                List.of(route53DnsRecordSource, cloudMapDnsRecordSource),
+                List.of(cloudMapDnsRecordSource, route53DnsRecordSource))) {
+            for (List<DnsClientVpcSource> providers : List.of(List.of(first, second), List.of(second, first))) {
+                byte[] response = query(new EmbeddedDnsServer(List.of(), sources, List.of(), providers), request);
+                assertEquals(5, ByteBuffer.wrap(response).getShort(2) & 15);
+                assertEquals(0, ByteBuffer.wrap(response).getShort(6));
+            }
+        }
+    }
+
+    @Test
     void configuredTtlReachesTheDnsPacket() throws Exception {
         String namespace = uniqueNamespace();
         String namespaceId = privateDnsNamespace(namespace);
