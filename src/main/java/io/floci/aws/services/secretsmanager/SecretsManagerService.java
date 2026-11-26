@@ -429,9 +429,11 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
                     version.setVersionStages(newStages);
                 }
 
-                List<String> newStages = new ArrayList<>(previousCurrent.getVersionStages());
-                newStages.add(AWSPREVIOUS);
-                previousCurrent.setVersionStages(newStages);
+                if (!stages.contains(AWSPREVIOUS)) {
+                    List<String> newStages = new ArrayList<>(previousCurrent.getVersionStages());
+                    newStages.add(AWSPREVIOUS);
+                    previousCurrent.setVersionStages(newStages);
+                }
             }
 
             SecretVersion newVersion = new SecretVersion();
