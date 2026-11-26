@@ -93,6 +93,8 @@ public class SesService {
 
     private static final int MAX_BULK_DESTINATIONS = 50;
     private static final int MAX_RECIPIENTS_PER_DESTINATION = 50;
+    static final String CVET_SUCCESS_URL_INVALID = "The success redirection URL is invalid.";
+    static final String CVET_FAILURE_URL_INVALID = "The failure redirection URL is invalid.";
     // Identities live in SesIdentityService (CRUD, verification, MAIL FROM, notifications, tags,
     // and the DKIM state machine with its Route53 lookup), which the v2 controller and the v1
     // handler call directly. The facade keeps the cross-domain flows (create's configuration-set
@@ -915,18 +917,27 @@ public class SesService {
      */
     public void patchCustomVerificationEmailTemplate(CustomVerificationEmailTemplate changes, String region) {
         requireCvetField(changes.getTemplateName(), "TemplateName");
-        if (isGiven(changes.getSuccessRedirectionURL()) && !isValidRedirectUrl(changes.getSuccessRedirectionURL())) {
-            throw new AwsException("InvalidParameterValue", "The success redirection URL is invalid.", 400);
-        }
-        if (isGiven(changes.getFailureRedirectionURL()) && !isValidRedirectUrl(changes.getFailureRedirectionURL())) {
-            throw new AwsException("InvalidParameterValue", "The failure redirection URL is invalid.", 400);
-        }
-        if (isGiven(changes.getFromEmailAddress())
-                && !identityService.isVerifiedSender(changes.getFromEmailAddress(), region)) {
-            throw new AwsException("FromEmailAddressNotVerified",
-                    "The from email address " + changes.getFromEmailAddress() + " is not verified.", 400);
-        }
+        checkCvetUrlsAndSender(changes, region);
         cvetService.patchCustomVerificationEmailTemplate(changes, region);
+    }
+
+    /**
+     * The checks every create and update shares, in the order SES runs them (probed on v1 and v2):
+     * the success URL, the failure URL, then the sender. A member left out is not checked, which
+     * only the v1 update allows. The sentences are the v1 ones; {@link SesV2Json#remapCvetWriteException}
+     * restates them for v2.
+     */
+    private void checkCvetUrlsAndSender(CustomVerificationEmailTemplate t, String region) {
+        if (isGiven(t.getSuccessRedirectionURL()) && !isValidRedirectUrl(t.getSuccessRedirectionURL())) {
+            throw new AwsException("InvalidParameterValue", CVET_SUCCESS_URL_INVALID, 400);
+        }
+        if (isGiven(t.getFailureRedirectionURL()) && !isValidRedirectUrl(t.getFailureRedirectionURL())) {
+            throw new AwsException("InvalidParameterValue", CVET_FAILURE_URL_INVALID, 400);
+        }
+        if (isGiven(t.getFromEmailAddress()) && !identityService.isVerifiedSender(t.getFromEmailAddress(), region)) {
+            throw new AwsException("FromEmailAddressNotVerified",
+                    "The from email address " + t.getFromEmailAddress() + " is not verified.", 400);
+        }
     }
 
     private static boolean isGiven(String member) {
@@ -1058,18 +1069,7 @@ public class SesService {
         requireCvetField(t.getTemplateContent(), "TemplateContent");
         requireCvetField(t.getSuccessRedirectionURL(), "SuccessRedirectionURL");
         requireCvetField(t.getFailureRedirectionURL(), "FailureRedirectionURL");
-        if (!identityService.isVerifiedSender(t.getFromEmailAddress(), region)) {
-            // v1-native code (verified: FromEmailAddressNotVerified / 400); remapV1Exception
-            // translates it to NotFoundException / 404 for the v2 boundary.
-            throw new AwsException("FromEmailAddressNotVerified",
-                    "The from email address <" + t.getFromEmailAddress() + "> is not verified", 400);
-        }
-        if (!isValidRedirectUrl(t.getSuccessRedirectionURL())) {
-            throw new AwsException("InvalidParameterValue", "The success redirection URL is invalid", 400);
-        }
-        if (!isValidRedirectUrl(t.getFailureRedirectionURL())) {
-            throw new AwsException("InvalidParameterValue", "The failure redirection URL is invalid", 400);
-        }
+        checkCvetUrlsAndSender(t, region);
     }
 
     private static boolean isValidRedirectUrl(String url) {
