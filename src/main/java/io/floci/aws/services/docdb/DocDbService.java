@@ -6,7 +6,9 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.BackupWindows;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.AccountAwareStorageBackend.AccountEntry;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.docdb.container.DocDbContainerHandle;
@@ -35,6 +37,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -251,6 +254,7 @@ public class DocDbService {
                 if (!"memory".equals(config.storage().mode())) {
                     cluster.setVolumeId(UUID.randomUUID().toString());
                 }
+                cluster.setMasterPassword(masterPassword);
                 // A cluster record is metadata: its identifier, ARN and tags need no Docker, so the
                 // cluster is created and reaches 'available' even when no daemon is reachable. Only
                 // connecting to the database needs the container.
@@ -623,6 +627,15 @@ public class DocDbService {
                 throw new AwsException("InvalidDBClusterStateFault",
                         "Cannot delete DocDB cluster " + id + " — it still has DB instances.", 400);
             }
+            if ("maintenance".equals(cluster.getStatus()) || "deleting".equals(cluster.getStatus())) {
+                // Only the startup restore reports maintenance, while the cluster's container starts again, and a
+                // stored cluster reads deleting only while a delete waits on that restore, which removes the cluster
+                // once the container has started.
+                cluster.setStatus("deleting");
+                clusters.put(key(region, id), cluster);
+                LOG.infov("DocDB cluster {0} is deleted once its container has started", id);
+                return;
+            }
 
             removeCluster(region, cluster, false);
         }
@@ -652,6 +665,291 @@ public class DocDbService {
         clusters.delete(key(region, id));
         writeLocks.remove("cluster:" + key(region, id));
         LOG.infov("DocDB cluster {0} deleted", id);
+    }
+
+    // ── Restart ───────────────────────────────────────────────────────────────
+
+    /**
+     * Brings the stored clusters' MongoDB containers back after Floci restarts. Shutdown removes them and keeps their
+     * data volumes, so a cluster read back from storage reported itself available with nothing behind its endpoint.
+     * Each cluster reports {@code maintenance}, and its instances {@code starting}, at once, and its container comes
+     * back in the background, so Floci does not wait for Docker or an image pull. The new container starts on the
+     * cluster's volume with the master password its data was set up with, and the cluster and its instances then
+     * report its endpoint and {@code available}. With no Docker daemon reachable they report {@code available} with
+     * no container, as a cluster created then does.
+     *
+     * <p>A cluster recorded before Floci kept the master password reads it from the container it left, if one is
+     * there; one recorded before it kept the data in a volume gets a volume now, its data having gone with its
+     * container. A cluster whose container does not start is left with none and its instances {@code failed}, and is
+     * tried again at the next start; one still {@code deleting} at startup is removed then. A cluster deleted during
+     * its restore is {@code deleting} until its container has started, and goes then. Every cluster is tried, and the
+     * ones that could not be restored fail the returned future together. A shutdown during the restore leaves the
+     * clusters not started yet as they are, for the next start.
+     */
+    public CompletableFuture<Void> restorePersistedRuntime() {
+        if (config.services().docdb().mock()
+                || !(clusters instanceof AccountAwareStorageBackend<DocDbCluster> aware)) {
+            return CompletableFuture.completedFuture(null);
+        }
+        Map<String, RestoringCluster> stored = new LinkedHashMap<>();
+        for (AccountEntry<DocDbCluster> entry : aware.scanAllAccountEntries(storedKey -> true)) {
+            String region = entry.key().contains("::")
+                    ? entry.key().substring(0, entry.key().indexOf("::")) : regionResolver.getDefaultRegion();
+            String id = entry.value().getDbClusterIdentifier();
+            stored.putIfAbsent(entry.accountId() + "/" + key(region, id),
+                    new RestoringCluster(entry.accountId(), region, id, null, false));
+        }
+        List<RestoringCluster> pending = new ArrayList<>();
+        List<RuntimeException> prepareFailures = new ArrayList<>();
+        // Marking is quick and calls no Docker, so it runs before startup goes on; Docker work is all in the background.
+        for (RestoringCluster candidate : stored.values()) {
+            try {
+                RestoringCluster restoring = RequestScopes.callAs(candidate.accountId(), candidate.region(),
+                        () -> prepareRestore(candidate));
+                if (restoring != null) {
+                    pending.add(restoring);
+                }
+            } catch (RuntimeException e) {
+                prepareFailures.add(restoreFailure(candidate, e));
+            }
+        }
+        return CompletableFuture.runAsync(() -> {
+            List<RuntimeException> failures = new ArrayList<>(prepareFailures);
+            for (RestoringCluster restoring : pending) {
+                if (containerManager.isShuttingDown()) {
+                    // Clusters not reached yet stay as they are, which the next start restores.
+                    break;
+                }
+                try {
+                    RequestScopes.runAs(restoring.accountId(), restoring.region(), () -> {
+                        if (restoring.deleting()) {
+                            finishDelete(restoring);
+                        } else {
+                            restoreCluster(restoring);
+                        }
+                    });
+                } catch (RuntimeException e) {
+                    failures.add(restoreFailure(restoring, e));
+                }
+            }
+            if (!failures.isEmpty()) {
+                RuntimeException failure = failures.getFirst();
+                failures.subList(1, failures.size()).forEach(failure::addSuppressed);
+                throw failure;
+            }
+        });
+    }
+
+    private static RuntimeException restoreFailure(RestoringCluster restoring, RuntimeException cause) {
+        return new IllegalStateException("Could not restore DocumentDB cluster " + restoring.id() + " of account "
+                + restoring.accountId() + " in " + restoring.region(), cause);
+    }
+
+    /**
+     * Marks a stored cluster as being restored, under its lock, or, for a delete Floci did not live to finish, as
+     * one to remove; null for one gone meanwhile. A cluster recorded before its data was kept in a volume is given
+     * one here, kept before any Docker call, so a failed start leaves no volume behind that nothing names.
+     */
+    private RestoringCluster prepareRestore(RestoringCluster candidate) {
+        String region = candidate.region();
+        String key = key(region, candidate.id());
+        RestoringCluster restoring;
+        List<String> members;
+        synchronized (lockFor("cluster:" + key)) {
+            // Read as DescribeDBClusters reads it, which moves a record stored under a legacy key onto its key.
+            DocDbCluster cluster = findCluster(region, candidate.id()).orElse(null);
+            if (cluster == null) {
+                return null;
+            }
+            boolean deleting = "deleting".equals(cluster.getStatus());
+            restoring = new RestoringCluster(candidate.accountId(), region, candidate.id(),
+                    cluster.getDbClusterResourceId(), deleting);
+            if (deleting) {
+                return restoring;
+            }
+            members = List.copyOf(cluster.getDbClusterMembers());
+            if (cluster.getVolumeId() == null && !"memory".equals(config.storage().mode())) {
+                cluster.setVolumeId(UUID.randomUUID().toString());
+            }
+            cluster.setStatus("maintenance");
+            clusters.put(key, cluster);
+        }
+        updateInstances(region, candidate.id(), members, "starting", null, 0);
+        return restoring;
+    }
+
+    /** Removes a cluster a delete Floci did not live to finish left behind, its container and volume with it. */
+    private void finishDelete(RestoringCluster restoring) {
+        synchronized (lockFor("cluster:" + key(restoring.region(), restoring.id()))) {
+            DocDbCluster cluster = restoreTarget(restoring);
+            if (cluster != null) {
+                removeCluster(restoring.region(), cluster, false);
+            }
+        }
+    }
+
+    private void restoreCluster(RestoringCluster restoring) {
+        DocDbContainerHandle handle = null;
+        try {
+            DocDbCluster cluster = restoreTarget(restoring);
+            if (cluster == null) {
+                return;
+            }
+            String password = cluster.getMasterPassword() != null ? cluster.getMasterPassword()
+                    : containerManager.survivingMasterPassword(cluster.getContainerId());
+            if (password == null) {
+                throw new IllegalStateException("DocumentDB cluster " + restoring.id() + " was created before Floci"
+                        + " kept master passwords, and no container of it is left to read its password from;"
+                        + " delete the cluster and create it again");
+            }
+            if (cluster.getMasterPassword() == null) {
+                // Kept before the container it was read from is replaced, so a failed start does not lose it.
+                keepPassword(restoring, password);
+            }
+            handle = containerManager.tryStart(restoring.id(), config.services().docdb().defaultImage(),
+                    cluster.getMasterUsername(), password, restoring.region(), cluster.getVolumeId());
+            finishRestore(restoring, handle);
+        } catch (RuntimeException e) {
+            if (handle != null) {
+                try {
+                    containerManager.stop(handle);
+                } catch (RuntimeException cleanup) {
+                    e.addSuppressed(cleanup);
+                }
+            }
+            if (containerManager.isShuttingDown()) {
+                // Left as it is, which the next start restores.
+                LOG.debugv("DocDB cluster {0} not restored: {1}", restoring.id(), e.getMessage());
+                return;
+            }
+            try {
+                failRestore(restoring);
+            } catch (RuntimeException recordFailure) {
+                e.addSuppressed(recordFailure);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Gives the cluster and its instances the container started for it, or none when no Docker daemon is reachable,
+     * and makes them available; a cluster deleted while it started is removed now.
+     */
+    private void finishRestore(RestoringCluster restoring, DocDbContainerHandle handle) {
+        String region = restoring.region();
+        String key = key(region, restoring.id());
+        DocDbCluster cluster;
+        List<String> members;
+        synchronized (lockFor("cluster:" + key)) {
+            cluster = restoreTarget(restoring);
+            if (cluster == null) {
+                if (handle != null) {
+                    containerManager.stop(handle);
+                }
+                return;
+            }
+            if (handle != null) {
+                cluster.setEndpoint(handle.getHost());
+                cluster.setReaderEndpoint(handle.getHost());
+                cluster.setPort(handle.getPort());
+                cluster.setContainerId(handle.getContainerId());
+                cluster.setContainerHost(handle.getHost());
+                cluster.setContainerPort(handle.getPort());
+            } else {
+                clearContainer(cluster);
+            }
+            if ("deleting".equals(cluster.getStatus())) {
+                removeCluster(region, cluster, false);
+                return;
+            }
+            cluster.setStatus("available");
+            clusters.put(key, cluster);
+            members = List.copyOf(cluster.getDbClusterMembers());
+        }
+        updateInstances(region, restoring.id(), members, "available", cluster.getEndpoint(), cluster.getPort());
+    }
+
+    /** Puts the master password read from a container left behind into the cluster's record. */
+    private void keepPassword(RestoringCluster restoring, String password) {
+        String key = key(restoring.region(), restoring.id());
+        synchronized (lockFor("cluster:" + key)) {
+            DocDbCluster cluster = restoreTarget(restoring);
+            if (cluster != null) {
+                cluster.setMasterPassword(password);
+                clusters.put(key, cluster);
+            }
+        }
+    }
+
+    /** Leaves a cluster whose container did not start with none, and its instances failed, for the next start. */
+    private void failRestore(RestoringCluster restoring) {
+        String region = restoring.region();
+        String key = key(region, restoring.id());
+        DocDbCluster cluster;
+        List<String> members;
+        synchronized (lockFor("cluster:" + key)) {
+            cluster = restoreTarget(restoring);
+            if (cluster == null) {
+                return;
+            }
+            if ("deleting".equals(cluster.getStatus())) {
+                removeCluster(region, cluster, false);
+                return;
+            }
+            clearContainer(cluster);
+            cluster.setStatus("available");
+            clusters.put(key, cluster);
+            members = List.copyOf(cluster.getDbClusterMembers());
+        }
+        updateInstances(region, restoring.id(), members, "failed", cluster.getEndpoint(), cluster.getPort());
+    }
+
+    /** The cluster the restore is for, or null when it is gone or another cluster has taken its identifier. */
+    private DocDbCluster restoreTarget(RestoringCluster restoring) {
+        return findCluster(restoring.region(), restoring.id())
+                .filter(cluster -> Objects.equals(cluster.getDbClusterResourceId(), restoring.resourceId()))
+                .orElse(null);
+    }
+
+    /** What a cluster with no container reports, as one created with no Docker daemon reachable does. */
+    private void clearContainer(DocDbCluster cluster) {
+        cluster.setEndpoint(resolveEndpointHost());
+        cluster.setReaderEndpoint(resolveEndpointHost());
+        cluster.setPort(MONGO_PORT);
+        cluster.setContainerId(null);
+        cluster.setContainerHost(null);
+        cluster.setContainerPort(0);
+    }
+
+    /**
+     * Sets the status of a cluster's instances and, when given, the endpoint they report, each under its own lock,
+     * which every path that holds both takes before the cluster's.
+     */
+    private void updateInstances(String region, String clusterId, List<String> members, String status,
+                                 String endpoint, int port) {
+        for (String instanceId : members) {
+            String key = key(region, instanceId);
+            synchronized (lockFor("instance:" + key)) {
+                findInstance(region, instanceId)
+                        .filter(instance -> clusterId.equals(instance.getDbClusterIdentifier()))
+                        .ifPresent(instance -> {
+                            instance.setStatus(status);
+                            if (endpoint != null) {
+                                instance.setEndpoint(endpoint);
+                                instance.setPort(port);
+                            }
+                            instances.put(key, instance);
+                        });
+            }
+        }
+    }
+
+    /**
+     * A cluster the startup restore brings back, or removes when {@code deleting}, by the account and Region it is
+     * stored in and the resource ID it had when marked.
+     */
+    private record RestoringCluster(String accountId, String region, String id, String resourceId,
+                                    boolean deleting) {
     }
 
     // ── Cluster snapshots ─────────────────────────────────────────────────────
@@ -936,6 +1234,10 @@ public class DocDbService {
                 }
 
                 DocDbCluster cluster = getDbCluster(dbClusterIdentifier);
+                if (cluster.getStatus() != null && !"available".equals(cluster.getStatus())) {
+                    throw new AwsException("InvalidDBClusterStateFault",
+                            "DB cluster is not available for member creation.", 400);
+                }
 
                 DocDbInstance instance = new DocDbInstance();
                 instance.setDbInstanceIdentifier(id);
