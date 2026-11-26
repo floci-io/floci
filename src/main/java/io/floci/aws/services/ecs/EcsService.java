@@ -263,7 +263,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private static final int MAX_CAPACITY_PROVIDER_BASE = 100_000;
     // region::clusterArn/instanceArn → ContainerInstance
     private final Map<String, ContainerInstance> containerInstances = new ConcurrentHashMap<>();
-    // name → CapacityProvider (excludes built-ins FARGATE, FARGATE_SPOT)
+    // region::name → CapacityProvider (excludes built-ins FARGATE, FARGATE_SPOT). A provider stored
+    // before the key carried the region sits under its bare name until its next write.
     private Map<String, CapacityProvider> capacityProviders = new ConcurrentHashMap<>();
     private AccountAwareStorageBackend<CapacityProvider> capacityProvidersStore;
     // taskSetArn → TaskSet
@@ -282,9 +283,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private final Map<String, InsightsSample> publishedInsights = new ConcurrentHashMap<>();
     // targetArn → List<Attribute>
     private Map<String, List<Attribute>> attributes = new ConcurrentHashMap<>();
-    // name → value (account-level settings)
-    // principalArn::name → value. The root principal's row doubles as the account default, which
-    // is how AWS describes it: "the account settings for the root user or the default setting".
+    // region::principalArn::name → value. The root principal's row doubles as the account default,
+    // which is how AWS describes it: "the account settings for the root user or the default setting".
+    // A row stored before the key carried the region (principalArn::name) is the default region's.
     private Map<String, String> accountSettings = new ConcurrentHashMap<>();
     // deploymentIds for which SERVICE_DEPLOYMENT_IN_PROGRESS has already been emitted this process.
     private final Set<String> inProgressEmitted = ConcurrentHashMap.newKeySet();
@@ -2047,7 +2048,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             existing.merge(task.getCapacityProviderName(), 1, Integer::sum);
         }
         List<Placement> missing = new ArrayList<>();
-        for (Placement placement : distribute(strategy, svc.getDesiredCount())) {
+        for (Placement placement : distribute(strategy, svc.getDesiredCount(),
+                regionResolver.regionOf(svc.getServiceArn()))) {
             int running = existing.getOrDefault(placement.capacityProviderName(), 0);
             if (running > 0) {
                 existing.put(placement.capacityProviderName(), running - 1);
@@ -2083,7 +2085,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             LaunchType launchType = request.getLaunchType() != null ? request.getLaunchType() : LaunchType.FARGATE;
             return Collections.nCopies(count, new Placement(launchType, null));
         }
-        return distribute(strategy, count);
+        return distribute(strategy, count, regionResolver.regionOf(cluster.getClusterArn()));
     }
 
     /** The cluster's {@code defaultCapacityProviderStrategy}, which is stored as raw JSON. */
@@ -2118,7 +2120,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * CreateService fail on it. A lone entry weighing 0 is left alone: the model scopes that rule
      * to a strategy naming more than one provider.
      */
-    private void validateCapacityProviderStrategy(List<CapacityProviderStrategyItem> strategy) {
+    private void validateCapacityProviderStrategy(List<CapacityProviderStrategyItem> strategy, String region) {
         if (strategy.size() > MAX_CAPACITY_PROVIDERS_PER_STRATEGY) {
             throw new AwsException("InvalidParameterException",
                     "A capacity provider strategy can contain a maximum of "
@@ -2145,7 +2147,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     "At least one capacity provider in a capacity provider strategy must have a "
                             + "weight greater than zero.", 400);
         }
-        strategy.forEach(item -> requireCapacityProvider(item.capacityProvider()));
+        strategy.forEach(item -> requireCapacityProvider(item.capacityProvider(), region));
     }
 
     /**
@@ -2154,8 +2156,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * integer split go to the heaviest entries, so a 1:1 strategy with an odd count still places
      * every task.
      */
-    private List<Placement> distribute(List<CapacityProviderStrategyItem> strategy, int count) {
-        validateCapacityProviderStrategy(strategy);
+    private List<Placement> distribute(List<CapacityProviderStrategyItem> strategy, int count, String region) {
+        validateCapacityProviderStrategy(strategy, region);
 
         List<Placement> placements = new ArrayList<>();
         for (CapacityProviderStrategyItem item : strategy) {
@@ -2207,18 +2209,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return new Placement(launchType, capacityProvider);
     }
 
-    /** Accepts the two built-in Fargate providers as well as anything CreateCapacityProvider made. */
-    private void requireCapacityProvider(String name) {
+    /** Accepts the two built-in Fargate providers, in every region, and any the region's own CreateCapacityProvider made. */
+    private void requireCapacityProvider(String name, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterException",
                     "A capacity provider strategy entry must name a capacity provider.", 400);
         }
-        if (FARGATE_CAPACITY_PROVIDERS.contains(name) || capacityProviders.containsKey(name)) {
-            return;
-        }
-        boolean knownByArn = capacityProviders.values().stream()
-                .anyMatch(cp -> name.equals(cp.getCapacityProviderArn()));
-        if (!knownByArn) {
+        if (!FARGATE_CAPACITY_PROVIDERS.contains(name) && findCapacityProvider(name, region) == null) {
             throw new AwsException("ClientException",
                     "The specified capacity provider '" + name + "' was not found. "
                             + "Specify a valid capacity provider and try again.", 400);
@@ -3512,7 +3509,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (strategy == null || strategy.isEmpty()) {
             return LaunchType.FARGATE;
         }
-        validateCapacityProviderStrategy(strategy);
+        validateCapacityProviderStrategy(strategy, regionResolver.regionOf(cluster.getClusterArn()));
         return placementFor(strategy.getFirst().capacityProvider()).launchType();
     }
 
@@ -3822,7 +3819,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     : readStored(servicesStore, services, account,
                             serviceKey(region, id.substring(0, idSlash), id.substring(idSlash + 1)))
                     .filter(s -> arn.equals(s.getServiceArn())).map(EcsServiceModel::getTags);
-            case "capacity-provider" -> readStored(capacityProvidersStore, capacityProviders, account, id)
+            // The key capacityProviderKey builds, then the bare name a provider was saved under before.
+            case "capacity-provider" -> readStored(capacityProvidersStore, capacityProviders, account,
+                            capacityProviderKey(region, id))
+                    .or(() -> readStored(capacityProvidersStore, capacityProviders, account, id))
                     .filter(cp -> arn.equals(cp.getCapacityProviderArn())).map(CapacityProvider::getTags);
             case "task" -> Optional.ofNullable(tasks.get(arn)).map(EcsTask::getTags);
             case "task-set" -> Optional.ofNullable(taskSets.get(arn))
@@ -3966,10 +3966,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * Sets one principal's account setting. A request that names no principal sets it for the
      * caller, which here is the account root, because Floci does not authenticate a separate user.
      */
-    public AccountSetting putAccountSetting(String name, String value, String principalArn) {
+    public AccountSetting putAccountSetting(String name, String value, String principalArn, String region) {
         validateAccountSetting(name, value);
         String principal = principalArn != null ? principalArn : rootPrincipalArn();
-        accountSettings.put(accountSettingKey(principal, name), value);
+        removeLegacyAccountSetting(principal, name, region);
+        accountSettings.put(accountSettingKey(region, principal, name), value);
         return new AccountSetting(name, value, principal, settingType(name));
     }
 
@@ -3978,16 +3979,18 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * stores that on the root user, so setting the default and setting the root user's own value
      * are the same write.
      */
-    public AccountSetting putAccountSettingDefault(String name, String value) {
-        return putAccountSetting(name, value, rootPrincipalArn());
+    public AccountSetting putAccountSettingDefault(String name, String value, String region) {
+        return putAccountSetting(name, value, rootPrincipalArn(), region);
     }
 
-    public AccountSetting deleteAccountSetting(String name, String principalArn) {
+    public AccountSetting deleteAccountSetting(String name, String principalArn, String region) {
         requireAccountSettingName(name);
         String principal = principalArn != null ? principalArn : rootPrincipalArn();
-        String removed = accountSettings.remove(accountSettingKey(principal, name));
+        String legacy = removeLegacyAccountSetting(principal, name, region);
+        String current = accountSettings.remove(accountSettingKey(region, principal, name));
+        String removed = current != null ? current : legacy;
         return new AccountSetting(name,
-                removed != null ? removed : effectiveAccountSetting(principal, name),
+                removed != null ? removed : effectiveAccountSetting(principal, name, region),
                 principal, settingType(name));
     }
 
@@ -4002,7 +4005,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      */
     public AccountSettingPage listAccountSettings(String filterName, String filterValue,
                                                    String principalArn, boolean effectiveSettings,
-                                                   Integer maxResults, String nextToken) {
+                                                   Integer maxResults, String nextToken, String region) {
         if (filterName != null) {
             requireAccountSettingName(filterName);
         }
@@ -4013,11 +4016,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         String principal = principalArn != null ? principalArn : rootPrincipalArn();
         List<AccountSetting> settings = new ArrayList<>();
         for (String name : ACCOUNT_SETTING_NAMES) {
-            String explicit = accountSettings.get(accountSettingKey(principal, name));
+            String explicit = explicitAccountSetting(principal, name, region);
             if (explicit != null) {
                 settings.add(new AccountSetting(name, explicit, principal, settingType(name)));
             } else if (effectiveSettings) {
-                settings.add(new AccountSetting(name, effectiveAccountSetting(principal, name),
+                settings.add(new AccountSetting(name, effectiveAccountSetting(principal, name, region),
                         principal, settingType(name)));
             }
         }
@@ -4039,20 +4042,42 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return new AccountSettingPage(List.copyOf(filtered.subList(offset, end)), token);
     }
 
-    private String effectiveAccountSetting(String principal, String name) {
-        String explicit = accountSettings.get(accountSettingKey(principal, name));
+    private String effectiveAccountSetting(String principal, String name, String region) {
+        String explicit = explicitAccountSetting(principal, name, region);
         if (explicit != null) {
             return explicit;
         }
-        String accountDefault = accountSettings.get(accountSettingKey(rootPrincipalArn(), name));
+        String accountDefault = explicitAccountSetting(rootPrincipalArn(), name, region);
         return accountDefault != null ? accountDefault : ACCOUNT_SETTING_DEFAULTS.get(name);
+    }
+
+    /**
+     * The value a principal set in a region. A row saved before the key carried the region is the
+     * default region's, so only that region reads it.
+     */
+    private String explicitAccountSetting(String principal, String name, String region) {
+        String value = accountSettings.get(accountSettingKey(region, principal, name));
+        if (value == null && region.equals(regionResolver.getDefaultRegion())) {
+            value = accountSettings.get(legacyAccountSettingKey(principal, name));
+        }
+        return value;
+    }
+
+    /** Drops the region-less row a write in the default region supersedes, returning its value. */
+    private String removeLegacyAccountSetting(String principal, String name, String region) {
+        return region.equals(regionResolver.getDefaultRegion())
+                ? accountSettings.remove(legacyAccountSettingKey(principal, name)) : null;
     }
 
     private static String settingType(String name) {
         return AWS_MANAGED_SETTING.equals(name) ? "aws_managed" : "user";
     }
 
-    private static String accountSettingKey(String principalArn, String name) {
+    private static String accountSettingKey(String region, String principalArn, String name) {
+        return region + "::" + principalArn + "::" + name;
+    }
+
+    private static String legacyAccountSettingKey(String principalArn, String name) {
         return principalArn + "::" + name;
     }
 
@@ -4514,7 +4539,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public CapacityProvider createCapacityProvider(String name, Map<String, Object> asgProvider,
                                                     Map<String, String> tags, String region) {
         validateCapacityProviderName(name);
-        if (capacityProviders.containsKey(name)) {
+        if (findCapacityProvider(name, region) != null) {
             throw new AwsException("InvalidParameterException",
                     "A capacity provider with name " + name + " already exists.", 400);
         }
@@ -4528,15 +4553,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (tags != null) {
             cp.setTags(tags);
         }
-        capacityProviders.put(name, cp);
+        storeCapacityProvider(cp);
         return cp;
     }
 
-    public CapacityProvider updateCapacityProvider(String name, Map<String, Object> asgProvider) {
-        CapacityProvider cp = resolveCapacityProviderOrThrow(name);
+    public CapacityProvider updateCapacityProvider(String name, Map<String, Object> asgProvider, String region) {
+        CapacityProvider cp = resolveCapacityProviderOrThrow(name, region);
         cp.setAutoScalingGroupProvider(asgProvider);
         cp.setUpdateStatus("UPDATE_COMPLETE");
-        capacityProviders.put(cp.getName(), cp);
+        storeCapacityProvider(cp);
         return cp;
     }
 
@@ -4550,20 +4575,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * {@code CapacityProviderStatus} takes, so reporting it there hands the SDK an enum it
      * cannot map.
      */
-    public CapacityProvider deleteCapacityProvider(String nameOrArn) {
+    public CapacityProvider deleteCapacityProvider(String nameOrArn, String region) {
         if (RESERVED_CAPACITY_PROVIDERS.contains(nameOrArn)) {
             throw new AwsException("InvalidParameterException",
                     "The " + nameOrArn + " capacity provider is reserved and can't be deleted.", 400);
         }
-        CapacityProvider cp = resolveCapacityProviderOrThrow(nameOrArn);
-        String attachedTo = clusterUsingCapacityProvider(cp.getName());
+        CapacityProvider cp = resolveCapacityProviderOrThrow(nameOrArn, region);
+        String attachedTo = clusterUsingCapacityProvider(cp.getName(), region);
         if (attachedTo != null) {
             throw new AwsException("InvalidParameterException",
                     "The capacity provider " + cp.getName() + " is associated with cluster "
                             + attachedTo + " and can't be deleted. Remove it with "
                             + "PutClusterCapacityProviders or delete the cluster first.", 400);
         }
-        String usedBy = serviceUsingCapacityProvider(cp);
+        String usedBy = serviceUsingCapacityProvider(cp, region);
         if (usedBy != null) {
             throw new AwsException("InvalidParameterException",
                     "The capacity provider " + cp.getName() + " is in the capacity provider "
@@ -4572,16 +4597,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                             + "first.", 400);
         }
         cp.setUpdateStatus("DELETE_IN_PROGRESS");
-        capacityProviders.remove(cp.getName());
+        removeLegacyCapacityProvider(cp);
+        capacityProviders.remove(capacityProviderKey(region, cp.getName()));
         return cp;
     }
 
     public record DescribeCapacityProvidersResult(List<CapacityProvider> capacityProviders,
                                                    List<Failure> failures) {}
 
-    public List<CapacityProvider> describeCapacityProviders(List<String> providers) {
-        return describeCapacityProvidersDetailed(providers, regionResolver.getDefaultRegion())
-                .capacityProviders();
+    public List<CapacityProvider> describeCapacityProviders(List<String> providers, String region) {
+        return describeCapacityProvidersDetailed(providers, region).capacityProviders();
     }
 
     /**
@@ -4593,7 +4618,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (providers == null || providers.isEmpty()) {
             List<CapacityProvider> result =
                     new ArrayList<>(List.of(builtInFargate(region), builtInFargateSpot(region)));
-            result.addAll(capacityProviders.values());
+            capacityProvidersIn(region).forEach(result::add);
             return new DescribeCapacityProvidersResult(result, List.of());
         }
         List<CapacityProvider> found = new ArrayList<>();
@@ -4602,10 +4627,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             CapacityProvider cp = switch (ref) {
                 case "FARGATE" -> builtInFargate(region);
                 case "FARGATE_SPOT" -> builtInFargateSpot(region);
-                default -> capacityProviders.getOrDefault(ref,
-                        capacityProviders.values().stream()
-                                .filter(p -> ref.equals(p.getCapacityProviderArn()))
-                                .findFirst().orElse(null));
+                default -> findCapacityProvider(ref, region);
             };
             if (cp == null) {
                 failures.add(Failure.missing(AwsArnUtils.looksLikeArn(ref) ? ref
@@ -4617,9 +4639,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return new DescribeCapacityProvidersResult(found, failures);
     }
 
-    /** The cluster a capacity provider is attached to, or {@code null} when none is. */
-    private String clusterUsingCapacityProvider(String name) {
+    /** The cluster of the region a capacity provider is attached to, or {@code null} when none is. */
+    private String clusterUsingCapacityProvider(String name, String region) {
         return clusters.values().stream()
+                .filter(c -> region.equals(regionResolver.regionOf(c.getClusterArn())))
                 .filter(c -> c.getCapacityProviders() != null && c.getCapacityProviders().contains(name))
                 .map(EcsCluster::getClusterName)
                 .findFirst().orElse(null);
@@ -4631,9 +4654,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * service's strategy, not only out of every cluster. A deleted service is INACTIVE and holds
      * nothing back.
      */
-    private String serviceUsingCapacityProvider(CapacityProvider cp) {
+    private String serviceUsingCapacityProvider(CapacityProvider cp, String region) {
         return services.values().stream()
                 .filter(svc -> !"INACTIVE".equals(svc.getStatus()))
+                .filter(svc -> region.equals(regionResolver.regionOf(svc.getServiceArn())))
                 .filter(svc -> svc.getCapacityProviderStrategy() != null
                         && svc.getCapacityProviderStrategy().stream()
                                 .anyMatch(item -> cp.getName().equals(item.capacityProvider())
@@ -6722,6 +6746,40 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         taskDefinitions.put(taskDefinitionKey(regionOf(td), td.getFamily(), td.getRevision()), td);
     }
 
+    /**
+     * Stores a capacity provider under its region's key. One persisted under its bare name before the
+     * key carried the region is re-filed on its next write, and the old key is dropped only when it
+     * holds this same provider: the same name in another region is a different provider.
+     */
+    private void storeCapacityProvider(CapacityProvider cp) {
+        removeLegacyCapacityProvider(cp);
+        String region = regionResolver.regionOf(cp.getCapacityProviderArn());
+        capacityProviders.put(capacityProviderKey(region, cp.getName()), cp);
+    }
+
+    private void removeLegacyCapacityProvider(CapacityProvider cp) {
+        CapacityProvider legacy = capacityProviders.get(cp.getName());
+        if (legacy != null && Objects.equals(cp.getCapacityProviderArn(), legacy.getCapacityProviderArn())) {
+            capacityProviders.remove(cp.getName());
+        }
+    }
+
+    /** Capacity providers are regional; the region is read from each one's ARN, whatever its storage key. */
+    private Stream<CapacityProvider> capacityProvidersIn(String region) {
+        return capacityProviders.values().stream()
+                .filter(cp -> region.equals(regionResolver.regionOf(cp.getCapacityProviderArn())));
+    }
+
+    /** The region's created provider with this name or ARN, or {@code null}; FARGATE and FARGATE_SPOT are not stored. */
+    private CapacityProvider findCapacityProvider(String nameOrArn, String region) {
+        if (nameOrArn == null) {
+            return null;
+        }
+        return capacityProvidersIn(region)
+                .filter(cp -> nameOrArn.equals(cp.getName()) || nameOrArn.equals(cp.getCapacityProviderArn()))
+                .findFirst().orElse(null);
+    }
+
     /** Task definitions are regional; the region is read from each one's ARN, whatever its storage key. */
     private Stream<TaskDefinition> taskDefinitionsIn(String region) {
         return taskDefinitions.values().stream().filter(td -> region.equals(regionOf(td)));
@@ -6816,12 +6874,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return instance;
     }
 
-    private CapacityProvider resolveCapacityProviderOrThrow(String nameOrArn) {
-        CapacityProvider cp = capacityProviders.get(nameOrArn);
-        if (cp != null) { return cp; }
-        cp = capacityProviders.values().stream()
-                .filter(p -> p.getCapacityProviderArn().equals(nameOrArn))
-                .findFirst().orElse(null);
+    private CapacityProvider resolveCapacityProviderOrThrow(String nameOrArn, String region) {
+        CapacityProvider cp = findCapacityProvider(nameOrArn, region);
         if (cp == null) {
             throw new AwsException("InvalidParameterException",
                     "Capacity provider not found: " + nameOrArn, 400);
@@ -6850,6 +6904,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     private static String clusterKey(String region, String clusterName) {
         return region + "::" + clusterName;
+    }
+
+    private static String capacityProviderKey(String region, String name) {
+        return region + "::" + name;
     }
 
     private static String familyKey(String region, String family) {
