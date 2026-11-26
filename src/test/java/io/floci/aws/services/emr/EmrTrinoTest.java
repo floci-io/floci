@@ -128,21 +128,32 @@ class EmrTrinoTest {
 
     @Test
     void theCoordinatorRunsTheQueriesTooOnEmrsPortOrTheOneTrinoConfigNames() {
+        // Clients through Floci reach it on a host of the cluster's own, over the scheme they used.
         assertEquals(List.of("coordinator=true", "node-scheduler.include-coordinator=true",
-                "http-server.http.port=8889", "discovery.uri=http://localhost:8889"),
+                "http-server.http.port=8889", "discovery.uri=http://localhost:8889",
+                "http-server.process-forwarded=true"),
                 List.of(EmrTrino.properties(EmrTrino.config(Map.of())).split("\n")));
         // "To change the port, use the presto-config configuration classification to set the http-server.http.port
         // property", trino-config for Trino: its discovery follows.
         Map<String, String> moved = EmrTrino.config(Map.of("http-server.http.port", "8890",
                 "query.max-memory", "1GB"));
         assertEquals(List.of("coordinator=true", "node-scheduler.include-coordinator=true",
-                "http-server.http.port=8890", "discovery.uri=http://localhost:8890", "query.max-memory=1GB"),
+                "http-server.http.port=8890", "discovery.uri=http://localhost:8890",
+                "http-server.process-forwarded=true", "query.max-memory=1GB"),
                 List.of(EmrTrino.properties(moved).split("\n")));
         assertEquals(8890, EmrTrino.port(moved));
         assertEquals(8889, EmrTrino.port(Map.of("http-server.http.port", "eighty")));
         assertEquals("http://ip-10-0-0-1.ec2.internal:8890", EmrTrino.server("ip-10-0-0-1.ec2.internal", 8890));
         assertEquals(List.of("/usr/bin/trino", "--server", "localhost:8890", "--execute", "SELECT 1"),
                 EmrTrino.readyQuery(8890));
+    }
+
+    @Test
+    void clientsOutsideTheClusterReachItsTrinoOnAHostOfTheClustersOwnUnderFlocis() {
+        assertEquals("http://j-2axxxxxxgaplf.emr-trino.localhost:4566",
+                EmrTrino.address("http://localhost:4566", "j-2AXXXXXXGAPLF"));
+        assertEquals("https://j-2axxxxxxgaplf.emr-trino.localhost.floci.io:4566",
+                EmrTrino.address("https://localhost.floci.io:4566/", "j-2AXXXXXXGAPLF"));
     }
 
     @Test

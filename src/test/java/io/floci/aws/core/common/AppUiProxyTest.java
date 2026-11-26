@@ -230,6 +230,21 @@ class AppUiProxyTest {
     }
 
     @Test
+    void aRoutesOwnHeadersGoOnInPlaceOfTheClientsOfThoseNames() throws Exception {
+        when(appUis.route(eq(HOST + ":4566"), eq("http"))).thenReturn(AppUiRoute.to("127.0.0.1",
+                node.actualPort(), 503, null).withHeaders(Map.of("X-Forwarded-Proto", "https")));
+        answer = (response, body) -> response.putHeader("content-type", "text/plain").end("answered");
+
+        Answered response = send(HOST, HttpMethod.POST, "/v1/statement", "SELECT 1",
+                Map.of("x-forwarded-proto", "http", "X-Trino-User", "someone"));
+
+        assertEquals(200, response.statusCode());
+        assertEquals(List.of("https"), interfaceSaw.get().getAll("X-Forwarded-Proto"));
+        assertEquals("someone", interfaceSaw.get().get("X-Trino-User"));
+        assertEquals(HOST + ":4566", interfaceSaw.get().get("host"));
+    }
+
+    @Test
     void anInterfaceThatIsNotUpYetIsAnsweredAsItsRouteSays() throws Exception {
         int closed = node.actualPort();
         await(node.close());
@@ -275,9 +290,15 @@ class AppUiProxyTest {
     }
 
     private Answered send(String host, HttpMethod method, String uri, String body) throws Exception {
+        return send(host, method, uri, body, Map.of());
+    }
+
+    private Answered send(String host, HttpMethod method, String uri, String body, Map<String, String> headers)
+            throws Exception {
         RequestOptions options = new RequestOptions().setMethod(method)
                 .setServer(SocketAddress.inetSocketAddress(floci.actualPort(), "127.0.0.1"))
                 .setHost(host).setPort(4566).setURI(uri);
+        headers.forEach(options::putHeader);
         return await(client.request(options).compose(request -> body == null ? request.send()
                 : request.send(Buffer.buffer(body)))
                 .compose(response -> response.body().map(read -> new Answered(response, read))));

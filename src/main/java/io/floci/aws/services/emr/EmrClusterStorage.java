@@ -1499,6 +1499,11 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                 spec.withLinkLocalIp(address);
             }
         }
+        if (hiveMetastore != null && hiveMetastore.trino() != null && !shared) {
+            // Its Trino's port, as Trino's container shares its network, which clients outside the cluster reach
+            // through Floci (see trinoInterface), as they do its web interfaces.
+            spec.withLoopbackPortBinding(EmrTrino.port(hiveMetastore.trino().config()), 0);
+        }
         if (yarn != null && !shared) {
             // Its web interfaces, which Floci's application UI links reach, published on the host's loopback interface
             // alone, as Floci on the host reaches them there, and they take no credentials.
@@ -1832,6 +1837,25 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     e.getMessage());
             return Optional.empty();
         }
+    }
+
+    /**
+     * Where Floci reaches the cluster's Trino on {@code port}, once it has answered queries and while it runs: at the
+     * port its primary node's container publishes for it, as for the node's web interfaces ({@link #webInterface}).
+     */
+    @Override
+    public Optional<ContainerLifecycleManager.EndpointInfo> trinoInterface(String clusterId, int port) {
+        String name = trinoName(clusterId);
+        try {
+            if (!readyTrino.contains(name) || lifecycleManager.probeContainer(name) != ContainerLiveness.RUNNING) {
+                return Optional.empty();
+            }
+        } catch (RuntimeException e) {
+            // Docker did not answer: as for a node not running, the client is told to try again.
+            LOG.debugv(e, "The Trino of EMR cluster {0} could not be looked at: {1}", clusterId, e.getMessage());
+            return Optional.empty();
+        }
+        return webInterface(clusterId, port);
     }
 
     @Override

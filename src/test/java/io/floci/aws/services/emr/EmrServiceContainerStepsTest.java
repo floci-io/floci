@@ -1131,6 +1131,64 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void aClusterWithFlocisTrinoStartsItsPrimaryNodeAndTrinoAsItBecomesReadyStepsOrNone() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrService withTrino = fixture.withTrino();
+        EmrCluster requested = cluster("trino", true);
+        requested.setApplications(TRINO);
+
+        String clusterId = withTrino.runJobFlow(requested, REGION).getId();
+
+        assertEquals("WAITING", withTrino.describeCluster(clusterId).getState());
+        // On a thread of its own, which starts the node as an application UI link does, by running nothing on it.
+        assertEquals(1, fixture.stepThreadsWaiting());
+        fixture.runStepThread();
+        fixture.runStepThread();
+        assertEquals(List.of("true"), runner.jobs.get(0).command());
+        assertEquals(new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of(), Map.of()),
+                fixture.clusterStorage.metastores.get(0).trino());
+        assertEquals(0, fixture.stepThreadsWaiting());
+    }
+
+    @Test
+    void aClusterWithoutFlocisTrinoStartsNothingAsItBecomesReady() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrCluster trino = cluster("trino", true);
+        trino.setApplications(TRINO);
+        EmrCluster hive = cluster("hive", true);
+        hive.setApplications("[{\"Name\": \"Hive\"}]");
+
+        // Floci's Trino off, and on for a cluster that does not install Trino.
+        service.runJobFlow(trino, REGION);
+        fixture.withTrino().runJobFlow(hive, REGION);
+
+        assertEquals(0, fixture.stepThreadsWaiting());
+    }
+
+    @Test
+    void aClustersTrinoIsFoundByItsIdOnThePortItsTrinoConfigNames() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrService withTrino = fixture.withTrino();
+        EmrCluster trino = cluster("trino", true);
+        trino.setApplications(TRINO);
+        trino.setConfigurations("[{\"Classification\": \"trino-config\", \"Properties\": "
+                + "{\"http-server.http.port\": \"8890\"}}]");
+        String trinoId = withTrino.runJobFlow(trino, REGION).getId();
+        EmrCluster hive = cluster("hive", true);
+        hive.setApplications("[{\"Name\": \"Hive\"}]");
+        String hiveId = withTrino.runJobFlow(hive, REGION).getId();
+
+        assertEquals(Optional.of(new EmrService.TrinoCluster(ACCOUNT, REGION, trinoId, "WAITING", 8890)),
+                withTrino.trinoCluster(trinoId));
+        assertEquals(Optional.empty(), withTrino.trinoCluster(hiveId));
+        assertEquals(Optional.empty(), withTrino.trinoCluster("j-NOSUCHCLUSTER"));
+        // With Floci's Trino off, or on a network its steps share, it runs none.
+        assertEquals(Optional.empty(), service.trinoCluster(trinoId));
+        fixture.clusterStorage.ownNetwork = false;
+        assertEquals(Optional.empty(), withTrino.trinoCluster(trinoId));
+    }
+
+    @Test
     void aClusterWithTrinoRunsNoneWhileFlocisTrinoIsOff() {
         EmrStep query = sparkStep("query", "CONTINUE");
         query.setArgs(List.of("trino-cli", "--execute", "SHOW CATALOGS"));

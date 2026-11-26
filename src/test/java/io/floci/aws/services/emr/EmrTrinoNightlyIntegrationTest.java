@@ -13,6 +13,10 @@ import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.S3TestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.RestAssured;
+import io.restassured.path.json.JsonPath;
+import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -30,6 +34,9 @@ import software.amazon.awssdk.services.s3.S3Client;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.URI;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -40,8 +47,11 @@ import java.util.concurrent.TimeUnit;
 import static io.floci.aws.testing.EmrRequests.awaitStep;
 import static io.floci.aws.testing.EmrRequests.emr;
 import static io.floci.aws.testing.EmrRequests.terminateClusterAndAwaitCleanup;
+import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -52,7 +62,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * queries" does, over a CSV in Floci's S3. Its {@code hive} catalog is the cluster's Hive metastore, or, with
  * {@code trino-connector-hive} setting {@code hive.metastore} to {@code glue}, Floci's Glue Data Catalog. The
  * cluster's other {@code trino-connector-<catalog>} classifications add catalogs, Iceberg's on Glue as the Release
- * Guide's "Use an Iceberg cluster with Trino" has it, and its {@code trino-config} moves Trino to another port.
+ * Guide's "Use an Iceberg cluster with Trino" has it, and its {@code trino-config} moves Trino to another port. A
+ * cluster with no step starts its Trino as it becomes ready, and a client outside the cluster queries it through Floci
+ * on the cluster's own host.
  *
  * <p>A nightly check: it pulls the Trino image of {@code emr-7.5.0}'s Trino, 446, about 1 GB, and the release's Spark
  * and Hive images.
@@ -196,6 +208,21 @@ class EmrTrinoNightlyIntegrationTest {
         assertFalse(s3.listObjectsV2(request -> request.bucket(bucket).prefix("iceberg/")).contents().isEmpty());
     }
 
+    // No step: Trino starts with the cluster, and a client outside the cluster's network queries it through Floci on
+    // the cluster's own host, the query's next pages on that host too.
+    @Test
+    @Timeout(value = 7, unit = TimeUnit.MINUTES)
+    void trinoStartsWithTheClusterAndAClientOutsideItQueriesItThroughFlocisHostForIt() {
+        startCluster("[]");
+        String host = clusterId.toLowerCase(Locale.ROOT) + "." + EmrTrino.HOST_LABEL + ".localhost:" + RestAssured.port;
+
+        assertEquals(List.of(List.of("hive"), List.of("system")), query(host, "SHOW CATALOGS"));
+        // A catalog read, on the cluster's metastore, once Trino's node serves it.
+        assertTrue(query(host, "SHOW SCHEMAS FROM hive").contains(List.of("default")));
+        assertEquals("WAITING", emr("DescribeCluster", "{\"ClusterId\":\"" + clusterId + "\"}").then()
+                .statusCode(200).extract().jsonPath().getString("Cluster.Status.State"));
+    }
+
     // A schema in the bucket's warehouse folder, an external table over the CSV, a table of each item's sum, then the
     // sums.
     private String tables(String schema) {
@@ -222,6 +249,37 @@ class EmrTrinoNightlyIntegrationTest {
         clusterId = emr("RunJobFlow", request.toString()).then().statusCode(200).extract().jsonPath()
                 .getString("JobFlowId");
         cleanup.register(() -> terminateClusterAndAwaitCleanup(clusterId, emrService));
+    }
+
+    // A client outside the cluster: the statement posted to Trino through Floci's host for the cluster, asked again
+    // while that answers 503 as Trino's clients do, Trino starting with the cluster, then each next page Trino names
+    // followed, on the host it was asked on, until the last; the rows they hold together.
+    private static List<List<Object>> query(String host, String statement) {
+        Response[] first = new Response[1];
+        await("the Trino of the cluster to take a query").atMost(Duration.ofMinutes(5))
+                .pollInterval(Duration.ofSeconds(1))
+                .until(() -> (first[0] = trino(host).body(statement).post("/v1/statement")).statusCode() != 503);
+        JsonPath page = first[0].then().statusCode(200).extract().jsonPath();
+        List<List<Object>> rows = new ArrayList<>();
+        while (true) {
+            List<List<Object>> data = page.getList("data");
+            if (data != null) {
+                rows.addAll(data);
+            }
+            String next = page.getString("nextUri");
+            if (next == null) {
+                JsonPath last = page;
+                assertNull(last.get("error"), last::prettify);
+                return rows;
+            }
+            URI uri = URI.create(next);
+            assertEquals(host, uri.getRawAuthority());
+            page = trino(host).get(uri.getRawPath()).then().statusCode(200).extract().jsonPath();
+        }
+    }
+
+    private static RequestSpecification trino(String host) {
+        return given().header("Host", host).header("X-Trino-User", "floci");
     }
 
     // EMR's trino-cli, through command-runner.jar, running the statements given.
