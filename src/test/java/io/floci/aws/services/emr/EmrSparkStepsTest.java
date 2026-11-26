@@ -246,6 +246,24 @@ class EmrSparkStepsTest {
     }
 
     @Test
+    void trinosNodeLogAndEnvironmentAreTheClustersTrinoNodeLogAndEnvExports() {
+        String configurations = """
+                [{"Classification": "trino-node", "Properties": {"node.environment": "production"}},
+                 {"Classification": "trino-log", "Properties": {"io.trino": "DEBUG"}},
+                 {"Classification": "trino-env", "Properties": {},
+                  "Configurations": [{"Classification": "export", "Properties": {"DB_PASSWORD": "s3cret"}}]},
+                 {"Classification": "hadoop-env",
+                  "Configurations": [{"Classification": "export", "Properties": {"HADOOP_HEAPSIZE": "2048"}}]}]
+                """;
+
+        assertEquals(Map.of("node.environment", "production"), EmrSparkSteps.trinoNode(configurations, objectMapper));
+        assertEquals(Map.of("io.trino", "DEBUG"), EmrSparkSteps.trinoLog(configurations, objectMapper));
+        // "If any classification ends in env, use the export sub-classification."
+        assertEquals(Map.of("DB_PASSWORD", "s3cret"), EmrSparkSteps.trinoEnvironment(configurations, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.trinoEnvironment(null, objectMapper));
+    }
+
+    @Test
     void trinosCatalogsAreTheClustersTrinoConnectorsALaterConfigurationWinning() {
         String configurations = """
                 [{"Classification": "trino-connector-hive", "Properties": {"hive.metastore": "glue",

@@ -847,18 +847,24 @@ holding the driver and its executors, or a command or a script. The cluster itse
   cluster's metastore at `thrift://localhost:9083`, as the Release Guide's Delta Lake and Iceberg tutorials have them,
   or on Floci's Glue with `hive.metastore` set to `glue`, Iceberg's `iceberg.catalog.type` for Iceberg, and on Floci's
   S3, as `hive` is. A classification's properties go into its catalog after Floci's, a later configuration's winning.
-  The image's own catalogs go, as EMR's Trino has those the cluster configures. Trino reaches S3 and Glue as the
-  cluster's EC2 instance profile's role, with a session of its own, as the metastore does. A step runs `trino-cli`, as
-  the Release Guide's "Start the Trino CLI by running trino-cli" does on the primary node, through `command-runner.jar`:
-  the CLI of the same Trino, which Floci copies into the cluster's image from Trino's image as it makes it, on the
-  image's Java 17, connects to the coordinator unless the step names a `--server` of its own. As the cluster becomes
-  ready, its bootstrap done, Floci starts its primary node, with its HDFS and Trino, in the background, steps or none,
-  as an application UI link does, the cluster `WAITING` or `RUNNING` meanwhile; Trino is ready once it has answered a
-  query for ten seconds, within three minutes, as Trino runs a query that reads a catalog once it has learnt that its
-  node serves the catalog. A step that comes first starts them itself and waits for Trino, a Trino that does not answer
-  failing the step; the cluster's next steps have it at once. Clients outside the cluster reach it through Floci, on a
-  host of the cluster's own, `http://<cluster-id>.emr-trino.<floci-host>:<port>`, as EMR's reach Trino's port on the
-  primary node: Trino's CLI with `--server=http://j-2AXXXXXXGAPLF.emr-trino.localhost:4566`, or
+  The image's own catalogs go, as EMR's Trino has those the cluster configures. `trino-node`'s and `trino-log`'s
+  properties go into the image's own `node.properties` and `log.properties`, after its lines, a property given twice
+  taking the later, so an image of `trino.image`'s keeps its settings where the cluster gives none, and Floci names the
+  node, with hyphens for the host name's dots, only where neither gives it an id; and the variables `trino-env`'s nested
+  `export` gives, as "If any classification ends in env, use the export sub-classification", are Trino's environment,
+  which a catalog reads as `${ENV:NAME}` where its connector takes Trino's configuration, as Iceberg's and the memory
+  connector's do, after Floci's own AWS settings, which they may change. Trino reaches S3 and Glue as the cluster's EC2
+  instance profile's role, with a session of its own, as the metastore does. A step runs `trino-cli`, as the Release
+  Guide's "Start the Trino CLI by running trino-cli" does on the primary node, through `command-runner.jar`: the CLI of
+  the same Trino, which Floci copies into the cluster's image from Trino's image as it makes it, on the image's Java 17,
+  connects to the coordinator unless the step names a `--server` of its own. As the cluster becomes ready, its bootstrap
+  done, Floci starts its primary node, with its HDFS and Trino, in the background, steps or none, as an application UI
+  link does, the cluster `WAITING` or `RUNNING` meanwhile; Trino is ready once it has answered a query for ten seconds,
+  within three minutes, as Trino runs a query that reads a catalog once it has learnt that its node serves the catalog.
+  A step that comes first starts them itself and waits for Trino, a Trino that does not answer failing the step; the
+  cluster's next steps have it at once. Clients outside the cluster reach it through Floci, on a host of the cluster's
+  own, `http://<cluster-id>.emr-trino.<floci-host>:<port>`, as EMR's reach Trino's port on the primary node: Trino's CLI
+  with `--server=http://j-2AXXXXXXGAPLF.emr-trino.localhost:4566`, or
   `jdbc:trino://j-2AXXXXXXGAPLF.emr-trino.localhost:4566/hive`. Floci's host must resolve its subdomains, as for
   application UIs: `localhost` and `localhost.floci.io` do, and Floci's TLS certificate names `*.emr-trino.localhost`
   and `*.emr-trino.localhost.floci.io`. The host takes no credentials, as Floci's Trino has no authentication, so
@@ -1090,11 +1096,11 @@ holding the driver and its executors, or a command or a script. The cluster itse
   own `-amzn` builds; Floci runs the Trino project's image of the same version (see **Trino**), so a connector that
   image has no plugin for stops Trino, with what it logged, and the step. Floci starts it in the background as the
   cluster becomes ready, so the cluster is `WAITING` before Trino answers, where EMR's runs once the cluster is up, and
-  a client meanwhile gets a `503`. Its `trino-connector-*` classifications and `trino-config` apply; `trino-node`,
-  `trino-log`, `trino-env`, `trino-password-authenticator` and `trino-exchange-manager` do not yet. With
-  `docker-network` set to `host`, `container:<id>` or `none` it does not run, as the metastore service does not. From
-  `emr-7.14.0` on, "When you select Trino as the only application at launch, Amazon EMR no longer starts YARN and HDFS";
-  Floci's primary node still runs the HDFS, beside the metastore.
+  a client meanwhile gets a `503`. Its `trino-connector-*`, `trino-config`, `trino-node`, `trino-log` and `trino-env`
+  classifications apply; `trino-password-authenticator` and `trino-exchange-manager` do not yet. With `docker-network`
+  set to `host`, `container:<id>` or `none` it does not run, as the metastore service does not. From `emr-7.14.0` on,
+  "When you select Trino as the only application at launch, Amazon EMR no longer starts YARN and HDFS"; Floci's primary
+  node still runs the HDFS, beside the metastore.
 - **Tez's intermediate data is not compressed on YARN.** The images name the LZO codec for it, whose native library they
   lack, so Floci turns that compression off, which a `tez-site` classification can turn back on with a codec they have.
 - **No Hive metastore service in a network namespace the steps share.** With `docker-network` set to `host` or

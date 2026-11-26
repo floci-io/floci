@@ -1609,7 +1609,13 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                         .withMemoryMb(trino.memoryMb())
                         .withEntrypoint(List.of("/bin/bash", "-c", EmrTrino.ENTRYPOINT))
                         .withEnv(awsEnv.sdkBaselineEnv(region, Optional.empty(), endpoint, credentials, accountId))
+                        // After Floci's AWS settings, which an export may change as its trino-env.sh would, and before
+                        // the files Floci writes, which it may not: Docker keeps the last of a variable given twice.
+                        .withEnv(trino.environment().entrySet().stream()
+                                .map(variable -> variable.getKey() + "=" + variable.getValue()).toList())
                         .withEnv(EmrTrino.CONFIG_VARIABLE, EmrTrino.properties(EmrTrino.config(trino.config())))
+                        .withEnv(EmrTrino.NODE_VARIABLE, EmrTrino.properties(trino.node()))
+                        .withEnv(EmrTrino.LOG_VARIABLE, EmrTrino.properties(trino.log()))
                         .withJavaTrustStore()
                         .withLogRotation()
                         .withLabels(labels(clusterId, accountId, region, EmrTrino.COMPONENT));

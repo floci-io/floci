@@ -62,7 +62,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * queries" does, over a CSV in Floci's S3. Its {@code hive} catalog is the cluster's Hive metastore, or, with
  * {@code trino-connector-hive} setting {@code hive.metastore} to {@code glue}, Floci's Glue Data Catalog. The
  * cluster's other {@code trino-connector-<catalog>} classifications add catalogs, Iceberg's on Glue as the Release
- * Guide's "Use an Iceberg cluster with Trino" has it, and its {@code trino-config} moves Trino to another port. A
+ * Guide's "Use an Iceberg cluster with Trino" has it, its {@code trino-config} moves Trino to another port, and its
+ * {@code trino-node}, {@code trino-log} and {@code trino-env} reach Trino's node, log and environment. A
  * cluster with no step starts its Trino as it becomes ready, and a client outside the cluster queries it through Floci
  * on the cluster's own host.
  *
@@ -187,12 +188,17 @@ class EmrTrinoNightlyIntegrationTest {
             }
             glue.deleteDatabase(request -> request.name(schema));
         });
-        // The Release Guide's Iceberg catalog on the Glue Data Catalog, a TPC-H one, and another port.
+        // The Release Guide's Iceberg catalog on the Glue Data Catalog, a TPC-H one, and another port; and the node's
+        // environment, a logger, and a variable trino-env exports, which the Iceberg catalog's file format names.
         startCluster("""
-                [{"Classification": "trino-connector-iceberg",
-                  "Properties": {"connector.name": "iceberg", "iceberg.catalog.type": "glue"}},
+                [{"Classification": "trino-connector-iceberg", "Properties": {"connector.name": "iceberg",
+                  "iceberg.catalog.type": "glue", "iceberg.file-format": "${ENV:ICEBERG_FORMAT}"}},
                  {"Classification": "trino-connector-tpch", "Properties": {}},
-                 {"Classification": "trino-config", "Properties": {"http-server.http.port": "8890"}}]""");
+                 {"Classification": "trino-config", "Properties": {"http-server.http.port": "8890"}},
+                 {"Classification": "trino-node", "Properties": {"node.environment": "production"}},
+                 {"Classification": "trino-log", "Properties": {"io.trino": "INFO"}},
+                 {"Classification": "trino-env",
+                  "Configurations": [{"Classification": "export", "Properties": {"ICEBERG_FORMAT": "ORC"}}]}]""");
 
         String step = trinoStep("SHOW CATALOGS; CREATE SCHEMA iceberg." + schema + " WITH (location = '"
                 + s3Uri("iceberg/") + "'); CREATE TABLE iceberg." + schema + ".nation AS SELECT nationkey, name FROM "
@@ -206,6 +212,9 @@ class EmrTrinoNightlyIntegrationTest {
         assertEquals("ICEBERG", glue.getTable(request -> request.databaseName(schema).name("nation")).table()
                 .parameters().get("table_type").toUpperCase(Locale.ROOT));
         assertFalse(s3.listObjectsV2(request -> request.bucket(bucket).prefix("iceberg/")).contents().isEmpty());
+        // In the file format trino-env's variable gave the catalog.
+        assertTrue(s3.listObjectsV2(request -> request.bucket(bucket).prefix("iceberg/")).contents().stream()
+                .anyMatch(object -> object.key().endsWith(".orc")));
     }
 
     // No step: Trino starts with the cluster, and a client outside the cluster's network queries it through Floci on
