@@ -1,5 +1,5 @@
 {
-  "_source": {"generator": "tools/aws/regen_rest_routes.py", "botocore": "botocore 1.44.9 (local/aws/botocore)"},
+  "_source": {"generator": "tools/aws/regen_rest_routes.py", "botocore": "botocore 1.44.9 (installed package)"},
   "models": {
     "accessanalyzer": {
       "credentialScope": "access-analyzer",
@@ -870,6 +870,43 @@
         "TagResource": {"method": "POST", "requestUri": "/tags/{resourceArn}"},
         "UntagResource": {"method": "DELETE", "requestUri": "/tags/{resourceArn}"},
         "UpdateCluster": {"method": "POST", "requestUri": "/cluster/{identifier}"}
+      }
+    },
+    "efs": {
+      "credentialScope": "elasticfilesystem",
+      "apiVersion": "2015-02-01",
+      "operations": {
+        "CreateAccessPoint": {"method": "POST", "requestUri": "/2015-02-01/access-points"},
+        "CreateFileSystem": {"method": "POST", "requestUri": "/2015-02-01/file-systems"},
+        "CreateMountTarget": {"method": "POST", "requestUri": "/2015-02-01/mount-targets"},
+        "CreateReplicationConfiguration": {"method": "POST", "requestUri": "/2015-02-01/file-systems/{SourceFileSystemId}/replication-configuration"},
+        "CreateTags": {"method": "POST", "requestUri": "/2015-02-01/create-tags/{FileSystemId}"},
+        "DeleteAccessPoint": {"method": "DELETE", "requestUri": "/2015-02-01/access-points/{AccessPointId}"},
+        "DeleteFileSystem": {"method": "DELETE", "requestUri": "/2015-02-01/file-systems/{FileSystemId}"},
+        "DeleteFileSystemPolicy": {"method": "DELETE", "requestUri": "/2015-02-01/file-systems/{FileSystemId}/policy"},
+        "DeleteMountTarget": {"method": "DELETE", "requestUri": "/2015-02-01/mount-targets/{MountTargetId}"},
+        "DeleteReplicationConfiguration": {"method": "DELETE", "requestUri": "/2015-02-01/file-systems/{SourceFileSystemId}/replication-configuration"},
+        "DeleteTags": {"method": "POST", "requestUri": "/2015-02-01/delete-tags/{FileSystemId}"},
+        "DescribeAccessPoints": {"method": "GET", "requestUri": "/2015-02-01/access-points"},
+        "DescribeAccountPreferences": {"method": "GET", "requestUri": "/2015-02-01/account-preferences"},
+        "DescribeBackupPolicy": {"method": "GET", "requestUri": "/2015-02-01/file-systems/{FileSystemId}/backup-policy"},
+        "DescribeFileSystemPolicy": {"method": "GET", "requestUri": "/2015-02-01/file-systems/{FileSystemId}/policy"},
+        "DescribeFileSystems": {"method": "GET", "requestUri": "/2015-02-01/file-systems"},
+        "DescribeLifecycleConfiguration": {"method": "GET", "requestUri": "/2015-02-01/file-systems/{FileSystemId}/lifecycle-configuration"},
+        "DescribeMountTargetSecurityGroups": {"method": "GET", "requestUri": "/2015-02-01/mount-targets/{MountTargetId}/security-groups"},
+        "DescribeMountTargets": {"method": "GET", "requestUri": "/2015-02-01/mount-targets"},
+        "DescribeReplicationConfigurations": {"method": "GET", "requestUri": "/2015-02-01/file-systems/replication-configurations"},
+        "DescribeTags": {"method": "GET", "requestUri": "/2015-02-01/tags/{FileSystemId}/"},
+        "ListTagsForResource": {"method": "GET", "requestUri": "/2015-02-01/resource-tags/{ResourceId}"},
+        "ModifyMountTargetSecurityGroups": {"method": "PUT", "requestUri": "/2015-02-01/mount-targets/{MountTargetId}/security-groups"},
+        "PutAccountPreferences": {"method": "PUT", "requestUri": "/2015-02-01/account-preferences"},
+        "PutBackupPolicy": {"method": "PUT", "requestUri": "/2015-02-01/file-systems/{FileSystemId}/backup-policy"},
+        "PutFileSystemPolicy": {"method": "PUT", "requestUri": "/2015-02-01/file-systems/{FileSystemId}/policy"},
+        "PutLifecycleConfiguration": {"method": "PUT", "requestUri": "/2015-02-01/file-systems/{FileSystemId}/lifecycle-configuration"},
+        "TagResource": {"method": "POST", "requestUri": "/2015-02-01/resource-tags/{ResourceId}"},
+        "UntagResource": {"method": "DELETE", "requestUri": "/2015-02-01/resource-tags/{ResourceId}"},
+        "UpdateFileSystem": {"method": "PUT", "requestUri": "/2015-02-01/file-systems/{FileSystemId}"},
+        "UpdateFileSystemProtection": {"method": "PUT", "requestUri": "/2015-02-01/file-systems/{FileSystemId}/protection"}
       }
     },
     "eks": {

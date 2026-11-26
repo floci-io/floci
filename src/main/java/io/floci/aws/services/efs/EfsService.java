@@ -45,6 +45,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
@@ -212,6 +213,21 @@ public class EfsService implements Resettable {
         response.setMarker(request.getMarker());
         response.setNextMarker(nextMarker);
         return response;
+    }
+
+    /** The Region's stored file system of the id; empty for one EFS holds none of. */
+    public Optional<FileSystem> findFileSystem(String region, String fileSystemId) {
+        return fileSystemId == null ? Optional.empty() : fileSystemStore.get(regionKey(region, fileSystemId));
+    }
+
+    /** The Region's stored mount target of the id; empty for one EFS holds none of. */
+    public Optional<MountTarget> findMountTarget(String region, String mountTargetId) {
+        return mountTargetId == null ? Optional.empty() : mountTargetStore.get(regionKey(region, mountTargetId));
+    }
+
+    /** The Region's stored access point of the id; empty for one EFS holds none of. */
+    public Optional<AccessPointDescription> findAccessPoint(String region, String accessPointId) {
+        return accessPointId == null ? Optional.empty() : accessPointStore.get(regionKey(region, accessPointId));
     }
 
     public FileSystem getFileSystem(String region, String fileSystemId) {
