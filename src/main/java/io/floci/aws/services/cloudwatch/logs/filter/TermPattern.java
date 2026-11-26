@@ -21,30 +21,51 @@ final class TermPattern extends FilterPattern {
         }
     }
 
-    private final List<Term> includes = new ArrayList<>();
-    private final List<Term> excludes = new ArrayList<>();
-    private final List<Term> optionals = new ArrayList<>();
-    private int regexes;
+    private final List<Term> includes;
+    private final List<Term> excludes;
+    private final List<Term> optionals;
+
+    private TermPattern(List<Term> includes, List<Term> excludes, List<Term> optionals, int regexes) {
+        super(regexes);
+        this.includes = includes;
+        this.excludes = excludes;
+        this.optionals = optionals;
+    }
 
     static TermPattern of(String text) {
-        TermPattern pattern = new TermPattern();
+        List<Term> includes = new ArrayList<>();
+        List<Term> excludes = new ArrayList<>();
+        List<Term> optionals = new ArrayList<>();
         PatternCursor cursor = new PatternCursor(text);
         if (cursor.peek() == '%') {
-            pattern.add(new Term(Mode.INCLUDE, null, cursor.regex()));
+            includes.add(new Term(Mode.INCLUDE, null, cursor.regex()));
             cursor.expectEnd();
-            return pattern;
+            return new TermPattern(List.copyOf(includes), List.of(), List.of(), 1);
         }
+        int regexCount = 0;
         while (true) {
             cursor.skipWhitespace();
             if (cursor.atEnd()) {
-                return pattern;
+                return new TermPattern(List.copyOf(includes), List.copyOf(excludes), List.copyOf(optionals),
+                        regexCount);
             }
-            pattern.add(readTerm(cursor));
-            if (!cursor.atEnd() && !Character.isWhitespace(cursor.peek())
-                    && cursor.peek() != '-' && cursor.peek() != '?') {
+            Term term = readTerm(cursor);
+            if (term.regex() != null) {
+                regexCount++;
+            }
+            addTerm(term, includes, excludes, optionals);
+            if (isMissingTermSeparator(cursor)) {
                 throw cursor.error("terms must be separated");
             }
         }
+    }
+
+    private static boolean isMissingTermSeparator(PatternCursor cursor) {
+        if (cursor.atEnd()) {
+            return false;
+        }
+        char nextChar = cursor.peek();
+        return !Character.isWhitespace(nextChar) && nextChar != '-' && nextChar != '?';
     }
 
     private static Term readTerm(PatternCursor cursor) {
@@ -73,10 +94,7 @@ final class TermPattern extends FilterPattern {
         return new Term(mode, value, null);
     }
 
-    private void add(Term term) {
-        if (term.regex() != null) {
-            regexes++;
-        }
+    private static void addTerm(Term term, List<Term> includes, List<Term> excludes, List<Term> optionals) {
         switch (term.mode()) {
             case INCLUDE -> includes.add(term);
             case EXCLUDE -> excludes.add(term);
@@ -105,10 +123,5 @@ final class TermPattern extends FilterPattern {
     @Override
     public boolean declaresField(String reference) {
         return false;
-    }
-
-    @Override
-    public int regexCount() {
-        return regexes;
     }
 }
