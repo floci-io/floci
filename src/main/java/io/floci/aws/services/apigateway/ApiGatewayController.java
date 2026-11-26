@@ -58,6 +58,7 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -1315,7 +1316,14 @@ public class ApiGatewayController {
 
     @GET
     @Path("/domainnames")
-    public Response getDomainNames(@Context HttpHeaders headers) {
+    public Response getDomainNames(@Context HttpHeaders headers,
+                                   @Context UriInfo uriInfo) {
+        String resourceOwner = uriInfo.getQueryParameters().getFirst("resourceOwner");
+        List<String> owners = List.of("SELF", "OTHER_ACCOUNTS");
+        if (resourceOwner != null && !owners.contains(resourceOwner)) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notInEnum(resourceOwner, "resourceOwner", owners));
+        }
         String region = regionResolver.resolveRegion(headers);
         List<CustomDomain> domains = service.getDomainNames(region);
         ObjectNode root = objectMapper.createObjectNode();
