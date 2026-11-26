@@ -249,7 +249,7 @@ Samples are readable with `GetMetricStatistics` and `GetMetricData`, and alarms 
 The filter pattern syntax follows the AWS reference:
 
 - Terms: `ERROR ARGUMENTS` (all present), `?ERROR ?ARGUMENTS` (any present), `ERROR -ARGUMENTS`
-  (exclusion), `"exact phrase"`. Terms are case-sensitive substrings of the message.
+  or `ERROR - ARGUMENTS` (exclusion), `"exact phrase"`. Terms are case-sensitive substrings of the message.
 - Regular expressions between percent signs, `%^[hc]at%`, with the operators and escapes AWS
   allows. Parentheses and characters outside ASCII are rejected, as on AWS.
 - JSON patterns: `{ $.eventType = "UpdateTrail" && $.code >= 400 }`, with `=`, `!=`, `<`, `<=`,
