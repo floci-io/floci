@@ -174,11 +174,15 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         }
         Map<String, JsonNode> nodesByName = nodesByName(cluster);
         removeStrayNodes(cluster, region, nodesByName);
+        syncNodeClaims(cluster, region, nodesByName);
         if (launched.isEmpty() && pods.isEmpty()) {
             return;
         }
+        JsonNode poolList = read(cluster, "nodepools");
         Map<String, NodePool> pools = new HashMap<>();
-        EksAutoModeNodes.nodePools(read(cluster, "nodepools")).forEach(pool -> pools.put(pool.name(), pool));
+        EksAutoModeNodes.nodePools(poolList).forEach(pool -> pools.put(pool.name(), pool));
+        Map<String, JsonNode> poolItems = new HashMap<>();
+        poolList.path("items").forEach(item -> poolItems.put(item.path("metadata").path("name").asText(), item));
         // The DaemonSet pods a node runs besides its workload, which room and sizing count; read only for pods to place.
         List<EksAutoModeNodes.PendingPod> daemons = pods.isEmpty() ? List.of()
                 : EksAutoModeNodes.daemonPods(read(cluster, "daemonsets"));
@@ -295,7 +299,8 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         for (Launch launch : EksAutoModeNodes.plan(List.copyOf(pools.values()), withoutRoom,
                 instanceTypes.instanceTypes(), zonesByNodeClass, daemons, region)) {
             try {
-                launch(cluster, region, launch, nodeClasses.get(launch.pool().nodeClass()), subnetZones);
+                launch(cluster, region, launch, nodeClasses.get(launch.pool().nodeClass()), subnetZones,
+                        poolItems.getOrDefault(launch.pool().name(), MAPPER.createObjectNode()));
             } catch (RuntimeException e) {
                 LOG.warnv("EKS Auto Mode pool {0} of cluster {1} launched no node for {2}: {3}",
                         launch.pool().name(), cluster.getName(), podNames(launch), e.getMessage());
@@ -396,7 +401,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
     }
 
     private void launch(Cluster cluster, String region, Launch launch, JsonNode nodeClass,
-                        Map<String, String> subnetZones) {
+                        Map<String, String> subnetZones, JsonNode poolItem) {
         if (nodeClass == null) {
             throw new IllegalStateException("its NodeClass " + launch.pool().nodeClass() + " isn't there");
         }
@@ -434,6 +439,72 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         }
         LOG.infov("EKS Auto Mode pool {0} of cluster {1} launched {2} ({3}) for {4}", launch.pool().name(),
                 cluster.getName(), instanceId, launch.instanceType().instanceType, podNames(launch));
+        Instance instance = reservation.getInstances().getFirst();
+        String claim = EksAutoModeNodeClaims.name(launch.pool().name(), instanceId);
+        try {
+            apply(cluster, EksAutoModeNodeClaims.claim(launch, instanceId, poolItem,
+                    EksAutoModeNodes.withRegion(launch.labels(), region)), "apply nodeclaim " + claim);
+            exec(cluster, List.of("kubectl", "patch", "nodeclaim", claim, "--subresource=status", "--type=merge", "-p",
+                    EksAutoModeNodeClaims.launchedStatus(clusterManager.deriveInstanceNodeProviderId(instance, region),
+                            imageId, clock.instant().toString())), "patch nodeclaim " + claim);
+        } catch (RuntimeException e) {
+            LOG.warnv("EKS Auto Mode NodeClaim {0} of cluster {1} wasn''t made: {2}", claim, cluster.getName(),
+                    e.getMessage());
+        }
+    }
+
+    /**
+     * Keeps the NodeClaims in step with the instances: one whose node has joined is marked registered, initialized
+     * and ready, as its node is; one whose instance is gone loses its finalizer and is deleted, as Karpenter's
+     * termination ends it.
+     */
+    private void syncNodeClaims(Cluster cluster, String region, Map<String, JsonNode> nodesByName) {
+        JsonNode claims;
+        try {
+            claims = read(cluster, "nodeclaims");
+        } catch (RuntimeException e) {
+            LOG.debugv("EKS Auto Mode NodeClaims of cluster {0} unreadable: {1}", cluster.getName(), e.getMessage());
+            return;
+        }
+        Map<String, Instance> live = new HashMap<>();
+        for (Instance instance : instancesOf(cluster, region, "pending", "running", "stopping", "stopped")) {
+            live.put(EksAutoModeNodeClaims.name(String.valueOf(tag(instance, POOL_TAG)), instance.getInstanceId()),
+                    instance);
+        }
+        for (JsonNode claim : claims.path("items")) {
+            String name = claim.path("metadata").path("name").asText();
+            Instance instance = live.get(name);
+            try {
+                if (instance == null) {
+                    deleteNodeClaim(cluster, name);
+                    continue;
+                }
+                JsonNode node = nodesByName.get(clusterManager.deriveInstanceNodeName(instance, region));
+                if (node != null && !EksAutoModeNodeClaims.saysJoined(claim, node.path("metadata").path("name").asText(),
+                        EksAutoModeNodeClaims.nodeReady(node))) {
+                    exec(cluster, List.of("kubectl", "patch", "nodeclaim", name, "--subresource=status",
+                            "--type=merge", "-p", EksAutoModeNodeClaims.joinedStatus(
+                                    clusterManager.deriveInstanceNodeProviderId(instance, region),
+                                    instance.getImageId(), node, clock.instant().toString())),
+                            "patch nodeclaim " + name);
+                }
+            } catch (RuntimeException e) {
+                LOG.warnv("EKS Auto Mode NodeClaim {0} of cluster {1} isn''t in step yet: {2}", name,
+                        cluster.getName(), e.getMessage());
+            }
+        }
+    }
+
+    /** Takes the NodeClaim's finalizer off and deletes it, as Karpenter does once its instance is gone. */
+    private void deleteNodeClaim(Cluster cluster, String name) {
+        exec(cluster, List.of("kubectl", "patch", "nodeclaim", name, "--type=merge", "-p",
+                "{\"metadata\":{\"finalizers\":null}}"), "patch nodeclaim " + name);
+        exec(cluster, List.of("kubectl", "delete", "nodeclaim", name, "--ignore-not-found=true", "--wait=false"),
+                "delete nodeclaim " + name);
+    }
+
+    private void apply(Cluster cluster, String json, String what) {
+        exec(cluster, List.of("sh", "-c", "echo '" + json.replace("'", "'\\''") + "' | kubectl apply -f -"), what);
     }
 
     /** Whether the cluster is still among the running ones, not deleted or being deleted. */
@@ -604,6 +675,18 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             ec2.terminateInstances(region, removed);
             LOG.infov("EKS Auto Mode compute of cluster {0} is off: terminated {1}", cluster.getName(), removed);
         }
+        for (Instance instance : launched) {
+            if (removed.contains(instance.getInstanceId())) {
+                String claim = EksAutoModeNodeClaims.name(String.valueOf(tag(instance, POOL_TAG)),
+                        instance.getInstanceId());
+                try {
+                    deleteNodeClaim(cluster, claim);
+                } catch (RuntimeException e) {
+                    LOG.warnv("EKS Auto Mode NodeClaim {0} of cluster {1} wasn''t deleted: {2}", claim,
+                            cluster.getName(), e.getMessage());
+                }
+            }
+        }
         // A worker that was joining can register while it terminates; its node goes on a later pass, as with compute
         // on. The nodes are read only while EC2 still keeps such an instance.
         if (!instancesOf(cluster, region, "shutting-down", "terminated").isEmpty()) {
@@ -751,6 +834,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
 
     private JsonNode read(Cluster cluster, String kind) {
         List<String> command = "nodes".equals(kind) || "nodepools".equals(kind) || "nodeclasses".equals(kind)
+                || "nodeclaims".equals(kind)
                 ? List.of("kubectl", "get", kind, "-o", "json") : List.of("kubectl", "get", kind, "-A", "-o", "json");
         return readJson(cluster, command, "get " + kind);
     }

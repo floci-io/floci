@@ -513,6 +513,14 @@ launches nodes on AWS. Floci checks every 10 seconds.
   The node of an Auto Mode instance that is terminated (one that registered while its instance was being
   terminated, say), by its provider ID, is deleted by the next pass, while EC2 keeps the instance, an hour as on AWS, with compute on or
   off.
+- **NodeClaim.** Each node has a `NodeClaim` (`karpenter.sh/v1`), as on AWS: named after its pool with five
+  characters (`general-purpose-kw46r`), owned by its NodePool and held by the `karpenter.sh/termination` finalizer,
+  labelled as its node, with the pool's requirements (plus the chosen instance type, the pool and the NodeClass), its
+  pods' requests, and the pool's `expireAfter` (336h when the pool doesn't say) and `terminationGracePeriod`. Its
+  status says `Launched` once the instance is up, then, once the node joins, `Registered`, `Initialized` and `Ready`
+  (as the node's own Ready), with the node's name, capacity and allocatable. It goes, finalizer and all, with its
+  instance. `kubectl get nodeclaims` shows the type, capacity type, zone, node and readiness, as Karpenter's columns
+  do.
 - **Removal.** Turning compute off terminates the cluster's Auto Mode instances and takes their nodes out of it.
   Deleting the cluster terminates them, waits up to a minute for them to finish terminating, as they hold the
   cluster security group deleted next (one that doesn't fails the delete, which can be retried), and deletes the
@@ -520,7 +528,8 @@ launches nodes on AWS. Floci checks every 10 seconds.
 
 On AWS, a node is named after its instance ID and is a managed instance a plain `DescribeInstances` doesn't list.
 In Floci it is named as other joined instances are, after its private DNS name, and `DescribeInstances` lists it.
-Floci makes no `NodeClaim` objects, and doesn't replace underutilized nodes with smaller ones.
+Floci doesn't replace underutilized nodes with smaller ones, and a NodeClaim's requirements name only the instance
+type chosen, where AWS lists every type that would do.
 
 ### Auto Mode load balancing for Services
 

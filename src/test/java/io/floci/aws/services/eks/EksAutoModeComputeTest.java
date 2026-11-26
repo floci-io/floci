@@ -80,7 +80,7 @@ class EksAutoModeComputeTest {
             iam, instanceTypes, mock(EmulatorConfig.class), clock);
     private final Map<String, String> lists = new HashMap<>(Map.of("pods", PENDING_POD,
             "nodepools", POOLS, "nodeclasses", NODE_CLASSES, "nodes", "{\"items\": []}", "daemonsets",
-            "{\"items\": []}"));
+            "{\"items\": []}", "nodeclaims", "{\"items\": []}"));
 
     @BeforeEach
     void cluster() {
@@ -157,6 +157,45 @@ class EksAutoModeComputeTest {
         verify(iam).addRoleToInstanceProfile(profileName.getValue(), "auto-node");
         assertEquals("arn:aws:iam::000000000000:instance-profile/eks/us-east-1/prod/" + profileName.getValue(),
                 profile.getValue());
+        // Its NodeClaim, then the claim's launched status.
+        String claim = EksAutoModeNodeClaims.name("general-purpose", "i-1");
+        verify(clusterManager).execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length == 3
+                && "sh".equals(cmd[0]) && cmd[2].contains("\"kind\":\"NodeClaim\"")
+                && cmd[2].contains("\"name\":\"" + claim + "\"")), anyInt());
+        verify(clusterManager).execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length > 4
+                && "patch".equals(cmd[1]) && claim.equals(cmd[3]) && "--subresource=status".equals(cmd[4])
+                && cmd[cmd.length - 1].contains("\"type\":\"Launched\",\"status\":\"True\"")), anyInt());
+    }
+
+    /**
+     * Each pass keeps the NodeClaims in step: one whose node has joined is marked registered, initialized and ready;
+     * one whose instance is gone loses its finalizer and is deleted.
+     */
+    @Test
+    void nodeClaimsFollowTheirInstancesAndNodes() {
+        joinedNode("i-node", "node-1");
+        String live = EksAutoModeNodeClaims.name("general-purpose", "i-node");
+        String gone = EksAutoModeNodeClaims.name("general-purpose", "i-gone");
+        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"node-1\"}, "
+                + "\"status\": {\"phase\": \"Running\"}}]}");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}, "
+                + "\"status\": {\"conditions\": [{\"type\": \"Ready\", \"status\": \"True\"}]}}]}");
+        lists.put("nodeclaims", "{\"items\": [{\"metadata\": {\"name\": \"" + live + "\"}, \"status\": {}},"
+                + "{\"metadata\": {\"name\": \"" + gone + "\"}, \"status\": {}}]}");
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
+        verify(clusterManager).execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length > 4
+                && "patch".equals(cmd[1]) && live.equals(cmd[3]) && "--subresource=status".equals(cmd[4])
+                && cmd[cmd.length - 1].contains("\"nodeName\":\"node-1\"")
+                && cmd[cmd.length - 1].contains("\"type\":\"Ready\",\"status\":\"True\"")), anyInt());
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "patch", "nodeclaim", gone,
+                "--type=merge", "-p", "{\"metadata\":{\"finalizers\":null}}"}, 15);
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "nodeclaim", gone,
+                "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete",
+                "nodeclaim", live, "--ignore-not-found=true", "--wait=false"}, 15);
     }
 
     @Test

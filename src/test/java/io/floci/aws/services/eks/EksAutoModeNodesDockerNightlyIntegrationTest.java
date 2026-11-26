@@ -154,6 +154,11 @@ class EksAutoModeNodesDockerNightlyIntegrationTest {
                 "/eks/" + REGION + "/" + cluster.getName() + "/")).getFirst();
         assertEquals(List.of(role), profile.getRoleNames());
         assertEquals(profile.getArn(), instance.getIamInstanceProfileArn());
+        // Its NodeClaim, launched, owned by the pool.
+        String claim = EksAutoModeNodeClaims.name("general-purpose", instance.getInstanceId());
+        assertEquals("True NodePool general-purpose", node.kubectlOutput("get", "nodeclaim", claim, "-o",
+                "jsonpath={.status.conditions[?(@.type==\"Launched\")].status} "
+                        + "{.metadata.ownerReferences[0].kind} {.metadata.labels.karpenter\\.sh/nodepool}"));
         // A second pass while the node hasn't joined launches no other.
         RequestScopes.runAs(ACCOUNT, REGION, () -> compute.reconcile(cluster, REGION));
         assertEquals(1, RequestScopes.callAs(ACCOUNT, REGION, () -> compute.instancesOf(cluster, REGION, "pending", "running")).size());
@@ -171,6 +176,13 @@ class EksAutoModeNodesDockerNightlyIntegrationTest {
         await("the pod is scheduled on the new node").atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(2))
                 .ignoreExceptions().until(() -> nodeName.equals(node.kubectlOutput("get", "pod", "web",
                         "-o", "jsonpath={.spec.nodeName}")));
+        // The NodeClaim says its node joined, as its node is.
+        await("the NodeClaim is ready").atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(2))
+                .ignoreExceptions().until(() -> {
+                    RequestScopes.runAs(ACCOUNT, REGION, () -> compute.reconcile(cluster, REGION));
+                    return (nodeName + " True").equals(node.kubectlOutput("get", "nodeclaim", claim, "-o",
+                            "jsonpath={.status.nodeName} {.status.conditions[?(@.type==\"Ready\")].status}"));
+                });
 
         cluster.setComputeConfig(new ComputeConfig(false, List.of(), null));
         RequestScopes.runAs(ACCOUNT, REGION, () -> compute.removeNodes(cluster, REGION));
@@ -178,6 +190,8 @@ class EksAutoModeNodesDockerNightlyIntegrationTest {
         assertEquals(List.of(), RequestScopes.callAs(ACCOUNT, REGION, () -> compute.instancesOf(cluster, REGION, "pending", "running")));
         await("the node is gone").atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(2))
                 .ignoreExceptions().until(() -> node.kubectl("get", "node", nodeName).exitCode() != 0);
+        await("the NodeClaim is gone").atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(2))
+                .ignoreExceptions().until(() -> node.kubectl("get", "nodeclaim", claim).exitCode() != 0);
 
         // DeleteCluster runs the Auto Mode cleanups, compute's among them.
         Cluster deleted = cluster;
