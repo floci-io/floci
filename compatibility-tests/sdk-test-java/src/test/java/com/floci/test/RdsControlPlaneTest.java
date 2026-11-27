@@ -47,6 +47,7 @@ import software.amazon.awssdk.services.rds.model.DbSnapshotAlreadyExistsExceptio
 import software.amazon.awssdk.services.rds.model.DbSnapshotNotFoundException;
 import software.amazon.awssdk.services.rds.model.DescribeCertificatesResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDBLogFilesDetails;
+import software.amazon.awssdk.services.rds.model.DescribeDbInstancesRequest;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxiesResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxyEndpointsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxyTargetGroupsResponse;
@@ -78,6 +79,7 @@ import software.amazon.awssdk.services.rds.model.Tag;
 import software.amazon.awssdk.services.rds.model.UpgradeTarget;
 import software.amazon.awssdk.services.rds.model.ValidStorageOptions;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.logging.Level;
@@ -1261,7 +1263,7 @@ class RdsControlPlaneTest {
                     .optionGroupName(optionGroupName)))
                     .isInstanceOf(InvalidOptionGroupStateException.class);
 
-            deleteDbInstance(rds, instanceName);
+            deleteDbInstanceAndWait(rds, instanceName);
             rds.deleteOptionGroup(b -> b.optionGroupName(optionGroupName));
         } finally {
             deleteDbInstance(rds, instanceName);
@@ -1302,12 +1304,17 @@ class RdsControlPlaneTest {
 
     private static void deleteDbInstance(RdsClient client, String name) {
         try {
-            client.deleteDBInstance(b -> b
-                    .dbInstanceIdentifier(name)
-                    .skipFinalSnapshot(true));
+            deleteDbInstanceAndWait(client, name);
         } catch (Exception e) {
-            LOG.log(Level.FINE, "RDS DB instance already absent during cleanup " + name, e);
+            LOG.log(Level.FINE, "Could not confirm deletion of RDS DB instance " + name, e);
         }
+    }
+
+    private static void deleteDbInstanceAndWait(RdsClient client, String name) {
+        client.deleteDBInstance(b -> b.dbInstanceIdentifier(name).skipFinalSnapshot(true));
+        Duration timeout = Duration.ofMinutes(TestFixtures.isRealAws() ? 30 : 2);
+        DescribeDbInstancesRequest request = DescribeDbInstancesRequest.builder().dbInstanceIdentifier(name).build();
+        client.waiter().waitUntilDBInstanceDeleted(request, TestFixtures.waiterOverride(timeout));
     }
 
     private static void deregisterProxyTarget(
