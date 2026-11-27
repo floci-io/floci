@@ -101,7 +101,7 @@ class AutoScalingDescribeGroupsFilterIntegrationTest {
                     () -> client.describeAutoScalingGroups(r -> r.nextToken("not-a-token")));
             assertEquals(400, e.statusCode());
             assertEquals("InvalidNextToken", e.awsErrorDetails().errorCode());
-            assertEquals("The NextToken value is not valid.", e.awsErrorDetails().errorMessage());
+            assertEquals("The token 'not-a-token' was invalid", e.awsErrorDetails().errorMessage());
             e = assertThrows(AutoScalingException.class,
                     () -> client.describeAutoScalingGroups(r -> r.maxRecords(101)));
             assertEquals("ValidationError", e.awsErrorDetails().errorCode());

@@ -294,7 +294,7 @@ public class AutoScalingQueryHandler {
         PaginatedResult<AutoScalingGroup> page = Pagination.paginate(matches,
                 AutoScalingGroup::getAutoScalingGroupName, maxRecords != null ? maxRecords : 50,
                 p.getFirst("NextToken"), "autoscaling-groups",
-                token -> new AwsException("InvalidNextToken", "The NextToken value is not valid.", 400));
+                token -> new AwsException("InvalidNextToken", "The token '" + token + "' was invalid", 400));
         List<AutoScalingGroup> groups = page.items();
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeAutoScalingGroupsResponse", NS)
