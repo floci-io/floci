@@ -418,19 +418,19 @@ public class RedshiftZeroEtlWriter {
 
     /**
      * Applies a partial update that moves the row's primary key so it is safe to replay over rows already copied or
-     * applied: when the old key is present, any existing row under the new key is removed first so moving the old row
-     * (and its unchanged TOASTed columns) does not hit a duplicate-key error; when the old key is already gone, the
-     * row under the new key is updated in place instead of being deleted.
+     * applied: when the new key already exists on the target, it already holds the row's unchanged TOASTed columns,
+     * so it is updated in place and any stale row under the old key is removed; otherwise the old row is moved to
+     * the new key.
      */
     private static void applyKeyChangingUpdate(Connection connection, RowChange change, String moveSql,
                                                List<ColumnValue> newKeys) throws SQLException {
-        String dropConflictSql = "DELETE FROM " + change.table().qualifiedName() + keyCondition(newKeys)
-                + " AND EXISTS (SELECT 1 FROM " + change.table().qualifiedName() + keyCondition(change.keys()) + ")";
-        executeBound(connection, dropConflictSql, valuesThenKeys(newKeys, change.keys()));
-        int moved = executeBound(connection, moveSql, valuesThenKeys(change.values(), change.keys()));
-        if (moved == 0) {
-            RowChange inPlace = new RowChange(RowChange.Kind.UPDATE, change.table(), change.values(), newKeys);
-            executeBound(connection, rowChangeSql(inPlace), valuesThenKeys(change.values(), newKeys));
+        RowChange inPlace = new RowChange(RowChange.Kind.UPDATE, change.table(), change.values(), newKeys);
+        int updated = executeBound(connection, rowChangeSql(inPlace), valuesThenKeys(change.values(), newKeys));
+        if (updated > 0) {
+            RowChange dropOld = new RowChange(RowChange.Kind.DELETE, change.table(), List.of(), change.keys());
+            executeBound(connection, rowChangeSql(dropOld), change.keys());
+        } else {
+            executeBound(connection, moveSql, valuesThenKeys(change.values(), change.keys()));
         }
     }
 

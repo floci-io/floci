@@ -361,11 +361,12 @@ class RdsIntegrationLoaderTest {
 
         loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
 
-        verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), eq(LOAD_ID),
-                eq("target down"));
-        // Two startReplication attempts (each drops before creating) plus final cleanup on failure.
-        verify(containers, times(3)).queryPostgres(anyString(), anyString(), anyString(),
+        InOrder order = inOrder(containers, integrations);
+        // Two startReplication attempts (each drops before creating) plus cleanup before marking failed.
+        order.verify(containers, times(3)).queryPostgres(anyString(), anyString(), anyString(),
                 startsWith("SELECT pg_drop_replication_slot"));
+        order.verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), eq(LOAD_ID),
+                eq("target down"));
         verifyNoInteractions(replicator);
     }
 }

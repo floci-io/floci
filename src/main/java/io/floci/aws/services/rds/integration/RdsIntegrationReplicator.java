@@ -232,14 +232,16 @@ public class RdsIntegrationReplicator implements Resettable {
     }
 
     private void fail(Replication replication, Source source, String failure) {
+        if (integrations.isReplicating(replication.integration, replication.sourceDatabase, replication.databaseName)) {
+            try {
+                sources.dropReplication(source, replication.sourceDatabase, replication.name);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Integration {0} could not drop replication slot {1} from the source",
+                        replication.integration.getIntegrationArn(), replication.name);
+            }
+        }
         integrations.failReplication(replication.integration, replication.sourceDatabase, replication.databaseName,
                 failure);
-        try {
-            sources.dropReplication(source, replication.sourceDatabase, replication.name);
-        } catch (RuntimeException e) {
-            LOG.warnv(e, "Integration {0} could not drop replication slot {1} from the source",
-                    replication.integration.getIntegrationArn(), replication.name);
-        }
     }
 
     /** Drops the slot and the publication of a deleted integration from its source. */

@@ -186,20 +186,26 @@ public class RdsIntegrationLoader implements Resettable {
 
     /**
      * Ends the load. A loaded destination whose source replicates starts replicating; when the load failed, or the
-     * integration was deleted meanwhile, the slot and the publication it set up are dropped from the source.
+     * integration was deleted meanwhile, the slot and the publication it set up are dropped from the source before
+     * marking the destination failed so a retry cannot have its new slot dropped by this worker.
      */
     private void finish(Integration integration, String sourceDatabase, String databaseName, String loadId,
                         long startedIn, String failure, boolean replicating) {
         if (generation.get() != startedIn) {
             return;
         }
+        if (failure != null && replicating
+                && (isCurrentLoad(integration, sourceDatabase, databaseName, loadId, startedIn)
+                        || !integrations.exists(integration))) {
+            dropReplication(integration, sourceDatabase);
+        }
         integrations.finishDestination(integration, sourceDatabase, databaseName, loadId, failure);
-        if (!replicating) {
+        if (!replicating || failure != null) {
             return;
         }
-        if (failure == null && integrations.isReplicating(integration, sourceDatabase, databaseName)) {
+        if (integrations.isReplicating(integration, sourceDatabase, databaseName)) {
             replicator.start(integration, sourceDatabase, databaseName);
-        } else if (failure != null || !integrations.exists(integration)) {
+        } else if (!integrations.exists(integration)) {
             dropReplication(integration, sourceDatabase);
         }
     }
