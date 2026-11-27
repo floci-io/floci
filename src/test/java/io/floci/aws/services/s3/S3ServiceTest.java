@@ -47,6 +47,7 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -475,6 +476,29 @@ class S3ServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> s3Service.createBucket(bucketName, "us-east-1"), bucketName);
         assertEquals("InvalidBucketName", ex.getErrorCode());
+    }
+
+    @Test
+    void bucketStoredWithoutARegionIsInTheDefaultRegion() {
+        // A bucket persisted before buckets recorded their Region is in the default one, as
+        // ListBuckets reports it, so the region redirect still applies to it.
+        InMemoryStorage<String, Bucket> bucketStore = new InMemoryStorage<>();
+        S3Service service = new S3Service(bucketStore, new InMemoryStorage<>(), tempDir.resolve("legacy-region"),
+                false, (LambdaService) null, new RegionResolver("eu-west-2", "000000000000"));
+        Bucket unrecorded = new Bucket("legacy-null-region");
+        unrecorded.setRegion(null);
+        bucketStore.put(unrecorded.getName(), unrecorded);
+        Bucket blank = new Bucket("legacy-blank-region");
+        blank.setRegion("");
+        bucketStore.put(blank.getName(), blank);
+        Bucket recorded = new Bucket("recorded-region");
+        recorded.setRegion("ap-south-1");
+        bucketStore.put(recorded.getName(), recorded);
+
+        assertEquals(Optional.of("eu-west-2"), service.findBucketRegion("legacy-null-region"));
+        assertEquals(Optional.of("eu-west-2"), service.findBucketRegion("legacy-blank-region"));
+        assertEquals(Optional.of("ap-south-1"), service.findBucketRegion("recorded-region"));
+        assertEquals(Optional.empty(), service.findBucketRegion("no-such-bucket"));
     }
 
     @Test

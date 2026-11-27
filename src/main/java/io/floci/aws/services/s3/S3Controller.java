@@ -315,10 +315,7 @@ public class S3Controller {
             rejectUnservedSubresource("HEAD", uriInfo);
             s3Service.authorizeBucketRead(bucket, "s3:ListBucket", authorization);
             s3Service.headBucket(bucket);
-            String bucketRegion = s3Service.getBucketRegion(bucket);
-            if (bucketRegion == null || bucketRegion.isBlank()) {
-                bucketRegion = regionResolver.getDefaultRegion();
-            }
+            String bucketRegion = s3Service.findBucketRegion(bucket).orElse(regionResolver.getDefaultRegion());
             return Response.ok()
                     .header("x-amz-bucket-region", bucketRegion)
                     .build();

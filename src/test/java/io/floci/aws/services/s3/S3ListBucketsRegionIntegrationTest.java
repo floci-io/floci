@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.Bucket;
 import software.amazon.awssdk.services.s3.model.ListBucketsResponse;
@@ -76,7 +77,10 @@ class S3ListBucketsRegionIntegrationTest {
                         assertNull(bucket.bucketArn());
                     }
                 } finally {
-                    client.deleteBucket(request -> request.bucket(explicitBucket));
+                    // S3 redirects a request for an eu-central-1 bucket signed for us-east-1.
+                    try (S3Client home = S3TestClients.pathStyle(Region.EU_CENTRAL_1)) {
+                        home.deleteBucket(request -> request.bucket(explicitBucket));
+                    }
                 }
             } finally {
                 client.deleteBucket(request -> request.bucket(defaultBucket));
