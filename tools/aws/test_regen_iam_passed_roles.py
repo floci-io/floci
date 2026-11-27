@@ -40,8 +40,9 @@ def structure(**members) -> dict:
 @pytest.fixture
 def corrections(monkeypatch):
     """No corrections at all, so a test sees the rule alone and sets what it needs."""
-    for name in ("BY_HAND", "NOT_READ", "EXCLUDED_MEMBERS", "EXTRA_MEMBERS", "MEMBER_SERVICES"):
+    for name in ("BY_HAND", "NOT_READ", "EXCLUDED_MEMBERS", "EXTRA_MEMBERS", "MEMBER_SERVICES", "ROLE_SOURCES"):
         monkeypatch.setattr(r, name, {})
+    r._role_source.cache_clear()
     monkeypatch.setattr(r, "NAMESPACES", ("svc",))
     return monkeypatch
 
@@ -201,6 +202,52 @@ def test_each_member_goes_to_the_one_service_the_reference_names(corrections):
 
 def test_a_role_passed_to_no_named_service_carries_none(corrections):
     assert r.entry_for("svc:CreateThing", [], SIMPLE)["roles"][0] == {"member": "RoleArn"}
+
+
+CLUSTER = {"svc": model({"CreateCluster": "In"}, {"In": structure(roleArn="String", computeConfig="Compute"),
+                                                  "Compute": structure(nodeRoleArn="String")})}
+
+
+def role_source(corrections, tmp_path, members):
+    path = tmp_path / "svc-roles.json"
+    path.write_text(json.dumps({"members": members}), encoding="utf-8")
+    corrections.setattr(r, "ROLE_SOURCES", {"svc": path})
+    r._role_source.cache_clear()
+
+
+def test_a_vendored_role_source_gives_each_member_the_service_its_role_is_for(corrections, tmp_path):
+    # The request's own member by its operation, a member of a type it holds by that type, wherever it sits.
+    role_source(corrections, tmp_path, [
+        {"operation": "CreateCluster", "member": "roleArn", "rolePage": "cluster", "trustedBy": ["svc.amazonaws.com"]},
+        {"type": "Compute", "member": "nodeRoleArn", "rolePage": "node", "trustedBy": ["other.amazonaws.com"]}])
+    assert r.entry_for("svc:CreateCluster", ["other", "svc"], CLUSTER)["roles"] == [
+        {"member": "computeConfig.nodeRoleArn", "passedTo": "other"}, {"member": "roleArn", "passedTo": "svc"}]
+
+
+def test_a_vendored_role_for_a_service_the_reference_does_not_name_fails(corrections, tmp_path):
+    role_source(corrections, tmp_path, [
+        {"operation": "CreateCluster", "member": "roleArn", "rolePage": "cluster", "trustedBy": ["lambda.amazonaws.com"]},
+        {"type": "Compute", "member": "nodeRoleArn", "rolePage": "node", "trustedBy": ["other.amazonaws.com"]}])
+    with pytest.raises(ValueError, match="not one of"):
+        r.entry_for("svc:CreateCluster", ["other", "svc"], CLUSTER)
+    # A member it does not give still needs saying which.
+    role_source(corrections, tmp_path, [
+        {"type": "Compute", "member": "nodeRoleArn", "rolePage": "node", "trustedBy": ["other.amazonaws.com"]}])
+    with pytest.raises(ValueError, match="ROLE_SOURCES"):
+        r.entry_for("svc:CreateCluster", ["other", "svc"], CLUSTER)
+
+
+def test_a_vendored_role_no_operation_reads_is_reported(corrections, tmp_path):
+    corrections.setattr(r, "load_models", lambda data, clients: CLUSTER)
+    covered = {"svc:CreateCluster": {"passedTo": ["other", "svc"], "clients": ["svc"]}}
+    role_source(corrections, tmp_path, [
+        {"operation": "CreateCluster", "member": "roleArn", "rolePage": "cluster", "trustedBy": ["svc.amazonaws.com"]},
+        {"type": "Compute", "member": "nodeRoleArn", "rolePage": "node", "trustedBy": ["other.amazonaws.com"]}])
+    assert r._unmatched_corrections(covered, {"svc": ["svc"]}, tmp_path) == []
+    role_source(corrections, tmp_path, [
+        {"type": "Compute", "member": "goneRoleArn", "rolePage": "node", "trustedBy": ["other.amazonaws.com"]}])
+    assert r._unmatched_corrections(covered, {"svc": ["svc"]}, tmp_path) == [
+        "ROLE_SOURCES gives svc's Compute.goneRoleArn, which no operation there reads a role from"]
 
 
 def test_several_services_need_a_member_service(corrections):

@@ -3074,7 +3074,16 @@ role each passes:
   `UpdatePipe` pass `RoleArn` to `pipes.amazonaws.com`.
 - **EKS:** `CreateCluster` passes `roleArn`, `CreateNodegroup` `nodeRole`, `CreateFargateProfile`
   `podExecutionRoleArn`, and `CreateAddon` and `UpdateAddon` `serviceAccountRoleArn` and each of
-  their `podIdentityAssociations`' `roleArn`, to `eks.amazonaws.com`. `CreatePodIdentityAssociation`
+  their `podIdentityAssociations`' `roleArn`, to `eks.amazonaws.com`, all read from the table below.
+  `CreateCluster` and `UpdateClusterConfig` pass EKS Auto Mode's `computeConfig.nodeRoleArn` to
+  `ec2.amazonaws.com`. The Service Reference passes both operations' roles to `ec2.amazonaws.com` and
+  `eks.amazonaws.com` without saying which member's goes where, so a vendored source,
+  `tools/aws/sources/eks-roles.json`, written by `tools/aws/fetch_eks_roles.py` from the EKS API
+  reference and user guide, gives each member's role and the service its trust policy is for:
+  `roleArn` is the cluster IAM role ("The Amazon Resource Name (ARN) of the IAM role that provides
+  permissions for the Kubernetes control plane", trusted by `eks.amazonaws.com`), and `nodeRoleArn`
+  "the IAM Role EKS will assign to EC2 Managed Instances", the node IAM role (trusted by
+  `ec2.amazonaws.com`). `CreatePodIdentityAssociation`
   and `UpdatePodIdentityAssociation` pass `roleArn` to `pods.eks.amazonaws.com`, but not
   `targetRoleArn`, which the association's role assumes. `CreateAccessEntry` passes `principalArn`
   to `ec2.amazonaws.com` when its `type` is `EC2_LINUX` or `EC2_WINDOWS`: "If you create an access
@@ -3192,8 +3201,8 @@ when the caller may not pass the role.
   `StartQuery`, for two); one whose role is a parameter of the runbook it runs (SSM
   `StartAutomationExecution`, Config `PutRemediationConfigurations`); one the Service Reference
   passes roles from to several services without saying which member goes where (EMR `RunJobFlow`,
-  whose `JobFlowRole` also names an instance profile, EKS `UpdateClusterConfig`, CloudWatch Logs
-  `CreateImportTask`); and one the botocore
+  whose `JobFlowRole` also names an instance profile, CloudWatch Logs `CreateImportTask`); and one
+  the botocore
   models Floci is pinned to do not have yet (SSM `RegisterDefaultHostManagementConfiguration`,
   Kinesis Analytics `ImportSnapshot`, Secrets Manager `AssociateCrossAccountReplica`), whose role
   the generator reads as soon as a release that has it is pinned. EC2's `RequestSpotFleet` names
