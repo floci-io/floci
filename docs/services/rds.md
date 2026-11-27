@@ -348,7 +348,7 @@ they belong to, as the model requires. An omitted `Enabled` activates the subscr
 | `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7001` | First host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_PORT` | `7099` | Last host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT` | `false` | `true` = `Describe*` reports the requested `Port` instead of the proxy port; connect via the proxy port |
-| `FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC` | `false` | `true` = a standalone instance serves its `Port` at its own address in its VPC, under its RDS endpoint name; see [Endpoints in a VPC](#endpoints-in-a-vpc) |
+| `FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC` | `false` | `true` = a DB instance serves its `Port` at its own address in its VPC, under its RDS endpoint name, and a DB cluster's endpoint names resolve to its instances; see [Endpoints in a VPC](#endpoints-in-a-vpc) |
 | `FLOCI_SERVICES_RDS_ENDPOINT_HOST` | _(auto-detected)_ | Hostname advertised in RDS endpoints; when set in Docker, Floci advertises each proxy's published host port |
 | `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING` | `true` | Refuse a PostgreSQL IAM auth token generated for another hostname, port or region than the endpoint publishes, as RDS does; set `false` to accept such tokens. MySQL and MariaDB always refuse them |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
@@ -375,8 +375,8 @@ host port; for example, requesting `5432` with the default
 `7001`-`7099` range returns a port in that range. Ports outside AWS's valid
 `1150`-`65535` interval are rejected.
 
-Set `FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC=true` for a standalone instance to serve its requested `Port` for real, at
-its own address in its VPC; see [Endpoints in a VPC](#endpoints-in-a-vpc).
+Set `FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC=true` for an instance, or a cluster's instances, to serve the requested
+`Port` for real, at their own addresses in their VPC; see [Endpoints in a VPC](#endpoints-in-a-vpc).
 
 Set `FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT=true` to make `Describe*` report the requested `Port`
 instead (for example so Terraform's `port` does not show a diff). The proxy still listens in the proxy
@@ -575,8 +575,8 @@ another VPC, which it does not move back.
 
 ## Endpoints in a VPC
 
-With `FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC=true`, a standalone DB instance gets its own address in its VPC, as on RDS,
-instead of sharing Floci's address on a proxy port:
+With `FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC=true`, a DB instance gets its own address in its VPC, as on RDS, instead of
+sharing Floci's address on a proxy port:
 
 - The instance is served in the subnet of its DB subnet group in its Availability Zone, or the group's first subnet
   when none is in it, at an address EC2 leases from that subnet. An instance created without a DB subnet group is in
@@ -589,8 +589,10 @@ instead of sharing Floci's address on a proxy port:
 - `DescribeDBInstances` reports that port and the name RDS gives the instance,
   `<instance>.<identifier>.<region>.rds.amazonaws.com`. The identifier is twelve letters and digits, the same for
   every instance of an account in a Region, as the RDS user guide describes it. Floci's DNS server answers the name
-  with the instance's address while it runs, and with no address while it is stopped. In the China Regions the name
-  ends in `amazonaws.com.cn`: AWS publishes no China example, so that shape is Floci's reading.
+  with the instance's address while it runs, and with no address while it is stopped. The answer lives five seconds,
+  as "Aurora DNS zones use a short TTL of five seconds" (AWS Knowledge Center), the zone an account's instance and
+  cluster names in a Region share. In the China Regions the name ends in `amazonaws.com.cn`: AWS publishes no China
+  example, so that shape is Floci's reading.
 - A relay container at the address forwards each connection to the instance's auth proxy, so IAM authentication,
   TLS and the master login work as they do on the proxy port. The relay is on the VPC's network and on RDS's Docker
   network (`FLOCI_SERVICES_RDS_DOCKER_NETWORK`, else `FLOCI_SERVICES_DOCKER_NETWORK`, else Floci's own), and reaches
@@ -604,6 +606,24 @@ instead of sharing Floci's address on a proxy port:
   After a blue/green switchover the new production instance answers on the blue name and address.
 - While a relay holds an address, `DeleteSubnet` and `DeleteVpc` refuse to remove its subnet and VPC, as they do for
   a subnet a network interface is in.
+- Each instance of an Aurora DB cluster is served the same way, at its own address, on the cluster's `Port` or its
+  engine's default: the API reference says an Aurora instance's port "is managed by the cluster", so a `Port` given
+  to `CreateDBInstance` for a cluster's instance is not used. Two clusters can both serve 5432. A cluster restored
+  from a snapshot without a `Port` of its own serves the port the snapshot reports, as the API reference gives that
+  default. `StopDBCluster` removes the instances' relays and `StartDBCluster` serves them again. A Multi-AZ DB
+  cluster, whose instances Floci does not create, and an Aurora Serverless v1 cluster (`EngineMode` `serverless`),
+  which has none, keep the proxy endpoint, where their database is reached.
+- `DescribeDBClusters` and `DescribeDBClusterEndpoints` report the names the Aurora user guide gives a cluster's
+  endpoints, `<cluster>.cluster-<identifier>.<region>.rds.amazonaws.com` for the cluster endpoint,
+  `<cluster>.cluster-ro-<identifier>...` for the reader endpoint and `<endpoint>.cluster-custom-<identifier>...` for
+  a custom endpoint. They resolve to the cluster's instances as Aurora points them: the cluster endpoint to the
+  writer, so a `FailoverDBCluster` moves it to the new writer; the reader endpoint to one of the other instances, or
+  to the writer when none of them is served; and a custom endpoint to one of the instances it holds (its static
+  members, or every instance it does not exclude, without the writer for a `READER` endpoint), picked at random, as
+  Aurora's DNS does. A name with no instance served behind it resolves to no address, as does a custom endpoint whose
+  static members have all been deleted. So does a cluster with no instance yet, as on AWS: "Until you create the
+  primary DB instance, the DB cluster endpoints remain in the Creating status" (Aurora user guide). An IAM authentication token
+  generated for any of a cluster's names is good at each of its instances, as is one for the instance's own name.
 - A `DeleteDBInstance` whose relays Docker does not confirm removed, its current one or one a subnet move left,
   fails, and the instance keeps its proxy port, so a relay never forwards to another database; a retry removes them.
   A `StopDBInstance` stops all the same, and the next start, a delete or a restart removes the relay. Until a relay
@@ -617,12 +637,12 @@ host, still connects through the proxy port, which keeps listening in the proxy 
 the name and port `DescribeDBInstances` reports.
 
 The name resolves to the private address alone: `PubliclyAccessible` changes nothing, and the address is IPv4 only.
-A state reset removes the relays with the instances.
+A state reset removes the relays with the instances, and the cluster names with the clusters.
 
 The setting needs Docker-backed VPC networks (`FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED`, on by default) and does
 nothing in mock mode. The relay runs EC2's socat image (`FLOCI_SERVICES_EC2_SOCAT_IMAGE`). An instance's VPC security
-groups do not filter traffic to its address, even with security-group enforcement on. Aurora and Multi-AZ DB
-clusters, their member instances and DB proxies keep the proxy endpoint on Floci's address.
+groups do not filter traffic to its address, even with security-group enforcement on. DB proxies keep the proxy
+endpoint on Floci's address.
 
 ## Modifying a DB instance
 
@@ -984,10 +1004,11 @@ A `READER` endpoint leaves out the cluster's current writer, so after a failover
 instance no longer shows among its members, as Aurora adjusts `READER` membership. Member names match
 the cluster's instances regardless of case and are stored as the cluster spells them.
 
-Custom endpoints are modelled, not routed: a custom endpoint reports the cluster's own endpoint host
-(read from the cluster each time, so it follows a restart onto another proxy port), so it is
-reachable, but connections through it go where the cluster endpoint sends them rather than being
-spread across the chosen members.
+Outside [Endpoints in a VPC](#endpoints-in-a-vpc), custom endpoints are modelled, not routed: a custom
+endpoint reports the cluster's own endpoint host (read from the cluster each time, so it follows a
+restart onto another proxy port), so it is reachable, but connections through it go where the
+cluster endpoint sends them rather than being spread across the chosen members. With endpoints in
+their VPC, a custom endpoint has its own name, which resolves to the instances it holds.
 
 ## Data API endpoint
 

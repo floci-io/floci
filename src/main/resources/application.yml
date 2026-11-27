@@ -655,7 +655,7 @@ floci:
       proxy-base-port: 7001
       proxy-max-port: 7099
       # advertise-requested-port: false         # FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT; true = Describe* reports the requested Port, not the proxy port
-      # endpoints-in-vpc: false                 # FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC; true = an instance in a VPC serves its Port at its own address and RDS endpoint name
+      # endpoints-in-vpc: false                 # FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC; true = an instance in a VPC serves its Port at its own address and RDS endpoint name, and a cluster's endpoint names resolve to its instances
       # endpoint-host: localhost                 # Hostname clients use; enables published-port translation in Docker
       # iam-token-endpoint-binding: true         # FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING; false accepts PostgreSQL IAM tokens generated for another hostname or port
       # Omit image overrides to adapt Floci's built-in images to EngineVersion.
