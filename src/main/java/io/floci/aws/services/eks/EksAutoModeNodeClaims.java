@@ -39,10 +39,19 @@ final class EksAutoModeNodeClaims {
 
     /**
      * The NodeClaim's name for an instance of {@code pool}: the pool's name and five characters, as Karpenter's
-     * {@code generateName} gives them, here derived from the instance ID so each pass finds the same one.
+     * {@code generateName} gives them, here derived from the instance ID.
      */
     static String name(String pool, String instanceId) {
-        byte[] hash = Digests.sha256(instanceId.getBytes(StandardCharsets.UTF_8));
+        return name(pool, instanceId, 0);
+    }
+
+    /**
+     * As above; {@code attempt} past 0 derives another name, for when the first is another instance's already. The
+     * name chosen is kept in the instance's {@code karpenter.sh/nodeclaim} tag.
+     */
+    static String name(String pool, String instanceId, int attempt) {
+        String seed = attempt == 0 ? instanceId : instanceId + "#" + attempt;
+        byte[] hash = Digests.sha256(seed.getBytes(StandardCharsets.UTF_8));
         StringBuilder suffix = new StringBuilder();
         for (int i = 0; i < 5; i++) {
             suffix.append(SUFFIX_ALPHABET.charAt(Math.floorMod(hash[i], SUFFIX_ALPHABET.length())));
@@ -54,8 +63,8 @@ final class EksAutoModeNodeClaims {
      * The NodeClaim of a launch, as it is applied: metadata and spec. {@code poolItem} is the NodePool as
      * {@code kubectl get nodepools} lists it, whose UID owns the claim and whose template gives its requirements.
      */
-    static String claim(Launch launch, String instanceId, JsonNode poolItem, Map<String, String> labels) {
-        return claim(launch, instanceId, poolItem, labels, requests(launch));
+    static String claim(Launch launch, String name, JsonNode poolItem, Map<String, String> labels) {
+        return claim(launch, name, poolItem, labels, requests(launch));
     }
 
     /** What a launch's pods request: CPU millicores, memory bytes, and how many they are. */
@@ -68,13 +77,13 @@ final class EksAutoModeNodeClaims {
      * As above, with the {@code requests} (CPU millicores, memory bytes, pods) its spec gives, or none when
      * {@code null}, as for a claim made again whose node's pods aren't known.
      */
-    static String claim(Launch launch, String instanceId, JsonNode poolItem, Map<String, String> labels,
+    static String claim(Launch launch, String name, JsonNode poolItem, Map<String, String> labels,
                         long[] requests) {
         ObjectNode claim = MAPPER.createObjectNode();
         claim.put("apiVersion", "karpenter.sh/v1");
         claim.put("kind", "NodeClaim");
         ObjectNode metadata = claim.putObject("metadata");
-        metadata.put("name", name(launch.pool().name(), instanceId));
+        metadata.put("name", name);
         ObjectNode claimLabels = metadata.putObject("labels");
         labels.forEach(claimLabels::put);
         claimLabels.put(NODECLASS_LABEL, launch.pool().nodeClass());

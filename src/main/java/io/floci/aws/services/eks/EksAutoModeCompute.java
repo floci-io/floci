@@ -81,6 +81,8 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
     static final String DISRUPTED_KEY = "karpenter.sh/disrupted";
     static final String DISRUPTED_TAINT = DISRUPTED_KEY + ":NoSchedule";
     static final String NODE_CLASS_TAG = "eks:kubernetes-node-class-name";
+    /** The tag naming an instance's NodeClaim, as Karpenter tags the instances it launches. */
+    static final String NODECLAIM_TAG = "karpenter.sh/nodeclaim";
     static final String MANAGED_LAUNCH_TAG = "aws:ec2:managed-launch";
     static final String MANAGED_LAUNCH = "eks-auto";
     /** How long a launched node may take to register before its pool may get another. */
@@ -439,19 +441,45 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         }
         LOG.infov("EKS Auto Mode pool {0} of cluster {1} launched {2} ({3}) for {4}", launch.pool().name(),
                 cluster.getName(), instanceId, launch.instanceType().instanceType, podNames(launch));
-        makeNodeClaim(cluster, region, launch, reservation.getInstances().getFirst(), imageId, poolItem,
+        Instance instance = reservation.getInstances().getFirst();
+        String claim = uniqueClaimName(cluster, region, launch.pool().name(), instanceId);
+        try {
+            ec2.createTags(region, List.of(instanceId), List.of(new Tag(NODECLAIM_TAG, claim)));
+        } catch (RuntimeException e) {
+            LOG.warnv("EKS Auto Mode instance {0} of cluster {1} wasn''t tagged with its NodeClaim: {2}", instanceId,
+                    cluster.getName(), e.getMessage());
+        }
+        makeNodeClaim(cluster, region, launch, instance, claim, imageId, poolItem,
                 EksAutoModeNodeClaims.requests(launch));
+    }
+
+    /**
+     * A NodeClaim name for a new instance of {@code pool} that none of the cluster's other instances has, as
+     * Karpenter's {@code generateName} gives a name not taken: two instances of a pool whose derived names are the
+     * same would otherwise share one claim, and deleting it would remove both nodes.
+     */
+    private String uniqueClaimName(Cluster cluster, String region, String pool, String instanceId) {
+        Set<String> taken = new HashSet<>();
+        for (Instance other : instancesOf(cluster, region, "pending", "running", "stopping", "stopped")) {
+            if (!instanceId.equals(other.getInstanceId())) {
+                taken.add(claimName(other));
+            }
+        }
+        String name = EksAutoModeNodeClaims.name(pool, instanceId);
+        for (int attempt = 1; taken.contains(name); attempt++) {
+            name = EksAutoModeNodeClaims.name(pool, instanceId, attempt);
+        }
+        return name;
     }
 
     /**
      * Applies the NodeClaim of an instance, with {@code requests} in its spec ({@code null} for none), and marks it
      * launched. One that can't be made is logged, and a later pass makes it again.
      */
-    private void makeNodeClaim(Cluster cluster, String region, Launch launch, Instance instance, String imageId,
-                               JsonNode poolItem, long[] requests) {
-        String claim = EksAutoModeNodeClaims.name(launch.pool().name(), instance.getInstanceId());
+    private void makeNodeClaim(Cluster cluster, String region, Launch launch, Instance instance, String claim,
+                               String imageId, JsonNode poolItem, long[] requests) {
         try {
-            apply(cluster, EksAutoModeNodeClaims.claim(launch, instance.getInstanceId(), poolItem,
+            apply(cluster, EksAutoModeNodeClaims.claim(launch, claim, poolItem,
                     EksAutoModeNodes.withRegion(launch.labels(), region), requests), "apply nodeclaim " + claim);
             exec(cluster, List.of("kubectl", "patch", "nodeclaim", claim, "--subresource=status", "--type=merge", "-p",
                     EksAutoModeNodeClaims.launchedStatus(clusterManager.deriveInstanceNodeProviderId(instance, region),
@@ -546,7 +574,8 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             }
             String zone = zone(instance);
             makeNodeClaim(cluster, region, new Launch(pool, type.get(), zone,
-                    EksAutoModeNodes.labels(type.get(), pool, zone), List.of()), instance, instance.getImageId(),
+                    EksAutoModeNodes.labels(type.get(), pool, zone), List.of()), instance, claimName(instance),
+                    instance.getImageId(),
                     pools.items().get(pool.name()),
                     requestsByNode.get(clusterManager.deriveInstanceNodeName(instance, region)));
         }
@@ -577,9 +606,14 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         }
     }
 
-    /** The name of an instance's NodeClaim, from its pool and instance ID. */
+    /**
+     * The name of an instance's NodeClaim: its {@code karpenter.sh/nodeclaim} tag, or, for an instance without one
+     * (its tagging failed), the name derived from its pool and instance ID.
+     */
     private static String claimName(Instance instance) {
-        return EksAutoModeNodeClaims.name(String.valueOf(tag(instance, POOL_TAG)), instance.getInstanceId());
+        String tagged = tag(instance, NODECLAIM_TAG);
+        return tagged != null ? tagged
+                : EksAutoModeNodeClaims.name(String.valueOf(tag(instance, POOL_TAG)), instance.getInstanceId());
     }
 
     /**

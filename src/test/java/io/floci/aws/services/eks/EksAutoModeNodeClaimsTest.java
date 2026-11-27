@@ -30,6 +30,10 @@ class EksAutoModeNodeClaimsTest {
         assertTrue(name.matches("general-purpose-[bcdfghjklmnpqrstvwxz2456789]{5}"), name);
         assertEquals(name, EksAutoModeNodeClaims.name("general-purpose", "i-0123456789abcdef0"));
         assertNotEquals(name, EksAutoModeNodeClaims.name("general-purpose", "i-0123456789abcdef1"));
+        // Another attempt derives another name, for when the first is taken.
+        String second = EksAutoModeNodeClaims.name("general-purpose", "i-0123456789abcdef0", 1);
+        assertTrue(second.matches("general-purpose-[bcdfghjklmnpqrstvwxz2456789]{5}"), second);
+        assertNotEquals(name, second);
     }
 
     /**
@@ -54,13 +58,14 @@ class EksAutoModeNodeClaimsTest {
                 new PendingPod("default", "a", 100, 64L << 20, Map.of(), List.of(), List.of()),
                 new PendingPod("default", "b", 250, 32L << 20, Map.of(), List.of(), List.of())));
 
-        JsonNode claim = MAPPER.readTree(EksAutoModeNodeClaims.claim(launch, "i-1", MAPPER.readTree(poolItem),
+        JsonNode claim = MAPPER.readTree(EksAutoModeNodeClaims.claim(launch, "general-purpose-kw46r",
+                MAPPER.readTree(poolItem),
                 launch.labels()));
 
         assertEquals("karpenter.sh/v1", claim.path("apiVersion").asText());
         assertEquals("NodeClaim", claim.path("kind").asText());
         JsonNode metadata = claim.path("metadata");
-        assertEquals(EksAutoModeNodeClaims.name("general-purpose", "i-1"), metadata.path("name").asText());
+        assertEquals("general-purpose-kw46r", metadata.path("name").asText());
         assertEquals("[\"karpenter.sh/termination\"]", metadata.path("finalizers").toString());
         assertEquals("NodePool", metadata.path("ownerReferences").get(0).path("kind").asText());
         assertEquals("b3a94e41", metadata.path("ownerReferences").get(0).path("uid").asText());
@@ -89,14 +94,14 @@ class EksAutoModeNodeClaimsTest {
         NodePool pool = new NodePool("batch", "default", List.of(), List.of(), Map.of(), 0, null, List.of());
 
         JsonNode claim = MAPPER.readTree(EksAutoModeNodeClaims.claim(new Launch(pool, large, null, Map.of(),
-                List.of()), "i-1", MAPPER.readTree("{\"metadata\": {\"name\": \"batch\"}}"), Map.of()));
+                List.of()), "batch-kw46r", MAPPER.readTree("{\"metadata\": {\"name\": \"batch\"}}"), Map.of()));
 
         assertEquals("336h", claim.path("spec").path("expireAfter").asText());
         assertEquals("24h0m0s", claim.path("spec").path("terminationGracePeriod").asText());
         assertFalse(claim.path("metadata").has("ownerReferences"));
         // A claim made again whose node's pods aren't known requests nothing rather than zero.
         assertFalse(MAPPER.readTree(EksAutoModeNodeClaims.claim(new Launch(pool, large, null, Map.of(), List.of()),
-                "i-1", MAPPER.readTree("{\"metadata\": {\"name\": \"batch\"}}"), Map.of(), null))
+                "batch-kw46r", MAPPER.readTree("{\"metadata\": {\"name\": \"batch\"}}"), Map.of(), null))
                 .path("spec").has("resources"));
     }
 

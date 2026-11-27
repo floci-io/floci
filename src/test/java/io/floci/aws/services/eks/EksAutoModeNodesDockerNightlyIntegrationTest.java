@@ -147,15 +147,16 @@ class EksAutoModeNodesDockerNightlyIntegrationTest {
         Instance instance = launched.getFirst();
         assertEquals(subnet, instance.getSubnetId());
         Map<String, String> tags = instance.getTags().stream().collect(Collectors.toMap(Tag::getKey, Tag::getValue));
+        // Tagged with its NodeClaim's name too, as Karpenter tags the instances it launches.
+        String claim = EksAutoModeNodeClaims.name("general-purpose", instance.getInstanceId());
         assertEquals(Map.of("eks:eks-cluster-name", cluster.getName(), "eks:kubernetes-node-pool-name", "general-purpose",
                 "eks:kubernetes-node-class-name", "default", "kubernetes.io/cluster/" + cluster.getName(), "owned",
-                "aws:ec2:managed-launch", "eks-auto"), tags);
+                "aws:ec2:managed-launch", "eks-auto", EksAutoModeCompute.NODECLAIM_TAG, claim), tags);
         InstanceProfile profile = RequestScopes.callAs(ACCOUNT, REGION, () -> iam.listInstanceProfiles(
                 "/eks/" + REGION + "/" + cluster.getName() + "/")).getFirst();
         assertEquals(List.of(role), profile.getRoleNames());
         assertEquals(profile.getArn(), instance.getIamInstanceProfileArn());
         // Its NodeClaim, launched, owned by the pool.
-        String claim = EksAutoModeNodeClaims.name("general-purpose", instance.getInstanceId());
         assertEquals("True NodePool general-purpose", node.kubectlOutput("get", "nodeclaim", claim, "-o",
                 "jsonpath={.status.conditions[?(@.type==\"Launched\")].status} "
                         + "{.metadata.ownerReferences[0].kind} {.metadata.labels.karpenter\\.sh/nodepool}"));

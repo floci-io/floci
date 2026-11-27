@@ -157,8 +157,9 @@ class EksAutoModeComputeTest {
         verify(iam).addRoleToInstanceProfile(profileName.getValue(), "auto-node");
         assertEquals("arn:aws:iam::000000000000:instance-profile/eks/us-east-1/prod/" + profileName.getValue(),
                 profile.getValue());
-        // Its NodeClaim, then the claim's launched status.
+        // Its NodeClaim, named in the instance's tag, then the claim's launched status.
         String claim = EksAutoModeNodeClaims.name("general-purpose", "i-1");
+        verifyTaggedWithClaim("i-1", claim);
         verify(clusterManager).execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length == 3
                 && "sh".equals(cmd[0]) && cmd[2].contains("\"kind\":\"NodeClaim\"")
                 && cmd[2].contains("\"name\":\"" + claim + "\"")), anyInt());
@@ -197,6 +198,26 @@ class EksAutoModeComputeTest {
                 "nodeclaim", live, "--ignore-not-found=true", "--wait=false"}, 15);
         verify(clusterManager, never()).execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length > 3
                 && "someone-elses".equals(cmd[3])), anyInt());
+    }
+
+    /**
+     * A launched instance whose derived claim name another instance of its pool has already gets another, so two
+     * nodes never share one claim.
+     */
+    @Test
+    void aLaunchedInstanceWhoseClaimNameIsTakenGetsAnother() {
+        Instance other = new Instance();
+        other.setInstanceId("i-other");
+        String taken = EksAutoModeNodeClaims.name("general-purpose", "i-1");
+        other.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose"),
+                new Tag(EksAutoModeCompute.NODECLAIM_TAG, taken)));
+        instancesByState(List.of(), List.of(other), List.of());
+
+        compute.reconcile(cluster("prod"), REGION);
+
+        String claim = EksAutoModeNodeClaims.name("general-purpose", "i-1", 1);
+        verifyTaggedWithClaim("i-1", claim);
+        verifyClaimMarkedLaunched(claim);
     }
 
     /** A running instance whose claim is missing, as when making it failed, gets it again without a new launch. */
@@ -276,6 +297,13 @@ class EksAutoModeComputeTest {
     private void aReadyNode(String nodeName) {
         lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"" + nodeName + "\", \"labels\": {}}, "
                 + "\"status\": {\"conditions\": [{\"type\": \"Ready\", \"status\": \"True\"}]}}]}");
+    }
+
+    /** That instance {@code instanceId} was tagged with its NodeClaim's name, {@code claim}. */
+    private void verifyTaggedWithClaim(String instanceId, String claim) {
+        verify(ec2).createTags(eq(REGION), eq(List.of(instanceId)), argThat(tags -> tags.size() == 1
+                && EksAutoModeCompute.NODECLAIM_TAG.equals(tags.getFirst().getKey())
+                && claim.equals(tags.getFirst().getValue())));
     }
 
     /** That {@code claim}'s status was patched to say it was launched. */
