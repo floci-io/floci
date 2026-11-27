@@ -175,6 +175,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         Map<String, JsonNode> nodesByName = nodesByName(cluster);
         removeStrayNodes(cluster, region, nodesByName);
         Set<String> claimsDeleted = syncNodeClaims(cluster, region, nodesByName, podList);
+        removeStoppedOfDeletedClaims(cluster, region, claimsDeleted);
         if (launched.isEmpty() && pods.isEmpty()) {
             return;
         }
@@ -203,8 +204,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                 neverRegistered.add(instance);
                 continue;
             }
-            if (pool == null || claimsDeleted.contains(EksAutoModeNodeClaims.name(String.valueOf(tag(instance,
-                    POOL_TAG)), instance.getInstanceId()))) {
+            if (pool == null || claimsDeleted.contains(claimName(instance))) {
                 // Karpenter removes the nodes of a NodePool that was deleted, or that UpdateClusterConfig dropped,
                 // and the node of a NodeClaim that was deleted, as deleting a claim is how a node is removed.
                 poolGone.add(instance);
@@ -482,8 +482,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         Set<String> deleted = new HashSet<>();
         Map<String, Instance> live = new HashMap<>();
         for (Instance instance : instancesOf(cluster, region, "pending", "running", "stopping", "stopped")) {
-            live.put(EksAutoModeNodeClaims.name(String.valueOf(tag(instance, POOL_TAG)), instance.getInstanceId()),
-                    instance);
+            live.put(claimName(instance), instance);
         }
         Set<String> listed = new HashSet<>();
         for (JsonNode claim : claims.path("items")) {
@@ -518,8 +517,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         }
         if (podList != null) {
             List<Instance> unclaimed = instancesOf(cluster, region, "pending", "running").stream()
-                    .filter(i -> !listed.contains(EksAutoModeNodeClaims.name(String.valueOf(tag(i, POOL_TAG)),
-                            i.getInstanceId()))).toList();
+                    .filter(i -> !listed.contains(claimName(i))).toList();
             if (!unclaimed.isEmpty()) {
                 remakeNodeClaims(cluster, region, unclaimed, EksAutoModeNodes.requestsByNode(podList));
             }
@@ -552,6 +550,36 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                     pools.items().get(pool.name()),
                     requestsByNode.get(clusterManager.deriveInstanceNodeName(instance, region)));
         }
+    }
+
+    /**
+     * The instances of deleted claims that are stopping or stopped, which the pass's pending and running ones leave
+     * out, go too: a stopped node serves no pods, so its node is deleted without a drain and its instance terminated.
+     * The next pass then ends the claim.
+     */
+    private void removeStoppedOfDeletedClaims(Cluster cluster, String region, Set<String> claimsDeleted) {
+        if (claimsDeleted.isEmpty()) {
+            return;
+        }
+        for (Instance instance : instancesOf(cluster, region, "stopping", "stopped")) {
+            if (!claimsDeleted.contains(claimName(instance))) {
+                continue;
+            }
+            try {
+                clusterManager.removeJoinedNode(cluster, instance);
+                ec2.terminateInstances(region, List.of(instance.getInstanceId()));
+                LOG.infov("EKS Auto Mode removed stopped instance {0} of cluster {1}, whose claim was deleted",
+                        instance.getInstanceId(), cluster.getName());
+            } catch (RuntimeException e) {
+                LOG.warnv("EKS Auto Mode stopped instance {0} of cluster {1}, whose claim was deleted, wasn''t "
+                        + "removed: {2}", instance.getInstanceId(), cluster.getName(), e.getMessage());
+            }
+        }
+    }
+
+    /** The name of an instance's NodeClaim, from its pool and instance ID. */
+    private static String claimName(Instance instance) {
+        return EksAutoModeNodeClaims.name(String.valueOf(tag(instance, POOL_TAG)), instance.getInstanceId());
     }
 
     /**

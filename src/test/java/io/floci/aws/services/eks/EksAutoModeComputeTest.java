@@ -558,6 +558,33 @@ class EksAutoModeComputeTest {
                 "nodeclaim", claim, "--type=merge", "-p", "{\"metadata\":{\"finalizers\":null}}"}, 15);
     }
 
+    /** A deleted claim whose instance was stopped has its node deleted, without a drain, and its instance ended. */
+    @Test
+    void aDeletedClaimsStoppedInstanceIsRemoved() {
+        Instance stopped = new Instance();
+        stopped.setInstanceId("i-stopped");
+        stopped.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(stopped));
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenAnswer(inv -> {
+            Map<String, List<String>> filters = inv.getArgument(2);
+            return filters.get("instance-state-name").contains("stopped") ? List.of(reservation) : List.of();
+        });
+        String claim = EksAutoModeNodeClaims.name("general-purpose", "i-stopped");
+        lists.put("nodeclaims", "{\"items\": [" + managedClaim(claim, "").replace("\"metadata\": {",
+                "\"metadata\": {\"deletionTimestamp\": \"2026-11-27T00:00:00Z\", ") + "]}");
+        lists.put("pods", "{\"items\": []}");
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
+        InOrder order = inOrder(clusterManager, ec2);
+        order.verify(clusterManager).removeJoinedNode(cluster, stopped);
+        order.verify(ec2).terminateInstances(REGION, List.of("i-stopped"));
+        verify(clusterManager, never()).execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length > 1
+                && "drain".equals(cmd[1])), anyInt());
+    }
+
     /**
      * A pool's nodes that are already unavailable use up its disruption budget first, as Karpenter counts it: of two
      * nodes, at 10% one may go, and with one not Ready the empty other stays; once it is Ready again, the empty one
