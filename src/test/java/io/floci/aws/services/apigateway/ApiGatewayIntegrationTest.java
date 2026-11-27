@@ -53,7 +53,7 @@ class ApiGatewayIntegrationTest {
     @Test @Order(3)
     void listRestApis() {
         given()
-                .when().get("/restapis")
+                .when().get("/restapis?limit=500")
                 .then()
                 .statusCode(200)
                 .body("item.id", hasItem(apiId));

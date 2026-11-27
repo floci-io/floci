@@ -88,7 +88,7 @@ class ApiGatewayOpenApiWarningsIntegrationTest {
     }
 
     private static List<String> apiIds() {
-        return given().get("/restapis").then().statusCode(200).extract().path("item.id");
+        return given().get("/restapis?limit=500").then().statusCode(200).extract().path("item.id");
     }
 
     @Test

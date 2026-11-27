@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.TlsCertificateManager;
+import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -12,7 +13,9 @@ import io.floci.aws.services.apigateway.model.RestApi;
 import io.floci.aws.services.apigatewayv2.ApiGatewayV2OpenApiImporter;
 import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
 import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -92,7 +95,8 @@ class ApiGatewayRootResourceLookupTest {
         api.setRootResourceId("root-id");
 
         ApiGatewayService mockedService = mock(ApiGatewayService.class);
-        when(mockedService.getRestApis(REGION)).thenReturn(List.of(api));
+        when(mockedService.getRestApiPage(REGION, null, null))
+                .thenReturn(new PaginatedResult<>(List.of(api), null));
         RegionResolver regionResolver = mock(RegionResolver.class);
         HttpHeaders headers = mock(HttpHeaders.class);
         when(regionResolver.resolveRegion(headers)).thenReturn(REGION);
@@ -101,7 +105,10 @@ class ApiGatewayRootResourceLookupTest {
                 mock(ApiGatewayV2Service.class), mock(ApiGatewayV2OpenApiImporter.class),
                 regionResolver, objectMapper, null);
 
-        Response response = controller.getRestApis(headers);
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
+
+        Response response = controller.getRestApis(headers, uriInfo, null, null);
         JsonNode body = objectMapper.readTree((String) response.getEntity());
 
         assertEquals("root-id", body.path("item").get(0).path("rootResourceId").asText());

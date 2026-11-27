@@ -527,6 +527,14 @@ public class ApiGatewayService implements ResourceProvider, Resettable, PassedRo
         return apiStore.scan(k -> k.startsWith(prefix));
     }
 
+    /** AWS answers an explicitly empty {@code position}, and Floci a blank one, with a BadRequestException instead of the first page. */
+    public PaginatedResult<RestApi> getRestApiPage(String region, Integer limit, String position) {
+        if (position != null && position.isBlank()) {
+            throw new AwsException("BadRequestException", "Invalid position parameter", 400);
+        }
+        return pageById(getRestApis(region), RestApi::getId, limit, position);
+    }
+
     public synchronized void deleteRestApi(String region, String apiId) {
         getRestApi(region, apiId);
         apiStore.delete(apiKey(region, apiId));
