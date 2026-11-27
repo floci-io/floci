@@ -68,6 +68,18 @@ class CloudFormationS3PolicyJsonIntegrationTest {
                 S3Exception denied = assertThrows(S3Exception.class,
                         () -> s3.getObjectAsBytes(request -> request.bucket(name).key("owned")));
                 assertEquals("AccessDenied", denied.awsErrorDetails().errorCode());
+
+                ((ObjectNode) resources.path("Bucket").path("Properties")).putArray("Tags")
+                        .addObject().put("Key", "Revision").put("Value", "updated");
+                cfn.updateStack(request -> request.stackName(name).templateBody(template.toString()));
+                assertEquals("UPDATE_COMPLETE",
+                        CfnStackWaits.awaitStatus(cfn, name, "UPDATE_COMPLETE").stackStatusAsString());
+                JsonNode updated = MAPPER.readTree(s3.getBucketPolicy(request -> request.bucket(name)).policy());
+                assertTrue(updated.isObject());
+                assertEquals(stored, updated);
+                S3Exception deniedAfterUpdate = assertThrows(S3Exception.class,
+                        () -> s3.getObjectAsBytes(request -> request.bucket(name).key("owned")));
+                assertEquals("AccessDenied", deniedAfterUpdate.awsErrorDetails().errorCode());
             } finally {
                 if (objectCreated) {
                     s3.deleteObject(request -> request.bucket(name).key("owned"));
