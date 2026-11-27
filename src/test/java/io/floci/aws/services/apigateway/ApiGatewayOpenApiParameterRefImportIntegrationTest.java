@@ -106,7 +106,7 @@ class ApiGatewayOpenApiParameterRefImportIntegrationTest {
                 .body("message", containsString("#/components/parameters/Missing"));
 
         given()
-                .when().get("/restapis")
+                .when().get("/restapis?limit=500")
                 .then()
                 .statusCode(200)
                 .body("item.name", not(hasItem("MissingParameterRefAPI")));
@@ -232,7 +232,7 @@ class ApiGatewayOpenApiParameterRefImportIntegrationTest {
                 .body("message", containsString("#/components/parameters/Loop"));
 
         given()
-                .when().get("/restapis")
+                .when().get("/restapis?limit=500")
                 .then()
                 .statusCode(200)
                 .body("item.name", not(hasItem("CyclicParameterRefAPI")));

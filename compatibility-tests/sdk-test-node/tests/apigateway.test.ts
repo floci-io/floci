@@ -102,7 +102,7 @@ describe('API Gateway v1 — management plane', () => {
     });
 
     it('should list REST APIs including the created one', async () => {
-      const res = await gw.send(new GetRestApisCommand({}));
+      const res = await gw.send(new GetRestApisCommand({ limit: 500 }));
       expect(res.items?.some(a => a.id === apiId)).toBe(true);
     });
 

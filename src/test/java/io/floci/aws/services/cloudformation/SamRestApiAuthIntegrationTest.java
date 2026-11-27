@@ -65,7 +65,7 @@ class SamRestApiAuthIntegrationTest {
         given().contentType(ContentType.JSON).queryParam("mode", "import")
                 .body(document.toString()).post("/restapis").then().statusCode(400)
                 .body("message", containsString("Only one Authorizer or IAM authorization"));
-        given().get("/restapis").then().statusCode(200)
+        given().get("/restapis?limit=500").then().statusCode(200)
                 .body("item.find { it.name == '" + title + "' }", equalTo(null));
     }
 

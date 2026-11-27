@@ -1137,7 +1137,7 @@ class SamTransformIntegrationTest {
 
         String apiId = given()
         .when()
-            .get("/restapis")
+            .get("/restapis?limit=500")
         .then()
             .statusCode(200)
             .body("item.find { it.name == '" + apiName + "' }.name", equalTo(apiName))
@@ -1219,7 +1219,7 @@ class SamTransformIntegrationTest {
 
         String apiId = given()
         .when()
-            .get("/restapis")
+            .get("/restapis?limit=500")
         .then()
             .statusCode(200)
             .body("item.find { it.name == '" + apiName + "' }.name", equalTo(apiName))
@@ -1291,7 +1291,7 @@ class SamTransformIntegrationTest {
         // provisioner that never reads DefinitionBody at all cannot pass this test.
         String apiId = given()
         .when()
-            .get("/restapis")
+            .get("/restapis?limit=500")
         .then()
             .statusCode(200)
             .body("item.name", hasItem(apiName))
