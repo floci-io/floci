@@ -5,28 +5,27 @@ setup() {
     load 'test_helper/common-setup'
     CLUSTER_ID="bats-neptune-$(unique_name)"
     INSTANCE_ID="bats-neptune-inst-$(unique_name)"
-    CLUSTER_CREATED=false
-    INSTANCE_CREATED=false
+}
+
+# A cold graph backend can take longer than the CLI's default 60-second read deadline.
+neptune_cmd() {
+    aws_cmd --cli-read-timeout 180 neptune "$@"
 }
 
 teardown() {
-    if [ "$INSTANCE_CREATED" = "true" ]; then
-        aws_cmd neptune delete-db-instance \
-            --db-instance-identifier "$INSTANCE_ID" >/dev/null 2>&1 || true
-    fi
-    if [ "$CLUSTER_CREATED" = "true" ]; then
-        aws_cmd neptune delete-db-cluster \
-            --db-cluster-identifier "$CLUSTER_ID" \
-            --skip-final-snapshot >/dev/null 2>&1 || true
-    fi
+    # The server may have created the resource even if the client did not receive a successful response.
+    neptune_cmd delete-db-instance \
+        --db-instance-identifier "$INSTANCE_ID" >/dev/null 2>&1 || true
+    neptune_cmd delete-db-cluster \
+        --db-cluster-identifier "$CLUSTER_ID" \
+        --skip-final-snapshot >/dev/null 2>&1 || true
 }
 
 @test "Neptune: create DB cluster" {
-    run aws_cmd neptune create-db-cluster \
+    run neptune_cmd create-db-cluster \
         --db-cluster-identifier "$CLUSTER_ID" \
         --engine neptune
     assert_success
-    CLUSTER_CREATED=true
 
     id=$(json_get "$output" '.DBCluster.DBClusterIdentifier')
     engine=$(json_get "$output" '.DBCluster.Engine')
@@ -42,12 +41,11 @@ teardown() {
 }
 
 @test "Neptune: create duplicate cluster fails" {
-    aws_cmd neptune create-db-cluster \
+    neptune_cmd create-db-cluster \
         --db-cluster-identifier "$CLUSTER_ID" \
         --engine neptune >/dev/null
-    CLUSTER_CREATED=true
 
-    run aws_cmd neptune create-db-cluster \
+    run neptune_cmd create-db-cluster \
         --db-cluster-identifier "$CLUSTER_ID" \
         --engine neptune
     assert_failure
@@ -55,12 +53,11 @@ teardown() {
 }
 
 @test "Neptune: describe DB cluster by ID" {
-    aws_cmd neptune create-db-cluster \
+    neptune_cmd create-db-cluster \
         --db-cluster-identifier "$CLUSTER_ID" \
         --engine neptune >/dev/null
-    CLUSTER_CREATED=true
 
-    run aws_cmd neptune describe-db-clusters \
+    run neptune_cmd describe-db-clusters \
         --db-cluster-identifier "$CLUSTER_ID"
     assert_success
 
@@ -69,12 +66,11 @@ teardown() {
 }
 
 @test "Neptune: modify DB cluster IAM auth" {
-    aws_cmd neptune create-db-cluster \
+    neptune_cmd create-db-cluster \
         --db-cluster-identifier "$CLUSTER_ID" \
         --engine neptune >/dev/null
-    CLUSTER_CREATED=true
 
-    run aws_cmd neptune modify-db-cluster \
+    run neptune_cmd modify-db-cluster \
         --db-cluster-identifier "$CLUSTER_ID" \
         --enable-iam-database-authentication
     assert_success
@@ -84,18 +80,16 @@ teardown() {
 }
 
 @test "Neptune: create DB instance in cluster" {
-    aws_cmd neptune create-db-cluster \
+    neptune_cmd create-db-cluster \
         --db-cluster-identifier "$CLUSTER_ID" \
         --engine neptune >/dev/null
-    CLUSTER_CREATED=true
 
-    run aws_cmd neptune create-db-instance \
+    run neptune_cmd create-db-instance \
         --db-instance-identifier "$INSTANCE_ID" \
         --db-cluster-identifier "$CLUSTER_ID" \
         --db-instance-class db.r5.large \
         --engine neptune
     assert_success
-    INSTANCE_CREATED=true
 
     id=$(json_get "$output" '.DBInstance.DBInstanceIdentifier')
     cluster=$(json_get "$output" '.DBInstance.DBClusterIdentifier')
@@ -107,18 +101,16 @@ teardown() {
 }
 
 @test "Neptune: describe DB instance by ID" {
-    aws_cmd neptune create-db-cluster \
+    neptune_cmd create-db-cluster \
         --db-cluster-identifier "$CLUSTER_ID" \
         --engine neptune >/dev/null
-    CLUSTER_CREATED=true
-    aws_cmd neptune create-db-instance \
+    neptune_cmd create-db-instance \
         --db-instance-identifier "$INSTANCE_ID" \
         --db-cluster-identifier "$CLUSTER_ID" \
         --db-instance-class db.r5.large \
         --engine neptune >/dev/null
-    INSTANCE_CREATED=true
 
-    run aws_cmd neptune describe-db-instances \
+    run neptune_cmd describe-db-instances \
         --db-instance-identifier "$INSTANCE_ID"
     assert_success
 
@@ -127,18 +119,16 @@ teardown() {
 }
 
 @test "Neptune: delete cluster with instance fails" {
-    aws_cmd neptune create-db-cluster \
+    neptune_cmd create-db-cluster \
         --db-cluster-identifier "$CLUSTER_ID" \
         --engine neptune >/dev/null
-    CLUSTER_CREATED=true
-    aws_cmd neptune create-db-instance \
+    neptune_cmd create-db-instance \
         --db-instance-identifier "$INSTANCE_ID" \
         --db-cluster-identifier "$CLUSTER_ID" \
         --db-instance-class db.r5.large \
         --engine neptune >/dev/null
-    INSTANCE_CREATED=true
 
-    run aws_cmd neptune delete-db-cluster \
+    run neptune_cmd delete-db-cluster \
         --db-cluster-identifier "$CLUSTER_ID" \
         --skip-final-snapshot
     assert_failure
@@ -146,25 +136,21 @@ teardown() {
 }
 
 @test "Neptune: delete DB instance then cluster" {
-    aws_cmd neptune create-db-cluster \
+    neptune_cmd create-db-cluster \
         --db-cluster-identifier "$CLUSTER_ID" \
         --engine neptune >/dev/null
-    CLUSTER_CREATED=true
-    aws_cmd neptune create-db-instance \
+    neptune_cmd create-db-instance \
         --db-instance-identifier "$INSTANCE_ID" \
         --db-cluster-identifier "$CLUSTER_ID" \
         --db-instance-class db.r5.large \
         --engine neptune >/dev/null
-    INSTANCE_CREATED=true
 
-    run aws_cmd neptune delete-db-instance \
+    run neptune_cmd delete-db-instance \
         --db-instance-identifier "$INSTANCE_ID"
     assert_success
-    INSTANCE_CREATED=false
 
-    run aws_cmd neptune delete-db-cluster \
+    run neptune_cmd delete-db-cluster \
         --db-cluster-identifier "$CLUSTER_ID" \
         --skip-final-snapshot
     assert_success
-    CLUSTER_CREATED=false
 }
