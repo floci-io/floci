@@ -4516,7 +4516,10 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
         DbInstanceStatus status = instance.getStatus();
-        if (status == DbInstanceStatus.CREATING || status == DbInstanceStatus.DELETING || isStoppedOrInTransit(status)) {
+        if (status == DbInstanceStatus.CREATING) {
+            throw new AwsException("InvalidDBInstanceState", "Database instance is not in available state.", 400);
+        }
+        if (status == DbInstanceStatus.DELETING || isStoppedOrInTransit(status)) {
             throw new AwsException("InvalidDBInstanceState",
                     "DB instance " + id + " is in state " + status.name().toLowerCase(Locale.ROOT)
                             + " and cannot be modified.", 400);
@@ -5516,7 +5519,13 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
 
-        if (instance.getStatus() == DbInstanceStatus.CREATING || instance.getStatus() == DbInstanceStatus.DELETING) {
+        if (instance.getStatus() == DbInstanceStatus.CREATING) {
+            throw new AwsException("InvalidDBInstanceState",
+                    "Can only reboot db instances with state in: available, storage-optimization, "
+                            + "storage-initialization, incompatible-credentials, incompatible-parameters.  "
+                            + "Instance " + id + " has state: creating.", 400);
+        }
+        if (instance.getStatus() == DbInstanceStatus.DELETING) {
             throw new AwsException("InvalidDBInstanceState", "DB instance " + id + " is not in available state.", 400);
         }
         instance.setStatus(DbInstanceStatus.REBOOTING);

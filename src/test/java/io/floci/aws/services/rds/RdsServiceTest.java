@@ -285,6 +285,10 @@ class RdsServiceTest {
                 assertEquals("InvalidDBInstanceState", modify.getErrorCode());
                 AwsException reboot = assertThrows(AwsException.class, () -> rdsService.rebootDbInstance("starting-db"));
                 assertEquals("InvalidDBInstanceState", reboot.getErrorCode());
+                assertEquals(400, reboot.getHttpStatus());
+                assertEquals("Can only reboot db instances with state in: available, storage-optimization, "
+                        + "storage-initialization, incompatible-credentials, incompatible-parameters.  "
+                        + "Instance starting-db has state: creating.", reboot.getMessage());
                 DbInstance pending = rdsService.ensureInstanceBackend("starting-db", "us-east-1");
                 assertEquals(DbInstanceStatus.CREATING, pending.getStatus());
                 assertNull(pending.getContainerId());
@@ -530,6 +534,7 @@ class RdsServiceTest {
                     () -> rdsService.modifyDbInstance(id, null, null, null, null, null, "us-east-1", false));
             assertEquals("InvalidDBInstanceState", failure.getErrorCode());
             assertEquals(400, failure.getHttpStatus());
+            assertEquals("Database instance is not in available state.", failure.getMessage());
             DbInstance pending = rdsService.getDbInstance(id);
             assertEquals(DbInstanceStatus.CREATING, pending.getStatus());
             assertTrue(pending.isAutoMinorVersionUpgrade());
