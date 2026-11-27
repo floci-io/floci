@@ -31,7 +31,11 @@ operation is corrected here, each with its reason: a role member it does not see
 a member it sees that passes no role (`EXCLUDED_MEMBERS`), and which service a member's role goes to
 when the reference names several (`MEMBER_SERVICES`). Where a namespace's documentation says it, which
 service that is comes from a vendored source instead (`ROLE_SOURCES`): EKS's API reference names the
-role each member takes, and its user guide the service each role's trust policy is for.
+role each member takes, and its user guide the service each role's trust policy is for; EMR's
+management guide names the default role of each role RunJobFlow takes and the service its full access
+policy passes each to, and its API reference which member names an instance profile, whose roles are
+the ones passed (`instanceProfile`), and which names a runtime role, whose access a condition key
+controls instead, so it passes none.
 
 Only the namespaces in `NAMESPACES` are read, and in them every operation the reference lists with
 `iam:PassRole`, whether Floci serves it or not, so an operation Floci adds is checked from the
@@ -75,6 +79,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import fetch_eks_roles
+import fetch_emr_roles
 from regen_iam_authorized_actions import fetch_references
 from regen_partitions import resolve_botocore_data
 from regen_query_services import latest_model_dir, load_model
@@ -272,8 +277,6 @@ NOT_READ = {
     "ec2:RequestSpotFleet": "the request names its roles in EC2's own protocol, one of them as an instance profile",
     "ecs:CreateDaemon": "the roles are the daemon task definition's, which only a lookup finds",
     "ecs:UpdateDaemon": "the roles are the daemon task definition's, which only a lookup finds",
-    "elasticmapreduce:RunJobFlow": "JobFlowRole names an instance profile, and the reference passes the roles "
-                                   "to three services without saying which goes where",
     "elasticmapreduce:UpdateStudio": NO_ROLE_MEMBER,
     "glue:GetJob": NO_ROLE_MEMBER,
     "glue:GetJobs": NO_ROLE_MEMBER,
@@ -413,14 +416,24 @@ MEMBER_SERVICES = {
 # computeConfig.nodeRoleArn as "the IAM Role EKS will assign to EC2 Managed Instances", naming the guide's IAM
 # reference for EKS Auto Mode, whose section of the node role links the guide's page of it, whose trust policy names
 # "ec2.amazonaws.com"; tools/aws/fetch_eks_roles.py vendors those pages and `vendored_service` reads them, choosing
-# among the services the reference names. The file is written by its own script from the pages, unchanged, and nothing
-# about an operation is stated here.
+# among the services the reference names. And granted for EMR: the management guide's page of each role RunJobFlow
+# takes names its default role ("The default role name is EMR_EC2_DefaultRole"), and the full access policy it gives
+# users passes each default role to its service alone ("iam:PassedToService": "ec2.amazonaws.com*"); the API reference
+# says JobFlowRole names an instance profile ("Also called instance profile and Amazon EC2 role"), whose roles are the
+# ones passed, the CLI reference's create-cluster examples give the others by name ("--service-role EMR_DefaultRole"),
+# and the guide's page on runtime roles that access to StepExecutionRoleArn's runtime role is controlled
+# by a condition key ("You can control access to the runtime role with the condition key
+# elasticmapreduce:ExecutionRoleArn"), so it passes none; tools/aws/fetch_emr_roles.py vendors those pages and
+# `vendored_role` reads them. Each file is written by its own script from the pages, unchanged, and nothing about an
+# operation is stated here.
 ROLE_SOURCES: dict[str, Path] = {
     "eks": REPO_ROOT / "tools/aws/sources/eks-roles.json",
+    "elasticmapreduce": REPO_ROOT / "tools/aws/sources/emr-roles.json",
 }
 # The script that writes each namespace's role source, whose pages `verify_role_sources` reads it against.
 ROLE_FETCHERS = {
     "eks": fetch_eks_roles,
+    "elasticmapreduce": fetch_emr_roles,
 }
 
 
@@ -614,10 +627,10 @@ def _role_source(namespace: str) -> tuple[dict, ...]:
     return () if path is None else tuple(json.loads(path.read_text(encoding="utf-8"))["members"])
 
 
-def vendored_service(operation: str, path: str, passed_to: list[str], models: dict[str, dict]) -> str | None:
-    """The one of `passed_to` the role at `path` is for, by the namespace's vendored role source (`ROLE_SOURCES`):
-    the service a trust policy of the role its member names is for, the member given by its operation when it is the
-    request's own and by the botocore type holding it otherwise. None for a member the source does not give."""
+def vendored_role(operation: str, path: str, models: dict[str, dict]) -> dict | None:
+    """What the namespace's vendored role source (`ROLE_SOURCES`) gives for the member at `path`, the member given by
+    its operation when it is the request's own and by the botocore type holding it otherwise; None for a member the
+    source does not give."""
     name = operation.split(":", 1)[1]
     own = PATH_STEP_RE.match(path) is not None
     for model in models.values():
@@ -626,15 +639,25 @@ def vendored_service(operation: str, path: str, passed_to: list[str], models: di
             continue
         owner, member, _shape = walked
         for entry in _role_source(namespace_of(operation)):
-            if entry["member"] != member or (entry.get("operation") != name if own else entry.get("type") != owner):
-                continue
-            services = [service.removesuffix(SERVICE_SUFFIX) for service in entry["trustedBy"]]
-            chosen = [service for service in services if service in passed_to]
-            if len(chosen) != 1:
-                raise ValueError(f"{operation}: the role at {path} is for {services} by {entry['rolePage']}, which "
-                                 f"is not one of {passed_to} the reference passes its roles to")
-            return chosen[0]
+            if entry["member"] == member and (entry.get("operation") == name if own else entry.get("type") == owner):
+                return entry
     return None
+
+
+def vendored_service(operation: str, path: str, passed_to: list[str], models: dict[str, dict]) -> str | None:
+    """The one of `passed_to` the role at `path` is for, by the namespace's vendored role source (`ROLE_SOURCES`):
+    the service its documentation passes the role its member names to, or else the service a trust policy of that
+    role is for. None for a member the source does not give."""
+    entry = vendored_role(operation, path, models)
+    if entry is None:
+        return None
+    services = [service.removesuffix(SERVICE_SUFFIX)
+                for service in entry.get("passedToService", entry.get("trustedBy", []))]
+    chosen = [service for service in services if service in passed_to]
+    if len(chosen) != 1:
+        raise ValueError(f"{operation}: the role at {path} is for {services} by {entry.get('rolePage')}, which "
+                         f"is not one of {passed_to} the reference passes its roles to")
+    return chosen[0]
 
 
 def load_models(data: Path, clients: set[str]) -> dict[str, dict]:
@@ -708,6 +731,10 @@ def entry_for(operation: str, passed_to: list[str], models: dict[str, dict]) -> 
         if not any(member_exists(model, name, path) for model in models.values()):
             raise ValueError(f"{operation}: EXTRA_MEMBERS names {path}, which its request does not have")
         members[path] = by_name
+    # A member the vendored role source says names a role whose access a condition key controls, rather than passing
+    # it, passes none.
+    for path in [path for path in members if (vendored_role(operation, path, models) or {}).get("accessControlledBy")]:
+        members.pop(path)
     if not members:
         raise ValueError(f"{operation}: no request member names a role; read it by hand (BY_HAND), "
                          f"name the member (EXTRA_MEMBERS) or say why it is not read (NOT_READ)")
@@ -725,8 +752,11 @@ def entry_for(operation: str, passed_to: list[str], models: dict[str, dict]) -> 
                 raise ValueError(f"{operation}: the role at {path} can go to any of {passed_to}; "
                                  f"say which in MEMBER_SERVICES or a vendored role source (ROLE_SOURCES)")
             role["passedTo"] = vendored
-        if members[path]:
+        vendored = vendored_role(operation, path, models) or {}
+        if members[path] or vendored.get("byName"):
             role["byName"] = True
+        if vendored.get("instanceProfile"):
+            role["instanceProfile"] = True
         roles.append(role)
     return {"passedTo": passed_to, "roles": roles}
 
@@ -895,7 +925,8 @@ def validate(document: dict) -> list[str]:
             if service is not None and service not in passed_to:
                 problems.append(f"{operation}: the role at {path} goes to {service}, which the reference "
                                 f"does not name")
-            if set(role) - {"member", "passedTo", "byName"} or role.get("byName", True) is not True:
+            if (set(role) - {"member", "passedTo", "byName", "instanceProfile"} or role.get("byName", True) is not True
+                    or role.get("instanceProfile", True) is not True):
                 problems.append(f"{operation}: the role at {path} carries an unknown field")
     return problems
 

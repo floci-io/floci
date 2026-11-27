@@ -3000,13 +3000,16 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 ? step.getExecutionRoleArn() : instanceProfileRole(cluster, accountId);
     }
 
-    /** The role of the cluster's EC2 instance profile, its {@code JobFlowRole}, given by name or ARN, or null. */
+    /**
+     * The role of the cluster's EC2 instance profile, its {@code JobFlowRole}, given by name or by the profile's own
+     * ARN, as IAM's passed-role check finds it ({@link IamService#instanceProfileNamed}), or null.
+     */
     private String instanceProfileRole(EmrCluster cluster, String accountId) {
         String profile = cluster.getJobFlowRole();
         if (profile == null || iamService == null) {
             return null;
         }
-        return iamService.findInstanceProfile(accountId, profile.substring(profile.lastIndexOf('/') + 1))
+        return IamService.instanceProfileNamed(iamService, accountId, profile)
                 .filter(found -> found.getRoleNames() != null && found.getRoleNames().size() == 1)
                 .flatMap(found -> iamService.findRole(accountId, found.getRoleNames().getFirst()))
                 .map(IamRole::getArn)

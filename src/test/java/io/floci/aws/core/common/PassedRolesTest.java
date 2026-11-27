@@ -17,6 +17,7 @@ import java.util.Optional;
 import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -45,13 +46,16 @@ class PassedRolesTest {
      * {@code lt-web} once a refresh names only a version, or from {@code arn-template} at the group's
      * version 2 once a refresh names that template alone. IAM holds the role {@code app-role} under the
      * path {@code /app/}. Service Catalog holds a launch constraint {@code cons-launch} and a notification
-     * constraint {@code cons-notify}.
+     * constraint {@code cons-notify}. The instance profile {@code 123456} holds the role {@code numbered-instance}.
      */
     private static final PassedRoles.Lookups LOOKUPS = new PassedRoles.Lookups() {
         @Override
         public List<String> instanceProfileRoleArns(String profileName, String profileArn) {
             if ("web-profile".equals(profileName)) {
                 return List.of(ROLES + "web-instance");
+            }
+            if ("123456".equals(profileName)) {
+                return List.of(ROLES + "numbered-instance");
             }
             return PROFILE_ARN.equals(profileArn) ? List.of(ROLES + "arn-instance") : List.of();
         }
@@ -699,6 +703,30 @@ class PassedRolesTest {
         // A member taking only an ARN passes nothing for a name.
         assertEquals(List.of(), PassedRoles.of("codebuild:CreateProject",
                 json("{\"name\":\"p\",\"serviceRole\":\"app-role\"}"), LOOKUPS));
+    }
+
+    @Test
+    void anEmrClusterPassesItsInstanceProfilesRolesToEc2AndItsRolesByNameToTheirServices() {
+        // JobFlowRole names an instance profile, whose roles go to EC2; the service role, given by its name, to EMR, and
+        // the automatic scaling role to Application Auto Scaling. The steps' runtime role is not passed.
+        String request = """
+                {"Name":"c","ServiceRole":"app-role","JobFlowRole":"web-profile","AutoScalingRole":"%1$sscaling",
+                 "StepExecutionRoleArn":"%1$sruntime"}""".formatted(ROLES);
+        assertEquals(List.of(passed("scaling", "application-autoscaling.amazonaws.com"), passed("web-instance", EC2),
+                new PassedRole(ROLES + "app/app-role", "elasticmapreduce.amazonaws.com")),
+                PassedRoles.of("elasticmapreduce:RunJobFlow", json(request), LOOKUPS));
+        // A profile named by its ARN passes its roles too, and one that does not exist passes none.
+        assertEquals(List.of(passed("arn-instance", EC2)), PassedRoles.of("elasticmapreduce:RunJobFlow",
+                json("{\"JobFlowRole\":\"" + PROFILE_ARN + "\"}"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("elasticmapreduce:RunJobFlow",
+                json("{\"JobFlowRole\":\"no-such-profile\"}"), LOOKUPS));
+        // A number is read as the name EMR reads it as, a profile's or a role's.
+        assertEquals(List.of(passed("numbered-instance", EC2), passed("123456", "elasticmapreduce.amazonaws.com")),
+                PassedRoles.of("elasticmapreduce:RunJobFlow", json("{\"JobFlowRole\":123456,\"ServiceRole\":123456}"),
+                        LOOKUPS));
+        // A call that is no request of its own has no instance profile lookup, so it is refused.
+        assertThrows(IllegalArgumentException.class, () -> PassedRoles.ofBody("elasticmapreduce:RunJobFlow",
+                new ObjectMapper().createObjectNode(), name -> ROLES + name));
     }
 
     @Test

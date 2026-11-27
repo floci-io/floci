@@ -1654,6 +1654,33 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void aJobFlowRoleArnOfAnotherAccountOrPathNamesNoProfile() {
+        // The instance profile is read as IAM's passed-role check reads it: by its name or by its own ARN, so an ARN
+        // of another account or path, which that check finds no role for, gives the steps no role either.
+        IamService iam = mock(IamService.class);
+        InstanceProfile profile = new InstanceProfile();
+        profile.setArn("arn:aws:iam::" + ACCOUNT + ":instance-profile/EMR_EC2_DefaultRole");
+        profile.setRoleNames(List.of("emr-ec2"));
+        IamRole role = new IamRole();
+        role.setArn("arn:aws:iam::" + ACCOUNT + ":role/emr-ec2");
+        when(iam.findInstanceProfile(ACCOUNT, "EMR_EC2_DefaultRole")).thenReturn(Optional.of(profile));
+        when(iam.findRole(ACCOUNT, "emr-ec2")).thenReturn(Optional.of(role));
+        EmrServiceFixture withIam = EmrServiceFixture.docker(runner, iam);
+        List<String> named = List.of("arn:aws:iam::999999999999:instance-profile/EMR_EC2_DefaultRole",
+                "arn:aws:iam::" + ACCOUNT + ":instance-profile/other/EMR_EC2_DefaultRole", profile.getArn());
+        for (int i = 0; i < named.size(); i++) {
+            EmrCluster requested = cluster("named-" + i, true, sparkStep("profile", "CONTINUE"));
+            requested.setJobFlowRole(named.get(i));
+            withIam.service.runJobFlow(requested, REGION);
+            withIam.runStepThread();
+        }
+
+        assertNull(runner.jobs.get(0).executionRole());
+        assertNull(runner.jobs.get(1).executionRole());
+        assertEquals(role.getArn(), runner.jobs.get(2).executionRole());
+    }
+
+    @Test
     void aStepRunsWithoutARoleWhenIamKnowsNone() {
         service.runJobFlow(cluster("roleless", true, sparkStep("plain", "CONTINUE")), REGION);
 

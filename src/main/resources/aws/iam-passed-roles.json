@@ -441,7 +441,11 @@
       {"member": "ServiceRole"},
       {"member": "UserRole"}
     ]},
-    "elasticmapreduce:RunJobFlow": {"passedTo": ["application-autoscaling", "ec2", "elasticmapreduce"], "notRead": "JobFlowRole names an instance profile, and the reference passes the roles to three services without saying which goes where"},
+    "elasticmapreduce:RunJobFlow": {"passedTo": ["application-autoscaling", "ec2", "elasticmapreduce"], "roles": [
+      {"member": "AutoScalingRole", "passedTo": "application-autoscaling", "byName": true},
+      {"member": "JobFlowRole", "passedTo": "ec2", "instanceProfile": true},
+      {"member": "ServiceRole", "passedTo": "elasticmapreduce", "byName": true}
+    ]},
     "elasticmapreduce:StartNotebookExecution": {"passedTo": [], "roles": [
       {"member": "ExecutionEngine.ExecutionRoleArn"},
       {"member": "ServiceRole", "byName": true}

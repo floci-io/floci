@@ -1191,9 +1191,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     /** The ARNs of the roles the instance profile, named by {@code name} or {@code arn}, holds. */
     private List<String> instanceProfileRoleArns(String accountId, String name, String arn) {
-        String profileName = arn != null ? arn.substring(arn.lastIndexOf('/') + 1) : name;
-        return iamService.findInstanceProfile(accountId, profileName)
-                .filter(profile -> arn == null || arn.equals(profile.getArn()))
+        return IamService.instanceProfileNamed(iamService, accountId, arn != null ? arn : name)
                 .map(profile -> profile.getRoleNames().stream()
                         .flatMap(roleName -> iamService.findRole(accountId, roleName).stream())
                         .map(IamRole::getArn)

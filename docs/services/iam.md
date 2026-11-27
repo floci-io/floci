@@ -3090,6 +3090,19 @@ role each passes:
   entry with type EC2_LINUX or EC2_WINDOWS, the IAM principal creating the access entry must have
   the iam:PassRole permission." `CreateCapability`, `UpdateCapability` and `RegisterCluster`, which
   Floci does not serve, are checked from the table below.
+- **EMR:** `RunJobFlow` passes `ServiceRole` to `elasticmapreduce.amazonaws.com`, `AutoScalingRole`
+  to `application-autoscaling.amazonaws.com`, each by its name or its ARN, and the roles of the
+  instance profile `JobFlowRole` names, by its name or its ARN, to `ec2.amazonaws.com`, all read from
+  the table below. The Service Reference passes its roles to the three services without saying which
+  member's goes where, so a vendored source, `tools/aws/sources/emr-roles.json`, written by
+  `tools/aws/fetch_emr_roles.py` from the EMR API reference, management guide and the AWS CLI
+  reference, gives each member's role: the guide's page of each role names its default role ("The
+  default role name is EMR_EC2_DefaultRole"), the full access policy it gives users passes each
+  default role to one service (`"iam:PassedToService": "ec2.amazonaws.com*"`), the API reference
+  calls `JobFlowRole` an instance profile ("Also called instance profile and Amazon EC2 role"), and
+  the CLI reference's examples give the roles by name (`--service-role EMR_DefaultRole`). The steps'
+  runtime role, `StepExecutionRoleArn`, is not passed: "You can control access to the runtime role
+  with the condition key elasticmapreduce:ExecutionRoleArn."
 - **CloudFormation:** `CreateStack`, `UpdateStack`, `DeleteStack`, `CreateChangeSet` and
   `ContinueUpdateRollback` pass `RoleARN` to `cloudformation.amazonaws.com` when the request names
   one. `CreateStackSet` and `UpdateStackSet` pass `AdministrationRoleARN`, or, for a self-managed
@@ -3157,7 +3170,9 @@ botocore's models, `src/main/resources/aws/iam-passed-roles.json`. A request mem
 when its name ends in `Role`, `RoleArn` or `RoleName` (or a plural, or one of those followed by
 `Update` or `Override`) and it holds a string, or a list or map of them; it is read from a JSON or
 CBOR body, from Query form parameters, in either list form, or from a REST-XML body by the elements
-botocore names, and its role is passed to the service the Service Reference names. Form parameters
+botocore names, and its role is passed to the service the Service Reference names. A JSON number or
+Boolean in such a member is read as the text a handler reads it as, so `"JobFlowRole":123456` names
+the instance profile `123456`, as EMR takes it. Form parameters
 are read only from a request the Query protocol dispatches, a form posted to the root path, so a
 request to another protocol's route is read as its handler reads it whatever `Content-Type` it is
 sent with: an S3 replication configuration sent as a form is still read as its XML. The table is keyed
@@ -3200,9 +3215,8 @@ when the caller may not pass the role.
 - Not read: an operation whose request names no role (SSM `CreateDocument` and CloudWatch Logs
   `StartQuery`, for two); one whose role is a parameter of the runbook it runs (SSM
   `StartAutomationExecution`, Config `PutRemediationConfigurations`); one the Service Reference
-  passes roles from to several services without saying which member goes where (EMR `RunJobFlow`,
-  whose `JobFlowRole` also names an instance profile, CloudWatch Logs `CreateImportTask`); and one
-  the botocore
+  passes roles from to several services without saying which member goes where (CloudWatch Logs
+  `CreateImportTask`); and one the botocore
   models Floci is pinned to do not have yet (SSM `RegisterDefaultHostManagementConfiguration`,
   Kinesis Analytics `ImportSnapshot`, Secrets Manager `AssociateCrossAccountReplica`), whose role
   the generator reads as soon as a release that has it is pinned. EC2's `RequestSpotFleet` names
