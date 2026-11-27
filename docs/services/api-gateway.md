@@ -319,11 +319,13 @@ and [response contract](https://docs.aws.amazon.com/apigateway/latest/developerg
 `GetDomainNames` accepts the `resourceOwner` values `SELF` and `OTHER_ACCOUNTS`.
 Other supplied values, including an empty value, return `ValidationException`.
 
-A domain created with `CreateDomainName` is `AVAILABLE` at once. Its `regionalDomainName` is
-`<domain>.regional.local`, and a request whose `Host` header is either that name or the domain
-itself is routed through the domain's base path mappings to the mapped REST API stage. An
-`EDGE` domain also reports a `distributionDomainName` under `cloudfront.net` and the fixed
-CloudFront hosted zone `Z2FDTNDATAQYW2`; a `REGIONAL` domain reports neither, as on AWS. The
+A domain created with `CreateDomainName` is `AVAILABLE` at once. A request whose `Host` header is
+the domain itself or `<domain>.regional.local` is routed through the domain's base path mappings
+to the mapped REST API stage. A `REGIONAL` domain reports that name as its `regionalDomainName`,
+with a `regionalHostedZoneId` and its regional certificate. An `EDGE` domain reports only its
+distribution, as on AWS: a `distributionDomainName` under `cloudfront.net` and the fixed
+CloudFront hosted zone `Z2FDTNDATAQYW2`, and no regional field even when it was given a regional
+certificate. A `REGIONAL` domain reports no distribution. The
 `regionalHostedZoneId` is the zone the [General Reference](https://docs.aws.amazon.com/general/latest/gr/apigateway.html)
 publishes for the domain's region, or the placeholder `Z2FDTNDATAQYL2`, which is no AWS zone, in a
 region the table does not list. The id is set at creation, so a stored domain keeps the one it
@@ -332,8 +334,8 @@ domain between the two types with `UpdateDomainName` creates or drops the distri
 domain created with no endpoint type is `EDGE`, as on AWS; it is `REGIONAL` when the request
 carries a regional certificate (`regionalCertificateArn` or `regionalCertificateName`) or the
 partition has no edge-optimized endpoints.
-`GetDomainName` returns the `domainNameArn`, the `endpointConfiguration`, both certificate ARNs
-and the `tags`. Tags are managed through `TagResource`, `UntagResource` and `GetTags` on
+`GetDomainName` returns the `domainNameArn`, the `endpointConfiguration`, its `certificateArn`, the
+`regionalCertificateArn` of a `REGIONAL` domain, and the `tags`. Tags are managed through `TagResource`, `UntagResource` and `GetTags` on
 `arn:aws:apigateway:<region>::/domainnames/<domain>`. A second mapping on a base path that
 already has one is a `ConflictException`. A `PRIVATE` endpoint type is refused: private custom
 domains are not emulated. Mutual TLS, ownership verification certificates, routing modes and
