@@ -473,14 +473,12 @@ public class ApiGatewayController {
     @GET
     @Path("/restapis/{apiId}/resources")
     public Response getResources(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
-                                 @QueryParam("embed") List<String> embed) {
+                                 @QueryParam("embed") List<String> embed,
+                                 @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        List<ApiGatewayResource> resources = service.getResources(region, apiId);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("item");
         boolean embedMethods = embed != null && embed.contains("methods");
-        resources.forEach(r -> items.add(toResourceNode(r, embedMethods)));
-        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+        return pageResponse(service.getResourcePage(region, apiId, pageLimit(limit), position),
+                resource -> toResourceNode(resource, embedMethods));
     }
 
     @GET

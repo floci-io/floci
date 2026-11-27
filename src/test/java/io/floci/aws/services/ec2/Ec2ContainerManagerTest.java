@@ -1797,16 +1797,16 @@ class Ec2ContainerManagerTest {
         List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
         List<Instance> shutDown = new CopyOnWriteArrayList<>();
         harness.manager.setGuestShutdownHandler(shutDown::add);
-        Instance instance = launchRunningInstance(harness, "i-reboot", exitWatches);
         RestartContainerCmd restart = mock(RestartContainerCmd.class, RETURNS_SELF);
         when(harness.dockerClient.restartContainerCmd(TEST_CONTAINER_ID)).thenReturn(restart);
-        ResultCallback<WaitResponse> beforeReboot = exitWatches.getLast();
         when(restart.exec()).thenAnswer(invocation -> {
             when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
-            beforeReboot.onNext(exitStatus(0));
+            exitWatches.getFirst().onNext(exitStatus(0));
             when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.RUNNING);
             return null;
         });
+
+        Instance instance = launchRunningInstance(harness, "i-reboot", exitWatches);
 
         harness.manager.reboot(instance);
         awaitUntil(() -> exitWatches.size() == 2, Duration.ofSeconds(5));
@@ -1822,7 +1822,6 @@ class Ec2ContainerManagerTest {
         List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
         List<Instance> shutDown = new CopyOnWriteArrayList<>();
         harness.manager.setGuestShutdownHandler(shutDown::add);
-        Instance instance = launchRunningInstance(harness, "i-tworeboots", exitWatches);
         RestartContainerCmd restart = mock(RestartContainerCmd.class, RETURNS_SELF);
         when(harness.dockerClient.restartContainerCmd(TEST_CONTAINER_ID)).thenReturn(restart);
         CountDownLatch firstRestartMayFinish = new CountDownLatch(1);
@@ -1839,6 +1838,8 @@ class Ec2ContainerManagerTest {
             when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.RUNNING);
             return null;
         });
+
+        Instance instance = launchRunningInstance(harness, "i-tworeboots", exitWatches);
 
         harness.manager.reboot(instance);
         awaitUntil(() -> restarts.get() == 1, Duration.ofSeconds(5));
