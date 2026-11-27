@@ -4,7 +4,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
+import io.floci.aws.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 
 import java.net.URI;
@@ -13,8 +15,15 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * HTTP client for the floci-duck sidecar.
@@ -26,22 +35,44 @@ import java.util.Map;
 @ApplicationScoped
 public class FlociDuckClient {
 
+    /** A bucket an {@code s3://} path in the SQL, the setup or the output path names. */
+    private static final Pattern S3_BUCKET = Pattern.compile("s3://([a-z0-9][a-z0-9.-]{1,62})");
+
     private final FlociDuckManager duckManager;
     private final EmulatorConfig config;
     private final ContainerReachableEndpoint containerEndpoint;
     private final ObjectMapper mapper;
     private final HttpClient httpClient;
+    private final Function<String, Optional<String>> bucketRegions;
 
     @Inject
     public FlociDuckClient(FlociDuckManager duckManager,
                            EmulatorConfig config,
                            ContainerReachableEndpoint containerEndpoint,
-                           ObjectMapper mapper) {
+                           ObjectMapper mapper,
+                           Instance<S3Service> s3Service) {
+        // Looked up per call: S3 Select, a part of S3, uses this client.
+        this(duckManager, config, containerEndpoint, mapper, bucket -> s3Service.get().findBucketRegion(bucket));
+    }
+
+    FlociDuckClient(FlociDuckManager duckManager,
+                    EmulatorConfig config,
+                    ContainerReachableEndpoint containerEndpoint,
+                    ObjectMapper mapper) {
+        this(duckManager, config, containerEndpoint, mapper, bucket -> Optional.empty());
+    }
+
+    FlociDuckClient(FlociDuckManager duckManager,
+                    EmulatorConfig config,
+                    ContainerReachableEndpoint containerEndpoint,
+                    ObjectMapper mapper,
+                    Function<String, Optional<String>> bucketRegions) {
         this.duckManager = duckManager;
         this.config = config;
         this.containerEndpoint = containerEndpoint;
         this.mapper = mapper;
         this.httpClient = HttpClient.newHttpClient();
+        this.bucketRegions = bucketRegions;
     }
 
     /**
@@ -84,7 +115,8 @@ public class FlociDuckClient {
                         String accessKeyId, String secretAccessKey, String sessionToken) {
         String duckUrl = duckManager.ensureReady();
 
-        String effectiveSetup = injectSessionToken(setupDdl, sessionToken);
+        String effectiveSetup = withBucketRegions(injectSessionToken(setupDdl, sessionToken),
+                accessKeyId, secretAccessKey, sessionToken, sql, setupDdl, outputS3Path);
         Map<String, Object> body = buildBaseBody(sql, effectiveSetup, accessKeyId, secretAccessKey);
         if (outputS3Path != null) {
             body.put("output_s3_path", outputS3Path);
@@ -122,7 +154,8 @@ public class FlociDuckClient {
                                            String accessKeyId, String secretAccessKey, String sessionToken) {
         String duckUrl = duckManager.ensureReady();
 
-        String effectiveSetup = injectSessionToken(setupDdl, sessionToken);
+        String effectiveSetup = withBucketRegions(injectSessionToken(setupDdl, sessionToken),
+                accessKeyId, secretAccessKey, sessionToken, sql, setupDdl, null);
         Map<String, Object> body = buildBaseBody(sql, effectiveSetup, accessKeyId, secretAccessKey);
 
         String responseBody = post(duckUrl + "/query", body, "query");
@@ -135,6 +168,52 @@ public class FlociDuckClient {
         }
         String setToken = "SET s3_session_token = '" + sessionToken.replace("'", "''") + "';\n";
         return setupDdl == null || setupDdl.isBlank() ? setToken : setToken + setupDdl;
+    }
+
+    /**
+     * S3 answers a bucket only in its own Region, and DuckDB signs every request for its one {@code s3_region}: it
+     * re-signs a read that gets 301 PermanentRedirect but not a write. Each bucket the statement names in another
+     * Region than the default therefore gets a secret scoped to it and signed for its Region, with the request's
+     * credentials; DuckDB picks the secret whose scope matches a path and the {@code s3_*} settings for the rest.
+     * Every request runs on its own connection, so the secrets end with it.
+     */
+    String withBucketRegions(String setupDdl, String accessKeyId, String secretAccessKey, String sessionToken,
+                             String... statements) {
+        Set<String> buckets = new LinkedHashSet<>();
+        for (String text : Stream.of(statements).filter(t -> t != null && !t.isEmpty()).toList()) {
+            Matcher matcher = S3_BUCKET.matcher(text);
+            while (matcher.find()) {
+                buckets.add(matcher.group(1));
+            }
+        }
+        StringBuilder secrets = new StringBuilder();
+        URI endpoint = URI.create(containerEndpoint.baseUrl());
+        int index = 0;
+        for (String bucket : buckets) {
+            Optional<String> region = bucketRegions.apply(bucket);
+            if (region.isEmpty() || region.get().equals(config.defaultRegion())) {
+                continue;
+            }
+            secrets.append("CREATE OR REPLACE SECRET floci_bucket_").append(index++).append(" (TYPE s3")
+                    .append(", KEY_ID ").append(literal(accessKeyId == null || accessKeyId.isEmpty() ? "test" : accessKeyId))
+                    .append(", SECRET ").append(literal(secretAccessKey == null || secretAccessKey.isEmpty()
+                            ? "test" : secretAccessKey));
+            if (sessionToken != null && !sessionToken.isBlank()) {
+                secrets.append(", SESSION_TOKEN ").append(literal(sessionToken));
+            }
+            secrets.append(", REGION ").append(literal(region.get()))
+                    .append(", ENDPOINT ").append(literal(endpoint.getAuthority()))
+                    .append(", URL_STYLE 'path', USE_SSL ").append("https".equals(endpoint.getScheme()))
+                    .append(", SCOPE ").append(literal("s3://" + bucket)).append(");\n");
+        }
+        if (secrets.isEmpty()) {
+            return setupDdl;
+        }
+        return setupDdl == null || setupDdl.isBlank() ? secrets.toString() : secrets + setupDdl;
+    }
+
+    private static String literal(String value) {
+        return "'" + value.replace("'", "''") + "'";
     }
 
     // ── internals ─────────────────────────────────────────────────────────────
