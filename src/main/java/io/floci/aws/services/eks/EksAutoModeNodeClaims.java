@@ -51,6 +51,21 @@ final class EksAutoModeNodeClaims {
      * {@code kubectl get nodepools} lists it, whose UID owns the claim and whose template gives its requirements.
      */
     static String claim(Launch launch, String instanceId, JsonNode poolItem, Map<String, String> labels) {
+        return claim(launch, instanceId, poolItem, labels, requests(launch));
+    }
+
+    /** What a launch's pods request: CPU millicores, memory bytes, and how many they are. */
+    static long[] requests(Launch launch) {
+        return new long[]{launch.pods().stream().mapToLong(PendingPod::cpuMillis).sum(),
+            launch.pods().stream().mapToLong(PendingPod::memoryBytes).sum(), launch.pods().size()};
+    }
+
+    /**
+     * As above, with the {@code requests} (CPU millicores, memory bytes, pods) its spec gives, or none when
+     * {@code null}, as for a claim made again whose node's pods aren't known.
+     */
+    static String claim(Launch launch, String instanceId, JsonNode poolItem, Map<String, String> labels,
+                        long[] requests) {
         ObjectNode claim = MAPPER.createObjectNode();
         claim.put("apiVersion", "karpenter.sh/v1");
         claim.put("kind", "NodeClaim");
@@ -87,12 +102,12 @@ final class EksAutoModeNodeClaims {
         requirement(requirements, "node.kubernetes.io/instance-type", launch.instanceType().instanceType);
         requirement(requirements, EksAutoModeNodes.NODEPOOL_LABEL, launch.pool().name());
         requirement(requirements, NODECLASS_LABEL, launch.pool().nodeClass());
-        long cpu = launch.pods().stream().mapToLong(PendingPod::cpuMillis).sum();
-        long memory = launch.pods().stream().mapToLong(PendingPod::memoryBytes).sum();
-        ObjectNode requests = spec.putObject("resources").putObject("requests");
-        requests.put("cpu", cpu + "m");
-        requests.put("memory", String.valueOf(memory));
-        requests.put("pods", String.valueOf(launch.pods().size()));
+        if (requests != null) {
+            ObjectNode resources = spec.putObject("resources").putObject("requests");
+            resources.put("cpu", requests[0] + "m");
+            resources.put("memory", String.valueOf(requests[1]));
+            resources.put("pods", String.valueOf(requests[2]));
+        }
         return claim.toString();
     }
 

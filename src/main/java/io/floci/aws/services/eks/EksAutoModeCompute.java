@@ -174,7 +174,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         }
         Map<String, JsonNode> nodesByName = nodesByName(cluster);
         removeStrayNodes(cluster, region, nodesByName);
-        syncNodeClaims(cluster, region, nodesByName, true);
+        syncNodeClaims(cluster, region, nodesByName, podList);
         if (launched.isEmpty() && pods.isEmpty()) {
             return;
         }
@@ -439,19 +439,20 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         }
         LOG.infov("EKS Auto Mode pool {0} of cluster {1} launched {2} ({3}) for {4}", launch.pool().name(),
                 cluster.getName(), instanceId, launch.instanceType().instanceType, podNames(launch));
-        makeNodeClaim(cluster, region, launch, reservation.getInstances().getFirst(), imageId, poolItem);
+        makeNodeClaim(cluster, region, launch, reservation.getInstances().getFirst(), imageId, poolItem,
+                EksAutoModeNodeClaims.requests(launch));
     }
 
     /**
-     * Applies the NodeClaim of an instance and marks it launched. One that can't be made is logged, and a later pass
-     * makes it again.
+     * Applies the NodeClaim of an instance, with {@code requests} in its spec ({@code null} for none), and marks it
+     * launched. One that can't be made is logged, and a later pass makes it again.
      */
     private void makeNodeClaim(Cluster cluster, String region, Launch launch, Instance instance, String imageId,
-                               JsonNode poolItem) {
+                               JsonNode poolItem, long[] requests) {
         String claim = EksAutoModeNodeClaims.name(launch.pool().name(), instance.getInstanceId());
         try {
             apply(cluster, EksAutoModeNodeClaims.claim(launch, instance.getInstanceId(), poolItem,
-                    EksAutoModeNodes.withRegion(launch.labels(), region)), "apply nodeclaim " + claim);
+                    EksAutoModeNodes.withRegion(launch.labels(), region), requests), "apply nodeclaim " + claim);
             exec(cluster, List.of("kubectl", "patch", "nodeclaim", claim, "--subresource=status", "--type=merge", "-p",
                     EksAutoModeNodeClaims.launchedStatus(clusterManager.deriveInstanceNodeProviderId(instance, region),
                             imageId, clock.instant().toString())), "patch nodeclaim " + claim);
@@ -465,10 +466,10 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
      * Keeps the NodeClaims in step with the instances: one whose node has joined is marked registered, initialized
      * and ready, as its node is; one whose instance is gone loses Karpenter's finalizer and is deleted, as Karpenter's
      * termination ends it. Only the claims Auto Mode manages ({@code app.kubernetes.io/managed-by: eks}) are touched.
-     * With {@code remake}, a pending or running instance of a pool whose claim is missing, as when making it failed,
-     * gets it again.
+     * With the cluster's pods ({@code podList}, {@code null} for none), a pending or running instance of a pool whose
+     * claim is missing, as when making it failed, gets it again.
      */
-    private void syncNodeClaims(Cluster cluster, String region, Map<String, JsonNode> nodesByName, boolean remake) {
+    private void syncNodeClaims(Cluster cluster, String region, Map<String, JsonNode> nodesByName, JsonNode podList) {
         JsonNode claims;
         try {
             claims = read(cluster, "nodeclaims");
@@ -507,18 +508,22 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                         cluster.getName(), e.getMessage());
             }
         }
-        if (remake) {
+        if (podList != null) {
             List<Instance> unclaimed = instancesOf(cluster, region, "pending", "running").stream()
                     .filter(i -> !listed.contains(EksAutoModeNodeClaims.name(String.valueOf(tag(i, POOL_TAG)),
                             i.getInstanceId()))).toList();
             if (!unclaimed.isEmpty()) {
-                remakeNodeClaims(cluster, region, unclaimed);
+                remakeNodeClaims(cluster, region, unclaimed, EksAutoModeNodes.requestsByNode(podList));
             }
         }
     }
 
-    /** Makes the NodeClaims of instances of pools that are still there whose claims are missing. */
-    private void remakeNodeClaims(Cluster cluster, String region, List<Instance> unclaimed) {
+    /**
+     * Makes the NodeClaims of instances of pools that are still there whose claims are missing. A joined node's claim
+     * requests what the pods bound to it request; one whose node hasn't joined requests nothing it can't know.
+     */
+    private void remakeNodeClaims(Cluster cluster, String region, List<Instance> unclaimed,
+                                  Map<String, long[]> requestsByNode) {
         JsonNode poolList;
         try {
             poolList = read(cluster, "nodepools");
@@ -539,7 +544,8 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             String zone = zone(instance);
             makeNodeClaim(cluster, region, new Launch(pool, type.get(), zone,
                     EksAutoModeNodes.labels(type.get(), pool, zone), List.of()), instance, instance.getImageId(),
-                    poolItems.get(pool.name()));
+                    poolItems.get(pool.name()),
+                    requestsByNode.get(clusterManager.deriveInstanceNodeName(instance, region)));
         }
     }
 
@@ -733,7 +739,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         if (!instancesOf(cluster, region, "shutting-down", "terminated").isEmpty()) {
             Map<String, JsonNode> nodesByName = nodesByName(cluster);
             removeStrayNodes(cluster, region, nodesByName);
-            syncNodeClaims(cluster, region, nodesByName, false);
+            syncNodeClaims(cluster, region, nodesByName, null);
         }
     }
 

@@ -208,16 +208,19 @@ class EksAutoModeComputeTest {
     void aMissingClaimIsMadeAgainWithoutANewLaunch() {
         joinedNode("i-node", "node-1");
         String claim = EksAutoModeNodeClaims.name("general-purpose", "i-node");
-        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"node-1\"}, "
+        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"node-1\", "
+                + "\"containers\": [{\"resources\": {\"requests\": {\"cpu\": \"250m\", \"memory\": \"64Mi\"}}}]}, "
                 + "\"status\": {\"phase\": \"Running\"}}]}");
         lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}, "
                 + "\"status\": {\"conditions\": [{\"type\": \"Ready\", \"status\": \"True\"}]}}]}");
 
         compute.reconcile(cluster("prod"), REGION);
 
+        // It requests what the pods bound to its node request, not nothing.
         verify(clusterManager).execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length > 2
                 && "sh".equals(cmd[0]) && cmd[2].contains("\"name\":\"" + claim + "\"")
-                && cmd[2].contains("kubectl apply -f -")), anyInt());
+                && cmd[2].contains("\"requests\":{\"cpu\":\"250m\",\"memory\":\"" + (64L << 20)
+                + "\",\"pods\":\"1\"}") && cmd[2].contains("kubectl apply -f -")), anyInt());
         verify(clusterManager).execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length > 4
                 && "patch".equals(cmd[1]) && claim.equals(cmd[3]) && "--subresource=status".equals(cmd[4])
                 && cmd[cmd.length - 1].contains("\"type\":\"Launched\",\"status\":\"True\"")), anyInt());

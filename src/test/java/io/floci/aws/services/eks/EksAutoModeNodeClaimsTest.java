@@ -94,6 +94,10 @@ class EksAutoModeNodeClaimsTest {
         assertEquals("336h", claim.path("spec").path("expireAfter").asText());
         assertFalse(claim.path("spec").has("terminationGracePeriod"));
         assertFalse(claim.path("metadata").has("ownerReferences"));
+        // A claim made again whose node's pods aren't known requests nothing rather than zero.
+        assertFalse(MAPPER.readTree(EksAutoModeNodeClaims.claim(new Launch(pool, large, null, Map.of(), List.of()),
+                "i-1", MAPPER.readTree("{\"metadata\": {\"name\": \"batch\"}}"), Map.of(), null))
+                .path("spec").has("resources"));
     }
 
     /** Launched first; once its node joins, registered, initialized, and ready as the node is. */
