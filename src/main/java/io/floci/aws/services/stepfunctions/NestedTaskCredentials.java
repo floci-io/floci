@@ -168,13 +168,17 @@ public class NestedTaskCredentials {
     static void validateTarget(String resource, JsonNode input, StateMachine machine, String taskAccount) {
         StatesIntegration integration = StatesIntegration.parse(resource).orElse(null);
         String target = input.path("StateMachineArn").asText(null);
-        if (!isNested(integration) || !AwsArnUtils.isArn(target)) {
+        boolean nested = isNested(integration);
+        // A callback task starts the child too, once the executor strips .waitForTaskToken.
+        boolean callback = integration != null && integration.isAnySuffix("states", "startExecution")
+                && ".waitForTaskToken".equals(integration.suffix());
+        if (!(nested || callback) || !AwsArnUtils.isArn(target)) {
             return;
         }
         AwsArnUtils.Arn machineArn = AwsArnUtils.parse(machine.getStateMachineArn());
         AwsArnUtils.Arn targetArn = AwsArnUtils.parse(target);
         String account = taskAccount != null ? taskAccount : machineArn.accountId();
-        if (!account.equals(targetArn.accountId())) {
+        if (nested && !account.equals(targetArn.accountId())) {
             throw accessDenied(integration, "Not authorized to access this resource: " + target);
         }
         if (!targetArn.region().isEmpty() && !targetArn.region().equals(machineArn.region())) {
