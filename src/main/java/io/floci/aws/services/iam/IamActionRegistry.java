@@ -239,52 +239,6 @@ public class IamActionRegistry {
         rule("rds-data", "POST", "^/CommitTransaction/?$",    "rds-data:CommitTransaction"),
         rule("rds-data", "POST", "^/RollbackTransaction/?$",  "rds-data:RollbackTransaction"),
 
-        // ── EventBridge Scheduler ──────────────────────────────────────────────
-        rule("scheduler", "GET",    "^/schedules/[^/]+$",       "scheduler:GetSchedule"),
-        rule("scheduler", "POST",   "^/schedules/[^/]+$",       "scheduler:CreateSchedule"),
-        rule("scheduler", "PUT",    "^/schedules/[^/]+$",       "scheduler:UpdateSchedule"),
-        rule("scheduler", "DELETE", "^/schedules/[^/]+$",       "scheduler:DeleteSchedule"),
-        rule("scheduler", "GET",    "^/schedules$",             "scheduler:ListSchedules"),
-        rule("scheduler", "GET",    "^/schedule-groups/[^/]+$", "scheduler:GetScheduleGroup"),
-        rule("scheduler", "POST",   "^/schedule-groups/[^/]+$", "scheduler:CreateScheduleGroup"),
-        rule("scheduler", "DELETE", "^/schedule-groups/[^/]+$", "scheduler:DeleteScheduleGroup"),
-        rule("scheduler", "GET",    "^/schedule-groups$",       "scheduler:ListScheduleGroups"),
-        // Tagging is served at /tags/<arn> and at /tags, naming the ARN in the query or the body.
-        rule("scheduler", "GET",    "^/tags(/.+)?$",            "scheduler:ListTagsForResource"),
-        rule("scheduler", "POST",   "^/tags(/.+)?$",            "scheduler:TagResource"),
-        rule("scheduler", "DELETE", "^/tags(/.+)?$",            "scheduler:UntagResource"),
-
-        // ── Aurora DSQL ────────────────────────────────────────────────────────
-        rule("dsql", "POST",   "^/cluster$",                                  "dsql:CreateCluster"),
-        rule("dsql", "GET",    "^/cluster$",                                  "dsql:ListClusters"),
-        rule("dsql", "GET",    "^/cluster/[^/]+$",                            "dsql:GetCluster"),
-        rule("dsql", "POST",   "^/cluster/[^/]+$",                            "dsql:UpdateCluster"),
-        rule("dsql", "DELETE", "^/cluster/[^/]+$",                            "dsql:DeleteCluster"),
-        rule("dsql", "POST",   "^/cluster/[^/]+/policy$",                     "dsql:PutClusterPolicy"),
-        rule("dsql", "GET",    "^/cluster/[^/]+/policy$",                     "dsql:GetClusterPolicy"),
-        rule("dsql", "DELETE", "^/cluster/[^/]+/policy$",                     "dsql:DeleteClusterPolicy"),
-        rule("dsql", "GET",    "^/clusters/[^/]+/vpc-endpoint-service-name$", "dsql:GetVpcEndpointServiceName"),
-        rule("dsql", "POST",   "^/stream/[^/]+$",                             "dsql:CreateStream"),
-        rule("dsql", "GET",    "^/stream/[^/]+$",                             "dsql:ListStreams"),
-        rule("dsql", "GET",    "^/stream/[^/]+/[^/]+$",                       "dsql:GetStream"),
-        rule("dsql", "DELETE", "^/stream/[^/]+/[^/]+$",                       "dsql:DeleteStream"),
-        // Tagging is served at /tags/<arn> and at /tags, naming the ARN in the query or the body.
-        rule("dsql", "GET",    "^/tags(/.+)?$",                               "dsql:ListTagsForResource"),
-        rule("dsql", "POST",   "^/tags(/.+)?$",                               "dsql:TagResource"),
-        rule("dsql", "DELETE", "^/tags(/.+)?$",                               "dsql:UntagResource"),
-
-        // ── EventBridge Pipes ──────────────────────────────────────────────────
-        rule("pipes", "POST",   "^/v1/pipes/[^/]+/start$", "pipes:StartPipe"),
-        rule("pipes", "POST",   "^/v1/pipes/[^/]+/stop$",  "pipes:StopPipe"),
-        rule("pipes", "GET",    "^/v1/pipes/[^/]+$",       "pipes:DescribePipe"),
-        rule("pipes", "POST",   "^/v1/pipes/[^/]+$",       "pipes:CreatePipe"),
-        rule("pipes", "PUT",    "^/v1/pipes/[^/]+$",       "pipes:UpdatePipe"),
-        rule("pipes", "DELETE", "^/v1/pipes/[^/]+$",       "pipes:DeletePipe"),
-        rule("pipes", "GET",    "^/v1/pipes$",             "pipes:ListPipes"),
-        rule("pipes", "GET",    "^/tags(/.+)?$",           "pipes:ListTagsForResource"),
-        rule("pipes", "POST",   "^/tags(/.+)?$",           "pipes:TagResource"),
-        rule("pipes", "DELETE", "^/tags(/.+)?$",           "pipes:UntagResource"),
-
         // ── EKS ────────────────────────────────────────────────────────────────
         // Floci takes an access entry's principal ARN whole, slashes included, so any other GET or DELETE under
         // an entry is DescribeAccessEntry or DeleteAccessEntry. The entry's access policy routes come first, as
