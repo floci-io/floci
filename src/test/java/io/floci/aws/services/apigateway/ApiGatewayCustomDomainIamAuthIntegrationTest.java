@@ -70,7 +70,8 @@ class ApiGatewayCustomDomainIamAuthIntegrationTest {
 
         given().contentType(ContentType.JSON)
                 .body("{\"domainName\":\"" + DOMAIN + "\","
-                        + "\"certificateArn\":\"arn:aws:acm:us-east-1:123456789012:certificate/abc\"}")
+                        + "\"regionalCertificateArn\":\"arn:aws:acm:us-east-1:123456789012:certificate/abc\","
+                        + "\"endpointConfiguration\":{\"types\":[\"REGIONAL\"]}}")
                 .when().post("/domainnames")
                 .then().statusCode(201)
                 .body("regionalDomainName", equalTo(DOMAIN + ".regional.local"));

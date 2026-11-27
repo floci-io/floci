@@ -2722,13 +2722,18 @@ public class ApiGatewayController {
         node.putObject("endpointConfiguration").putArray("types").add(d.getEndpointConfigurationType());
         if (d.getCertificateName() != null) node.put("certificateName", d.getCertificateName());
         if (d.getCertificateArn() != null) node.put("certificateArn", d.getCertificateArn());
-        node.put("regionalDomainName", d.getRegionalDomainName());
-        node.put("regionalHostedZoneId", d.getRegionalHostedZoneId());
-        if (d.getRegionalCertificateName() != null) {
-            node.put("regionalCertificateName", d.getRegionalCertificateName());
-        }
-        if (d.getRegionalCertificateArn() != null) {
-            node.put("regionalCertificateArn", d.getRegionalCertificateArn());
+        // An edge-optimized domain reports only its distribution (aws-cli
+        // examples/apigateway/create-domain-name.rst, Example 1). The regional name stays stored,
+        // since the custom domain filter still routes on it.
+        if (!"EDGE".equals(d.getEndpointConfigurationType())) {
+            node.put("regionalDomainName", d.getRegionalDomainName());
+            node.put("regionalHostedZoneId", d.getRegionalHostedZoneId());
+            if (d.getRegionalCertificateName() != null) {
+                node.put("regionalCertificateName", d.getRegionalCertificateName());
+            }
+            if (d.getRegionalCertificateArn() != null) {
+                node.put("regionalCertificateArn", d.getRegionalCertificateArn());
+            }
         }
         if (d.getDistributionDomainName() != null) {
             node.put("distributionDomainName", d.getDistributionDomainName());
