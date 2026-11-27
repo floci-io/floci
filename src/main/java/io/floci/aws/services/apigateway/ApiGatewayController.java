@@ -1509,15 +1509,7 @@ public class ApiGatewayController {
         if (payload == null || payload.isBlank()) {
             throw new AwsException("BadRequestException", "Body is required for OpenAPI import", 400);
         }
-        try {
-            JsonNode root = objectMapper.readTree(payload);
-            if (root.isObject() && root.hasNonNull("body") && root.get("body").isTextual()) {
-                return root.get("body").asText();
-            }
-        } catch (IOException e) {
-            // Not JSON at all — a raw YAML/JSON OpenAPI document.
-        }
-        return payload;
+        return ApiGatewayV2OpenApiImporter.restDefinition(objectMapper, payload);
     }
 
     @POST

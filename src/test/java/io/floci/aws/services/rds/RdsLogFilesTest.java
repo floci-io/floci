@@ -52,6 +52,13 @@ class RdsLogFilesTest {
     }
 
     @Test
+    void aSurrogateWithoutItsPairIsReplacedAndAPairStays() {
+        List<RdsLogFiles.LogLine> lines = RdsLogFiles.parseDockerLines(docker(
+                "2026-10-15T10:00:00Z a\uD83D b\uD83D\uDE00 c\uFFFF\r"));
+        assertEquals("a\uFFFD b\uD83D\uDE00 c\uFFFD\uFFFD", lines.get(0).text());
+    }
+
+    @Test
     void describeFiltersByNameTimeAndSize() {
         List<RdsLogFiles.LogFile> files = RdsLogFiles.files("postgres", RdsLogFiles.parseDockerLines(docker(
                 "2026-10-15T09:00:00Z a",

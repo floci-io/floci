@@ -113,6 +113,23 @@ public final class XmlBuilder {
         return s;
     }
 
+    /**
+     * Whether the character at {@code index} cannot appear in an XML 1.0 document, escaped or not:
+     * a control character other than tab, line feed and carriage return, U+FFFE, U+FFFF, or a
+     * surrogate without its pair. {@link #escape} leaves these as they are, so a value that may
+     * carry one is cleaned before it is written.
+     */
+    public static boolean isForbiddenAt(String s, int index) {
+        char c = s.charAt(index);
+        if (Character.isHighSurrogate(c)) {
+            return index + 1 == s.length() || !Character.isLowSurrogate(s.charAt(index + 1));
+        }
+        if (Character.isLowSurrogate(c)) {
+            return index == 0 || !Character.isHighSurrogate(s.charAt(index - 1));
+        }
+        return (c < ' ' && c != '\t' && c != '\n' && c != '\r') || c == '\uFFFE' || c == '\uFFFF';
+    }
+
     /** Appends {@code s} from {@code from} with the XML special characters replaced, in runs. */
     private static void appendEscaped(StringBuilder out, String s, int from) {
         int len = s.length();
