@@ -38,12 +38,13 @@ import java.util.regex.Pattern;
  * a literal and a label, before a label, before a greedy label, then the route naming more of the query.
  *
  * <p>A request a route filter moved under an internal prefix ({@code SignedServiceRoute}) is matched on its path
- * without the prefix, which is the path the model gives its operation. The router matched it decoded, so a label's
- * value holds the slashes its encoding hid (a key ARN on the Payment Cryptography data plane), and the controller's
- * route takes them: a path that matches no route with each label taking one segment is matched again with each
- * label taking as many as its value spans. So is a request whose controller takes a label's value with the slashes
- * it was sent with unencoded (a durable execution's ARN, an EKS access entry's principal), the route whose labels
- * the path then gives the values the router gave the path parameters of the method it dispatched to being its own.
+ * without the prefix, which is the path the model gives its operation. The router matches it percent-encoded, as it
+ * was sent, so a label whose slashes are encoded stays one segment. A label sent with its slashes unencoded (a key
+ * ARN on the Payment Cryptography data plane) still reaches a controller route that takes them: a path that matches
+ * no route with each label taking one segment is matched again with each label taking as many as its value spans.
+ * So is a request whose controller takes a label's value with the slashes it was sent with unencoded (a durable
+ * execution's ARN, an EKS access entry's principal), the route whose labels the path then gives the values the
+ * router gave the path parameters of the method it dispatched to being its own.
  *
  * <p>An operation may have alternative routes, the bare paths a shared controller also serves it on, with where
  * the request carries the members the path no longer holds, and the alternative's own method when it is not the
@@ -219,7 +220,7 @@ final class IamRestRoutes {
 
     /**
      * As {@link #operation}, for a path a route filter moved under an internal prefix, given without it: when it
-     * matches no route, its labels may span the slashes their decoded values hold.
+     * matches no route, its labels may span the slashes they were sent with unencoded.
      */
     Optional<String> operation(String scope, String method, String path, MultivaluedMap<String, String> query,
                                boolean movedUnderPrefix) {

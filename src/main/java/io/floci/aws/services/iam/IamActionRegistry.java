@@ -299,7 +299,9 @@ public class IamActionRegistry {
      * The path the router matched, relative to the application root. A request no filter rewrote is matched
      * on its normalized path, still percent-encoded but with encoded unreserved characters such as {@code %2E}
      * decoded and dot segments removed, so {@code /functions/x/%2E%2E/fn} is {@code /functions/fn}; a request
-     * a filter rewrote is matched on its new path, decoded. {@link #sentPath} for a synthetic context.
+     * a filter rewrote is matched on its new path decoded once, which stays percent-encoded when the filter escaped
+     * it first ({@code RequestUriRewrite}, as {@link SignedServiceRoute} does). {@link #sentPath} for a synthetic
+     * context.
      */
     static String rawPath(ContainerRequestContext ctx) {
         ResteasyReactiveRequestContext request = ResteasyRequests.of(ctx);
@@ -358,7 +360,10 @@ public class IamActionRegistry {
                 .orElse(path);
     }
 
-    /** Whether a route filter moved the request under an internal prefix, so the router matched its path decoded. */
+    /**
+     * Whether a route filter moved the request under an internal prefix, so its path is matched on the model's routes
+     * without the prefix and a label may span the slashes it was sent with unencoded.
+     */
     private static boolean movedUnderPrefix(ContainerRequestContext ctx) {
         return SignedServiceRoute.internalPrefix(ctx).isPresent();
     }
