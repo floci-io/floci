@@ -674,10 +674,31 @@ public class CloudWatchMetricsService implements Resettable {
         return node;
     }
 
-    /** Metric alarms evaluated by the existing metric evaluator. */
+    /** The metric alarms of the caller's account. */
     public List<MetricAlarm> allAlarms() {
         return alarmStore.scan(k -> true).stream().filter(MetricAlarm.class::isInstance)
                 .map(MetricAlarm.class::cast).toList();
+    }
+
+    /**
+     * The metric alarms of every account, each with the account that owns it, for the evaluator,
+     * which runs outside any request and so has no account of its own.
+     */
+    public List<AccountAwareStorageBackend.AccountEntry<MetricAlarm>> metricAlarmsInEveryAccount() {
+        List<AccountAwareStorageBackend.AccountEntry<MetricAlarm>> alarms = new ArrayList<>();
+        if (alarmStore instanceof AccountAwareStorageBackend<Alarm> aware) {
+            for (AccountAwareStorageBackend.AccountEntry<Alarm> entry : aware.scanAllAccountEntries(k -> true)) {
+                if (entry.value() instanceof MetricAlarm alarm) {
+                    alarms.add(new AccountAwareStorageBackend.AccountEntry<>(entry.accountId(), entry.key(), alarm));
+                }
+            }
+            return alarms;
+        }
+        for (MetricAlarm alarm : allAlarms()) {
+            alarms.add(new AccountAwareStorageBackend.AccountEntry<>(regionResolver.getDefaultAccountId(),
+                    alarm.getRegion() + "::" + alarm.getAlarmName(), alarm));
+        }
+        return alarms;
     }
 
     /**
