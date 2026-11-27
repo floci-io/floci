@@ -3462,6 +3462,36 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(118)
+    void putBucketEncryptionRefusesAKeyIdentifierWithALineBreakAndTheBucketKeepsWorking() {
+        String body = "<ServerSideEncryptionConfiguration><Rule>"
+                + "<ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm>"
+                + "<KMSMasterKeyID>key\nid</KMSMasterKeyID></ApplyServerSideEncryptionByDefault>"
+                + "</Rule></ServerSideEncryptionConfiguration>";
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .put("/test-bucket?encryption")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidArgument"));
+        given()
+            .contentType("text/plain")
+            .body("safe-data")
+        .when()
+            .put("/test-bucket/plain.txt")
+        .then()
+            .statusCode(200);
+        given()
+        .when()
+            .get("/test-bucket/plain.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("safe-data"));
+    }
+
+    @Test
     @Order(115)
     void putObjectWithTraversalAfterBucketPrefixReturnsBadRequest() {
         given()

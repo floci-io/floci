@@ -4613,6 +4613,15 @@ public interface EmulatorConfig {
         String dockerHost();
 
         /**
+         * Opt-in: allow an {@code ssh://} Docker host (from {@code docker-host}, {@code DOCKER_HOST},
+         * or the active Docker context). Off by default, because each Docker connection runs an
+         * {@code ssh} process on the Floci host; an {@code ssh://} endpoint is refused at startup
+         * until this is set to {@code true}.
+         */
+        @WithDefault("false")
+        boolean allowSshHost();
+
+        /**
          * Size of the connection pool behind the shared Docker client. Every short Docker call
          * leases a connection from it; streams that stay open while a container or a command runs
          * live in the separate streaming pool. Once this pool is full, create, start, stop and
