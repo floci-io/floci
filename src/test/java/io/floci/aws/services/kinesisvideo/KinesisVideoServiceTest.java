@@ -195,10 +195,28 @@ class KinesisVideoServiceTest {
     }
 
     @Test
+    void listStreams_streamDeletedBetweenPages_doesNotSkipRemainingStreams() {
+        KinesisVideoStream a = service.createStream(REGION, ACCOUNT, request("a"));
+        service.createStream(REGION, ACCOUNT, request("b"));
+        service.createStream(REGION, ACCOUNT, request("c"));
+
+        KinesisVideoService.Page first = service.listStreams(REGION, ACCOUNT, 1, null, null);
+        assertEquals(List.of("a"), names(first));
+        service.deleteStream(REGION, ACCOUNT, a.streamArn(), null);
+
+        KinesisVideoService.Page second = service.listStreams(REGION, ACCOUNT, 1, first.nextToken(), null);
+        assertEquals(List.of("b"), names(second));
+        KinesisVideoService.Page third = service.listStreams(REGION, ACCOUNT, 1, second.nextToken(), null);
+        assertEquals(List.of("c"), names(third));
+        assertNull(third.nextToken());
+    }
+
+    @Test
     void listStreams_invalidArguments_throwInvalidArgument() {
         assertInvalidArgument(() -> service.listStreams(REGION, ACCOUNT, 0, null, null));
         assertInvalidArgument(() -> service.listStreams(REGION, ACCOUNT, 10001, null, null));
         assertInvalidArgument(() -> service.listStreams(REGION, ACCOUNT, null, "not a token", null));
+        assertInvalidArgument(() -> service.listStreams(REGION, ACCOUNT, null, "IA==", null));
     }
 
     private static KinesisVideoService.CreateStreamRequest request(String streamName) {

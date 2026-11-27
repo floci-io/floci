@@ -145,10 +145,16 @@ public class KinesisVideoService implements Resettable {
         if (namePrefix != null) {
             items.removeIf(stream -> !stream.streamName().startsWith(namePrefix));
         }
+        String after = decodeCursor(nextToken);
+        if (after != null) {
+            items.removeIf(stream -> stream.streamName().compareTo(after) <= 0);
+        }
         items.sort(Comparator.comparing(KinesisVideoStream::streamName));
-        int offset = decodeOffset(nextToken, items.size());
-        int end = Math.min(items.size(), offset + limit);
-        return new Page(List.copyOf(items.subList(offset, end)), end < items.size() ? encodeOffset(end) : null);
+        if (items.size() <= limit) {
+            return new Page(List.copyOf(items), null);
+        }
+        List<KinesisVideoStream> page = List.copyOf(items.subList(0, limit));
+        return new Page(page, encodeCursor(page.get(limit - 1).streamName()));
     }
 
     @Override
@@ -245,23 +251,29 @@ public class KinesisVideoService implements Resettable {
         return Map.copyOf(tags);
     }
 
-    private static int decodeOffset(String token, int size) {
+    /**
+     * The token names the last stream of the previous page, not its position, so a stream deleted or created
+     * between two pages does not shift the next page past a stream that was never returned.
+     */
+    private static String decodeCursor(String token) {
         if (token == null || token.isEmpty()) {
-            return 0;
+            return null;
         }
+        String streamName;
         try {
-            int offset = Integer.parseInt(new String(Base64.getDecoder().decode(token), StandardCharsets.UTF_8));
-            if (offset < 0 || offset > size) {
-                throw invalidArgument("NextToken is invalid.");
-            }
-            return offset;
+            streamName = new String(Base64.getDecoder().decode(token), StandardCharsets.UTF_8);
         } catch (IllegalArgumentException e) {
             throw invalidArgument("NextToken is invalid.");
         }
+        if (streamName.isEmpty() || streamName.length() > MAX_STREAM_NAME_LENGTH
+                || !NAME_PATTERN.matcher(streamName).matches()) {
+            throw invalidArgument("NextToken is invalid.");
+        }
+        return streamName;
     }
 
-    private static String encodeOffset(int offset) {
-        return Base64.getEncoder().encodeToString(Integer.toString(offset).getBytes(StandardCharsets.UTF_8));
+    private static String encodeCursor(String streamName) {
+        return Base64.getEncoder().encodeToString(streamName.getBytes(StandardCharsets.UTF_8));
     }
 
     private static String newVersion() {
