@@ -103,7 +103,7 @@ class CloudWatchMetricMathAlarmTest {
 
     private void put(ObjectNode request, boolean queryProtocol) {
         if (queryProtocol) {
-            assertEquals(200, queryHandler.handle("PutMetricAlarm", toQuery(request), REGION).getStatus());
+            assertEquals(200, queryHandler.handle("PutMetricAlarm", CloudWatchTestRequests.toQuery(request), REGION).getStatus());
         } else {
             assertEquals(200, jsonHandler.handle("PutMetricAlarm", request, REGION).getStatus());
         }
@@ -169,26 +169,6 @@ class CloudWatchMetricMathAlarmTest {
             }
         } else {
             assertEquals(value.asText(), xpath.evaluate(path, document), path);
-        }
-    }
-
-    private static MultivaluedMap<String, String> toQuery(JsonNode value) {
-        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
-        flatten(value, "", params);
-        return params;
-    }
-
-    private static void flatten(JsonNode value, String prefix, MultivaluedMap<String, String> params) {
-        if (value.isArray()) {
-            for (int index = 0; index < value.size(); index++) {
-                flatten(value.get(index), prefix + ".member." + (index + 1), params);
-            }
-        } else if (value.isObject()) {
-            for (Map.Entry<String, JsonNode> field : value.properties()) {
-                flatten(field.getValue(), prefix.isEmpty() ? field.getKey() : prefix + "." + field.getKey(), params);
-            }
-        } else {
-            params.putSingle(prefix, value.asText());
         }
     }
 
