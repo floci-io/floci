@@ -160,7 +160,13 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
         resource.getAttributes().remove(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
-        return ReplacementCleanup.complete(resource, this::delete);
+        return ReplacementCleanup.complete(resource, (resourceType, physicalId, region) -> {
+            // An older debt can become the live rule under a different accepted bus alias.
+            if (!"AWS::Events::Rule".equals(resourceType)
+                    || !sameRuleBackend(physicalId, resource.getPhysicalId())) {
+                delete(resourceType, physicalId, region);
+            }
+        });
     }
 
     @Override
@@ -223,7 +229,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             priorPhysicalId = rulePhysicalId(ruleNameOf(priorPhysicalId),
                     priorBus != null ? priorBus : attributesBefore.get("EventBusName"), ctx.accountId());
         }
-        boolean replaced = ctx.isUpdate() && !physicalId.equals(priorPhysicalId);
+        boolean replaced = ctx.isUpdate() && !sameRuleBackend(physicalId, priorPhysicalId);
         boolean replacementPreexisting = replaced && eventBridgeService.ruleExists(ruleName, busName, ctx.region());
         Rule rule = eventBridgeService.putRule(ruleName, busName, eventPattern, scheduleExpression,
                 state, description, roleArn, Map.of(), ctx.region());
@@ -403,7 +409,8 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         return ("AWS::Events::EventBus".equals(resource.getResourceType())
                 && resource.getAttributes().containsKey(CfnRollback.EVENT_BUS_UPDATE_SNAPSHOT_ATTR))
                 || ("AWS::Events::Rule".equals(resource.getResourceType())
-                && resource.getAttributes().containsKey(CfnRollback.REPLACEMENT_CLEANUP_ATTR));
+                && (resource.getAttributes().containsKey(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR)
+                    || ReplacementCleanup.hasRollbackState(resource)));
     }
 
     @Override
@@ -847,6 +854,12 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             return DEFAULT_EVENT_BUS.equals(busName) ? ruleName : busName + RULE_ID_SEPARATOR + ruleName;
         }
         return busNameOrArn + RULE_ID_SEPARATOR + ruleName;
+    }
+
+    private static boolean sameRuleBackend(String first, String second) {
+        return first != null && second != null && ruleNameOf(first).equals(ruleNameOf(second))
+                && EventBridgeService.resolvedBusName(busNameOf(first))
+                        .equals(EventBridgeService.resolvedBusName(busNameOf(second)));
     }
 
     /** The rule name a rule's physical id carries: all of it, or what follows its custom bus. */

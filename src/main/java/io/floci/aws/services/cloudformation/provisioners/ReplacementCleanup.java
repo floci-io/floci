@@ -218,6 +218,13 @@ public final class ReplacementCleanup {
         }
     }
 
+    /** Current rollback work, distinct from deletes a skipped earlier attempt still owes. */
+    static boolean hasRollbackState(StackResource r) {
+        ObjectNode cleanup = read(r);
+        return cleanup != null && (cleanup.path("priorPhysicalId").asText(null) != null
+                || cleanup.path("undeletedReplacement").asText(null) != null);
+    }
+
     static boolean hasReplacement(StackResource r) {
         ObjectNode cleanup = read(r);
         return cleanup != null && cleanup.path("displaced").size() > 0;

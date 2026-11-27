@@ -849,6 +849,68 @@ class EventsCfnProvisionerTest {
     }
 
     @Test
+    void skippedReplacementDebtDoesNotRetainAPreMutationFailure() {
+        stubPutRule();
+        StackResource r = priorRule(true);
+        when(events.ruleExists("orders", null, REGION)).thenReturn(false, true);
+        AwsException failure = new AwsException("InternalException", "delete unavailable", 500);
+        doThrow(failure).doNothing().when(events).deleteRule("orders", null, REGION);
+        provisioner.provision(r, ruleProps(), ctx(r.getPhysicalId()));
+        assertSame(failure, assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r)));
+        assertTrue(provisioner.retainsFailedUpdateState(r));
+
+        ObjectNode invalid = ruleProps().put("Targets", "invalid");
+        assertThrows(AwsException.class,
+                () -> provisioner.provision(r, invalid, ctx(r.getPhysicalId())));
+
+        assertEquals("old-bus|original", r.getPhysicalId());
+        assertFalse(provisioner.retainsFailedUpdateState(r), "old debt is not this attempt's rollback");
+        assertTrue(provisioner.hasReplacementUpdate(r), "the skipped replacement still needs deletion");
+        assertTrue(provisioner.completeUpdate(r).complete());
+        verify(events, times(2)).deleteRule("orders", null, REGION);
+        verify(events, never()).deleteRule("original", "old-bus", REGION);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void busArnAliasDoesNotDisplaceTheLiveRule(boolean rollback) {
+        stubPutRule();
+        StackResource r = priorRule(true);
+        String alias = "arn:aws:events:us-west-2:111122223333:event-bus/old-bus";
+        ObjectNode props = ruleProps().put("Name", "original").put("EventBusName", alias);
+        provisioner.provision(r, props, ctx(r.getPhysicalId()));
+
+        assertEquals(alias + "|original", r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        assertTrue(provisioner.retainsFailedUpdateState(r), "the target snapshot belongs to this attempt");
+        if (rollback) {
+            assertTrue(provisioner.rollbackUpdate(r));
+            assertEquals("old-bus|original", r.getPhysicalId());
+        } else {
+            provisioner.completeUpdate(r);
+        }
+        verify(events, never()).deleteRule(anyString(), any(), anyString());
+    }
+
+    @Test
+    void committedUpdateDoesNotDeleteOldDebtThatNowAliasesTheLiveRule() {
+        stubPutRule();
+        StackResource r = priorRule(true);
+        ReplacementCleanup.recordOrphan(r, "old-bus|orders", r.getResourceType(), REGION);
+        String alias = "arn:aws:events:us-west-2:111122223333:event-bus/old-bus";
+        when(events.ruleExists("orders", alias, REGION)).thenReturn(true);
+        when(events.ruleExists("orders", "old-bus", REGION)).thenReturn(true);
+        when(events.ruleExists("original", "old-bus", REGION)).thenReturn(true);
+        provisioner.provision(r, ruleProps().put("EventBusName", alias), ctx(r.getPhysicalId()));
+
+        assertTrue(provisioner.completeUpdate(r).complete());
+
+        verify(events).deleteRule("original", "old-bus", REGION);
+        verify(events, never()).deleteRule("orders", "old-bus", REGION);
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
     void rollbackPreservesAPreexistingDestinationRule() {
         stubPutRule();
         StackResource r = priorRule(true);

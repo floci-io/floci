@@ -1734,7 +1734,8 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         return effectiveBus;
     }
 
-    private static String resolvedBusName(String busName) {
+    /** The bus identity used by rule storage, including accepted ARN aliases. */
+    public static String resolvedBusName(String busName) {
         if (busName == null || busName.isBlank()) {
             return "default";
         }
