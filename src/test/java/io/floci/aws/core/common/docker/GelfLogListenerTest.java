@@ -1,6 +1,8 @@
 package io.floci.aws.core.common.docker;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.InfoCmd;
+import com.github.dockerjava.api.model.Info;
 import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.StreamType;
 import io.floci.aws.config.EmulatorConfig;
@@ -9,6 +11,8 @@ import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -42,6 +46,27 @@ class GelfLogListenerTest {
     private final List<String> lines = new CopyOnWriteArrayList<>();
     private final GelfLogListener listener = new GelfLogListener(mock(DockerClient.class), true, "127.0.0.1");
     private GelfLogListener restarted;
+
+    @ParameterizedTest
+    @CsvSource({"Docker Desktop,host.docker.internal", "docker desktop,host.docker.internal", "Ubuntu 24.04,127.0.0.1"})
+    void defaultAddressUsesTheDaemonPlatform(String operatingSystem, String host) {
+        DockerClient docker = mock(DockerClient.class);
+        InfoCmd info = mock(InfoCmd.class);
+        when(docker.infoCmd()).thenReturn(info);
+        when(info.exec()).thenReturn(new Info().withOperatingSystem(operatingSystem));
+        restarted = new GelfLogListener(docker, true, null);
+
+        assertTrue(restarted.ensureStarted().startsWith(host + ":"));
+    }
+
+    @Test
+    void unavailableDaemonInformationUsesLoopback() {
+        DockerClient docker = mock(DockerClient.class);
+        when(docker.infoCmd()).thenThrow(new IllegalStateException("daemon unavailable"));
+        restarted = new GelfLogListener(docker, true, null);
+
+        assertTrue(restarted.ensureStarted().startsWith("127.0.0.1:"));
+    }
 
     @AfterEach
     void close() {
