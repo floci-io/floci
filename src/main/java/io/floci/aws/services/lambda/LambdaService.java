@@ -4747,18 +4747,16 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
             return;
         }
         LOG.debugv("Observing S3 update: {0}/{1}", event.bucketName(), event.key());
-        // For simplicity, we scan all functions in the default region
-        // Most local dev setups use a single region.
-        // This runs on the CDI event thread with no RequestContext, so an ambient scan
-        // would only ever see the default account's partition — a function owned by any
-        // other account would silently never hot-reload from S3.
-        String region = regionResolver.getDefaultRegion();
-        List<LambdaFunction> functions = functionStore.listAllAccounts(region);
+        // This runs on the CDI event thread with no RequestContext, so an ambient scan would only
+        // see the default account's functions in the default Region. Every function is scanned
+        // instead, and each one syncs in its own Region and account.
+        List<LambdaFunction> functions = functionStore.listAllAccounts();
         boolean async = reactiveS3SyncAsync();
         for (LambdaFunction fn : functions) {
             if (!event.bucketName().equals(fn.getS3Bucket()) || !event.key().equals(fn.getS3Key())) {
                 continue;
             }
+            String region = regionResolver.regionOf(fn.getFunctionArn());
             if (!async) {
                 syncFromS3(fn, event.bucketName(), event.key(), region);
                 continue;

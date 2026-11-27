@@ -27,7 +27,7 @@ class LambdaFunctionStoreAccountScopeTest {
 
         assertTrue(store.list(REGION).isEmpty(),
                 "the ambient scan must not see another account's function");
-        List<LambdaFunction> all = store.listAllAccounts(REGION);
+        List<LambdaFunction> all = store.listAllAccounts();
         assertEquals(1, all.size());
         assertEquals("other-fn", all.get(0).getFunctionName());
     }
@@ -45,7 +45,7 @@ class LambdaFunctionStoreAccountScopeTest {
     }
 
     @Test
-    void listAllAccountsKeepsTheRegionAndLatestFilter() {
+    void listAllAccountsSeesEveryRegionButOnlyLatest() {
         LambdaFunctionStore store = accountAwareStore();
         store.saveForAccount(OTHER_ACCOUNT, REGION, function("latest-fn", OTHER_ACCOUNT));
         LambdaFunction published = function("latest-fn", OTHER_ACCOUNT);
@@ -53,10 +53,12 @@ class LambdaFunctionStoreAccountScopeTest {
         store.saveForAccount(OTHER_ACCOUNT, REGION, published);
         store.saveForAccount(OTHER_ACCOUNT, "eu-west-1", function("elsewhere-fn", OTHER_ACCOUNT));
 
-        List<LambdaFunction> all = store.listAllAccounts(REGION);
+        List<LambdaFunction> all = store.listAllAccounts();
 
-        assertEquals(1, all.size(), "published versions and other regions must stay excluded");
-        assertEquals("$LATEST", all.get(0).getVersion());
+        assertEquals(2, all.size(), "published versions must stay excluded, other Regions included");
+        assertTrue(all.stream().allMatch(function -> "$LATEST".equals(function.getVersion())));
+        assertEquals(List.of("elsewhere-fn", "latest-fn"), all.stream()
+                .map(LambdaFunction::getFunctionName).sorted().toList());
     }
 
     @Test
