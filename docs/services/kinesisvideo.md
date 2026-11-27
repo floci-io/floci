@@ -26,7 +26,7 @@ Floci implements the REST JSON control plane of Amazon Kinesis Video Streams for
 
 ## IAM
 
-Under IAM enforcement (`floci.services.iam.enforcement-enabled`), each request is checked as its `kinesisvideo:` action, from the routes and request resources generated from botocore and the AWS Service Reference. `DescribeStream` and `DeleteStream` are checked on the stream they name, `ListStreams` acts on no resource type and is checked on `*`, and a `CreateStream` with `Tags` also needs `kinesisvideo:TagStream`, with its tags as `aws:RequestTag/<key>` and `aws:TagKeys`. A refusal is `AccessDeniedException` with the 401 status the model declares for the service.
+Under IAM enforcement (`floci.services.iam.enforcement-enabled`), each request is checked as its `kinesisvideo:` action, from the routes and request resources generated from botocore and the AWS Service Reference. `DescribeStream` and `DeleteStream` are checked on the stream they name, a `DescribeStream` by `StreamName` on the ARN the stream is stored under, creation time included, and `aws:ResourceTag/<key>` reads the tags the stream was created with; `ListStreams` acts on no resource type and is checked on `*`, and a `CreateStream` with `Tags` also needs `kinesisvideo:TagStream`, with its tags as `aws:RequestTag/<key>` and `aws:TagKeys`. A refusal is `AccessDeniedException` with the 401 status the model declares for the service.
 
 ## Not implemented
 

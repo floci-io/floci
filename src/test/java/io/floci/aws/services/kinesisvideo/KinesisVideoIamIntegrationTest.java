@@ -20,8 +20,9 @@ import static org.hamcrest.Matchers.equalTo;
 
 /**
  * Kinesis Video Streams requests are checked against the caller's policies through the generated routes: a stream
- * call on the stream it names, {@code ListStreams} on {@code *}, and a {@code CreateStream} that tags the stream it
- * makes also as {@code kinesisvideo:TagStream}.
+ * call on the stream it names, by its ARN or by its name through the ARN the stream is stored under, with the tags the
+ * stream holds for {@code aws:ResourceTag}; {@code ListStreams} on {@code *}; and a {@code CreateStream} that tags the
+ * stream it makes also as {@code kinesisvideo:TagStream}.
  */
 @QuarkusTest
 @TestProfile(SignedIamEnforcementProfile.class)
@@ -83,6 +84,65 @@ class KinesisVideoIamIntegrationTest {
             send(admin, "/describeStream", byArn(allowed)).then().statusCode(404);
         } finally {
             deleteStream(other);
+        }
+    }
+
+    /**
+     * A request naming the stream by {@code StreamName} is checked on the ARN the stream is stored under, creation time
+     * included: an allow on that exact ARN reads it by name, and a deny on it refuses the read by name even beside an
+     * allow on every resource.
+     */
+    @Test
+    void aNameBasedReadIsCheckedOnTheStreamsStoredArn() throws Exception {
+        String name = uniqueName();
+        String arn = createStream(name);
+        String byName = "{\"StreamName\":\"" + name + "\"}";
+        String denyExact = "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Allow\",\"Action\":\"kinesisvideo:DescribeStream\",\"Resource\":\"*\"},"
+                + "{\"Effect\":\"Deny\",\"Action\":\"kinesisvideo:DescribeStream\",\"Resource\":\"" + arn + "\"}]}";
+        try (SignedIamUsers.User allowed = SignedIamUsers.createUser(endpoint, "kvs-iam-", "access",
+                     allow("\"kinesisvideo:DescribeStream\"", arn));
+             SignedIamUsers.User refused = SignedIamUsers.createUser(endpoint, "kvs-iam-", "access", denyExact)) {
+            send(allowed, "/describeStream", byName).then().statusCode(200)
+                    .body("StreamInfo.StreamARN", equalTo(arn));
+            denied(send(refused, "/describeStream", byName), "kinesisvideo:DescribeStream");
+            denied(send(refused, "/describeStream", byArn(arn)), "kinesisvideo:DescribeStream");
+        } finally {
+            deleteStream(arn);
+        }
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags the stream was created with, whether the request names the
+     * stream by its ARN or by its name: an allow on one team's tag reads that team's stream and not an untagged one,
+     * and a deny on it refuses that stream beside an allow on every resource.
+     */
+    @Test
+    void aResourceTagConditionReadsTheTagsTheStreamHolds() throws Exception {
+        String taggedName = uniqueName();
+        String tagged = send(admin, "/createStream", tagged(taggedName, "video")).then().statusCode(200)
+                .extract().path("StreamARN");
+        String untagged = createStream(uniqueName());
+        String onTeamVideo = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":"
+                + "\"kinesisvideo:DescribeStream\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":"
+                + "{\"aws:ResourceTag/team\":\"video\"}}}]}";
+        String denyTeamVideo = "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Allow\",\"Action\":\"kinesisvideo:DescribeStream\",\"Resource\":\"*\"},"
+                + "{\"Effect\":\"Deny\",\"Action\":\"kinesisvideo:DescribeStream\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"video\"}}}]}";
+        try (SignedIamUsers.User team = SignedIamUsers.createUser(endpoint, "kvs-iam-", "access", onTeamVideo);
+             SignedIamUsers.User others = SignedIamUsers.createUser(endpoint, "kvs-iam-", "access", denyTeamVideo)) {
+            send(team, "/describeStream", byArn(tagged)).then().statusCode(200);
+            send(team, "/describeStream", "{\"StreamName\":\"" + taggedName + "\"}").then().statusCode(200);
+            denied(send(team, "/describeStream", byArn(untagged)), "kinesisvideo:DescribeStream");
+
+            denied(send(others, "/describeStream", byArn(tagged)), "kinesisvideo:DescribeStream");
+            denied(send(others, "/describeStream", "{\"StreamName\":\"" + taggedName + "\"}"),
+                    "kinesisvideo:DescribeStream");
+            send(others, "/describeStream", byArn(untagged)).then().statusCode(200);
+        } finally {
+            deleteStream(tagged);
+            deleteStream(untagged);
         }
     }
 

@@ -16,6 +16,7 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -133,6 +134,26 @@ public class KinesisVideoService implements Resettable {
         return new Page(page, encodeCursor(page.get(limit - 1).streamName()));
     }
 
+    /**
+     * The ARN the stream of {@code streamName} in the account and Region is stored under, which ends with the creation
+     * time a request naming the stream by its name does not carry; empty when there is no such stream.
+     */
+    public Optional<String> storedStreamArn(String region, String accountId, String streamName) {
+        return streams.getForAccount(accountId, key(region, streamName)).map(KinesisVideoStream::streamArn);
+    }
+
+    /**
+     * The tags of the stream of the account and Region whose ARN is {@code streamArn}, matched on the whole ARN, so the
+     * ARN of a deleted stream reads none from a stream later created with its name; empty when there is no such stream.
+     */
+    public Map<String, String> storedStreamTags(String region, String accountId, String streamArn) {
+        return streamNameOf(streamArn)
+                .flatMap(streamName -> streams.getForAccount(accountId, key(region, streamName)))
+                .filter(stream -> stream.streamArn().equals(streamArn))
+                .map(KinesisVideoStream::tags)
+                .orElse(Map.of());
+    }
+
     @Override
     public void clear() {
         streams.clear();
@@ -146,18 +167,23 @@ public class KinesisVideoService implements Resettable {
     }
 
     private static String streamNameFromArn(String streamArn) {
+        return streamNameOf(streamArn).orElseThrow(() -> invalidArgument("StreamARN is invalid."));
+    }
+
+    /** The stream name a Kinesis Video stream ARN ({@code stream/<name>/<creationTime>}) carries; empty for any other. */
+    private static Optional<String> streamNameOf(String streamArn) {
         AwsArnUtils.Arn arn;
         try {
             arn = AwsArnUtils.parse(streamArn);
-        } catch (IllegalArgumentException e) {
-            throw invalidArgument("StreamARN is invalid.");
+        } catch (IllegalArgumentException notAnArn) {
+            return Optional.empty();
         }
         String[] resource = arn.resource().split("/", -1);
         if (!"kinesisvideo".equals(arn.service()) || resource.length != 3 || !"stream".equals(resource[0])
                 || !NAME_PATTERN.matcher(resource[1]).matches() || !resource[2].matches("[0-9]+")) {
-            throw invalidArgument("StreamARN is invalid.");
+            return Optional.empty();
         }
-        return resource[1];
+        return Optional.of(resource[1]);
     }
 
     /**

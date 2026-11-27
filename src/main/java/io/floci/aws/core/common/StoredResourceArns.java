@@ -66,7 +66,8 @@ import java.util.Optional;
  * of a landing zone or an enabled control; GuardDuty, for the tags of a detector or a Malware Protection plan; Cloud
  * Map, for the tags of a namespace or a service; Elastic Load Balancing, for the tags of a load balancer, a target
  * group, a listener, a rule or a Classic Load Balancer; SQS, for the tags of a queue; SNS, for the tags of a topic;
- * Kinesis Data Streams, for the tags of a stream or a consumer; EventBridge Pipes, for the tags of a pipe; Aurora DSQL,
+ * Kinesis Data Streams, for the tags of a stream or a consumer; Kinesis Video Streams, for the stream a name names,
+ * whose creation time it minted, and the tags of a stream; EventBridge Pipes, for the tags of a pipe; Aurora DSQL,
  * for the tags of a cluster; EKS, for the tags of a cluster, a node group, a Fargate profile, an add-on, a Pod Identity
  * association or an access entry; Resource Groups, for the tags of a group; CloudWatch Logs, for a delivery, the
  * delivery destinations of a delivery source and the tags of a log group, a destination, a delivery source, a
