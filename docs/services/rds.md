@@ -6,6 +6,10 @@
 
 `CreateDBInstance` returns `creating`. Use the SDK instance-available waiter before modifying the instance, taking a snapshot or connecting to the database. A standalone instance starts its database and proxy in the background. Its record is visible to `DescribeDBInstances` while startup runs. Modify and reboot requests during startup return `InvalidDBInstanceState`. If you delete the instance while its container or proxy is starting, it stays `deleting` until Floci can remove those resources.
 
+If you keep a PostgreSQL automated backup, Floci saves it before removing the volume. If Docker is
+unavailable after a restart, the instance stays `deleting`. Retry the delete or restart Floci once
+Docker is available.
+
 ### Recoverable backend startup failures
 
 If a persisted database's container or authentication relay cannot start when Floci restarts,

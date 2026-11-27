@@ -1243,8 +1243,6 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
                     return;
                 }
                 if (instance.getStatus() == DbInstanceStatus.DELETING) {
-                    // A retained backup may need the container even though clients never saw it as available.
-                    instance.setContainerId(starting.getContainerId());
                     instance.setVpcEndpointAddress(starting.getVpcEndpointAddress());
                     finishDeferredInstanceDelete(instance, region);
                 } else if (instance.getStatus() == DbInstanceStatus.CREATING) {
@@ -2342,7 +2340,12 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
         if (instance.getStatus() == DbInstanceStatus.DELETING && snapshotData.get(dataKey).isPresent()) {
             backup.setDataSaved(true);
         } else {
-            String dump = saveBackupData(instance.getEngine(), instance.getContainerId(), instance.getMasterUsername(),
+            String containerId = instance.getContainerId();
+            if (instance.getDeleteAutomatedBackupsAfterStart() != null
+                    && instance.getEngine() == DatabaseEngine.POSTGRES) {
+                containerId = recoverDeferredBackupContainer(instance);
+            }
+            String dump = saveBackupData(instance.getEngine(), containerId, instance.getMasterUsername(),
                     "DB instance " + instance.getDbInstanceIdentifier(), "InvalidDBInstanceState");
             if (dump != null) {
                 snapshotData.put(dataKey, dump);
@@ -2350,6 +2353,21 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
             }
         }
         return backup;
+    }
+
+    /** A delete accepted during startup owns the volume even if the container ID was never persisted. */
+    private String recoverDeferredBackupContainer(DbInstance instance) {
+        if (!config.services().rds().mock()) {
+            RdsContainerHandle handle = containerManager.getActiveHandle(instance.getDbInstanceArn());
+            if (handle == null || !hasBackend(handle.getHost(), handle.getPort())) {
+                handle = startInstanceContainer(instance);
+            }
+            if (handle != null) {
+                return handle.getContainerId();
+            }
+        }
+        throw new AwsException("InvalidDBInstanceState", "Cannot retain the automated backup of DB instance "
+                + instance.getDbInstanceIdentifier() + " until its PostgreSQL database is running.", 400);
     }
 
     private DbClusterAutomatedBackup retainedClusterBackupOf(DbCluster cluster, String region) {

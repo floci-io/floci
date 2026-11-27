@@ -313,7 +313,11 @@ class RdsServiceTest {
         try {
             beginStandaloneCreate(id);
             assertTrue(proxyStarting.await(5, TimeUnit.SECONDS));
-            assertNull(rdsService.getDbInstance(id).getContainerHost());
+            DbInstance instance = rdsService.getDbInstance(id);
+            assertNull(instance.getContainerHost());
+            when(containerManager.getActiveHandle(instance.getDbInstanceArn()))
+                    .thenReturn(new RdsContainerHandle("cont-id", instance.getDbInstanceArn(), id, "localhost", 5432));
+            when(containerManager.createPostgresSnapshot("cont-id", "admin")).thenReturn("retained dump");
             assertTimeoutPreemptively(Duration.ofSeconds(2), () -> rdsService.deleteDbInstance(id, "us-east-1", false));
             rdsService.deleteDbInstance(id);
             assertEquals(DbInstanceStatus.DELETING, rdsService.getDbInstance(id).getStatus());
@@ -325,26 +329,63 @@ class RdsServiceTest {
         }
         AwsException deleted = assertThrows(AwsException.class, () -> rdsService.getDbInstance(id));
         assertEquals("DBInstanceNotFound", deleted.getErrorCode());
+        verify(containerManager).tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
         verify(containerManager).createPostgresSnapshot("cont-id", "admin");
         verify(proxyManager).stopProxy(anyString());
         verify(containerManager).removeVolume(any(), any(), any());
     }
 
-    @Test
-    void restoreFinishesADeletionAcceptedDuringStartup() {
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void deferredDeleteRecoversTheRetainedBackupBeforeRemovingTheVolume(boolean retryOnBoot, @TempDir Path tempDir)
+            throws Exception {
         when(rdsConfig.mock()).thenReturn(false);
-        DbInstance instance = rdsService.createDbInstance("delete-on-restore", "postgres", "16.3", "admin", "password",
+        String id = "delete-on-restore";
+        String region = "us-east-1";
+        DbInstance instance = rdsService.createDbInstance(id, "postgres", "16.3", "admin", "password",
                 "app", "db.t3.micro", 20, false, null, null, null);
+        // Startup had not published its runtime when the delete was accepted.
+        instance.setContainerId(null);
+        instance.setContainerHost(null);
+        instance.setContainerPort(0);
         instance.setDeleteAutomatedBackupsAfterStart(false);
         instance.setBackendCleanupRequired(true);
         instance.setStatus(DbInstanceStatus.DELETING);
+        Path file = tempDir.resolve("instances.json");
+        TypeReference<Map<String, DbInstance>> type = new TypeReference<>() {};
+        new PersistentStorage<String, DbInstance>(file, type).put(region + "::" + id, instance);
+        PersistentStorage<String, DbInstance> instances = new PersistentStorage<>(file, type);
+        instances.load();
+        RdsContainerManager manager = mock(RdsContainerManager.class);
+        RdsService restarted = newService(manager, mock(RdsProxyManager.class), instances, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
 
-        rdsService.restorePersistedRuntime();
+        restarted.restorePersistedRuntime();
+        assertEquals(DbInstanceStatus.DELETING, restarted.getDbInstance(id).getStatus());
+        verify(manager, never()).stopForDelete(any(), any());
+        verify(manager, never()).removeVolume(any(), any(), any());
 
-        AwsException deleted = assertThrows(AwsException.class, () -> rdsService.getDbInstance("delete-on-restore"));
-        assertEquals("DBInstanceNotFound", deleted.getErrorCode());
-        verify(containerManager).createPostgresSnapshot("cont-id", "admin");
-        verify(containerManager).stopForDelete(instance.getDbInstanceArn(), instance.getDockerVolumeName());
+        String arn = instance.getDbInstanceArn();
+        when(manager.tryStart(eq(arn), eq(id), eq(instance.getContainerStorageResourceId()),
+                eq(instance.getDockerVolumeName()), eq(DatabaseEngine.POSTGRES), any(), eq("admin"), eq("password"),
+                eq("app"), any())).thenReturn(new RdsContainerHandle("recovered", arn, id, "localhost", 5432));
+        when(manager.createPostgresSnapshot("recovered", "admin")).thenReturn("retained dump");
+        if (retryOnBoot) {
+            restarted.restorePersistedRuntime();
+        } else {
+            restarted.deleteDbInstance(id, region, true);
+        }
+        verify(manager).removeVolume(arn, instance.getContainerStorageResourceId(), instance.getDockerVolumeName());
+        assertEquals("DBInstanceNotFound", assertThrows(AwsException.class, () -> restarted.getDbInstance(id))
+                .getErrorCode());
+
+        String target = "restored-db";
+        when(manager.tryStart(any(), eq(target), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("restored", target, "localhost", 5432));
+        restarted.restoreDbInstanceToPointInTime(new PointInTimeRestoreRequest(target, null,
+                instance.getDbiResourceId(), null, null, true, null, null, null, null, null, null, null,
+                null, null, null, null, null, null, null, null, null, Map.of()), region);
+        verify(manager).restorePostgresSnapshot("restored", "admin", "retained dump");
     }
 
     @Test
