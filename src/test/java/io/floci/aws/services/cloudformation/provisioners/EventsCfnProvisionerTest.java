@@ -10,6 +10,7 @@ import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridge.model.ApiDestination;
 import io.floci.aws.services.eventbridge.model.EcsParameters;
+import io.floci.aws.services.eventbridge.model.EventBus;
 import io.floci.aws.services.eventbridge.model.HttpParameters;
 import io.floci.aws.services.eventbridge.model.Rule;
 import io.floci.aws.services.eventbridge.model.Target;
@@ -24,6 +25,7 @@ import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 import org.mockito.stubbing.OngoingStubbing;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -625,6 +627,56 @@ class EventsCfnProvisionerTest {
         assertEquals("ValidationError", thrown.getErrorCode());
         assertTrue(thrown.getMessage().contains("Policy is not supported on a partner event bus"));
         verify(events, never()).createEventBus(any(), any(), any(), any(), any());
+        verify(events, never()).putPermission(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void eventBusPolicyPreservesResolvedJson(boolean text) throws Exception {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Sid":"AllowEvents","Effect":"Allow",
+                "Principal":"*","Action":"events:PutEvents","Resource":"*"}]}
+                """;
+        ObjectNode props = mapper.createObjectNode().put("Name", "orders-bus");
+        props.set("Policy", text ? mapper.getNodeFactory().textNode(policy) : mapper.readTree(policy));
+        when(events.createEventBus(eq("orders-bus"), any(), any(), any(), eq(REGION)))
+                .thenReturn(new EventBus("orders-bus",
+                        "arn:aws:events:us-east-1:000000000000:event-bus/orders-bus", null, Instant.now()));
+
+        provisioner.provision(resource("AWS::Events::EventBus", "Bus"), props, ctx(null));
+
+        ArgumentCaptor<String> submitted = ArgumentCaptor.forClass(String.class);
+        verify(events).putPermission(eq("orders-bus"), any(), any(), any(), any(), submitted.capture(), eq(REGION));
+        assertEquals(mapper.readTree(policy), mapper.readTree(submitted.getValue()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "{", "null", "[]", "true", "\"policy\"", "{} {}"})
+    void eventBusRejectsInvalidResolvedPolicyBeforeCreatingTheBus(String policy) {
+        ObjectNode props = mapper.createObjectNode().put("Name", "orders-bus").put("Policy", policy);
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource("AWS::Events::EventBus", "Bus"), props, ctx(null)));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verify(events, never()).createEventBus(any(), any(), any(), any(), any());
+        verify(events, never()).putPermission(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void eventBusAllowsPolicyOmittedByResolution() {
+        ObjectNode props = mapper.createObjectNode().put("Name", "orders-bus");
+        props.set("Policy", mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+        ProvisionContext context = ctx(null);
+        when(context.engine().resolveNode(props.get("Policy"))).thenReturn(mapper.nullNode());
+        when(events.createEventBus(eq("orders-bus"), any(), any(), any(), eq(REGION)))
+                .thenReturn(new EventBus("orders-bus",
+                        "arn:aws:events:us-east-1:000000000000:event-bus/orders-bus", null, Instant.now()));
+        StackResource bus = resource("AWS::Events::EventBus", "Bus");
+
+        provisioner.provision(bus, props, context);
+
+        assertEquals("orders-bus", bus.getPhysicalId());
         verify(events, never()).putPermission(any(), any(), any(), any(), any(), any(), any());
     }
 
