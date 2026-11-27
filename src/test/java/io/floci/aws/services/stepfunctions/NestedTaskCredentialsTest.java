@@ -66,4 +66,25 @@ class NestedTaskCredentialsTest {
         assertSame(machine, NestedTaskCredentials.inAccount(machine, null));
         assertSame(machine, NestedTaskCredentials.inAccount(machine, "000000000111"));
     }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"arn:aws:states:::states:startExecution", "arn:aws:states:::states:startExecution.sync",
+            "arn:aws:states:::states:startExecution.sync:2", "arn:aws:states:::aws-sdk:sfn:startExecution",
+            "arn:aws:states:::aws-sdk:sfn:startSyncExecution"})
+    void aNestedExecutionOfAStateMachineInAnotherRegionFailsWithTheIntegrationsAccessError(String resource) {
+        StateMachine machine = new StateMachine();
+        machine.setStateMachineArn("arn:aws:states:us-east-1:000000000111:stateMachine:parent");
+        String sameRegion = "arn:aws:states:us-east-1:000000000111:stateMachine:child";
+        String otherRegion = "arn:aws:states:eu-west-1:000000000111:stateMachine:child";
+
+        NestedTaskCredentials.validateTarget(resource,
+                new ObjectMapper().createObjectNode().put("StateMachineArn", sameRegion), machine, null);
+        AslExecutor.FailStateException refused = assertThrows(AslExecutor.FailStateException.class,
+                () -> NestedTaskCredentials.validateTarget(resource,
+                        new ObjectMapper().createObjectNode().put("StateMachineArn", otherRegion), machine, null));
+
+        assertEquals(resource.contains("aws-sdk") ? "Sfn.SfnException" : "StepFunctions.AWSStepFunctionsException",
+                refused.error);
+        assertTrue(refused.cause.contains(otherRegion), refused.cause);
+    }
 }
