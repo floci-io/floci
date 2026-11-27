@@ -1815,6 +1815,23 @@ public class AslExecutor {
     }
 
     /**
+     * Fails a task that names a state machine outside the execution's Region: "Cross-Region AWS SDK integration and
+     * cross-Region AWS resource access aren't available in Step Functions" (Developer Guide, "Accessing cross-account
+     * AWS resources in Step Functions"). AWS does not name the error, so the task fails with the one it reports for a
+     * state machine of an account it cannot reach (see {@link NestedTaskCredentials#validateTargetAccount}).
+     */
+    private static void requireExecutionRegion(String stateMachineArn, String region, String error) {
+        if (!AwsArnUtils.isArn(stateMachineArn)) {
+            return;
+        }
+        String target = AwsArnUtils.parse(stateMachineArn).region();
+        if (!target.isEmpty() && !target.equals(region)) {
+            throw new FailStateException(error, "Cross-Region access is not available in Step Functions: "
+                    + stateMachineArn + " is not in the execution's Region, " + region);
+        }
+    }
+
+    /**
      * An {@code aws-sdk:} Task failure carries the name of the SDK exception class, which always
      * ends in {@code Exception}. AWS answers a missing state machine with
      * {@code Sfn.StateMachineDoesNotExistException}, while the StartExecution wire response names
@@ -1864,6 +1881,7 @@ public class AslExecutor {
             throw new FailStateException("Sfn.InvalidArnException",
                     "StateMachineArn is required for StartExecution");
         }
+        requireExecutionRegion(smArn, region, "Sfn.SfnException");
         Execution exec;
         try {
             exec = sfnService.get().startExecution(smArn, input.path("Name").asText(null),
@@ -2096,6 +2114,7 @@ public class AslExecutor {
             throw new FailStateException("Sfn.InvalidArnException",
                     "StateMachineArn is required for StartSyncExecution");
         }
+        requireExecutionRegion(smArn, region, "Sfn.SfnException");
         Execution exec;
         try {
             exec = sfnService.get().startSyncExecution(smArn, input.path("Name").asText(null),
@@ -2138,6 +2157,7 @@ public class AslExecutor {
             throw new FailStateException("States.TaskFailed",
                     "StateMachineArn is required for nested state machine execution");
         }
+        requireExecutionRegion(smArn, region, "StepFunctions.AWSStepFunctionsException");
         // Preserve provenance: an Input produced by States.JsonToString is JSON text whose content is the
         // child's wire input (so the child parses it back to an object); any other value is serialized as
         // a JSON value. Also honor Name/Name.$ instead of always generating a random execution name.
