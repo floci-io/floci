@@ -1,6 +1,5 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
@@ -9,7 +8,6 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.floci.aws.services.cloudwatch.metrics.model.MetricDatum;
 import io.floci.aws.services.cloudwatch.metricstreams.CloudWatchMetricStreamsService;
-import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -84,23 +82,11 @@ class CloudWatchWeightedSummaryTest {
     private void publish(boolean useQuery, ObjectNode datum) {
         ObjectNode request = MAPPER.createObjectNode().put("Namespace", "Example/Weighted");
         request.putArray("MetricData").add(datum);
-        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
-        request.properties().forEach(field -> flatten(params, field.getKey(), field.getValue()));
+        MultivaluedMap<String, String> params = CloudWatchTestRequests.toQuery(request);
         try (Response response = useQuery ? query.handle("PutMetricData", params, REGION)
                 : json.handle("PutMetricData", request, REGION)) {
             assertEquals(200, response.getStatus());
         }
     }
 
-    private static void flatten(MultivaluedMap<String, String> params, String key, JsonNode value) {
-        if (value.isObject()) {
-            value.properties().forEach(field -> flatten(params, key + "." + field.getKey(), field.getValue()));
-        } else if (value.isArray()) {
-            for (int i = 0; i < value.size(); i++) {
-                flatten(params, key + ".member." + (i + 1), value.get(i));
-            }
-        } else {
-            params.putSingle(key, value.asText());
-        }
-    }
 }

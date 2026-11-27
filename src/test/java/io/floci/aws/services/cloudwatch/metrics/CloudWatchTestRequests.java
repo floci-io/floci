@@ -1,8 +1,11 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.restassured.response.Response;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.MultivaluedMap;
 
 import java.net.URI;
 import java.util.LinkedHashMap;
@@ -38,6 +41,26 @@ final class CloudWatchTestRequests {
         return given().port(endpoint.getPort()).header("Authorization", scope)
                 .contentType("application/x-www-form-urlencoded")
                 .formParams(queryParameters(operation, body)).post("/");
+    }
+
+    static MultivaluedMap<String, String> toQuery(JsonNode value) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        flatten(value, "", params);
+        return params;
+    }
+
+    private static void flatten(JsonNode value, String prefix, MultivaluedMap<String, String> params) {
+        if (value.isArray()) {
+            for (int index = 0; index < value.size(); index++) {
+                flatten(value.get(index), prefix + ".member." + (index + 1), params);
+            }
+        } else if (value.isObject()) {
+            for (Map.Entry<String, JsonNode> field : value.properties()) {
+                flatten(field.getValue(), prefix.isEmpty() ? field.getKey() : prefix + "." + field.getKey(), params);
+            }
+        } else {
+            params.putSingle(prefix, value.asText());
+        }
     }
 
     private static Map<String, Object> queryParameters(String operation, Map<String, ?> body) {
