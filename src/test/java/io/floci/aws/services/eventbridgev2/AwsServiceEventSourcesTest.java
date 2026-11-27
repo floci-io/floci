@@ -10,6 +10,7 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridge.model.Target;
 import io.floci.aws.services.eventbridgev2.model.EventSourceV2;
+import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
 import io.floci.aws.testing.ManualClock;
@@ -72,7 +73,7 @@ class AwsServiceEventSourcesTest {
         when(secrets.createSecret(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(secret);
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(
                 AccountAwareStorageBackend.inMemory(ACCOUNT), secrets, regionResolver, clock,
-                "http://floci.test:4566", certificateManager, eventBridge);
+                "http://floci.test:4566", certificateManager, eventBridge, mock(KmsService.class));
         service = new EventBridgeV2Service(AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT), regionResolver, delivery, eventSources, clock, true);
         bus = service.createEventBus(json("{\"Name\":\"orders\"}"), REGION).getArn();

@@ -12,6 +12,7 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridgev2.model.EventBusV2;
 import io.floci.aws.services.eventbridgev2.model.SubscriberV2;
+import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -66,7 +67,8 @@ class EventBridgeV2ServiceTest {
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(
                 AccountAwareStorageBackend.inMemory(ACCOUNT), mock(SecretsManagerService.class), regionResolver, clock,
-                "http://floci.test:4566", mock(TlsCertificateManager.class), mock(EventBridgeService.class));
+                "http://floci.test:4566", mock(TlsCertificateManager.class), mock(EventBridgeService.class),
+                mock(KmsService.class));
         service = new EventBridgeV2Service(AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT), regionResolver, delivery, eventSources, clock, true);
     }

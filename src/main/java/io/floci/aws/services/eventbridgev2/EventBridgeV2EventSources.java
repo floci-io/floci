@@ -23,6 +23,8 @@ import io.floci.aws.services.eventbridge.model.Target;
 import io.floci.aws.services.eventbridgev2.model.EventBusV2;
 import io.floci.aws.services.eventbridgev2.model.EventSourceV2;
 import io.floci.aws.services.eventbridgev2.model.RotationRequest;
+import io.floci.aws.services.kms.KmsService;
+import io.floci.aws.services.kms.model.KmsKey;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -38,6 +40,7 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
@@ -74,20 +77,23 @@ public class EventBridgeV2EventSources implements Resettable {
     private final WebhookDeduplication deduplication;
     private final TlsCertificateManager certificateManager;
     private final EventBridgeService eventBridge;
+    private final KmsService kms;
 
     @Inject
     public EventBridgeV2EventSources(StorageFactory storageFactory, SecretsManagerService secrets,
                                      RegionResolver regionResolver, EmulatorConfig config,
-                                     TlsCertificateManager certificateManager, EventBridgeService eventBridge) {
+                                     TlsCertificateManager certificateManager, EventBridgeService eventBridge,
+                                     KmsService kms) {
         this(storageFactory.create("eventbridgev2", "eventbridgev2-event-sources.json",
                         new TypeReference<Map<String, EventSourceV2>>() {}),
                 secrets, regionResolver, Clock.systemUTC(), config.effectiveBaseUrl(), certificateManager,
-                eventBridge);
+                eventBridge, kms);
     }
 
     EventBridgeV2EventSources(AccountAwareStorageBackend<EventSourceV2> sources, SecretsManagerService secrets,
                               RegionResolver regionResolver, Clock clock, String baseUrl,
-                              TlsCertificateManager certificateManager, EventBridgeService eventBridge) {
+                              TlsCertificateManager certificateManager, EventBridgeService eventBridge,
+                              KmsService kms) {
         this.sources = sources;
         this.secrets = secrets;
         this.regionResolver = regionResolver;
@@ -95,6 +101,7 @@ public class EventBridgeV2EventSources implements Resettable {
         this.baseUrl = URI.create(baseUrl);
         this.certificateManager = certificateManager;
         this.eventBridge = eventBridge;
+        this.kms = kms;
         this.deduplication = new WebhookDeduplication(clock);
     }
 
@@ -115,6 +122,9 @@ public class EventBridgeV2EventSources implements Resettable {
         if (roleArn != null) {
             requireOwnAccount(roleArn);
         }
+        String keyIdentifier = WebhookEventsConfigurations.keyIdentifier(
+                configuration.path(WebhookEventsConfigurations.WEBHOOK));
+        WebhookEventsConfigurations.requireKeyArnOfCaller(keyIdentifier, region, regionResolver.getAccountId());
         String clientToken = request.path("ClientToken").textValue();
         if (clientToken == null) {
             throw EventBridgeV2Service.invalidInput("ClientToken is required");
@@ -132,14 +142,18 @@ public class EventBridgeV2EventSources implements Resettable {
 
         // The request carries credentials, so only its hash is kept.
         String requestHash = Digests.sha256Hex(EventBridgeV2Service.withoutClientToken(request));
+        requireBus(eventBusArn, findBusByName);
+        KmsKey kmsKey = keyIdentifier == null ? null : requireKey(keyIdentifier, region);
         Optional<EventSourceV2> retried = retriedSource(region, clientToken, requestHash);
         if (retried.isPresent()) {
             return retried.get();
         }
-        requireBus(eventBusArn, findBusByName);
         String key = EventBridgeV2Service.storageKey(region, name);
         if (sources.get(key).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsException", "Resource already exists", 409);
+        }
+        if (kmsKey != null) {
+            refuseAwsManagedKey(keyIdentifier, kmsKey, region);
         }
 
         String hostId = WebhookTokens.newHostId(random);
@@ -149,7 +163,13 @@ public class EventBridgeV2EventSources implements Resettable {
         source.setArn(sourceArn(region, "webhook", name));
         source.setEventBusArn(eventBusArn);
         source.setDescription(request.path("Description").textValue());
-        source.setConfiguration(WebhookEventsConfigurations.echo(webhook));
+        JsonNode echoed = WebhookEventsConfigurations.echo(webhook);
+        if (keyIdentifier == null) {
+            // Create's Describe leaves out an empty KmsKeyIdentifier, update's echoes it.
+            ((ObjectNode) echoed.get(WebhookEventsConfigurations.WEBHOOK)).remove(
+                    WebhookEventsConfigurations.KMS_KEY_IDENTIFIER);
+        }
+        source.setConfiguration(echoed);
         source.setState(EventBridgeV2Service.ACTIVE);
         source.setCreationTime(now);
         source.setLastModifiedTime(now);
@@ -158,7 +178,7 @@ public class EventBridgeV2EventSources implements Resettable {
         source.setCreateRequestHash(requestHash);
         source.setWebhookHostId(hostId);
         source.setWebhookToken(WebhookTokens.newToken(hostId, random));
-        source.setSecretArn(createSecret(webhook, region));
+        source.setSecretArn(createSecret(webhook, keyIdentifier, region));
         try {
             sources.put(key, source);
         } catch (RuntimeException e) {
@@ -298,9 +318,19 @@ public class EventBridgeV2EventSources implements Resettable {
         }
         JsonNode webhook = configuration == null ? null : WebhookEventsConfigurations.validateForUpdate(
                 configuration, WebhookEventsConfigurations.authType(
-                        source.getConfiguration().get(WebhookEventsConfigurations.WEBHOOK)));
+                        source.getConfiguration().get(WebhookEventsConfigurations.WEBHOOK)),
+                region, regionResolver.getAccountId());
 
         requireNotRevoked(source, "EventSource is revoked and cannot be updated");
+
+        String newKey = webhook == null ? null : WebhookEventsConfigurations.keyIdentifier(webhook);
+        if (newKey != null) {
+            refuseAwsManagedKey(newKey, requireKey(newKey, region), region);
+        }
+        if (webhook != null && !Objects.equals(newKey, WebhookEventsConfigurations.keyIdentifier(
+                source.getConfiguration().get(WebhookEventsConfigurations.WEBHOOK)))) {
+            secrets.updateSecret(source.getSecretArn(), null, newKey == null ? "" : newKey, region);
+        }
 
         EventSourceV2 changed = copyOf(source);
         changed.setDescription(request.hasNonNull("Description") ? request.get("Description").textValue()
@@ -616,7 +646,33 @@ public class EventBridgeV2EventSources implements Resettable {
         deduplication.clear();
     }
 
-    private String createSecret(JsonNode webhook, String region) {
+    private KmsKey requireKey(String keyIdentifier, String region) {
+        try {
+            return kms.describeKey(keyIdentifier, region);
+        } catch (AwsException e) {
+            if (!"NotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("The KMS key of an event source was not found: {0}", e.getMessage());
+            throw new AwsException("AccessDeniedException",
+                    "KMS_KEY_NOT_FOUND: The event bus's KMS key does not exist.", 403);
+        }
+    }
+
+    private void refuseAwsManagedKey(String keyIdentifier, KmsKey key, String region) {
+        if (!kms.isAwsManagedKey(key.getArn())) {
+            return;
+        }
+        boolean alias = keyIdentifier.startsWith("alias/") || keyIdentifier.contains(":alias/");
+        String shown = !alias ? key.getArn()
+                : AwsArnUtils.looksLikeArn(keyIdentifier) ? keyIdentifier
+                : regionResolver.buildArn("kms", region, keyIdentifier);
+        throw EventBridgeV2Service.invalidInput("The KMS key " + shown + " can't be used for a webhook EventSource "
+                + "because it is an AWS managed key. Supply a customer managed key, or omit KmsKeyIdentifier to use "
+                + "the AWS managed key aws/secretsmanager");
+    }
+
+    private String createSecret(JsonNode webhook, String keyIdentifier, String region) {
         JsonNode auth = webhook.get("AuthConfiguration");
         String authType = WebhookEventsConfigurations.authType(webhook);
         String secretString;
@@ -632,7 +688,7 @@ public class EventBridgeV2EventSources implements Resettable {
             secretString = staticToken.hasNonNull("SecretValue") ? staticToken.get("SecretValue").textValue()
                     : generated();
         }
-        return secrets.createSecret("events-webhook!" + UUID.randomUUID(), secretString, null, null, null,
+        return secrets.createSecret("events-webhook!" + UUID.randomUUID(), secretString, null, null, keyIdentifier,
                 List.of(new Secret.Tag("aws:secretsmanager:owningService", OWNING_SERVICE)), OWNING_SERVICE,
                 region).getArn();
     }

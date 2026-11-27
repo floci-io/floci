@@ -510,6 +510,6 @@ class WebhookEventsConfigurationsTest {
 
     private static String updateRefusal(String configurationJson, String storedAuthType) {
         return assertThrows(AwsException.class, () -> WebhookEventsConfigurations.validateForUpdate(
-                json(configurationJson), storedAuthType)).getMessage();
+                json(configurationJson), storedAuthType, "us-east-1", "000000000000")).getMessage();
     }
 }

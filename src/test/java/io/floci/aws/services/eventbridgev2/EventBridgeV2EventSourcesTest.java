@@ -11,6 +11,8 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridgev2.model.EventBusV2;
 import io.floci.aws.services.eventbridgev2.model.EventSourceV2;
+import io.floci.aws.services.kms.KmsService;
+import io.floci.aws.services.kms.model.KmsKey;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
 import io.floci.aws.testing.ManualClock;
@@ -58,6 +60,7 @@ class EventBridgeV2EventSourcesTest {
     private EventBridgeV2Service service;
     private ManualClock clock;
     private EventBridgeService eventBridge;
+    private KmsService kms;
     private String bus;
 
     @BeforeEach
@@ -73,9 +76,10 @@ class EventBridgeV2EventSourcesTest {
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
         certificateManager = mock(TlsCertificateManager.class);
         eventBridge = mock(EventBridgeService.class);
+        kms = mock(KmsService.class);
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(
                 AccountAwareStorageBackend.inMemory(ACCOUNT), secrets, regionResolver, clock, "http://floci.test:4566",
-                certificateManager, eventBridge);
+                certificateManager, eventBridge, kms);
         service = new EventBridgeV2Service(AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT), regionResolver, mock(EventBridgeV2Delivery.class),
                 eventSources, clock, true);
@@ -394,7 +398,7 @@ class EventBridgeV2EventSourcesTest {
         doThrow(failure).when(failing).put(any(), any());
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(failing, secrets,
                 new RegionResolver(REGION, ACCOUNT), clock, "http://floci.test:4566",
-                certificateManager, eventBridge);
+                certificateManager, eventBridge, kms);
 
         EventBusV2 existing = new EventBusV2();
         existing.setArn(bus);
@@ -708,6 +712,292 @@ class EventBridgeV2EventSourcesTest {
                 "{\"EventSourceArn\":\"" + source.getArn() + "\",\"Configuration\":{\"WebhookEventsConfiguration\":"
                         + "{}}}"), REGION));
         assertTrue(missing.getMessage().startsWith("2 validation errors detected: Value null at "), missing.getMessage());
+    }
+
+    // ──────────────────────────── KmsKeyIdentifier ────────────────────────────
+
+    private static final String KEY_ARN =
+            "arn:aws:kms:us-east-1:000000000000:key/1234abcd-12ab-34cd-56ef-1234567890ab";
+
+    private void customerKey(String identifier) {
+        stubKey(identifier, KEY_ARN, false);
+    }
+
+    private void stubKey(String identifier, String keyArn, boolean awsManaged) {
+        KmsKey key = new KmsKey();
+        key.setArn(keyArn);
+        when(kms.describeKey(identifier, REGION)).thenReturn(key);
+        when(kms.isAwsManagedKey(keyArn)).thenReturn(awsManaged);
+    }
+
+    private void missingKey(String identifier) {
+        when(kms.describeKey(identifier, REGION)).thenThrow(
+                new AwsException("NotFoundException", "Alias is not found.", 400));
+    }
+
+    private static ObjectNode withKey(ObjectNode request, String identifier) {
+        ((ObjectNode) request.get("Configuration").get("WebhookEventsConfiguration"))
+                .put("KmsKeyIdentifier", identifier);
+        return request;
+    }
+
+    private JsonNode updateWithKey(EventSourceV2 source, String identifier) {
+        String key = identifier == null ? "" : ",\"KmsKeyIdentifier\":\"" + identifier + "\"";
+        return json("{\"EventSourceArn\":\"" + source.getArn() + "\",\"Configuration\":"
+                + "{\"WebhookEventsConfiguration\":{\"AuthConfiguration\":" + STATIC_AUTH + ",\"RoleArn\":\"" + ROLE
+                + "\"" + key + "}}}");
+    }
+
+    private void assertCreateFails(ObjectNode request, String code, int status, String message) {
+        AwsException e = assertThrows(AwsException.class, () -> service.createEventSource(request, REGION));
+        assertEquals(code, e.getErrorCode());
+        assertEquals(status, e.getHttpStatus());
+        assertEquals(message, e.getMessage());
+    }
+
+    private static final String KEY_MISSING = "KMS_KEY_NOT_FOUND: The event bus's KMS key does not exist.";
+
+    @Test
+    void createRefusesAKeyArnOfAnotherRegionBeforeAnotherAccountAndBeforeTheClientToken() {
+        ObjectNode request = withKey(create("hook", bus, STATIC_AUTH),
+                "arn:aws:kms:eu-west-1:111111111111:key/1234abcd-12ab-34cd-56ef-1234567890ab");
+        request.remove("ClientToken");
+        assertCreateFails(request, "InvalidInputException", 400,
+                "WebhookEventsConfiguration.KmsKeyIdentifier region 'eu-west-1' must match the caller's region "
+                        + "'us-east-1'");
+    }
+
+    @Test
+    void createRefusesAKeyOrAliasArnOfAnotherAccountBeforeTheBusLookup() {
+        String missingBus = "arn:aws:events:us-east-1:000000000000:event-busv2/missing/abcdefghijklmnopqrstuvwxy";
+        String message = "WebhookEventsConfiguration.KmsKeyIdentifier account '111111111111' must match the "
+                + "caller's account '000000000000'";
+        assertCreateFails(withKey(create("hook", missingBus, STATIC_AUTH),
+                "arn:aws:kms:us-east-1:111111111111:key/1234abcd-12ab-34cd-56ef-1234567890ab"),
+                "InvalidInputException", 400, message);
+        assertCreateFails(withKey(create("hook", missingBus, STATIC_AUTH),
+                "arn:aws:kms:us-east-1:111111111111:alias/mine"), "InvalidInputException", 400, message);
+    }
+
+    @Test
+    void createRefusesAKeyArnOfAnotherRegionBeforeAuthChecks() {
+        ObjectNode request = withKey(create("hook", bus, "{\"StaticTokenAuthConfiguration\":"
+                + "{\"TokenHttpHeader\":\"Host\"}}"), "arn:aws:kms:eu-west-1:000000000000:alias/mine");
+        assertCreateFails(request, "InvalidInputException", 400,
+                "WebhookEventsConfiguration.KmsKeyIdentifier region 'eu-west-1' must match the caller's region "
+                        + "'us-east-1'");
+    }
+
+    @Test
+    void createAnswersAMissingKeyAfterTheBusLookup() {
+        missingKey("alias/gone");
+        String missingBus = "arn:aws:events:us-east-1:000000000000:event-busv2/missing/abcdefghijklmnopqrstuvwxy";
+        assertCreateFails(withKey(create("hook", missingBus, STATIC_AUTH), "alias/gone"),
+                "ResourceNotFoundException", 404, "Resource does not exist");
+        assertCreateFails(withKey(create("hook", bus, STATIC_AUTH), "alias/gone"),
+                "AccessDeniedException", 403, KEY_MISSING);
+        verify(secrets, never()).createSecret(any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void createAnswersAMissingKeyForAReplayBeforeTheIdempotencyConflict() {
+        service.createEventSource(create("hook", bus, STATIC_AUTH, "\"ClientToken\":\"t-1\""), REGION);
+        missingKey("alias/gone");
+        assertCreateFails(withKey(create("hook", bus, STATIC_AUTH, "\"ClientToken\":\"t-1\""), "alias/gone"),
+                "AccessDeniedException", 403, KEY_MISSING);
+    }
+
+    @Test
+    void createAnswersAMissingKeyBeforeTheNameClash() {
+        service.createEventSource(create("hook", bus, STATIC_AUTH), REGION);
+        missingKey("alias/gone");
+        assertCreateFails(withKey(create("hook", bus, STATIC_AUTH, "\"ClientToken\":\"other\""), "alias/gone"),
+                "AccessDeniedException", 403, KEY_MISSING);
+    }
+
+    @Test
+    void createStillReplaysWhenTheKeyExists() {
+        customerKey("alias/mine");
+        ObjectNode request = withKey(create("hook", bus, STATIC_AUTH, "\"ClientToken\":\"t-1\""), "alias/mine");
+        EventSourceV2 first = service.createEventSource(request, REGION);
+        assertEquals(first.getArn(), service.createEventSource(request, REGION).getArn());
+    }
+
+    @Test
+    void createRefusesAnAwsManagedKeyAfterTheNameClash() {
+        stubKey("alias/aws/secretsmanager", "arn:aws:kms:us-east-1:000000000000:key/aws-key", true);
+        service.createEventSource(create("hook", bus, STATIC_AUTH), REGION);
+        assertCreateFails(withKey(create("hook", bus, STATIC_AUTH, "\"ClientToken\":\"other\""),
+                "alias/aws/secretsmanager"), "ResourceAlreadyExistsException", 409, "Resource already exists");
+        assertCreateFails(withKey(create("second", bus, STATIC_AUTH), "alias/aws/secretsmanager"),
+                "InvalidInputException", 400, "The KMS key "
+                        + "arn:aws:kms:us-east-1:000000000000:alias/aws/secretsmanager can't be used for a webhook "
+                        + "EventSource because it is an AWS managed key. Supply a customer managed key, or omit "
+                        + "KmsKeyIdentifier to use the AWS managed key aws/secretsmanager");
+        verify(secrets, times(1)).createSecret(any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void createNamesTheKeyArnOrTheAliasArnOfAnAwsManagedKey() {
+        String keyArn = "arn:aws:kms:us-east-1:000000000000:key/aws-key";
+        String aliasArn = "arn:aws:kms:us-east-1:000000000000:alias/aws/secretsmanager";
+        stubKey("aws-key", keyArn, true);
+        stubKey(keyArn, keyArn, true);
+        stubKey(aliasArn, keyArn, true);
+        String tail = " can't be used for a webhook EventSource because it is an AWS managed key. Supply a "
+                + "customer managed key, or omit KmsKeyIdentifier to use the AWS managed key aws/secretsmanager";
+        assertCreateFails(withKey(create("a", bus, STATIC_AUTH), "aws-key"), "InvalidInputException", 400,
+                "The KMS key " + keyArn + tail);
+        assertCreateFails(withKey(create("b", bus, STATIC_AUTH), keyArn), "InvalidInputException", 400,
+                "The KMS key " + keyArn + tail);
+        assertCreateFails(withKey(create("c", bus, STATIC_AUTH), aliasArn), "InvalidInputException", 400,
+                "The KMS key " + aliasArn + tail);
+    }
+
+    @Test
+    void createEncryptsTheSecretWithTheKeyAndEchoesTheIdentifierAsGiven() {
+        customerKey("alias/mine");
+        EventSourceV2 source = service.createEventSource(withKey(create("hook", bus, STATIC_AUTH), "alias/mine"),
+                REGION);
+
+        ArgumentCaptor<String> kmsKeyId = ArgumentCaptor.forClass(String.class);
+        verify(secrets).createSecret(any(), any(), any(), any(), kmsKeyId.capture(), any(), any(), any());
+        assertEquals("alias/mine", kmsKeyId.getValue());
+        assertEquals("alias/mine", source.getConfiguration().get("WebhookEventsConfiguration")
+                .get("KmsKeyIdentifier").textValue());
+    }
+
+    @Test
+    void createAcceptsAnEmptyKeyIdentifierWithNoKeyAndLeavesItOutOfTheEcho() {
+        EventSourceV2 source = service.createEventSource(withKey(create("hook", bus, STATIC_AUTH), ""), REGION);
+
+        ArgumentCaptor<String> kmsKeyId = ArgumentCaptor.forClass(String.class);
+        verify(secrets).createSecret(any(), any(), any(), any(), kmsKeyId.capture(), any(), any(), any());
+        assertNull(kmsKeyId.getValue());
+        assertFalse(source.getConfiguration().get("WebhookEventsConfiguration").has("KmsKeyIdentifier"));
+        verify(kms, never()).describeKey(any(), any());
+    }
+
+    @Test
+    void createFailsBeforeStoringAnythingWhenTheSecretRefusesTheKey() {
+        customerKey("alias/disabled");
+        AwsException refused = new AwsException("EncryptionFailure", "Secrets Manager can't encrypt", 400);
+        when(secrets.createSecret(any(), any(), any(), any(), eq("alias/disabled"), any(), any(), any()))
+                .thenThrow(refused);
+        assertCreateFails(withKey(create("hook", bus, STATIC_AUTH), "alias/disabled"), "EncryptionFailure", 400,
+                "Secrets Manager can't encrypt");
+        assertTrue(names(service.listEventSources(json("{}"), REGION)).isEmpty());
+    }
+
+    @Test
+    void updateChecksTheKeyArnAfterTheSecretRefusalAndTheAuthTypeAndBeforeTheAuthHeaders() {
+        EventSourceV2 source = service.createEventSource(create("hook", bus, STATIC_AUTH), REGION);
+        String foreign = "arn:aws:kms:eu-west-1:000000000000:key/1234abcd-12ab-34cd-56ef-1234567890ab";
+        String message = "WebhookEventsConfiguration.KmsKeyIdentifier region 'eu-west-1' must match the caller's "
+                + "region 'us-east-1'";
+
+        AwsException secret = assertThrows(AwsException.class, () -> service.updateEventSource(json(
+                "{\"EventSourceArn\":\"" + source.getArn() + "\",\"Configuration\":{\"WebhookEventsConfiguration\":"
+                        + "{\"AuthConfiguration\":{\"StaticTokenAuthConfiguration\":{\"TokenHttpHeader\":\"X-Token\","
+                        + "\"SecretValue\":\"secret-value\"}},\"RoleArn\":\"" + ROLE + "\",\"KmsKeyIdentifier\":\"" + foreign
+                        + "\"}}}"), REGION));
+        assertTrue(secret.getMessage().startsWith("UpdateEventSource does not accept SecretValue"));
+
+        AwsException type = assertThrows(AwsException.class, () -> service.updateEventSource(json(
+                "{\"EventSourceArn\":\"" + source.getArn() + "\",\"Configuration\":{\"WebhookEventsConfiguration\":"
+                        + "{\"AuthConfiguration\":" + BASIC_AUTH + ",\"RoleArn\":\"" + ROLE
+                        + "\",\"KmsKeyIdentifier\":\"" + foreign + "\"}}}"), REGION));
+        assertTrue(type.getMessage().startsWith("The webhook authentication type can't be changed"));
+
+        AwsException header = assertThrows(AwsException.class, () -> service.updateEventSource(json(
+                "{\"EventSourceArn\":\"" + source.getArn() + "\",\"Configuration\":{\"WebhookEventsConfiguration\":"
+                        + "{\"AuthConfiguration\":{\"StaticTokenAuthConfiguration\":{\"TokenHttpHeader\":\"Host\"}},"
+                        + "\"RoleArn\":\"" + ROLE + "\",\"KmsKeyIdentifier\":\"" + foreign + "\"}}}"), REGION));
+        assertEquals(message, header.getMessage());
+
+        AwsException account = assertThrows(AwsException.class, () -> service.updateEventSource(
+                updateWithKey(source, "arn:aws:kms:us-east-1:111111111111:alias/mine"), REGION));
+        assertEquals("WebhookEventsConfiguration.KmsKeyIdentifier account '111111111111' must match the caller's "
+                + "account '000000000000'", account.getMessage());
+    }
+
+    @Test
+    void updateAnswersARevokedSourceBeforeTheKeyLookup() {
+        EventSourceV2 source = service.createEventSource(create("hook", bus, STATIC_AUTH), REGION);
+        service.revokeResource(json("{\"Arn\":\"" + source.getArn() + "\"}"), REGION);
+        missingKey("alias/gone");
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.updateEventSource(updateWithKey(source, "alias/gone"), REGION));
+        assertEquals("EventSource is revoked and cannot be updated", e.getMessage());
+    }
+
+    @Test
+    void updateAnswersAMissingKeyThenAnAwsManagedKey() {
+        EventSourceV2 source = service.createEventSource(create("hook", bus, STATIC_AUTH), REGION);
+        missingKey("alias/gone");
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.updateEventSource(updateWithKey(source, "alias/gone"), REGION));
+        assertEquals("AccessDeniedException", missing.getErrorCode());
+        assertEquals(KEY_MISSING, missing.getMessage());
+
+        stubKey("alias/aws/secretsmanager", "arn:aws:kms:us-east-1:000000000000:key/aws-key", true);
+        AwsException managed = assertThrows(AwsException.class,
+                () -> service.updateEventSource(updateWithKey(source, "alias/aws/secretsmanager"), REGION));
+        assertEquals("InvalidInputException", managed.getErrorCode());
+        assertTrue(managed.getMessage().startsWith(
+                "The KMS key arn:aws:kms:us-east-1:000000000000:alias/aws/secretsmanager can't be used"));
+        verify(secrets, never()).updateSecret(any(), any(), any(), any());
+    }
+
+    @Test
+    void updateReEncryptsTheSecretWhenTheKeyChanges() {
+        customerKey("alias/one");
+        customerKey("alias/two");
+        EventSourceV2 source = service.createEventSource(create("hook", bus, STATIC_AUTH), REGION);
+
+        service.updateEventSource(updateWithKey(source, "alias/one"), REGION);
+        verify(secrets).updateSecret(source.getSecretArn(), null, "alias/one", REGION);
+
+        service.updateEventSource(updateWithKey(source, "alias/one"), REGION);
+        verify(secrets, times(1)).updateSecret(any(), any(), any(), any());
+
+        service.updateEventSource(updateWithKey(source, "alias/two"), REGION);
+        verify(secrets).updateSecret(source.getSecretArn(), null, "alias/two", REGION);
+
+        EventSourceV2 updated = service.updateEventSource(updateWithKey(source, null), REGION);
+        verify(secrets).updateSecret(source.getSecretArn(), null, "", REGION);
+        assertFalse(updated.getConfiguration().get("WebhookEventsConfiguration").has("KmsKeyIdentifier"));
+    }
+
+    @Test
+    void updateWithAnEmptyKeyIdentifierEchoesItAndReturnsTheSecretToTheDefaultKey() {
+        customerKey("alias/one");
+        EventSourceV2 source = service.createEventSource(withKey(create("hook", bus, STATIC_AUTH), "alias/one"),
+                REGION);
+
+        EventSourceV2 updated = service.updateEventSource(updateWithKey(source, ""), REGION);
+
+        assertEquals("", updated.getConfiguration().get("WebhookEventsConfiguration").get("KmsKeyIdentifier")
+                .textValue());
+        verify(secrets).updateSecret(source.getSecretArn(), null, "", REGION);
+        verify(kms, times(1)).describeKey(any(), any());
+    }
+
+    @Test
+    void updateWithAnEmptyKeyIdentifierOnASourceWithNoKeyLeavesTheSecretAlone() {
+        EventSourceV2 source = service.createEventSource(withKey(create("hook", bus, STATIC_AUTH), ""), REGION);
+        service.updateEventSource(updateWithKey(source, ""), REGION);
+        verify(secrets, never()).updateSecret(any(), any(), any(), any());
+    }
+
+    @Test
+    void anUpdateWithNoConfigurationLeavesTheKeyAlone() {
+        customerKey("alias/one");
+        EventSourceV2 source = service.createEventSource(withKey(create("hook", bus, STATIC_AUTH), "alias/one"),
+                REGION);
+        service.updateEventSource(json("{\"EventSourceArn\":\"" + source.getArn() + "\",\"Description\":\"d\"}"),
+                REGION);
+        verify(secrets, never()).updateSecret(any(), any(), any(), any());
     }
 
     // ──────────────────────────── Delete ────────────────────────────
