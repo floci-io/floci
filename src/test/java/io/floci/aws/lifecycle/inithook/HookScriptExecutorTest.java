@@ -1,11 +1,14 @@
 package io.floci.aws.lifecycle.inithook;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Answers;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
@@ -20,6 +23,7 @@ import java.util.concurrent.TimeUnit;
 
 
 @ExtendWith(MockitoExtension.class)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class HookScriptExecutorTest {
 
     @TempDir
