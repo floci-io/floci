@@ -3,7 +3,6 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.dynamodb.DynamoDbConditionKeys;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
@@ -1004,18 +1003,13 @@ public class IamConditionContextResolver {
     public List<Map<String, List<String>>> resolveRemainingTargets(String credentialScope, String action,
                                                                    ContainerRequestContext ctx) {
         if ("dynamodb".equals(credentialScope)) {
-            List<String> modes = DynamoDbConditionKeys.returnValues(action, bufferedJsonBody(ctx));
-            if (modes.size() < 2) {
+            JsonNode body = bufferedJsonBody(ctx);
+            if (DynamoDbConditionKeys.returnValues(action, body).size() < 2) {
                 return List.of();
             }
-            Map<String, List<String>> primary = dynamoDbConditionContext(action, ctx);
-            List<Map<String, List<String>>> contexts = new ArrayList<>();
-            for (int i = 1; i < modes.size(); i++) {
-                Map<String, List<String>> context = new LinkedHashMap<>(primary);
-                context.put("dynamodb:ReturnValues", List.of(modes.get(i)));
-                contexts.add(context);
-            }
-            return contexts;
+            List<Map<String, List<String>>> contexts = DynamoDbConditionKeys.perReturnMode(action, body,
+                    dynamoDbConditionContext(action, ctx));
+            return contexts.subList(1, contexts.size());
         }
         if (!"ec2".equals(credentialScope)) {
             return List.of();
@@ -1341,12 +1335,9 @@ public class IamConditionContextResolver {
         TableDefinition table = describeTargetTable(targetTableName(body));
         DynamoDbConditionKeys.Result keys = dynamoDbKeys(action, body, table, ctx);
 
-        Map<String, List<String>> conditions = new LinkedHashMap<>(keys.conditionKeys());
-        List<String> returnValues = DynamoDbConditionKeys.returnValues(action, body);
-        if (!returnValues.isEmpty()) {
-            conditions.put("dynamodb:ReturnValues", List.of(returnValues.getFirst()));
-        }
-        return conditions.isEmpty() ? null : conditions;
+        Map<String, List<String>> conditions = DynamoDbConditionKeys.perReturnMode(action, body, keys.conditionKeys())
+                .getFirst();
+        return conditions.isEmpty() ? null : new LinkedHashMap<>(conditions);
     }
 
     /**
@@ -1386,19 +1377,11 @@ public class IamConditionContextResolver {
             return null;
         }
         List<Map<String, List<String>>> contexts = new ArrayList<>();
-        JsonNode body = bufferedJsonBody(ctx);
-        JsonNode items = body == null ? null : body.get("RequestItems");
-        if (items == null || !items.isObject()) {
-            return List.of(Map.of());
-        }
-        items.properties().forEach(entry -> {
-            String reference = entry.getKey().trim();
+        DynamoDbConditionKeys.batchTableRequests(bufferedJsonBody(ctx)).forEach((written, single) -> {
+            String reference = written.trim();
             if (resourceArn != null && !matchesTableResource(reference, resourceArn)) {
                 return;
             }
-            ObjectNode single = ((ObjectNode) body).objectNode();
-            single.setAll((ObjectNode) body);
-            single.putObject("RequestItems").set(entry.getKey(), entry.getValue());
             DynamoDbConditionKeys.Result keys = dynamoDbKeys(
                     action, single, describeTargetTable(reference), ctx);
             contexts.add(new LinkedHashMap<>(keys.conditionKeys()));

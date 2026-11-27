@@ -345,19 +345,8 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
      */
     private static List<Map<String, List<String>>> dynamoDbConditionKeys(String action, JsonNode request,
                                                                          String region, RequestLookups lookups) {
-        Map<String, List<String>> context = DynamoDbConditionKeys.extract(action, request,
-                dynamoDbTable(request.path("TableName"), region, lookups)).conditionKeys();
-        List<String> returnValues = DynamoDbConditionKeys.returnValues(action, request);
-        if (returnValues.isEmpty()) {
-            return List.of(Map.copyOf(context));
-        }
-        List<Map<String, List<String>>> contexts = new ArrayList<>();
-        for (String mode : returnValues) {
-            Map<String, List<String>> withMode = new LinkedHashMap<>(context);
-            withMode.put("dynamodb:ReturnValues", List.of(mode));
-            contexts.add(Map.copyOf(withMode));
-        }
-        return List.copyOf(contexts);
+        return DynamoDbConditionKeys.perReturnMode(action, request, DynamoDbConditionKeys.extract(action, request,
+                dynamoDbTable(request.path("TableName"), region, lookups)).conditionKeys());
     }
 
     /** The table a name or an ARN in {@code region} names; null when it names none DynamoDB has. */
@@ -402,11 +391,9 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
         }
         if (DYNAMODB_BATCHES.contains(namedAs) && input.path("RequestItems").isObject()) {
             List<Permission> permissions = new ArrayList<>();
-            input.path("RequestItems").properties().forEach(entry -> {
-                ObjectNode single = input.deepCopy();
-                single.putObject("RequestItems").set(entry.getKey(), entry.getValue());
+            DynamoDbConditionKeys.batchTableRequests(input).forEach((reference, single) -> {
                 Map<String, List<String>> context = Map.copyOf(DynamoDbConditionKeys.extract(namedAs, single,
-                        dynamoDbTable(TextNode.valueOf(entry.getKey()), owner.region(), lookups)).conditionKeys());
+                        dynamoDbTable(TextNode.valueOf(reference), owner.region(), lookups)).conditionKeys());
                 RequestResources.ofBody(namedAs, single, owner.partition(), owner.region(), owner.accountId(), null)
                         .stream().filter(AwsArnUtils::isArn)
                         .forEach(resource -> permissions.add(new Permission(namedAs, resource, context)));

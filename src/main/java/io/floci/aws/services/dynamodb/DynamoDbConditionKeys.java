@@ -1,6 +1,7 @@
 package io.floci.aws.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.dynamodb.model.GlobalSecondaryIndex;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
@@ -314,6 +315,44 @@ public final class DynamoDbConditionKeys {
             }
             return conditions;
         }
+    }
+
+    /**
+     * One condition context for each mode a single-item write asks for ({@link #returnValues}): {@code context} with
+     * that mode's {@code dynamodb:ReturnValues}, so every output the request can return is authorized; {@code context}
+     * alone for any other request.
+     */
+    public static List<Map<String, List<String>>> perReturnMode(String action, JsonNode body,
+                                                                Map<String, List<String>> context) {
+        List<String> modes = returnValues(action, body);
+        if (modes.isEmpty()) {
+            return List.of(Map.copyOf(context));
+        }
+        List<Map<String, List<String>>> contexts = new ArrayList<>();
+        for (String mode : modes) {
+            Map<String, List<String>> withMode = new LinkedHashMap<>(context);
+            withMode.put("dynamodb:ReturnValues", List.of(mode));
+            contexts.add(Map.copyOf(withMode));
+        }
+        return List.copyOf(contexts);
+    }
+
+    /**
+     * The request of each table a batch's {@code RequestItems} names, by its reference as written: the request with
+     * that table's entry alone, so each table's keys are read from its own entry. Empty for a request with no
+     * {@code RequestItems} object.
+     */
+    public static Map<String, ObjectNode> batchTableRequests(JsonNode body) {
+        Map<String, ObjectNode> requests = new LinkedHashMap<>();
+        if (body == null || !body.isObject() || !body.path("RequestItems").isObject()) {
+            return requests;
+        }
+        body.path("RequestItems").properties().forEach(entry -> {
+            ObjectNode single = ((ObjectNode) body).deepCopy();
+            single.putObject("RequestItems").set(entry.getKey(), entry.getValue());
+            requests.put(entry.getKey(), single);
+        });
+        return requests;
     }
 
     /**
