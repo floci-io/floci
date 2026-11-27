@@ -309,7 +309,7 @@ final class AslExecutorFixture {
                     redshiftDataHandler, serviceRegistry, mock(NestedTaskCredentials.class), lambdaTaskAuthorizer,
                     expressMaxExecutionTime,
                     nanoTime, null, emrTaskInvoker, emrServerlessTaskInvoker, null, nestedWaiter,
-                    eventBridgeInvoker, null);
+                    eventBridgeInvoker, null, null);
         }
     }
 }

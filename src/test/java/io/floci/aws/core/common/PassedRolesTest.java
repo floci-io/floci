@@ -706,7 +706,7 @@ class PassedRolesTest {
     }
 
     @Test
-    void anEmrClusterPassesItsInstanceProfilesRolesToEc2AndItsRolesByNameToTheirServices() {
+    void anEmrClusterPassesItsInstanceProfilesRolesToEc2AndItsRolesByNameToTheirServices() throws Exception {
         // JobFlowRole names an instance profile, whose roles go to EC2; the service role, given by its name, to EMR, and
         // the automatic scaling role to Application Auto Scaling. The steps' runtime role is not passed.
         String request = """
@@ -724,9 +724,9 @@ class PassedRolesTest {
         assertEquals(List.of(passed("numbered-instance", EC2), passed("123456", "elasticmapreduce.amazonaws.com")),
                 PassedRoles.of("elasticmapreduce:RunJobFlow", json("{\"JobFlowRole\":123456,\"ServiceRole\":123456}"),
                         LOOKUPS));
-        // A call that is no request of its own has no instance profile lookup, so it is refused.
-        assertThrows(IllegalArgumentException.class, () -> PassedRoles.ofBody("elasticmapreduce:RunJobFlow",
-                new ObjectMapper().createObjectNode(), name -> ROLES + name));
+        // A call that is no request of its own, a state machine's task, passes the same roles.
+        assertEquals(PassedRoles.of("elasticmapreduce:RunJobFlow", json(request), LOOKUPS),
+                PassedRoles.ofBody("elasticmapreduce:RunJobFlow", new ObjectMapper().readTree(request), LOOKUPS));
     }
 
     @Test

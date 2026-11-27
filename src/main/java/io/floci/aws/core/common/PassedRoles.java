@@ -284,16 +284,12 @@ final class PassedRoles {
                     fromInstanceProfile(ctx, lookups, "LaunchTemplateData.IamInstanceProfile");
             case "ec2:CreateFlowLogs" -> fromForm(ctx, VPC_FLOW_LOGS, "DeliverLogsPermissionArn");
             case "iam:AddRoleToInstanceProfile" -> instanceProfileRole(ctx, lookups);
-            case "ecs:RegisterTaskDefinition" -> ecsTaskDefinition(jsonBody(ctx), lookups);
-            case "ecs:RunTask", "ecs:StartTask" -> ecsTask(jsonBody(ctx), lookups);
-            case "ecs:CreateService", "ecs:UpdateService" -> ecsService(jsonBody(ctx), lookups);
-            case "ecs:CreateTaskSet" -> ecsTaskDefinitionRoles(jsonBody(ctx), lookups);
-            case "ecs:CreateCapacityProvider", "ecs:UpdateCapacityProvider" ->
-                    ecsRoles(values(jsonBody(ctx), "managedInstancesProvider", "infrastructureRoleArn"), ECS, lookups);
+            case "ecs:RegisterTaskDefinition", "ecs:RunTask", "ecs:StartTask", "ecs:CreateService", "ecs:UpdateService",
+                 "ecs:CreateTaskSet", "ecs:CreateCapacityProvider", "ecs:UpdateCapacityProvider",
+                 "scheduler:CreateSchedule", "scheduler:UpdateSchedule" -> byHandOfBody(action, jsonBody(ctx), lookups);
             case "states:CreateStateMachine", "states:UpdateStateMachine" -> fromJson(ctx, STATES, "roleArn");
             case "events:PutRule" -> fromJson(ctx, EVENTS, "RoleArn");
             case "events:PutTargets" -> fromJson(ctx, EVENTS, "Targets", "[]", "RoleArn");
-            case "scheduler:CreateSchedule", "scheduler:UpdateSchedule" -> fromJson(ctx, SCHEDULER, "Target", "RoleArn");
             case "pipes:CreatePipe", "pipes:UpdatePipe" -> fromJson(ctx, PIPES, "RoleArn");
             case "eks:CreatePodIdentityAssociation", "eks:UpdatePodIdentityAssociation" ->
                     fromJson(ctx, EKS_PODS, "roleArn");
@@ -304,8 +300,11 @@ final class PassedRoles {
             case "cloudformation:CreateStack", "cloudformation:UpdateStack", "cloudformation:DeleteStack",
                  "cloudformation:CreateChangeSet", "cloudformation:ContinueUpdateRollback" ->
                     fromForm(ctx, CLOUDFORMATION, "RoleARN");
-            case "cloudformation:CreateStackSet", "cloudformation:UpdateStackSet" ->
-                    stackSetAdministrationRole(ctx, lookups, "cloudformation:UpdateStackSet".equals(action));
+            case "cloudformation:CreateStackSet", "cloudformation:UpdateStackSet" -> {
+                Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
+                yield stackSetAdministrationRole(form.get("AdministrationRoleARN"), form.get("PermissionModel"),
+                        form.get("StackSetName"), lookups, "cloudformation:UpdateStackSet".equals(action));
+            }
             case "autoscaling:CreateLaunchConfiguration" -> launchConfiguration(ctx, lookups);
             case "autoscaling:CreateAutoScalingGroup", "autoscaling:UpdateAutoScalingGroup" ->
                     autoScalingGroup(ctx, lookups);
@@ -340,6 +339,32 @@ final class PassedRoles {
             case "servicecatalog:CreateConstraint" -> launchConstraintRoles(jsonBody(ctx), lookups, false);
             case "servicecatalog:UpdateConstraint" -> launchConstraintRoles(jsonBody(ctx), lookups, true);
             case "swf:RespondDecisionTaskCompleted" -> swfDecisionRoles(jsonBody(ctx));
+            default -> null;
+        };
+    }
+
+    /**
+     * The roles a JSON request for an operation read here passes, for one that is not an HTTP request of its own (a
+     * state machine's task to its integrated service), read from the members a direct request's are read from: the
+     * same body for an ECS or a Scheduler request, and for a CloudFormation request the members its form parameters
+     * carry. Null for any other operation.
+     */
+    private static List<PassedRole> byHandOfBody(String operation, JsonNode body, Lookups lookups) {
+        return switch (operation) {
+            case "ecs:RegisterTaskDefinition" -> ecsTaskDefinition(body, lookups);
+            case "ecs:RunTask", "ecs:StartTask" -> ecsTask(body, lookups);
+            case "ecs:CreateService", "ecs:UpdateService" -> ecsService(body, lookups);
+            case "ecs:CreateTaskSet" -> ecsTaskDefinitionRoles(body, lookups);
+            case "ecs:CreateCapacityProvider", "ecs:UpdateCapacityProvider" ->
+                    ecsRoles(values(body, "managedInstancesProvider", "infrastructureRoleArn"), ECS, lookups);
+            case "scheduler:CreateSchedule", "scheduler:UpdateSchedule" ->
+                    passed(values(body, "Target", "RoleArn"), SCHEDULER);
+            case "cloudformation:CreateStack", "cloudformation:UpdateStack", "cloudformation:DeleteStack",
+                 "cloudformation:CreateChangeSet", "cloudformation:ContinueUpdateRollback" ->
+                    passed(values(body, "RoleARN"), CLOUDFORMATION);
+            case "cloudformation:CreateStackSet", "cloudformation:UpdateStackSet" ->
+                    stackSetAdministrationRole(text(body, "AdministrationRoleARN"), text(body, "PermissionModel"),
+                            text(body, "StackSetName"), lookups, "cloudformation:UpdateStackSet".equals(operation));
             default -> null;
         };
     }
@@ -409,21 +434,24 @@ final class PassedRoles {
 
     /**
      * The roles a JSON request for {@code operation} passes, for a call that is not an HTTP request of its own (a
-     * state machine's task to its integrated service), read from the members the table gives the operation as a
-     * direct request's are, a role given by name being the one {@code named} gives. An operation whose roles are
-     * read by hand here, from a request of its own, or that names an instance profile, whose roles only IAM's own
-     * lookup finds, is not read so, and fails.
+     * state machine's task to its integrated service), read as a direct request's are: by hand for the operations
+     * {@link #byHandOfBody} reads, and otherwise from the members the table gives the operation, a role given by name
+     * being the one IAM holds under it, or else the one the name gives in the account, and an instance profile
+     * passing the roles it holds. Any other operation whose roles are read by hand here, from a request of its own,
+     * is not read so, and fails.
      */
-    static List<PassedRole> ofBody(String operation, JsonNode body, UnaryOperator<String> named) {
+    static List<PassedRole> ofBody(String operation, JsonNode body, Lookups lookups) {
+        List<PassedRole> byHand = byHandOfBody(operation, body, lookups);
+        if (byHand != null) {
+            return byHand;
+        }
         if (PassedRoleMembers.table().byHand().contains(operation)) {
             throw new IllegalArgumentException(operation + " passes roles read by hand, from a request of its own");
         }
         List<PassedRoleMembers.Member> members = PassedRoleMembers.of(operation);
-        if (members != null && members.stream().anyMatch(PassedRoleMembers.Member::instanceProfile)) {
-            throw new IllegalArgumentException(operation + " passes an instance profile's roles, which only a lookup "
-                    + "finds");
-        }
-        return members == null ? List.of() : fromTable(members, Map.of(), body, named, null);
+        return members == null ? List.of() : fromTable(members, Map.of(), body,
+                name -> lookups.heldRoleArn(name).orElseGet(() -> lookups.roleArn(name)),
+                profile -> instanceProfileRoles(lookups, profile));
     }
 
     private static List<PassedRole> fromTable(List<PassedRoleMembers.Member> members, Map<String, String> form,
@@ -700,16 +728,15 @@ final class PassedRoles {
      * own permission model, which Floci keeps whatever the request names, and one of a StackSet that
      * does not exist passes nothing.
      */
-    private static List<PassedRole> stackSetAdministrationRole(ContainerRequestContext ctx, Lookups lookups,
-                                                               boolean update) {
-        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
-        String named = blankToNull(form.get("AdministrationRoleARN"));
+    private static List<PassedRole> stackSetAdministrationRole(String administrationRole, String permissionModel,
+                                                               String stackSetName, Lookups lookups, boolean update) {
+        String named = blankToNull(administrationRole);
         if (named != null) {
             return passed(List.of(named), CLOUDFORMATION);
         }
-        String model = blankToNull(form.get("PermissionModel"));
+        String model = blankToNull(permissionModel);
         if (update) {
-            String name = blankToNull(form.get("StackSetName"));
+            String name = blankToNull(stackSetName);
             Optional<String> stored = name == null ? Optional.empty() : lookups.stackSetPermissionModel(name);
             if (stored.isEmpty()) {
                 return List.of();
@@ -1018,6 +1045,12 @@ final class PassedRoles {
                 && "application".equalsIgnoreCase(mediaType.getType())
                 && ("cbor".equalsIgnoreCase(mediaType.getSubtype())
                         || "x-amz-cbor-1.1".equalsIgnoreCase(mediaType.getSubtype()));
+    }
+
+    /** The string {@code member} of {@code body}; null when it is none. */
+    private static String text(JsonNode body, String member) {
+        List<String> found = values(body, member);
+        return found.isEmpty() ? null : found.getFirst();
     }
 
     private static String blankToNull(String value) {
