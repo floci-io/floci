@@ -65,12 +65,44 @@ class ApiGatewayRestApiPagingIntegrationTest {
 
                 assertThrows(BadRequestException.class,
                         () -> client.getRestApis(r -> r.limit(1).position("missing")));
-                given().queryParam("position", "").when().get("/restapis").then().statusCode(400)
-                        .body("__type", equalTo("BadRequestException"));
-                given().queryParam("position", " ").when().get("/restapis").then().statusCode(400)
-                        .body("__type", equalTo("BadRequestException"));
             } finally {
                 created.forEach(id -> client.deleteRestApi(r -> r.restApiId(id)));
+            }
+        }
+    }
+
+    @Test
+    void everyCollectionRefusesAnEmptyOrBlankPosition() {
+        try (ApiGatewayClient client = client()) {
+            String apiId = client.createRestApi(r -> r.name("BlankPositionApi")).id();
+            String planId = client.createUsagePlan(r -> r.name("BlankPositionPlan")).id();
+            String domainName = "blank-position.example.com";
+            client.createDomainName(r -> r.domainName(domainName));
+            try {
+                List<String> collections = List.of(
+                        "/restapis",
+                        "/restapis/" + apiId + "/resources",
+                        "/restapis/" + apiId + "/deployments",
+                        "/restapis/" + apiId + "/authorizers",
+                        "/restapis/" + apiId + "/requestvalidators",
+                        "/restapis/" + apiId + "/models",
+                        "/restapis/" + apiId + "/documentation/parts",
+                        "/usageplans",
+                        "/usageplans/" + planId + "/keys",
+                        "/domainnames/" + domainName + "/basepathmappings",
+                        "/vpclinks");
+                for (String collection : collections) {
+                    for (String position : List.of("", " ")) {
+                        given().queryParam("position", position).when().get(collection).then().statusCode(400)
+                                .body("__type", equalTo("BadRequestException"))
+                                .body("message", equalTo("Invalid position parameter"));
+                    }
+                    given().when().get(collection).then().statusCode(200);
+                }
+            } finally {
+                client.deleteDomainName(r -> r.domainName(domainName));
+                client.deleteUsagePlan(r -> r.usagePlanId(planId));
+                client.deleteRestApi(r -> r.restApiId(apiId));
             }
         }
     }
