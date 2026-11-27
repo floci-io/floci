@@ -87,7 +87,7 @@ public class DockerClientProducer {
     }
 
     void validateDockerHostAtStartup(Function<String, String> environment) {
-        String dockerHost = resolveDockerHost(config.docker(), environment);
+        String dockerHost = resolveDockerConnection(config.docker(), environment, false).host();
         requireSshOptIn(dockerHost, config.docker().allowSshHost());
     }
 
@@ -157,35 +157,14 @@ public class DockerClientProducer {
      */
     public static ResolvedDockerConnection resolveDockerConnection(
             EmulatorConfig.DockerConfig docker, Function<String, String> environment) {
-        Path dockerConfigDir = resolveDockerConfigDir(docker.dockerConfigPath(), environment.apply("DOCKER_CONFIG"));
-        return resolveDockerConnection(docker.dockerHost(), environment.apply("DOCKER_HOST"), isWindows(),
-                dockerConfigDir, environment.apply("DOCKER_CONTEXT"));
+        return resolveDockerConnection(docker, environment, true);
     }
 
-    /**
-     * Resolves only the effective Docker host without validating context TLS material, so the
-     * startup SSH opt-in check does not fail startup on unrelated Docker TLS misconfigurations
-     * when only non-Docker services are used.
-     */
-    static String resolveDockerHost(EmulatorConfig.DockerConfig docker, Function<String, String> environment) {
-        String configuredHost = docker.dockerHost();
-        String normalizedEnvHost = normalizeDockerHost(environment.apply("DOCKER_HOST"));
-        boolean atDefault = "unix:///var/run/docker.sock".equals(configuredHost);
-        if (atDefault && normalizedEnvHost != null && !normalizedEnvHost.isBlank()) {
-            return normalizedEnvHost;
-        }
-        if (atDefault) {
-            Path dockerConfigDir =
-                    resolveDockerConfigDir(docker.dockerConfigPath(), environment.apply("DOCKER_CONFIG"));
-            String contextHost = resolveActiveDockerContextHost(dockerConfigDir, environment.apply("DOCKER_CONTEXT"));
-            if (contextHost != null) {
-                return normalizeDockerHost(contextHost);
-            }
-        }
-        if (atDefault && isWindows()) {
-            return WINDOWS_DEFAULT_DOCKER_HOST;
-        }
-        return normalizeDockerHost(configuredHost);
+    private static ResolvedDockerConnection resolveDockerConnection(
+            EmulatorConfig.DockerConfig docker, Function<String, String> environment, boolean resolveTls) {
+        Path dockerConfigDir = resolveDockerConfigDir(docker.dockerConfigPath(), environment.apply("DOCKER_CONFIG"));
+        return resolveDockerConnection(docker.dockerHost(), environment.apply("DOCKER_HOST"), isWindows(),
+                dockerConfigDir, environment.apply("DOCKER_CONTEXT"), resolveTls);
     }
 
     /**
@@ -242,6 +221,13 @@ public class DockerClientProducer {
     static ResolvedDockerConnection resolveDockerConnection(
             String configuredHost, String dockerHostEnv, boolean isWindows, Path dockerConfigDir,
             String dockerContextEnv) {
+        return resolveDockerConnection(
+                configuredHost, dockerHostEnv, isWindows, dockerConfigDir, dockerContextEnv, true);
+    }
+
+    private static ResolvedDockerConnection resolveDockerConnection(
+            String configuredHost, String dockerHostEnv, boolean isWindows, Path dockerConfigDir,
+            String dockerContextEnv, boolean resolveTls) {
         String normalizedEnvHost = normalizeDockerHost(dockerHostEnv);
         boolean atDefault = "unix:///var/run/docker.sock".equals(configuredHost);
         if (atDefault && normalizedEnvHost != null && !normalizedEnvHost.isBlank()) {
@@ -249,19 +235,23 @@ public class DockerClientProducer {
         }
         if (atDefault) {
             DockerContextEndpoint contextEndpoint =
-                    resolveActiveDockerContextEndpoint(dockerConfigDir, dockerContextEnv);
+                    resolveActiveDockerContextEndpoint(dockerConfigDir, dockerContextEnv, resolveTls);
             if (contextEndpoint != null) {
                 String normalizedContextHost = normalizeDockerHost(contextEndpoint.host());
-                LOG.infov("No DOCKER_HOST override set; using endpoint ''{0}'' from the active "
-                        + "Docker context instead of the platform default.", normalizedContextHost);
+                if (resolveTls) {
+                    LOG.infov("No DOCKER_HOST override set; using endpoint ''{0}'' from the active "
+                            + "Docker context instead of the platform default.", normalizedContextHost);
+                }
                 return new ResolvedDockerConnection(normalizedContextHost, contextEndpoint.tlsCertPath(),
                         contextEndpoint.skipTlsVerify());
             }
         }
         if (atDefault && isWindows) {
-            LOG.infov("Docker host is at its unix-socket default on Windows, which has no "
-                    + "/var/run/docker.sock equivalent; using named pipe ''{0}'' instead.",
-                    WINDOWS_DEFAULT_DOCKER_HOST);
+            if (resolveTls) {
+                LOG.infov("Docker host is at its unix-socket default on Windows, which has no "
+                        + "/var/run/docker.sock equivalent; using named pipe ''{0}'' instead.",
+                        WINDOWS_DEFAULT_DOCKER_HOST);
+            }
             return new ResolvedDockerConnection(WINDOWS_DEFAULT_DOCKER_HOST, Optional.empty(), false);
         }
         return new ResolvedDockerConnection(normalizeDockerHost(configuredHost), Optional.empty(), false);
@@ -297,25 +287,13 @@ public class DockerClientProducer {
      * name (the built-in {@code "default"} context has no endpoint of its own, so it is treated
      * the same as no context being configured at all), then read that context's {@code Host}
      * endpoint from its metadata file under {@code contexts/meta/}, along with any TLS client
-     * material under {@code contexts/tls/}.
+     * material under {@code contexts/tls/} when {@code resolveTls} is true.
      *
      * @return the resolved endpoint, or {@code null} if no active non-default context is
      *         configured, its metadata is missing, or {@code config.json} is missing or malformed
      */
-    private static String resolveActiveDockerContextHost(Path dockerConfigDir, String dockerContextEnv) {
-        if (dockerConfigDir == null) {
-            return null;
-        }
-        String currentContext = resolveActiveDockerContextName(dockerConfigDir, dockerContextEnv);
-        if (currentContext == null || currentContext.isBlank() || DEFAULT_CONTEXT_NAME.equals(currentContext)) {
-            return null;
-        }
-        String host = readContextDockerHost(dockerConfigDir, currentContext);
-        return host == null || host.isBlank() ? null : host;
-    }
-
     private static DockerContextEndpoint resolveActiveDockerContextEndpoint(
-            Path dockerConfigDir, String dockerContextEnv) {
+            Path dockerConfigDir, String dockerContextEnv, boolean resolveTls) {
         if (dockerConfigDir == null) {
             return null;
         }
@@ -326,6 +304,9 @@ public class DockerClientProducer {
         String host = readContextDockerHost(dockerConfigDir, currentContext);
         if (host == null || host.isBlank()) {
             return null;
+        }
+        if (!resolveTls) {
+            return new DockerContextEndpoint(host, Optional.empty(), false);
         }
         return new DockerContextEndpoint(host, resolveActiveDockerContextTlsMaterial(dockerConfigDir, currentContext),
                 readContextSkipTlsVerify(dockerConfigDir, currentContext));

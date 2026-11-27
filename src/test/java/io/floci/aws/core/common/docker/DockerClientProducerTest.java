@@ -272,13 +272,19 @@ class DockerClientProducerTest {
     // ConnectionRequestTimeoutException. The @Default and @StreamingDocker beans must
     // therefore be genuinely separate DockerClient instances (and thus separate pools),
     // not the same instance handed out under two qualifiers.
-    @Test
-    void dockerClientAndStreamingDockerClient_areDistinctInstances(@TempDir Path dockerConfigDir) throws IOException {
+    private static EmulatorConfig mockConfig(String dockerHost, Path dockerConfigDir) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
         when(config.docker()).thenReturn(docker);
-        when(docker.dockerHost()).thenReturn("unix:///var/run/docker.sock");
-        when(docker.dockerConfigPath()).thenReturn(Optional.of(dockerConfigDir.toString()));
+        when(docker.dockerHost()).thenReturn(dockerHost);
+        when(docker.dockerConfigPath()).thenReturn(Optional.ofNullable(dockerConfigDir).map(Path::toString));
+        return config;
+    }
+
+    @Test
+    void dockerClientAndStreamingDockerClient_areDistinctInstances(@TempDir Path dockerConfigDir) throws IOException {
+        EmulatorConfig config = mockConfig("unix:///var/run/docker.sock", dockerConfigDir);
+        EmulatorConfig.DockerConfig docker = config.docker();
         when(docker.maxConnections()).thenReturn(100);
         when(docker.streamingMaxConnections()).thenReturn(512);
         when(docker.connectionRequestTimeoutSeconds()).thenReturn(30);
@@ -784,11 +790,8 @@ class DockerClientProducerTest {
             acceptor.setDaemon(true);
             acceptor.start();
 
-            EmulatorConfig config = mock(EmulatorConfig.class);
-            EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
-            when(config.docker()).thenReturn(docker);
-            when(docker.dockerHost()).thenReturn("tcp://127.0.0.1:" + daemon.getLocalPort());
-            when(docker.dockerConfigPath()).thenReturn(Optional.empty());
+            EmulatorConfig config = mockConfig("tcp://127.0.0.1:" + daemon.getLocalPort(), null);
+            EmulatorConfig.DockerConfig docker = config.docker();
             when(docker.maxConnections()).thenReturn(2);
             when(docker.connectionRequestTimeoutSeconds()).thenReturn(1);
             when(docker.apiTimeoutSeconds()).thenReturn(300);
@@ -883,13 +886,8 @@ class DockerClientProducerTest {
 
     @Test
     void validateDockerHostAtStartup_refusesSshHostUntilOptInIsOn() {
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
-        when(config.docker()).thenReturn(docker);
-        when(docker.dockerHost()).thenReturn("ssh://remote-docker");
-        when(docker.dockerConfigPath()).thenReturn(Optional.empty());
-        when(docker.allowSshHost()).thenReturn(false);
-
+        EmulatorConfig config = mockConfig("ssh://remote-docker", null);
+        EmulatorConfig.DockerConfig docker = config.docker();
         DockerClientProducer producer = new DockerClientProducer(config);
 
         IllegalStateException startupFailure = assertThrows(IllegalStateException.class,
@@ -909,14 +907,7 @@ class DockerClientProducerTest {
         writeContextFixture(tempDir, "remote-tls", "tcp://remote-docker:2376");
         writeContextTlsFixture(tempDir, "remote-tls", true, false, false);
 
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
-        when(config.docker()).thenReturn(docker);
-        when(docker.dockerHost()).thenReturn("unix:///var/run/docker.sock");
-        when(docker.dockerConfigPath()).thenReturn(Optional.of(tempDir.toString()));
-        when(docker.allowSshHost()).thenReturn(false);
-
-        DockerClientProducer producer = new DockerClientProducer(config);
+        DockerClientProducer producer = new DockerClientProducer(mockConfig("unix:///var/run/docker.sock", tempDir));
 
         assertDoesNotThrow(() -> producer.validateDockerHostAtStartup(name -> null),
                 "Unrelated Docker context TLS errors must not block startup");
@@ -928,14 +919,7 @@ class DockerClientProducerTest {
         writeContextFixture(tempDir, "remote-ssh", "ssh://remote-docker");
         writeContextTlsFixture(tempDir, "remote-ssh", true, false, false);
 
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
-        when(config.docker()).thenReturn(docker);
-        when(docker.dockerHost()).thenReturn("unix:///var/run/docker.sock");
-        when(docker.dockerConfigPath()).thenReturn(Optional.of(tempDir.toString()));
-        when(docker.allowSshHost()).thenReturn(false);
-
-        DockerClientProducer producer = new DockerClientProducer(config);
+        DockerClientProducer producer = new DockerClientProducer(mockConfig("unix:///var/run/docker.sock", tempDir));
 
         IllegalStateException startupFailure = assertThrows(IllegalStateException.class,
                 () -> producer.validateDockerHostAtStartup(name -> null));
