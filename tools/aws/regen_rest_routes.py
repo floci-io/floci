@@ -85,6 +85,7 @@ MODELS: dict[str, str] = {
     "es": "es",
     "fis": "fis",
     "inspector2": "inspector2",
+    "kinesisvideo": "kinesisvideo",
     "lakeformation": "lakeformation",
     "lambda": "lambda",
     "lambda-core": "lambda",

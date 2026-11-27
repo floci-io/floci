@@ -24,6 +24,10 @@ Floci implements the REST JSON control plane of Amazon Kinesis Video Streams for
 - Creating a stream whose name exists in the account and Region returns `ResourceInUseException`.
 - Requests are checked by `RequestConstraintCheck` against the member types, required members, lengths, patterns and enum values generated from botocore's Kinesis Video model, such as the `StreamName` and `DeviceName` pattern (`[a-zA-Z0-9_.-]+`), the `MediaType` pattern, the `Version` pattern of `CurrentVersion`, the `ResourceARN` pattern of `StreamARN`, the 1 to 10000 range of `MaxResults` and the `BEGINS_WITH` value of `ComparisonOperator`. `tools/aws/regen_kinesisvideo_shapes.py` vendors them; `make aws-data-sync` regenerates them and `make aws-data-check` checks for drift. A member of the wrong JSON type fails with `SerializationException`, more than the 50 tags the model allows with `TagsPerResourceExceededLimitException`, and any other violation with `InvalidArgumentException`. A `DescribeStream` naming neither `StreamName` nor `StreamARN`, and a `NextToken` that `ListStreams` did not return, also fail with `InvalidArgumentException`.
 
+## IAM
+
+Under IAM enforcement (`floci.services.iam.enforcement-enabled`), each request is checked as its `kinesisvideo:` action, from the routes and request resources generated from botocore and the AWS Service Reference. `DescribeStream` and `DeleteStream` are checked on the stream they name, `ListStreams` acts on no resource type and is checked on `*`, and a `CreateStream` with `Tags` also needs `kinesisvideo:TagStream`, with its tags as `aws:RequestTag/<key>` and `aws:TagKeys`. A refusal is `AccessDeniedException` with the 401 status the model declares for the service.
+
 ## Not implemented
 
 Media ingestion and playback (`GetDataEndpoint` and the `kinesis-video-media` and `kinesis-video-archived-media` data planes), signaling channels, stream updates, tagging actions, and the image generation, notification, edge and storage configuration actions are not emulated yet.

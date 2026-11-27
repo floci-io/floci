@@ -924,6 +924,11 @@
       "UpdateOrgEc2DeepInspectionConfiguration",
       "UpdateOrganizationConfiguration"
     ],
+    "kinesisvideo": [
+      "ListEdgeAgentConfigurations",
+      "ListSignalingChannels",
+      "ListStreams"
+    ],
     "lakeformation": [
       "AddLFTagsToResource",
       "AttachRLSPolicy",
