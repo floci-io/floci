@@ -1,17 +1,13 @@
 package io.floci.aws.services.s3;
 
+import io.floci.aws.testing.EnforcementFixtures;
+import io.floci.aws.testing.S3TestClients;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.RestAssured;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.sync.RequestBody;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.S3Exception;
-
-import java.net.URI;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -29,10 +25,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @QuarkusTest
 class S3RegionRedirectIntegrationTest {
 
-    private static final String US_EAST_1_AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20260325/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=test";
-    private static final String EU_WEST_1_AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20260325/eu-west-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=test";
+    private static final String US_EAST_1_AUTH = EnforcementFixtures.auth("test", "us-east-1", "s3");
+    private static final String EU_WEST_1_AUTH = EnforcementFixtures.auth("test", "eu-west-1", "s3");
 
     @Test
     void requestSignedForAnotherRegionIsPermanentlyRedirected() {
@@ -151,9 +145,9 @@ class S3RegionRedirectIntegrationTest {
     @Test
     void sdkClientWithCrossRegionAccessFollowsTheRedirect() {
         String bucket = "redirect-sdk-bucket";
-        try (S3Client home = client(Region.US_EAST_1, false);
-             S3Client wrongRegion = client(Region.EU_WEST_1, false);
-             S3Client crossRegion = client(Region.EU_WEST_1, true)) {
+        try (S3Client home = S3TestClients.pathStyle(Region.US_EAST_1);
+             S3Client wrongRegion = S3TestClients.pathStyle(Region.EU_WEST_1);
+             S3Client crossRegion = S3TestClients.pathStyle(Region.EU_WEST_1, true)) {
             home.createBucket(request -> request.bucket(bucket));
             try {
                 home.putObject(request -> request.bucket(bucket).key("hello.txt"), RequestBody.fromString("hello"));
@@ -171,16 +165,5 @@ class S3RegionRedirectIntegrationTest {
                 home.deleteBucket(request -> request.bucket(bucket));
             }
         }
-    }
-
-    private static S3Client client(Region region, boolean crossRegionAccess) {
-        return S3Client.builder()
-                .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
-                .httpClientBuilder(UrlConnectionHttpClient.builder())
-                .forcePathStyle(true)
-                .region(region)
-                .crossRegionAccessEnabled(crossRegionAccess)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
-                .build();
     }
 }

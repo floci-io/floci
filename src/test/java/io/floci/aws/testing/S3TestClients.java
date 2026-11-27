@@ -27,11 +27,20 @@ public final class S3TestClients {
 
     /** A path-style client in {@code region} for account {@code 741624100001}. */
     public static S3Client pathStyle(Region region) {
+        return pathStyle(region, false);
+    }
+
+    /**
+     * {@link #pathStyle(Region)} with the SDK's cross-Region access on or off: on, it follows S3's 301
+     * PermanentRedirect to a bucket in another Region.
+     */
+    public static S3Client pathStyle(Region region, boolean crossRegionAccess) {
         return S3Client.builder()
                 .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
                 .httpClientBuilder(UrlConnectionHttpClient.builder())
                 .forcePathStyle(true)
                 .region(region)
+                .crossRegionAccessEnabled(crossRegionAccess)
                 .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("741624100001", "test")))
                 .build();
     }
