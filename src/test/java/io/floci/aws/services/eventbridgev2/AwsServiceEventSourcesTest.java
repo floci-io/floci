@@ -596,6 +596,20 @@ class AwsServiceEventSourcesTest {
     }
 
     @Test
+    void anUpdateFailedSourceStillTakesEventsThroughItsEarlierRule() {
+        EventSourceV2 source = service.createEventSource(create("svc", "{\"AwsService\":\"aws.ssm\"}"), REGION);
+        subscribe();
+        assertThrows(AwsException.class, () -> service.updateEventSource(update(source,
+                "{\"AwsService\":\"aws.ssm\",\"Pattern\":\"{}\"}"), REGION));
+        assertEquals("UPDATE_FAILED", service.describeEventSource(arn(source.getArn()), REGION).getState());
+
+        service.forwardServiceEvent(bus, source.getArn().substring(source.getArn().length() - 25),
+                "{\"id\":\"e1\",\"source\":\"aws.ssm\",\"detail-type\":\"x\",\"detail\":{}}");
+
+        verify(delivery, times(1)).deliver(any(), any());
+    }
+
+    @Test
     void aRevokedSourceTakesNoEvents() {
         EventSourceV2 source = service.createEventSource(create("svc", "{\"AwsService\":\"aws.ssm\"}"), REGION);
         subscribe();
