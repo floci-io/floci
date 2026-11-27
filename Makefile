@@ -622,7 +622,8 @@ IAM_AUTHORIZED_ACTIONS_PATHS := src/main/resources/aws/iam-authorized-actions.js
 	src/main/resources/aws/rest-routes.json tools/aws/sources/s3-required-actions.json \
 	tools/aws/fetch_s3_required_actions.py tools/aws/test_fetch_s3_required_actions.py
 IAM_PASSED_ROLES_PATHS := src/main/resources/aws/iam-passed-roles.json $(IAM_PASSED_ROLES_GENERATOR) \
-	tools/aws/test_regen_iam_passed_roles.py
+	tools/aws/test_regen_iam_passed_roles.py tools/aws/sources/eks-roles.json tools/aws/fetch_eks_roles.py \
+	tools/aws/test_fetch_eks_roles.py
 IAM_PASSED_NETWORK_CONNECTORS_PATHS := src/main/resources/aws/iam-passed-network-connectors.json \
 	tools/aws/regen_iam_passed_network_connectors.py $(IAM_PASSED_ROLES_GENERATOR) \
 	tools/aws/test_regen_iam_passed_network_connectors.py

@@ -64,9 +64,9 @@ import java.util.regex.Pattern;
  * you must grant your user permission to pass the role to Amazon ECS"), task roles to
  * {@code ecs-tasks.amazonaws.com}.
  *
- * <p>An EKS request passes the cluster's {@code roleArn}, a node group's {@code nodeRole}, a Fargate
- * profile's {@code podExecutionRoleArn}, and an add-on's service account role and the role of each Pod
- * Identity association it makes, to {@code eks.amazonaws.com}. A Pod Identity association passes its
+ * <p>EKS's cluster, node group, Fargate profile and add-on roles are read from the table, a cluster's
+ * {@code roleArn} going to {@code eks.amazonaws.com} and its EKS Auto Mode {@code computeConfig.nodeRoleArn}
+ * to {@code ec2.amazonaws.com}, as the vendored EKS role source gives them. A Pod Identity association passes its
  * {@code roleArn} to {@code pods.eks.amazonaws.com}: the EKS user guide has "The IAM principal that is
  * creating the association must have iam:PassRole." Its target role is not passed but assumed with the
  * association's role: "Pod Identity then automatically performs two role assumptions in sequence: first
@@ -133,7 +133,6 @@ final class PassedRoles {
     private static final String EVENTS = ServicePrincipals.of("events");
     private static final String SCHEDULER = ServicePrincipals.of("scheduler");
     private static final String PIPES = ServicePrincipals.of("pipes");
-    private static final String EKS = ServicePrincipals.of("eks");
     private static final String EMR = ServicePrincipals.of("elasticmapreduce");
     private static final String EKS_PODS = ServicePrincipals.of("pods.eks");
     private static final String CLOUDFORMATION = ServicePrincipals.of("cloudformation");
@@ -287,10 +286,6 @@ final class PassedRoles {
             case "events:PutRule" -> fromJson(ctx, EVENTS, "RoleArn");
             case "events:PutTargets" -> fromJson(ctx, EVENTS, "Targets", "[]", "RoleArn");
             case "pipes:CreatePipe", "pipes:UpdatePipe" -> fromJson(ctx, PIPES, "RoleArn");
-            case "eks:CreateCluster" -> fromJson(ctx, EKS, "roleArn");
-            case "eks:CreateNodegroup" -> fromJson(ctx, EKS, "nodeRole");
-            case "eks:CreateFargateProfile" -> fromJson(ctx, EKS, "podExecutionRoleArn");
-            case "eks:CreateAddon", "eks:UpdateAddon" -> eksAddonRoles(jsonBody(ctx));
             case "eks:CreatePodIdentityAssociation", "eks:UpdatePodIdentityAssociation" ->
                     fromJson(ctx, EKS_PODS, "roleArn");
             case "eks:CreateAccessEntry" -> eksNodeAccessEntry(jsonBody(ctx));
@@ -719,13 +714,6 @@ final class PassedRoles {
         passed.addAll(passed(heldOrNamedRoles(values(body, "AutoScalingRole"),
                 name -> lookups.heldRoleArn(name).orElseGet(() -> lookups.roleArn(name))), APPLICATION_AUTOSCALING));
         return passed;
-    }
-
-    /** An EKS add-on's service account role and the role of each Pod Identity association it makes. */
-    private static List<PassedRole> eksAddonRoles(JsonNode body) {
-        List<String> roles = new ArrayList<>(values(body, "serviceAccountRoleArn"));
-        roles.addAll(values(body, "podIdentityAssociations", "[]", "roleArn"));
-        return passed(roles, EKS);
     }
 
     /** An EKS access entry's principal, when its type is one whose nodes run as that role. */

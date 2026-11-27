@@ -601,6 +601,31 @@ class IamPassRoleEnforcementIntegrationTest {
     }
 
     /** Creates an EKS cluster as the account's admin, removed afterwards, and returns its name. */
+    @Test
+    void anEksAutoModeClusterNeedsPassRoleOnItsNodeRoleForEc2AndItsClusterRoleForEks() {
+        // The node role is the role EKS Auto Mode's EC2 Managed Instances run as, so it is passed to EC2; the
+        // cluster role, the control plane's, to EKS.
+        String cluster = role("auto-cluster");
+        String node = role("auto-node");
+        User user = user("passrole-eks-auto");
+        String body = """
+                {"name":"passrole-auto-%s","roleArn":"%s","computeConfig":{"enabled":true,"nodePools":["general-purpose"],
+                 "nodeRoleArn":"%s"},"kubernetesNetworkConfig":{"elasticLoadBalancing":{"enabled":true}},
+                 "storageConfig":{"blockStorage":{"enabled":true}}}""".formatted(suffix(), cluster, node);
+
+        user.policy(allow("eks:CreateCluster", "*") + "," + passRole(cluster, "eks.amazonaws.com"));
+        denied(user.rest("eks").body(body).post("/clusters").then());
+        user.policy(allow("eks:CreateCluster", "*") + "," + passRole(cluster, "eks.amazonaws.com") + ","
+                + passRole(node, "eks.amazonaws.com"));
+        denied(user.rest("eks").body(body).post("/clusters").then());
+
+        user.policy(allow("eks:CreateCluster", "*") + "," + passRole(cluster, "eks.amazonaws.com") + ","
+                + passRole(node, "ec2.amazonaws.com"));
+        String name = user.rest("eks").body(body).post("/clusters").then().statusCode(200)
+                .extract().path("cluster.name");
+        cleanup.register(() -> admin("eks").delete("/clusters/" + name));
+    }
+
     private String eksCluster() {
         String name = "passrole-cluster-" + suffix();
         admin("eks").contentType("application/json")

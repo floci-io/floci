@@ -224,6 +224,14 @@ class PassedRolesTest {
         String eks = "eks.amazonaws.com";
         assertEquals(List.of(passed("cluster", eks)), PassedRoles.of("eks:CreateCluster",
                 json("{\"name\":\"c\",\"roleArn\":\"" + ROLES + "cluster\"}"), LOOKUPS));
+        // EKS Auto Mode's node role is the one its EC2 Managed Instances run as, passed to EC2.
+        String autoMode = "{\"computeConfig\":{\"enabled\":true,\"nodePools\":[\"general-purpose\"],\"nodeRoleArn\":\""
+                + ROLES + "auto-node\"}}";
+        assertEquals(List.of(passed("auto-node", EC2), passed("cluster", eks)), PassedRoles.of("eks:CreateCluster",
+                json(autoMode.replace("{\"computeConfig\"", "{\"roleArn\":\"" + ROLES + "cluster\",\"computeConfig\"")),
+                LOOKUPS));
+        assertEquals(List.of(passed("auto-node", EC2)), PassedRoles.of("eks:UpdateClusterConfig", json(autoMode),
+                LOOKUPS));
         assertEquals(List.of(passed("node", eks)), PassedRoles.of("eks:CreateNodegroup",
                 json("{\"nodeRole\":\"" + ROLES + "node\"}"), LOOKUPS));
         assertEquals(List.of(passed("fargate", eks)), PassedRoles.of("eks:CreateFargateProfile",
@@ -233,7 +241,7 @@ class PassedRolesTest {
                  {"serviceAccount":"a","roleArn":"%1$spod-a"},{"serviceAccount":"b","roleArn":"%1$spod-b"}]}"""
                 .formatted(ROLES);
         for (String action : List.of("eks:CreateAddon", "eks:UpdateAddon")) {
-            assertEquals(List.of(passed("addon", eks), passed("pod-a", eks), passed("pod-b", eks)),
+            assertEquals(List.of(passed("pod-a", eks), passed("pod-b", eks), passed("addon", eks)),
                     PassedRoles.of(action, json(addon), LOOKUPS));
         }
         // The association's role goes to Pod Identity; its target role is assumed with it, not passed.
