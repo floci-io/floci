@@ -268,7 +268,7 @@ describe('S3', () => {
 
   it('should delete bucket', async () => {
     await s3.send(new DeleteBucketCommand({ Bucket: bucketName }));
-    await s3.send(new DeleteBucketCommand({ Bucket: euBucketName }));
+    await euS3.send(new DeleteBucketCommand({ Bucket: euBucketName }));
     await euS3.send(new DeleteBucketCommand({ Bucket: signedRegionBucket }));
     bucketName = '';
     euBucketName = '';

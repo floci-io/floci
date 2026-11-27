@@ -497,6 +497,7 @@ floci:
       enforce-auth: false
       default-presign-expiry-seconds: 3600
       global-bucket-namespace: false
+      region-redirect: true                  # FLOCI_SERVICES_S3_REGION_REDIRECT - 301 PermanentRedirect for a request signed for another Region than its bucket's
       restore-completion-delay-seconds: 0   # FLOCI_SERVICES_S3_RESTORE_COMPLETION_DELAY_SECONDS
       lifecycle-sweep-enabled: true          # FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_ENABLED - apply lifecycle expiration rules in the background
       lifecycle-sweep-interval-seconds: 60   # FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_INTERVAL_SECONDS

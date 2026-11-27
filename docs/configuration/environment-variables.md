@@ -295,6 +295,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_S3_ENABLED` | `true` | Enable the S3 service |
 | `FLOCI_SERVICES_S3_DEFAULT_PRESIGN_EXPIRY_SECONDS` | `3600` | Default pre-signed URL expiry when none is specified |
 | `FLOCI_SERVICES_S3_GLOBAL_BUCKET_NAMESPACE` | `false` | When `true`, bucket/object resolution spans every account's partition so a bucket created in one account is visible cross-account (a single global namespace), matching real S3's global bucket names. Off by default keeps buckets isolated per account |
+| `FLOCI_SERVICES_S3_REGION_REDIRECT` | `true` | Answer a SigV4 request signed for a region other than its bucket's with `301 PermanentRedirect` and the bucket's region in `x-amz-bucket-region`, as S3 does. `false` serves every bucket to every region |
 | `FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_ENABLED` | `true` | Apply bucket lifecycle expiration rules (`Expiration`, `NoncurrentVersionExpiration`, `AbortIncompleteMultipartUpload`) in the background |
 | `FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_INTERVAL_SECONDS` | `60` | How often the lifecycle sweep runs |
 

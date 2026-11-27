@@ -22,11 +22,16 @@ public final class S3TestClients {
 
     /** A path-style client in us-east-1 for account {@code 741624100001}. */
     public static S3Client pathStyle() {
+        return pathStyle(Region.US_EAST_1);
+    }
+
+    /** A path-style client in {@code region} for account {@code 741624100001}. */
+    public static S3Client pathStyle(Region region) {
         return S3Client.builder()
                 .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
                 .httpClientBuilder(UrlConnectionHttpClient.builder())
                 .forcePathStyle(true)
-                .region(Region.US_EAST_1)
+                .region(region)
                 .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("741624100001", "test")))
                 .build();
     }

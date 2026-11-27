@@ -3392,6 +3392,11 @@ public class S3Service implements Resettable, ResourceProvider {
         return resolveBucket(bucketName).map(Bucket::getRegion).orElse(null);
     }
 
+    /** The Region the bucket lives in, empty when no bucket of that name resolves or it records none. */
+    public Optional<String> findBucketRegion(String bucketName) {
+        return resolveBucket(bucketName).map(Bucket::getRegion).filter(region -> !region.isBlank());
+    }
+
     // --- Batch Delete ---
 
     public record DeleteResult(String key, String versionId, boolean deleteMarker, String deleteMarkerVersionId) {
