@@ -1,21 +1,17 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.RestAssured;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudformation.model.Stack;
 import software.amazon.awssdk.services.cloudformation.model.StackResource;
 import software.amazon.awssdk.services.cloudformation.model.StackResourceDetail;
 
-import java.net.URI;
 import java.util.List;
 import java.util.UUID;
 
@@ -39,12 +35,7 @@ class CloudFormationStackResourceStackIdSdkIntegrationTest {
 
     @BeforeEach
     void createStack() {
-        cfn = CloudFormationClient.builder()
-                .endpointOverride(URI.create("http://127.0.0.1:" + RestAssured.port))
-                .region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
-                .httpClientBuilder(UrlConnectionHttpClient.builder())
-                .build();
+        cfn = AwsTestClients.create(CloudFormationClient.builder(), "test", Region.US_EAST_1);
         stackName = "cfn-srsid-" + UUID.randomUUID().toString().substring(0, 8);
         Stack stack = CfnStackWaits.createStack(cfn, stackName, TEMPLATE, "CREATE_COMPLETE");
         stackId = stack.stackId();
