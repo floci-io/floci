@@ -699,7 +699,9 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
      * after it. Only a node named after such an instance and whose provider ID is that instance's is touched, and
      * not one a live Auto Mode instance's node shares the name of, so the cluster's own node and other workers stay
      * whatever their labels, a worker that joined later under the same name included. A pass retries
-     * while EC2 keeps the terminated instance, an hour as on AWS.
+     * while EC2 keeps the terminated instance, an hour as on AWS. A live instance's node left under its private DNS
+     * name from before Auto Mode nodes took their instance IDs, whose removal when it registered again failed, is
+     * deleted the same way, each pass until it is gone.
      */
     private void removeStrayNodes(Cluster cluster, String region, Map<String, JsonNode> nodesByName) {
         if (nodesByName.isEmpty()) {
@@ -716,10 +718,20 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                 stray.add(name);
             }
         }
+        List<Instance> live = instancesOf(cluster, region, "pending", "running", "stopping", "stopped");
+        for (Instance instance : live) {
+            String legacy = clusterManager.deriveInstanceDnsName(instance, region);
+            JsonNode node = legacy == null || legacy.equals(clusterManager.deriveInstanceNodeName(instance, region))
+                    ? null : nodesByName.get(legacy);
+            if (node != null && node.path("spec").path("providerID").asText("")
+                    .endsWith("/" + instance.getInstanceId())) {
+                stray.add(legacy);
+            }
+        }
         if (stray.isEmpty()) {
             return;
         }
-        for (Instance instance : instancesOf(cluster, region, "pending", "running", "stopping", "stopped")) {
+        for (Instance instance : live) {
             stray.remove(clusterManager.deriveInstanceNodeName(instance, region));
         }
         for (String name : stray) {
@@ -727,11 +739,11 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                 exec(cluster, List.of("kubectl", "delete", "node", name, "--ignore-not-found=true", "--wait=false"),
                         "delete node " + name);
                 nodesByName.remove(name);
-                LOG.infov("EKS Auto Mode deleted node {0} of cluster {1}, whose instance is gone", name,
+                LOG.infov("EKS Auto Mode deleted node {0} of cluster {1}, no live instance''s node", name,
                         cluster.getName());
             } catch (RuntimeException e) {
-                LOG.warnv("EKS Auto Mode node {0} of cluster {1}, whose instance is gone, wasn''t deleted: {2}", name,
-                        cluster.getName(), e.getMessage());
+                LOG.warnv("EKS Auto Mode node {0} of cluster {1}, no live instance''s node, wasn''t deleted: {2}",
+                        name, cluster.getName(), e.getMessage());
             }
         }
     }

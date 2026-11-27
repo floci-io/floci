@@ -541,6 +541,39 @@ class EksAutoModeComputeTest {
     }
 
     /**
+     * A live instance's node left under its private DNS name from before Auto Mode nodes took their instance IDs,
+     * whose removal failed when it registered again, goes on a later pass; its node under the instance ID stays, and
+     * so does a node of that DNS name another instance's provider ID names.
+     */
+    @Test
+    void aLiveInstancesNodeLeftUnderItsDnsNameIsDeleted() {
+        Instance live = joinedNode("i-node", "i-node");
+        when(clusterManager.deriveInstanceDnsName(live, REGION)).thenReturn("ip-10-0-1-10.ec2.internal");
+        lists.put("pods", "{\"items\": []}");
+        lists.put("nodes", "{\"items\": ["
+                + "{\"metadata\": {\"name\": \"i-node\", \"labels\": {}}, "
+                + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-node\"}},"
+                + "{\"metadata\": {\"name\": \"ip-10-0-1-10.ec2.internal\", \"labels\": {}}, "
+                + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-node\"}}]}");
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"Never\"}, \"template\""));
+
+        compute.reconcile(cluster("prod"), REGION);
+
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
+                "ip-10-0-1-10.ec2.internal", "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
+                "i-node", "--ignore-not-found=true", "--wait=false"}, 15);
+
+        // Another instance's worker under that name now: its provider ID isn't this instance's.
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"ip-10-0-1-10.ec2.internal\", \"labels\": {}}, "
+                + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-worker\"}}]}");
+        compute.reconcile(cluster("prod"), REGION);
+        verify(clusterManager, times(1)).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
+                "ip-10-0-1-10.ec2.internal", "--ignore-not-found=true", "--wait=false"}, 15);
+    }
+
+    /**
      * With compute off, a worker that was joining when it was terminated and registered while it shut down has its
      * node deleted by the next pass too, as with compute on.
      */
