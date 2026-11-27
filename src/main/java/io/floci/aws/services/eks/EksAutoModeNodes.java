@@ -662,6 +662,19 @@ final class EksAutoModeNodes {
     }
 
     /**
+     * The status of an object's condition {@code type} (a node's or a NodeClaim's {@code status.conditions}),
+     * {@code Unknown} when it says none, or {@code null} when it has no such condition.
+     */
+    static String conditionStatus(JsonNode object, String type) {
+        for (JsonNode condition : object.path("status").path("conditions")) {
+            if (type.equals(condition.path("type").asText())) {
+                return condition.path("status").asText("Unknown");
+            }
+        }
+        return null;
+    }
+
+    /**
      * The CPU (millicores) and memory (bytes) the pods of {@code kubectl get pods -A -o json} bound to each node
      * request, and how many they are, those that finished left out.
      */

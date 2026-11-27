@@ -10,12 +10,14 @@ import io.floci.aws.services.eks.EksAutoModeNodes.PendingPod;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * The {@code NodeClaim} (karpenter.sh/v1) Auto Mode keeps for each node it launches, shaped as AWS shows it
  * (measured on an Auto Mode cluster in us-east-1): named after its pool with a five-character suffix, owned by its
  * NodePool, held by the {@code karpenter.sh/termination} finalizer, labelled as its node is, and with the pool's
- * requirements, its pods' requests, the pool's {@code expireAfter} and {@code terminationGracePeriod} in its spec. Its
+ * requirements, its pods' requests, the pool's {@code expireAfter} and {@code terminationGracePeriod} (336h and 24h
+ * when it doesn't say) in its spec. Its
  * status says it was launched, then, once its node has joined, registered, initialized and ready.
  */
 final class EksAutoModeNodeClaims {
@@ -25,6 +27,8 @@ final class EksAutoModeNodeClaims {
     static final String NODECLASS_LABEL = NODECLASS_GROUP + "/nodeclass";
     /** What Auto Mode puts in {@code expireAfter} when the pool doesn't say: its built-in pools' 14 days. */
     static final String DEFAULT_EXPIRE_AFTER = "336h";
+    /** What Auto Mode puts in {@code terminationGracePeriod} when the pool doesn't say: 24 hours. */
+    static final String DEFAULT_TERMINATION_GRACE_PERIOD = "24h0m0s";
     static final String MANAGED_BY = "app.kubernetes.io/managed-by";
     static final String MANAGED_BY_VALUE = "eks";
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -88,9 +92,8 @@ final class EksAutoModeNodeClaims {
         JsonNode template = poolItem.path("spec").path("template").path("spec");
         ObjectNode spec = claim.putObject("spec");
         spec.put("expireAfter", template.path("expireAfter").asText(DEFAULT_EXPIRE_AFTER));
-        if (template.hasNonNull("terminationGracePeriod")) {
-            spec.put("terminationGracePeriod", template.path("terminationGracePeriod").asText());
-        }
+        spec.put("terminationGracePeriod", template.path("terminationGracePeriod")
+                .asText(DEFAULT_TERMINATION_GRACE_PERIOD));
         ObjectNode classRef = spec.putObject("nodeClassRef");
         classRef.put("group", NODECLASS_GROUP);
         classRef.put("kind", "NodeClass");
@@ -147,17 +150,11 @@ final class EksAutoModeNodeClaims {
         if (nodeStatus.has("allocatable")) {
             status.set("allocatable", nodeStatus.path("allocatable"));
         }
-        String ready = "Unknown";
-        for (JsonNode condition : nodeStatus.path("conditions")) {
-            if ("Ready".equals(condition.path("type").asText())) {
-                ready = condition.path("status").asText("Unknown");
-            }
-        }
         ArrayNode conditions = status.putArray("conditions");
         condition(conditions, "Launched", "True", now);
         condition(conditions, "Registered", "True", now);
         condition(conditions, "Initialized", "True", now);
-        condition(conditions, "Ready", ready, now);
+        condition(conditions, "Ready", nodeReady(node), now);
         return wrap(status);
     }
 
@@ -173,12 +170,7 @@ final class EksAutoModeNodeClaims {
                 || !nodeStatus.path("allocatable").equals(status.path("allocatable"))) {
             return false;
         }
-        for (JsonNode condition : status.path("conditions")) {
-            if ("Ready".equals(condition.path("type").asText())) {
-                return nodeReady(node).equals(condition.path("status").asText());
-            }
-        }
-        return false;
+        return nodeReady(node).equals(EksAutoModeNodes.conditionStatus(claim, "Ready"));
     }
 
     /** Whether Auto Mode manages a NodeClaim, as its {@code app.kubernetes.io/managed-by: eks} label says. */
@@ -205,12 +197,7 @@ final class EksAutoModeNodeClaims {
 
     /** A node's Ready condition status, {@code Unknown} when it has none. */
     static String nodeReady(JsonNode node) {
-        for (JsonNode condition : node.path("status").path("conditions")) {
-            if ("Ready".equals(condition.path("type").asText())) {
-                return condition.path("status").asText("Unknown");
-            }
-        }
-        return "Unknown";
+        return Objects.requireNonNullElse(EksAutoModeNodes.conditionStatus(node, "Ready"), "Unknown");
     }
 
     private static void condition(ArrayNode conditions, String type, String status, String now) {

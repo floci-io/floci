@@ -162,9 +162,7 @@ class EksAutoModeComputeTest {
         verify(clusterManager).execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length == 3
                 && "sh".equals(cmd[0]) && cmd[2].contains("\"kind\":\"NodeClaim\"")
                 && cmd[2].contains("\"name\":\"" + claim + "\"")), anyInt());
-        verify(clusterManager).execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length > 4
-                && "patch".equals(cmd[1]) && claim.equals(cmd[3]) && "--subresource=status".equals(cmd[4])
-                && cmd[cmd.length - 1].contains("\"type\":\"Launched\",\"status\":\"True\"")), anyInt());
+        verifyClaimMarkedLaunched(claim);
     }
 
     /**
@@ -177,10 +175,8 @@ class EksAutoModeComputeTest {
         joinedNode("i-node", "node-1");
         String live = EksAutoModeNodeClaims.name("general-purpose", "i-node");
         String gone = EksAutoModeNodeClaims.name("general-purpose", "i-gone");
-        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"node-1\"}, "
-                + "\"status\": {\"phase\": \"Running\"}}]}");
-        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}, "
-                + "\"status\": {\"conditions\": [{\"type\": \"Ready\", \"status\": \"True\"}]}}]}");
+        aRunningPodOn("node-1", "");
+        aReadyNode("node-1");
         lists.put("nodeclaims", "{\"items\": [" + managedClaim(live, "") + ", "
                 + managedClaim(gone, ", \"example.com/audit\"") + ", "
                 + "{\"metadata\": {\"name\": \"someone-elses\", "
@@ -208,11 +204,8 @@ class EksAutoModeComputeTest {
     void aMissingClaimIsMadeAgainWithoutANewLaunch() {
         joinedNode("i-node", "node-1");
         String claim = EksAutoModeNodeClaims.name("general-purpose", "i-node");
-        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"node-1\", "
-                + "\"containers\": [{\"resources\": {\"requests\": {\"cpu\": \"250m\", \"memory\": \"64Mi\"}}}]}, "
-                + "\"status\": {\"phase\": \"Running\"}}]}");
-        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}, "
-                + "\"status\": {\"conditions\": [{\"type\": \"Ready\", \"status\": \"True\"}]}}]}");
+        aRunningPodOn("node-1", "{\"cpu\": \"250m\", \"memory\": \"64Mi\"}");
+        aReadyNode("node-1");
 
         compute.reconcile(cluster("prod"), REGION);
 
@@ -221,9 +214,7 @@ class EksAutoModeComputeTest {
                 && "sh".equals(cmd[0]) && cmd[2].contains("\"name\":\"" + claim + "\"")
                 && cmd[2].contains("\"requests\":{\"cpu\":\"250m\",\"memory\":\"" + (64L << 20)
                 + "\",\"pods\":\"1\"}") && cmd[2].contains("kubectl apply -f -")), anyInt());
-        verify(clusterManager).execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length > 4
-                && "patch".equals(cmd[1]) && claim.equals(cmd[3]) && "--subresource=status".equals(cmd[4])
-                && cmd[cmd.length - 1].contains("\"type\":\"Launched\",\"status\":\"True\"")), anyInt());
+        verifyClaimMarkedLaunched(claim);
         verify(ec2, never()).runInstances(anyString(), anyString(), anyString(), anyInt(), anyInt(), any(), anyList(),
                 anyString(), anyString(), anyList(), anyString(), anyString(), any(), any(), anyInt(), any(), any(),
                 any(), anyString(), anyBoolean(), any(), any(), any(), anyBoolean(), any(), any());
@@ -253,6 +244,27 @@ class EksAutoModeComputeTest {
 
         verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "nodeclaim", claim,
                 "--ignore-not-found=true", "--wait=false"}, 15);
+    }
+
+    /** A running pod bound to {@code nodeName}, requesting {@code requests} (a JSON object, or empty for none). */
+    private void aRunningPodOn(String nodeName, String requests) {
+        String resources = requests.isEmpty() ? ""
+                : ", \"containers\": [{\"resources\": {\"requests\": " + requests + "}}]";
+        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"" + nodeName + "\""
+                + resources + "}, \"status\": {\"phase\": \"Running\"}}]}");
+    }
+
+    /** The cluster's one node, {@code nodeName}, Ready. */
+    private void aReadyNode(String nodeName) {
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"" + nodeName + "\", \"labels\": {}}, "
+                + "\"status\": {\"conditions\": [{\"type\": \"Ready\", \"status\": \"True\"}]}}]}");
+    }
+
+    /** That {@code claim}'s status was patched to say it was launched. */
+    private void verifyClaimMarkedLaunched(String claim) {
+        verify(clusterManager).execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length > 4
+                && "patch".equals(cmd[1]) && claim.equals(cmd[3]) && "--subresource=status".equals(cmd[4])
+                && cmd[cmd.length - 1].contains("\"type\":\"Launched\",\"status\":\"True\"")), anyInt());
     }
 
     private static String managedClaim(String name, String moreFinalizers) {
@@ -328,8 +340,7 @@ class EksAutoModeComputeTest {
         compute.reconcile(cluster, REGION);
         clock.advance(Duration.ofSeconds(20));
         // A pod runs there for a while, which starts the wait over.
-        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"node-1\"}, "
-                + "\"status\": {\"phase\": \"Running\"}}]}");
+        aRunningPodOn("node-1", "");
         compute.reconcile(cluster, REGION);
         lists.put("pods", "{\"items\": []}");
         clock.advance(Duration.ofSeconds(20));
@@ -384,8 +395,7 @@ class EksAutoModeComputeTest {
     @Test
     void aBusyNodeLeftTaintedAsDisruptedHasTheTaintTakenOff() {
         Instance node = joinedNode("i-node", "node-1");
-        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"node-1\"}, "
-                + "\"status\": {\"phase\": \"Running\"}}]}");
+        aRunningPodOn("node-1", "");
         lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}, \"spec\": "
                 + "{\"unschedulable\": true, "
                 + "\"taints\": [{\"key\": \"karpenter.sh/disrupted\", \"effect\": \"NoSchedule\"}]}}]}");
@@ -511,8 +521,7 @@ class EksAutoModeComputeTest {
     @Test
     void aDeletedPoolsNodeIsDrainedAndRemoved() {
         Instance node = joinedNode("i-node", "node-1");
-        lists.put("pods", "{\"items\": [{\"metadata\": {}, \"spec\": {\"nodeName\": \"node-1\"}, "
-                + "\"status\": {\"phase\": \"Running\"}}]}");
+        aRunningPodOn("node-1", "");
         lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}}]}");
         lists.put("nodepools", "{\"items\": []}");
         Cluster cluster = cluster("prod");

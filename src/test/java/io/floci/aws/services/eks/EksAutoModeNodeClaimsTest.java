@@ -81,9 +81,9 @@ class EksAutoModeNodeClaimsTest {
         assertEquals("2", spec.path("resources").path("requests").path("pods").asText());
     }
 
-    /** A pool without expireAfter or terminationGracePeriod gives Auto Mode's 336h and no grace period. */
+    /** A pool without expireAfter or terminationGracePeriod gives Auto Mode's 336h and 24h. */
     @Test
-    void aPoolWithoutExpireAfterGivesAutoModesDefault() throws Exception {
+    void aPoolWithoutExpireAfterOrGracePeriodGivesAutoModesDefaults() throws Exception {
         CatalogInstanceType large = new CatalogInstanceType();
         large.instanceType = "c6a.large";
         NodePool pool = new NodePool("batch", "default", List.of(), List.of(), Map.of(), 0, null, List.of());
@@ -92,7 +92,7 @@ class EksAutoModeNodeClaimsTest {
                 List.of()), "i-1", MAPPER.readTree("{\"metadata\": {\"name\": \"batch\"}}"), Map.of()));
 
         assertEquals("336h", claim.path("spec").path("expireAfter").asText());
-        assertFalse(claim.path("spec").has("terminationGracePeriod"));
+        assertEquals("24h0m0s", claim.path("spec").path("terminationGracePeriod").asText());
         assertFalse(claim.path("metadata").has("ownerReferences"));
         // A claim made again whose node's pods aren't known requests nothing rather than zero.
         assertFalse(MAPPER.readTree(EksAutoModeNodeClaims.claim(new Launch(pool, large, null, Map.of(), List.of()),

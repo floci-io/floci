@@ -517,8 +517,9 @@ launches nodes on AWS. Floci checks every 10 seconds.
 - **NodeClaim.** Each node has a `NodeClaim` (`karpenter.sh/v1`), as on AWS: named after its pool with five
   characters (`general-purpose-kw46r`), owned by its NodePool and held by the `karpenter.sh/termination` finalizer,
   labelled as its node, with the pool's requirements (plus the chosen instance type, the pool and the NodeClass), its
-  pods' requests, and the pool's `expireAfter` (336h when the pool doesn't say) and `terminationGracePeriod`. Its
-  status says `Launched` once the instance is up, then, once the node joins, `Registered`, `Initialized` and `Ready`
+  pods' requests, and the pool's `expireAfter` and `terminationGracePeriod` (336h and 24h0m0s when the pool doesn't
+  say, as on AWS). Its status says `Launched` once the instance is up, then, once the node joins, `Registered`,
+  `Initialized` and `Ready`
   (as the node's own Ready), with the node's name, capacity and allocatable, kept in step as they change. It goes
   with its instance, Karpenter's finalizer taken off (other finalizers stay). A claim that couldn't be made is made
   on a later pass. Floci touches only the claims labelled `app.kubernetes.io/managed-by: eks`. `kubectl get

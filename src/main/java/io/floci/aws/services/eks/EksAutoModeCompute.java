@@ -178,11 +178,9 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         if (launched.isEmpty() && pods.isEmpty()) {
             return;
         }
-        JsonNode poolList = read(cluster, "nodepools");
-        Map<String, NodePool> pools = new HashMap<>();
-        EksAutoModeNodes.nodePools(poolList).forEach(pool -> pools.put(pool.name(), pool));
-        Map<String, JsonNode> poolItems = new HashMap<>();
-        poolList.path("items").forEach(item -> poolItems.put(item.path("metadata").path("name").asText(), item));
+        Pools poolsRead = Pools.of(read(cluster, "nodepools"));
+        Map<String, NodePool> pools = poolsRead.byName();
+        Map<String, JsonNode> poolItems = poolsRead.items();
         // The DaemonSet pods a node runs besides its workload, which room and sizing count; read only for pods to place.
         List<EksAutoModeNodes.PendingPod> daemons = pods.isEmpty() ? List.of()
                 : EksAutoModeNodes.daemonPods(read(cluster, "daemonsets"));
@@ -524,19 +522,15 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
      */
     private void remakeNodeClaims(Cluster cluster, String region, List<Instance> unclaimed,
                                   Map<String, long[]> requestsByNode) {
-        JsonNode poolList;
+        Pools pools;
         try {
-            poolList = read(cluster, "nodepools");
+            pools = Pools.of(read(cluster, "nodepools"));
         } catch (RuntimeException e) {
             LOG.debugv("EKS Auto Mode NodePools of cluster {0} unreadable: {1}", cluster.getName(), e.getMessage());
             return;
         }
-        Map<String, NodePool> pools = new HashMap<>();
-        EksAutoModeNodes.nodePools(poolList).forEach(pool -> pools.put(pool.name(), pool));
-        Map<String, JsonNode> poolItems = new HashMap<>();
-        poolList.path("items").forEach(item -> poolItems.put(item.path("metadata").path("name").asText(), item));
         for (Instance instance : unclaimed) {
-            NodePool pool = pools.get(tag(instance, POOL_TAG));
+            NodePool pool = pools.byName().get(tag(instance, POOL_TAG));
             Optional<Ec2InstanceTypeCatalog.CatalogInstanceType> type = instanceTypes.find(instance.getInstanceType());
             if (pool == null || type.isEmpty()) {
                 continue;
@@ -544,7 +538,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             String zone = zone(instance);
             makeNodeClaim(cluster, region, new Launch(pool, type.get(), zone,
                     EksAutoModeNodes.labels(type.get(), pool, zone), List.of()), instance, instance.getImageId(),
-                    poolItems.get(pool.name()),
+                    pools.items().get(pool.name()),
                     requestsByNode.get(clusterManager.deriveInstanceNodeName(instance, region)));
         }
     }
@@ -683,6 +677,20 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
      * joining, or without a Ready condition yet, as Floci's own Ready node has none between its creation and its
      * status, isn't counted.
      */
+    /**
+     * The NodePools of {@code kubectl get nodepools}, by name, as Auto Mode reads them and as they're listed (whose
+     * UID and template a NodeClaim takes).
+     */
+    private record Pools(Map<String, NodePool> byName, Map<String, JsonNode> items) {
+        static Pools of(JsonNode list) {
+            Map<String, NodePool> byName = new HashMap<>();
+            EksAutoModeNodes.nodePools(list).forEach(pool -> byName.put(pool.name(), pool));
+            Map<String, JsonNode> items = new HashMap<>();
+            list.path("items").forEach(item -> items.put(item.path("metadata").path("name").asText(), item));
+            return new Pools(byName, items);
+        }
+    }
+
     private static boolean unavailable(JsonNode node) {
         if (node == null) {
             return false;
@@ -690,12 +698,8 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         if (!node.path("metadata").path("deletionTimestamp").isMissingNode()) {
             return true;
         }
-        for (JsonNode condition : node.path("status").path("conditions")) {
-            if ("Ready".equals(condition.path("type").asText())) {
-                return !"True".equals(condition.path("status").asText());
-            }
-        }
-        return false;
+        String ready = EksAutoModeNodes.conditionStatus(node, "Ready");
+        return ready != null && !"True".equals(ready);
     }
 
     private static boolean disrupted(JsonNode node) {
