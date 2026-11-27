@@ -523,7 +523,7 @@ class AppConfigIntegrationTest {
                 .body("Tags.team", equalTo("platform"));
     }
 
-    // ──────────────────────────── Tags on non-application resources (no-op) ────────────────────────────
+    // ──────────────────────────── Tags on untagged environment and deployment ARNs ────────────────────────────
 
     @Test @Order(22)
     void listTagsForEnvironmentArnReturnsEmpty() {
@@ -547,10 +547,10 @@ class AppConfigIntegrationTest {
 
     // ──────────── Tags on top-level (non-application-nested) resource ARNs ────────────
     // deploymentstrategy/extension/extensionassociation are real, taggable AppConfig resource
-    // types per the API - unlike environment/deployment above, their ARNs don't nest under
+    // types per the API. Unlike environment/deployment above, their ARNs don't nest under
     // application/..., so they need their own top-level branch in AppConfigTagHandler#parseArn.
-    // Regression coverage for that ARN-shape acceptance; no tag storage exists for these types
-    // yet (same no-op precedent as environment/deployment above), so only 200-not-400 is asserted.
+    // Regression coverage for that ARN-shape acceptance. Floci stores tags for applications and
+    // environments only, so tagging these is accepted and not stored, and only 200-not-400 is asserted.
 
     @Test @Order(24)
     void listTagsForDeploymentStrategyArnIsAcceptedNotRejected() {
@@ -1280,6 +1280,138 @@ class AppConfigIntegrationTest {
 
         return "{\"ApplicationIdentifier\":\"" + app + "\",\"EnvironmentIdentifier\":\"" + env + "\","
                 + "\"ConfigurationProfileIdentifier\":\"" + profile + "\"}";
+    }
+
+    // ──────────────────────────── Tags given at creation ────────────────────────────
+
+    @Test @Order(60)
+    void createApplicationAppliesTagsFromRequest() {
+        String taggedAppId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\": \"tagged-app\", \"Tags\": {\"Team\": \"a\"}}")
+                .when().post("/applications")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        given().urlEncodingEnabled(false)
+                .when().get(tagsPath("arn:aws:appconfig:us-east-1:000000000000:application/" + taggedAppId))
+                .then()
+                .statusCode(200)
+                .body("Tags.Team", equalTo("a"));
+    }
+
+    @Test @Order(61)
+    void createEnvironmentAppliesTagsFromRequest() {
+        String taggedEnvId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\": \"tagged-env\", \"Tags\": {\"Team\": \"a\"}}")
+                .when().post("/applications/" + appId + "/environments")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        given().urlEncodingEnabled(false)
+                .when().get(tagsPath("arn:aws:appconfig:us-east-1:000000000000:application/" + appId
+                        + "/environment/" + taggedEnvId))
+                .then()
+                .statusCode(200)
+                .body("Tags.Team", equalTo("a"));
+    }
+
+    @Test @Order(62)
+    void tagResourceOnEnvironmentIsListedBack() {
+        String untaggedEnvId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\": \"env-tagged-later\"}")
+                .when().post("/applications/" + appId + "/environments")
+                .then().statusCode(201)
+                .extract().path("Id");
+        String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId + "/environment/" + untaggedEnvId;
+        given().urlEncodingEnabled(false)
+                .contentType(ContentType.JSON)
+                .body("{\"Tags\": {\"Owner\": \"ops\"}}")
+                .when().post(tagsPath(arn))
+                .then().statusCode(204);
+
+        given().urlEncodingEnabled(false)
+                .when().get(tagsPath(arn))
+                .then()
+                .statusCode(200)
+                .body("Tags.Owner", equalTo("ops"));
+    }
+
+    @Test @Order(63)
+    void createApplicationRejectsTagsThatAreNotAMapOfStrings() {
+        for (String tags : new String[] {"{\"Team\": 123}", "[\"Team\"]"}) {
+            given()
+                    .contentType(ContentType.JSON)
+                    .body("{\"Name\": \"bad-tags-app\", \"Tags\": " + tags + "}")
+                    .when().post("/applications")
+                    .then()
+                    .statusCode(400)
+                    .body("__type", equalTo("BadRequestException"));
+        }
+    }
+
+    @Test @Order(64)
+    void createEnvironmentRejectsTagsThatAreNotAMapOfStrings() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\": \"bad-tags-env\", \"Tags\": {\"Team\": 123}}")
+                .when().post("/applications/" + appId + "/environments")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test @Order(65)
+    void applicationAnswersLeaveTagsOutWhileTheApplicationKeepsThem() {
+        String taggedAppId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\": \"wire-app\", \"Tags\": {\"Team\": \"a\"}}")
+                .when().post("/applications")
+                .then().statusCode(201)
+                .body("$", not(hasKey("tags")))
+                .body("$", not(hasKey("Tags")))
+                .extract().path("Id");
+
+        given().when().get("/applications/" + taggedAppId)
+                .then().statusCode(200)
+                .body("$", not(hasKey("tags")));
+        given().contentType(ContentType.JSON).body("{\"Description\": \"changed\"}")
+                .when().patch("/applications/" + taggedAppId)
+                .then().statusCode(200)
+                .body("$", not(hasKey("tags")));
+        given().when().get("/applications")
+                .then().statusCode(200)
+                .body("Items.find { it.Id == '" + taggedAppId + "' }", not(hasKey("tags")));
+        given().urlEncodingEnabled(false)
+                .when().get(tagsPath("arn:aws:appconfig:us-east-1:000000000000:application/" + taggedAppId))
+                .then().statusCode(200)
+                .body("Tags.Team", equalTo("a"));
+    }
+
+    @Test @Order(66)
+    void environmentAnswersLeaveTagsOutWhileTheEnvironmentKeepsThem() {
+        String taggedEnvId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\": \"wire-env\", \"Tags\": {\"Team\": \"a\"}}")
+                .when().post("/applications/" + appId + "/environments")
+                .then().statusCode(201)
+                .body("$", not(hasKey("tags")))
+                .body("$", not(hasKey("Tags")))
+                .extract().path("Id");
+
+        given().when().get("/applications/" + appId + "/environments/" + taggedEnvId)
+                .then().statusCode(200)
+                .body("$", not(hasKey("tags")));
+        given().when().get("/applications/" + appId + "/environments")
+                .then().statusCode(200)
+                .body("Items.find { it.Id == '" + taggedEnvId + "' }", not(hasKey("tags")));
+        given().urlEncodingEnabled(false)
+                .when().get(tagsPath("arn:aws:appconfig:us-east-1:000000000000:application/" + appId
+                        + "/environment/" + taggedEnvId))
+                .then().statusCode(200)
+                .body("Tags.Team", equalTo("a"));
     }
 
     /** The modeled {@code /tags/{ResourceArn}} for an ARN, encoded as one path segment as an SDK sends it. */

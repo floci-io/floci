@@ -1756,7 +1756,7 @@ class ApiGatewayOpenApiImportTest {
         given().contentType(ContentType.JSON).queryParam("mode", "import").body(spec)
                 .post("/restapis").then().statusCode(400)
                 .body("message", containsString("Only one Authorizer or IAM authorization"));
-        given().get("/restapis").then().statusCode(200)
+        given().get("/restapis?limit=500").then().statusCode(200)
                 .body("item.find { it.name == 'MultiAuthAPI' }", nullValue());
 
     }
@@ -1837,7 +1837,7 @@ class ApiGatewayOpenApiImportTest {
                         containsString("caching")));
 
         given()
-                .when().get("/restapis")
+                .when().get("/restapis?limit=500")
                 .then().statusCode(200)
                 .body("item.name", not(hasItem(title)));
     }

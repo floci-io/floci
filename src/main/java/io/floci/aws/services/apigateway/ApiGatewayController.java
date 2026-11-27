@@ -435,13 +435,14 @@ public class ApiGatewayController {
 
     @GET
     @Path("/restapis")
-    public Response getRestApis(@Context HttpHeaders headers) {
+    public Response getRestApis(@Context HttpHeaders headers, @Context UriInfo uriInfo,
+                                @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        List<RestApi> apis = service.getRestApis(region);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("item");
-        apis.forEach(a -> items.add(toApiNode(region, a)));
-        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+        // An empty query value binds as null, so presence is read from the URI.
+        String requestedPosition = position == null && uriInfo.getQueryParameters().containsKey("position")
+                ? "" : position;
+        return pageResponse(service.getRestApiPage(region, pageLimit(limit), requestedPosition),
+                api -> toApiNode(region, api));
     }
 
     @GET

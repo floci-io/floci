@@ -195,6 +195,12 @@ Tagged REST APIs, stages, API keys, usage plans and custom domain names are disc
 [Resource Groups Tagging API](resource-groups-tagging.md), whose `TagResources` and `UntagResources`
 write REST API, stage, API key, usage plan and custom domain name tags through to API Gateway.
 
+### REST API Pagination
+
+`GetRestApis` accepts `limit` and `position`, returns 25 APIs by default and caps pages at 500.
+A nonterminal page includes `position`; the final page omits it. An unknown or blank `position`
+is a `BadRequestException`.
+
 ### Base Path Mapping Pagination
 
 `GetBasePathMappings` accepts `limit` and `position`, returns 25 mappings by default,

@@ -150,7 +150,7 @@ class IamServingServiceEnforcementIntegrationTest {
         given()
                 .header("Authorization", auth(ACCOUNT_ID, "apigateway"))
         .when()
-                .get("/restapis")
+                .get("/restapis?limit=500")
         .then()
                 .statusCode(200)
                 .body(not(containsString(apiName)));

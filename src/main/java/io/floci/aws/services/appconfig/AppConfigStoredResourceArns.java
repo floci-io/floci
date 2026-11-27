@@ -10,7 +10,7 @@ import java.util.Optional;
 
 /**
  * What IAM asks AppConfig of the resources a request names: the application an id or a name finds, the configuration a
- * session's token is on, and the tags of the application an ARN names.
+ * session's token is on, and the tags of the application or environment an ARN names.
  */
 @ApplicationScoped
 public class AppConfigStoredResourceArns implements StoredResourceArns {

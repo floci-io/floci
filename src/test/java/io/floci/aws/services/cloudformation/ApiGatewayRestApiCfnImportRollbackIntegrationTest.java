@@ -84,7 +84,7 @@ class ApiGatewayRestApiCfnImportRollbackIntegrationTest {
 
     /** Of the REST APIs named {@link #API_NAME}, only the one created outside the stack is left, unchanged. */
     private static void assertOnlyTheOutsideApiIsLeft(String outsideId) {
-        given().when().get("/restapis").then().statusCode(200)
+        given().when().get("/restapis?limit=500").then().statusCode(200)
                 .body("item.findAll { it.name == '" + API_NAME + "' }.id", contains(outsideId));
         given().when().get("/restapis/" + outsideId).then().statusCode(200)
                 .body("description", equalTo("outside the stack"));

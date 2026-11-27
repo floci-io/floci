@@ -1687,6 +1687,15 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean globalBucketNamespace();
 
+        /**
+         * Answer a SigV4 request signed for a Region other than its bucket's with S3's
+         * {@code 301 PermanentRedirect} and the bucket's Region in {@code x-amz-bucket-region}.
+         * When off, every bucket is served from every Region.
+         * Env: FLOCI_SERVICES_S3_REGION_REDIRECT
+         */
+        @WithDefault("true")
+        boolean regionRedirect();
+
         /** Seconds before RestoreObject reports a completed temporary copy. */
         @WithDefault("0")
         long restoreCompletionDelaySeconds();

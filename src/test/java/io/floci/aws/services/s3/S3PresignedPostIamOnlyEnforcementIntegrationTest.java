@@ -255,7 +255,7 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
                     .body("Error.Code", equalTo("AccessDenied"));
             trailWriter.flushNow();
 
-            List<JsonNode> records = trailRecords(logBucket);
+            List<JsonNode> records = trailRecords(logBucket, region);
             assertTrue(records.stream().anyMatch(record -> "PostObject".equals(record.path("eventName").asText())
                             && "AccessDenied".equals(record.path("errorCode").asText())
                             && bucket.equals(record.path("requestParameters").path("bucketName").asText())
@@ -375,10 +375,13 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
                 .statusCode(200);
     }
 
-    /** Every record in the log files the trail delivered to {@code logBucket}. */
-    private static List<JsonNode> trailRecords(String logBucket) throws IOException {
+    /**
+     * Every record in the log files the trail delivered to {@code logBucket}, read with requests signed for the
+     * bucket's {@code region}: S3 redirects a request signed for any other.
+     */
+    private static List<JsonNode> trailRecords(String logBucket, String region) throws IOException {
         String listing = given()
-                .header("Authorization", auth("test", "s3"))
+                .header("Authorization", auth("test", "s3", region))
         .when()
                 .get("/" + logBucket + "?list-type=2")
         .then()
@@ -388,7 +391,7 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
         Matcher key = Pattern.compile("<Key>([^<]+\\.json\\.gz)</Key>").matcher(listing);
         while (key.find()) {
             byte[] compressed = given()
-                    .header("Authorization", auth("test", "s3"))
+                    .header("Authorization", auth("test", "s3", region))
             .when()
                     .get("/" + logBucket + "/" + key.group(1))
             .then()

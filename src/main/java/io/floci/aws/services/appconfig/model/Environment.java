@@ -5,7 +5,9 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -24,6 +26,7 @@ public class Environment {
     @JsonProperty("Monitors")
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private List<Monitor> monitors;
+    private Map<String, String> tags = new HashMap<>();
 
     public Environment() {}
 
@@ -44,4 +47,7 @@ public class Environment {
 
     public List<Monitor> getMonitors() { return monitors; }
     public void setMonitors(List<Monitor> monitors) { this.monitors = monitors != null ? List.copyOf(monitors) : null; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags != null ? tags : new HashMap<>(); }
 }
