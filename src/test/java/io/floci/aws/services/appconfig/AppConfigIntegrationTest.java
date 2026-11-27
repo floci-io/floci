@@ -1363,6 +1363,57 @@ class AppConfigIntegrationTest {
                 .body("__type", equalTo("BadRequestException"));
     }
 
+    @Test @Order(65)
+    void applicationAnswersLeaveTagsOutWhileTheApplicationKeepsThem() {
+        String taggedAppId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\": \"wire-app\", \"Tags\": {\"Team\": \"a\"}}")
+                .when().post("/applications")
+                .then().statusCode(201)
+                .body("$", not(hasKey("tags")))
+                .body("$", not(hasKey("Tags")))
+                .extract().path("Id");
+
+        given().when().get("/applications/" + taggedAppId)
+                .then().statusCode(200)
+                .body("$", not(hasKey("tags")));
+        given().contentType(ContentType.JSON).body("{\"Description\": \"changed\"}")
+                .when().patch("/applications/" + taggedAppId)
+                .then().statusCode(200)
+                .body("$", not(hasKey("tags")));
+        given().when().get("/applications")
+                .then().statusCode(200)
+                .body("Items.find { it.Id == '" + taggedAppId + "' }", not(hasKey("tags")));
+        given().urlEncodingEnabled(false)
+                .when().get(tagsPath("arn:aws:appconfig:us-east-1:000000000000:application/" + taggedAppId))
+                .then().statusCode(200)
+                .body("Tags.Team", equalTo("a"));
+    }
+
+    @Test @Order(66)
+    void environmentAnswersLeaveTagsOutWhileTheEnvironmentKeepsThem() {
+        String taggedEnvId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\": \"wire-env\", \"Tags\": {\"Team\": \"a\"}}")
+                .when().post("/applications/" + appId + "/environments")
+                .then().statusCode(201)
+                .body("$", not(hasKey("tags")))
+                .body("$", not(hasKey("Tags")))
+                .extract().path("Id");
+
+        given().when().get("/applications/" + appId + "/environments/" + taggedEnvId)
+                .then().statusCode(200)
+                .body("$", not(hasKey("tags")));
+        given().when().get("/applications/" + appId + "/environments")
+                .then().statusCode(200)
+                .body("Items.find { it.Id == '" + taggedEnvId + "' }", not(hasKey("tags")));
+        given().urlEncodingEnabled(false)
+                .when().get(tagsPath("arn:aws:appconfig:us-east-1:000000000000:application/" + appId
+                        + "/environment/" + taggedEnvId))
+                .then().statusCode(200)
+                .body("Tags.Team", equalTo("a"));
+    }
+
     /** The modeled {@code /tags/{ResourceArn}} for an ARN, encoded as one path segment as an SDK sends it. */
     private static String tagsPath(String arn) {
         return "/tags/" + URLEncoder.encode(arn, StandardCharsets.UTF_8);
