@@ -8,7 +8,6 @@ import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.SignedServiceRoute;
 import io.floci.aws.core.common.WireProtocol;
-import io.floci.aws.services.eks.EksController;
 import io.floci.aws.services.s3.S3BucketSubresources;
 import io.floci.aws.services.s3.S3ObjectActions;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -22,6 +21,7 @@ import org.jboss.resteasy.reactive.server.core.ResteasyReactiveRequestContext;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -239,91 +239,6 @@ public class IamActionRegistry {
         rule("rds-data", "POST", "^/CommitTransaction/?$",    "rds-data:CommitTransaction"),
         rule("rds-data", "POST", "^/RollbackTransaction/?$",  "rds-data:RollbackTransaction"),
 
-        // ── EKS ────────────────────────────────────────────────────────────────
-        // Floci takes an access entry's principal ARN whole, slashes included, so any other GET or DELETE under
-        // an entry is DescribeAccessEntry or DeleteAccessEntry. The entry's access policy routes come first, as
-        // they win in the router; a DELETE is a disassociate only when a cluster access policy ARN follows.
-        rule("eks", "GET",    "^/clusters/[^/]+/access-entries/.+/access-policies$",     "eks:ListAssociatedAccessPolicies"),
-        rule("eks", "POST",   "^/clusters/[^/]+/access-entries/.+/access-policies$",     "eks:AssociateAccessPolicy"),
-        rule("eks", "DELETE", "^/clusters/[^/]+/access-entries/.+/access-policies/" + EksController.ACCESS_POLICY_ARN + "$",
-                "eks:DisassociateAccessPolicy"),
-        rule("eks", "GET",    "^/clusters/[^/]+/access-entries/.+$",                     "eks:DescribeAccessEntry"),
-        rule("eks", "DELETE", "^/clusters/[^/]+/access-entries/.+$",                     "eks:DeleteAccessEntry"),
-        rule("eks", "POST",   "^/clusters/[^/]+/access-entries/.+$",                     "eks:UpdateAccessEntry"),
-        rule("eks", "GET",    "^/clusters/[^/]+/access-entries$",                        "eks:ListAccessEntries"),
-        rule("eks", "POST",   "^/clusters/[^/]+/access-entries$",                        "eks:CreateAccessEntry"),
-        rule("eks", "GET",    "^/clusters$",                                             "eks:ListClusters"),
-        rule("eks", "POST",   "^/clusters$",                                             "eks:CreateCluster"),
-        rule("eks", "GET",    "^/clusters/[^/]+$",                                       "eks:DescribeCluster"),
-        rule("eks", "DELETE", "^/clusters/[^/]+$",                                       "eks:DeleteCluster"),
-        rule("eks", "POST",   "^/clusters/[^/]+/update-config$",                         "eks:UpdateClusterConfig"),
-        rule("eks", "POST",   "^/clusters/[^/]+/encryption-config/associate$", "eks:AssociateEncryptionConfig"),
-        rule("eks", "GET",    "^/clusters/[^/]+/updates$",                               "eks:ListUpdates"),
-        rule("eks", "POST",   "^/clusters/[^/]+/updates$",                               "eks:UpdateClusterVersion"),
-        rule("eks", "GET",    "^/clusters/[^/]+/updates/[^/]+$",                         "eks:DescribeUpdate"),
-        rule("eks", "POST",   "^/clusters/[^/]+/updates/[^/]+/cancel-update$",           "eks:CancelUpdate"),
-        rule("eks", "GET",    "^/clusters/[^/]+/node-groups$",                           "eks:ListNodegroups"),
-        rule("eks", "POST",   "^/clusters/[^/]+/node-groups$",                           "eks:CreateNodegroup"),
-        rule("eks", "GET",    "^/clusters/[^/]+/node-groups/[^/]+$",                     "eks:DescribeNodegroup"),
-        rule("eks", "DELETE", "^/clusters/[^/]+/node-groups/[^/]+$",                     "eks:DeleteNodegroup"),
-        rule("eks", "POST",   "^/clusters/[^/]+/node-groups/[^/]+/update-config$",       "eks:UpdateNodegroupConfig"),
-        rule("eks", "POST",   "^/clusters/[^/]+/node-groups/[^/]+/update-version$",      "eks:UpdateNodegroupVersion"),
-        rule("eks", "GET",    "^/clusters/[^/]+/fargate-profiles$",                      "eks:ListFargateProfiles"),
-        rule("eks", "POST",   "^/clusters/[^/]+/fargate-profiles$",                      "eks:CreateFargateProfile"),
-        rule("eks", "GET",    "^/clusters/[^/]+/fargate-profiles/[^/]+$",                "eks:DescribeFargateProfile"),
-        rule("eks", "DELETE", "^/clusters/[^/]+/fargate-profiles/[^/]+$",                "eks:DeleteFargateProfile"),
-        rule("eks", "GET",    "^/clusters/[^/]+/addons$",                                "eks:ListAddons"),
-        rule("eks", "POST",   "^/clusters/[^/]+/addons$",                                "eks:CreateAddon"),
-        rule("eks", "GET",    "^/clusters/[^/]+/addons/[^/]+$",                          "eks:DescribeAddon"),
-        rule("eks", "DELETE", "^/clusters/[^/]+/addons/[^/]+$",                          "eks:DeleteAddon"),
-        rule("eks", "POST",   "^/clusters/[^/]+/addons/[^/]+/update$",                   "eks:UpdateAddon"),
-        rule("eks", "GET",    "^/addons/supported-versions$",                            "eks:DescribeAddonVersions"),
-        rule("eks", "GET",    "^/addons/configuration-schemas$", "eks:DescribeAddonConfiguration"),
-        rule("eks", "GET",    "^/clusters/[^/]+/pod-identity-associations$", "eks:ListPodIdentityAssociations"),
-        rule("eks", "POST",   "^/clusters/[^/]+/pod-identity-associations$", "eks:CreatePodIdentityAssociation"),
-        rule("eks", "GET",    "^/clusters/[^/]+/pod-identity-associations/[^/]+$",
-                "eks:DescribePodIdentityAssociation"),
-        rule("eks", "POST",   "^/clusters/[^/]+/pod-identity-associations/[^/]+$",
-                "eks:UpdatePodIdentityAssociation"),
-        rule("eks", "DELETE", "^/clusters/[^/]+/pod-identity-associations/[^/]+$",
-                "eks:DeletePodIdentityAssociation"),
-        rule("eks", "GET",    "^/clusters/[^/]+/identity-provider-configs$", "eks:ListIdentityProviderConfigs"),
-        rule("eks", "POST",   "^/clusters/[^/]+/identity-provider-configs/associate$",
-                "eks:AssociateIdentityProviderConfig"),
-        rule("eks", "POST",   "^/clusters/[^/]+/identity-provider-configs/describe$",
-                "eks:DescribeIdentityProviderConfig"),
-        rule("eks", "POST",   "^/clusters/[^/]+/identity-provider-configs/disassociate$",
-                "eks:DisassociateIdentityProviderConfig"),
-        rule("eks", "POST",   "^/clusters/[^/]+/insights$",                              "eks:ListInsights"),
-        rule("eks", "GET",    "^/clusters/[^/]+/insights/[^/]+$",                        "eks:DescribeInsight"),
-        rule("eks", "GET",    "^/clusters/[^/]+/insights-refresh$",                      "eks:DescribeInsightsRefresh"),
-        rule("eks", "POST",   "^/clusters/[^/]+/insights-refresh$",                      "eks:StartInsightsRefresh"),
-        rule("eks", "GET",    "^/clusters/[^/]+/capabilities$",                          "eks:ListCapabilities"),
-        rule("eks", "POST",   "^/clusters/[^/]+/capabilities$",                          "eks:CreateCapability"),
-        rule("eks", "GET",    "^/clusters/[^/]+/capabilities/[^/]+$",                    "eks:DescribeCapability"),
-        rule("eks", "POST",   "^/clusters/[^/]+/capabilities/[^/]+$",                    "eks:UpdateCapability"),
-        rule("eks", "DELETE", "^/clusters/[^/]+/capabilities/[^/]+$",                    "eks:DeleteCapability"),
-        rule("eks", "GET",    "^/clusters/[^/]+/certificate-authorities$", "eks:ListCertificateAuthorities"),
-        rule("eks", "POST",   "^/clusters/[^/]+/certificate-authorities$", "eks:CreateCertificateAuthority"),
-        rule("eks", "GET",    "^/clusters/[^/]+/certificate-authorities/[^/]+$",
-                "eks:DescribeCertificateAuthority"),
-        rule("eks", "DELETE", "^/clusters/[^/]+/certificate-authorities/[^/]+$",
-                "eks:DeleteCertificateAuthority"),
-        rule("eks", "POST",   "^/clusters/[^/]+/certificate-authorities/[^/]+/activate$",
-                "eks:ActivateCertificateAuthority"),
-        rule("eks", "GET",    "^/access-policies$",                                      "eks:ListAccessPolicies"),
-        rule("eks", "GET",    "^/cluster-versions$",                                     "eks:DescribeClusterVersions"),
-        rule("eks", "POST",   "^/cluster-registrations$",                                "eks:RegisterCluster"),
-        rule("eks", "DELETE", "^/cluster-registrations/[^/]+$",                          "eks:DeregisterCluster"),
-        rule("eks", "GET",    "^/eks-anywhere-subscriptions$", "eks:ListEksAnywhereSubscriptions"),
-        rule("eks", "POST",   "^/eks-anywhere-subscriptions$", "eks:CreateEksAnywhereSubscription"),
-        rule("eks", "GET",    "^/eks-anywhere-subscriptions/[^/]+$", "eks:DescribeEksAnywhereSubscription"),
-        rule("eks", "POST",   "^/eks-anywhere-subscriptions/[^/]+$", "eks:UpdateEksAnywhereSubscription"),
-        rule("eks", "DELETE", "^/eks-anywhere-subscriptions/[^/]+$", "eks:DeleteEksAnywhereSubscription"),
-        rule("eks", "GET",    "^/tags(/.+)?$",                                           "eks:ListTagsForResource"),
-        rule("eks", "POST",   "^/tags(/.+)?$",                                           "eks:TagResource"),
-        rule("eks", "DELETE", "^/tags(/.+)?$",                                           "eks:UntagResource"),
-
         // ── Resource Groups ─────────────────────────────────────────────────────
         rule("resource-groups", "POST", "^/_rg/groups/?$", "resource-groups:CreateGroup"),
         rule("resource-groups", "POST", "^/_rg/get-group/?$", "resource-groups:GetGroup"),
@@ -461,7 +376,7 @@ public class IamActionRegistry {
         }
         MultivaluedMap<String, String> query = ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters();
         Optional<IamRestRoutes.Match> match = restRoutes.match(credentialScope, method, withoutInternalPrefix(ctx, path),
-                query, movedUnderPrefix(ctx), ctx.getHeaders());
+                query, movedUnderPrefix(ctx), ctx.getHeaders(), routedLabels(ctx));
         if (match.isPresent()) {
             String action = IamAuthorizedActions.actionFor(credentialScope, match.get().operation(), method,
                     match.get().model(), query);
@@ -511,7 +426,7 @@ public class IamActionRegistry {
                                                               ContainerRequestContext ctx) {
         return routes.match(credentialScope, ctx.getMethod().toUpperCase(), withoutInternalPrefix(ctx, routedPath(ctx)),
                 ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx),
-                ctx.getHeaders());
+                ctx.getHeaders(), routedLabels(ctx));
     }
 
     /**
@@ -534,7 +449,7 @@ public class IamActionRegistry {
         String method = ctx.getMethod().toUpperCase();
         MultivaluedMap<String, String> query = ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters();
         return restRoutes.match(credentialScope, method, withoutInternalPrefix(ctx, routedPath(ctx)), query,
-                        movedUnderPrefix(ctx), ctx.getHeaders())
+                        movedUnderPrefix(ctx), ctx.getHeaders(), routedLabels(ctx))
                 .filter(match -> action.equals(IamAuthorizedActions.actionFor(credentialScope, match.operation(),
                         method, match.model(), query)))
                 .map(match -> credentialScope + ":" + match.operation())
@@ -564,7 +479,7 @@ public class IamActionRegistry {
         String path = routedPath(ctx);
         return IamRestRoutes.vendored().ambiguous(credentialScope, ctx.getMethod().toUpperCase(),
                 withoutInternalPrefix(ctx, path), ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx),
-                ctx.getHeaders());
+                ctx.getHeaders(), routedLabels(ctx));
     }
 
     /** The route a request of the operation matches, {@link RouteMembers#NONE} for one it matches none of. */
@@ -576,7 +491,7 @@ public class IamActionRegistry {
         }
         return IamRestRoutes.vendored().match(operation.substring(0, separator), ctx.getMethod().toUpperCase(),
                         withoutInternalPrefix(ctx, routedPath(ctx)), ctx.getUriInfo().getQueryParameters(),
-                        movedUnderPrefix(ctx), ctx.getHeaders())
+                        movedUnderPrefix(ctx), ctx.getHeaders(), routedLabels(ctx))
                 .filter(match -> match.operation().equals(operation.substring(separator + 1)))
                 .map(match -> new RouteMembers(match.located(), match.model(),
                         IamRestRoutes.vendored().apiVersion(match.model())))
@@ -660,6 +575,20 @@ public class IamActionRegistry {
     /** Whether a route filter moved the request under an internal prefix, so the router matched its path decoded. */
     private static boolean movedUnderPrefix(ContainerRequestContext ctx) {
         return SignedServiceRoute.internalPrefix(ctx).isPresent();
+    }
+
+    /**
+     * The values the router gave the path parameters of the method it dispatched the request to, which tell apart the
+     * vendored routes the request matches ({@link IamRestRoutes#match}); none for a request it has not dispatched.
+     */
+    private static List<String> routedLabels(ContainerRequestContext ctx) {
+        UriInfo uriInfo = ctx.getUriInfo();
+        MultivaluedMap<String, String> parameters = uriInfo == null ? null : uriInfo.getPathParameters();
+        List<String> values = new ArrayList<>();
+        if (parameters != null) {
+            parameters.values().forEach(values::addAll);
+        }
+        return values;
     }
 
     /** The path without its trailing slashes, the root's own kept. */

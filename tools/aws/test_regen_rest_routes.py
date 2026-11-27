@@ -285,6 +285,18 @@ def test_an_arn_label_the_controller_lets_span_slashes_is_greedy():
     doc = r.build({"oam": model("rest-json", "2022-06-10", TagResource=("PUT", "/tags/{ResourceArn}"),
                                 GetSink=("POST", "/GetSink"))}, "test")
     assert doc["models"]["oam"]["operations"]["TagResource"] == {"method": "PUT", "requestUri": "/tags/{ResourceArn+}"}
+    # EKS's access entry routes take the principal ARN, and a policy ARN after it, whole; the cluster's name stays
+    # one segment, and a route of EKS's naming no ARN keeps the model's.
+    doc = r.build({"eks": model("rest-json", "2017-11-01",
+                                DisassociateAccessPolicy=("DELETE", "/clusters/{name}/access-entries/{principalArn}"
+                                                                    "/access-policies/{policyArn}"),
+                                DescribeAccessEntry=("GET", "/clusters/{name}/access-entries/{principalArn}"),
+                                DescribeCluster=("GET", "/clusters/{name}"))}, "test")
+    operations = doc["models"]["eks"]["operations"]
+    assert operations["DisassociateAccessPolicy"]["requestUri"] == \
+        "/clusters/{name}/access-entries/{principalArn+}/access-policies/{policyArn+}"
+    assert operations["DescribeAccessEntry"]["requestUri"] == "/clusters/{name}/access-entries/{principalArn+}"
+    assert operations["DescribeCluster"] == {"method": "GET", "requestUri": "/clusters/{name}"}
 
 
 PAGE = "https://docs.aws.amazon.com/glue/latest/dg/iceberg-rest-apis.html"

@@ -129,9 +129,12 @@ SHARED_ROUTES: dict[str, frozenset[str]] = {
 # the slashes the ARN holds: a request may send the ARN unencoded and still reach the operation, so its
 # route has to take that request too or it would go unchecked. API Gateway v2's tag routes are
 # `/v2/tags/{resourceArn: .+}` in its controller, and OAM's `/tags/{resourceArn:.+}` in its own and in the
-# shared tags controller, which takes every `/tags/{arn}` request.
+# shared tags controller, which takes every `/tags/{arn}` request. EKS's access entry routes take the principal
+# as `{principalArn: .+}`, and a cluster access policy ARN after it with its `/` sent as it is or encoded.
 ARN_SPANNING_ROUTES: dict[str, frozenset[str]] = {
     "apigatewayv2": frozenset({"TagResource", "UntagResource", "GetTags"}),
+    "eks": frozenset({"DescribeAccessEntry", "DeleteAccessEntry", "UpdateAccessEntry", "AssociateAccessPolicy",
+                      "ListAssociatedAccessPolicies", "DisassociateAccessPolicy"}),
     "oam": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
 }
 
