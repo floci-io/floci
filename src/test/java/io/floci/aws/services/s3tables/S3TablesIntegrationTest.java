@@ -2,7 +2,6 @@ package io.floci.aws.services.s3tables;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -14,7 +13,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.regex.Pattern;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.testing.S3TablesRequests.s3tables;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -199,10 +198,5 @@ class S3TablesIntegrationTest {
         .then()
                 .statusCode(200)
                 .body("configuration.icebergCompaction.status", equalTo("enabled"));
-    }
-
-    private static RequestSpecification s3tables() {
-        return given().header("Authorization",
-                "AWS4-HMAC-SHA256 Credential=000000000000/20260101/us-east-1/s3tables/aws4_request");
     }
 }

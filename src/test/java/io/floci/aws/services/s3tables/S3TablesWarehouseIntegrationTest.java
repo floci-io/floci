@@ -3,7 +3,6 @@ package io.floci.aws.services.s3tables;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,7 +16,7 @@ import software.amazon.awssdk.services.s3.model.NoSuchBucketException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.testing.S3TablesRequests.s3tables;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -117,10 +116,5 @@ class S3TablesWarehouseIntegrationTest {
                 .then().statusCode(204);
 
         assertThrows(NoSuchBucketException.class, () -> s3.headBucket(r -> r.bucket(bucket)));
-    }
-
-    private static RequestSpecification s3tables() {
-        return given().header("Authorization",
-                "AWS4-HMAC-SHA256 Credential=000000000000/20260101/us-east-1/s3tables/aws4_request");
     }
 }
