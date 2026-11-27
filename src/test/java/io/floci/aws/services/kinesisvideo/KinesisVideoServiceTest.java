@@ -6,7 +6,6 @@ import io.floci.aws.services.kinesisvideo.model.KinesisVideoStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -78,32 +77,6 @@ class KinesisVideoServiceTest {
     }
 
     @Test
-    void createStream_invalidArguments_throwInvalidArgument() {
-        assertInvalidArgument(() -> service.createStream(REGION, ACCOUNT, request(null)));
-        assertInvalidArgument(() -> service.createStream(REGION, ACCOUNT, request("")));
-        assertInvalidArgument(() -> service.createStream(REGION, ACCOUNT, request("bad name")));
-        assertInvalidArgument(() -> service.createStream(REGION, ACCOUNT, request("a".repeat(257))));
-        assertInvalidArgument(() -> service.createStream(REGION, ACCOUNT,
-                new KinesisVideoService.CreateStreamRequest("camera-1", null, "h264", null, null, null)));
-        assertInvalidArgument(() -> service.createStream(REGION, ACCOUNT,
-                new KinesisVideoService.CreateStreamRequest("camera-1", null, null, null, -1, null)));
-        assertInvalidArgument(() -> service.createStream(REGION, ACCOUNT,
-                new KinesisVideoService.CreateStreamRequest("camera-1", null, null, null, null, Map.of())));
-    }
-
-    @Test
-    void createStream_tooManyTags_throwsTagsPerResourceExceededLimit() {
-        Map<String, String> tags = new HashMap<>();
-        for (int i = 0; i < 51; i++) {
-            tags.put("key" + i, "value");
-        }
-
-        AwsException error = assertThrows(AwsException.class, () -> service.createStream(REGION, ACCOUNT,
-                new KinesisVideoService.CreateStreamRequest("camera-1", null, null, null, null, tags)));
-        assertEquals("TagsPerResourceExceededLimitException", error.getErrorCode());
-    }
-
-    @Test
     void describeStream_byArn_returnsStream() {
         KinesisVideoStream stream = service.createStream(REGION, ACCOUNT, request("camera-1"));
 
@@ -137,7 +110,7 @@ class KinesisVideoServiceTest {
         assertInvalidArgument(() -> service.describeStream(REGION, ACCOUNT, null, null));
         assertInvalidArgument(() -> service.describeStream(REGION, ACCOUNT, null, "not-an-arn"));
         assertInvalidArgument(() -> service.describeStream(REGION, ACCOUNT, null,
-                "arn:aws:kinesis:us-east-1:111111111111:stream/camera-1"));
+                "arn:aws:kinesisvideo:us-east-1:111111111111:channel/camera-1/1"));
     }
 
     @Test
@@ -170,10 +143,9 @@ class KinesisVideoServiceTest {
     }
 
     @Test
-    void deleteStream_unknownOrMissingArn_throws() {
+    void deleteStream_unknownArn_throwsResourceNotFound() {
         assertNotFound(() -> service.deleteStream(REGION, ACCOUNT,
                 "arn:aws:kinesisvideo:us-east-1:111111111111:stream/missing/1", null));
-        assertInvalidArgument(() -> service.deleteStream(REGION, ACCOUNT, null, null));
     }
 
     @Test
@@ -212,9 +184,7 @@ class KinesisVideoServiceTest {
     }
 
     @Test
-    void listStreams_invalidArguments_throwInvalidArgument() {
-        assertInvalidArgument(() -> service.listStreams(REGION, ACCOUNT, 0, null, null));
-        assertInvalidArgument(() -> service.listStreams(REGION, ACCOUNT, 10001, null, null));
+    void listStreams_invalidNextToken_throwsInvalidArgument() {
         assertInvalidArgument(() -> service.listStreams(REGION, ACCOUNT, null, "not a token", null));
         assertInvalidArgument(() -> service.listStreams(REGION, ACCOUNT, null, "IA==", null));
     }

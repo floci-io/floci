@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.instanceOf;
@@ -82,16 +83,47 @@ class KinesisVideoIntegrationTest {
     }
 
     @Test
-    void createStream_missingOrInvalidName_returnsInvalidArgument() {
-        post("/createStream", "{}")
+    void requestsBreakingTheModelConstraints_returnInvalidArgument() {
+        assertInvalidArgument("/createStream", "{}", "StreamName");
+        assertInvalidArgument("/createStream", "{\"StreamName\":\"bad name\"}", "StreamName");
+        assertInvalidArgument("/createStream", "{\"StreamName\":\"" + "a".repeat(257) + "\"}", "StreamName");
+        assertInvalidArgument("/createStream", "{\"StreamName\":\"camera-1\",\"MediaType\":\"h264\"}",
+                "MediaType");
+        assertInvalidArgument("/createStream", "{\"StreamName\":\"camera-1\",\"DataRetentionInHours\":-1}",
+                "DataRetentionInHours");
+        assertInvalidArgument("/createStream", "{\"StreamName\":\"camera-1\",\"Tags\":{}}", "Tags");
+        assertInvalidArgument("/deleteStream", "{}", "StreamARN");
+        assertInvalidArgument("/deleteStream", "{\"StreamARN\":\"not-an-arn\"}", "StreamARN");
+        assertInvalidArgument("/deleteStream", "{\"StreamARN\":\"arn:aws:kinesisvideo:us-east-1:" + ACCOUNT
+                + ":stream/camera-1/1\",\"CurrentVersion\":\"not valid\"}", "CurrentVersion");
+        assertInvalidArgument("/listStreams", "{\"MaxResults\":0}", "MaxResults");
+        assertInvalidArgument("/listStreams", "{\"MaxResults\":10001}", "MaxResults");
+        assertInvalidArgument("/listStreams", "{\"StreamNameCondition\":{\"ComparisonOperator\":\"ENDS_WITH\","
+                + "\"ComparisonValue\":\"camera\"}}", "StreamNameCondition.ComparisonOperator");
+
+        post("/listStreams", "{}").then().statusCode(200).body("StreamInfoList", hasSize(0));
+    }
+
+    @Test
+    void createStream_moreThanFiftyTags_returnsTagsPerResourceExceededLimit() {
+        StringBuilder tags = new StringBuilder();
+        for (int i = 0; i < 51; i++) {
+            tags.append(i == 0 ? "" : ",").append("\"key").append(i).append("\":\"value\"");
+        }
+
+        post("/createStream", "{\"StreamName\":\"camera-1\",\"Tags\":{" + tags + "}}")
                 .then().statusCode(400)
-                .body("__type", equalTo("InvalidArgumentException"));
-        post("/createStream", "{\"StreamName\":\"bad name\"}")
-                .then().statusCode(400)
-                .body("__type", equalTo("InvalidArgumentException"));
+                .body("__type", equalTo("TagsPerResourceExceededLimitException"));
+    }
+
+    @Test
+    void memberOfTheWrongType_returnsSerializationException() {
         post("/createStream", "{\"StreamName\":\"camera-1\",\"DataRetentionInHours\":\"24\"}")
                 .then().statusCode(400)
-                .body("__type", equalTo("InvalidArgumentException"));
+                .body("__type", equalTo("SerializationException"));
+        post("/createStream", "{\"StreamName\":5}")
+                .then().statusCode(400)
+                .body("__type", equalTo("SerializationException"));
     }
 
     @Test
@@ -135,6 +167,12 @@ class KinesisVideoIntegrationTest {
                 .then().statusCode(200)
                 .body("StreamInfoList.StreamName", contains("camera-b"))
                 .body("NextToken", nullValue());
+    }
+
+    private static void assertInvalidArgument(String path, String body, String member) {
+        post(path, body).then().statusCode(400)
+                .body("__type", equalTo("InvalidArgumentException"))
+                .body("message", containsString("'" + member + "'"));
     }
 
     private static Response post(String path, String body) {

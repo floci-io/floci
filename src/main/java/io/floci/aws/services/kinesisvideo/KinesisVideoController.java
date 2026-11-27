@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.JsonErrorResponseUtils;
 import io.floci.aws.core.common.RegionResolver;
@@ -21,7 +20,6 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -46,6 +44,7 @@ public class KinesisVideoController {
     @Path("/createStream")
     public Response createStream(@Context HttpHeaders headers, String body) {
         JsonNode request = readTree(body);
+        KinesisVideoRequestShapes.check("CreateStream", request);
         KinesisVideoService.CreateStreamRequest createRequest = new KinesisVideoService.CreateStreamRequest(
                 text(request, "StreamName"),
                 text(request, "DeviceName"),
@@ -64,6 +63,7 @@ public class KinesisVideoController {
     @Path("/deleteStream")
     public Response deleteStream(@Context HttpHeaders headers, String body) {
         JsonNode request = readTree(body);
+        KinesisVideoRequestShapes.check("DeleteStream", request);
         kinesisVideoService.deleteStream(region(headers), regionResolver.getAccountId(),
                 text(request, "StreamARN"), text(request, "CurrentVersion"));
         return Response.ok(objectMapper.createObjectNode()).build();
@@ -73,6 +73,7 @@ public class KinesisVideoController {
     @Path("/describeStream")
     public Response describeStream(@Context HttpHeaders headers, String body) {
         JsonNode request = readTree(body);
+        KinesisVideoRequestShapes.check("DescribeStream", request);
         KinesisVideoStream stream = kinesisVideoService.describeStream(region(headers),
                 regionResolver.getAccountId(), text(request, "StreamName"), text(request, "StreamARN"));
         ObjectNode response = objectMapper.createObjectNode();
@@ -84,15 +85,10 @@ public class KinesisVideoController {
     @Path("/listStreams")
     public Response listStreams(@Context HttpHeaders headers, String body) {
         JsonNode request = readTree(body);
-        String namePrefix = null;
-        JsonNode condition = request.path("StreamNameCondition");
-        if (condition.isObject()) {
-            String operator = text(condition, "ComparisonOperator");
-            if (operator != null && !"BEGINS_WITH".equals(operator)) {
-                throw invalidArgument("ComparisonOperator must be BEGINS_WITH.");
-            }
-            namePrefix = text(condition, "ComparisonValue");
-        }
+        KinesisVideoRequestShapes.check("ListStreams", request);
+        String namePrefix = request.has("StreamNameCondition")
+                ? text(request.get("StreamNameCondition"), "ComparisonValue")
+                : null;
         KinesisVideoService.Page page = kinesisVideoService.listStreams(region(headers),
                 regionResolver.getAccountId(), integer(request, "MaxResults"), text(request, "NextToken"),
                 namePrefix);
@@ -123,26 +119,16 @@ public class KinesisVideoController {
         info.put("DataRetentionInHours", stream.dataRetentionInHours());
     }
 
+    // The members below were checked against the model by KinesisVideoRequestShapes, so each is either absent,
+    // null, or of its modeled type.
     private static String text(JsonNode request, String field) {
         JsonNode value = request.get(field);
-        if (value == null || value.isNull()) {
-            return null;
-        }
-        if (!value.isTextual()) {
-            throw invalidArgument(field + " must be a string.");
-        }
-        return value.asText();
+        return value == null || value.isNull() ? null : value.textValue();
     }
 
     private static Integer integer(JsonNode request, String field) {
         JsonNode value = request.get(field);
-        if (value == null || value.isNull()) {
-            return null;
-        }
-        if (!value.isInt()) {
-            throw invalidArgument(field + " must be an integer.");
-        }
-        return value.intValue();
+        return value == null || value.isNull() ? null : value.intValue();
     }
 
     private static Map<String, String> tags(JsonNode request) {
@@ -150,17 +136,9 @@ public class KinesisVideoController {
         if (value == null || value.isNull()) {
             return null;
         }
-        if (!value.isObject()) {
-            throw invalidArgument("Tags must be a map of strings.");
-        }
         Map<String, String> tags = new LinkedHashMap<>();
-        Iterator<Map.Entry<String, JsonNode>> fields = value.fields();
-        while (fields.hasNext()) {
-            Map.Entry<String, JsonNode> field = fields.next();
-            if (!field.getValue().isTextual()) {
-                throw invalidArgument("Tags must be a map of strings.");
-            }
-            tags.put(field.getKey(), field.getValue().asText());
+        for (Map.Entry<String, JsonNode> field : value.properties()) {
+            tags.put(field.getKey(), field.getValue().textValue());
         }
         return tags;
     }
@@ -179,9 +157,5 @@ public class KinesisVideoController {
         } catch (JsonProcessingException e) {
             throw new WebApplicationException(JsonErrorResponseUtils.createSerializationErrorResponse());
         }
-    }
-
-    private static AwsException invalidArgument(String message) {
-        return new AwsException("InvalidArgumentException", message, 400);
     }
 }

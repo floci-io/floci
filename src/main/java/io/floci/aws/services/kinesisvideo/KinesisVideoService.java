@@ -23,18 +23,11 @@ import java.util.regex.Pattern;
 public class KinesisVideoService implements Resettable {
     static final String STATUS_ACTIVE = "ACTIVE";
 
-    private static final Pattern NAME_PATTERN = Pattern.compile("[a-zA-Z0-9_.-]+");
-    private static final Pattern MEDIA_TYPE_PATTERN = Pattern.compile(
-            "[\\w\\-.+]+/[\\w\\-.+]+(,[\\w\\-.+]+/[\\w\\-.+]+)*");
-    private static final Pattern VERSION_PATTERN = Pattern.compile("[a-zA-Z0-9]+");
-    private static final int MAX_STREAM_NAME_LENGTH = 256;
-    private static final int MAX_DEVICE_NAME_LENGTH = 128;
-    private static final int MAX_MEDIA_TYPE_LENGTH = 128;
-    private static final int MAX_KMS_KEY_ID_LENGTH = 2048;
-    private static final int MAX_TAGS = 50;
-    private static final int MAX_TAG_KEY_LENGTH = 128;
-    private static final int MAX_TAG_VALUE_LENGTH = 256;
-    private static final int MAX_LIST_RESULTS = 10000;
+    // The constraints AWS models (names, media type, version, tags, MaxResults) are checked against the vendored
+    // model by KinesisVideoRequestShapes before a request reaches this service. What stays here is what the model
+    // does not say: the parts of a stream ARN, and the stream name a NextToken carries.
+    private static final Pattern NAME_PATTERN = Pattern.compile("[a-zA-Z0-9_.-]{1,256}");
+    private static final int DEFAULT_LIST_RESULTS = 10000;
     private static final String DEFAULT_KMS_ALIAS = "alias/aws/kinesisvideo";
 
     private final AccountAwareStorageBackend<KinesisVideoStream> streams;
@@ -63,12 +56,9 @@ public class KinesisVideoService implements Resettable {
     }
 
     public synchronized KinesisVideoStream createStream(String region, String accountId, CreateStreamRequest request) {
-        String streamName = requireName(request.streamName(), "StreamName", MAX_STREAM_NAME_LENGTH);
-        String deviceName = optionalName(request.deviceName(), "DeviceName", MAX_DEVICE_NAME_LENGTH);
-        String mediaType = optionalMediaType(request.mediaType());
-        String kmsKeyId = optionalKmsKeyId(request.kmsKeyId());
-        int retention = dataRetention(request.dataRetentionInHours());
-        Map<String, String> tags = validateTags(request.tags());
+        String streamName = request.streamName();
+        int retention = request.dataRetentionInHours() == null ? 0 : request.dataRetentionInHours();
+        Map<String, String> tags = request.tags() == null ? Map.of() : Map.copyOf(request.tags());
 
         String key = key(region, streamName);
         if (streams.getForAccount(accountId, key).isPresent()) {
@@ -82,14 +72,14 @@ public class KinesisVideoService implements Resettable {
         lastCreationTimeMillis = creationTimeMillis;
         String arn = AwsArnUtils.Arn.of("kinesisvideo", region, accountId,
                 "stream/" + streamName + "/" + creationTimeMillis).toString();
-        String resolvedKmsKeyId = kmsKeyId != null
-                ? kmsKeyId
+        String resolvedKmsKeyId = request.kmsKeyId() != null
+                ? request.kmsKeyId()
                 : AwsArnUtils.Arn.of("kms", region, accountId, DEFAULT_KMS_ALIAS).toString();
         KinesisVideoStream stream = new KinesisVideoStream(
                 streamName,
                 arn,
-                deviceName,
-                mediaType,
+                request.deviceName(),
+                request.mediaType(),
                 resolvedKmsKeyId,
                 newVersion(),
                 STATUS_ACTIVE,
@@ -101,13 +91,6 @@ public class KinesisVideoService implements Resettable {
     }
 
     public synchronized void deleteStream(String region, String accountId, String streamArn, String currentVersion) {
-        if (streamArn == null) {
-            throw invalidArgument("StreamARN is required.");
-        }
-        if (currentVersion != null && (currentVersion.isEmpty() || currentVersion.length() > 64
-                || !VERSION_PATTERN.matcher(currentVersion).matches())) {
-            throw invalidArgument("CurrentVersion is invalid.");
-        }
         KinesisVideoStream stream = findByArn(region, accountId, streamArn);
         if (currentVersion != null && !currentVersion.equals(stream.version())) {
             throw new AwsException("VersionMismatchException",
@@ -127,18 +110,11 @@ public class KinesisVideoService implements Resettable {
             }
             return stream;
         }
-        requireName(streamName, "StreamName", MAX_STREAM_NAME_LENGTH);
         return streams.getForAccount(accountId, key(region, streamName)).orElseThrow(KinesisVideoService::notFound);
     }
 
     public Page listStreams(String region, String accountId, Integer maxResults, String nextToken, String namePrefix) {
-        int limit = maxResults == null ? MAX_LIST_RESULTS : maxResults;
-        if (limit < 1 || limit > MAX_LIST_RESULTS) {
-            throw invalidArgument("MaxResults must be between 1 and " + MAX_LIST_RESULTS + ".");
-        }
-        if (namePrefix != null) {
-            requireName(namePrefix, "ComparisonValue", MAX_STREAM_NAME_LENGTH);
-        }
+        int limit = maxResults == null ? DEFAULT_LIST_RESULTS : maxResults;
         String regionPrefix = region + "::";
         List<KinesisVideoStream> items = new ArrayList<>(streams.scanForAccount(accountId,
                 key -> key.startsWith(regionPrefix)));
@@ -170,9 +146,6 @@ public class KinesisVideoService implements Resettable {
     }
 
     private static String streamNameFromArn(String streamArn) {
-        if (streamArn.isEmpty() || streamArn.length() > 1024) {
-            throw invalidArgument("StreamARN is invalid.");
-        }
         AwsArnUtils.Arn arn;
         try {
             arn = AwsArnUtils.parse(streamArn);
@@ -185,70 +158,6 @@ public class KinesisVideoService implements Resettable {
             throw invalidArgument("StreamARN is invalid.");
         }
         return resource[1];
-    }
-
-    private static String requireName(String value, String field, int maxLength) {
-        if (value == null) {
-            throw invalidArgument(field + " is required.");
-        }
-        return optionalName(value, field, maxLength);
-    }
-
-    private static String optionalName(String value, String field, int maxLength) {
-        if (value != null && (value.isEmpty() || value.length() > maxLength
-                || !NAME_PATTERN.matcher(value).matches())) {
-            throw invalidArgument(field + " must be 1 to " + maxLength
-                    + " characters matching [a-zA-Z0-9_.-]+.");
-        }
-        return value;
-    }
-
-    private static String optionalMediaType(String value) {
-        if (value != null && (value.isEmpty() || value.length() > MAX_MEDIA_TYPE_LENGTH
-                || !MEDIA_TYPE_PATTERN.matcher(value).matches())) {
-            throw invalidArgument("MediaType is invalid.");
-        }
-        return value;
-    }
-
-    private static String optionalKmsKeyId(String value) {
-        if (value != null && (value.isEmpty() || value.length() > MAX_KMS_KEY_ID_LENGTH)) {
-            throw invalidArgument("KmsKeyId must be 1 to " + MAX_KMS_KEY_ID_LENGTH + " characters.");
-        }
-        return value;
-    }
-
-    private static int dataRetention(Integer value) {
-        if (value == null) {
-            return 0;
-        }
-        if (value < 0) {
-            throw invalidArgument("DataRetentionInHours must be greater than or equal to 0.");
-        }
-        return value;
-    }
-
-    private static Map<String, String> validateTags(Map<String, String> tags) {
-        if (tags == null) {
-            return Map.of();
-        }
-        if (tags.isEmpty()) {
-            throw invalidArgument("Tags must contain at least 1 tag.");
-        }
-        if (tags.size() > MAX_TAGS) {
-            throw new AwsException("TagsPerResourceExceededLimitException",
-                    "A stream can have at most " + MAX_TAGS + " tags.", 400);
-        }
-        for (Map.Entry<String, String> tag : tags.entrySet()) {
-            String tagKey = tag.getKey();
-            String tagValue = tag.getValue();
-            if (tagKey == null || tagKey.isEmpty() || tagKey.length() > MAX_TAG_KEY_LENGTH
-                    || tagValue == null || tagValue.length() > MAX_TAG_VALUE_LENGTH) {
-                throw invalidArgument("Tag keys must be 1 to " + MAX_TAG_KEY_LENGTH
-                        + " characters and values at most " + MAX_TAG_VALUE_LENGTH + " characters.");
-            }
-        }
-        return Map.copyOf(tags);
     }
 
     /**
@@ -265,8 +174,7 @@ public class KinesisVideoService implements Resettable {
         } catch (IllegalArgumentException e) {
             throw invalidArgument("NextToken is invalid.");
         }
-        if (streamName.isEmpty() || streamName.length() > MAX_STREAM_NAME_LENGTH
-                || !NAME_PATTERN.matcher(streamName).matches()) {
+        if (!NAME_PATTERN.matcher(streamName).matches()) {
             throw invalidArgument("NextToken is invalid.");
         }
         return streamName;

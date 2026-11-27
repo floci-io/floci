@@ -21,7 +21,8 @@ Floci implements the REST JSON control plane of Amazon Kinesis Video Streams for
 - Without `KmsKeyId`, `StreamInfo.KmsKeyId` is the ARN of the AWS managed key alias `alias/aws/kinesisvideo`.
 - `DataRetentionInHours` defaults to `0`, which AWS reads as no retention.
 - `Version` is generated at creation. `DeleteStream` returns `VersionMismatchException` when `CurrentVersion` differs from it.
-- Creating a stream whose name exists in the account and Region returns `ResourceInUseException`. Invalid names, media types, retention, tags, `MaxResults` and `NextToken` return `InvalidArgumentException`, and more than 50 tags return `TagsPerResourceExceededLimitException`.
+- Creating a stream whose name exists in the account and Region returns `ResourceInUseException`.
+- Requests are checked by `RequestConstraintCheck` against the member types, required members, lengths, patterns and enum values generated from botocore's Kinesis Video model, such as the `StreamName` and `DeviceName` pattern (`[a-zA-Z0-9_.-]+`), the `MediaType` pattern, the `Version` pattern of `CurrentVersion`, the `ResourceARN` pattern of `StreamARN`, the 1 to 10000 range of `MaxResults` and the `BEGINS_WITH` value of `ComparisonOperator`. `tools/aws/regen_kinesisvideo_shapes.py` vendors them; `make aws-data-sync` regenerates them and `make aws-data-check` checks for drift. A member of the wrong JSON type fails with `SerializationException`, more than the 50 tags the model allows with `TagsPerResourceExceededLimitException`, and any other violation with `InvalidArgumentException`. A `DescribeStream` naming neither `StreamName` nor `StreamARN`, and a `NextToken` that `ListStreams` did not return, also fail with `InvalidArgumentException`.
 
 ## Not implemented
 
