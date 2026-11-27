@@ -18,9 +18,10 @@ import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.hasItem;
 
 /**
  * The alarm evaluator runs outside any request, so it has to evaluate every account's alarms in
@@ -77,18 +78,17 @@ class CloudWatchAlarmAccountScopeIntegrationTest {
                 """.formatted(alarm, namespace, topicArn));
         cleanup.register(() -> cloudWatch("DeleteAlarms", "{\"AlarmNames\":[\"" + alarm + "\"]}"));
 
-        await().atMost(Duration.ofSeconds(15)).pollInterval(Duration.ofMillis(200)).untilAsserted(() -> {
-            AlarmEvaluatorTestAccess.evaluateNow(alarmEvaluator);
-            cloudWatch("DescribeAlarms", "{\"AlarmNames\":[\"" + alarm + "\"]}")
-                    .then().body("MetricAlarms[0].StateValue", equalTo("ALARM"));
-        });
+        // evaluateNow runs one pass synchronously, so the state has changed when it returns.
+        AlarmEvaluatorTestAccess.evaluateNow(alarmEvaluator);
+        cloudWatch("DescribeAlarms", "{\"AlarmNames\":[\"" + alarm + "\"]}")
+                .then().body("MetricAlarms[0].StateValue", equalTo("ALARM"));
 
+        // The evaluator re-sends an alarm's actions on every pass while it stays in ALARM, so a
+        // scheduled pass may add a message: wait for this account's notification, not a count.
         await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(200)).untilAsserted(() -> {
             List<String> bodies = sqs("ReceiveMessage", "{\"QueueUrl\":\"" + queueUrl + "\",\"MaxNumberOfMessages\":10}")
                     .jsonPath().getList("Messages.Body", String.class);
-            assertThat(bodies, hasSize(1));
-            assertThat(bodies.getFirst(), containsString(alarm));
-            assertThat(bodies.getFirst(), containsString(ACCOUNT));
+            assertThat(bodies, hasItem(allOf(containsString(alarm), containsString(ACCOUNT))));
         });
     }
 

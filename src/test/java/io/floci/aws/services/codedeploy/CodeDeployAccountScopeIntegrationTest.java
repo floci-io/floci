@@ -86,7 +86,7 @@ class CodeDeployAccountScopeIntegrationTest {
         String deploymentId = codeDeploy("CreateDeployment", deploymentRequest).jsonPath().getString("deploymentId");
 
         ObjectNode getDeployment = OBJECT_MAPPER.createObjectNode().put("deploymentId", deploymentId);
-        await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(200)).untilAsserted(() ->
+        await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(200)).untilAsserted(() ->
                 codeDeploy("GetDeployment", getDeployment)
                         .then().body("deploymentInfo.status", equalTo("Succeeded")));
         lambda().when().get(LAMBDA + "/functions/" + function + "/aliases/live")
