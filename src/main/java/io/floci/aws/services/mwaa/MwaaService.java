@@ -1096,23 +1096,32 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
         int intervalSeconds = Math.max(1, config.services().mwaa().dagSyncIntervalSeconds());
         dagSyncPoller.scheduleAtFixedRate(() -> {
             try {
-                for (Environment environment : allEnvironments()) {
-                    if (environment.getStatus() != EnvironmentStatus.AVAILABLE) {
-                        continue;
-                    }
-                    try {
-                        syncDags(environment);
-                    } catch (Exception e) {
-                        // A bad/unsyncable DAG or S3 error must never fail the environment itself —
-                        // only this poller pass for this one environment is affected.
-                        LOG.warnv("DAG sync failed for MWAA environment {0}: {1}",
-                                environment.getName(), e.getMessage());
-                    }
-                }
+                syncDagsOfAvailableEnvironments();
             } catch (Exception e) {
                 LOG.error("Error in MWAA DAG-sync poller", e);
             }
         }, intervalSeconds, intervalSeconds, TimeUnit.SECONDS);
+    }
+
+    /**
+     * One pass of the DAG-sync poller over every account's available environments, each synced as
+     * the account that owns it, in its region, so its DAGs and requirements come from that account's S3.
+     */
+    void syncDagsOfAvailableEnvironments() {
+        for (Environment environment : allEnvironments()) {
+            if (environment.getStatus() != EnvironmentStatus.AVAILABLE) {
+                continue;
+            }
+            try {
+                RequestScopes.runAs(environmentAccount(environment), environmentRegion(environment),
+                        () -> syncDags(environment));
+            } catch (Exception e) {
+                // A bad/unsyncable DAG or S3 error must never fail the environment itself:
+                // only this poller pass for this one environment is affected.
+                LOG.warnv("DAG sync failed for MWAA environment {0}: {1}",
+                        environment.getName(), e.getMessage());
+            }
+        }
     }
 
     // Package-private (not private) so MwaaServiceTest can run a single sync pass directly.
