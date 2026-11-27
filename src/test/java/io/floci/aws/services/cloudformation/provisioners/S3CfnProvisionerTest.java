@@ -56,6 +56,7 @@ class S3CfnProvisionerTest {
             return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(i -> i.getArgument(0));
+        when(engine.resolveJsonAttribute(any())).thenCallRealMethod();
         when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(i -> i.getArgument(0));
         // A bucket carrying a configuration no test declares, so every declared one is a change.
         when(s3.getBucketNotificationConfiguration(anyString())).thenReturn(queueNotification("existing"));
@@ -879,6 +880,20 @@ class S3CfnProvisionerTest {
 
         assertEquals("b", r.getPhysicalId());
         assertTrue(r.getAttributes().isEmpty());
+    }
+
+    @Test
+    void aBucketPolicyIntrinsicReturningJsonTextIsNotEncodedTwice() {
+        JsonNode document = props("""
+                {"Fn::Sub": "{\\"Version\\":\\"2012-10-17\\",\\"Statement\\":[]}"}
+                """);
+        String resolved = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        when(ctx.engine().resolveNode(document)).thenReturn(MAPPER.getNodeFactory().textNode(resolved));
+        JsonNode properties = MAPPER.createObjectNode().put("Bucket", "b").set("PolicyDocument", document);
+
+        provisioner.provision(resource("Policy", "AWS::S3::BucketPolicy"), properties, ctx);
+
+        verify(s3).putBucketPolicy("b", resolved);
     }
 
     /**
