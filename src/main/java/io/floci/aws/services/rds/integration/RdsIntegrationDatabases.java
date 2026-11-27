@@ -137,8 +137,7 @@ public class RdsIntegrationDatabases implements IntegrationDatabaseCreator {
                 + "WHERE r.rolname = current_user "
                 + "AND (r.rolsuper OR (r.rolcreatedb AND pg_catalog.pg_has_role(r.oid, d.datdba, 'MEMBER')))");
         if (allowed.isEmpty()) {
-            throw new SpectrumSqlException(INSUFFICIENT_PRIVILEGE,
-                    "permission denied to create database \"" + databaseName + "\"");
+            throw new SpectrumSqlException(INSUFFICIENT_PRIVILEGE, "permission denied to create database");
         }
     }
 

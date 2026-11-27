@@ -140,6 +140,7 @@ class RdsIntegrationRetryPermissionDockerNightlyIntegrationTest {
             SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
                     () -> retry(databaseName, backend));
             assertEquals("42501", error.sqlState(), error.getMessage());
+            assertEquals("permission denied to create database", error.getMessage());
             assertThat(backend.statements, empty());
         }
         verify(integrations, never()).addDestination(any(), anyString(), anyString(), anyBoolean());

@@ -237,7 +237,10 @@ class RdsIntegrationDatabasesTest {
         backend.existingDatabase = true;
         backend.canRetryDatabase = false;
 
-        assertState("42501", () -> databases.create(statement("orders"), session("orders-dw"), backend));
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> databases.create(statement("orders"), session("orders-dw"), backend));
+        assertEquals("42501", error.sqlState(), error.getMessage());
+        assertEquals("permission denied to create database", error.getMessage());
 
         assertThat(backend.statements, empty());
         verify(integrations, never()).addDestination(any(), anyString(), anyString(), anyBoolean());
