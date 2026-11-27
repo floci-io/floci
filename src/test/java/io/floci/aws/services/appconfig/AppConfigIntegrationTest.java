@@ -1339,6 +1339,30 @@ class AppConfigIntegrationTest {
                 .body("Tags.Owner", equalTo("ops"));
     }
 
+    @Test @Order(63)
+    void createApplicationRejectsTagsThatAreNotAMapOfStrings() {
+        for (String tags : new String[] {"{\"Team\": 123}", "[\"Team\"]"}) {
+            given()
+                    .contentType(ContentType.JSON)
+                    .body("{\"Name\": \"bad-tags-app\", \"Tags\": " + tags + "}")
+                    .when().post("/applications")
+                    .then()
+                    .statusCode(400)
+                    .body("__type", equalTo("BadRequestException"));
+        }
+    }
+
+    @Test @Order(64)
+    void createEnvironmentRejectsTagsThatAreNotAMapOfStrings() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\": \"bad-tags-env\", \"Tags\": {\"Team\": 123}}")
+                .when().post("/applications/" + appId + "/environments")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+    }
+
     /** The modeled {@code /tags/{ResourceArn}} for an ARN, encoded as one path segment as an SDK sends it. */
     private static String tagsPath(String arn) {
         return "/tags/" + URLEncoder.encode(arn, StandardCharsets.UTF_8);

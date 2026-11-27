@@ -60,20 +60,20 @@ public class AppConfigTagHandler implements TagHandler {
     @Override
     public void tagResource(String region, String arn, Map<String, String> tags) {
         ResourceRef ref = parseArn(arn);
-        switch (ref.type()) {
-            case "application" -> service.tagApplication(ref.id(), tags);
-            case "environment" -> service.tagEnvironment(ref.applicationId(), ref.id(), tags);
-            default -> { }
+        if ("application".equals(ref.type())) {
+            service.tagApplication(ref.id(), tags);
+        } else if ("environment".equals(ref.type())) {
+            service.tagEnvironment(ref.applicationId(), ref.id(), tags);
         }
     }
 
     @Override
     public void untagResource(String region, String arn, List<String> tagKeys) {
         ResourceRef ref = parseArn(arn);
-        switch (ref.type()) {
-            case "application" -> service.untagApplication(ref.id(), tagKeys);
-            case "environment" -> service.untagEnvironment(ref.applicationId(), ref.id(), tagKeys);
-            default -> { }
+        if ("application".equals(ref.type())) {
+            service.untagApplication(ref.id(), tagKeys);
+        } else if ("environment".equals(ref.type())) {
+            service.untagEnvironment(ref.applicationId(), ref.id(), tagKeys);
         }
     }
 
