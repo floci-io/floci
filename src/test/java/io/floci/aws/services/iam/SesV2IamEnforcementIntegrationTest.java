@@ -164,6 +164,90 @@ class SesV2IamEnforcementIntegrationTest {
         .when().post("/v2/email/outbound-emails"));
     }
 
+    /**
+     * A v2 templated send is checked on the template its {@code Content.Template} names, by name or by ARN: a grant on
+     * one template reaches a send with that template and no other.
+     */
+    @Test
+    void aV2TemplatedSendIsCheckedOnTheTemplateItNames() {
+        String sender = identity();
+        String allowed = template();
+        String other = template();
+        String accessKeyId = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"ses:SendEmail",
+                  "Resource":"arn:aws:ses:us-east-1:%s:template/%s"}]}""".formatted(ACCOUNT, allowed));
+
+        templatedSend(accessKeyId, sender, "\"TemplateName\":\"" + allowed + "\"").then().statusCode(200);
+        templatedSend(accessKeyId, sender, "\"TemplateArn\":\"arn:aws:ses:us-east-1:" + ACCOUNT + ":template/"
+                + allowed + "\"").then().statusCode(200);
+        assertAccessDenied(templatedSend(accessKeyId, sender, "\"TemplateName\":\"" + other + "\""));
+    }
+
+    /** A deny on one template stops a v2 send with that template, by name or by ARN, and no other. */
+    @Test
+    void aDenyOnATemplateStopsAV2SendWithIt() {
+        String sender = identity();
+        String denied = template();
+        String other = template();
+        String accessKeyId = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"*","Resource":"*"},
+                  {"Effect":"Deny","Action":"ses:SendEmail","Resource":"arn:aws:ses:us-east-1:%s:template/%s"}]}"""
+                .formatted(ACCOUNT, denied));
+
+        assertAccessDenied(templatedSend(accessKeyId, sender, "\"TemplateName\":\"" + denied + "\""));
+        assertAccessDenied(templatedSend(accessKeyId, sender, "\"TemplateArn\":\"arn:aws:ses:us-east-1:" + ACCOUNT
+                + ":template/" + denied + "\""));
+        templatedSend(accessKeyId, sender, "\"TemplateName\":\"" + other + "\"").then().statusCode(200);
+    }
+
+    /** A v2 bulk send is checked on the template its {@code DefaultContent.Template} names. */
+    @Test
+    void aV2BulkSendIsCheckedOnTheTemplateItsDefaultContentNames() {
+        String sender = identity();
+        String allowed = template();
+        String other = template();
+        String accessKeyId = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"ses:SendBulkEmail",
+                  "Resource":"arn:aws:ses:us-east-1:%s:template/%s"}]}""".formatted(ACCOUNT, allowed));
+
+        bulkSend(accessKeyId, sender, "\"TemplateName\":\"" + allowed + "\"").then().statusCode(200);
+        bulkSend(accessKeyId, sender, "\"TemplateArn\":\"arn:aws:ses:us-east-1:" + ACCOUNT + ":template/"
+                + allowed + "\"").then().statusCode(200);
+        assertAccessDenied(bulkSend(accessKeyId, sender, "\"TemplateName\":\"" + other + "\""));
+    }
+
+    private static Response bulkSend(String accessKeyId, String from, String selector) {
+        return given()
+            .contentType("application/json")
+            .header("Authorization", auth(accessKeyId, "ses"))
+            .body("""
+                {"FromEmailAddress":"%s","DefaultContent":{"Template":{%s,"TemplateData":"{}"}},
+                  "BulkEmailEntries":[{"Destination":{"ToAddresses":["to@example.com"]}}]}""".formatted(from, selector))
+        .when().post("/v2/email/outbound-bulk-emails");
+    }
+
+    private static Response templatedSend(String accessKeyId, String from, String selector) {
+        return given()
+            .contentType("application/json")
+            .header("Authorization", auth(accessKeyId, "ses"))
+            .body("""
+                {"FromEmailAddress":"%s","Destination":{"ToAddresses":["to@example.com"]},
+                  "Content":{"Template":{%s,"TemplateData":"{}"}}}""".formatted(from, selector))
+        .when().post("/v2/email/outbound-emails");
+    }
+
+    private static String template() {
+        String name = "sesv2-iam-" + UUID.randomUUID().toString().substring(0, 8);
+        given()
+            .contentType("application/json")
+            .header("Authorization", auth(ACCOUNT, "ses"))
+            .body("{\"TemplateName\":\"" + name + "\",\"TemplateContent\":{\"Subject\":\"s\",\"Text\":\"t\"}}")
+        .when().post("/v2/email/templates")
+        .then().statusCode(200);
+        return name;
+    }
+
     private static String identity() {
         String identity = "sesv2-iam-" + UUID.randomUUID().toString().substring(0, 8) + "@example.com";
         given()

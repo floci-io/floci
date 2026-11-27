@@ -2266,6 +2266,52 @@ def with_structure_names(resources: list[dict], formats: dict[str, str], names: 
     return found
 
 
+def nested_type_selectors(models: dict[str, dict], operation: str, types: list[str]) -> dict[str, dict[str, str]]:
+    """By type, the members selecting it in a structure named after the type that a top-level structure of the
+    operation's request holds, the one ending `Name` and the one ending `Arn` named after the type too, each by its
+    kind: SES v2 `SendEmail` names its template in `Content.Template.TemplateName` or `Content.Template.TemplateArn`.
+    A type two such structures name is left out."""
+    found: dict[str, set[tuple[str, str]]] = {}
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec is None or "input" not in spec or not READ_PROTOCOLS & _protocols(model):
+            continue
+        for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+            shape = model["shapes"][member["shape"]]
+            if member.get("location") not in BODY_LOCATIONS or shape["type"] != "structure":
+                continue
+            for field, ref in shape.get("members", {}).items():
+                inner = model["shapes"][ref["shape"]]
+                kinds = [kind for kind in types if stem(field) == stem(kind)]
+                if inner["type"] != "structure" or len(kinds) != 1:
+                    continue
+                selectors = tuple(sorted((suffix, f"{name}.{field}.{sub}")
+                                         for sub, nested in inner.get("members", {}).items()
+                                         for suffix in ("Name", "Arn")
+                                         if sub == field + suffix
+                                         and model["shapes"][nested["shape"]]["type"] == "string"))
+                if selectors:
+                    found.setdefault(kinds[0], set()).add(selectors)
+    return {kind: dict(next(iter(paths))) for kind, paths in sorted(found.items()) if len(paths) == 1}
+
+
+def with_nested_type_selectors(resources: list[dict], types: list[str], formats: dict[str, str],
+                               selectors: dict[str, dict[str, str]]) -> list[dict]:
+    """The resources, and each type `nested_type_selectors` finds selected in a nested structure: its ARN from the
+    member ending `Arn`, and its format's one name variable filled from the member ending `Name`."""
+    found = list(resources)
+    for kind, paths in selectors.items():
+        variables = [variable for variable in VARIABLE_RE.findall(formats.get(kind, "")) if variable.endswith("Name")
+                     and variable not in KNOWN_VARIABLES]
+        entries = []
+        if "Arn" in paths:
+            entries.append({"types": types, "arn": paths["Arn"]})
+        if "Name" in paths and len(variables) == 1:
+            entries.append({"type": kind, "fill": {variables[0]: paths["Name"]}})
+        found += [entry for entry in entries if entry not in found]
+    return found
+
+
 def structure_account_members(models: dict[str, dict], operation: str, types: list[str]) -> dict[str, str]:
     """The top-level members of the operation's request whose name ends in `Account`, by the type whose botocore
     structure (the one named after the type, `Snapshot` for `snapshot`) has a member of that same name; a type
@@ -4201,6 +4247,7 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
     resources = with_account(resources, formats, account_members(models, name))
     resources = with_structure_account(resources, formats, structure_account_members(models, name, types))
     resources = with_structure_names(resources, formats, structure_name_fields(models, name, types))
+    resources = with_nested_type_selectors(resources, types, formats, nested_type_selectors(models, name, types))
     resources = with_change_lists(resources, types, formats, members)
     resources = with_type_named_members(resources, types, formats, members, stem(SUBJECT_RE.sub("", name)))
     resources = with_arn_of(resources, formats, name_or_arn_members(models, name),
@@ -5215,12 +5262,13 @@ PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?$")
 FIND_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[]|(\.[A-Za-z][A-Za-z0-9_]*)*)$")
 # A member of a request's body at any depth, as `body_only_identifiers` writes it: `Delete.Objects[].Key`.
 BODY_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_]*(\[])?)*$")
-# A member filling a variable may also be a field of a structure, or of each element of a list of structures, one
-# value for each.
+# A member filling a variable may also be a field of a structure, or of a structure inside one, or of each element of
+# a list of structures, one value for each.
 FILL_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[]|\[]\.[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)?|\{}"
-                          r"|\{}\.[A-Za-z][A-Za-z0-9_]*|\.[A-Za-z][A-Za-z0-9_]*)?$")
+                          r"|\{}\.[A-Za-z][A-Za-z0-9_]*|(\.[A-Za-z][A-Za-z0-9_]*){1,2})?$")
 # ARN paths can traverse structures, array elements ([]) and map values ({}).
 ARN_PATH_RE = re.compile(r"^(?:[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_]*(\[])?)?"
+                         r"|[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*){2}"
                          r"|[A-Za-z][A-Za-z0-9_]*\{\}(\.[A-Za-z][A-Za-z0-9_]*){1,2})$")
 # A format's resource that is a literal and one variable, at its end.
 ONE_VARIABLE_RE = re.compile(r"^[^$]*\$\{\w+}$")

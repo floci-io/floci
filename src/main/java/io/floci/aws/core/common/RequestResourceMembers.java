@@ -42,13 +42,15 @@ final class RequestResourceMembers {
     /** An ARN may be nested in structures, array elements or map values. */
     private static final Pattern ARN_MEMBER = Pattern.compile(
             "[A-Za-z][A-Za-z0-9_]*(\\[])?(\\.[A-Za-z][A-Za-z0-9_]*(\\[])?)?"
+                    + "|[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*){2}"
                     + "|[A-Za-z][A-Za-z0-9_]*\\{\\}(\\.[A-Za-z][A-Za-z0-9_]*){1,2}");
     /**
-     * A member filling a variable may also be a field of a structure, or of each of a list's structures, or of a field
-     * of each of them, or of a map's structure values, one value for each, or a map's keys ({@code Name{}}).
+     * A member filling a variable may also be a field of a structure or of a structure inside one, or of each of a
+     * list's structures, or of a field of each of them, or of a map's structure values, one value for each, or a map's
+     * keys ({@code Name{}}).
      */
     private static final Pattern FILL_MEMBER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\[]|\\[]\\.[A-Za-z][A-Za-z0-9_]*"
-            + "(\\.[A-Za-z][A-Za-z0-9_]*)?|\\{}|\\{}\\.[A-Za-z][A-Za-z0-9_]*|\\.[A-Za-z][A-Za-z0-9_]*)?");
+            + "(\\.[A-Za-z][A-Za-z0-9_]*)?|\\{}|\\{}\\.[A-Za-z][A-Za-z0-9_]*|(\\.[A-Za-z][A-Za-z0-9_]*){1,2})?");
     /**
      * A member a service finds a resource by: one list, or a value at any depth of structures, as a lookup's request
      * gives it ({@code AlternateIdentifier.ExternalId.Id}).
