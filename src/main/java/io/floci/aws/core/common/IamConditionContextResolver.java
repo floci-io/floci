@@ -1377,13 +1377,19 @@ public class IamConditionContextResolver {
             return null;
         }
         List<Map<String, List<String>>> contexts = new ArrayList<>();
-        DynamoDbConditionKeys.batchTableRequests(bufferedJsonBody(ctx)).forEach((written, single) -> {
-            String reference = written.trim();
+        JsonNode body = bufferedJsonBody(ctx);
+        JsonNode items = body == null || !body.isObject() ? null : body.get("RequestItems");
+        if (items == null || !items.isObject()) {
+            return List.of(Map.of());
+        }
+        // Only the tables the checked resource names are copied out, each as a shallow copy of the batch.
+        items.properties().forEach(entry -> {
+            String reference = entry.getKey().trim();
             if (resourceArn != null && !matchesTableResource(reference, resourceArn)) {
                 return;
             }
-            DynamoDbConditionKeys.Result keys = dynamoDbKeys(
-                    action, single, describeTargetTable(reference), ctx);
+            DynamoDbConditionKeys.Result keys = dynamoDbKeys(action,
+                    DynamoDbConditionKeys.batchTableRequest(body, entry.getKey()), describeTargetTable(reference), ctx);
             contexts.add(new LinkedHashMap<>(keys.conditionKeys()));
         });
         return contexts.isEmpty() ? List.of(Map.of()) : contexts;

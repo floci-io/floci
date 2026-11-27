@@ -347,12 +347,20 @@ public final class DynamoDbConditionKeys {
         if (body == null || !body.isObject() || !body.path("RequestItems").isObject()) {
             return requests;
         }
-        body.path("RequestItems").properties().forEach(entry -> {
-            ObjectNode single = ((ObjectNode) body).deepCopy();
-            single.putObject("RequestItems").set(entry.getKey(), entry.getValue());
-            requests.put(entry.getKey(), single);
-        });
+        body.path("RequestItems").properties().forEach(entry -> requests.put(entry.getKey(),
+                batchTableRequest(body, entry.getKey())));
         return requests;
+    }
+
+    /**
+     * The request of the table a batch's {@code RequestItems} names as {@code reference}: a shallow copy of the batch,
+     * sharing its other members, with that table's entry alone. The batch itself is left as it was.
+     */
+    public static ObjectNode batchTableRequest(JsonNode body, String reference) {
+        ObjectNode single = ((ObjectNode) body).objectNode();
+        single.setAll((ObjectNode) body);
+        single.putObject("RequestItems").set(reference, body.path("RequestItems").get(reference));
+        return single;
     }
 
     /**
