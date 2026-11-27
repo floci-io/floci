@@ -1452,7 +1452,7 @@ class IotServiceTest {
 
     private void mqttShadowRequest(String topic, String payload) {
         Executor inline = Runnable::run;
-        service.handleReservedMqttPublish(topic, payload.getBytes(StandardCharsets.UTF_8), inline);
+        service.handleReservedMqttPublish(topic, payload.getBytes(StandardCharsets.UTF_8), ACCOUNT, REGION, inline);
     }
 
     /** The payload fanned out on the topic, verifying the broker received exactly one publish on it. */
@@ -1485,7 +1485,8 @@ class IotServiceTest {
         List<Runnable> deferred = new ArrayList<>();
 
         service.handleReservedMqttPublish("$aws/things/sensor-10/shadow/update",
-                "{\"state\":{\"desired\":{\"color\":\"blue\"}}}".getBytes(StandardCharsets.UTF_8), deferred::add);
+                "{\"state\":{\"desired\":{\"color\":\"blue\"}}}".getBytes(StandardCharsets.UTF_8), ACCOUNT, REGION,
+                deferred::add);
 
         verifyNoInteractions(sqs);
         assertEquals(3, deferred.size(), "one rule evaluation per event");

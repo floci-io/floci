@@ -80,7 +80,9 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.deleteInAccount;
 import static io.floci.aws.core.storage.AccountAwareStorageBackend.getInAccount;
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.putInAccount;
 
 @ApplicationScoped
 public class IotService {
@@ -947,7 +949,12 @@ public class IotService {
      * one, the stored metadata, the version and the current time. Publishes nothing.
      */
     public JsonNode getThingShadow(String thingName, String shadowName, String region) {
-        IotShadow shadow = shadowStore.get(shadowKey(region, thingName, shadowName))
+        return getThingShadow(thingName, shadowName, regionResolver.getAccountId(), region);
+    }
+
+    /** The shadow as {@link #getThingShadow(String, String, String)} returns it, read in {@code accountId}. */
+    JsonNode getThingShadow(String thingName, String shadowName, String accountId, String region) {
+        IotShadow shadow = getInAccount(shadowStore, accountId, shadowKey(region, thingName, shadowName))
                 .orElseThrow(() -> shadowNotFound(thingName));
         ObjectNode document = storedShadowDocument(shadow);
         ObjectNode state = (ObjectNode) document.get("state");
@@ -964,7 +971,7 @@ public class IotService {
     }
 
     public JsonNode updateThingShadow(String thingName, String shadowName, JsonNode request, String region) {
-        return updateThingShadow(thingName, shadowName, request, region, Runnable::run);
+        return updateThingShadow(thingName, shadowName, request, regionResolver.getAccountId(), region, Runnable::run);
     }
 
     /**
@@ -972,11 +979,11 @@ public class IotService {
      * UpdateThingShadow response, after publishing accepted, documents and, when desired and
      * reported differ, delta, each handing its rule evaluation to {@code ruleRunner}.
      */
-    JsonNode updateThingShadow(String thingName, String shadowName, JsonNode request, String region,
+    JsonNode updateThingShadow(String thingName, String shadowName, JsonNode request, String accountId, String region,
                                Executor ruleRunner) {
         ShadowUpdate update;
         synchronized (shadowWriteLock) {
-            update = writeShadowUpdate(thingName, shadowName, request, region);
+            update = writeShadowUpdate(thingName, shadowName, request, accountId, region);
         }
         ReservedShadowTopic topics = new ReservedShadowTopic(thingName, shadowName, "update");
         publishShadowEvent(topics.acceptedTopic(), update.accepted(), region, ruleRunner);
@@ -988,17 +995,17 @@ public class IotService {
     }
 
     public JsonNode deleteThingShadow(String thingName, String shadowName, String region) {
-        return deleteThingShadow(thingName, shadowName, null, region, Runnable::run);
+        return deleteThingShadow(thingName, shadowName, null, regionResolver.getAccountId(), region, Runnable::run);
     }
 
     /** Deletes the shadow and returns the delete/accepted document after publishing it. */
-    JsonNode deleteThingShadow(String thingName, String shadowName, String clientToken, String region,
-                               Executor ruleRunner) {
+    JsonNode deleteThingShadow(String thingName, String shadowName, String clientToken, String accountId,
+                               String region, Executor ruleRunner) {
         ObjectNode accepted = objectMapper.createObjectNode();
         synchronized (shadowWriteLock) {
             String key = shadowKey(region, thingName, shadowName);
-            IotShadow shadow = shadowStore.get(key).orElseThrow(() -> shadowNotFound(thingName));
-            shadowStore.delete(key);
+            IotShadow shadow = getInAccount(shadowStore, accountId, key).orElseThrow(() -> shadowNotFound(thingName));
+            deleteInAccount(shadowStore, accountId, key);
             accepted.put("version", shadow.getVersion());
         }
         accepted.put("timestamp", Instant.now().getEpochSecond());
@@ -1009,9 +1016,10 @@ public class IotService {
     }
 
     /** The read-modify-write of one update; the caller holds {@link #shadowWriteLock}. */
-    private ShadowUpdate writeShadowUpdate(String thingName, String shadowName, JsonNode request, String region) {
+    private ShadowUpdate writeShadowUpdate(String thingName, String shadowName, JsonNode request, String accountId,
+                                           String region) {
         String key = shadowKey(region, thingName, shadowName);
-        IotShadow existing = shadowStore.get(key).orElse(null);
+        IotShadow existing = getInAccount(shadowStore, accountId, key).orElse(null);
         long currentVersion = existing == null ? 0 : existing.getVersion();
         if (request.hasNonNull("version") && request.path("version").asLong() != currentVersion) {
             throw new AwsException("ConflictException", "Version conflict", 409);
@@ -1034,7 +1042,7 @@ public class IotService {
         shadow.setShadowName(blankToNull(shadowName));
         shadow.setVersion(version);
         shadow.setDocument(document.toString());
-        shadowStore.put(key, shadow);
+        putInAccount(shadowStore, accountId, key, shadow);
 
         ObjectNode accepted = objectMapper.createObjectNode();
         if (!requestState.isMissingNode()) {
@@ -1672,15 +1680,16 @@ public class IotService {
     }
 
     /**
-     * Answers a device shadow request published on an MQTT reserved topic. Every response goes
-     * through {@link #publishShadowEvent}, and a failure after the request parsed keeps its clientToken.
+     * Answers a device shadow request published on an MQTT reserved topic by a session of
+     * {@code accountId} in {@code region}, which own the shadow. Every response goes through
+     * {@link #publishShadowEvent}, and a failure after the request parsed keeps its clientToken.
      */
-    void handleReservedMqttPublish(String topic, byte[] payload, Executor ruleRunner) {
+    void handleReservedMqttPublish(String topic, byte[] payload, String accountId, String region,
+                                   Executor ruleRunner) {
         ReservedShadowTopic shadowTopic = parseReservedShadowTopic(topic);
         if (shadowTopic == null) {
             return;
         }
-        String region = config.defaultRegion();
         JsonNode request;
         try {
             request = objectMapper.readTree(payload == null || payload.length == 0 ? "{}".getBytes(StandardCharsets.UTF_8) : payload);
@@ -1692,12 +1701,14 @@ public class IotService {
         String clientToken = request.path("clientToken").asText(null);
         try {
             switch (shadowTopic.operation()) {
-                case "update" -> updateThingShadow(shadowTopic.thingName(), shadowTopic.shadowName(), request, region, ruleRunner);
-                case "get" -> publishShadowEvent(shadowTopic.acceptedTopic(),
-                        withClientToken(getThingShadow(shadowTopic.thingName(), shadowTopic.shadowName(), region), clientToken),
+                case "update" -> updateThingShadow(shadowTopic.thingName(), shadowTopic.shadowName(), request, accountId,
                         region, ruleRunner);
-                case "delete" -> deleteThingShadow(shadowTopic.thingName(), shadowTopic.shadowName(), clientToken, region,
-                        ruleRunner);
+                case "get" -> publishShadowEvent(shadowTopic.acceptedTopic(),
+                        withClientToken(getThingShadow(shadowTopic.thingName(), shadowTopic.shadowName(), accountId, region),
+                                clientToken),
+                        region, ruleRunner);
+                case "delete" -> deleteThingShadow(shadowTopic.thingName(), shadowTopic.shadowName(), clientToken,
+                        accountId, region, ruleRunner);
                 default -> publishShadowRejected(shadowTopic, 400,
                         "Unsupported shadow operation: " + shadowTopic.operation(), clientToken, region, ruleRunner);
             }

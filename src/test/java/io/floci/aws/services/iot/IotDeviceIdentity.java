@@ -6,6 +6,7 @@ import io.floci.aws.core.common.Pem;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.testing.PartitionCleanup;
 import io.restassured.path.json.JsonPath;
+import io.restassured.specification.RequestSpecification;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
@@ -17,6 +18,7 @@ import java.security.PrivateKey;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 
+import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 
 /** A device provisioned through CreateKeysAndCertificate, ready to present itself on the TLS listener. */
@@ -29,17 +31,35 @@ final class IotDeviceIdentity {
     final String certificateArn;
     final X509Certificate certificate;
     final PrivateKey privateKey;
+    /** The region every request about this device is signed for; null sends them unsigned, to the default region. */
+    private final String region;
 
-    private IotDeviceIdentity(String certificateId, String certificateArn, X509Certificate certificate, PrivateKey privateKey) {
+    private IotDeviceIdentity(String certificateId, String certificateArn, X509Certificate certificate, PrivateKey privateKey,
+                              String region) {
         this.certificateId = certificateId;
         this.certificateArn = certificateArn;
         this.certificate = certificate;
         this.privateKey = privateKey;
+        this.region = region;
     }
 
     /** Provisions a device over the REST API, as an onboarding flow does. */
     static IotDeviceIdentity provision(boolean active) {
-        JsonPath created = given()
+        return provisionIn(null, active);
+    }
+
+    /**
+     * Provisions a device in {@code region}, every request about it signed for that region, and has
+     * {@code cleanup} deactivate and delete its certificate after the test.
+     */
+    static IotDeviceIdentity provision(String region, boolean active, PartitionCleanup cleanup) {
+        IotDeviceIdentity device = provisionIn(region, active);
+        cleanup.register(device::delete);
+        return device;
+    }
+
+    private static IotDeviceIdentity provisionIn(String region, boolean active) {
+        JsonPath created = request(region)
                 .queryParam("setAsActive", active)
                 .when().post("/keys-and-certificate")
                 .then().statusCode(200)
@@ -48,7 +68,16 @@ final class IotDeviceIdentity {
                 created.getString("certificateId"),
                 created.getString("certificateArn"),
                 Pem.parseCertificate(created.getString("certificatePem")),
-                Pem.parsePrivateKey(created.getString("keyPair.PrivateKey")));
+                Pem.parsePrivateKey(created.getString("keyPair.PrivateKey")),
+                region);
+    }
+
+    private static RequestSpecification request(String region) {
+        return region == null ? given() : given().header("Authorization", auth("test", region, "iot"));
+    }
+
+    private RequestSpecification request() {
+        return request(region);
     }
 
     /**
@@ -67,16 +96,16 @@ final class IotDeviceIdentity {
      */
     String attachNewPolicy(String document, PartitionCleanup cleanup) {
         String policy = "device-policy-" + System.nanoTime();
-        given()
+        request()
                 .contentType("application/json")
                 .body(OBJECT_MAPPER.createObjectNode().put("policyDocument", document).toString())
                 .when().post("/policies/" + policy)
                 .then().statusCode(200);
         cleanup.register(() -> {
-            given().queryParam("target", certificateArn).when().post("/target-policies/" + policy).then().statusCode(200);
-            given().when().delete("/policies/" + policy).then().statusCode(200);
+            request().queryParam("target", certificateArn).when().post("/target-policies/" + policy).then().statusCode(200);
+            request().when().delete("/policies/" + policy).then().statusCode(200);
         });
-        given().queryParam("target", certificateArn).when().put("/target-policies/" + policy).then().statusCode(200);
+        request().queryParam("target", certificateArn).when().put("/target-policies/" + policy).then().statusCode(200);
         return policy;
     }
 
@@ -85,24 +114,24 @@ final class IotDeviceIdentity {
      * {@code cleanup} detaches and deletes it after the test.
      */
     void attachNewThing(String thingName, PartitionCleanup cleanup) {
-        given().contentType("application/json").body("{}").when().post("/things/" + thingName).then().statusCode(200);
-        cleanup.register(() -> given().when().delete("/things/" + thingName).then().statusCode(200));
-        given().header("x-amzn-principal", certificateArn).when().put("/things/" + thingName + "/principals").then().statusCode(200);
-        cleanup.register(() -> given().header("x-amzn-principal", certificateArn)
+        request().contentType("application/json").body("{}").when().post("/things/" + thingName).then().statusCode(200);
+        cleanup.register(() -> request().when().delete("/things/" + thingName).then().statusCode(200));
+        request().header("x-amzn-principal", certificateArn).when().put("/things/" + thingName + "/principals").then().statusCode(200);
+        cleanup.register(() -> request().header("x-amzn-principal", certificateArn)
                 .when().delete("/things/" + thingName + "/principals").then().statusCode(200));
     }
 
     /** IoT Core deletes only an inactive certificate with nothing attached. */
     private void delete() {
-        given().queryParam("newStatus", "INACTIVE").when().put("/certificates/" + certificateId).then().statusCode(200);
-        given().when().delete("/certificates/" + certificateId).then().statusCode(200);
+        request().queryParam("newStatus", "INACTIVE").when().put("/certificates/" + certificateId).then().statusCode(200);
+        request().when().delete("/certificates/" + certificateId).then().statusCode(200);
     }
 
     /** A certificate the Floci CA signed but IoT Core never registered. */
     static IotDeviceIdentity stranger(Path tlsDir) {
         CertificateGenerator.GeneratedCertificate issued = FlociCertificateAuthority.loadOrCreate(tlsDir).issueClientCertificate("stranger");
         return new IotDeviceIdentity("unregistered", "arn:aws:iot:us-east-1:000000000000:cert/unregistered",
-                Pem.parseCertificate(issued.certificatePem()), Pem.parsePrivateKey(issued.privateKeyPem()));
+                Pem.parseCertificate(issued.certificatePem()), Pem.parsePrivateKey(issued.privateKeyPem()), null);
     }
 
     /** Presents the device certificate and trusts only the Floci CA. */
