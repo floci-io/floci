@@ -306,9 +306,9 @@ class RdsEndpointAddressesTest {
         addresses.route("cluster-1", Map.of(writer, clusterName("cluster-1", List.of(), List.of())));
 
         assertFalse(addresses.names(reports));
-        assertTrue(addresses.namesCluster("cluster-1", writer.toUpperCase()));
-        assertFalse(addresses.namesCluster("cluster-2", writer));
-        assertTrue(addresses.namesCluster("cluster-2", other));
+        assertTrue(addresses.reaches("cluster-1", writer.toUpperCase()));
+        assertFalse(addresses.reaches("cluster-2", writer));
+        assertTrue(addresses.reaches("cluster-2", other));
 
         addresses.forgetCluster("cluster-1");
 
@@ -336,6 +336,63 @@ class RdsEndpointAddressesTest {
         when(config.services().rds().endpointsInVpc()).thenReturn(true);
         cluster.setSubnetAvailabilityZones(new LinkedHashMap<>());
         assertFalse(addresses.inVpc(cluster));
+    }
+
+    @Test
+    void aProxysEndpointIsServedUnderItsNameAndReachesItsProxyAlone() {
+        String relayId = RdsEndpointAddresses.newRelayId();
+        String name = AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION);
+
+        String address = addresses.serve(relayId, ACCOUNT, REGION, "vpc-1", "subnet-a", 5432, 7005, "proxy endpoint",
+                null);
+        addresses.remember(name, relayId, "prx-1");
+
+        assertEquals("10.0.1.20", address);
+        assertEquals(Optional.of(address), addresses.addressOf(name.toUpperCase()));
+        assertTrue(addresses.reaches("prx-1", name.toUpperCase()));
+        assertFalse(addresses.reaches("prx-2", name));
+        assertTrue(addresses.targetsPort(7005));
+        verify(fixture.builder).withCmd(List.of("TCP-LISTEN:5432,fork,reuseaddr,nodelay,backlog=4096",
+                "TCP:host.docker.internal:7005,nodelay"));
+
+        String renamed = AwsEndpoints.rdsProxyEndpointHost("reports", ACCOUNT, REGION);
+        addresses.remember(renamed, relayId, "prx-1");
+        assertFalse(addresses.names(name));
+        assertTrue(addresses.reaches("prx-1", renamed));
+
+        addresses.discard(relayId);
+
+        assertFalse(addresses.names(renamed));
+        assertFalse(addresses.reaches("prx-1", renamed));
+        assertFalse(addresses.targetsPort(7005));
+    }
+
+    @Test
+    void aDiscardedEndpointWhoseRelayDockerKeepsLosesItsNameAndKeepsItsPort() {
+        String relayId = RdsEndpointAddresses.newRelayId();
+        String name = AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION);
+        addresses.serve(relayId, ACCOUNT, REGION, "vpc-1", "subnet-a", 5432, 7005, "proxy", null);
+        addresses.remember(name, relayId, "prx-1");
+        doThrow(new IllegalStateException("daemon down")).when(fixture.lifecycleManager)
+                .removeIfExistsStrict("relay-1");
+
+        addresses.discard(relayId);
+
+        assertFalse(addresses.names(name));
+        assertFalse(addresses.reaches("prx-1", name));
+        assertTrue(addresses.targetsPort(7005));
+        assertTrue(addresses.hasSubnetDependency(REGION, "subnet-a"));
+    }
+
+    @Test
+    void aResetForgetsWhichProxyAnEndpointReaches() {
+        String relayId = RdsEndpointAddresses.newRelayId();
+        String name = AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION);
+        addresses.remember(name, relayId, "prx-1");
+
+        addresses.clear();
+
+        assertFalse(addresses.reaches("prx-1", name));
     }
 
     /** An instance served at its own address, with its name known. */

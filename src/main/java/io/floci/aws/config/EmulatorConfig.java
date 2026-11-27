@@ -2138,7 +2138,8 @@ public interface EmulatorConfig {
          * When true, a DB instance in a subnet with a Docker-backed VPC network gets its own address there and
          * serves the Port it was created with, or its engine's default, under the endpoint name RDS gives it,
          * which Floci's DNS server answers. A DB cluster's instances serve its port the same way, and its cluster,
-         * reader and custom endpoint names resolve to them. Off, every endpoint is Floci's address and a proxy port.
+         * reader and custom endpoint names resolve to them; a DB proxy's endpoints serve its engine family's port
+         * at their own addresses. Off, every endpoint is Floci's address and a proxy port.
          */
         @WithDefault("false")
         boolean endpointsInVpc();

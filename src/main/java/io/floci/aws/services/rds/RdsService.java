@@ -5356,9 +5356,10 @@ public class RdsService implements Resettable, ResourceProvider {
                     tokensBoundToEndpoint);
         }
         // A cluster's endpoint names resolve to its instances in its VPC, so the cluster's proxy and each of its
-        // instances' (whose resource id is the cluster's) take a token generated for any of them.
+        // instances' (whose resource id is the cluster's) take a token generated for any of them; a DB proxy takes one
+        // generated for any of the endpoints added to it.
         return new RdsProxyBinding(advertisedHost, publishedPort, region, accountId, resourceId,
-                tokensBoundToEndpoint, host -> endpointAddresses.namesCluster(resourceId, host));
+                tokensBoundToEndpoint, host -> endpointAddresses.reaches(resourceId, host));
     }
 
     private static boolean hasBackend(String host, int port) {
@@ -7434,15 +7435,21 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         String proxyKey = dbProxyKey(effectiveRegion, dbProxyName);
         String accountId = currentAccountId();
+        // A proxy's endpoint hostname is built from its name and DNS names ignore case, so names that differ only
+        // in case would be one hostname.
         if (findDbProxy(dbProxyName, effectiveRegion).isPresent()
-                || scopedKeyExists(proxies, accountId, proxyKey)) {
+                || scopedKeyExists(proxies, accountId, proxyKey)
+                || listDbProxies(null, effectiveRegion).stream()
+                        .anyMatch(existing -> existing.getDbProxyName().equalsIgnoreCase(dbProxyName))) {
             throw new AwsException("DBProxyAlreadyExistsFault",
                     "DB proxy " + dbProxyName + " already exists.", 400);
         }
 
         boolean mock = config.services().rds().mock();
-        // Proxies share a hostname, so each needs its own listener port.
-        int proxyPort = reserveOrAllocateProxyPort(defaultPortForEngineFamily(engineFamily));
+        // Proxies share a hostname, so each needs its own listener port. In their VPC each endpoint serves the engine
+        // family's port at its own address, so the listener's is any free one.
+        int proxyPort = endpointsInVpc() ? allocateProxyPort()
+                : reserveOrAllocateProxyPort(defaultPortForEngineFamily(engineFamily));
         DbProxy proxy = new DbProxy();
         proxy.setDbProxyName(dbProxyName);
         proxy.setEngineFamily(engineFamily.toUpperCase());
@@ -7474,6 +7481,15 @@ public class RdsService implements Resettable, ResourceProvider {
         String resourceId = "prx-" + randomResourceSuffix();
         proxy.setDbProxyResourceId(resourceId);
         proxy.setDbProxyArn(regionResolver.buildArn("rds", effectiveRegion, "db-proxy:" + resourceId));
+        if (assignProxyEndpoint(proxy)) {
+            try {
+                serveProxyInVpc(proxy);
+            } catch (RuntimeException serveFailure) {
+                endpointAddresses.discard(proxy.getVpcEndpointId());
+                releaseProxyPort(proxyPort);
+                throw serveFailure;
+            }
+        }
 
         DbProxyTargetGroup targetGroup = new DbProxyTargetGroup();
         targetGroup.setDbProxyName(dbProxyName);
@@ -7504,6 +7520,9 @@ public class RdsService implements Resettable, ResourceProvider {
                 createFailure.addSuppressed(verificationFailure);
             }
             if (stateRemoved) {
+                if (proxyInVpc(proxy)) {
+                    endpointAddresses.discard(proxy.getVpcEndpointId());
+                }
                 releaseProxyPort(proxyPort);
                 throw createFailure;
             }
@@ -7766,7 +7785,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                         proxyAccountId, targetRegion, targetId, user, pw)
                                 : validateDbPasswordForScope(
                                         proxyAccountId, targetRegion, targetId, user, pw),
-                        proxyBinding(engine, proxy.getEndpointHost(), proxy.getProxyPort(),
+                        proxyBinding(engine, proxy.getEndpointHost(), proxyPublishedPort(proxy),
                                 targetRegion, proxyAccountId, proxy.getDbProxyResourceId()),
                         RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY);
             }
@@ -8140,6 +8159,8 @@ public class RdsService implements Resettable, ResourceProvider {
             restartDbProxyRelayAfterFailure(proxy, relayTargetGroup, deleteFailure);
             throw deleteFailure;
         }
+        // Gone with the records: a relay Docker keeps still holds the port it forwards to from other databases.
+        discardProxyRelays(proxy, endpoints);
         releaseProxyPort(proxy.getProxyPort());
         LOG.infov("DB proxy {0} deleted", name);
     }
@@ -8284,7 +8305,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     "DB proxy " + proxy.getDbProxyName() + " is not available.", 400);
         }
         String key = proxyEndpointKey(effectiveRegion, name);
-        if (DEFAULT_PROXY_ENDPOINT_NAME.equals(name) || proxyEndpoints.get(key).isPresent()) {
+        if (proxyEndpointNameTaken(effectiveRegion, name, null)) {
             throw new AwsException("DBProxyEndpointAlreadyExistsFault",
                     "DB proxy endpoint " + name + " already exists.", 400);
         }
@@ -8313,7 +8334,22 @@ public class RdsService implements Resettable, ResourceProvider {
         endpoint.setTargetRole(role);
         endpoint.setEndpointNetworkType(networkType);
         endpoint.setTags(tags);
-        proxyEndpoints.put(key, endpoint);
+        if (assignProxyEndpoint(proxy, endpoint)) {
+            try {
+                serveProxyInVpc(proxy, endpoint);
+            } catch (RuntimeException serveFailure) {
+                endpointAddresses.discard(endpoint.getVpcEndpointId());
+                throw serveFailure;
+            }
+        }
+        try {
+            proxyEndpoints.put(key, endpoint);
+        } catch (RuntimeException storeFailure) {
+            if (proxyEndpointInVpc(endpoint)) {
+                endpointAddresses.discard(endpoint.getVpcEndpointId());
+            }
+            throw storeFailure;
+        }
         return withProxyHost(endpoint, proxy);
     }
 
@@ -8362,19 +8398,38 @@ public class RdsService implements Resettable, ResourceProvider {
         String name = isBlank(newName) ? endpoint.getDbProxyEndpointName()
                 : requireProxyEndpointName(newName, "NewDBProxyEndpointName");
         boolean renamed = !name.equals(endpoint.getDbProxyEndpointName());
-        if (renamed && (DEFAULT_PROXY_ENDPOINT_NAME.equals(name)
-                || proxyEndpoints.get(proxyEndpointKey(effectiveRegion, name)).isPresent())) {
+        if (renamed && proxyEndpointNameTaken(effectiveRegion, name, endpoint)) {
             throw new AwsException("DBProxyEndpointAlreadyExistsFault",
                     "DB proxy endpoint " + name + " already exists.", 400);
         }
-        String oldKey = proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName());
+        String oldName = endpoint.getDbProxyEndpointName();
+        List<String> oldGroups = endpoint.getVpcSecurityGroupIds();
+        String oldKey = proxyEndpointKey(effectiveRegion, oldName);
+        String newKey = proxyEndpointKey(effectiveRegion, name);
         endpoint.setDbProxyEndpointName(name);
         if (vpcSecurityGroupIds != null) {
             endpoint.setVpcSecurityGroupIds(vpcSecurityGroupIds);
         }
-        proxyEndpoints.put(proxyEndpointKey(effectiveRegion, name), endpoint);
-        if (renamed) {
-            proxyEndpoints.delete(oldKey);
+        try {
+            proxyEndpoints.put(newKey, endpoint);
+            if (renamed) {
+                proxyEndpoints.delete(oldKey);
+            }
+        } catch (RuntimeException storeFailure) {
+            // The endpoint keeps the name it had, the one its DNS entry and IAM tokens still name.
+            endpoint.setDbProxyEndpointName(oldName);
+            endpoint.setVpcSecurityGroupIds(oldGroups);
+            if (renamed) {
+                attemptRollback(storeFailure, () -> proxyEndpoints.delete(newKey));
+            }
+            attemptRollback(storeFailure, () -> proxyEndpoints.put(oldKey, endpoint));
+            throw storeFailure;
+        }
+        if (renamed && proxyEndpointInVpc(endpoint)) {
+            // The relay and address stay; the endpoint answers by its new name only.
+            String host = proxyEndpointHost(proxy, endpoint);
+            endpointAddresses.remember(host, endpoint.getVpcEndpointId(), proxy.getDbProxyResourceId());
+            coverTlsHost(host);
         }
         return withProxyHost(endpoint, proxy);
     }
@@ -8384,6 +8439,9 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         DbProxyEndpoint endpoint = requireProxyEndpoint(effectiveRegion, endpointName);
         proxyEndpoints.delete(proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName()));
+        if (proxyEndpointInVpc(endpoint)) {
+            endpointAddresses.discard(endpoint.getVpcEndpointId());
+        }
         endpoint.setStatus("deleting");
         return withProxyHost(endpoint, getDbProxy(endpoint.getDbProxyName(), effectiveRegion));
     }
@@ -8407,9 +8465,13 @@ public class RdsService implements Resettable, ResourceProvider {
         return name;
     }
 
-    /** Reports the proxy's current host, which a restore can change after the endpoint was created. */
-    private static DbProxyEndpoint withProxyHost(DbProxyEndpoint endpoint, DbProxy proxy) {
-        endpoint.setEndpoint(proxy.getEndpoint());
+    /**
+     * Reports the endpoint's host: its own name in its VPC, otherwise the proxy's current host, which a restore can
+     * change after the endpoint was created.
+     */
+    private DbProxyEndpoint withProxyHost(DbProxyEndpoint endpoint, DbProxy proxy) {
+        endpoint.setEndpoint(endpoint.getVpcEndpointId() != null ? proxyEndpointHost(proxy, endpoint)
+                : proxy.getEndpoint());
         return endpoint;
     }
 
@@ -8443,6 +8505,122 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private String proxyEndpointKey(String region, String endpointName) {
         return effectiveRegion(region) + "::" + endpointName;
+    }
+
+    /**
+     * Whether {@code name} is the default endpoint's or another endpoint's of the Region, ignoring case: an endpoint's
+     * hostname is built from its name and DNS names ignore case, so names that differ only in case would be one
+     * hostname. {@code self}, an endpoint being renamed, does not count.
+     */
+    private boolean proxyEndpointNameTaken(String region, String name, DbProxyEndpoint self) {
+        if (DEFAULT_PROXY_ENDPOINT_NAME.equalsIgnoreCase(name)) {
+            return true;
+        }
+        String prefix = effectiveRegion(region) + "::";
+        return proxyEndpoints.scan(key -> key.startsWith(prefix)).stream()
+                .filter(endpoint -> self == null
+                        || !endpoint.getDbProxyEndpointName().equals(self.getDbProxyEndpointName()))
+                .anyMatch(endpoint -> endpoint.getDbProxyEndpointName().equalsIgnoreCase(name));
+    }
+
+    /** Whether endpoints go in their VPC, as a new proxy's and its endpoints' do. */
+    private boolean endpointsInVpc() {
+        return endpointAddresses != null && endpointAddresses.enabled();
+    }
+
+    /** Whether the proxy's endpoints are in its VPC, each served at its own address. */
+    private boolean proxyInVpc(DbProxy proxy) {
+        return endpointAddresses != null && proxy.getVpcEndpointId() != null;
+    }
+
+    /** Whether an endpoint added to a proxy is in its VPC, served at its own address. */
+    private boolean proxyEndpointInVpc(DbProxyEndpoint endpoint) {
+        return endpointAddresses != null && endpoint.getVpcEndpointId() != null;
+    }
+
+    /**
+     * The port a proxy's endpoints serve in its VPC: its engine family's, as "all proxies listen on port 5432 for
+     * PostgreSQL" and "on port 3306 for MySQL" (RDS user guide); SQL Server's 1433, which the guide does not name.
+     */
+    private int proxyServedPort(DbProxy proxy) {
+        return defaultPortForEngineFamily(proxy.getEngineFamily());
+    }
+
+    /** The port an IAM token for the proxy names, which its listener checks: the one its endpoints serve. */
+    private int proxyPublishedPort(DbProxy proxy) {
+        return proxyInVpc(proxy) ? proxyServedPort(proxy) : proxy.getProxyPort();
+    }
+
+    /**
+     * Gives a proxy its default endpoint in its VPC, served in the first of its subnets under the name RDS gives it,
+     * when endpoints go in their VPC; false, leaving the proxy as it was, otherwise.
+     */
+    private boolean assignProxyEndpoint(DbProxy proxy) {
+        if (!endpointsInVpc() || proxy.getVpcSubnetIds().isEmpty()) {
+            return false;
+        }
+        proxy.setVpcEndpointId(RdsEndpointAddresses.newRelayId());
+        proxy.setVpcEndpointSubnetId(proxy.getVpcSubnetIds().getFirst());
+        proxy.setVpcEndpointAddress(null);
+        proxy.setEndpointHost(AwsEndpoints.rdsProxyHost(proxy.getDbProxyName(),
+                accountIdFromArn(proxy.getDbProxyArn()), regionResolver.regionOf(proxy.getDbProxyArn())));
+        return true;
+    }
+
+    /** {@link #assignProxyEndpoint(DbProxy)} for an endpoint added to a proxy, in the first of its own subnets. */
+    private boolean assignProxyEndpoint(DbProxy proxy, DbProxyEndpoint endpoint) {
+        if (!proxyInVpc(proxy) || endpoint.getVpcSubnetIds().isEmpty()) {
+            return false;
+        }
+        endpoint.setVpcEndpointId(RdsEndpointAddresses.newRelayId());
+        endpoint.setVpcEndpointSubnetId(endpoint.getVpcSubnetIds().getFirst());
+        endpoint.setVpcEndpointAddress(null);
+        return true;
+    }
+
+    /** The name of an endpoint added to a proxy, in its VPC. */
+    private String proxyEndpointHost(DbProxy proxy, DbProxyEndpoint endpoint) {
+        return AwsEndpoints.rdsProxyEndpointHost(endpoint.getDbProxyEndpointName(),
+                accountIdFromArn(proxy.getDbProxyArn()), regionResolver.regionOf(proxy.getDbProxyArn()));
+    }
+
+    /**
+     * Serves the proxy's default endpoint at its address, relayed to the proxy's listener, records the address and
+     * makes the name known. Nothing listens until a target is registered, as an RDS proxy without one takes no
+     * connections.
+     *
+     * @throws IllegalStateException when the subnet has no address to give
+     */
+    private void serveProxyInVpc(DbProxy proxy) {
+        String accountId = accountIdFromArn(proxy.getDbProxyArn());
+        endpointAddresses.remember(proxy.getEndpointHost(), proxy.getVpcEndpointId(), proxy.getDbProxyResourceId());
+        proxy.setVpcEndpointAddress(endpointAddresses.serve(proxy.getVpcEndpointId(), accountId,
+                regionResolver.regionOf(proxy.getDbProxyArn()), proxy.getVpcId(), proxy.getVpcEndpointSubnetId(),
+                proxyServedPort(proxy), proxy.getProxyPort(), "DB proxy " + proxy.getDbProxyName(),
+                proxy.getVpcEndpointAddress()));
+    }
+
+    /**
+     * {@link #serveProxyInVpc(DbProxy)} for an endpoint added to the proxy, in its own VPC. An IAM token generated
+     * for its name is good at the proxy, and the proxies' certificate covers the name.
+     */
+    private void serveProxyInVpc(DbProxy proxy, DbProxyEndpoint endpoint) {
+        String host = proxyEndpointHost(proxy, endpoint);
+        endpointAddresses.remember(host, endpoint.getVpcEndpointId(), proxy.getDbProxyResourceId());
+        coverTlsHost(host);
+        endpoint.setVpcEndpointAddress(endpointAddresses.serve(endpoint.getVpcEndpointId(),
+                accountIdFromArn(proxy.getDbProxyArn()), regionResolver.regionOf(proxy.getDbProxyArn()),
+                endpoint.getVpcId(), endpoint.getVpcEndpointSubnetId(), proxyServedPort(proxy), proxy.getProxyPort(),
+                "DB proxy endpoint " + endpoint.getDbProxyEndpointName(), endpoint.getVpcEndpointAddress()));
+    }
+
+    /** Discards the relays of a proxy's endpoints and its default endpoint ({@link RdsEndpointAddresses#discard}). */
+    private void discardProxyRelays(DbProxy proxy, List<DbProxyEndpoint> endpoints) {
+        endpoints.stream().filter(this::proxyEndpointInVpc)
+                .forEach(endpoint -> endpointAddresses.discard(endpoint.getVpcEndpointId()));
+        if (proxyInVpc(proxy)) {
+            endpointAddresses.discard(proxy.getVpcEndpointId());
+        }
     }
 
     // ── DB Subnet Groups ──────────────────────────────────────────────────────
@@ -9637,13 +9815,16 @@ public class RdsService implements Resettable, ResourceProvider {
         synchronized (clusterNameRoutes) {
             hosts = publishClusterNames(cluster);
         }
-        for (String host : hosts) {
-            try {
-                proxyManager.coverTlsHost(host);
-            } catch (RuntimeException e) {
-                // The name still resolves; only a client that checks the certificate's names refuses it.
-                LOG.warnv(e, "The RDS proxies' certificate does not cover {0}", host);
-            }
+        hosts.forEach(this::coverTlsHost);
+    }
+
+    /** Puts {@code host} on the proxies' certificate, which TLS clients check a name they connect by against. */
+    private void coverTlsHost(String host) {
+        try {
+            proxyManager.coverTlsHost(host);
+        } catch (RuntimeException e) {
+            // The name still resolves; only a client that checks the certificate's names refuses it.
+            LOG.warnv(e, "The RDS proxies' certificate does not cover {0}", host);
         }
     }
 
@@ -10388,6 +10569,9 @@ public class RdsService implements Resettable, ResourceProvider {
                 ? source.getTargetConnectionNetworkType() : "IPV4");
         copy.setVpcSubnetIds(source.getVpcSubnetIds());
         copy.setVpcSecurityGroupIds(source.getVpcSecurityGroupIds());
+        copy.setVpcEndpointId(source.getVpcEndpointId());
+        copy.setVpcEndpointSubnetId(source.getVpcEndpointSubnetId());
+        copy.setVpcEndpointAddress(source.getVpcEndpointAddress());
         copy.setAuth(source.getAuth().stream().map(this::copyDbProxyAuth).toList());
         copy.setTags(source.getTags());
         return copy;
@@ -10502,7 +10686,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                 accountId, proxyRegion, targetId, user, password)
                         : validateDbPasswordForScope(
                                 accountId, proxyRegion, targetId, user, password),
-                proxyBinding(engine, proxy.getEndpointHost(), proxy.getProxyPort(),
+                proxyBinding(engine, proxy.getEndpointHost(), proxyPublishedPort(proxy),
                         proxyRegion, accountId, proxy.getDbProxyResourceId()),
                 RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY);
     }
@@ -10947,12 +11131,14 @@ public class RdsService implements Resettable, ResourceProvider {
                 proxy.setProxyPort(proxyPort);
                 if (config.services().rds().mock()) {
                     proxy.setEndpointHost("localhost");
+                    placeRestoredProxy(proxy);
                     proxy.setStatus("available");
                     persistRestoredProxy(proxy);
                     ensureRestoredDefaultTargetGroup(proxy);
                     continue;
                 }
                 proxy.setEndpointHost(dbProxyEndpointHost());
+                placeRestoredProxy(proxy);
                 persistRestoredProxy(proxy);
                 DbProxyTargetGroup targetGroup = ensureRestoredDefaultTargetGroup(proxy);
                 if (targetGroup.getTargets().isEmpty()) {
@@ -10990,6 +11176,67 @@ public class RdsService implements Resettable, ResourceProvider {
                 LOG.warnv(e, "Failed to restore RDS proxy {0}", proxy.getDbProxyName());
             }
         }
+    }
+
+    /**
+     * Puts a restored proxy's endpoints in its VPC, or takes them out, as {@code endpoints-in-vpc} now says: the
+     * setting may have changed across the restart. Those in it are served again at the addresses they had; one whose
+     * relay cannot be served keeps its name, with no address.
+     */
+    private void placeRestoredProxy(DbProxy proxy) {
+        if (endpointAddresses == null) {
+            return;
+        }
+        String accountId = accountIdFromArn(proxy.getDbProxyArn());
+        String region = regionResolver.regionOf(proxy.getDbProxyArn());
+        // In the proxy's account, which a restart reads outside any request.
+        List<DbProxyEndpoint> endpoints = RequestScopes.callAs(accountId, region,
+                () -> proxyEndpointsOf(region, proxy.getDbProxyName()));
+        if (!endpointsInVpc()) {
+            if (!proxyInVpc(proxy) && endpoints.stream().noneMatch(this::proxyEndpointInVpc)) {
+                return;
+            }
+            // Out of the VPC whatever Docker says: a relay it keeps stays tracked until it is removed.
+            discardProxyRelays(proxy, endpoints);
+            proxy.setVpcEndpointId(null);
+            proxy.setVpcEndpointSubnetId(null);
+            proxy.setVpcEndpointAddress(null);
+            for (DbProxyEndpoint endpoint : endpoints) {
+                endpoint.setVpcEndpointId(null);
+                endpoint.setVpcEndpointSubnetId(null);
+                endpoint.setVpcEndpointAddress(null);
+            }
+            persistRestoredProxyEndpoints(accountId, region, endpoints);
+            return;
+        }
+        if (proxyInVpc(proxy)) {
+            proxy.setEndpointHost(AwsEndpoints.rdsProxyHost(proxy.getDbProxyName(), accountId, region));
+        } else if (!assignProxyEndpoint(proxy)) {
+            return;
+        }
+        try {
+            serveProxyInVpc(proxy);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "DB proxy {0} is known by its name with no address until its relay can be served",
+                    proxy.getDbProxyName());
+        }
+        for (DbProxyEndpoint endpoint : endpoints) {
+            if (!proxyEndpointInVpc(endpoint)) {
+                assignProxyEndpoint(proxy, endpoint);
+            }
+            try {
+                serveProxyInVpc(proxy, endpoint);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "DB proxy endpoint {0} is known by its name with no address until its relay can be "
+                        + "served", endpoint.getDbProxyEndpointName());
+            }
+        }
+        persistRestoredProxyEndpoints(accountId, region, endpoints);
+    }
+
+    private void persistRestoredProxyEndpoints(String accountId, String region, List<DbProxyEndpoint> endpoints) {
+        RequestScopes.runAs(accountId, region, () -> endpoints.forEach(endpoint -> proxyEndpoints.put(
+                proxyEndpointKey(region, endpoint.getDbProxyEndpointName()), endpoint)));
     }
 
     private void persistRestoredProxy(DbProxy proxy) {
@@ -11981,9 +12228,13 @@ public class RdsService implements Resettable, ResourceProvider {
         return allocateProxyPort();
     }
 
-    private int reserveOrAllocateProxyPort(int persistedPort) {
-        if (persistedPort > 0 && reserveOwnedProxyPort(persistedPort)) {
-            return persistedPort;
+    /**
+     * {@code preferredPort} when it is free, as a new proxy's engine-default port, otherwise a free port of the range.
+     * A port a relay that may still run forwards to is not free, whoever it served.
+     */
+    private int reserveOrAllocateProxyPort(int preferredPort) {
+        if (preferredPort > 0 && reserveAvailableProxyPort(preferredPort)) {
+            return preferredPort;
         }
         return allocateProxyPort();
     }

@@ -21,6 +21,10 @@ import io.floci.aws.services.rds.model.DbEndpoint;
 import io.floci.aws.services.rds.model.DbInstance;
 import io.floci.aws.services.rds.model.DbInstanceSettings;
 import io.floci.aws.services.rds.model.DbInstanceStatus;
+import io.floci.aws.services.rds.model.DbProxy;
+import io.floci.aws.services.rds.model.DbProxyAuth;
+import io.floci.aws.services.rds.model.DbProxyEndpoint;
+import io.floci.aws.services.rds.model.DbProxyTargetGroup;
 import io.floci.aws.services.rds.model.ReadReplicaRequest;
 import io.floci.aws.services.rds.proxy.RdsProxyBinding;
 import io.floci.aws.services.rds.proxy.RdsProxyManager;
@@ -30,6 +34,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -63,7 +68,8 @@ import static org.mockito.Mockito.when;
 /**
  * With {@code endpoints-in-vpc} on, a standalone instance serves the Port it was created with at its own address in
  * its subnet, under the name RDS gives it, through every step of its life, and a cluster's instances serve the
- * cluster's port the same way, its endpoint names resolving to them; the relay is a real
+ * cluster's port the same way, its endpoint names resolving to them, as do a DB proxy's endpoints on its engine
+ * family's port; the relay is a real
  * {@link io.floci.aws.services.ec2.VpcAddressRelays} over a mocked EC2 and Docker.
  */
 @ResourceLock(ParallelLocks.PORTS)
@@ -87,6 +93,8 @@ class RdsEndpointsInVpcTest {
     private RdsEndpointAddresses endpointAddresses;
     private StorageBackend<String, DbInstance> instances;
     private StorageBackend<String, DbCluster> clusters;
+    private StorageBackend<String, DbProxy> proxies;
+    private StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups;
     private RdsService rdsService;
 
     @BeforeEach
@@ -126,6 +134,8 @@ class RdsEndpointsInVpcTest {
         endpointAddresses = newEndpointAddresses();
         instances = new FailingStore();
         clusters = new InMemoryStorage<>();
+        proxies = new FailingProxyStore();
+        proxyTargetGroups = new InMemoryStorage<>();
         rdsService = newService(instances);
     }
 
@@ -1299,6 +1309,340 @@ class RdsEndpointsInVpcTest {
         assertEquals(new DbEndpoint(clusterHost("orders-copy", "cluster"), 6000), restored.getEndpoint());
     }
 
+    @Test
+    void aProxyServesItsEngineFamilysPortAtItsOwnAddressUnderItsName() {
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+
+        String name = AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION);
+        assertEquals(name, proxy.getEndpoint());
+        assertEquals("10.0.1.20", proxy.getVpcEndpointAddress());
+        assertEquals(SUBNET_A, proxy.getVpcEndpointSubnetId());
+        assertTrue(proxy.getProxyPort() >= 7000 && proxy.getProxyPort() <= 7099);
+        verify(fixture.builder).withCmd(List.of("TCP-LISTEN:5432,fork,reuseaddr,nodelay,backlog=4096",
+                "TCP:host.docker.internal:" + proxy.getProxyPort() + ",nodelay"));
+        assertEquals(Optional.of("10.0.1.20"), endpointAddresses.addressOf(name));
+        assertEquals(name, rdsService.describeDbProxyEndpoints(REGION, "app-proxy", "default", null, null)
+                .endpoints().getFirst().getEndpoint());
+    }
+
+    @Test
+    void twoProxiesBothServeTheirEngineFamilysPortEachAtItsOwnAddress() {
+        DbProxy first = createProxy("first-proxy", "POSTGRESQL");
+        DbProxy second = createProxy("second-proxy", "POSTGRESQL");
+        createProxy("mysql-proxy", "MYSQL");
+
+        assertNotEquals(first.getVpcEndpointAddress(), second.getVpcEndpointAddress());
+        assertNotEquals(first.getProxyPort(), second.getProxyPort());
+        verify(fixture.builder).withCmd(List.of("TCP-LISTEN:3306,fork,reuseaddr,nodelay,backlog=4096",
+                "TCP:host.docker.internal:" + rdsService.getDbProxy("mysql-proxy", REGION).getProxyPort()
+                        + ",nodelay"));
+    }
+
+    @Test
+    void anEndpointAddedToAProxyHasItsOwnNameAndAddressInItsOwnVpc() {
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+
+        DbProxyEndpoint reader = rdsService.createDbProxyEndpoint(REGION, "app-proxy", "reader",
+                List.of(SUBNET_E, SUBNET_F), null, "READ_ONLY", null, Map.of());
+
+        String name = AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION);
+        assertEquals(name, reader.getEndpoint());
+        assertEquals("vpc-other", reader.getVpcId());
+        assertEquals(SUBNET_E, reader.getVpcEndpointSubnetId());
+        assertEquals(Optional.of(reader.getVpcEndpointAddress()), endpointAddresses.addressOf(name));
+        assertNotEquals(proxy.getVpcEndpointAddress(), reader.getVpcEndpointAddress());
+        assertEquals(name, rdsService.describeDbProxyEndpoints(REGION, "app-proxy", "reader", null, null)
+                .endpoints().getFirst().getEndpoint());
+        verify(proxyManager).coverTlsHost(name);
+    }
+
+    @Test
+    void aTokenGeneratedForAnyOfAProxysEndpointsIsGoodAtTheProxy() {
+        create("app", "postgres", 5432);
+        createProxy("app-proxy", "POSTGRESQL");
+        createProxy("other-proxy", "POSTGRESQL");
+        rdsService.createDbProxyEndpoint(REGION, "app-proxy", "reader", List.of(SUBNET_A, SUBNET_B), null,
+                "READ_ONLY", null, Map.of());
+        rdsService.createDbProxyEndpoint(REGION, "other-proxy", "elsewhere", List.of(SUBNET_A, SUBNET_B), null,
+                "READ_WRITE", null, Map.of());
+
+        rdsService.registerDbProxyTargets("app-proxy", null, List.of(), List.of("app"), 90, 40);
+
+        ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
+        verify(proxyManager).startProxy(any(), any(), any(), anyBoolean(),
+                eq(rdsService.getDbProxy("app-proxy", REGION).getProxyPort()), any(), anyInt(),
+                eq(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)), any(), any(), any(), any(),
+                binding.capture(), any());
+        assertEquals(5432, binding.getValue().publishedPort());
+        assertTrue(binding.getValue().acceptsHost(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)));
+        assertTrue(binding.getValue().acceptsHost(AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION)));
+        assertFalse(binding.getValue().acceptsHost(
+                AwsEndpoints.rdsProxyEndpointHost("elsewhere", ACCOUNT, REGION)));
+        assertFalse(binding.getValue().acceptsHost(AwsEndpoints.rdsProxyHost("other-proxy", ACCOUNT, REGION)));
+    }
+
+    @Test
+    void aRenamedProxyEndpointAnswersByItsNewNameAtTheSameAddress() {
+        createProxy("app-proxy", "POSTGRESQL");
+        DbProxyEndpoint endpoint = rdsService.createDbProxyEndpoint(REGION, "app-proxy", "reader",
+                List.of(SUBNET_A, SUBNET_B), null, "READ_ONLY", null, Map.of());
+        String address = endpoint.getVpcEndpointAddress();
+
+        DbProxyEndpoint renamed = rdsService.modifyDbProxyEndpoint(REGION, "reader", "reports", null);
+
+        String name = AwsEndpoints.rdsProxyEndpointHost("reports", ACCOUNT, REGION);
+        assertEquals(name, renamed.getEndpoint());
+        assertEquals(Optional.of(address), endpointAddresses.addressOf(name));
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION)));
+        verify(proxyManager).coverTlsHost(name);
+    }
+
+    @Test
+    void aProxyEndpointCreateTheSubnetHasNoAddressForFailsAndLeavesNothingBehind() {
+        createProxy("app-proxy", "POSTGRESQL");
+        when(ec2Service.allocateVpcPrivateIp(anyString(), anyString(), anyString())).thenReturn(Optional.empty());
+
+        assertThrows(IllegalStateException.class, () -> rdsService.createDbProxyEndpoint(REGION, "app-proxy",
+                "reader", List.of(SUBNET_A, SUBNET_B), null, "READ_ONLY", null, Map.of()));
+
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION)));
+        assertEquals(1, rdsService.describeDbProxyEndpoints(REGION, "app-proxy", null, null, null)
+                .endpoints().size());
+    }
+
+    @Test
+    void aProxyWhoseRecordCannotBeStoredLeavesNoRelayOrPortBehind() {
+        ((FailingProxyStore) proxies).failNextPut = true;
+
+        assertThrows(IllegalStateException.class, () -> createProxy("app-proxy", "POSTGRESQL"));
+
+        assertTrue(fixture.present.isEmpty());
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)));
+        assertEquals(7000, createProxy("next-proxy", "POSTGRESQL").getProxyPort());
+    }
+
+    @Test
+    void modifyingAProxyKeepsItsEndpointInItsVpc() {
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+
+        rdsService.modifyDbProxy("app-proxy", null, null, null, null, true, null, null, null, REGION);
+
+        DbProxy modified = rdsService.getDbProxy("app-proxy", REGION);
+        assertEquals(proxy.getVpcEndpointId(), modified.getVpcEndpointId());
+        assertEquals(proxy.getVpcEndpointAddress(), modified.getVpcEndpointAddress());
+    }
+
+    @Test
+    void aRestartStartsAProxysListenerForItsEndpointsName() {
+        create("app", "postgres", 5432);
+        createProxy("app-proxy", "POSTGRESQL");
+        rdsService.registerDbProxyTargets("app-proxy", null, List.of(), List.of("app"), 90, 40);
+        endpointAddresses.stopManagedContainers();
+        clearInvocations(proxyManager);
+
+        newService(instances, newEndpointAddresses()).restorePersistedRuntime();
+
+        ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
+        verify(proxyManager).startProxy(any(), any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                eq(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)), any(), any(), any(), any(),
+                binding.capture(), any());
+        assertEquals(5432, binding.getValue().publishedPort());
+    }
+
+    @Test
+    void aRenameTheStoreRefusesKeepsTheNameDnsAnswers() throws Exception {
+        createProxy("app-proxy", "POSTGRESQL");
+        DbProxyEndpoint endpoint = rdsService.createDbProxyEndpoint(REGION, "app-proxy", "reader",
+                List.of(SUBNET_A, SUBNET_B), null, "READ_ONLY", null, Map.of());
+        InMemoryStorage<String, DbProxyEndpoint> refusing = new InMemoryStorage<>() {
+            @Override
+            public void delete(String key) {
+                throw new IllegalStateException("store refused the delete");
+            }
+        };
+        refusing.put(REGION + "::reader", endpoint);
+        Field store = RdsService.class.getDeclaredField("proxyEndpoints");
+        store.setAccessible(true);
+        store.set(rdsService, refusing);
+
+        assertThrows(IllegalStateException.class,
+                () -> rdsService.modifyDbProxyEndpoint(REGION, "reader", "reports", null));
+
+        String name = AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION);
+        assertEquals(name, rdsService.describeDbProxyEndpoints(REGION, "app-proxy", "reader", null, null)
+                .endpoints().getFirst().getEndpoint());
+        assertEquals(Optional.of(endpoint.getVpcEndpointAddress()), endpointAddresses.addressOf(name));
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyEndpointHost("reports", ACCOUNT, REGION)));
+    }
+
+    @Test
+    void deletingAProxysEndpointAndThenTheProxyRemovesTheirRelaysAndNames() {
+        createProxy("app-proxy", "POSTGRESQL");
+        rdsService.createDbProxyEndpoint(REGION, "app-proxy", "reader", List.of(SUBNET_A, SUBNET_B), null,
+                "READ_ONLY", null, Map.of());
+        rdsService.createDbProxyEndpoint(REGION, "app-proxy", "writer", List.of(SUBNET_A, SUBNET_B), null,
+                "READ_WRITE", null, Map.of());
+        assertEquals(3, fixture.present.size());
+
+        rdsService.deleteDbProxyEndpoint(REGION, "reader");
+
+        assertEquals(2, fixture.present.size());
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION)));
+
+        rdsService.deleteDbProxy("app-proxy", REGION);
+
+        assertTrue(fixture.present.isEmpty());
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)));
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyEndpointHost("writer", ACCOUNT, REGION)));
+    }
+
+    @Test
+    void aProxyWhoseRelayDockerKeepsIsDeletedAndItsRelayKeepsItsPortFromOthers() {
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+        doThrow(new IllegalStateException("daemon down")).when(fixture.lifecycleManager)
+                .removeIfExistsStrict("relay-1");
+
+        rdsService.deleteDbProxy("app-proxy", REGION);
+
+        assertThrows(AwsException.class, () -> rdsService.getDbProxy("app-proxy", REGION));
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)));
+        assertTrue(endpointAddresses.targetsPort(proxy.getProxyPort()));
+        assertNotEquals(proxy.getProxyPort(), createProxy("next-proxy", "POSTGRESQL").getProxyPort());
+    }
+
+    @Test
+    void aProxyDeleteThatFailsKeepsItsEndpointsServed() {
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+        rdsService.createDbProxyEndpoint(REGION, "app-proxy", "reader", List.of(SUBNET_A, SUBNET_B), null,
+                "READ_ONLY", null, Map.of());
+        doThrow(new IllegalStateException("listener stuck")).when(proxyManager).stopProxy(any());
+
+        assertThrows(IllegalStateException.class, () -> rdsService.deleteDbProxy("app-proxy", REGION));
+
+        assertEquals(2, fixture.present.size());
+        assertEquals(Optional.of(proxy.getVpcEndpointAddress()),
+                endpointAddresses.addressOf(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)));
+        assertTrue(endpointAddresses.names(AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION)));
+    }
+
+    @Test
+    void aProxyCreateTheSubnetHasNoAddressForFailsAndLeavesNothingBehind() {
+        when(ec2Service.allocateVpcPrivateIp(anyString(), anyString(), anyString())).thenReturn(Optional.empty());
+
+        assertThrows(IllegalStateException.class, () -> createProxy("app-proxy", "POSTGRESQL"));
+
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)));
+        assertThrows(AwsException.class, () -> rdsService.getDbProxy("app-proxy", REGION));
+        assertTrue(fixture.present.isEmpty());
+        when(ec2Service.allocateVpcPrivateIp(anyString(), anyString(), anyString()))
+                .thenReturn(Optional.of("10.0.1.30"));
+        assertEquals(7000, createProxy("next-proxy", "POSTGRESQL").getProxyPort());
+    }
+
+    @Test
+    void aRestartServesAProxyAgainAtItsAddressAndTheSettingOffTakesItOut() {
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+        String address = proxy.getVpcEndpointAddress();
+        endpointAddresses.stopManagedContainers();
+
+        RdsEndpointAddresses restarted = newEndpointAddresses();
+        newService(instances, restarted).restorePersistedRuntime();
+
+        assertEquals(Optional.of(address),
+                restarted.addressOf(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)));
+        restarted.stopManagedContainers();
+
+        when(config.services().rds().endpointsInVpc()).thenReturn(false);
+        RdsEndpointAddresses off = newEndpointAddresses();
+        RdsService offService = newService(instances, off);
+        offService.restorePersistedRuntime();
+
+        DbProxy outside = offService.getDbProxy("app-proxy", REGION);
+        assertNull(outside.getVpcEndpointId());
+        assertEquals("localhost", outside.getEndpoint());
+    }
+
+    @Test
+    void theSettingOffTakesAProxyOutOfItsVpcWhileARelayDockerKeepsHoldsItsPort() {
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+        when(config.services().rds().endpointsInVpc()).thenReturn(false);
+        doThrow(new IllegalStateException("daemon down")).when(fixture.lifecycleManager)
+                .removeIfExistsStrict(any(String.class));
+
+        RdsEndpointAddresses restarted = newEndpointAddresses();
+        RdsService service = newService(instances, restarted);
+        service.restorePersistedRuntime();
+
+        DbProxy outside = service.getDbProxy("app-proxy", REGION);
+        assertEquals("localhost", outside.getEndpoint());
+        assertNull(outside.getVpcEndpointId());
+        assertTrue(restarted.targetsPort(proxy.getProxyPort()));
+    }
+
+    @Test
+    void theSettingOffRemovesARelayTheStartupSweepCouldNotOnceDockerConfirms() {
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+        when(config.services().rds().endpointsInVpc()).thenReturn(false);
+        // The startup sweep's removal fails; the proxy's own retry goes through.
+        doThrow(new IllegalStateException("daemon down"))
+                .doAnswer(invocation -> fixture.present.remove(invocation.<String>getArgument(0)))
+                .when(fixture.lifecycleManager).removeIfExistsStrict(any(String.class));
+
+        RdsEndpointAddresses restarted = newEndpointAddresses();
+        newService(instances, restarted).restorePersistedRuntime();
+
+        assertTrue(fixture.placements.all().isEmpty());
+        assertFalse(restarted.targetsPort(proxy.getProxyPort()));
+    }
+
+    @Test
+    void aProxyOutsideItsVpcIsNotGivenAPortARetainedRelayForwardsTo() {
+        endpointAddresses.serve(RdsEndpointAddresses.newRelayId(), ACCOUNT, REGION, "vpc-default", SUBNET_A, 5432,
+                5432, "retained", null);
+        when(config.services().rds().endpointsInVpc()).thenReturn(false);
+
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+
+        assertNotEquals(5432, proxy.getProxyPort());
+        // A free engine-default port is still the one a new proxy takes.
+        assertEquals(3306, createProxy("mysql-proxy", "MYSQL").getProxyPort());
+    }
+
+    @Test
+    void namesThatDifferOnlyInCaseAreOneProxyOrEndpointName() {
+        createProxy("Orders", "POSTGRESQL");
+        rdsService.createDbProxyEndpoint(REGION, "Orders", "Reader", List.of(SUBNET_A, SUBNET_B), null,
+                "READ_ONLY", null, Map.of());
+
+        assertEquals("DBProxyAlreadyExistsFault",
+                assertThrows(AwsException.class, () -> createProxy("orders", "POSTGRESQL")).getErrorCode());
+        for (String name : List.of("reader", "Default")) {
+            assertEquals("DBProxyEndpointAlreadyExistsFault", assertThrows(AwsException.class,
+                    () -> rdsService.createDbProxyEndpoint(REGION, "Orders", name, List.of(SUBNET_A, SUBNET_B), null,
+                            "READ_ONLY", null, Map.of())).getErrorCode());
+        }
+        DbProxyEndpoint renamed = rdsService.modifyDbProxyEndpoint(REGION, "Reader", "reader", null);
+        assertEquals(AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION), renamed.getEndpoint());
+    }
+
+    @Test
+    void mockModeKeepsTheProxyOnFloci() {
+        when(config.services().rds().mock()).thenReturn(true);
+
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+
+        assertEquals("localhost", proxy.getEndpoint());
+        assertNull(proxy.getVpcEndpointId());
+        assertTrue(fixture.present.isEmpty());
+    }
+
+    private DbProxy createProxy(String name, String engineFamily) {
+        return rdsService.createDbProxy(name, engineFamily, false, false, "arn:aws:iam::123456789012:role/proxy",
+                List.of(SUBNET_A, SUBNET_B), List.of(), List.of(new DbProxyAuth("SECRETS",
+                        "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-AbCdEf", "DISABLED", null, null)),
+                Map.of());
+    }
+
     private DbCluster createCluster(String id, Integer port) {
         return rdsService.createDbCluster(id, "aurora-postgresql", "16.3", "admin", "password", "app", false, null,
                 null, null, false, REGION, null, null, null, false, null, null, false, port);
@@ -1327,7 +1671,7 @@ class RdsEndpointsInVpcTest {
     private RdsService newService(StorageBackend<String, DbInstance> store, RdsEndpointAddresses addresses) {
         return new RdsService(containerManager, proxyManager, ec2Service, new RegionResolver(REGION, ACCOUNT),
                 config, store, clusters, new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), null, null, null, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), null, null, null, proxies, proxyTargetGroups,
                 new InMemoryStorage<>(), null, null, null, addresses);
     }
 
@@ -1339,6 +1683,20 @@ class RdsEndpointsInVpcTest {
 
     private RdsService newServiceView() {
         return newService(instances);
+    }
+
+    /** A proxy store whose next write fails, as a full disk would make it. */
+    private static final class FailingProxyStore extends InMemoryStorage<String, DbProxy> {
+        boolean failNextPut;
+
+        @Override
+        public synchronized void put(String key, DbProxy value) {
+            if (failNextPut) {
+                failNextPut = false;
+                throw new IllegalStateException("store refused the write");
+            }
+            super.put(key, value);
+        }
     }
 
     /** A store whose next write of an available instance fails, as a full disk would make it. */
