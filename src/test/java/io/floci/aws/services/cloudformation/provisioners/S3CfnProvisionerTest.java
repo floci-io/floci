@@ -881,6 +881,20 @@ class S3CfnProvisionerTest {
         assertTrue(r.getAttributes().isEmpty());
     }
 
+    @Test
+    void aBucketPolicyIntrinsicReturningJsonTextIsNotEncodedTwice() {
+        JsonNode document = props("""
+                {"Fn::Sub": "{\\"Version\\":\\"2012-10-17\\",\\"Statement\\":[]}"}
+                """);
+        String resolved = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        when(ctx.engine().resolveNode(document)).thenReturn(MAPPER.getNodeFactory().textNode(resolved));
+        JsonNode properties = MAPPER.createObjectNode().put("Bucket", "b").set("PolicyDocument", document);
+
+        provisioner.provision(resource("Policy", "AWS::S3::BucketPolicy"), properties, ctx);
+
+        verify(s3).putBucketPolicy("b", resolved);
+    }
+
     /**
      * provision runs again on every UpdateStack. The id follows the bucket, which is create-only,
      * so an unchanged policy keeps its id and does not look like a replaced resource.
