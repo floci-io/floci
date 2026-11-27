@@ -309,7 +309,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             group = rdsService.modifyDbSubnetGroup(name, subnetIds, region);
         } else {
             group = rdsService.createDbSubnetGroup(name, description, subnetIds, region);
-            deleteRenamedResource(priorPhysicalId, name, id -> rdsService.deleteDbSubnetGroup(id), "DB subnet group");
+            deleteRenamedResource(priorPhysicalId, name, id -> rdsService.deleteDbSubnetGroup(id, region), "DB subnet group");
         }
         r.setPhysicalId(group.getDbSubnetGroupName());
         r.getAttributes().put("DBSubnetGroupName", group.getDbSubnetGroupName());
