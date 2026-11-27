@@ -467,7 +467,9 @@ launches nodes on AWS. Floci checks every 10 seconds.
 
 - **Pool.** The pod goes to the first NodePool, by `weight` then name, with an instance type the pool's requirements
   allow, whose node the pod's `nodeSelector`, required node affinity and tolerations accept, and that fits its CPU and
-  memory requests. A requirement on a label Floci doesn't give its nodes (a GPU count, say) is left out. A pod one of
+  memory requests. A type whose node would take the pool's nodes, joined or joining, past its `limits` (`cpu`,
+  `memory`, `nodes`) is left out, as AWS stopped at two 2-vCPU nodes for a pool limited to 4 vCPUs, so a pod such a
+  pool can't take goes to the next pool, or waits. A requirement on a label Floci doesn't give its nodes (a GPU count, say) is left out. A pod one of
   the pool's schedulable nodes has room for, joined or still joining, waits for the scheduler instead. A joined
   node's room is its `status.allocatable` CPU, memory and pods less its pods' requests (sidecars included); one still
   joining has its instance type's whole size and 110 pods. A cordoned node, one with a taint of its own the pod
@@ -526,6 +528,8 @@ launches nodes on AWS. Floci checks every 10 seconds.
   with its instance, Karpenter's finalizer taken off (other finalizers stay). A claim that couldn't be made is made
   on a later pass. Floci touches only the claims labelled `app.kubernetes.io/managed-by: eks`. `kubectl get
   nodeclaims` shows the type, capacity type, zone, node and readiness, as Karpenter's columns do.
+- **Pool status.** Each pool's `status.resources` (`cpu`, `memory`, `pods`, `nodes`) and `status.nodes` say what its
+  joined nodes have, the sum of their capacity, as AWS shows them.
 - **Removal.** Turning compute off terminates the cluster's Auto Mode instances and takes their nodes out of it.
   Deleting the cluster terminates them, waits up to a minute for them to finish terminating, as they hold the
   cluster security group deleted next (one that doesn't fails the delete, which can be retried), and deletes the

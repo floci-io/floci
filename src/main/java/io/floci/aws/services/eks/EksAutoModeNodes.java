@@ -110,11 +110,43 @@ final class EksAutoModeNodes {
     }
 
     /**
+     * The CPU (millicores), memory (bytes) and nodes a pool's nodes have, or a pool's {@code limits} allow, each
+     * {@link Long#MAX_VALUE} when unlimited.
+     */
+    record Capacity(long cpuMillis, long memoryBytes, long nodes) {
+
+        static final Capacity NONE = new Capacity(0, 0, 0);
+        static final Capacity UNLIMITED = new Capacity(Long.MAX_VALUE, Long.MAX_VALUE, Long.MAX_VALUE);
+
+        /** The capacity of one node of {@code type}. */
+        static Capacity of(CatalogInstanceType type) {
+            return new Capacity(type.vcpu * 1000L, type.memoryMib * 1024L * 1024L, 1);
+        }
+
+        Capacity plus(Capacity other) {
+            return new Capacity(cpuMillis + other.cpuMillis, memoryBytes + other.memoryBytes, nodes + other.nodes);
+        }
+
+        /** Whether this, a pool's nodes with one more, stays within {@code limits}. */
+        boolean within(Capacity limits) {
+            return cpuMillis <= limits.cpuMillis && memoryBytes <= limits.memoryBytes && nodes <= limits.nodes;
+        }
+    }
+
+    /**
      * A NodePool: its NodeClass, its requirements, the taints and labels its nodes get, its weight, how long a node
-     * stays empty before it goes (null for {@code Never}), and its disruption budgets' {@code nodes} values.
+     * stays empty before it goes (null for {@code Never}), its disruption budgets' {@code nodes} values, and the
+     * {@code limits} its nodes' capacity may not pass.
      */
     record NodePool(String name, String nodeClass, List<Requirement> requirements, List<Taint> taints,
-                    Map<String, String> labels, int weight, Duration consolidateAfter, List<String> budgets) {
+                    Map<String, String> labels, int weight, Duration consolidateAfter, List<String> budgets,
+                    Capacity limits) {
+
+        /** A pool without limits. */
+        NodePool(String name, String nodeClass, List<Requirement> requirements, List<Taint> taints,
+                 Map<String, String> labels, int weight, Duration consolidateAfter, List<String> budgets) {
+            this(name, nodeClass, requirements, taints, labels, weight, consolidateAfter, budgets, Capacity.UNLIMITED);
+        }
 
         /**
          * How many of the pool's {@code nodes} may be disrupted at once: the least its budgets allow, a percentage
@@ -320,6 +352,17 @@ final class EksAutoModeNodes {
     /** As above; with the region the nodes join in, whose label DaemonSets may select on. */
     static List<Launch> plan(List<NodePool> pools, List<PendingPod> pods, List<CatalogInstanceType> types,
                              Map<String, List<String>> zonesByNodeClass, List<PendingPod> daemons, String region) {
+        return plan(pools, pods, types, zonesByNodeClass, daemons, region, Map.of());
+    }
+
+    /**
+     * As above; with the capacity each pool's nodes already have, joined or joining, by pool name: no pool gets a node
+     * that would take it past its {@code limits}, as Karpenter counts them, and a pod goes to the next pool that
+     * could take it.
+     */
+    static List<Launch> plan(List<NodePool> pools, List<PendingPod> pods, List<CatalogInstanceType> types,
+                             Map<String, List<String>> zonesByNodeClass, List<PendingPod> daemons, String region,
+                             Map<String, Capacity> used) {
         List<NodePool> ordered = pools.stream()
                 .sorted(Comparator.comparingInt(NodePool::weight).reversed().thenComparing(NodePool::name))
                 .toList();
@@ -332,7 +375,7 @@ final class EksAutoModeNodes {
         for (PendingPod pod : pods) {
             for (NodePool pool : ordered) {
                 if (candidate(pool, sized, zonesOf(pool, zonesByNodeClass), pod, pod.cpuMillis(), pod.memoryBytes(),
-                        daemons, region)
+                        daemons, region, used)
                         .isPresent()) {
                     byPool.computeIfAbsent(pool.name(), k -> new ArrayList<>()).add(pod);
                     break;
@@ -350,10 +393,11 @@ final class EksAutoModeNodes {
             PendingPod largest = group.stream().max(Comparator.comparingLong(PendingPod::cpuMillis)
                     .thenComparingLong(PendingPod::memoryBytes)).orElseThrow();
             List<String> placesIn = zonesOf(pool, zonesByNodeClass);
-            Optional<Placement> placement = candidate(pool, sized, placesIn, largest, cpu, memory, daemons, region)
+            Optional<Placement> placement = candidate(pool, sized, placesIn, largest, cpu, memory, daemons, region,
+                    used)
                     .filter(p -> group.stream().allMatch(pod -> pod.fits(labels(p.type(), pool, p.zone()), pool.taints())))
                     .or(() -> candidate(pool, sized, placesIn, largest, largest.cpuMillis(), largest.memoryBytes(),
-                            daemons, region));
+                            daemons, region, used));
             placement.ifPresent(p -> launches.add(new Launch(pool, p.type(), p.zone(),
                     labels(p.type(), pool, p.zone()), List.copyOf(group))));
         }
@@ -412,8 +456,13 @@ final class EksAutoModeNodes {
 
     private static Optional<Placement> candidate(NodePool pool, List<CatalogInstanceType> sized, List<String> zones,
                                                  PendingPod pod, long cpuMillis, long memoryBytes,
-                                                 List<PendingPod> daemons, String region) {
+                                                 List<PendingPod> daemons, String region,
+                                                 Map<String, Capacity> used) {
+        Capacity poolUsed = used.getOrDefault(pool.name(), Capacity.NONE);
         for (CatalogInstanceType type : sized) {
+            if (!poolUsed.plus(Capacity.of(type)).within(pool.limits())) {
+                continue;
+            }
             for (String zone : zones) {
                 Map<String, String> labels = labels(type, pool, zone);
                 long[] daemon = daemonRequests(daemons, withRegion(labels, region), pool.taints());
@@ -512,6 +561,24 @@ final class EksAutoModeNodes {
         return Optional.of(new NodeAsk(selector, List.copyOf(terms), List.copyOf(tolerations)));
     }
 
+    /** A CPU quantity as Kubernetes writes it: whole cores as a number, else millicores ({@code 1780m}). */
+    static String cpuQuantity(long millis) {
+        return millis % 1000 == 0 ? String.valueOf(millis / 1000) : millis + "m";
+    }
+
+    /** A memory quantity as a node's capacity gives it, in kibibytes ({@code 3858672Ki}), or bytes when not whole. */
+    static String memoryQuantity(long bytes) {
+        return bytes % 1024 == 0 ? bytes / 1024 + "Ki" : String.valueOf(bytes);
+    }
+
+    /** A pool's {@code limits}: {@code cpu}, {@code memory} and {@code nodes}, each unlimited when it doesn't say. */
+    static Capacity limits(JsonNode limits) {
+        return new Capacity(
+                limits.hasNonNull("cpu") ? cpuMillis(limits.path("cpu").asText()) : Long.MAX_VALUE,
+                limits.hasNonNull("memory") ? bytes(limits.path("memory").asText()) : Long.MAX_VALUE,
+                limits.hasNonNull("nodes") ? count(limits.path("nodes").asText()) : Long.MAX_VALUE);
+    }
+
     /** The NodePools of {@code kubectl get nodepools -o json}. */
     static List<NodePool> nodePools(JsonNode list) {
         List<NodePool> pools = new ArrayList<>();
@@ -544,7 +611,7 @@ final class EksAutoModeNodes {
                     template.path("spec").path("nodeClassRef").path("name").asText("default"),
                     requirements(template.path("spec").path("requirements")), List.copyOf(taints), labels,
                     item.path("spec").path("weight").asInt(0), duration(disruption.path("consolidateAfter").asText("0s")),
-                    List.copyOf(budgets)));
+                    List.copyOf(budgets), limits(item.path("spec").path("limits"))));
         }
         return pools;
     }
@@ -738,22 +805,12 @@ final class EksAutoModeNodes {
     }
 
     /**
-     * A CPU quantity in millicores: {@code 100m}, {@code 1}, {@code 0.5}, {@code 2e3}; rounded up, as Kubernetes
-     * does; 0 for none or one Floci can't read.
+     * A CPU quantity in millicores: {@code 100m}, {@code 1}, {@code 0.5}, {@code 2e3}, {@code 1k}; rounded up, as
+     * Kubernetes does; 0 for none or one Floci can't read.
      */
     static long cpuMillis(String quantity) {
-        Matcher m = QUANTITY.matcher(quantity.trim());
-        if (!m.matches()) {
-            return 0;
-        }
-        BigDecimal number = new BigDecimal(m.group(1));
-        BigDecimal millis = switch (m.group(2)) {
-            case "m" -> number;
-            case "" -> number.movePointRight(3);
-            case "k" -> number.movePointRight(6);
-            default -> BigDecimal.ZERO;
-        };
-        return millis.setScale(0, RoundingMode.CEILING).longValue();
+        BigDecimal value = quantity(quantity);
+        return value == null ? 0 : rounded(value.movePointRight(3));
     }
 
     /**
@@ -761,13 +818,31 @@ final class EksAutoModeNodes {
      * up; 0 for none or one Floci can't read.
      */
     static long bytes(String quantity) {
+        BigDecimal value = quantity(quantity);
+        return value == null ? 0 : rounded(value);
+    }
+
+    /** A count given as a quantity, as a pool's {@code limits.nodes} may be: {@code 10}, {@code 1k}; rounded up. */
+    static long count(String quantity) {
+        BigDecimal value = quantity(quantity);
+        return value == null ? 0 : rounded(value);
+    }
+
+    /**
+     * A Kubernetes quantity in its base unit, with any of its suffixes: decimal ({@code n}, {@code u}, {@code m},
+     * {@code k}, {@code M}, {@code G}, {@code T}, {@code P}, {@code E}), binary ({@code Ki} to {@code Ei}) or an
+     * exponent; {@code null} for one Floci can't read.
+     */
+    static BigDecimal quantity(String quantity) {
         Matcher m = QUANTITY.matcher(quantity.trim());
         if (!m.matches()) {
-            return 0;
+            return null;
         }
         BigDecimal number = new BigDecimal(m.group(1));
-        BigDecimal value = switch (m.group(2)) {
+        return switch (m.group(2)) {
             case "" -> number;
+            case "n" -> number.movePointLeft(9);
+            case "u" -> number.movePointLeft(6);
             case "m" -> number.movePointLeft(3);
             case "k" -> number.movePointRight(3);
             case "M" -> number.movePointRight(6);
@@ -781,9 +856,14 @@ final class EksAutoModeNodes {
             case "Ti" -> number.multiply(BigDecimal.valueOf(1L << 40));
             case "Pi" -> number.multiply(BigDecimal.valueOf(1L << 50));
             case "Ei" -> number.multiply(BigDecimal.valueOf(1L << 60));
-            default -> BigDecimal.ZERO;
+            default -> null;
         };
-        return value.setScale(0, RoundingMode.CEILING).longValue();
+    }
+
+    /** Rounded up, as Kubernetes rounds a quantity, and held at {@code Long.MAX_VALUE}. */
+    private static long rounded(BigDecimal value) {
+        BigDecimal up = value.setScale(0, RoundingMode.CEILING);
+        return up.compareTo(BigDecimal.valueOf(Long.MAX_VALUE)) >= 0 ? Long.MAX_VALUE : up.longValue();
     }
 
     /** A Kubernetes duration such as {@code 30s}, {@code 5m} or {@code 1h30m}; null for {@code Never}. */

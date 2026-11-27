@@ -325,6 +325,32 @@ class EksAutoModeComputeTest {
                 + "\"finalizers\": [\"karpenter.sh/termination\"" + moreFinalizers + "]}, \"status\": {}}";
     }
 
+    /**
+     * A pool at its limit launches nothing more for a pending pod, and its status says what its joined nodes have,
+     * as AWS shows it: their CPU, memory and pods, and how many they are.
+     */
+    @Test
+    void aPoolAtItsLimitLaunchesNothingAndItsStatusShowsItsNodes() {
+        joinedNode("i-node", "node-1");
+        // Cordoned, so the pending pod has no room on it and would get a node of its own but for the limit.
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}, "
+                + "\"spec\": {\"unschedulable\": true}, "
+                + "\"status\": {\"capacity\": {\"cpu\": \"2\", \"memory\": \"4194304Ki\", \"pods\": \"110\"}}}]}");
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"limits\": {\"cpu\": \"2\"}, \"template\""));
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
+        verify(ec2, never()).runInstances(anyString(), anyString(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                anyString(), anyString(), anyList(), anyString(), anyString(), any(), any(), anyInt(), any(), any(),
+                any(), anyString(), anyBoolean(), any(), any(), any(), anyBoolean(), any(), any());
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "patch", "nodepool",
+                "general-purpose", "--subresource=status", "--type=merge", "-p",
+                "{\"status\":{\"resources\":{\"cpu\":\"2\",\"memory\":\"4194304Ki\",\"pods\":\"110\","
+                        + "\"nodes\":\"1\"},\"nodes\":1}}"}, 15);
+    }
+
     @Test
     void aPoolWhoseNodeClassIsMissingOrWhoseImageTheCatalogLacksLaunchesNothing() {
         lists.put("nodeclasses", "{\"items\": []}");

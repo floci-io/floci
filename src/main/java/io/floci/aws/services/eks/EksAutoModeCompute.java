@@ -2,6 +2,7 @@ package io.floci.aws.services.eks;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.RequestScopes;
@@ -178,12 +179,22 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         removeStrayNodes(cluster, region, nodesByName);
         Set<String> claimsDeleted = syncNodeClaims(cluster, region, nodesByName, podList);
         removeStoppedOfDeletedClaims(cluster, region, claimsDeleted);
+        // Read before the pass may stop, so a pool whose last node went shows none.
+        JsonNode poolList = read(cluster, "nodepools");
+        updatePoolStatus(cluster, region, poolList, launched, nodesByName);
         if (launched.isEmpty() && pods.isEmpty()) {
             return;
         }
-        Pools poolsRead = Pools.of(read(cluster, "nodepools"));
+        Pools poolsRead = Pools.of(poolList);
         Map<String, NodePool> pools = poolsRead.byName();
         Map<String, JsonNode> poolItems = poolsRead.items();
+        // What each pool's nodes have, joined or joining, which its limits count, as Karpenter counts its NodeClaims.
+        Map<String, EksAutoModeNodes.Capacity> poolUsed = new HashMap<>();
+        for (Instance instance : launched) {
+            instanceTypes.find(instance.getInstanceType()).ifPresent(type -> poolUsed.merge(
+                    String.valueOf(tag(instance, POOL_TAG)), EksAutoModeNodes.Capacity.of(type),
+                    EksAutoModeNodes.Capacity::plus));
+        }
         // The DaemonSet pods a node runs besides its workload, which room and sizing count; read only for pods to place.
         List<EksAutoModeNodes.PendingPod> daemons = pods.isEmpty() ? List.of()
                 : EksAutoModeNodes.daemonPods(read(cluster, "daemonsets"));
@@ -299,7 +310,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         nodeClasses.forEach((name, spec) -> zonesByNodeClass.put(name, ids(spec.path("subnetSelectorTerms")).stream()
                 .map(subnetZones::get).filter(Objects::nonNull).distinct().toList()));
         for (Launch launch : EksAutoModeNodes.plan(List.copyOf(pools.values()), withoutRoom,
-                instanceTypes.instanceTypes(), zonesByNodeClass, daemons, region)) {
+                instanceTypes.instanceTypes(), zonesByNodeClass, daemons, region, poolUsed)) {
             try {
                 launch(cluster, region, launch, nodeClasses.get(launch.pool().nodeClass()), subnetZones,
                         poolItems.getOrDefault(launch.pool().name(), MAPPER.createObjectNode()));
@@ -947,6 +958,52 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
 
     private static List<String> podNames(Launch launch) {
         return launch.pods().stream().map(p -> p.namespace() + "/" + p.name()).toList();
+    }
+
+    /**
+     * Keeps each pool's {@code status.resources} and {@code status.nodes} what its joined nodes have, as Karpenter
+     * reports them: the sum of their capacity's CPU, memory and pods, and how many they are. A pool whose status
+     * already says so isn't written.
+     */
+    private void updatePoolStatus(Cluster cluster, String region, JsonNode poolList, List<Instance> launched,
+                                  Map<String, JsonNode> nodesByName) {
+        Map<String, long[]> totals = new HashMap<>();
+        for (Instance instance : launched) {
+            JsonNode node = nodesByName.get(clusterManager.deriveInstanceNodeName(instance, region));
+            if (node == null) {
+                continue;
+            }
+            JsonNode capacity = node.path("status").path("capacity");
+            long[] total = totals.computeIfAbsent(String.valueOf(tag(instance, POOL_TAG)), k -> new long[4]);
+            total[0] += EksAutoModeNodes.cpuMillis(capacity.path("cpu").asText(""));
+            total[1] += EksAutoModeNodes.bytes(capacity.path("memory").asText(""));
+            total[2] += capacity.path("pods").asLong(0);
+            total[3]++;
+        }
+        for (JsonNode item : poolList.path("items")) {
+            String name = item.path("metadata").path("name").asText();
+            long[] total = totals.getOrDefault(name, new long[4]);
+            ObjectNode resources = MAPPER.createObjectNode();
+            resources.put("cpu", EksAutoModeNodes.cpuQuantity(total[0]));
+            resources.put("memory", EksAutoModeNodes.memoryQuantity(total[1]));
+            resources.put("pods", String.valueOf(total[2]));
+            resources.put("nodes", String.valueOf(total[3]));
+            JsonNode status = item.path("status");
+            if (resources.equals(status.path("resources")) && status.path("nodes").asLong(-1) == total[3]) {
+                continue;
+            }
+            ObjectNode patch = MAPPER.createObjectNode();
+            ObjectNode patchStatus = patch.putObject("status");
+            patchStatus.set("resources", resources);
+            patchStatus.put("nodes", total[3]);
+            try {
+                exec(cluster, List.of("kubectl", "patch", "nodepool", name, "--subresource=status", "--type=merge",
+                        "-p", patch.toString()), "patch nodepool " + name);
+            } catch (RuntimeException e) {
+                LOG.warnv("EKS Auto Mode NodePool {0} of cluster {1} doesn''t show its nodes yet: {2}", name,
+                        cluster.getName(), e.getMessage());
+            }
+        }
     }
 
     /** The cluster's nodes by name. */
