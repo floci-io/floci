@@ -527,9 +527,9 @@ public class CloudFormationQueryHandler {
         try {
             CloudFormationService.StackResourcesView view = cfnService.describeStackResourcesView(stackName,
                     params.getFirst("LogicalResourceId"), params.getFirst("PhysicalResourceId"), region);
-            // The stack's own name, not what the caller passed: it may be an ARN, or absent
-            // entirely when the call named only a PhysicalResourceId.
-            return stackResourcesXml(view.resources(), view.stackName(), region);
+            // The view carries the stack's own name and id, not what the caller passed: that may
+            // be an ARN, or absent entirely when the call named only a PhysicalResourceId.
+            return stackResourcesXml(view);
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
@@ -565,8 +565,9 @@ public class CloudFormationQueryHandler {
         String stackName = params.getFirst("StackName");
         String logicalId = params.getFirst("LogicalResourceId");
         try {
-            List<StackResource> resources = cfnService.describeStackResources(stackName, region);
-            StackResource res = resources.stream()
+            CloudFormationService.StackResourcesView view =
+                    cfnService.describeStackResourcesView(stackName, null, null, region);
+            StackResource res = view.resources().stream()
                     .filter(r -> logicalId.equals(r.getLogicalId()))
                     .findFirst()
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -575,6 +576,8 @@ public class CloudFormationQueryHandler {
                     .start("DescribeStackResourceResponse", CF_NS)
                     .start("DescribeStackResourceResult")
                     .start("StackResourceDetail")
+                    .elem("StackName", view.stackName())
+                    .elem("StackId", view.stackId())
                     .elem("LogicalResourceId", res.getLogicalId())
                     .elem("PhysicalResourceId", res.getPhysicalId())
                     .elem("ResourceType", res.getResourceType())
@@ -800,14 +803,15 @@ public class CloudFormationQueryHandler {
         return xml.build();
     }
 
-    private Response stackResourcesXml(List<StackResource> resources, String stackName, String region) {
+    private Response stackResourcesXml(CloudFormationService.StackResourcesView view) {
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeStackResourcesResponse", CF_NS)
                 .start("DescribeStackResourcesResult")
                 .start("StackResources");
-        for (StackResource r : resources) {
+        for (StackResource r : view.resources()) {
             xml.start("member")
-               .elem("StackName", stackName)
+               .elem("StackName", view.stackName())
+               .elem("StackId", view.stackId())
                .elem("LogicalResourceId", r.getLogicalId())
                .elem("PhysicalResourceId", r.getPhysicalId())
                .elem("ResourceType", r.getResourceType())
