@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import io.floci.aws.core.common.TagOnCreate.TagSet;
 import io.floci.aws.core.common.TagOnCreate.Tagging;
+import io.floci.aws.testing.MockQueryRequests;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import org.junit.jupiter.api.Test;
@@ -289,7 +290,8 @@ class TagOnCreateTest {
     }
 
     private static ContainerRequestContext form(String body) {
-        return request("application/x-www-form-urlencoded", body.getBytes(StandardCharsets.UTF_8));
+        return MockQueryRequests.postedToRoot(request("application/x-www-form-urlencoded",
+                body.getBytes(StandardCharsets.UTF_8)));
     }
 
     private static ContainerRequestContext request(String mediaType, byte[] bytes) {

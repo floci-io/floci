@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.RequestResourceMembers.ArnFormat;
 import io.floci.aws.core.common.RequestResourceMembers.Member;
 import io.floci.aws.core.common.RequestResourceMembers.Resource;
+import io.floci.aws.testing.MockQueryRequests;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
@@ -1044,7 +1045,7 @@ class RequestResourceMembersTest {
     }
 
     private static ContainerRequestContext form(String body) {
-        return request("application/x-www-form-urlencoded", body);
+        return MockQueryRequests.postedToRoot(request("application/x-www-form-urlencoded", body));
     }
 
     private static ContainerRequestContext request(String mediaType, String body) {

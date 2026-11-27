@@ -163,6 +163,7 @@ class Ec2NetworkInterfaceResourceArnTest {
         when(context.getUriInfo()).thenReturn(uri);
         when(uri.getPath()).thenReturn("/");
         when(uri.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
+        when(context.getMethod()).thenReturn("POST");
         when(context.getMediaType()).thenReturn(MediaType.APPLICATION_FORM_URLENCODED_TYPE);
         when(context.getEntityStream()).thenReturn(
                 new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));

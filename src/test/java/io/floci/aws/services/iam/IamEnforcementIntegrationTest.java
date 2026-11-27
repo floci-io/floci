@@ -7,6 +7,7 @@ import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.ec2.model.Vpc;
 import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.testing.MockQueryRequests;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -359,7 +360,7 @@ class IamEnforcementIntegrationTest {
         when(request.getMediaType()).thenReturn(MediaType.valueOf("application/x-www-form-urlencoded"));
         when(request.getEntityStream())
                 .thenReturn(new ByteArrayInputStream(form.getBytes(StandardCharsets.UTF_8)));
-        return request;
+        return MockQueryRequests.postedToRoot(request);
     }
 
     private static ContainerRequestContext s3Request(String path) {

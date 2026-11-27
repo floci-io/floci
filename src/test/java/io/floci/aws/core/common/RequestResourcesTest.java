@@ -2,6 +2,7 @@ package io.floci.aws.core.common;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
+import io.floci.aws.testing.MockQueryRequests;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
@@ -1748,7 +1749,7 @@ class RequestResourcesTest {
     }
 
     private static ContainerRequestContext form(String body) {
-        return request("application/x-www-form-urlencoded", body);
+        return MockQueryRequests.postedToRoot(request("application/x-www-form-urlencoded", body));
     }
 
     /** The JSON body as EventBridge's JSON 1.1 handler serves it. */

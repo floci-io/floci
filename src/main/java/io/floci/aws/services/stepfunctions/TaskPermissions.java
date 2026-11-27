@@ -571,7 +571,7 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
         }
         AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
         List<Permission> checked = new ArrayList<>(permissions);
-        RequestChecks.passedRoles(IamAuthorizedActions.actionFor(namespace, operation), request, owner.partition(),
+        RequestChecks.passedRoles(namespace + ":" + operation, request, owner.partition(),
                         owner.region(), owner.accountId(), lookups.roles())
                 .forEach(check -> checked.add(new Permission(check.action(), check.resource(), check.context())));
         return checked;

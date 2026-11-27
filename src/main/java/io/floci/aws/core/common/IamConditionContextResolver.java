@@ -781,7 +781,8 @@ public class IamConditionContextResolver {
                 && s3UploadEncryptionConditionContext(ctx) == null && s3Service.isResolvable();
     }
 
-    private static String bodyText(ContainerRequestContext ctx) {
+    /** The request's body as UTF-8 text, buffered once and restored for its handler; null when it has none. */
+    static String bodyText(ContainerRequestContext ctx) {
         byte[] body = bufferEntity(ctx);
         return body == null ? null : new String(body, StandardCharsets.UTF_8);
     }
@@ -1228,8 +1229,9 @@ public class IamConditionContextResolver {
     }
 
     /**
-     * The decoded form parameters of a Query-protocol request, buffered once per request and
-     * restored for the controller that reads the form next. A repeated key keeps its first
+     * The decoded form parameters of a Query-protocol request, one the Query controller dispatches
+     * ({@link IamActionRegistry#isQueryRequest}), buffered once per request and restored for the
+     * controller that reads the form next; none for any other request. A repeated key keeps its first
      * value, which is the value the Query handlers read through {@code getFirst}, so the
      * resource this context describes is the resource the handler acts on.
      */
@@ -1247,16 +1249,17 @@ public class IamConditionContextResolver {
             });
             return parameters;
         }
+        // Only a request the Query controller dispatches carries its members as a form. Another protocol's handler
+        // reads its own body (S3's XML, a REST service's JSON) whatever Content-Type it is sent with, so a form type on
+        // it names no members here.
+        if (!IamActionRegistry.isQueryRequest(ctx)) {
+            return Map.of();
+        }
         Object cached = ctx.getProperty(BUFFERED_FORM_BODY);
         if (cached instanceof Map<?, ?> map) {
             return (Map<String, String>) map;
         }
         MediaType mediaType = ctx.getMediaType();
-        if (mediaType == null
-                || !"application".equalsIgnoreCase(mediaType.getType())
-                || !"x-www-form-urlencoded".equalsIgnoreCase(mediaType.getSubtype())) {
-            return Map.of();
-        }
         byte[] body = bufferEntity(ctx);
         if (body == null || body.length == 0) {
             return Map.of();

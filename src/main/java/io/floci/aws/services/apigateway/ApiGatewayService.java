@@ -524,6 +524,11 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return resourceStore.scan(k -> k.startsWith(prefix));
     }
 
+    public PaginatedResult<ApiGatewayResource> getResourcePage(String region, String apiId, Integer limit,
+                                                               String position) {
+        return pageById(getResources(region, apiId), ApiGatewayResource::getId, limit, position);
+    }
+
     /** The root resource id, with a resource-store fallback for data persisted before it was stored on the API. */
     public Optional<String> findRootResourceId(String region, String apiId) {
         Optional<RestApi> api = apiStore.get(apiKey(region, apiId));

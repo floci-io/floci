@@ -498,4 +498,39 @@ class S3ReplicationConfigurationIntegrationTest {
             .statusCode(404)
             .body(containsString("ReplicationConfigurationNotFoundError"));
     }
+
+    /**
+     * {@code Role} is a required <em>scalar</em> member of the configuration itself (botocore
+     * s3/2006-03-01/service-2.json: {@code "Role":{"shape":"Role"}}, a string), and the document
+     * must be well-formed as a whole. A second Role, one holding elements, one only inside a rule,
+     * or content after the configuration ends does not validate, so none is stored.
+     */
+    @Test
+    @Order(19)
+    void putReplicationRejectsARoleThatIsNotTheConfigurationsOneTextElement() {
+        String role = "<Role>arn:aws:iam::000000000000:role/replication-role</Role>";
+        String rule = "<Rule><ID>r</ID><Status>Enabled</Status><Destination>"
+                + "<Bucket>arn:aws:s3:::replication-config-int-test-target</Bucket></Destination></Rule>";
+        String open = "<ReplicationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
+        String close = "</ReplicationConfiguration>";
+        for (String document : new String[] {
+                open + role + "<Role>arn:aws:iam::000000000000:role/other</Role>" + rule + close,
+                open + role + "<Role><Arn>arn:aws:iam::000000000000:role/other</Arn></Role>" + rule + close,
+                open + rule.replace("<ID>r</ID>", "<ID>r</ID>" + role) + close,
+                open + role + rule + close + "<Role>arn:aws:iam::000000000000:role/other</Role>"}) {
+            given()
+                .body(document)
+            .when()
+                .put("/" + BUCKET + "?replication")
+            .then()
+                .statusCode(400)
+                .body(containsString("MalformedXML"));
+        }
+        given()
+        .when()
+            .get("/" + BUCKET + "?replication")
+        .then()
+            .statusCode(404)
+            .body(containsString("ReplicationConfigurationNotFoundError"));
+    }
 }

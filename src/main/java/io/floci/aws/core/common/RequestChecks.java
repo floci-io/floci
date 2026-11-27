@@ -60,7 +60,7 @@ public final class RequestChecks {
         for (String resource : resources) {
             contexts.forEach(context -> checks.add(new Check(action, resource, Map.copyOf(context))));
         }
-        checks.addAll(passedRoles(action, body, partition, region, accountId, roles));
+        checks.addAll(passedRoles(operation, body, partition, region, accountId, roles));
         if (tagging.isPresent()) {
             // A create tags the resource it makes, not the parent it makes it in, as the filter checks it.
             List<String> created = RequestResources.created(operation, tagging.get().action(), body, partition, region,
@@ -77,17 +77,17 @@ public final class RequestChecks {
     }
 
     /**
-     * {@code iam:PassRole} on each role a JSON request for {@code action}, the action a request for its operation is
-     * authorized as, passes, with {@code iam:PassedToService} where AWS names the service ({@link PassedRoles}), the
+     * {@code iam:PassRole} on each role a JSON request for {@code operation} passes (the table is keyed by operation,
+     * as the Service Reference lists it, not by the action it is authorized as), with {@code iam:PassedToService} where AWS names the service ({@link PassedRoles}), the
      * roles found by {@code roles} in the partition, Region and account given; without it a role given by name is the
      * account's of that name and a resource holding roles holds none. An operation passing roles read by hand from a
      * request of its own, and not from a body, fails.
      */
-    public static List<Check> passedRoles(String action, JsonNode body, String partition, String region,
+    public static List<Check> passedRoles(String operation, JsonNode body, String partition, String region,
                                           String accountId, PassedRoleLookups roles) {
         PassedRoleLookups lookups = roles != null ? roles : new PassedRoleLookups(null, List.of());
         List<Check> checks = new ArrayList<>();
-        for (PassedRoles.PassedRole passed : PassedRoles.ofBody(action, body,
+        for (PassedRoles.PassedRole passed : PassedRoles.ofBody(operation, body,
                 lookups.in(partition, accountId, region))) {
             checks.add(new Check("iam:PassRole", passed.roleArn(), passed.passedToService() == null ? Map.of()
                     : Map.of("iam:PassedToService", List.of(passed.passedToService()))));
