@@ -39,13 +39,21 @@ public final class SqsTestQueue {
 
     /** Creates a queue named {@code namePrefix} plus a random suffix. */
     public static SqsTestQueue create(SqsService sqsService, String account, String region, String namePrefix) {
-        String name = namePrefix + UUID.randomUUID().toString().substring(0, 8);
+        return named(sqsService, account, region, namePrefix + UUID.randomUUID().toString().substring(0, 8));
+    }
+
+    /** Creates a queue named {@code name}, so two accounts can each hold one of the same name. */
+    public static SqsTestQueue named(SqsService sqsService, String account, String region, String name) {
         String url = RequestScopes.callAs(account, () -> sqsService.createQueue(name, Map.of(), region).getQueueUrl());
         return new SqsTestQueue(sqsService, account, region, url);
     }
 
     public String url() {
         return url;
+    }
+
+    public String name() {
+        return url.substring(url.lastIndexOf('/') + 1);
     }
 
     public String arn() {

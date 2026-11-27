@@ -427,26 +427,84 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
         assertNothingDelivered(target);
     }
 
-    /** Another account's role needs the bus's grant as well as its own, which {@code PutPermission} gives. */
+    /**
+     * A bus named by its name is the one of the account the task's calls run in, a foreign Credentials role's own
+     * (Developer Guide, "Accessing cross-account AWS resources in Step Functions"), where the role's identity policy
+     * is enough: the same-named bus of the state machine's account receives nothing.
+     */
     @Test
-    void aForeignCredentialsRoleNeedsTheBusPolicyToo() throws Exception {
+    void aForeignCredentialsRoleSendsToTheSameNamedBusOfItsOwnAccount() throws Exception {
         Target target = target("events:putEvents");
+        String name = busName(target.resourceArn());
+        events(OTHER_ACCOUNT, "CreateEventBus", Map.of("Name", name));
+        cleanup.register(() -> events(OTHER_ACCOUNT, "DeleteEventBus", Map.of("Name", name)));
+        SqsTestQueue foreignSink = eventSink(OTHER_ACCOUNT, name, target.source());
         String executionRole = role(STATES_TRUST, ASSUME);
         String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole), PUBLISH_ANY);
-        String machine = machine(jsonPathTask(target, foreignRole), executionRole);
 
-        Response refused = terminal(start(machine, "{}"));
+        Response completed = terminal(start(machine(jsonPathTask(target, foreignRole), executionRole), "{}"));
 
-        assertFailed(refused, "EventBridge.AccessDeniedException");
-        String cause = refused.jsonPath().getString("cause");
-        assertTrue(cause.contains("arn:aws:sts::" + OTHER_ACCOUNT + ":assumed-role/"), cause);
+        assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
+        JsonNode delivered = foreignSink.awaitJson(Duration.ofSeconds(5));
+        assertTrue(delivered.toString().contains("hello"), delivered.toString());
+        assertNothingDelivered(target);
+    }
+
+    /**
+     * A bus named by its ARN is the one the ARN names, whichever account the task's calls run in: a foreign
+     * Credentials role allowed to send to the state machine's bus reaches that bus, not a same-named one of its own.
+     */
+    @Test
+    void aForeignCredentialsRoleSendsToTheBusItsArnNames() throws Exception {
+        Target target = target("events:putEvents");
+        String name = busName(target.resourceArn());
+        events(OTHER_ACCOUNT, "CreateEventBus", Map.of("Name", name));
+        cleanup.register(() -> events(OTHER_ACCOUNT, "DeleteEventBus", Map.of("Name", name)));
+        SqsTestQueue foreignSink = eventSink(OTHER_ACCOUNT, name, target.source());
+        String executionRole = role(STATES_TRUST, ASSUME);
+        String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole), PUBLISH_ANY);
+        events("PutPermission", Map.of("EventBusName", name, "StatementId", "s",
+                "Action", "events:PutEvents", "Principal", OTHER_ACCOUNT));
+        Map<String, Object> byArn = new LinkedHashMap<>(entry(target.resourceArn(), target.source()));
+        Map<String, Object> task = new LinkedHashMap<>(jsonPathTask(target, foreignRole));
+        task.put("Parameters", Map.of("Entries", List.of(byArn)));
+
+        Response completed = terminal(start(machine(task, executionRole), "{}"));
+
+        assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
+        assertDelivered(target);
+        assertEquals(0, foreignSink.receive().size());
+    }
+
+    /**
+     * The bus an ARN entry is checked on is the bus it is sent to: a foreign role allowed only on the state machine's
+     * bus sends to it by its ARN, and one allowed only on its own same-named bus is refused the state machine's.
+     */
+    @Test
+    void aBusArnIsCheckedOnTheBusItReaches() throws Exception {
+        Target target = target("events:putEvents");
+        String name = busName(target.resourceArn());
+        events(OTHER_ACCOUNT, "CreateEventBus", Map.of("Name", name));
+        cleanup.register(() -> events(OTHER_ACCOUNT, "DeleteEventBus", Map.of("Name", name)));
+        String foreignBus = "arn:aws:events:" + REGION + ":" + OTHER_ACCOUNT + ":event-bus/" + name;
+        events("PutPermission", Map.of("EventBusName", name, "StatementId", "s",
+                "Action", "events:PutEvents", "Principal", OTHER_ACCOUNT));
+        String executionRole = role(STATES_TRUST, ASSUME);
+        String allowedHere = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole),
+                allow(target.resourceArn(), "events:PutEvents"));
+        String allowedOnItsOwn = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole),
+                allow(foreignBus, "events:PutEvents"));
+        Map<String, Object> byArn = new LinkedHashMap<>(entry(target.resourceArn(), target.source()));
+
+        Map<String, Object> refusedTask = new LinkedHashMap<>(jsonPathTask(target, allowedOnItsOwn));
+        refusedTask.put("Parameters", Map.of("Entries", List.of(byArn)));
+        assertFailed(terminal(start(machine(refusedTask, executionRole), "{}")), "EventBridge.AccessDeniedException");
         assertNothingDelivered(target);
 
-        events("PutPermission", Map.of("EventBusName", busName(target.resourceArn()), "StatementId", "s",
-                "Action", "events:PutEvents", "Principal", OTHER_ACCOUNT));
-        Response allowed = terminal(start(machine, "{}"));
-
-        assertEquals("SUCCEEDED", allowed.jsonPath().getString("status"), allowed.asString());
+        Map<String, Object> allowedTask = new LinkedHashMap<>(jsonPathTask(target, allowedHere));
+        allowedTask.put("Parameters", Map.of("Entries", List.of(byArn)));
+        Response completed = terminal(start(machine(allowedTask, executionRole), "{}"));
+        assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
         assertDelivered(target);
     }
 
@@ -672,19 +730,29 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
 
     /** A queue receiving the events of {@code source} on {@code bus}, through a rule removed with it. */
     private SqsTestQueue eventSink(String bus, String source) {
-        SqsTestQueue sink = queue();
+        return eventSink(ACCOUNT, bus, source);
+    }
+
+    /** As {@link #eventSink(String, String)}, for a bus, rule and queue of {@code account}. */
+    private SqsTestQueue eventSink(String account, String bus, String source) {
+        SqsTestQueue sink = sfn().queue(sqsService, account, REGION, "sfn-msg-iam-");
         String rule = "sfn-iam-" + UUID.randomUUID();
-        events("PutRule", Map.of("Name", rule, "EventBusName", bus,
+        events(account, "PutRule", Map.of("Name", rule, "EventBusName", bus,
                 "EventPattern", "{\"source\":[\"" + source + "\"]}"));
-        cleanup.register(() -> events("DeleteRule", Map.of("Name", rule, "EventBusName", bus)));
-        events("PutTargets", Map.of("Rule", rule, "EventBusName", bus,
+        cleanup.register(() -> events(account, "DeleteRule", Map.of("Name", rule, "EventBusName", bus)));
+        events(account, "PutTargets", Map.of("Rule", rule, "EventBusName", bus,
                 "Targets", List.of(Map.of("Id", "1", "Arn", sink.arn()))));
-        cleanup.register(() -> events("RemoveTargets", Map.of("Rule", rule, "EventBusName", bus, "Ids", List.of("1"))));
+        cleanup.register(() -> events(account, "RemoveTargets", Map.of("Rule", rule, "EventBusName", bus,
+                "Ids", List.of("1"))));
         return sink;
     }
 
     private Response events(String action, Map<String, ?> input) {
-        Response response = given().port(baseUri.getPort()).header("Authorization", auth(ACCOUNT, "events"))
+        return events(ACCOUNT, action, input);
+    }
+
+    private Response events(String account, String action, Map<String, ?> input) {
+        Response response = given().port(baseUri.getPort()).header("Authorization", auth(account, "events"))
                 .header("X-Amz-Target", "AWSEvents." + action)
                 .contentType("application/x-amz-json-1.1").body(MAPPER.valueToTree(input).toString()).post("/");
         response.then().statusCode(200);
