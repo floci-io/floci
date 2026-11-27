@@ -283,6 +283,39 @@ class IotMqttTlsIntegrationTest {
     }
 
     /**
+     * The broker answers a shadow request on its reserved topics with the shadow's document. Each account has its
+     * own broker on AWS, so a device of another account subscribed to the same topics must not receive it.
+     */
+    @Test
+    void aShadowReplyReachesOnlyTheShadowsAccount() throws Exception {
+        String account = "222222222222";
+        String region = "us-east-1";
+        long id = System.nanoTime();
+        String thing = "tlsReplyThing" + id;
+        String accepted = "$aws/things/" + thing + "/shadow/update/accepted";
+        IotDeviceIdentity owner = IotDeviceIdentity.provisionInAccount(account, region, true, cleanup);
+        owner.attachNewPolicy(ALLOW_ALL_MQTT, cleanup);
+        owner.attachNewThing(thing, cleanup);
+        SSLContext ownerContext = owner.sslContext(TLS_DIR);
+
+        try (TlsClient ownerSubscriber = TlsClient.connect("tls-reply-owner-" + id, ownerContext);
+             TlsClient otherAccount = connectTls("tls-reply-other-" + id)) {
+            ownerSubscriber.subscribe(accepted, 0);
+            otherAccount.subscribe(accepted, 0);
+            try (TlsClient publisher = TlsClient.connect("tls-reply-pub-" + id, ownerContext)) {
+                publisher.publish("$aws/things/" + thing + "/shadow/update",
+                        "{\"state\":{\"reported\":{\"secret\":\"owner-only\"}}}".getBytes(StandardCharsets.UTF_8), 0);
+            }
+            String reply = new String(ownerSubscriber.takePayload(), StandardCharsets.UTF_8);
+            assertEquals("owner-only", OBJECT_MAPPER.readTree(reply).path("state").path("reported").path("secret").asText());
+            assertNull(otherAccount.pollPayload(Duration.ofSeconds(2)),
+                    "a device of the default account received account " + account + "'s shadow reply");
+        }
+        cleanup.register(() -> given().header("Authorization", auth(account, region, "iotdata"))
+                .when().delete("/things/" + thing + "/shadow").then().statusCode(200));
+    }
+
+    /**
      * Puts a rule republishing every message on {@code sourceTopic} to {@code targetTopic}, signed
      * with {@code authorization} (unsigned when null), and has {@code cleanup} delete it after the test.
      */

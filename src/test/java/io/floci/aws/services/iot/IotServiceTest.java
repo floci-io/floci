@@ -933,7 +933,7 @@ class IotServiceTest {
             """.formatted(first, leaf(first))), recordedPayload(BUILDING_UPDATE + "/delta"));
         for (String topic : recordedTopics()) {
             ArgumentCaptor<byte[]> fannedOut = ArgumentCaptor.forClass(byte[].class);
-            verify(broker, times(1)).publish(eq(topic), fannedOut.capture());
+            verify(broker, times(1)).publishInAccount(eq(ACCOUNT), eq(REGION), eq(topic), fannedOut.capture());
             assertEquals(recordedPayload(topic), mapper.readTree(fannedOut.getValue()));
         }
 
@@ -1353,7 +1353,7 @@ class IotServiceTest {
         assertEquals(2, deleted.get("version").asLong());
         assertEquals(List.of("$aws/things/sensor-4/shadow/delete/accepted"), recordedTopics());
         assertEquals(reparse(deleted), recordedPayload("$aws/things/sensor-4/shadow/delete/accepted"));
-        verify(broker, times(1)).publish(eq("$aws/things/sensor-4/shadow/delete/accepted"), any());
+        verify(broker, times(1)).publishInAccount(eq(ACCOUNT), eq(REGION), eq("$aws/things/sensor-4/shadow/delete/accepted"), any());
         AwsException e = assertThrows(AwsException.class, () -> service.getThingShadow("sensor-4", null, REGION));
         assertEquals(404, e.getHttpStatus());
     }
@@ -1483,7 +1483,7 @@ class IotServiceTest {
     /** The payload fanned out on the topic, verifying the broker received exactly one publish on it. */
     private JsonNode fannedOut(String topic) throws Exception {
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(broker, times(1)).publish(eq(topic), payload.capture());
+        verify(broker, times(1)).publishInAccount(eq(ACCOUNT), eq(REGION), eq(topic), payload.capture());
         return mapper.readTree(payload.getValue());
     }
 
@@ -1499,7 +1499,7 @@ class IotServiceTest {
             assertEquals(recordedPayload(topic), fannedOut(topic));
             assertEquals("c-1", recordedPayload(topic).get("clientToken").asText());
         }
-        verify(broker, times(3)).publish(anyString(), any());
+        verify(broker, times(3)).publishInAccount(eq(ACCOUNT), eq(REGION), anyString(), any());
         assertEquals("blue", service.getThingShadow("sensor-7", "building", REGION).at("/state/desired/color").asText());
     }
 
@@ -1565,7 +1565,7 @@ class IotServiceTest {
         assertEquals(json("{\"code\":409,\"message\":\"Version conflict\",\"clientToken\":\"c-9\"}"),
                 fannedOut("$aws/things/sensor-9/shadow/update/rejected"));
         assertEquals(List.of("$aws/things/sensor-9/shadow/update/rejected"), recordedTopics());
-        verify(broker, times(1)).publish(anyString(), any());
+        verify(broker, times(1)).publishInAccount(eq(ACCOUNT), eq(REGION), anyString(), any());
     }
 
     @Test
