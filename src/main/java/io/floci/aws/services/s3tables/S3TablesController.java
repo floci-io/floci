@@ -26,7 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-@Path("/")
+@Path(S3TablesRouteFilter.INTERNAL_PREFIX)
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class S3TablesController {

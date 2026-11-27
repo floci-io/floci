@@ -2,6 +2,7 @@ package io.floci.aws.services.s3tables;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -46,7 +47,7 @@ class S3TablesIntegrationTest {
     @Test
     @Order(1)
     void createsTableBucketThroughTheS3TablesRoute() {
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
                 .contentType(JSON_CONTENT_TYPE)
                 .body("""
@@ -63,7 +64,7 @@ class S3TablesIntegrationTest {
     @Test
     @Order(2)
     void managesNamespaceAndTableThroughEncodedBucketArnRoutes() {
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
                 .contentType(JSON_CONTENT_TYPE)
                 .body("""
@@ -77,7 +78,7 @@ class S3TablesIntegrationTest {
                 .body("namespace", contains(NAMESPACE))
                 .body("tableBucketARN", equalTo(BUCKET_ARN));
 
-        versionToken = given()
+        versionToken = s3tables()
                 .urlEncodingEnabled(false)
                 .contentType(JSON_CONTENT_TYPE)
                 .body("""
@@ -101,7 +102,7 @@ class S3TablesIntegrationTest {
     @Test
     @Order(3)
     void updatesMetadataLocationUsingOptimisticVersionTokens() {
-        String replacementToken = given()
+        String replacementToken = s3tables()
                 .urlEncodingEnabled(false)
                 .contentType(JSON_CONTENT_TYPE)
                 .body("""
@@ -119,7 +120,7 @@ class S3TablesIntegrationTest {
                 .extract()
                 .path("versionToken");
 
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
                 .contentType(JSON_CONTENT_TYPE)
                 .body("""
@@ -140,7 +141,7 @@ class S3TablesIntegrationTest {
     @Test
     @Order(4)
     void roundTripsTableBucketPolicy() {
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
                 .contentType(JSON_CONTENT_TYPE)
                 .body("""
@@ -151,7 +152,7 @@ class S3TablesIntegrationTest {
         .then()
                 .statusCode(200);
 
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
         .when()
                 .get("/buckets/" + ENCODED_BUCKET_ARN + "/policy")
@@ -164,7 +165,7 @@ class S3TablesIntegrationTest {
     @Test
     @Order(5)
     void roundTripsTypedMaintenanceConfigurationMaps() {
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
                 .contentType(JSON_CONTENT_TYPE)
                 .body("{ \"value\": { \"status\": \"enabled\" } }")
@@ -173,7 +174,7 @@ class S3TablesIntegrationTest {
         .then()
                 .statusCode(200);
 
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
         .when()
                 .get("/buckets/" + ENCODED_BUCKET_ARN + "/maintenance")
@@ -181,7 +182,7 @@ class S3TablesIntegrationTest {
                 .statusCode(200)
                 .body("configuration.icebergUnreferencedFileRemoval.status", equalTo("enabled"));
 
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
                 .contentType(JSON_CONTENT_TYPE)
                 .body("{ \"value\": { \"status\": \"enabled\" } }")
@@ -191,12 +192,17 @@ class S3TablesIntegrationTest {
         .then()
                 .statusCode(200);
 
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
         .when()
                 .get("/tables/" + ENCODED_BUCKET_ARN + "/" + NAMESPACE + "/" + TABLE_NAME + "/maintenance")
         .then()
                 .statusCode(200)
                 .body("configuration.icebergCompaction.status", equalTo("enabled"));
+    }
+
+    private static RequestSpecification s3tables() {
+        return given().header("Authorization",
+                "AWS4-HMAC-SHA256 Credential=000000000000/20260101/us-east-1/s3tables/aws4_request");
     }
 }

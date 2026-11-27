@@ -3,7 +3,9 @@ package io.floci.aws.core.common;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriBuilder;
 
+import java.net.URI;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
@@ -111,8 +113,9 @@ public final class SignedServiceRoute {
         if (!publicPaths.test(normalizedPath) || !signedForService(ctx)) {
             return;
         }
-        ctx.setRequestUri(ctx.getUriInfo().getRequestUriBuilder()
-                .replacePath(internalPrefix + normalizedPath)
+        URI requestUri = ctx.getUriInfo().getRequestUri();
+        RequestUriRewrite.apply(ctx, UriBuilder.fromUri(requestUri)
+                .replacePath(internalPrefix + requestUri.getRawPath())
                 .build());
         ctx.setProperty(INTERNAL_PREFIX_PROPERTY, internalPrefix);
     }
