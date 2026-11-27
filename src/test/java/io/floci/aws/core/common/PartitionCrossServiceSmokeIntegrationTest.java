@@ -1,8 +1,10 @@
 package io.floci.aws.core.common;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import io.floci.aws.services.ec2instanceconnect.InstanceConnectKeys;
+import io.floci.aws.services.rolesanywhere.RolesAnywhereTestMaterial;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.PartitionMatrix;
@@ -10,6 +12,7 @@ import io.floci.aws.testing.PartitionMatrix.PartitionCase;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.arc.Arc;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import io.restassured.path.json.config.JsonPathConfig;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
@@ -55,7 +58,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
             "eventbridge", "eventbridgev2", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics", "lambda",
             "lambdamicrovms", "lambdaweb", "memorydb", "msk", "mwaa", "networkfirewall", "oam", "opensearch", "organizations",
             "paymentcryptography", "pipes", "quicksight", "ram", "rds", "redshift", "redshiftserverless",
-            "rekognition", "resourceexplorer2", "resourcegroups", "route53resolver",
+            "rekognition", "resourceexplorer2", "resourcegroups", "rolesanywhere", "route53resolver",
             "s3tables", "s3vectors", "sagemaker", "scheduler", "secretsmanager", "servicequotas", "ses", "signer", "sns", "sqs",
             "stepfunctions", "timestreaminfluxdb", "transfer", "verifiedpermissions", "wafv2",
             "xray");
@@ -1154,6 +1157,31 @@ class PartitionCrossServiceSmokeIntegrationTest {
         String arn = signed(region, "signer").when()
                 .get("/signing-profiles/" + profileName)
             .then().statusCode(200).extract().jsonPath().getString("arn");
+        PartitionMatrix.assertArnIn(partitionCase, arn);
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void rolesAnywhereTrustAnchorArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "rolesanywhere");
+        ObjectNode body = new ObjectMapper().createObjectNode();
+        body.put("name", unique("smoke-anchor", partitionCase));
+        body.put("aliasName", "smoke-" + Long.toString(System.nanoTime(), 36));
+        ObjectNode source = body.putObject("source");
+        source.put("sourceType", "CERTIFICATE_BUNDLE");
+        source.putObject("sourceData").put("x509CertificateData", RolesAnywhereTestMaterial.CA_PEM);
+        JsonPath anchor = signed(region, "rolesanywhere")
+            .contentType(JSON)
+            .body(body.toString())
+        .when().post("/trustanchors").then().statusCode(201)
+            .extract().jsonPath();
+        String id = anchor.getString("trustAnchor.trustAnchorId");
+        cleanup.register(() -> signed(region, "rolesanywhere").when().delete("/trustanchor/" + id));
+        PartitionMatrix.assertArnIn(partitionCase, anchor.getString("trustAnchor.trustAnchorArn"));
+        PartitionMatrix.assertArnIn(partitionCase, anchor.getString("trustAnchor.aliasArn"));
+        String arn = signed(region, "rolesanywhere").urlEncodingEnabled(false).when()
+                .get("/trustanchor/" + anchor.getString("trustAnchor.trustAnchorArn"))
+            .then().statusCode(200).extract().jsonPath().getString("trustAnchor.trustAnchorArn");
         PartitionMatrix.assertArnIn(partitionCase, arn);
     }
 

@@ -929,6 +929,7 @@ public interface EmulatorConfig {
         AppIntegrationsServiceConfig appintegrations();
         DlmServiceConfig dlm();
         SignerServiceConfig signer();
+        RolesAnywhereServiceConfig rolesanywhere();
         XrayServiceConfig xray();
         CognitoIdentityServiceConfig cognitoidentity();
         GlobalAcceleratorServiceConfig globalaccelerator();
@@ -1027,6 +1028,11 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean mockSigningJobs();
+    }
+
+    interface RolesAnywhereServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface XrayServiceConfig {

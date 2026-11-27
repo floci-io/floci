@@ -82,6 +82,7 @@ import io.floci.aws.services.ram.RamController;
 import io.floci.aws.services.rdsdata.RdsDataController;
 import io.floci.aws.services.resourceexplorer2.ResourceExplorer2Controller;
 import io.floci.aws.services.resourcegroups.ResourceGroupsController;
+import io.floci.aws.services.rolesanywhere.RolesAnywhereController;
 import io.floci.aws.services.route53.Route53Controller;
 import io.floci.aws.services.rum.RumController;
 import io.floci.aws.services.s3.S3Controller;
@@ -813,6 +814,10 @@ public class ResolvedServiceCatalog {
                         "signer", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("signer"), Set.of(), Set.of(SignerController.class)),
+                descriptor("rolesanywhere", "rolesanywhere", config.services().rolesanywhere().enabled(), true,
+                        "rolesanywhere", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("rolesanywhere"), Set.of(), Set.of(RolesAnywhereController.class)),
                 descriptor("cognito-identity", "cognitoidentity",
                         config.services().cognitoidentity().enabled(), true,
                         "cognitoidentity", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,

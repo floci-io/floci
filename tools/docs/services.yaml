@@ -187,6 +187,10 @@ services:
       - TagResourceByBody
       - TagResourcePut
       - UntagResourceByQuery
+  - service: rolesanywhere
+    doc: docs/services/rolesanywhere.md
+    sources:
+      - { path: services/rolesanywhere/RolesAnywhereController.java, mode: rest }
   - service: signer
     doc: docs/services/signer.md
     sources:

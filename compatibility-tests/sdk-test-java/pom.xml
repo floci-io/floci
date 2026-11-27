@@ -669,6 +669,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>signer</artifactId>
         </dependency>
+        <!-- IAM Roles Anywhere client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>rolesanywhere</artifactId>
+        </dependency>
         <!-- X-Ray client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

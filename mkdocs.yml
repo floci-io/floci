@@ -175,6 +175,7 @@ nav:
     - Amazon Data Lifecycle Manager: services/dlm.md
     - ACM: services/acm.md
     - AWS Signer: services/signer.md
+    - IAM Roles Anywhere: services/rolesanywhere.md
     - Payment Cryptography: services/payment-cryptography.md
     - Payment Cryptography data plane: services/payment-cryptography-data.md
     - ECS: services/ecs.md

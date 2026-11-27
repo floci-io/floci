@@ -123,6 +123,7 @@ import software.amazon.awssdk.services.resourceexplorer2.ResourceExplorer2Client
 import software.amazon.awssdk.services.resourceexplorer2.ResourceExplorer2ClientBuilder;
 import software.amazon.awssdk.services.resourcegroups.ResourceGroupsClient;
 import software.amazon.awssdk.services.resourcegroupstaggingapi.ResourceGroupsTaggingApiClient;
+import software.amazon.awssdk.services.rolesanywhere.RolesAnywhereClient;
 import software.amazon.awssdk.services.route53.Route53Client;
 import software.amazon.awssdk.services.route53.model.Change;
 import software.amazon.awssdk.services.route53.model.ChangeAction;
@@ -1682,6 +1683,14 @@ public final class TestFixtures {
 
     public static SignerClient signerClient() {
         return SignerClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static RolesAnywhereClient rolesAnywhereClient() {
+        return RolesAnywhereClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

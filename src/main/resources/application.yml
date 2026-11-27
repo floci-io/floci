@@ -1219,6 +1219,8 @@ floci:
       enabled: true
     signer:
       enabled: true
+    rolesanywhere:
+      enabled: true
     xray:
       enabled: true
     cognitoidentity:
