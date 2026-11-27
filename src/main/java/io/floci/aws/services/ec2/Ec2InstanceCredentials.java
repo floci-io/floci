@@ -136,8 +136,7 @@ final class Ec2InstanceCredentials {
                 || !parsed.accountId().matches("[0-9]{12}") || !parsed.resource().startsWith("instance-profile/")) {
             return Optional.empty();
         }
-        String name = arn.substring(arn.lastIndexOf('/') + 1);
-        return iam.findInstanceProfile(parsed.accountId(), name).filter(profile -> arn.equals(profile.getArn()));
+        return IamService.instanceProfileNamed(iam, parsed.accountId(), arn);
     }
 
     synchronized Optional<SessionCredential> get(Instance instance, String roleName, Instant now) {

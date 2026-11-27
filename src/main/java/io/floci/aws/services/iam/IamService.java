@@ -3191,6 +3191,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
     }
 
+    /**
+     * The instance profile {@code nameOrArn} names in {@code accountId}, read as EC2 reads the profile a request
+     * names: by its name, or by its ARN, which must be the profile's own, its path and account included, so an ARN
+     * of another account or path names none; empty for one {@code iam} does not hold there. The one reading IAM's
+     * passed-role check, EMR's instance profile and an EC2 instance's credentials share, so a profile none of them
+     * finds is used by none.
+     */
+    public static Optional<InstanceProfile> instanceProfileNamed(IamService iam, String accountId, String nameOrArn) {
+        if (nameOrArn == null || nameOrArn.isBlank()) {
+            return Optional.empty();
+        }
+        if (!AwsArnUtils.isArn(nameOrArn)) {
+            return iam.findInstanceProfile(accountId, nameOrArn);
+        }
+        return iam.findInstanceProfile(accountId, nameOrArn.substring(nameOrArn.lastIndexOf('/') + 1))
+                .filter(profile -> nameOrArn.equals(profile.getArn()));
+    }
+
     public Optional<InstanceProfile> findInstanceProfile(String accountId, String profileName) {
         if (instanceProfiles instanceof AccountAwareStorageBackend<InstanceProfile> aware) {
             return aware.getForAccount(accountId, profileName);

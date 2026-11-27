@@ -133,6 +133,54 @@ class IamPassRoleEnforcementIntegrationTest {
     }
 
     @Test
+    void anEmrClusterNeedsPassRoleOnItsServiceRoleForEmrAndItsInstanceProfilesRoleForEc2() {
+        // ServiceRole is given by name and goes to EMR; JobFlowRole names an instance profile, whose role goes to EC2.
+        String service = role("emr-service");
+        String instance = role("emr-instance");
+        String profile = instanceProfile(instance.substring(instance.lastIndexOf('/') + 1));
+        User user = user("passrole-emr");
+        String body = """
+                {"Name":"passrole-emr-%s","ReleaseLabel":"emr-7.5.0","ServiceRole":"%s","JobFlowRole":"%s",
+                 "Instances":{"KeepJobFlowAliveWhenNoSteps":true,"InstanceGroups":[{"Name":"master",
+                 "InstanceRole":"MASTER","InstanceType":"m5.xlarge","InstanceCount":1}]}}"""
+                .formatted(suffix(), service.substring(service.lastIndexOf('/') + 1), profile);
+        String runJobFlow = "ElasticMapReduce.RunJobFlow";
+
+        user.policy(allow("elasticmapreduce:RunJobFlow", "*"));
+        deniedJson(user.json("elasticmapreduce", runJobFlow).body(body).post("/").then());
+        user.policy(allow("elasticmapreduce:RunJobFlow", "*") + "," + passRole(service, "elasticmapreduce.amazonaws.com")
+                + "," + passRole(instance, "elasticmapreduce.amazonaws.com"));
+        deniedJson(user.json("elasticmapreduce", runJobFlow).body(body).post("/").then());
+        // The service role, named by its name, is checked on the role IAM holds under it.
+        user.policy(allow("elasticmapreduce:RunJobFlow", "*") + "," + passRole(instance, "ec2.amazonaws.com"));
+        deniedJson(user.json("elasticmapreduce", runJobFlow).body(body).post("/").then());
+
+        user.policy(allow("elasticmapreduce:RunJobFlow", "*") + "," + passRole(service, "elasticmapreduce.amazonaws.com")
+                + "," + passRole(instance, "ec2.amazonaws.com"));
+        // A profile named by a JSON number is the one EMR reads it as.
+        String numbered = Long.toString(System.nanoTime());
+        admin("iam").formParam("Action", "CreateInstanceProfile").formParam("InstanceProfileName", numbered)
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> EnforcementFixtures.removeInstanceProfile(baseUri.getPort(), auth(ADMIN, "iam"),
+                numbered));
+        admin("iam").formParam("Action", "AddRoleToInstanceProfile").formParam("InstanceProfileName", numbered)
+                .formParam("RoleName", instance.substring(instance.lastIndexOf('/') + 1)).post("/").then()
+                .statusCode(200);
+        user.policy(allow("elasticmapreduce:RunJobFlow", "*") + "," + passRole(service, "elasticmapreduce.amazonaws.com"));
+        deniedJson(user.json("elasticmapreduce", runJobFlow)
+                .body(body.replace("\"JobFlowRole\":\"" + profile + "\"", "\"JobFlowRole\":" + numbered)).post("/")
+                .then());
+
+        user.policy(allow("elasticmapreduce:RunJobFlow", "*") + "," + passRole(service, "elasticmapreduce.amazonaws.com")
+                + "," + passRole(instance, "ec2.amazonaws.com"));
+        String clusterId = user.json("elasticmapreduce", runJobFlow).body(body).post("/").then().statusCode(200)
+                .extract().path("JobFlowId");
+        cleanup.register(() -> admin("elasticmapreduce").header("X-Amz-Target", "ElasticMapReduce.TerminateJobFlows")
+                .contentType("application/x-amz-json-1.1").body("{\"JobFlowIds\":[\"" + clusterId + "\"]}")
+                .post("/"));
+    }
+
+    @Test
     void aPassRoleGrantKeyedOnTheRolesTagIsNotSatisfiedByTheTag() {
         // The IAM guide warns that ResourceTag conditions with PassRole "do not have reliable results", so the
         // generated condition-key table reads no resource tag for it: a role carrying the tag does not pass.
