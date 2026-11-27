@@ -402,6 +402,12 @@ floci:
     log-max-size: "10m"
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
+    # FLOCI_DOCKER_ALLOW_SSH_HOST: opt-in; allow an ssh:// Docker host (from docker-host,
+    # DOCKER_HOST, or the active Docker context). Off by default because each Docker connection
+    # runs an ssh process; an ssh:// host is refused at startup until this is true. Keep in step
+    # with the @WithDefault on EmulatorConfig.DockerConfig.allowSshHost: a value set here WINS
+    # over the annotation.
+    allow-ssh-host: false
     # FLOCI_DOCKER_MAX_CONNECTIONS: connection pool size for Floci's short Docker calls. Past the
     # limit, create/start/stop/remove wait for a free connection and the emulator stalls. Keep in step
     # with the @WithDefault on EmulatorConfig.DockerConfig.maxConnections: a value set here WINS

@@ -11,10 +11,14 @@ import com.github.dockerjava.core.util.CertificateUtils;
 import com.github.dockerjava.transport.DockerHttpClient;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.Digests;
+import io.quarkus.runtime.StartupEvent;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.inject.Disposes;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Inject;
+import jakarta.interceptor.Interceptor;
 import org.jboss.logging.Logger;
 
 import javax.net.ssl.KeyManagerFactory;
@@ -75,6 +79,24 @@ public class DockerClientProducer {
         Duration probeInterval = breakerThreshold == 0 ? Duration.ZERO
                 : Duration.ofSeconds(validateBreakerProbeIntervalSeconds(config.docker().breakerProbeIntervalSeconds()));
         this.breaker = new DockerCircuitBreaker(breakerThreshold, probeInterval);
+    }
+
+    void validateDockerHostAtStartup(
+            @Observes @Priority(Interceptor.Priority.PLATFORM_BEFORE) StartupEvent ignored) {
+        String dockerHost = resolveDockerConnection(config.docker(), System::getenv).host();
+        requireSshOptIn(dockerHost, config.docker().allowSshHost());
+    }
+
+    /**
+     * Refuses an {@code ssh://} Docker host unless {@code floci.docker.allow-ssh-host} is on, so
+     * Floci spawns an {@code ssh} process per Docker connection only when explicitly enabled.
+     */
+    static void requireSshOptIn(String dockerHost, boolean allowSshHost) {
+        if (SshDockerEndpoint.isSshHost(dockerHost) && !allowSshHost) {
+            throw new IllegalStateException("Refusing to use SSH Docker host '" + dockerHost
+                    + "': each Docker connection runs an ssh process. Set floci.docker.allow-ssh-host"
+                    + " (FLOCI_DOCKER_ALLOW_SSH_HOST) to true to allow it.");
+        }
     }
 
     /**
@@ -575,6 +597,7 @@ public class DockerClientProducer {
     private DefaultDockerClientConfig buildClientConfig() {
         ResolvedDockerConnection connection = resolveDockerConnection(config.docker(), System::getenv);
         String dockerHost = connection.host();
+        requireSshOptIn(dockerHost, config.docker().allowSshHost());
 
         // createDefaultConfigBuilder() reads DOCKER_HOST directly from System.getenv() and passes
         // it to withDockerHost(), which calls URI.create() immediately. If DOCKER_HOST is set

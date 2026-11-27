@@ -273,12 +273,12 @@ class DockerClientProducerTest {
     // therefore be genuinely separate DockerClient instances (and thus separate pools),
     // not the same instance handed out under two qualifiers.
     @Test
-    void dockerClientAndStreamingDockerClient_areDistinctInstances() throws IOException {
+    void dockerClientAndStreamingDockerClient_areDistinctInstances(@TempDir Path dockerConfigDir) throws IOException {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
         when(config.docker()).thenReturn(docker);
         when(docker.dockerHost()).thenReturn("unix:///var/run/docker.sock");
-        when(docker.dockerConfigPath()).thenReturn(Optional.empty());
+        when(docker.dockerConfigPath()).thenReturn(Optional.of(dockerConfigDir.toString()));
         when(docker.maxConnections()).thenReturn(100);
         when(docker.streamingMaxConnections()).thenReturn(512);
         when(docker.connectionRequestTimeoutSeconds()).thenReturn(30);
@@ -859,5 +859,48 @@ class DockerClientProducerTest {
             assertNull(plainConfig.getSSLConfig(), "a config without TLS verify carries no SSL config");
             assertEquals("tcp://127.0.0.1:2375", plainConfig.getDockerHost().toString());
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ssh://remote-docker", "SSH://ubuntu@10.0.0.5:2222"})
+    void requireSshOptIn_refusesSshHostWhenOff_namingTheSetting(String sshHost) {
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> DockerClientProducer.requireSshOptIn(sshHost, false));
+
+        assertThat(e.getMessage(), containsString(sshHost));
+        assertThat(e.getMessage(), containsString("floci.docker.allow-ssh-host"));
+        assertThat(e.getMessage(), containsString("FLOCI_DOCKER_ALLOW_SSH_HOST"));
+    }
+
+    @Test
+    void requireSshOptIn_allowsSshHostWhenOn_andAllowsNonSshHostsWhenOff() {
+        assertDoesNotThrow(() -> DockerClientProducer.requireSshOptIn("ssh://remote-docker", true));
+        assertDoesNotThrow(() -> DockerClientProducer.requireSshOptIn("unix:///var/run/docker.sock", false));
+        assertDoesNotThrow(() -> DockerClientProducer.requireSshOptIn("tcp://127.0.0.1:2375", false));
+        assertDoesNotThrow(() -> DockerClientProducer.requireSshOptIn("npipe:////./pipe/docker_engine", false));
+        assertDoesNotThrow(() -> DockerClientProducer.requireSshOptIn(null, false));
+    }
+
+    @Test
+    void validateDockerHostAtStartup_refusesSshHostUntilOptInIsOn() {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+        when(config.docker()).thenReturn(docker);
+        when(docker.dockerHost()).thenReturn("ssh://remote-docker");
+        when(docker.dockerConfigPath()).thenReturn(Optional.empty());
+        when(docker.allowSshHost()).thenReturn(false);
+
+        DockerClientProducer producer = new DockerClientProducer(config);
+
+        IllegalStateException startupFailure = assertThrows(IllegalStateException.class,
+                () -> producer.validateDockerHostAtStartup(null));
+        assertThat(startupFailure.getMessage(), containsString("floci.docker.allow-ssh-host"));
+        assertThat(startupFailure.getMessage(), containsString("FLOCI_DOCKER_ALLOW_SSH_HOST"));
+
+        IllegalStateException clientFailure = assertThrows(IllegalStateException.class, producer::dockerClient);
+        assertThat(clientFailure.getMessage(), containsString("floci.docker.allow-ssh-host"));
+
+        when(docker.allowSshHost()).thenReturn(true);
+        assertDoesNotThrow(() -> producer.validateDockerHostAtStartup(null));
     }
 }

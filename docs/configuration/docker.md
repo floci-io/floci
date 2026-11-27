@@ -16,6 +16,16 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_DOCKER_HOST`
 
+An `ssh://` Docker host (from `docker-host`, `DOCKER_HOST`, or the active Docker context) is opt-in and refused at startup by default, because each Docker connection runs an `ssh` process (`ssh <host> docker system dial-stdio`). Set `allow-ssh-host` to `true` to allow it:
+
+```yaml
+floci:
+  docker:
+    allow-ssh-host: true
+```
+
+Environment variable: `FLOCI_DOCKER_ALLOW_SSH_HOST`
+
 When running Floci inside Docker Compose, mount the host socket:
 
 ```yaml
@@ -454,6 +464,7 @@ caller keeps its existing failure handling after retries are exhausted.
 | Environment variable | Default | Description |
 |---|---|---|
 | `FLOCI_DOCKER_DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon socket |
+| `FLOCI_DOCKER_ALLOW_SSH_HOST` | `false` | Allow an `ssh://` Docker host (off by default because each Docker connection runs an `ssh` process; refused at startup until enabled) |
 | `FLOCI_DOCKER_DOCKER_CONFIG_PATH` | _(unset)_ | Path to directory containing Docker's `config.json` |
 | `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's short Docker calls |
 | `FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD` | `3` | Docker call attempts in a row (each retry counts) that fail before the daemon answers, after which a failed ping makes every Docker call fail at once until the daemon answers again; `0` turns this off |
