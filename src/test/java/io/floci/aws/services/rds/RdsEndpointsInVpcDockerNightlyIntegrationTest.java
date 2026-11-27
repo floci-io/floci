@@ -5,6 +5,7 @@ import com.github.dockerjava.api.model.HostConfig;
 import io.floci.aws.core.common.AwsEndpoints;
 import io.floci.aws.core.common.dns.DnsAnswer;
 import io.floci.aws.core.common.docker.ContainerExec;
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.net.VpcNetworkManager;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.DockerAvailability;
@@ -20,8 +21,10 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.rds.RdsClient;
+import software.amazon.awssdk.services.rds.model.AuthScheme;
 import software.amazon.awssdk.services.rds.model.DBCluster;
 import software.amazon.awssdk.services.rds.model.DBInstance;
+import software.amazon.awssdk.services.rds.model.UserAuthConfig;
 
 import java.time.Duration;
 import java.util.LinkedHashSet;
@@ -44,7 +47,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * VPC's Docker network, the stand-in for a container in the same VPC, signs in through each address and sees each
  * database's own data. A stopped instance's name has no address, and a started one is served again at the address it
  * had. A real Aurora PostgreSQL cluster's instances serve its port the same way, and its cluster endpoint name
- * resolves to the writer, before and after a failover, and its reader endpoint name to the reader.
+ * resolves to the writer, before and after a failover, and its reader endpoint name to the reader. A DB proxy's default
+ * endpoint and an endpoint added to it serve 5432 at their own addresses, through the proxy to its target.
  *
  * <p>A Docker end-to-end check: it runs real database and relay containers. The client connects by address, as
  * Floci's DNS server is not reachable from containers on every runner. The tests share the default VPC, whose Docker
@@ -216,6 +220,69 @@ class RdsEndpointsInVpcDockerNightlyIntegrationTest {
                 }
                 try {
                     rds.deleteDBCluster(r -> r.dbClusterIdentifier(clusterId).skipFinalSnapshot(true));
+                } catch (RuntimeException ignored) {
+                    // Not created, or already gone.
+                }
+            }
+        } finally {
+            if (client != null) {
+                dockerClient.removeContainerCmd(client).withForce(true).exec();
+            }
+        }
+    }
+
+    @Test
+    void aProxysEndpointsServe5432AtTheirOwnAddressesThroughTheProxy() throws Exception {
+        String instanceId = "vpc-target-" + UUID.randomUUID().toString().substring(0, 8);
+        String proxyName = "vpc-proxy-" + UUID.randomUUID().toString().substring(0, 8);
+        String endpointName = "vpc-reader-" + UUID.randomUUID().toString().substring(0, 8);
+        String client = null;
+        try (RdsClient rds = AwsTestClients.create(RdsClient.builder(), ACCOUNT, Region.US_EAST_1)) {
+            try {
+                rds.createDBInstance(r -> r.dbInstanceIdentifier(instanceId).engine("postgres").engineVersion("16.3")
+                        .masterUsername("admin").masterUserPassword(PASSWORD).dbName("appdb")
+                        .dbInstanceClass("db.t3.micro").allocatedStorage(20).port(5432));
+                vpcIds.add(rdsService.getDbInstance(instanceId).getVpcId());
+                List<String> subnets = List.of(Ec2Service.defaultSubnetId(REGION, "a", ACCOUNT),
+                        Ec2Service.defaultSubnetId(REGION, "b", ACCOUNT));
+                String proxyEndpoint = rds.createDBProxy(r -> r.dbProxyName(proxyName).engineFamily("POSTGRESQL")
+                        .roleArn("arn:aws:iam::" + ACCOUNT + ":role/proxy").vpcSubnetIds(subnets)
+                        .auth(UserAuthConfig.builder().authScheme(AuthScheme.SECRETS)
+                                .secretArn("arn:aws:secretsmanager:" + REGION + ":" + ACCOUNT + ":secret:db-AbCdEf")
+                                .build())).dbProxy().endpoint();
+                assertEquals(AwsEndpoints.rdsProxyHost(proxyName, ACCOUNT, REGION), proxyEndpoint);
+                rds.registerDBProxyTargets(r -> r.dbProxyName(proxyName).dbInstanceIdentifiers(instanceId));
+                String added = rds.createDBProxyEndpoint(r -> r.dbProxyName(proxyName)
+                        .dbProxyEndpointName(endpointName).vpcSubnetIds(subnets)).dbProxyEndpoint().endpoint();
+                assertEquals(AwsEndpoints.rdsProxyEndpointHost(endpointName, ACCOUNT, REGION), added);
+                String proxyAddress = address(proxyEndpoint);
+                String addedAddress = address(added);
+                assertNotEquals(proxyAddress, addedAddress);
+
+                String vpcId = rdsService.getDbProxy(proxyName, REGION).getVpcId();
+                vpcIds.add(vpcId);
+                String network = vpcNetworkManager.networkNameFor(ACCOUNT, REGION, vpcId).orElseThrow();
+                String image = dockerClient.inspectContainerCmd(rdsService.getDbInstance(instanceId).getContainerId())
+                        .exec().getConfig().getImage();
+                client = dockerClient.createContainerCmd(image)
+                        .withEntrypoint("sleep")
+                        .withCmd("600")
+                        .withHostConfig(HostConfig.newHostConfig().withNetworkMode(network))
+                        .exec().getId();
+                dockerClient.startContainerCmd(client).exec();
+
+                assertEquals("proxied", psql(client, proxyAddress,
+                        "CREATE TABLE IF NOT EXISTS marker(v text PRIMARY KEY); "
+                        + "INSERT INTO marker VALUES ('proxied') ON CONFLICT DO NOTHING; SELECT v FROM marker;"));
+                assertEquals("proxied", psql(client, addedAddress, "SELECT v FROM marker;"));
+            } finally {
+                try {
+                    rds.deleteDBProxy(r -> r.dbProxyName(proxyName));
+                } catch (RuntimeException ignored) {
+                    // Not created, or already gone.
+                }
+                try {
+                    rds.deleteDBInstance(r -> r.dbInstanceIdentifier(instanceId).skipFinalSnapshot(true));
                 } catch (RuntimeException ignored) {
                     // Not created, or already gone.
                 }

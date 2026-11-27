@@ -65,6 +65,22 @@ public final class AwsEndpoints {
                 + region + ".rds." + AwsRegions.dnsSuffixFor(region);
     }
 
+    /**
+     * A DB proxy's default endpoint address, {@code <proxy>.proxy-<identifier>.<region>.rds.<dnsSuffix>}, as the CLI
+     * reference's {@code proxyExample.proxy-ab0cd1efghij.us-west-2.rds.amazonaws.com}.
+     */
+    public static String rdsProxyHost(String dbProxyName, String accountId, String region) {
+        return rdsClusterEndpointHost(dbProxyName, "proxy", accountId, region);
+    }
+
+    /**
+     * The address of an endpoint added to a DB proxy, {@code <endpoint>.endpoint.proxy-<identifier>...}, as the CLI
+     * reference's {@code proxyep1.endpoint.proxy-ab0cd1efghij.us-west-2.rds.amazonaws.com}.
+     */
+    public static String rdsProxyEndpointHost(String endpointName, String accountId, String region) {
+        return rdsClusterEndpointHost(endpointName + ".endpoint", "proxy", accountId, region);
+    }
+
     /** {@code <apiId>.execute-api.<region>.<dnsSuffix>}. */
     public static String executeApiHost(String apiId, String region) {
         return apiId + "." + host("execute-api", region);

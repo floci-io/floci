@@ -24,6 +24,11 @@ public class DbProxyEndpoint {
     private String dbProxyName;
     private String status;
     private String vpcId;
+    // With endpoints-in-vpc: the relay that serves this endpoint at its own address in vpcEndpointSubnetId, and
+    // that address once it has one.
+    private String vpcEndpointId;
+    private String vpcEndpointSubnetId;
+    private String vpcEndpointAddress;
     private List<String> vpcSubnetIds = new ArrayList<>();
     private List<String> vpcSecurityGroupIds = new ArrayList<>();
     /** The owning proxy's host, filled in for each response. */
@@ -52,6 +57,15 @@ public class DbProxyEndpoint {
 
     public String getVpcId() { return vpcId; }
     public void setVpcId(String vpcId) { this.vpcId = vpcId; }
+
+    public String getVpcEndpointId() { return vpcEndpointId; }
+    public void setVpcEndpointId(String vpcEndpointId) { this.vpcEndpointId = vpcEndpointId; }
+
+    public String getVpcEndpointSubnetId() { return vpcEndpointSubnetId; }
+    public void setVpcEndpointSubnetId(String vpcEndpointSubnetId) { this.vpcEndpointSubnetId = vpcEndpointSubnetId; }
+
+    public String getVpcEndpointAddress() { return vpcEndpointAddress; }
+    public void setVpcEndpointAddress(String vpcEndpointAddress) { this.vpcEndpointAddress = vpcEndpointAddress; }
 
     public List<String> getVpcSubnetIds() { return vpcSubnetIds; }
     public void setVpcSubnetIds(List<String> vpcSubnetIds) {
