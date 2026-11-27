@@ -48,11 +48,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Callable;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.FutureTask;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.LogRecord;
 
@@ -63,7 +59,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -306,7 +301,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendStartup(backendServer, backendDatabase, false);
                 return null;
             });
@@ -394,7 +389,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendStartup(backendServer, backendDatabase, true);
                 return null;
             });
@@ -509,7 +504,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendStartup(backendServer, backendDatabase, false);
                 return null;
             });
@@ -695,7 +690,7 @@ class PostgresProtocolHandlerTest {
         try (ServerSocket backendServer = new ServerSocket(0);
              ServerSocket clientServer = new ServerSocket(0)) {
 
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendClosesDuringBridge(backendServer);
                 return null;
             });
@@ -750,7 +745,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendRoleSwitch(backendServer, backendStartup, backendQuery, "approle", true);
                 return null;
             });
@@ -797,7 +792,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendRoleSwitch(backendServer, backendStartup, backendQuery, "approle", true);
                 return null;
             });
@@ -887,7 +882,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendRoleSwitch(backendServer, backendStartup, new AtomicReference<>(),
                         "approle", true, (in, out) -> {
                             settingsQuery.set(readSimpleQuery(in));
@@ -952,7 +947,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendRoleSwitch(backendServer, backendStartup, new AtomicReference<>(),
                         "approle", true, (in, out) -> {
                             answerRoleAdmission(in, out, "approle", true, true);
@@ -1022,7 +1017,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendRoleSwitch(backendServer, new AtomicReference<>(), new AtomicReference<>(),
                         "approle", true, (in, out) -> {
                             answerRoleAdmission(in, out, "approle", true, true);
@@ -1090,7 +1085,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendRoleSwitch(backendServer, new AtomicReference<>(), new AtomicReference<>(),
                         "approle", true, (in, out) -> {
                             readSimpleQuery(in);
@@ -1143,7 +1138,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendRoleSwitch(backendServer, new AtomicReference<>(), new AtomicReference<>(),
                         "approle", true, (in, out) -> afterHandover.set(in.read()));
                 return null;
@@ -1189,7 +1184,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendRoleSwitch(backendServer, new AtomicReference<>(), new AtomicReference<>(),
                         "approle", true, (in, out) -> {
                             readSimpleQuery(in);
@@ -1244,7 +1239,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket backendServer = new ServerSocket(0);
              ServerSocket clientServer = new ServerSocket(0)) {
 
-            BackendTask lookupTask = startBackend(() -> {
+            ProxyTestTask<Void> lookupTask = ProxyTestTask.start(() -> {
                 mockBackendRoleDefaultsLookup(lookupServer, List.of(
                         new String[] {"temp_file_limit", "1GB"},
                         new String[] {"no_such_parameter", "on"},
@@ -1254,7 +1249,7 @@ class PostgresProtocolHandlerTest {
                         new String[] {"search_path", "app, public"}), tried);
                 return null;
             });
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendRoleSwitch(backendServer, reopenedStartup, handover, "approle", true, (in, out) -> {
                     for (int i = 0; i < 3; i++) {
                         afterHandover.add(readSimpleQuery(in));
@@ -1328,7 +1323,7 @@ class PostgresProtocolHandlerTest {
         try (ServerSocket lookupServer = new ServerSocket(0);
              ServerSocket clientServer = new ServerSocket(0)) {
 
-            BackendTask lookupTask = startBackend(() -> {
+            ProxyTestTask<Void> lookupTask = ProxyTestTask.start(() -> {
                 mockBackendRoleDefaultsLookup(lookupServer,
                         List.<String[]>of(new String[] {"broken_default", "on"}), new ArrayList<>());
                 return null;
@@ -1594,7 +1589,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendRoleSwitch(backendServer, backendStartup, backendQuery, "nosuchrole", false);
                 return null;
             });
@@ -1661,7 +1656,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendMasterSession(backendServer, (in, out) ->
                         answerRoleAdmission(in, out, "dbadmin", true, false));
                 return null;
@@ -1704,7 +1699,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendRoleSwitch(backendServer, new AtomicReference<>(), backendQuery,
                         "approle", true, (in, out) -> {
                             answerRoleAdmission(in, out, "approle", true, true);
@@ -1760,7 +1755,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendRoleSwitch(backendServer, new AtomicReference<>(),
                         new AtomicReference<>(), "approle", true, (in, out) -> {
                             answerRoleAdmission(in, out, "approle", true, true);
@@ -1818,7 +1813,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendRoleSwitch(backendServer, new AtomicReference<>(),
                         new AtomicReference<>(), "approle", true, (in, out) -> {
                             answerRoleAdmission(in, out, "approle", true, true);
@@ -1888,7 +1883,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendMasterSession(backendServer, (in, out) -> {
                     answerRoleAdmission(in, out, "dbadmin", false, false);
                     readSimpleQuery(in);
@@ -2076,7 +2071,7 @@ class PostgresProtocolHandlerTest {
         AtomicReference<PostgresProtocolHandler.AuthenticatedSession> result = new AtomicReference<>();
         try (ServerSocket backendServer = new ServerSocket(0);
              ServerSocket clientServer = new ServerSocket(0)) {
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendMasterSession(backendServer, script);
                 return null;
             });
@@ -2116,49 +2111,6 @@ class PostgresProtocolHandlerTest {
                 assertTrue(backend.isClosed());
             }
         }
-    }
-
-    private static BackendTask startBackend(Callable<Void> backend) {
-        FutureTask<Void> task = new FutureTask<>(backend);
-        return new BackendTask(task, Thread.ofVirtual().start(task));
-    }
-
-    private record BackendTask(FutureTask<Void> task, Thread thread) {
-        void await() throws Exception {
-            try {
-                task.get(5, TimeUnit.SECONDS);
-            } finally {
-                thread.join(5_000);
-                assertFalse(thread.isAlive(), "backend thread did not terminate");
-            }
-        }
-    }
-
-    @Test
-    void backendTaskReportsIoFailureToOwningTest() {
-        IOException failure = new IOException("mock backend failed");
-        BackendTask backend = startBackend(() -> {
-            throw failure;
-        });
-        assertSame(failure, assertThrows(ExecutionException.class, backend::await).getCause());
-    }
-
-    @Test
-    void backendTaskReportsAssertionFailureToOwningTest() {
-        AssertionError failure = new AssertionError("mock backend assertion failed");
-        BackendTask backend = startBackend(() -> {
-            throw failure;
-        });
-        assertSame(failure, assertThrows(ExecutionException.class, backend::await).getCause());
-    }
-
-    @Test
-    void backendTaskCompletesOnVirtualThread() throws Exception {
-        BackendTask backend = startBackend(() -> {
-            assertTrue(Thread.currentThread().isVirtual());
-            return null;
-        });
-        backend.await();
     }
 
     private Thread startIamAuth(Socket proxyClient, Socket backend) {
@@ -2215,7 +2167,7 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendStartup(backendServer, new AtomicReference<>(), backendStartup, false);
                 return null;
             });
@@ -2750,7 +2702,7 @@ class PostgresProtocolHandlerTest {
                                                                           MockBackend backend) throws Exception {
         try (ServerSocket server = new ServerSocket(0)) {
 
-            BackendTask backendTask = startBackend(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 backend.serve(server);
                 return null;
             });
