@@ -559,7 +559,7 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
     }
 
     @Override
-    public void beforeReset() {
+    public void checkReset() {
         if (!drainInstanceStarts()) {
             throw new AwsException("ServiceUnavailable", "RDS instance startup is still in progress. Retry the reset.", 503);
         }
@@ -585,7 +585,16 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
     }
 
     @Override
+    public void cancelResetCheck() {
+        resumeInstanceStarts();
+    }
+
+    @Override
     public void afterReset() {
+        resumeInstanceStarts();
+    }
+
+    private void resumeInstanceStarts() {
         synchronized (instanceCreationLock) {
             instanceStartDrain = null;
         }

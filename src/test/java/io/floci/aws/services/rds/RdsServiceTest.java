@@ -4,7 +4,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.ContainerTeardown;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.docker.ContainerLiveness;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.floci.aws.core.common.docker.DockerHostResolver;
@@ -14,6 +16,7 @@ import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.core.storage.WalStorage;
+import io.floci.aws.lifecycle.EmulatorInfoController;
 import io.floci.aws.services.dsql.DsqlPrincipals;
 import io.floci.aws.services.dsql.dataplane.DsqlDatabases;
 import io.floci.aws.services.dsql.dataplane.DsqlEndpoint;
@@ -292,7 +295,7 @@ class RdsServiceTest {
             assertEquals(DbInstanceStatus.CREATING, response.getStatus());
         } finally {
             release.countDown();
-            rdsService.beforeReset();
+            rdsService.checkReset();
         }
     }
 
@@ -325,15 +328,17 @@ class RdsServiceTest {
                 verify(proxyManager, never()).startProxy(any(), any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
                         any(), any(), any(), any(), any(), any());
             } else {
-                assertTimeoutPreemptively(Duration.ofSeconds(25), rdsService::beginTeardown);
-                AwsException busy = assertTimeoutPreemptively(Duration.ofSeconds(2),
-                        () -> assertThrows(AwsException.class, rdsService::beforeReset));
+                StorageFactory storage = mock();
+                ContainerTeardown otherContainers = mock();
+                EmulatorInfoController controller = resetController(storage, otherContainers, List.of(rdsService));
+                AwsException busy = assertTimeoutPreemptively(Duration.ofSeconds(25),
+                        () -> assertThrows(AwsException.class, controller::reset));
                 assertEquals(503, busy.getHttpStatus());
                 assertEquals("ServiceUnavailable", busy.getErrorCode());
-                rdsService.afterReset();
+                verifyNoInteractions(otherContainers, storage);
                 beginStandaloneCreate("next-start");
                 release.countDown();
-                rdsService.beforeReset();
+                rdsService.checkReset();
                 assertEquals(DbInstanceStatus.AVAILABLE, rdsService.getDbInstance("slow-start").getStatus());
                 assertEquals(DbInstanceStatus.AVAILABLE, rdsService.getDbInstance("next-start").getStatus());
             }
@@ -342,6 +347,38 @@ class RdsServiceTest {
             rdsService.afterReset();
             rdsService.shutdownInstanceStarts();
         }
+    }
+
+    @Test
+    void laterResetRefusalReopensInstanceCreation() {
+        when(rdsConfig.mock()).thenReturn(false);
+        Resettable refusing = mock();
+        IllegalStateException refusal = new IllegalStateException("reset refused");
+        doAnswer(call -> {
+            AwsException busy = assertThrows(AwsException.class, () -> beginStandaloneCreate("during-check"));
+            assertEquals(503, busy.getHttpStatus());
+            throw refusal;
+        }).when(refusing).checkReset();
+        StorageFactory storage = mock();
+        ContainerTeardown otherContainers = mock();
+        EmulatorInfoController controller = resetController(storage, otherContainers, List.of(rdsService, refusing));
+
+        try {
+            assertSame(refusal, assertThrows(IllegalStateException.class, controller::reset));
+            verifyNoInteractions(otherContainers, storage);
+            assertEquals(DbInstanceStatus.CREATING, beginStandaloneCreate("after-refusal").getStatus());
+        } finally {
+            rdsService.shutdownInstanceStarts();
+        }
+    }
+
+    private EmulatorInfoController resetController(StorageFactory storage, ContainerTeardown otherContainers,
+                                                  List<Resettable> services) {
+        Instance<Resettable> resettables = mock();
+        when(resettables.iterator()).thenAnswer(call -> services.iterator());
+        Instance<ContainerTeardown> teardowns = mock();
+        when(teardowns.iterator()).thenAnswer(call -> List.of(otherContainers, rdsService).iterator());
+        return new EmulatorInfoController(null, null, storage, resettables, teardowns, null, config, null);
     }
 
     @Test
@@ -373,7 +410,7 @@ class RdsServiceTest {
             assertEquals("DBInstanceAlreadyExists", duplicate.getErrorCode());
         } finally {
             releaseProxy.countDown();
-            rdsService.beforeReset();
+            rdsService.checkReset();
         }
         AwsException deleted = assertThrows(AwsException.class, () -> rdsService.getDbInstance(id));
         assertEquals("DBInstanceNotFound", deleted.getErrorCode());
@@ -443,7 +480,7 @@ class RdsServiceTest {
         try {
             assertEquals(DbInstanceStatus.CREATING, beginStandaloneCreate("early-request").getStatus());
         } finally {
-            rdsService.beforeReset();
+            rdsService.checkReset();
         }
         DbInstance instance = rdsService.getDbInstance("early-request");
         assertEquals(DbInstanceStatus.AVAILABLE, instance.getStatus());
@@ -468,7 +505,7 @@ class RdsServiceTest {
         try {
             assertEquals(DbInstanceStatus.CREATING, beginStandaloneCreate(id).getStatus());
         } finally {
-            rdsService.beforeReset();
+            rdsService.checkReset();
         }
         DbInstance ready = rdsService.getDbInstance(id);
         assertEquals(DbInstanceStatus.AVAILABLE, ready.getStatus());
@@ -503,12 +540,12 @@ class RdsServiceTest {
             assertEquals(DbInstanceStatus.CREATING, beginStandaloneCreate("failed-start").getStatus());
             await().atMost(Duration.ofSeconds(5)).until(() ->
                     rdsService.getDbInstance("failed-start").getStatus() == DbInstanceStatus.FAILED);
-            rdsService.beforeReset();
+            rdsService.checkReset();
             rdsService.clear();
             rdsService.restorePersistedRuntime();
             assertEquals(DbInstanceStatus.FAILED, rdsService.getDbInstance("failed-start").getStatus());
         } finally {
-            rdsService.beforeReset();
+            rdsService.checkReset();
         }
     }
 
