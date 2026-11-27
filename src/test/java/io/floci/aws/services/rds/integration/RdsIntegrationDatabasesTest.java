@@ -5,7 +5,6 @@ import io.floci.aws.services.rds.model.Integration;
 import io.floci.aws.services.redshift.RedshiftService;
 import io.floci.aws.services.redshift.spectrum.BackendSql;
 import io.floci.aws.services.redshift.spectrum.ExternalStatement;
-import io.floci.aws.services.redshift.spectrum.SpectrumSession;
 import io.floci.aws.services.redshift.spectrum.SpectrumSqlException;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessService;
 import org.junit.jupiter.api.BeforeEach;
@@ -16,6 +15,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
+import static io.floci.aws.services.rds.integration.RdsIntegrationDatabasesFixture.ACCOUNT;
+import static io.floci.aws.services.rds.integration.RdsIntegrationDatabasesFixture.session;
+import static io.floci.aws.services.rds.integration.RdsIntegrationDatabasesFixture.statement;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
@@ -26,7 +28,6 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -37,8 +38,6 @@ import static org.mockito.Mockito.when;
  */
 class RdsIntegrationDatabasesTest {
 
-    private static final String ACCOUNT = "000000000000";
-    private static final String INTEGRATION_ID = "4b2f2f9c-7d1e-4f55-9a77-1a2b3c4d5e6f";
     private static final String NAMESPACE_ARN = "arn:aws:redshift-serverless:us-east-1:000000000000:"
             + "namespace/1a2b3c4d-0000-0000-0000-000000000000";
 
@@ -52,44 +51,14 @@ class RdsIntegrationDatabasesTest {
 
     @BeforeEach
     void setUp() {
-        integrations = mock(RdsIntegrationService.class);
-        loader = mock(RdsIntegrationLoader.class);
-        redshiftService = mock(RedshiftService.class);
-        serverless = mock(RedshiftServerlessService.class);
-        databases = new RdsIntegrationDatabases(integrations, loader, redshiftService, serverless);
+        RdsIntegrationDatabasesFixture fixture = new RdsIntegrationDatabasesFixture();
+        integrations = fixture.integrations;
+        loader = fixture.loader;
+        redshiftService = fixture.redshiftService;
+        serverless = fixture.serverless;
+        databases = fixture.databases;
+        integration = fixture.integration;
         backend = new RecordingBackend();
-        integration = new Integration();
-        integration.setIntegrationArn("arn:aws:rds:us-east-1:000000000000:integration:" + INTEGRATION_ID);
-        integration.setTargetArn("arn:aws:redshift:us-east-1:000000000000:cluster:orders-dw");
-        integration.setDataFilter("include: orders.*.*");
-        integration.setAccountId(ACCOUNT);
-        integration.setRegion("us-east-1");
-        when(integrations.findById(anyString())).thenReturn(Optional.empty());
-        when(integrations.findById(INTEGRATION_ID)).thenReturn(Optional.of(integration));
-        when(integrations.addDestination(any(), anyString(), anyString(), anyBoolean())).thenAnswer(invocation -> {
-            Integration updated = new Integration(integration);
-            updated.getDestinations().removeIf(d -> invocation.getArgument(2).equals(d.getSourceDatabase()));
-            updated.getDestinations().add(new Integration.Destination(invocation.getArgument(1),
-                    invocation.getArgument(2), Integration.Destination.STATE_SYNCING, null, "load-1"));
-            return updated;
-        });
-        when(integrations.reserveDestination(any(), anyString(), anyString(), any(), any())).thenAnswer(invocation -> {
-            Integration updated = new Integration(integration);
-            updated.getDestinations().removeIf(d -> invocation.getArgument(2).equals(d.getSourceDatabase()));
-            updated.getDestinations().add(new Integration.Destination(invocation.getArgument(1),
-                    invocation.getArgument(2), Integration.Destination.STATE_CREATING, null, "load-1"));
-            return updated;
-        });
-        when(integrations.startDestinationSync(any(), anyString(), any())).thenReturn(integration);
-        when(redshiftService.clusterRegion(ACCOUNT, "orders-dw")).thenReturn(Optional.of("us-east-1"));
-    }
-
-    private static SpectrumSession session(String clusterIdentifier) {
-        return new SpectrumSession(ACCOUNT, ACCOUNT + ":" + clusterIdentifier, "dev", List.of(), false);
-    }
-
-    private static ExternalStatement.CreateIntegrationDatabase statement(String sourceDatabase) {
-        return new ExternalStatement.CreateIntegrationDatabase("orders_dw", INTEGRATION_ID, sourceDatabase);
     }
 
     private void assertState(String sqlState, Runnable call) {
@@ -160,7 +129,7 @@ class RdsIntegrationDatabasesTest {
                 new AwsException("IntegrationAlreadyExistsFault", "already", 400));
 
         assertState("42P04", () -> databases.create(
-                new ExternalStatement.CreateIntegrationDatabase("orders_dw2", INTEGRATION_ID, "orders"),
+                statement("orders_dw2", "orders"),
                 session("orders-dw"), backend));
         verify(integrations).reserveDestination(integration, "orders_dw2", "orders", null, null);
         assertThat(backend.statements, empty());
@@ -261,7 +230,7 @@ class RdsIntegrationDatabasesTest {
         failing.failure = new SpectrumSqlException("42P04", "database \"orders_dw_v2\" already exists");
 
         assertState("42P04", () -> databases.create(
-                new ExternalStatement.CreateIntegrationDatabase("orders_dw_v2", INTEGRATION_ID, "orders"),
+                statement("orders_dw_v2", "orders"),
                 session("orders-dw"), failing));
 
         verify(integrations).restoreDestination(integration, "orders", "load-1", failed, List.of(error));

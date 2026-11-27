@@ -2,12 +2,8 @@ package io.floci.aws.services.rds.integration;
 
 import io.floci.aws.services.dsql.ExternalPostgresServer;
 import io.floci.aws.services.rds.model.Integration;
-import io.floci.aws.services.redshift.RedshiftService;
 import io.floci.aws.services.redshift.spectrum.BackendSql;
-import io.floci.aws.services.redshift.spectrum.ExternalStatement;
-import io.floci.aws.services.redshift.spectrum.SpectrumSession;
 import io.floci.aws.services.redshift.spectrum.SpectrumSqlException;
-import io.floci.aws.services.redshiftserverless.RedshiftServerlessService;
 import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -30,6 +26,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
+import static io.floci.aws.services.rds.integration.RdsIntegrationDatabasesFixture.session;
+import static io.floci.aws.services.rds.integration.RdsIntegrationDatabasesFixture.statement;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.empty;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -38,10 +36,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 /**
  * Retrying a failed zero-ETL destination checks the caller's privileges against a real PostgreSQL 16: each case
@@ -55,14 +51,9 @@ class RdsIntegrationRetryPermissionDockerNightlyIntegrationTest {
 
     private static final String SUPERUSER_PASSWORD = "floci-test";
     private static final String ROLE_PASSWORD = "retry-test";
-    private static final String ACCOUNT = "000000000000";
-    private static final String INTEGRATION_ID = "4b2f2f9c-7d1e-4f55-9a77-1a2b3c4d5e6f";
 
     private ExternalPostgresServer server;
-    private RdsIntegrationService integrations;
-    private RdsIntegrationLoader loader;
-    private RdsIntegrationDatabases databases;
-    private Integration integration;
+    private RdsIntegrationDatabasesFixture fixture;
 
     @BeforeAll
     void startServer() throws Exception {
@@ -93,26 +84,7 @@ class RdsIntegrationRetryPermissionDockerNightlyIntegrationTest {
 
     @BeforeEach
     void setUp() {
-        integrations = mock(RdsIntegrationService.class);
-        loader = mock(RdsIntegrationLoader.class);
-        RedshiftService redshiftService = mock(RedshiftService.class);
-        databases = new RdsIntegrationDatabases(integrations, loader, redshiftService,
-                mock(RedshiftServerlessService.class));
-        integration = new Integration();
-        integration.setIntegrationArn("arn:aws:rds:us-east-1:000000000000:integration:" + INTEGRATION_ID);
-        integration.setTargetArn("arn:aws:redshift:us-east-1:000000000000:cluster:orders-dw");
-        integration.setDataFilter("include: orders.*.*");
-        integration.setAccountId(ACCOUNT);
-        integration.setRegion("us-east-1");
-        when(integrations.findById(INTEGRATION_ID)).thenReturn(Optional.of(integration));
-        when(integrations.addDestination(any(), anyString(), anyString(), anyBoolean())).thenAnswer(invocation -> {
-            Integration updated = new Integration(integration);
-            updated.getDestinations().removeIf(d -> invocation.getArgument(2).equals(d.getSourceDatabase()));
-            updated.getDestinations().add(new Integration.Destination(invocation.getArgument(1),
-                    invocation.getArgument(2), Integration.Destination.STATE_SYNCING, null, "load-1"));
-            return updated;
-        });
-        when(redshiftService.clusterRegion(ACCOUNT, "orders-dw")).thenReturn(Optional.of("us-east-1"));
+        fixture = new RdsIntegrationDatabasesFixture();
     }
 
     @Test
@@ -143,8 +115,8 @@ class RdsIntegrationRetryPermissionDockerNightlyIntegrationTest {
             assertEquals("permission denied to create database", error.getMessage());
             assertThat(backend.statements, empty());
         }
-        verify(integrations, never()).addDestination(any(), anyString(), anyString(), anyBoolean());
-        verify(loader, never()).submit(any(), anyString(), anyString(), any());
+        verify(fixture.integrations, never()).addDestination(any(), anyString(), anyString(), anyBoolean());
+        verify(fixture.loader, never()).submit(any(), anyString(), anyString(), any());
     }
 
     private void assertAllowed(String role, String databaseName) throws SQLException {
@@ -152,15 +124,14 @@ class RdsIntegrationRetryPermissionDockerNightlyIntegrationTest {
             retry(databaseName, backend);
             assertThat(backend.statements, empty());
         }
-        verify(integrations).addDestination(integration, databaseName, "orders", false);
-        verify(loader).submit(any(), eq("orders"), eq(databaseName), eq("load-1"));
+        verify(fixture.integrations).addDestination(fixture.integration, databaseName, "orders", false);
+        verify(fixture.loader).submit(any(), eq("orders"), eq(databaseName), eq("load-1"));
     }
 
     private void retry(String databaseName, BackendSql backend) {
-        integration.getDestinations().add(new Integration.Destination(databaseName, "orders",
+        fixture.integration.getDestinations().add(new Integration.Destination(databaseName, "orders",
                 Integration.Destination.STATE_FAILED, null));
-        databases.create(new ExternalStatement.CreateIntegrationDatabase(databaseName, INTEGRATION_ID, "orders"),
-                new SpectrumSession(ACCOUNT, ACCOUNT + ":orders-dw", "dev", List.of(), false), backend);
+        fixture.databases.create(statement(databaseName, "orders"), session("orders-dw"), backend);
     }
 
     private JdbcBackend connectAs(String role) throws SQLException {

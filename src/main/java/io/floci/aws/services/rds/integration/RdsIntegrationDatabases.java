@@ -131,9 +131,8 @@ public class RdsIntegrationDatabases implements IntegrationDatabaseCreator {
      * connection.
      */
     private static void requireRetryPermission(String databaseName, BackendSql backend) {
-        String escaped = databaseName.replace("'", "''");
         Optional<String> allowed = backend.queryString("SELECT 1 FROM pg_catalog.pg_roles r "
-                + "JOIN pg_catalog.pg_database d ON d.datname = '" + escaped + "' "
+                + "JOIN pg_catalog.pg_database d ON d.datname = " + PostgresWire.quoteLiteral(databaseName) + " "
                 + "WHERE r.rolname = current_user "
                 + "AND (r.rolsuper OR (r.rolcreatedb AND pg_catalog.pg_has_role(r.oid, d.datdba, 'MEMBER')))");
         if (allowed.isEmpty()) {
