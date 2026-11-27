@@ -913,6 +913,7 @@ public interface EmulatorConfig {
         SsoAdminServiceConfig ssoadmin();
         SsoOidcServiceConfig ssooidc();
         Macie2ServiceConfig macie2();
+        KinesisVideoServiceConfig kinesisvideo();
         AccountServiceConfig account();
         AccessAnalyzerServiceConfig accessanalyzer();
         IdentityStoreServiceConfig identitystore();
@@ -1062,6 +1063,11 @@ public interface EmulatorConfig {
     }
 
     interface Macie2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface KinesisVideoServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

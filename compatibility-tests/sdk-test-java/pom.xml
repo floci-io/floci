@@ -407,6 +407,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>kinesis</artifactId>
         </dependency>
+        <!-- Kinesis Video Streams client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>kinesisvideo</artifactId>
+        </dependency>
         <!-- Netty async HTTP client — required for KinesisAsyncClient (SubscribeToShard) -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

@@ -133,7 +133,7 @@ NOT_COVERED = {
     "cloudfront": "its creation tags are a Tags structure holding Items, which this file does not read yet",
     "connect": _NO_ROUTES,
     "detective": _NO_ROUTES, "dlm": _NO_ROUTES,
-    "inspector2": _NO_ROUTES, "iot": _NO_ROUTES, "kafka": _NO_ROUTES,
+    "inspector2": _NO_ROUTES, "iot": _NO_ROUTES, "kafka": _NO_ROUTES, "kinesisvideo": _NO_ROUTES,
     "mq": _NO_ROUTES,
     "quicksight": "metadata-only REST subset; creation-tag IAM authorization is not implemented",
     "rum": _NO_ROUTES,

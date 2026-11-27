@@ -56,6 +56,7 @@ import io.floci.aws.services.iot.IotDataController;
 import io.floci.aws.services.iot.IotDomainConfigurationController;
 import io.floci.aws.services.iot.IotFleetIndexingController;
 import io.floci.aws.services.iot.IotLoggingController;
+import io.floci.aws.services.kinesisvideo.KinesisVideoController;
 import io.floci.aws.services.lakeformation.LakeFormationController;
 import io.floci.aws.services.lambda.LambdaController;
 import io.floci.aws.services.lambda.durable.DurableExecutionController;
@@ -594,6 +595,10 @@ public class ResolvedServiceCatalog {
                 descriptor("macie2", "macie2", config.services().macie2().enabled(), true,
                         "macie2", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("macie2"), Set.of(), Set.of(MacieController.class)),
+                descriptor("kinesisvideo", "kinesisvideo", config.services().kinesisvideo().enabled(), true,
+                        "kinesisvideo", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("kinesisvideo"), Set.of(),
+                        Set.of(KinesisVideoController.class)),
                 descriptor("account", "account", config.services().account().enabled(), true,
                         "account", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("account"), Set.of(), Set.of(AccountController.class)),

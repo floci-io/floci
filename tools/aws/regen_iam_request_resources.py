@@ -669,6 +669,7 @@ NOT_COVERED: dict[str, str] = {
     "execute-api": _REST,
     "iot": _LATER,
     "kafka": _REST,
+    "kinesisvideo": _REST,
     "lightsail": _LATER,
     "mq": _REST,
     "network-firewall": _LATER,
