@@ -4,6 +4,7 @@ import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -14,10 +15,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 
 /**
  * S3 answers a bucket only in its own Region, so floci-duck, which Floci drives for Athena, S3 Select, Redshift and
@@ -31,7 +36,7 @@ class FlociDuckBucketRegionSidecarIntegrationTest {
     @Inject
     FlociDuckClient duck;
 
-    @Inject
+    @InjectSpy
     S3Service s3Service;
 
     private final String suffix = UUID.randomUUID().toString().substring(0, 8);
@@ -73,32 +78,37 @@ class FlociDuckBucketRegionSidecarIntegrationTest {
 
     /**
      * The secrets carry the caller's credentials, so a request running at the same time, as another account, must
-     * not see them: floci-duck runs every request in a DuckDB instance of its own.
+     * not see them: floci-duck runs every request in a DuckDB instance of its own. The first request is held inside
+     * its read, after its secret exists, while the second looks.
      */
     @Test
     void aConcurrentRequestSeesNoneOfAnotherRequestsBucketSecrets() throws Exception {
         s3Service.createBucket(euBucket, "eu-west-1");
-        s3Service.putObject(euBucket, "rows.csv", "id,name\n1,eu\n".getBytes(StandardCharsets.UTF_8),
+        s3Service.putObject(euBucket, "held.csv", "id,name\n1,eu\n".getBytes(StandardCharsets.UTF_8),
                 "text/csv", null);
-        CompletableFuture<List<Map<String, Object>>> slow = CompletableFuture.supplyAsync(() -> duck.query(
-                "SELECT count(*) AS n FROM read_csv('s3://" + euBucket + "/rows.csv'), range(300000000) t(x)"
-                        + " WHERE x % 7 = 3", null));
-        int probesWhileRunning = 0;
+        CountDownLatch reading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            reading.countDown();
+            assertTrue(release.await(30, TimeUnit.SECONDS), "the held read was never released");
+            return invocation.callRealMethod();
+        }).when(s3Service).headObject(eq(euBucket), eq("held.csv"), any());
+        CompletableFuture<List<Map<String, Object>>> held = CompletableFuture.supplyAsync(() -> duck.query(
+                "SELECT CAST(id AS VARCHAR) AS id FROM read_csv('s3://" + euBucket + "/held.csv')", null));
         try {
-            while (!slow.isDone()) {
-                List<Map<String, Object>> secrets = duck.query(
-                        "SELECT CAST(count(*) AS VARCHAR) AS n FROM duckdb_secrets()", null, "222222222222",
-                        "secret-of-222", null);
-                if (!slow.isDone()) {
-                    assertEquals(List.of(Map.of("n", "0")), secrets);
-                    probesWhileRunning++;
-                }
-            }
+            assertTrue(reading.await(30, TimeUnit.SECONDS), "the first request never read its bucket");
+
+            assertEquals(List.of(Map.of("n", "0")), duck.query(
+                    "SELECT CAST(count(*) AS VARCHAR) AS n FROM duckdb_secrets()", null, "222222222222",
+                    "secret-of-222", null));
         } finally {
-            assertEquals(List.of(Map.of("n", "42857143")), slow.get(60, TimeUnit.SECONDS).stream()
-                    .map(row -> Map.of("n", String.valueOf(row.get("n")))).toList());
+            release.countDown();
         }
-        assertTrue(probesWhileRunning > 0, "no probe ran while the other request held its secret");
+        try {
+            assertEquals(List.of(Map.of("id", "1")), held.get(30, TimeUnit.SECONDS));
+        } finally {
+            s3Service.deleteObject(euBucket, "held.csv");
+        }
     }
 
     @Test
