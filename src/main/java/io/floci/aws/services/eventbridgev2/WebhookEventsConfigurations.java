@@ -32,7 +32,6 @@ final class WebhookEventsConfigurations {
     private static final String WHSEC = "whsec_";
     private static final int MIN_HMAC_SECRET_BYTES = 16;
     private static final int MAX_HMAC_SECRET_BYTES = 512;
-    private static final String ONLY_WEBHOOK = "Only WebhookEventsConfiguration event sources are supported.";
     private static final List<String> SECRET_MEMBERS = List.of("SecretValue", "Username", "Password");
     private static final List<String> AUTH_MEMBERS = List.of(STATIC_TOKEN, BASIC, HMAC);
 
@@ -46,17 +45,11 @@ final class WebhookEventsConfigurations {
     private WebhookEventsConfigurations() {
     }
 
-    /**
-     * Checks a create request's {@code Configuration} and returns its webhook configuration. A configuration of
-     * another variant is refused, as Floci serves webhook event sources only.
-     */
+    /** Checks the webhook configuration of a create request's {@code Configuration} and returns it. */
     static JsonNode validateForCreate(JsonNode configuration) {
-        Map.Entry<String, JsonNode> variant = onlyVariant(configuration);
-        if (!WEBHOOK.equals(variant.getKey())) {
-            throw invalidInput(ONLY_WEBHOOK);
-        }
-        validateWebhook(variant.getValue());
-        return variant.getValue();
+        JsonNode webhook = onlyVariant(configuration).getValue();
+        validateWebhook(webhook);
+        return webhook;
     }
 
     /**
@@ -66,8 +59,7 @@ final class WebhookEventsConfigurations {
     static JsonNode validateForUpdate(JsonNode configuration, String storedAuthType) {
         Map.Entry<String, JsonNode> variant = onlyVariant(configuration);
         if (!WEBHOOK.equals(variant.getKey())) {
-            throw invalidInput("EventSource type is immutable: the configuration variant must remain "
-                    + "WEBHOOK_EVENTS");
+            throw variantImmutable(ServiceEventsConfigurations.WEBHOOK_TYPE);
         }
         JsonNode webhook = variant.getValue();
         JsonNode auth = webhook.path("AuthConfiguration");
@@ -97,7 +89,12 @@ final class WebhookEventsConfigurations {
         return members;
     }
 
-    private static Map.Entry<String, JsonNode> onlyVariant(JsonNode configuration) {
+    static AwsException variantImmutable(String eventSourceType) {
+        return invalidInput("EventSource type is immutable: the configuration variant must remain "
+                + eventSourceType);
+    }
+
+    static Map.Entry<String, JsonNode> onlyVariant(JsonNode configuration) {
         List<Map.Entry<String, JsonNode>> members = variants(configuration);
         if (members.size() != 1) {
             throw invalidInput("Exactly one Configuration sub-field must be provided");
@@ -309,7 +306,7 @@ final class WebhookEventsConfigurations {
         return configuration;
     }
 
-    private static void dropNulls(JsonNode node) {
+    static void dropNulls(JsonNode node) {
         if (node instanceof ObjectNode object) {
             Iterator<Map.Entry<String, JsonNode>> fields = object.properties().iterator();
             while (fields.hasNext()) {

@@ -31,6 +31,7 @@ class RulePersistenceTest {
         rule.setEventBusName("default");
         rule.setScheduleExpression("rate(5 minutes)");
         rule.setState(RuleState.ENABLED);
+        rule.setManagedBy("events.amazonaws.com");
 
         PersistentStorage<String, Rule> writer = new PersistentStorage<>(
                 filePath, new TypeReference<Map<String, Rule>>() {});
@@ -47,6 +48,7 @@ class RulePersistenceTest {
         assertEquals("arn:aws:events:us-east-1:000000000000:rule/my-rule", loaded.get().getArn());
         assertEquals("rate(5 minutes)", loaded.get().getScheduleExpression());
         assertEquals(RuleState.ENABLED, loaded.get().getState());
+        assertEquals("events.amazonaws.com", loaded.get().getManagedBy());
     }
 
     @Test

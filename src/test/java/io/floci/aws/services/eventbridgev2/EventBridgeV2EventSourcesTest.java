@@ -8,19 +8,18 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridgev2.model.EventBusV2;
 import io.floci.aws.services.eventbridgev2.model.EventSourceV2;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
+import io.floci.aws.testing.ManualClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -57,7 +56,8 @@ class EventBridgeV2EventSourcesTest {
     private SecretsManagerService secrets;
     private TlsCertificateManager certificateManager;
     private EventBridgeV2Service service;
-    private TestClock clock;
+    private ManualClock clock;
+    private EventBridgeService eventBridge;
     private String bus;
 
     @BeforeEach
@@ -69,12 +69,13 @@ class EventBridgeV2EventSourcesTest {
             return secret;
         });
         when(secrets.describeSecret(any(), any())).thenReturn(new Secret());
-        clock = new TestClock(NOW);
+        clock = new ManualClock(NOW);
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
         certificateManager = mock(TlsCertificateManager.class);
+        eventBridge = mock(EventBridgeService.class);
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(
                 AccountAwareStorageBackend.inMemory(ACCOUNT), secrets, regionResolver, clock, "http://floci.test:4566",
-                certificateManager);
+                certificateManager, eventBridge);
         service = new EventBridgeV2Service(AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT), regionResolver, mock(EventBridgeV2Delivery.class),
                 eventSources, clock, true);
@@ -263,14 +264,6 @@ class EventBridgeV2EventSourcesTest {
     }
 
     @Test
-    void createRefusesAnotherVariantWithFlociOwnWording() {
-        AwsException e = assertThrows(AwsException.class, () -> service.createEventSource(json(
-                "{\"Name\":\"hook\",\"ClientToken\":\"t\",\"EventBusArn\":\"" + bus + "\",\"Configuration\":"
-                        + "{\"AwsServiceEventsConfiguration\":{\"AwsService\":\"aws.s3\"}}}"), REGION));
-        assertEquals("Only WebhookEventsConfiguration event sources are supported.", e.getMessage());
-    }
-
-    @Test
     void createWithoutAClientTokenIsRefusedBeforeTheSemanticRules() {
         ObjectNode request = create("hook", bus, "{\"BasicHttpAuthConfiguration\":{\"Username\":\"u\"}}");
         request.remove("ClientToken");
@@ -401,7 +394,7 @@ class EventBridgeV2EventSourcesTest {
         doThrow(failure).when(failing).put(any(), any());
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(failing, secrets,
                 new RegionResolver(REGION, ACCOUNT), clock, "http://floci.test:4566",
-                certificateManager);
+                certificateManager, eventBridge);
 
         EventBusV2 existing = new EventBusV2();
         existing.setArn(bus);
@@ -853,33 +846,6 @@ class EventBridgeV2EventSourcesTest {
             return MAPPER.readTree(json);
         } catch (Exception e) {
             throw new IllegalArgumentException(json, e);
-        }
-    }
-
-    private static final class TestClock extends Clock {
-        private Instant now;
-
-        TestClock(Instant now) {
-            this.now = now;
-        }
-
-        void advance(Duration duration) {
-            now = now.plus(duration);
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return now;
         }
     }
 }

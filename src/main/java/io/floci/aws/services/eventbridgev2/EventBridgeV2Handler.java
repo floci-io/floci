@@ -216,7 +216,7 @@ public class EventBridgeV2Handler {
     private Response handleCreateEventSource(JsonNode request, String region) {
         EventSourceV2 source = service.createEventSource(request, region);
         ObjectNode response = eventSourceIdentity(source);
-        response.set("EventSourceDetails", eventSourceDetails(source));
+        putEventSourceDetails(response, source);
         response.put("CreationTime", epochSeconds(source.getCreationTime()));
         return Response.ok(response).build();
     }
@@ -237,7 +237,7 @@ public class EventBridgeV2Handler {
         if (source.isRevoked()) {
             response.put("Revoked", true);
         }
-        response.set("EventSourceDetails", eventSourceDetails(source));
+        putEventSourceDetails(response, source);
         response.put("CreationTime", epochSeconds(source.getCreationTime()));
         response.put("LastModifiedTime", epochSeconds(source.getLastModifiedTime()));
         return Response.ok(response).build();
@@ -276,7 +276,7 @@ public class EventBridgeV2Handler {
             summary.put("EventSourceArn", source.getArn());
             summary.put("Name", source.getName());
             summary.put("EventBusArn", source.getEventBusArn());
-            summary.put("Type", "WEBHOOK_EVENTS");
+            summary.put("Type", ServiceEventsConfigurations.typeOf(source));
             summary.put("State", source.getState());
             if (source.isRevoked()) {
                 summary.put("Revoked", true);
@@ -299,6 +299,12 @@ public class EventBridgeV2Handler {
         response.put("EventBusArn", source.getEventBusArn());
         response.put("State", source.getState());
         return response;
+    }
+
+    private void putEventSourceDetails(ObjectNode response, EventSourceV2 source) {
+        if (!ServiceEventsConfigurations.isAwsService(source)) {
+            response.set("EventSourceDetails", eventSourceDetails(source));
+        }
     }
 
     private ObjectNode eventSourceDetails(EventSourceV2 source) {

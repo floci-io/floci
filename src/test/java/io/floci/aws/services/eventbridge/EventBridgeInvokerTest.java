@@ -18,6 +18,7 @@ import io.floci.aws.services.eventbridge.model.EcsParameters;
 import io.floci.aws.services.eventbridge.model.InputTransformer;
 import io.floci.aws.services.eventbridge.model.NetworkConfiguration;
 import io.floci.aws.services.eventbridge.model.Target;
+import io.floci.aws.services.eventbridgev2.EventBridgeV2Service;
 import io.floci.aws.services.firehose.FirehoseService;
 import io.floci.aws.services.firehose.model.Record;
 import io.floci.aws.services.lambda.LambdaService;
@@ -766,5 +767,39 @@ class EventBridgeInvokerTest {
         invoker.invokeTarget(target, event, "eu-west-1");
 
         verify(eventBridgeService, never()).putEvents(anyList(), anyString(), any());
+    }
+
+    @Test
+    void invokeTarget_eventBusV2Target_forwardsTheEventNamedByTheRule() {
+        EventBridgeV2Service eventBridgeV2Service = mock(EventBridgeV2Service.class);
+        EventBridgeInvoker forwarding = invokerWith(eventBridgeV2Service);
+        String busArn = "arn:aws:events:us-east-1:000000000000:event-busv2/orders/zzzzzzzzzzzzzzzzzzzzzzzzz";
+        String event = "{\"id\":\"e1\",\"source\":\"aws.ssm\",\"detail-type\":\"x\",\"detail\":{}}";
+
+        forwarding.invokeTarget(new Target("abcdefghijklmnopqrstuvwxy", busArn, null, null), event, "us-east-1",
+                "arn:aws:events:us-east-1:000000000000:rule/abcdefghijklmnopqrstuvwxy");
+
+        verify(eventBridgeV2Service).forwardServiceEvent(busArn,
+                "arn:aws:events:us-east-1:000000000000:rule/abcdefghijklmnopqrstuvwxy", event);
+        verify(eventBridgeService, never()).putEvents(anyList(), anyString(), any());
+    }
+
+    @Test
+    void invokeTarget_eventBusV2TargetWithoutTheRuleDeliversNothing() {
+        EventBridgeV2Service eventBridgeV2Service = mock(EventBridgeV2Service.class);
+
+        invokerWith(eventBridgeV2Service).invokeTarget(new Target("id1",
+                "arn:aws:events:us-east-1:000000000000:event-busv2/orders/zzzzzzzzzzzzzzzzzzzzzzzzz", null, null),
+                "{}", "us-east-1");
+
+        verifyNoInteractions(eventBridgeV2Service);
+    }
+
+    private EventBridgeInvoker invokerWith(EventBridgeV2Service eventBridgeV2Service) {
+        EmulatorConfig config = mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
+        return new EventBridgeInvoker(lambdaService, sqsService, mock(SnsService.class), batchService,
+                firehoseService, null, eventBridgeService, ecsService, null, stepFunctionsService,
+                mock(RedshiftDataService.class), null, mock(ServiceRegistry.class), regionResolver,
+                new ObjectMapper(), config, null, eventBridgeV2Service);
     }
 }

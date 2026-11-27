@@ -15,8 +15,11 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.eventbridge.EventBridgeService;
+import io.floci.aws.services.eventbridge.model.Target;
 import io.floci.aws.services.eventbridgev2.model.EventBusV2;
 import io.floci.aws.services.eventbridgev2.model.EventSourceV2;
 import io.floci.aws.services.eventbridgev2.model.RotationRequest;
@@ -47,6 +50,9 @@ import java.util.function.Function;
 @ApplicationScoped
 public class EventBridgeV2EventSources implements Resettable {
     private static final String OWNING_SERVICE = "events-webhook";
+    private static final String EVENTS_PRINCIPAL = ServicePrincipals.of("events");
+    private static final String CREATE_FAILED = "CREATE_FAILED";
+    private static final String UPDATE_FAILED = "UPDATE_FAILED";
     private static final String WEBHOOK_HOST_LABELS = "c01.events-webhook.";
 
     private static final Logger LOG = Logger.getLogger(EventBridgeV2EventSources.class);
@@ -67,32 +73,35 @@ public class EventBridgeV2EventSources implements Resettable {
     private final SecureRandom random = new SecureRandom();
     private final WebhookDeduplication deduplication;
     private final TlsCertificateManager certificateManager;
+    private final EventBridgeService eventBridge;
 
     @Inject
     public EventBridgeV2EventSources(StorageFactory storageFactory, SecretsManagerService secrets,
                                      RegionResolver regionResolver, EmulatorConfig config,
-                                     TlsCertificateManager certificateManager) {
+                                     TlsCertificateManager certificateManager, EventBridgeService eventBridge) {
         this(storageFactory.create("eventbridgev2", "eventbridgev2-event-sources.json",
                         new TypeReference<Map<String, EventSourceV2>>() {}),
-                secrets, regionResolver, Clock.systemUTC(), config.effectiveBaseUrl(), certificateManager);
+                secrets, regionResolver, Clock.systemUTC(), config.effectiveBaseUrl(), certificateManager,
+                eventBridge);
     }
 
     EventBridgeV2EventSources(AccountAwareStorageBackend<EventSourceV2> sources, SecretsManagerService secrets,
                               RegionResolver regionResolver, Clock clock, String baseUrl,
-                              TlsCertificateManager certificateManager) {
+                              TlsCertificateManager certificateManager, EventBridgeService eventBridge) {
         this.sources = sources;
         this.secrets = secrets;
         this.regionResolver = regionResolver;
         this.clock = clock;
         this.baseUrl = URI.create(baseUrl);
         this.certificateManager = certificateManager;
+        this.eventBridge = eventBridge;
         this.deduplication = new WebhookDeduplication(clock);
     }
 
     /**
-     * Creates a webhook event source on a bus of the caller's, {@code ACTIVE} at once, with the secret that holds
-     * its credential. A retry with the {@code ClientToken} of an earlier create returns that source when it repeats
-     * the request, and fails when it changes it.
+     * Creates an event source on a bus of the caller's. A webhook source is {@code ACTIVE} at once, with the secret
+     * that holds its credential. A retry with the {@code ClientToken} of an earlier create returns that source when
+     * it repeats the request, and fails when it changes it.
      */
     EventSourceV2 create(JsonNode request, String region, Function<String, Optional<EventBusV2>> findBusByName) {
         EventBridgeV2RequestShapes.check("CreateEventSource", request);
@@ -110,14 +119,20 @@ public class EventBridgeV2EventSources implements Resettable {
         if (clientToken == null) {
             throw EventBridgeV2Service.invalidInput("ClientToken is required");
         }
+        Map.Entry<String, JsonNode> variant = WebhookEventsConfigurations.onlyVariant(configuration);
+        if (ServiceEventsConfigurations.PARTNER.equals(variant.getKey())) {
+            checkPartnerSource(variant.getValue(), region);
+            requireBus(eventBusArn, findBusByName);
+            throw ServiceEventsConfigurations.partnerSourceMissing(variant.getValue());
+        }
+        if (ServiceEventsConfigurations.AWS_SERVICE.equals(variant.getKey())) {
+            return createServiceSource(request, region, clientToken, variant.getValue(), findBusByName);
+        }
         JsonNode webhook = WebhookEventsConfigurations.validateForCreate(configuration);
 
         // The request carries credentials, so only its hash is kept.
         String requestHash = Digests.sha256Hex(EventBridgeV2Service.withoutClientToken(request));
-        Optional<EventSourceV2> retried = EventBridgeV2Service.retried(() -> inRegion(region),
-                clientToken, requestHash, EventSourceV2::getClientToken, EventSourceV2::getCreateRequestHash,
-                () -> new AwsException("IdempotentParameterMismatchException",
-                        "ClientToken was used by a previous request with different parameters", 409));
+        Optional<EventSourceV2> retried = retriedSource(region, clientToken, requestHash);
         if (retried.isPresent()) {
             return retried.get();
         }
@@ -131,8 +146,7 @@ public class EventBridgeV2EventSources implements Resettable {
         Instant now = clock.instant();
         EventSourceV2 source = new EventSourceV2();
         source.setName(name);
-        source.setArn(regionResolver.buildArn("events", region,
-                "event-sourcev2/webhook/" + name + "/" + EventBridgeV2Service.newId(random)));
+        source.setArn(sourceArn(region, "webhook", name));
         source.setEventBusArn(eventBusArn);
         source.setDescription(request.path("Description").textValue());
         source.setConfiguration(WebhookEventsConfigurations.echo(webhook));
@@ -154,11 +168,121 @@ public class EventBridgeV2EventSources implements Resettable {
         return source;
     }
 
+    private Optional<EventSourceV2> retriedSource(String region, String clientToken, String requestHash) {
+        return EventBridgeV2Service.retried(() -> inRegion(region),
+                clientToken, requestHash, EventSourceV2::getClientToken, EventSourceV2::getCreateRequestHash,
+                () -> new AwsException("IdempotentParameterMismatchException",
+                        "ClientToken was used by a previous request with different parameters", 409));
+    }
+
+    private String sourceArn(String region, String kind, String name) {
+        return regionResolver.buildArn("events", region,
+                "event-sourcev2/" + kind + "/" + name + "/" + EventBridgeV2Service.newId(random));
+    }
+
+    private void checkPartnerSource(JsonNode partner, String region) {
+        ServiceEventsConfigurations.checkPattern(partner, false);
+        ServiceEventsConfigurations.checkOnFailure(partner, region, regionResolver.getAccountId());
+        ServiceEventsConfigurations.checkPartnerRegion(partner, region);
+    }
+
+    private void checkServiceSource(JsonNode service, String region) {
+        ServiceEventsConfigurations.checkPattern(service, true);
+        ServiceEventsConfigurations.checkOnFailure(service, region, regionResolver.getAccountId());
+    }
+
+    /**
+     * Creates a source of AWS service events. A pattern the forwarding rule cannot use still leaves the source
+     * behind, as {@code CREATE_FAILED}, with no rule.
+     */
+    private EventSourceV2 createServiceSource(JsonNode request, String region, String clientToken, JsonNode service,
+                                              Function<String, Optional<EventBusV2>> findBusByName) {
+        String eventBusArn = request.get("EventBusArn").textValue();
+        checkServiceSource(service, region);
+        String requestHash = Digests.sha256Hex(EventBridgeV2Service.withoutClientToken(request));
+        Optional<EventSourceV2> retried = retriedSource(region, clientToken, requestHash);
+        if (retried.isPresent()) {
+            if (CREATE_FAILED.equals(retried.get().getState())) {
+                throw ServiceEventsConfigurations.provisioningFailed();
+            }
+            return retried.get();
+        }
+        requireBus(eventBusArn, findBusByName);
+        String name = request.get("Name").textValue();
+        String key = EventBridgeV2Service.storageKey(region, name);
+        if (sources.get(key).isPresent()) {
+            throw new AwsException("ResourceAlreadyExistsException", "Resource already exists", 409);
+        }
+
+        Instant now = clock.instant();
+        EventSourceV2 source = new EventSourceV2();
+        source.setName(name);
+        source.setArn(sourceArn(region, "aws.service", name));
+        source.setEventBusArn(eventBusArn);
+        source.setDescription(request.path("Description").textValue());
+        source.setConfiguration(ServiceEventsConfigurations.echo(service));
+        source.setCreationTime(now);
+        source.setLastModifiedTime(now);
+        source.setTags(tags(request.get("Tags")));
+        source.setClientToken(clientToken);
+        source.setCreateRequestHash(requestHash);
+        boolean provisioned = provisionRule(source, service, region);
+        source.setState(provisioned ? EventBridgeV2Service.ACTIVE : CREATE_FAILED);
+        try {
+            sources.put(key, source);
+        } catch (RuntimeException e) {
+            if (provisioned) {
+                eventBridge.deleteManagedRule(id(source), region);
+            }
+            throw e;
+        }
+        if (!provisioned) {
+            throw ServiceEventsConfigurations.provisioningFailed();
+        }
+        return source;
+    }
+
+    /**
+     * Puts the rule on the default bus that forwards the service's events to the source's bus. False when the
+     * source's own pattern is not one an event rule can use, and then no rule is touched.
+     */
+    private boolean provisionRule(EventSourceV2 source, JsonNode service, String region) {
+        if (ServiceEventsConfigurations.givesPattern(service)) {
+            JsonNode own = ServiceEventsConfigurations.ownPattern(service);
+            if (!ServiceEventsConfigurations.isUsablePattern(own) || !acceptedByEventBridge(own)) {
+                return false;
+            }
+        }
+        String ruleName = id(source);
+        Target target = new Target(ruleName, source.getEventBusArn(), null, null);
+        String deadLetterQueue = service.path("OnFailureConfiguration").path("Arn").textValue();
+        if (deadLetterQueue != null) {
+            target.setDeadLetterConfig(new Target.DeadLetterConfig(deadLetterQueue));
+        }
+        eventBridge.putManagedRule(ruleName, EVENTS_PRINCIPAL,
+                ServiceEventsConfigurations.forwardingPattern(service, regionResolver.getAccountId(), region),
+                target, region);
+        return true;
+    }
+
+    private boolean acceptedByEventBridge(JsonNode pattern) {
+        try {
+            eventBridge.validateEventPattern(pattern.toString());
+            return true;
+        } catch (AwsException e) {
+            if (!"InvalidEventPatternException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("The pattern of an event source was refused: {0}", e.getMessage());
+            return false;
+        }
+    }
+
     /**
      * Replaces the description the request gives and the whole webhook configuration. The credentials, the URL and
      * the secret stay as they are. A refused update changes nothing.
      */
-    EventSourceV2 update(JsonNode request, String region) {
+    EventSourceV2 update(JsonNode request, String region, Function<String, Optional<EventBusV2>> findBusByName) {
         EventBridgeV2RequestShapes.check("UpdateEventSource", request);
         String arn = request.get("EventSourceArn").textValue();
         checkArn(arn, region);
@@ -169,6 +293,9 @@ public class EventBridgeV2EventSources implements Resettable {
             requireOwnAccount(roleArn);
         }
         EventSourceV2 source = require(arn, region);
+        if (ServiceEventsConfigurations.isAwsService(source)) {
+            return updateServiceSource(request, region, source, configuration, findBusByName);
+        }
         JsonNode webhook = configuration == null ? null : WebhookEventsConfigurations.validateForUpdate(
                 configuration, WebhookEventsConfigurations.authType(
                         source.getConfiguration().get(WebhookEventsConfigurations.WEBHOOK)));
@@ -182,6 +309,43 @@ public class EventBridgeV2EventSources implements Resettable {
                 : WebhookEventsConfigurations.echo(webhook));
         changed.setLastModifiedTime(clock.instant());
         sources.put(EventBridgeV2Service.storageKey(region, source.getName()), changed);
+        return changed;
+    }
+
+    /**
+     * Replaces the description and the whole configuration of a source of AWS service events, and the forwarding
+     * rule with it. A pattern the rule cannot use still stores the new configuration, as {@code UPDATE_FAILED},
+     * and leaves the rule as it was.
+     */
+    private EventSourceV2 updateServiceSource(JsonNode request, String region, EventSourceV2 source,
+                                              JsonNode configuration,
+                                              Function<String, Optional<EventBusV2>> findBusByName) {
+        JsonNode service = null;
+        if (configuration != null) {
+            Map.Entry<String, JsonNode> variant = WebhookEventsConfigurations.onlyVariant(configuration);
+            if (!ServiceEventsConfigurations.AWS_SERVICE.equals(variant.getKey())) {
+                throw WebhookEventsConfigurations.variantImmutable(ServiceEventsConfigurations.AWS_SERVICE_TYPE);
+            }
+            service = variant.getValue();
+            checkServiceSource(service, region);
+        }
+        requireNotRevoked(source, "EventSource is revoked and cannot be updated");
+        requireBus(source.getEventBusArn(), findBusByName);
+
+        EventSourceV2 changed = copyOf(source);
+        changed.setDescription(request.hasNonNull("Description") ? request.get("Description").textValue()
+                : source.getDescription());
+        changed.setLastModifiedTime(clock.instant());
+        boolean provisioned = true;
+        if (service != null) {
+            changed.setConfiguration(ServiceEventsConfigurations.echo(service));
+            provisioned = provisionRule(changed, service, region);
+            changed.setState(provisioned ? EventBridgeV2Service.ACTIVE : UPDATE_FAILED);
+        }
+        sources.put(EventBridgeV2Service.storageKey(region, source.getName()), changed);
+        if (!provisioned) {
+            throw ServiceEventsConfigurations.provisioningFailed();
+        }
         return changed;
     }
 
@@ -323,6 +487,16 @@ public class EventBridgeV2EventSources implements Resettable {
     /** Deletes the source and schedules its secret for deletion, unless the secret is already scheduled. */
     void delete(JsonNode request, String region) {
         EventSourceV2 source = find("DeleteEventSource", request, region);
+        if (ServiceEventsConfigurations.isAwsService(source)) {
+            eventBridge.deleteManagedRule(id(source), region);
+        } else {
+            deleteSecret(source, region);
+        }
+        sources.delete(EventBridgeV2Service.storageKey(region, source.getName()));
+        deduplication.forget(source.getArn());
+    }
+
+    private void deleteSecret(EventSourceV2 source, String region) {
         try {
             if (secrets.describeSecret(source.getSecretArn(), region).getDeletedDate() == null) {
                 secrets.deleteSecret(source.getSecretArn(), null, false, region);
@@ -333,8 +507,6 @@ public class EventBridgeV2EventSources implements Resettable {
             }
             LOG.warnv("The secret {0} of event source {1} is already gone", source.getSecretArn(), source.getArn());
         }
-        sources.delete(EventBridgeV2Service.storageKey(region, source.getName()));
-        deduplication.forget(source.getArn());
     }
 
     /**
@@ -378,7 +550,25 @@ public class EventBridgeV2EventSources implements Resettable {
 
     boolean hasSourcesOn(String eventBusArn, String region) {
         return inRegion(region).stream()
-                .anyMatch(source -> eventBusArn.equals(source.getEventBusArn()) && !source.isRevoked());
+                .anyMatch(source -> eventBusArn.equals(source.getEventBusArn()) && !source.isRevoked()
+                        && !CREATE_FAILED.equals(source.getState()));
+    }
+
+    /**
+     * Whether {@code ruleArn} is the managed rule of a source of AWS service events that is on the bus and takes
+     * events: the rule of that id on the default bus of the bus's own account and Region.
+     */
+    boolean takesServiceEvents(String eventBusArn, String region, String ruleArn) {
+        String sourceId = ruleArn.substring(ruleArn.lastIndexOf('/') + 1);
+        String managedRuleArn = regionResolver.buildArn("events", region,
+                AwsArnUtils.parse(eventBusArn).accountId(), "rule/" + sourceId);
+        if (!managedRuleArn.equals(ruleArn) || !eventBridge.isManagedRule(sourceId, region)) {
+            return false;
+        }
+        return inRegion(region).stream()
+                .anyMatch(source -> eventBusArn.equals(source.getEventBusArn())
+                        && ServiceEventsConfigurations.isAwsService(source) && !source.isRevoked()
+                        && sourceId.equals(id(source)));
     }
 
     /** The URL a source receives its events at, in the scheme of Floci's own base URL. */
@@ -469,7 +659,7 @@ public class EventBridgeV2EventSources implements Resettable {
         }
     }
 
-    private static AwsException busMissing() {
+    static AwsException busMissing() {
         return new AwsException("ResourceNotFoundException", "Resource does not exist", 404);
     }
 

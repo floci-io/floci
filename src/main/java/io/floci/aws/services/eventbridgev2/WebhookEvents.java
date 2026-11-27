@@ -33,7 +33,7 @@ final class WebhookEvents {
 
     private static final int MAX_METADATA_VALUE_BYTES = 1024;
     private static final byte[] UTF8_BOM = {(byte) 0xEF, (byte) 0xBB, (byte) 0xBF};
-    private static final DateTimeFormatter INGESTION_TIME =
+    static final DateTimeFormatter INGESTION_TIME =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
     private static final ObjectMapper STRICT = JsonMapper.builder()
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)

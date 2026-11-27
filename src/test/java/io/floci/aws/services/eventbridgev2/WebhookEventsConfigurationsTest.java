@@ -217,13 +217,6 @@ class WebhookEventsConfigurationsTest {
                 createRefusal("{\"WebhookEventsConfiguration\":{},\"PartnerEventsConfiguration\":{}}"));
     }
 
-    @ParameterizedTest
-    @ValueSource(strings = {"AwsServiceEventsConfiguration", "PartnerEventsConfiguration"})
-    void otherVariantsAreNotSupported(String variant) {
-        assertEquals("Only WebhookEventsConfiguration event sources are supported.",
-                createRefusal("{\"" + variant + "\":{}}"));
-    }
-
     @Test
     void authConfigurationMustSetExactlyOneMember() {
         String message = "WebhookEventsConfiguration.AuthConfiguration must set exactly one of "

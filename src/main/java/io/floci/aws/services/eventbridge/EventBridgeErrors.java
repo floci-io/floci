@@ -77,9 +77,25 @@ final class EventBridgeErrors {
         return validation("Rule can't be deleted since it has targets.");
     }
 
+    static AwsException managedRule(String rule) {
+        return managed(rule + " is a managed rule.");
+    }
+
+    static AwsException managedRuleNeedsForce(String rule) {
+        return managed(rule + " is a managed rule. Set 'force' parameter to true to override.");
+    }
+
+    static AwsException managedRuleTags(String rule) {
+        return managed("Tag related operations on the managed rule " + rule + " is not allowed.");
+    }
+
     static AwsException replaySourceArchiveNotFound(String archive) {
         return validation("Parameter EventSourceArn is not valid. Reason: Archive " + archive
                 + " does not exist.");
+    }
+
+    private static AwsException managed(String message) {
+        return new AwsException("ManagedRuleException", message, 400);
     }
 
     private static AwsException validation(String message) {
