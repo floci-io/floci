@@ -251,6 +251,7 @@ class RdsEndpointsInVpcDockerNightlyIntegrationTest {
                                 .secretArn("arn:aws:secretsmanager:" + REGION + ":" + ACCOUNT + ":secret:db-AbCdEf")
                                 .build())).dbProxy().endpoint();
                 assertEquals(AwsEndpoints.rdsProxyHost(proxyName, ACCOUNT, REGION), proxyEndpoint);
+                waitForAvailableInstance(rds, instanceId);
                 rds.registerDBProxyTargets(r -> r.dbProxyName(proxyName).dbInstanceIdentifiers(instanceId));
                 String added = rds.createDBProxyEndpoint(r -> r.dbProxyName(proxyName)
                         .dbProxyEndpointName(endpointName).vpcSubnetIds(subnets)).dbProxyEndpoint().endpoint();
