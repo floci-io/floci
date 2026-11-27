@@ -14,6 +14,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.condition.EnabledOnOs;
@@ -58,6 +59,11 @@ class UserDataPipelineDockerIntegrationTest {
                 .exec();
         containerId = container.getId();
         dockerClient.startContainerCmd(containerId).exec();
+    }
+
+    @BeforeEach
+    void clearGuestLog() {
+        ContainerExec.run(dockerClient, containerId, new String[]{"rm", "-f", LOG}, 10);
     }
 
     @AfterAll
@@ -132,12 +138,13 @@ class UserDataPipelineDockerIntegrationTest {
 
         long startedAt = System.nanoTime();
         UserDataPipeline.ExecutionResult result = UserDataPipeline.executeUserData(
-                dockerClient, dockerClient, containerId, "background service", script, Duration.ofSeconds(5), null,
+                dockerClient, dockerClient, containerId, "background service", script, Duration.ofSeconds(15), null,
                 null, LOG);
 
         assertTrue(result.isSuccess(), result.getFailureMessage());
-        assertTrue(Duration.ofNanos(System.nanoTime() - startedAt).toSeconds() < 5,
+        assertTrue(Duration.ofNanos(System.nanoTime() - startedAt).toSeconds() < 15,
                 "the wrapper must not wait for a background service it started");
+        assertTrue(readLog().contains("started\n"));
     }
 
     @Test

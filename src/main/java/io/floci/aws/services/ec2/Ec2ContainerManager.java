@@ -83,7 +83,6 @@ import java.util.zip.GZIPInputStream;
 public class Ec2ContainerManager {
 
     private static final Logger LOG = Logger.getLogger(Ec2ContainerManager.class);
-    // Guest-created /tmp mounts hide files copied through Docker's archive API.
     private static final List<String> ALLOWED_SSHD_PATHS = List.of("/usr/sbin/sshd", "/usr/local/sbin/sshd", "/sbin/sshd");
     // Inside containers, systemd's generators read PID 1's arguments instead of /proc/cmdline,
     // so these arguments apply runtime unit masks when container=docker is set.
@@ -2051,8 +2050,8 @@ public class Ec2ContainerManager {
         return UserDataPipeline.decodeUserDataPayload(userData);
     }
 
-    static String[] userDataExecutionCommand(String guestOutputLogPath) {
-        return UserDataPipeline.executionCommand(guestOutputLogPath);
+    static String[] userDataExecutionCommand() {
+        return UserDataPipeline.executionCommand(UserDataPipeline.CLOUD_INIT_OUTPUT_LOG_PATH);
     }
 
     /**

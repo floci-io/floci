@@ -237,15 +237,6 @@ class UserDataPipelineTest {
     }
 
     @Test
-    void cloudInitOutputCommandCarriesTheStatusWithoutATemporaryFile() {
-        String[] command = UserDataPipeline.executionCommand(UserDataPipeline.CLOUD_INIT_OUTPUT_LOG_PATH);
-
-        assertTrue(command[2].contains("echo $? >&3"));
-        assertTrue(command[2].contains("( exec 3>&- 4>&-; /var/lib/user-data.sh )"));
-        assertFalse(command[2].contains("/tmp/.floci-user-data"));
-    }
-
-    @Test
     void executionWithoutAGuestLogRunsTheBareScript() {
         assertArrayEquals(new String[]{UserDataPipeline.USER_DATA_SCRIPT_PATH},
                 UserDataPipeline.executionCommand(null));

@@ -1005,7 +1005,7 @@ class Ec2ContainerManagerTest {
     @Test
     void userDataExecutionCommandRunsScriptDirectlySoShebangIsHonored() {
         assertArrayEquals(UserDataPipeline.executionCommand(UserDataPipeline.CLOUD_INIT_OUTPUT_LOG_PATH),
-                Ec2ContainerManager.userDataExecutionCommand(UserDataPipeline.CLOUD_INIT_OUTPUT_LOG_PATH));
+                Ec2ContainerManager.userDataExecutionCommand());
     }
 
     @Test
