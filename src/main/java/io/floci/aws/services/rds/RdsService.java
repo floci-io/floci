@@ -4365,10 +4365,10 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
         validateInstanceSettings(settings);
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
-        // "You can't modify a stopped DB instance" (user guide, stopping an instance temporarily).
-        if (isStoppedOrInTransit(instance.getStatus())) {
+        DbInstanceStatus status = instance.getStatus();
+        if (status == DbInstanceStatus.CREATING || isStoppedOrInTransit(status)) {
             throw new AwsException("InvalidDBInstanceState",
-                    "DB instance " + id + " is in state " + instance.getStatus().name().toLowerCase(Locale.ROOT)
+                    "DB instance " + id + " is in state " + status.name().toLowerCase(Locale.ROOT)
                             + " and cannot be modified.", 400);
         }
         // Resolved before the first setter runs, since the checks it carries read the instance's

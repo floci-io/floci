@@ -289,18 +289,7 @@ class RdsServiceTest {
     @Test
     void firstDataRequestCanFinishStartingTheInstanceBeforeTheCreateWorkerRuns() {
         when(rdsConfig.mock()).thenReturn(false);
-        StorageBackend<String, DbInstance> instances = spy(new InMemoryStorage<String, DbInstance>());
-        rdsService = newService(containerManager, proxyManager, instances, new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
-        AtomicBoolean firstWrite = new AtomicBoolean(true);
-        doAnswer(call -> {
-            call.callRealMethod();
-            if (firstWrite.getAndSet(false)) {
-                // A Data API call sees the published record before the create worker takes its lock.
-                rdsService.ensureInstanceBackend("early-request", "us-east-1");
-            }
-            return null;
-        }).when(instances).put(anyString(), any());
+        onFirstInstanceWrite(() -> rdsService.ensureInstanceBackend("early-request", "us-east-1"));
         try {
             assertEquals(DbInstanceStatus.CREATING, beginStandaloneCreate("early-request").getStatus());
         } finally {
@@ -311,6 +300,48 @@ class RdsServiceTest {
         assertEquals("cont-id", instance.getContainerId());
         verify(containerManager).tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
         verify(containerManager, never()).stopByRuntimeId(any());
+    }
+
+    @Test
+    void modifyingACreatingInstanceLeavesStartupToTheWorker() {
+        when(rdsConfig.mock()).thenReturn(false);
+        String id = "early-modify";
+        onFirstInstanceWrite(() -> {
+            AwsException failure = assertThrows(AwsException.class,
+                    () -> rdsService.modifyDbInstance(id, null, null, null, null, null, "us-east-1", false));
+            assertEquals("InvalidDBInstanceState", failure.getErrorCode());
+            assertEquals(400, failure.getHttpStatus());
+            DbInstance pending = rdsService.getDbInstance(id);
+            assertEquals(DbInstanceStatus.CREATING, pending.getStatus());
+            assertTrue(pending.isAutoMinorVersionUpgrade());
+        });
+        try {
+            assertEquals(DbInstanceStatus.CREATING, beginStandaloneCreate(id).getStatus());
+        } finally {
+            rdsService.beforeReset();
+        }
+        DbInstance ready = rdsService.getDbInstance(id);
+        assertEquals(DbInstanceStatus.AVAILABLE, ready.getStatus());
+        assertEquals("cont-id", ready.getContainerId());
+        verify(proxyManager).startProxy(any(), any(), any(), anyBoolean(), eq(ready.getProxyPort()), any(),
+                anyInt(), any(), any(), any(), any(), any(), any());
+        DbInstance modified = rdsService.modifyDbInstance(id, null, null, null, null, null, "us-east-1", false);
+        assertFalse(modified.isAutoMinorVersionUpgrade());
+    }
+
+    private void onFirstInstanceWrite(Runnable request) {
+        StorageBackend<String, DbInstance> instances = spy(new InMemoryStorage<String, DbInstance>());
+        rdsService = newService(containerManager, proxyManager, instances, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        AtomicBoolean firstWrite = new AtomicBoolean(true);
+        doAnswer(call -> {
+            call.callRealMethod();
+            if (firstWrite.getAndSet(false)) {
+                // The instance is visible here, before the create worker has been scheduled.
+                request.run();
+            }
+            return null;
+        }).when(instances).put(anyString(), any());
     }
 
     @Test

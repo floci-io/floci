@@ -4,7 +4,7 @@
 **Management Endpoint:** `POST http://localhost:4566/`
 **Data Endpoint:** `localhost:<proxy-port>` (TCP)
 
-`CreateDBInstance` returns `creating`. Use the SDK instance-available waiter before taking a snapshot or connecting to the database. A standalone instance starts its database and proxy in the background. Its record is visible to `DescribeDBInstances` while startup runs.
+`CreateDBInstance` returns `creating`. Use the SDK instance-available waiter before modifying the instance, taking a snapshot or connecting to the database. A standalone instance starts its database and proxy in the background. Its record is visible to `DescribeDBInstances` while startup runs.
 
 ### Recoverable backend startup failures
 
