@@ -527,11 +527,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable, PassedRo
         return apiStore.scan(k -> k.startsWith(prefix));
     }
 
-    /** AWS answers an explicitly empty {@code position}, and Floci a blank one, with a BadRequestException instead of the first page. */
     public PaginatedResult<RestApi> getRestApiPage(String region, Integer limit, String position) {
-        if (position != null && position.isBlank()) {
-            throw new AwsException("BadRequestException", "Invalid position parameter", 400);
-        }
         return pageById(getRestApis(region), RestApi::getId, limit, position);
     }
 
@@ -1324,14 +1320,15 @@ public class ApiGatewayService implements ResourceProvider, Resettable, PassedRo
 
     /**
      * One page of a list, sorted by id here. The token is the id of the last item returned, and
-     * an unrecognised token is a {@code BadRequestException}, as on AWS.
+     * an unrecognised token is a {@code BadRequestException}, as on AWS. So is an explicitly empty
+     * {@code position}, which AWS refuses instead of serving the first page, and a blank one.
      */
     private static <T> PaginatedResult<T> pageById(List<T> items, Function<T, String> idOf, Integer limit,
                                                    String position) {
         List<T> sorted = items.stream().sorted(Comparator.comparing(idOf)).toList();
         int pageSize = resolvePageSize(limit);
         int start = 0;
-        if (position != null && !position.isBlank()) {
+        if (position != null) {
             while (start < sorted.size() && !position.equals(idOf.apply(sorted.get(start)))) {
                 start++;
             }
