@@ -34,10 +34,8 @@ import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.HexFormat;
-import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -187,7 +185,7 @@ class MySqlProtocolHandlerTest {
         byte[] secondQuery = comQueryPayload(sql);
         byte[] secondFrame = wrapCompressedFrame(wrapPacket(0, secondQuery), zlibPayload);
         withLoggedInClient(CLIENT_COMPRESS, CLIENT_COMPRESS, false, streams -> {
-            try (DriverTask<Void> sendFirst = startDriver(() -> {
+            try (ProxyTestTask<Void> sendFirst = ProxyTestTask.start(() -> {
                 streams.clientOut().write(firstFrame);
                 streams.clientOut().flush();
                 return null;
@@ -222,7 +220,7 @@ class MySqlProtocolHandlerTest {
             streams.clientOut().write(firstFrame);
             streams.clientOut().flush();
             assertArrayEquals(firstFrame, readCompressedFrame(streams.backendIn()));
-            try (DriverTask<Void> sendRest = startDriver(() -> {
+            try (ProxyTestTask<Void> sendRest = ProxyTestTask.start(() -> {
                 streams.clientOut().write(secondFrame);
                 streams.clientOut().flush();
                 return null;
@@ -307,7 +305,7 @@ class MySqlProtocolHandlerTest {
         byte[] thirdFrame = wrapCompressedPacket(Arrays.copyOfRange(command, 4, command.length), 2);
 
         withLoggedInClient(CLIENT_COMPRESS, CLIENT_COMPRESS, false, streams -> {
-            try (DriverTask<Void> sendFirst = startDriver(() -> {
+            try (ProxyTestTask<Void> sendFirst = ProxyTestTask.start(() -> {
                 streams.clientOut().write(firstFrame);
                 streams.clientOut().flush();
                 return null;
@@ -537,9 +535,9 @@ class MySqlProtocolHandlerTest {
                     assertEquals(compressionCapability, streams.backendClientCapabilities()
                             & (CLIENT_COMPRESS | CLIENT_ZSTD_COMPRESSION_ALGORITHM));
                     if (readConcurrently) {
-                        try (DriverTask<byte[]> receivedFrame = startDriver(
+                        try (ProxyTestTask<byte[]> receivedFrame = ProxyTestTask.start(
                                 () -> streams.backendIn().readNBytes(expectedFrame.length));
-                             DriverTask<Void> sentFrame = startDriver(() -> {
+                             ProxyTestTask<Void> sentFrame = ProxyTestTask.start(() -> {
                                  streams.clientOut().write(expectedFrame);
                                  streams.clientOut().flush();
                                  return null;
@@ -576,7 +574,7 @@ class MySqlProtocolHandlerTest {
              Socket backendPeer = backendServer.accept()) {
             ourClient.setSoTimeout(2_500);
             backendPeer.setSoTimeout(2_500);
-            DriverTask<Void> authTask = startProxy(proxyClient, backend, NO_RECONNECT, false, testTlsCertificates());
+            ProxyTestTask<Void> authTask = startProxy(proxyClient, backend, NO_RECONNECT, false, testTlsCertificates());
             try {
                 InputStream clientIn = ourClient.getInputStream();
                 OutputStream clientOut = ourClient.getOutputStream();
@@ -962,7 +960,7 @@ class MySqlProtocolHandlerTest {
 
         try (ServerSocket backendServer = new ServerSocket(0);
              ServerSocket clientServer = new ServerSocket(0)) {
-            DriverTask<Void> backendTask = startDriver(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 try {
                     mockMySqlBackend(
                             backendServer, nonce, "caching_sha2_password",
@@ -976,7 +974,7 @@ class MySqlProtocolHandlerTest {
             try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort());
                  Socket proxyClient = clientServer.accept();
                  Socket backend = new Socket("localhost", backendServer.getLocalPort())) {
-                DriverTask<Void> authTask = startDriver(() -> {
+                ProxyTestTask<Void> authTask = ProxyTestTask.start(() -> {
                     try {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, NO_RECONNECT, "admin", "secret",
@@ -1022,7 +1020,7 @@ class MySqlProtocolHandlerTest {
         try (ServerSocket backendServer = new ServerSocket(0);
              ServerSocket clientServer = new ServerSocket(0)) {
 
-            DriverTask<Void> backendTask = startDriver(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 try {
                     mockMySqlBackend(backendServer, nonce, backendResponseSeq, backendResponsePayload);
                 } catch (IOException e) {
@@ -1035,7 +1033,7 @@ class MySqlProtocolHandlerTest {
                  Socket proxyClient = clientServer.accept();
                  Socket backend = new Socket("localhost", backendServer.getLocalPort())) {
 
-                DriverTask<Void> authTask = startDriver(() -> {
+                ProxyTestTask<Void> authTask = ProxyTestTask.start(() -> {
                     try {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, NO_RECONNECT, "admin", "secret",
@@ -1111,7 +1109,7 @@ class MySqlProtocolHandlerTest {
         try (ServerSocket backendServer = new ServerSocket(0);
              ServerSocket clientServer = new ServerSocket(0)) {
 
-            DriverTask<Void> backendTask = startDriver(() -> {
+            ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 try (Socket socket = backendServer.accept()) {
                     OutputStream out = socket.getOutputStream();
                     InputStream in = socket.getInputStream();
@@ -1136,7 +1134,7 @@ class MySqlProtocolHandlerTest {
                  Socket proxyClient = clientServer.accept();
                  Socket backend = new Socket("localhost", backendServer.getLocalPort())) {
 
-                DriverTask<Void> authTask = startDriver(() -> {
+                ProxyTestTask<Void> authTask = ProxyTestTask.start(() -> {
                     try {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, NO_RECONNECT, "admin", "secret",
@@ -1199,7 +1197,7 @@ class MySqlProtocolHandlerTest {
                  Socket backend = new Socket("localhost", silentBackend.getLocalPort())) {
 
                 AtomicReference<IOException> authFailure = new AtomicReference<>();
-                DriverTask<Void> authTask = startDriver(() -> {
+                ProxyTestTask<Void> authTask = ProxyTestTask.start(() -> {
                     try {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, NO_RECONNECT, "admin", "secret",
@@ -1392,7 +1390,7 @@ class MySqlProtocolHandlerTest {
                 proxyClient.setSoTimeout(0);
                 return null;
             }).when(handlerSocket).setSoTimeout(0);
-            DriverTask<Void> authTask = startProxy(handlerSocket, backend, NO_RECONNECT, true,
+            ProxyTestTask<Void> authTask = startProxy(handlerSocket, backend, NO_RECONNECT, true,
                     testTlsCertificates());
             try {
                 OutputStream backendOut = backendPeer.getOutputStream();
@@ -1450,8 +1448,8 @@ class MySqlProtocolHandlerTest {
              Socket proxyClient = clientServer.accept();
              Socket backend = new Socket("localhost", backendServer.getLocalPort())) {
             ourClient.setSoTimeout(5_000);
-            DriverTask<Void> backendTask = startBackend(backendServer, fixedNonce(), OK_PAYLOAD, backendResponse);
-            DriverTask<Void> authTask = startProxy(proxyClient, backend, NO_RECONNECT, iamEnabled,
+            ProxyTestTask<Void> backendTask = startBackend(backendServer, fixedNonce(), OK_PAYLOAD, backendResponse);
+            ProxyTestTask<Void> authTask = startProxy(proxyClient, backend, NO_RECONNECT, iamEnabled,
                     testTlsCertificates());
 
             try {
@@ -1484,7 +1482,7 @@ class MySqlProtocolHandlerTest {
             throws Exception {
         AtomicReference<byte[]> rejectedResponse = new AtomicReference<>();
         AtomicReference<byte[]> masterResponse = new AtomicReference<>();
-        AtomicReference<DriverTask<Void>> masterBackendTask = new AtomicReference<>();
+        AtomicReference<ProxyTestTask<Void>> masterBackendTask = new AtomicReference<>();
         AtomicInteger reconnects = new AtomicInteger();
         RdsProxyTlsCertificates tlsCertificates = testTlsCertificates();
         if (tls) {
@@ -1504,9 +1502,9 @@ class MySqlProtocolHandlerTest {
                         masterBackendServer, MASTER_BACKEND_NONCE, OK_PAYLOAD, masterResponse));
                 return new Socket("localhost", masterBackendServer.getLocalPort());
             };
-            DriverTask<Void> backendTask = startBackend(
+            ProxyTestTask<Void> backendTask = startBackend(
                     backendServer, fixedNonce(), accessDeniedPayload(), rejectedResponse);
-            DriverTask<Void> authTask = startProxy(proxyClient, backend, connector, iamEnabled, tlsCertificates);
+            ProxyTestTask<Void> authTask = startProxy(proxyClient, backend, connector, iamEnabled, tlsCertificates);
 
             try {
                 InputStream clientIn = ourClient.getInputStream();
@@ -1542,7 +1540,7 @@ class MySqlProtocolHandlerTest {
                 try {
                     finishDrivers(ourClient, authTask, backendTask);
                 } finally {
-                    DriverTask<Void> masterTask = masterBackendTask.get();
+                    ProxyTestTask<Void> masterTask = masterBackendTask.get();
                     if (masterTask != null) {
                         masterTask.close();
                     }
@@ -1555,9 +1553,9 @@ class MySqlProtocolHandlerTest {
      * Backend that sends its handshake, records the HandshakeResponse it receives (null if the proxy
      * never forwards one), answers it with {@code verdict} at sequence 2, then closes.
      */
-    private static DriverTask<Void> startBackend(ServerSocket server, byte[] nonce, byte[] verdict,
+    private static ProxyTestTask<Void> startBackend(ServerSocket server, byte[] nonce, byte[] verdict,
                                        AtomicReference<byte[]> response) {
-        return startDriver(() -> {
+        return ProxyTestTask.start(() -> {
             try (Socket socket = server.accept()) {
                 OutputStream out = socket.getOutputStream();
                 out.write(buildHandshakeV10(nonce, MYSQL_NATIVE_PASSWORD));
@@ -1573,10 +1571,10 @@ class MySqlProtocolHandlerTest {
         });
     }
 
-    private static DriverTask<Void> startProxy(Socket proxyClient, Socket backend,
+    private static ProxyTestTask<Void> startProxy(Socket proxyClient, Socket backend,
                                      PostgresProtocolHandler.BackendConnector connector,
                                      boolean iamEnabled, RdsProxyTlsCertificates tlsCertificates) {
-        return startDriver(() -> {
+        return ProxyTestTask.start(() -> {
             MySqlProtocolHandler.handleAuth(
                     proxyClient, backend, connector, "admin", "secret",
                     iamEnabled, testSigV4Validator(), tlsCertificates,
@@ -1586,71 +1584,16 @@ class MySqlProtocolHandlerTest {
         });
     }
 
-    private static <T> DriverTask<T> startDriver(Callable<T> driver) {
-        FutureTask<T> task = new FutureTask<>(driver);
-        return new DriverTask<>(task, Thread.ofVirtual().start(task));
-    }
-
-    private record DriverTask<T>(FutureTask<T> task, Thread thread) implements AutoCloseable {
-        T await() throws Exception {
-            return await(5);
-        }
-
-        T await(long timeoutSeconds) throws Exception {
-            try {
-                return task.get(timeoutSeconds, TimeUnit.SECONDS);
-            } finally {
-                if (!task.isDone()) {
-                    thread.interrupt();
-                }
-                thread.join(5_000);
-                assertFalse(thread.isAlive(), "driver thread did not terminate");
-            }
-        }
-
-        @Override
-        public void close() throws Exception {
-            await();
-        }
-    }
-
-    private static void finishDrivers(Socket client, DriverTask<?>... drivers) {
+    private static void finishDrivers(Socket client, ProxyTestTask<?>... drivers) {
         finishDrivers(client, 5, drivers);
     }
 
-    private static void finishDrivers(Socket client, long timeoutSeconds, DriverTask<?>... drivers) {
+    private static void finishDrivers(Socket client, long timeoutSeconds, ProxyTestTask<?>... drivers) {
         try {
             assertAll(client::close);
         } finally {
             assertAll(Arrays.stream(drivers).filter(driver -> driver != null)
                     .map(driver -> () -> driver.await(timeoutSeconds)));
-        }
-    }
-
-    @Test
-    void driverTaskReportsIoFailureToOwningTest() {
-        IOException failure = new IOException("mock driver failed");
-        DriverTask<Void> driver = startDriver(() -> {
-            throw failure;
-        });
-        assertSame(failure, assertThrows(ExecutionException.class, driver::await).getCause());
-        assertFalse(driver.thread().isAlive());
-    }
-
-    @Test
-    void driverTaskReportsAssertionFailureToOwningTest() {
-        AssertionError failure = new AssertionError("mock driver assertion failed");
-        DriverTask<Void> driver = startDriver(() -> {
-            throw failure;
-        });
-        assertSame(failure, assertThrows(ExecutionException.class, driver::await).getCause());
-        assertFalse(driver.thread().isAlive());
-    }
-
-    @Test
-    void driverTaskCompletesOnVirtualThread() throws Exception {
-        try (DriverTask<Boolean> driver = startDriver(() -> Thread.currentThread().isVirtual())) {
-            assertTrue(driver.await());
         }
     }
 
