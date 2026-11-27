@@ -208,6 +208,7 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
     private final RdsProxyManager proxyManager;
     // Reserve each identifier until its metadata exists, including internal creates that wait for Docker.
     private final Set<String> provisioningIds = ConcurrentHashMap.newKeySet();
+    private final Set<DbInstance> startingStandaloneInstances = ConcurrentHashMap.newKeySet();
     private final Object instanceCreationLock = new Object();
     private ExecutorService instanceStarts = Executors.newVirtualThreadPerTaskExecutor();
     private final Ec2Service ec2Service;
@@ -1225,45 +1226,94 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
     private void finishStandaloneInstanceStart(DbInstance instance, String account, String region,
                                                String image, Map<String, String> parameters) {
         String id = instance.getDbInstanceIdentifier();
+        DbInstance starting;
         synchronized (instance) {
             if (findInstanceForScope(account, region, id) != instance
                     || instance.getStatus() != DbInstanceStatus.CREATING) {
                 return;
             }
-            boolean proxyAttempted = false;
+            starting = creatingResponse(instance);
+            startingStandaloneInstances.add(instance);
+        }
+        try {
+            startInstanceRuntime(instance, starting, account, region, image, parameters);
+            synchronized (instance) {
+                startingStandaloneInstances.remove(instance);
+                if (findInstanceForScope(account, region, id) != instance) {
+                    return;
+                }
+                if (instance.getStatus() == DbInstanceStatus.DELETING) {
+                    // A retained backup may need the container even though clients never saw it as available.
+                    instance.setContainerId(starting.getContainerId());
+                    instance.setVpcEndpointAddress(starting.getVpcEndpointAddress());
+                    finishDeferredInstanceDelete(instance, region);
+                } else if (instance.getStatus() == DbInstanceStatus.CREATING) {
+                    publishStandaloneInstanceStart(instance, starting, account, region);
+                }
+            }
+        } finally {
+            startingStandaloneInstances.remove(instance);
+        }
+    }
+
+    private void startInstanceRuntime(DbInstance instance, DbInstance starting, String account, String region,
+                                      String image, Map<String, String> parameters) {
+        try {
+            startStandaloneInstanceContainer(starting, image, parameters);
+            if (instance.getStatus() == DbInstanceStatus.CREATING
+                    && hasBackend(starting.getContainerHost(), starting.getContainerPort())) {
+                startCreatedInstanceProxy(starting, account, region);
+            }
+            starting.setStatus(DbInstanceStatus.AVAILABLE);
+        } catch (RuntimeException failure) {
+            stopFailedInstanceStart(starting, failure);
+        }
+    }
+
+    private void publishStandaloneInstanceStart(DbInstance instance, DbInstance starting, String account, String region) {
+        copyStartedRuntime(instance, starting);
+        try {
+            putInstanceForScope(account, region, instance.getDbInstanceIdentifier(), instance);
+        } catch (RuntimeException failure) {
+            stopFailedInstanceStart(starting, failure);
+            copyStartedRuntime(instance, starting);
             try {
-                startStandaloneInstanceContainer(instance, image, parameters);
-                if (hasBackend(instance.getContainerHost(), instance.getContainerPort())) {
-                    proxyAttempted = true;
-                    startCreatedInstanceProxy(instance, account, region);
-                }
-                instance.setStatus(DbInstanceStatus.AVAILABLE);
-                putInstanceForScope(account, region, id, instance);
-            } catch (RuntimeException failure) {
-                if (proxyAttempted) {
-                    try {
-                        proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
-                    } catch (RuntimeException cleanup) {
-                        failure.addSuppressed(cleanup);
-                    }
-                }
-                try {
-                    containerManager.stopByRuntimeId(instance.getDbInstanceArn());
-                    instance.setContainerId(null);
-                    instance.setContainerHost(null);
-                    instance.setContainerPort(0);
-                } catch (RuntimeException cleanup) {
-                    failure.addSuppressed(cleanup);
-                }
-                instance.setStatus(DbInstanceStatus.FAILED);
-                try {
-                    putInstanceForScope(account, region, id, instance);
-                } catch (RuntimeException persistFailure) {
-                    failure.addSuppressed(persistFailure);
-                }
-                LOG.errorv(failure, "Failed to start DB instance {0}", instance.getDbInstanceArn());
+                putInstanceForScope(account, region, instance.getDbInstanceIdentifier(), instance);
+            } catch (RuntimeException persistFailure) {
+                failure.addSuppressed(persistFailure);
+                LOG.errorv(failure, "Could not persist failed DB instance {0}", instance.getDbInstanceArn());
             }
         }
+    }
+
+    private static void copyStartedRuntime(DbInstance instance, DbInstance starting) {
+        instance.setContainerId(starting.getContainerId());
+        instance.setContainerHost(starting.getContainerHost());
+        instance.setContainerPort(starting.getContainerPort());
+        instance.setBackendNeverStarted(starting.isBackendNeverStarted());
+        instance.setVpcEndpointAddress(starting.getVpcEndpointAddress());
+        instance.setStatus(starting.getStatus());
+    }
+
+    private void stopFailedInstanceStart(DbInstance starting, RuntimeException failure) {
+        if (hasBackend(starting.getContainerHost(), starting.getContainerPort())) {
+            try {
+                proxyManager.stopProxy(rdsResourceRelayKey(
+                        starting.getDbInstanceArn(), starting.getDbInstanceIdentifier()));
+            } catch (RuntimeException cleanup) {
+                failure.addSuppressed(cleanup);
+            }
+        }
+        try {
+            containerManager.stopByRuntimeId(starting.getDbInstanceArn());
+            starting.setContainerId(null);
+            starting.setContainerHost(null);
+            starting.setContainerPort(0);
+        } catch (RuntimeException cleanup) {
+            failure.addSuppressed(cleanup);
+        }
+        starting.setStatus(DbInstanceStatus.FAILED);
+        LOG.errorv(failure, "Failed to start DB instance {0}", starting.getDbInstanceArn());
     }
 
     private void startStandaloneInstanceContainer(DbInstance instance, String image, Map<String, String> parameters) {
@@ -4366,7 +4416,7 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
         DbInstanceStatus status = instance.getStatus();
-        if (status == DbInstanceStatus.CREATING || isStoppedOrInTransit(status)) {
+        if (status == DbInstanceStatus.CREATING || status == DbInstanceStatus.DELETING || isStoppedOrInTransit(status)) {
             throw new AwsException("InvalidDBInstanceState",
                     "DB instance " + id + " is in state " + status.name().toLowerCase(Locale.ROOT)
                             + " and cannot be modified.", 400);
@@ -5366,6 +5416,9 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
 
+        if (instance.getStatus() == DbInstanceStatus.CREATING || instance.getStatus() == DbInstanceStatus.DELETING) {
+            throw new AwsException("InvalidDBInstanceState", "DB instance " + id + " is not in available state.", 400);
+        }
         instance.setStatus(DbInstanceStatus.REBOOTING);
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
 
@@ -5563,7 +5616,8 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
     private synchronized DbInstance doEnsureInstanceBackend(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
-        if (config.services().rds().mock()) {
+        if (startingStandaloneInstances.contains(instance) || instance.getStatus() == DbInstanceStatus.DELETING
+                || config.services().rds().mock()) {
             return instance;
         }
         if (hasBackend(instance.getContainerHost(), instance.getContainerPort())) {
@@ -5932,6 +5986,19 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
                     "DB instance " + id + " is the source of a blue/green deployment being created.", 400);
         }
 
+        if (startingStandaloneInstances.contains(instance)) {
+            // Keep the record, port and runtime identity until the worker can tear down everything it started.
+            if (instance.getDeleteAutomatedBackupsAfterStart() == null) {
+                instance.setDeleteAutomatedBackupsAfterStart(deleteAutomatedBackups);
+            }
+            instance.setBackendCleanupRequired(true);
+            instance.setStatus(DbInstanceStatus.DELETING);
+            putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
+            return;
+        }
+        if (instance.getDeleteAutomatedBackupsAfterStart() != null) {
+            deleteAutomatedBackups = instance.getDeleteAutomatedBackupsAfterStart();
+        }
         String clusterId = instance.getDbClusterIdentifier();
         // Taken before the instance changes, so a failed copy of its data leaves it as it was.
         DbInstanceAutomatedBackup retained = !deleteAutomatedBackups && isBlank(clusterId)
@@ -11077,9 +11144,25 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
         }
     }
 
+    private void finishDeferredInstanceDelete(DbInstance instance, String region) {
+        Boolean deleteBackups = instance.getDeleteAutomatedBackupsAfterStart();
+        if (deleteBackups != null) {
+            try {
+                deleteDbInstance(instance.getDbInstanceIdentifier(), region, deleteBackups);
+            } catch (RuntimeException failure) {
+                LOG.warnv(failure, "Could not finish deleting DB instance {0}", instance.getDbInstanceArn());
+            }
+        }
+    }
+
     private void restoreInstances(Map<Integer, String> persistedPortOwners) {
         for (DbInstance instance : allInstances()) {
             if (instance.getStatus() == DbInstanceStatus.DELETING) {
+                if (instance.getDeleteAutomatedBackupsAfterStart() != null) {
+                    String region = regionResolver.regionOf(instance.getDbInstanceArn());
+                    RequestScopes.runAs(accountIdFromArn(instance.getDbInstanceArn()), region,
+                            () -> finishDeferredInstanceDelete(instance, region));
+                }
                 continue;
             }
             boolean previouslyUnready = instance.getStatus() == DbInstanceStatus.CREATING

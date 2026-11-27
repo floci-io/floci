@@ -276,6 +276,16 @@ class RdsServiceTest {
             assertEquals(DbInstanceStatus.CREATING, rdsService.getDbInstance("starting-db").getStatus());
             AwsException duplicate = assertThrows(AwsException.class, () -> beginStandaloneCreate("starting-db"));
             assertEquals("DBInstanceAlreadyExists", duplicate.getErrorCode());
+            assertTimeoutPreemptively(Duration.ofSeconds(2), () -> {
+                AwsException modify = assertThrows(AwsException.class, () -> rdsService.modifyDbInstance(
+                        "starting-db", null, null, null, null, null, "us-east-1", false));
+                assertEquals("InvalidDBInstanceState", modify.getErrorCode());
+                AwsException reboot = assertThrows(AwsException.class, () -> rdsService.rebootDbInstance("starting-db"));
+                assertEquals("InvalidDBInstanceState", reboot.getErrorCode());
+                DbInstance pending = rdsService.ensureInstanceBackend("starting-db", "us-east-1");
+                assertEquals(DbInstanceStatus.CREATING, pending.getStatus());
+                assertNull(pending.getContainerId());
+            });
             release.countDown();
             await().atMost(Duration.ofSeconds(5)).until(() ->
                     rdsService.getDbInstance("starting-db").getStatus() == DbInstanceStatus.AVAILABLE);
@@ -284,6 +294,57 @@ class RdsServiceTest {
             release.countDown();
             rdsService.beforeReset();
         }
+    }
+
+    @Test
+    void deleteDuringProxyStartupKeepsTheIdentifierUntilCleanup() throws Exception {
+        when(rdsConfig.mock()).thenReturn(false);
+        CountDownLatch proxyStarting = new CountDownLatch(1);
+        CountDownLatch releaseProxy = new CountDownLatch(1);
+        doAnswer(call -> {
+            proxyStarting.countDown();
+            if (!releaseProxy.await(10, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Test did not release proxy startup");
+            }
+            return null;
+        }).when(proxyManager).startProxy(any(), any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any(), any(), any());
+        String id = "delete-during-start";
+        try {
+            beginStandaloneCreate(id);
+            assertTrue(proxyStarting.await(5, TimeUnit.SECONDS));
+            assertNull(rdsService.getDbInstance(id).getContainerHost());
+            assertTimeoutPreemptively(Duration.ofSeconds(2), () -> rdsService.deleteDbInstance(id, "us-east-1", false));
+            rdsService.deleteDbInstance(id);
+            assertEquals(DbInstanceStatus.DELETING, rdsService.getDbInstance(id).getStatus());
+            AwsException duplicate = assertThrows(AwsException.class, () -> beginStandaloneCreate(id));
+            assertEquals("DBInstanceAlreadyExists", duplicate.getErrorCode());
+        } finally {
+            releaseProxy.countDown();
+            rdsService.beforeReset();
+        }
+        AwsException deleted = assertThrows(AwsException.class, () -> rdsService.getDbInstance(id));
+        assertEquals("DBInstanceNotFound", deleted.getErrorCode());
+        verify(containerManager).createPostgresSnapshot("cont-id", "admin");
+        verify(proxyManager).stopProxy(anyString());
+        verify(containerManager).removeVolume(any(), any(), any());
+    }
+
+    @Test
+    void restoreFinishesADeletionAcceptedDuringStartup() {
+        when(rdsConfig.mock()).thenReturn(false);
+        DbInstance instance = rdsService.createDbInstance("delete-on-restore", "postgres", "16.3", "admin", "password",
+                "app", "db.t3.micro", 20, false, null, null, null);
+        instance.setDeleteAutomatedBackupsAfterStart(false);
+        instance.setBackendCleanupRequired(true);
+        instance.setStatus(DbInstanceStatus.DELETING);
+
+        rdsService.restorePersistedRuntime();
+
+        AwsException deleted = assertThrows(AwsException.class, () -> rdsService.getDbInstance("delete-on-restore"));
+        assertEquals("DBInstanceNotFound", deleted.getErrorCode());
+        verify(containerManager).createPostgresSnapshot("cont-id", "admin");
+        verify(containerManager).stopForDelete(instance.getDbInstanceArn(), instance.getDockerVolumeName());
     }
 
     @Test
