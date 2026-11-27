@@ -2375,6 +2375,10 @@ public class ApiGatewayController {
         }
 
         node.put("apiKeySource", api.getApiKeySource());
+        // Absent while compression is off, as on AWS.
+        if (api.getMinimumCompressionSize() != null) {
+            node.put("minimumCompressionSize", api.getMinimumCompressionSize());
+        }
         // Not settable on a REST API here, so the emulated value is always the AWS default.
         // Report it rather than omitting it, because a client that reads an absent member back
         // as null sees it as a difference from the configuration it just sent and never converges.
