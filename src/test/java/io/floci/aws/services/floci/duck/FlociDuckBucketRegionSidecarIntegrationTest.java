@@ -13,8 +13,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * S3 answers a bucket only in its own Region, so floci-duck, which Floci drives for Athena, S3 Select, Redshift and
@@ -66,6 +69,36 @@ class FlociDuckBucketRegionSidecarIntegrationTest {
                 + usBucket + "/rows.csv') ORDER BY id", null);
 
         assertEquals(List.of(Map.of("id", "1", "name", "eu"), Map.of("id", "2", "name", "us")), rows);
+    }
+
+    /**
+     * The secrets carry the caller's credentials, so a request running at the same time, as another account, must
+     * not see them: floci-duck runs every request in a DuckDB instance of its own.
+     */
+    @Test
+    void aConcurrentRequestSeesNoneOfAnotherRequestsBucketSecrets() throws Exception {
+        s3Service.createBucket(euBucket, "eu-west-1");
+        s3Service.putObject(euBucket, "rows.csv", "id,name\n1,eu\n".getBytes(StandardCharsets.UTF_8),
+                "text/csv", null);
+        CompletableFuture<List<Map<String, Object>>> slow = CompletableFuture.supplyAsync(() -> duck.query(
+                "SELECT count(*) AS n FROM read_csv('s3://" + euBucket + "/rows.csv'), range(300000000) t(x)"
+                        + " WHERE x % 7 = 3", null));
+        int probesWhileRunning = 0;
+        try {
+            while (!slow.isDone()) {
+                List<Map<String, Object>> secrets = duck.query(
+                        "SELECT CAST(count(*) AS VARCHAR) AS n FROM duckdb_secrets()", null, "222222222222",
+                        "secret-of-222", null);
+                if (!slow.isDone()) {
+                    assertEquals(List.of(Map.of("n", "0")), secrets);
+                    probesWhileRunning++;
+                }
+            }
+        } finally {
+            assertEquals(List.of(Map.of("n", "42857143")), slow.get(60, TimeUnit.SECONDS).stream()
+                    .map(row -> Map.of("n", String.valueOf(row.get("n")))).toList());
+        }
+        assertTrue(probesWhileRunning > 0, "no probe ran while the other request held its secret");
     }
 
     @Test

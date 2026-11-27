@@ -175,7 +175,9 @@ public class FlociDuckClient {
      * re-signs a read that gets 301 PermanentRedirect but not a write. Each bucket the statement names in another
      * Region than the default therefore gets a secret scoped to it and signed for its Region, with the request's
      * credentials; DuckDB picks the secret whose scope matches a path and the {@code s3_*} settings for the rest.
-     * Every request runs on its own connection, so the secrets end with it.
+     * The secrets are temporary, and floci-duck runs every request in a DuckDB instance of its own, so no other
+     * request, of this account or another, can see or use them, even one running at the same time
+     * ({@code FlociDuckBucketRegionSidecarIntegrationTest} holds the pinned image to that).
      */
     String withBucketRegions(String setupDdl, String accessKeyId, String secretAccessKey, String sessionToken,
                              String... statements) {
@@ -194,7 +196,7 @@ public class FlociDuckClient {
             if (region.isEmpty() || region.get().equals(config.defaultRegion())) {
                 continue;
             }
-            secrets.append("CREATE OR REPLACE SECRET floci_bucket_").append(index++).append(" (TYPE s3")
+            secrets.append("CREATE OR REPLACE TEMPORARY SECRET floci_bucket_").append(index++).append(" (TYPE s3")
                     .append(", KEY_ID ").append(literal(accessKeyId == null || accessKeyId.isEmpty() ? "test" : accessKeyId))
                     .append(", SECRET ").append(literal(secretAccessKey == null || secretAccessKey.isEmpty()
                             ? "test" : secretAccessKey));

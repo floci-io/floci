@@ -197,7 +197,7 @@ class FlociDuckClientServiceTest {
                 "SELECT * FROM read_csv('s3://eu-data/a.csv') JOIN read_csv('s3://us-data/b.csv') USING (id)",
                 null, "s3://eu-data/out/");
 
-        assertEquals("CREATE OR REPLACE SECRET floci_bucket_0 (TYPE s3, KEY_ID '111111111111', SECRET 'o''secret', "
+        assertEquals("CREATE OR REPLACE TEMPORARY SECRET floci_bucket_0 (TYPE s3, KEY_ID '111111111111', SECRET 'o''secret', "
                 + "SESSION_TOKEN 'token', REGION 'eu-west-1', ENDPOINT 'floci.internal:4566', URL_STYLE 'path', "
                 + "USE_SSL false, SCOPE 's3://eu-data');\nSET threads = 1;", setup);
         assertEquals("SET threads = 1;", client.withBucketRegions("SET threads = 1;", null, null, null,
