@@ -270,6 +270,81 @@ class CloudFormationS3BucketPropertiesIntegrationTest {
             .body(not(containsString("Fn::")));
     }
 
+    /** ObjectLockEnabled and ObjectLockConfiguration reach the bucket the template declares. */
+    @Test
+    void objectLockFollowsTheTemplate() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "cfn-object-lock-" + suffix;
+        String stackId = stack("CreateStack", "cfn-object-lock-stack-" + suffix, objectLockTemplate(bucket,
+                ", \"ObjectLockConfiguration\": { \"ObjectLockEnabled\": \"Enabled\", "
+                        + "\"Rule\": { \"DefaultRetention\": { \"Mode\": \"GOVERNANCE\", \"Days\": 1 } } }"));
+        await(stackId, "CREATE_COMPLETE");
+
+        bucketGet(bucket, "object-lock")
+            .body(containsString("<ObjectLockEnabled>Enabled</ObjectLockEnabled>"))
+            .body(containsString("<Mode>GOVERNANCE</Mode>"))
+            .body(containsString("<Days>1</Days>"));
+    }
+
+    @Test
+    void aStackUpdateChangesTheDefaultRetention() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "cfn-object-lock-retention-" + suffix;
+        String stackName = "cfn-object-lock-retention-stack-" + suffix;
+        String stackId = stack("CreateStack", stackName, objectLockTemplate(bucket,
+                ", \"ObjectLockConfiguration\": { \"ObjectLockEnabled\": \"Enabled\", "
+                        + "\"Rule\": { \"DefaultRetention\": { \"Mode\": \"GOVERNANCE\", \"Days\": 1 } } }"));
+        await(stackId, "CREATE_COMPLETE");
+
+        stack("UpdateStack", stackName, objectLockTemplate(bucket,
+                ", \"ObjectLockConfiguration\": { \"ObjectLockEnabled\": \"Enabled\", "
+                        + "\"Rule\": { \"DefaultRetention\": { \"Mode\": \"COMPLIANCE\", \"Years\": 2 } } }"));
+        await(stackId, "UPDATE_COMPLETE");
+
+        bucketGet(bucket, "object-lock")
+            .body(containsString("<Mode>COMPLIANCE</Mode>"))
+            .body(containsString("<Years>2</Years>"))
+            .body(not(containsString("<Days>")));
+    }
+
+    /** A later failure restores the retention the update attempted to change, as the snapshot carries it. */
+    @Test
+    void aFailedUpdateRestoresTheDefaultRetention() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "cfn-object-lock-rollback-" + suffix;
+        String stackName = "cfn-object-lock-rollback-stack-" + suffix;
+        String stackId = stack("CreateStack", stackName, objectLockTemplate(bucket,
+                ", \"ObjectLockConfiguration\": { \"ObjectLockEnabled\": \"Enabled\", "
+                        + "\"Rule\": { \"DefaultRetention\": { \"Mode\": \"GOVERNANCE\", \"Days\": 1 } } }"));
+        await(stackId, "CREATE_COMPLETE");
+
+        String update = """
+                { "Resources": {
+                    "Bucket": { "Type": "AWS::S3::Bucket",
+                        "Properties": { "BucketName": "%s", "ObjectLockEnabled": true,
+                            "ObjectLockConfiguration": { "ObjectLockEnabled": "Enabled",
+                                "Rule": { "DefaultRetention": { "Mode": "GOVERNANCE", "Days": 7 } } } } },
+                    "Broken": { "Type": "AWS::S3::Bucket", "DependsOn": "Bucket",
+                        "Properties": { "BucketName": "cfn-broken-%s",
+                            "VersioningConfiguration": { "Status": "Bogus" } } }
+                } }
+                """.formatted(bucket, suffix);
+        stack("UpdateStack", stackName, update);
+        await(stackId, "UPDATE_ROLLBACK_COMPLETE");
+
+        bucketGet(bucket, "object-lock")
+            .body(containsString("<Mode>GOVERNANCE</Mode>"))
+            .body(containsString("<Days>1</Days>"))
+            .body(not(containsString("<Days>7</Days>")));
+    }
+
+    private static String objectLockTemplate(String bucket, String objectLock) {
+        return """
+                { "Resources": { "Bucket": { "Type": "AWS::S3::Bucket", "Properties": {
+                    "BucketName": "%s", "ObjectLockEnabled": true%s } } } }
+                """.formatted(bucket, objectLock);
+    }
+
     @Test
     void aStackUpdateChangesTheLifecycleWindow() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);

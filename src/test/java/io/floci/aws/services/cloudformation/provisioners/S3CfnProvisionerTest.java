@@ -27,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -456,6 +457,80 @@ class S3CfnProvisionerTest {
                 {"BucketName": "c"}
                 """);
         verify(s3, never()).putBucketVersioning("c", null);
+    }
+
+    @Test
+    void objectLockEnabledOnCreateAlsoEnablesVersioning() {
+        provisionBucket("""
+                {"BucketName": "b", "ObjectLockEnabled": true,
+                 "ObjectLockConfiguration": {"ObjectLockEnabled": "Enabled",
+                   "Rule": {"DefaultRetention": {"Mode": "GOVERNANCE", "Days": 1}}}}
+                """);
+
+        verify(s3).enableObjectLockOnCreate("b");
+        verify(s3).putObjectLockConfiguration("b", "GOVERNANCE", "Days", 1);
+    }
+
+    @Test
+    void aRetentionInYearsIsAppliedAsYears() {
+        provisionBucket("""
+                {"BucketName": "b", "ObjectLockEnabled": true,
+                 "ObjectLockConfiguration": {"ObjectLockEnabled": "Enabled",
+                   "Rule": {"DefaultRetention": {"Mode": "COMPLIANCE", "Years": 2}}}}
+                """);
+
+        verify(s3).putObjectLockConfiguration("b", "COMPLIANCE", "Years", 2);
+    }
+
+    @Test
+    void objectLockEnabledWithoutAConfigurationEnablesNothingElse() {
+        provisionBucket("""
+                {"BucketName": "b", "ObjectLockEnabled": true}
+                """);
+
+        verify(s3).enableObjectLockOnCreate("b");
+        verify(s3, never()).putObjectLockConfiguration(anyString(), anyString(), anyString(), anyInt());
+    }
+
+    @Test
+    void anUpdateAddingTheLockGoesThroughPutObjectLockConfiguration() {
+        StackResource r = resource("Bucket", "AWS::S3::Bucket");
+        r.setPhysicalId("b");
+
+        provisioner.provision(r, props("""
+                {"BucketName": "b", "ObjectLockEnabled": true}
+                """), new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack", "b",
+                event -> { }, props("{\"BucketName\": \"b\"}")));
+
+        verify(s3, never()).enableObjectLockOnCreate(anyString());
+        verify(s3).putObjectLockConfiguration("b", null, null, 0);
+    }
+
+    @Test
+    void anUpdateChangesTheDefaultRetention() {
+        StackResource r = resource("Bucket", "AWS::S3::Bucket");
+        r.setPhysicalId("b");
+
+        provisioner.provision(r, props("""
+                {"BucketName": "b", "ObjectLockEnabled": true,
+                 "ObjectLockConfiguration": {"ObjectLockEnabled": "Enabled",
+                   "Rule": {"DefaultRetention": {"Mode": "COMPLIANCE", "Years": 3}}}}
+                """), new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack", "b",
+                event -> { }, props("{\"BucketName\": \"b\"}")));
+
+        verify(s3, never()).enableObjectLockOnCreate(anyString());
+        verify(s3).putObjectLockConfiguration("b", "COMPLIANCE", "Years", 3);
+    }
+
+    @Test
+    void aConfigurationWithoutAnEnabledLockIsNotApplied() {
+        provisionBucket("""
+                {"BucketName": "b",
+                 "ObjectLockConfiguration": {"Rule": {"DefaultRetention": {"Mode": "GOVERNANCE", "Days": 1}}}}
+                """);
+
+        verify(s3, never()).enableObjectLockOnCreate(anyString());
+        verify(s3, never()).putObjectLockConfiguration(anyString(), anyString(), anyString(), anyInt());
     }
 
     private NotificationConfiguration provisionedNotifications(String json) {

@@ -38,13 +38,14 @@ import java.util.regex.Pattern;
  * {@code account-regional} {@code BucketNamespace}, {@code CorsConfiguration},
  * {@code VersioningConfiguration}, {@code PublicAccessBlockConfiguration},
  * {@code BucketEncryption}, {@code LifecycleConfiguration},
- * {@code OwnershipControls}, {@code NotificationConfiguration} and
- * {@code Tags}. {@code NotificationConfiguration} is the exception to the XML translation: its
- * service method takes the parsed model, so the provisioner builds that model instead.
+ * {@code OwnershipControls}, {@code NotificationConfiguration}, {@code ObjectLockEnabled},
+ * {@code ObjectLockConfiguration} and {@code Tags}. {@code NotificationConfiguration} is the
+ * exception to the XML translation: its service method takes the parsed model, so the provisioner
+ * builds that model instead.
  *
  * <p><b>Silently dropped</b>, each of which has a service method waiting for it:
  * {@code WebsiteConfiguration}, {@code LoggingConfiguration},
- * {@code ObjectLockConfiguration}, {@code ReplicationConfiguration},
+ * {@code ReplicationConfiguration},
  * {@code AccelerateConfiguration}, {@code AccessControl}, and the four numbered configuration
  * lists ({@code AnalyticsConfigurations}, {@code IntelligentTieringConfigurations},
  * {@code InventoryConfigurations}, {@code MetricsConfigurations}). Declaring one of these still
@@ -155,6 +156,7 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
             // Built before anything is created, so a configuration that fails validation creates nothing.
             NotificationConfiguration notifications = notificationConfiguration(props, ctx);
             String ownershipControlsXml = ownershipControlsXml(props, ctx);
+            boolean objectLockEnabledOnCreate = objectLockEnabled(props, ctx);
             if (ctx.reusesPriorEntity(bucketName)) {
                 r.getAttributes().put(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR,
                         s3Service.snapshotBucketConfiguration(bucketName));
@@ -166,6 +168,9 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
                 s3Service.createBucket(bucketName, ctx.region());
                 unwind.created = !owned;
                 replacementCreated = !owned;
+                if (objectLockEnabledOnCreate) {
+                    s3Service.enableObjectLockOnCreate(bucketName);
+                }
             }
             // Ahead of the other properties, so a destination S3 cannot validate fails the resource
             // before any of them has changed the bucket. An unchanged configuration is not put again:
@@ -179,6 +184,7 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
             }
             applyBucketCorsConfiguration(bucketName, props, ctx);
             applyBucketVersioningConfiguration(bucketName, props, ctx);
+            applyObjectLockConfiguration(bucketName, props, ctx, objectLockEnabledOnCreate);
             applyPublicAccessBlockConfiguration(bucketName, props, ctx);
             applyBucketEncryption(bucketName, props, ctx);
             applyLifecycleConfiguration(bucketName, props, ctx);
@@ -260,6 +266,50 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         String status = ctx.resolveOptional(props.get("VersioningConfiguration"), "Status");
         if (status != null && !status.isBlank()) {
             s3Service.putBucketVersioning(bucketName, status);
+        }
+    }
+
+    /**
+     * The template's {@code ObjectLockEnabled: true}, which {@code enableObjectLockOnCreate} applies
+     * beside CreateBucket: it sets versioning {@code Enabled} and the lock in one step, as
+     * {@code create-bucket --object-lock-enabled-for-bucket} does.
+     */
+    private static boolean objectLockEnabled(JsonNode props, ProvisionContext ctx) {
+        return Boolean.parseBoolean(ctx.resolveOptional(props, "ObjectLockEnabled"));
+    }
+
+    /**
+     * The Object Lock configuration the template declares, through the same
+     * {@code PutObjectLockConfiguration} call the API takes. A create with
+     * {@code ObjectLockEnabled: true} was already enabled beside CreateBucket, so only an update
+     * that adds the lock to a bucket it reuses lands in the configuration-less arm, and S3's
+     * 409 {@code InvalidBucketState} for one whose versioning is not {@code Enabled} propagates
+     * rather than a stack that reports a configuration the bucket does not carry. The registry
+     * schema's {@code ObjectLockEnabled} of the configuration takes only {@code Enabled}, and a
+     * {@code DefaultRetention} takes a {@code Mode} with one period, {@code Days} or {@code Years}.
+     */
+    private void applyObjectLockConfiguration(String bucketName, JsonNode props, ProvisionContext ctx,
+                                              boolean objectLockEnabledOnCreate) {
+        JsonNode configuration = declared(props, "ObjectLockConfiguration");
+        if (configuration == null) {
+            if (objectLockEnabledOnCreate && ctx.reusesPriorEntity(bucketName)) {
+                s3Service.putObjectLockConfiguration(bucketName, null, null, 0);
+            }
+            return;
+        }
+        if (!"Enabled".equals(ctx.resolveOptional(configuration, "ObjectLockEnabled"))) {
+            return;
+        }
+        JsonNode retention = configuration.path("Rule").path("DefaultRetention");
+        String mode = ctx.resolveOptional(retention, "Mode");
+        Integer days = ctx.resolveOptionalInt(retention, "Days");
+        Integer years = ctx.resolveOptionalInt(retention, "Years");
+        if (days != null) {
+            s3Service.putObjectLockConfiguration(bucketName, mode, "Days", days);
+        } else if (years != null) {
+            s3Service.putObjectLockConfiguration(bucketName, mode, "Years", years);
+        } else {
+            s3Service.putObjectLockConfiguration(bucketName, mode, null, 0);
         }
     }
 
