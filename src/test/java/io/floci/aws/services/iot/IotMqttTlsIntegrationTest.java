@@ -37,6 +37,7 @@ import java.util.concurrent.TimeUnit;
 
 import static io.floci.aws.services.iot.IotMqttEnabledIntegrationTest.AWS_MAX_PAYLOAD;
 import static io.floci.aws.services.iot.IotMqttEnabledIntegrationTest.randomPayload;
+import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -212,6 +213,35 @@ class IotMqttTlsIntegrationTest {
             assertEquals("blue", OBJECT_MAPPER.readTree(accepted).path("state").path("desired").path("color").asText());
             assertEquals("tls-token", OBJECT_MAPPER.readTree(accepted).path("clientToken").asText());
         }
+    }
+
+    @Test
+    void shadowUpdateOverTlsFromADeviceInAnotherRegionLandsInThatRegion() throws Exception {
+        String region = "eu-west-1";
+        String thing = "tlsRegionThing" + System.nanoTime();
+        IotDeviceIdentity euDevice = IotDeviceIdentity.provision(region, true, cleanup);
+        euDevice.attachNewPolicy(ALLOW_ALL_MQTT, cleanup);
+        euDevice.attachNewThing(thing, cleanup);
+        SSLContext euContext = euDevice.sslContext(TLS_DIR);
+
+        try (TlsClient subscriber = TlsClient.connect("tls-region-sub-" + System.nanoTime(), euContext)) {
+            subscriber.subscribe("$aws/things/" + thing + "/shadow/update/accepted", 0);
+            try (TlsClient publisher = TlsClient.connect("tls-region-pub-" + System.nanoTime(), euContext)) {
+                publisher.publish("$aws/things/" + thing + "/shadow/update",
+                        "{\"state\":{\"reported\":{\"color\":\"green\"}}}".getBytes(StandardCharsets.UTF_8), 0);
+            }
+            assertNotNull(subscriber.takePayload());
+        }
+        cleanup.register(() -> given().header("Authorization", auth("test", region, "iotdata"))
+                .when().delete("/things/" + thing + "/shadow").then().statusCode(200));
+
+        given().header("Authorization", auth("test", region, "iotdata"))
+            .when().get("/things/" + thing + "/shadow")
+            .then().statusCode(200)
+            .body("state.reported.color", equalTo("green"));
+        given()
+            .when().get("/things/" + thing + "/shadow")
+            .then().statusCode(404);
     }
 
     @Test
