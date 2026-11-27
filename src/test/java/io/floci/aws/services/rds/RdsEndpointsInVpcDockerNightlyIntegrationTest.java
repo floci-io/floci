@@ -31,6 +31,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
+import static io.floci.aws.testing.RdsRequests.waitForAvailableInstance;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -109,8 +110,7 @@ class RdsEndpointsInVpcDockerNightlyIntegrationTest {
                 String firstName = AwsEndpoints.rdsInstanceHost(first, ACCOUNT, REGION);
                 String secondName = AwsEndpoints.rdsInstanceHost(second, ACCOUNT, REGION);
                 for (String id : List.of(first, second)) {
-                    DBInstance described = rds.describeDBInstances(r -> r.dbInstanceIdentifier(id))
-                            .dbInstances().getFirst();
+                    DBInstance described = waitForAvailableInstance(rds, id);
                     assertEquals(AwsEndpoints.rdsInstanceHost(id, ACCOUNT, REGION), described.endpoint().address());
                     assertEquals(5432, described.endpoint().port());
                 }

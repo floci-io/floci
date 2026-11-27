@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Properties;
 import java.util.Set;
 
+import static io.floci.aws.testing.RdsRequests.createPostgresInstance;
 import static io.floci.aws.testing.RdsRequests.rds;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -59,16 +60,7 @@ class RdsPgBouncerDockerNightlyIntegrationTest {
     void freshPgBouncerServerLoginsKeepWorking(String serverTlsMode) throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
         String dbId = "pgbouncer-" + suffix;
-        int proxyPort = rds("CreateDBInstance")
-                .formParam("DBInstanceIdentifier", dbId)
-                .formParam("Engine", "postgres")
-                .formParam("MasterUsername", "master")
-                .formParam("MasterUserPassword", "Master123!")
-                .formParam("DBName", "appdb")
-                .formParam("AllocatedStorage", "20")
-                .formParam("DBInstanceClass", "db.t3.micro")
-                .when().post("/").then().statusCode(200).extract().xmlPath()
-                .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+        int proxyPort = createPostgresInstance(dbId, "master", "Master123!", false);
         ContainerInfo pooler = null;
         Closeable poolerLogs = null;
         try {

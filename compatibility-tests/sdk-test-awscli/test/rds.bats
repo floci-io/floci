@@ -512,6 +512,8 @@ teardown() {
     assert_success
     dbi="$(json_get "$output" '.DBInstance.DbiResourceId')"
     source_arn="$(json_get "$output" '.DBInstance.DBInstanceArn')"
+    run aws_cmd rds wait db-instance-available --db-instance-identifier "$DB_ID"
+    assert_success
 
     run aws_cmd rds describe-db-instance-automated-backups --dbi-resource-id "$dbi"
     assert_success

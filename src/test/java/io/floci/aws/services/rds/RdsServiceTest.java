@@ -287,6 +287,33 @@ class RdsServiceTest {
     }
 
     @Test
+    void firstDataRequestCanFinishStartingTheInstanceBeforeTheCreateWorkerRuns() {
+        when(rdsConfig.mock()).thenReturn(false);
+        StorageBackend<String, DbInstance> instances = spy(new InMemoryStorage<String, DbInstance>());
+        rdsService = newService(containerManager, proxyManager, instances, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        AtomicBoolean firstWrite = new AtomicBoolean(true);
+        doAnswer(call -> {
+            call.callRealMethod();
+            if (firstWrite.getAndSet(false)) {
+                // A Data API call sees the published record before the create worker takes its lock.
+                rdsService.ensureInstanceBackend("early-request", "us-east-1");
+            }
+            return null;
+        }).when(instances).put(anyString(), any());
+        try {
+            assertEquals(DbInstanceStatus.CREATING, beginStandaloneCreate("early-request").getStatus());
+        } finally {
+            rdsService.beforeReset();
+        }
+        DbInstance instance = rdsService.getDbInstance("early-request");
+        assertEquals(DbInstanceStatus.AVAILABLE, instance.getStatus());
+        assertEquals("cont-id", instance.getContainerId());
+        verify(containerManager).tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verify(containerManager, never()).stopByRuntimeId(any());
+    }
+
+    @Test
     void failedBackgroundStartStaysFailedIfRecoveryCannotStartTheDatabase() {
         when(rdsConfig.mock()).thenReturn(false);
         when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))

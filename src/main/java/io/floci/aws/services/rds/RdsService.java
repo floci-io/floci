@@ -5638,7 +5638,7 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
         instance.setContainerPort(backendPort);
         instance.setProxyPort(relayPort);
         instance.setEndpoint(relayEndpoint);
-        if (instance.getStatus() == DbInstanceStatus.FAILED) {
+        if (instance.getStatus() == DbInstanceStatus.FAILED || instance.getStatus() == DbInstanceStatus.CREATING) {
             instance.setStatus(DbInstanceStatus.AVAILABLE);
         }
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);

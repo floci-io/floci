@@ -21,6 +21,7 @@ import java.util.concurrent.TimeUnit;
 import static io.floci.aws.testing.RdsRequests.assumeDocker;
 import static io.floci.aws.testing.RdsRequests.cleanupDockerInstance;
 import static io.floci.aws.testing.RdsRequests.rdsDockerClient;
+import static io.floci.aws.testing.RdsRequests.waitForAvailableInstance;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -56,7 +57,7 @@ class RdsEngineVersionDockerNightlyIntegrationTest {
                     createFailure = failure;
                     throw failure;
                 }
-                DBInstance original = describe(client, id);
+                DBInstance original = waitForAvailableInstance(client, id);
                 int port = original.endpoint().port();
                 await().atMost(Duration.ofSeconds(60)).untilAsserted(() ->
                         assertTrue(query(port, "SHOW server_version").startsWith("16.4")));

@@ -25,6 +25,7 @@ class RdsInstanceSnapshotIamTest {
                         .dbInstanceClass("db.t3.micro").allocatedStorage(20)
                         .masterUsername("admin").masterUserPassword("Password123!")
                         .enableIAMDatabaseAuthentication(sourceEnabled));
+                TestFixtures.waitForAvailableDbInstance(rds, source);
                 rds.createDBSnapshot(b -> b.dbInstanceIdentifier(source).dbSnapshotIdentifier(snapshot));
                 for (Boolean flag : new Boolean[]{null, false, true}) {
                     String target = source + "-" + (flag == null ? "omitted" : flag.toString());

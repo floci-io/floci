@@ -1123,7 +1123,7 @@ class RdsControlPlaneTest {
 
     private static CreateDbInstanceResponse createDbInstance(
             RdsClient client, String name, String password) {
-        return client.createDBInstance(b -> b
+        CreateDbInstanceResponse created = client.createDBInstance(b -> b
                 .dbInstanceIdentifier(name)
                 .engine("postgres")
                 .engineVersion("16.3")
@@ -1132,6 +1132,8 @@ class RdsControlPlaneTest {
                 .dbName("app")
                 .dbInstanceClass("db.t3.micro")
                 .allocatedStorage(20));
+        TestFixtures.waitForAvailableDbInstance(client, name);
+        return created;
     }
 
     private static RdsClient rdsClient(Region region) {

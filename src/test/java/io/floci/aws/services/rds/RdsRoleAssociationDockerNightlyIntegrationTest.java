@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
+import static io.floci.aws.testing.RdsRequests.waitForAvailableInstance;
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
 import static org.hamcrest.Matchers.contains;
@@ -72,6 +73,7 @@ class RdsRoleAssociationDockerNightlyIntegrationTest {
                 .formParam("MasterUserPassword", "password123")
                 .formParam("AllocatedStorage", "20")
         .when().post("/").then().statusCode(200);
+        waitForAvailableInstance(INSTANCE);
     }
 
     @Test
