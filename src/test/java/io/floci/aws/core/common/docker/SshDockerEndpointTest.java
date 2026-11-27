@@ -2,17 +2,21 @@ package io.floci.aws.core.common.docker;
 
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
 import java.net.URI;
-import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
-import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -87,16 +91,13 @@ class SshDockerEndpointTest {
     }
 
     @Test
-    void runForOutputGivesUpOnACommandThatOutlastsTheTimeout() {
-        String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
-        long started = System.nanoTime();
+    void runForOutputGivesUpOnACommandThatOutlastsTheTimeout() throws IOException {
+        StalledProcess stalled = new StalledProcess();
 
-        String output = SshDockerEndpoint.runForOutput(
-                List.of(java, "-cp", SshStdioSocketTest.testClasses(SleepForever.class), SleepForever.class.getName()),
-                Duration.ofSeconds(2));
+        String output = SshDockerEndpoint.runForOutput(stalled, List.of("ssh", "-G", "remote"), Duration.ofSeconds(10));
 
         assertThat(output, is(nullValue()));
-        assertThat(Duration.ofNanos(System.nanoTime() - started).toSeconds(), lessThan(10L));
+        assertThat(stalled.destroyed, is(true));
     }
 
     @Test
@@ -106,10 +107,61 @@ class SshDockerEndpointTest {
         assertThat(SshDockerEndpoint.isSshHost(null), is(false));
     }
 
-    /** Holds its output open without writing, as a stalled {@code ssh -G} would. */
-    public static final class SleepForever {
-        public static void main(String[] args) throws InterruptedException {
-            Thread.sleep(Long.MAX_VALUE);
+    /** Holds its output open and never exits within the wait, as a stalled {@code ssh -G} would. */
+    private static final class StalledProcess extends Process {
+
+        private final PipedOutputStream stdoutWriter = new PipedOutputStream();
+        private final PipedInputStream stdout;
+        private volatile boolean destroyed;
+
+        StalledProcess() throws IOException {
+            this.stdout = new PipedInputStream(stdoutWriter);
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return OutputStream.nullOutputStream();
+        }
+
+        @Override
+        public InputStream getInputStream() {
+            return stdout;
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return InputStream.nullInputStream();
+        }
+
+        @Override
+        public int waitFor() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean waitFor(long timeout, TimeUnit unit) {
+            return false;
+        }
+
+        @Override
+        public int exitValue() {
+            throw new IllegalThreadStateException("process has not exited");
+        }
+
+        @Override
+        public void destroy() {
+            destroyForcibly();
+        }
+
+        @Override
+        public Process destroyForcibly() {
+            destroyed = true;
+            try {
+                stdoutWriter.close();
+            } catch (IOException ignored) {
+                // Closing the pipe releases the reader thread; a second close is harmless.
+            }
+            return this;
         }
     }
 }

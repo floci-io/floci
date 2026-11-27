@@ -102,6 +102,10 @@ public class SshDockerEndpoint {
             LOG.warnv("Could not run {0}: {1}", command, e.getMessage());
             return null;
         }
+        return runForOutput(process, command, timeout);
+    }
+
+    static String runForOutput(Process process, List<String> command, Duration timeout) {
         CompletableFuture<String> output = new CompletableFuture<>();
         Thread.ofVirtual().name("docker-ssh-resolve").start(() -> {
             try (InputStream stdout = process.getInputStream()) {

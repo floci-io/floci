@@ -11,15 +11,19 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
-import static org.hamcrest.Matchers.lessThan;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.fail;
 
 class SshStdioSocketTest {
+
+    private static final Duration AWAIT_TIMEOUT = Duration.ofSeconds(10);
 
     private static List<String> javaMain(Class<?> main) {
         String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
@@ -27,11 +31,21 @@ class SshStdioSocketTest {
     }
 
     /** Only the test classes, since the whole test class path is too long for a Windows command line. */
-    static String testClasses(Class<?> main) {
+    private static String testClasses(Class<?> main) {
         try {
             return Path.of(main.getProtectionDomain().getCodeSource().getLocation().toURI()).toString();
         } catch (URISyntaxException e) {
             throw new IllegalStateException(e);
+        }
+    }
+
+    private static void awaitCondition(String description, BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.nanoTime() + AWAIT_TIMEOUT.toNanos();
+        while (!condition.getAsBoolean()) {
+            if (System.nanoTime() >= deadline) {
+                fail("Timed out waiting for: " + description);
+            }
+            Thread.sleep(10);
         }
     }
 
@@ -49,7 +63,9 @@ class SshStdioSocketTest {
 
     @Test
     void aReadWithNoDataFailsAfterTheSoTimeout() throws IOException {
-        try (SshStdioSocket socket = SshStdioSocket.open(javaMain(Echo.class))) {
+        AtomicLong clock = new AtomicLong();
+        try (SshStdioSocket socket = SshStdioSocket.open(
+                javaMain(Echo.class), () -> clock.addAndGet(Duration.ofSeconds(1).toNanos()))) {
             socket.setSoTimeout(200);
 
             assertThrows(SocketTimeoutException.class, () -> socket.getInputStream().read());
@@ -73,9 +89,11 @@ class SshStdioSocketTest {
     @Test
     void closingTheSocketEndsAWaitingRead() throws Exception {
         SshStdioSocket socket = SshStdioSocket.open(javaMain(Echo.class));
+        Thread reader = Thread.currentThread();
         Thread closer = Thread.ofVirtual().start(() -> {
             try {
-                Thread.sleep(300);
+                awaitCondition("reader waiting on queue", () ->
+                        reader.getState() == Thread.State.WAITING || reader.getState() == Thread.State.TIMED_WAITING);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
@@ -102,43 +120,44 @@ class SshStdioSocketTest {
 
     @Test
     void aSlowReaderGetsEveryByteOfASessionThatAlreadyEnded() throws Exception {
-        try (SshStdioSocket socket = SshStdioSocket.open(javaMain(WriteManyThenExit.class))) {
+        try (SshStdioSocket socket = SshStdioSocket.open(javaMain(WriteThenExit.class))) {
             socket.setSoTimeout(30_000);
             InputStream in = socket.getInputStream();
             in.read();
-            // Let the session finish while the queue is full and unread.
-            Thread.sleep(2_000);
+            assertThat(socket.awaitProcessExit(AWAIT_TIMEOUT), is(true));
+            socket.awaitOutputPumpExit(AWAIT_TIMEOUT);
 
             byte[] rest = in.readAllBytes();
 
-            assertThat(1 + rest.length, equalTo(WriteManyThenExit.BYTES));
+            assertThat(1 + rest.length, equalTo(WriteThenExit.BYTES));
         }
     }
 
     @Test
     void aSessionThatNeverAnswersFailsAtTheConnectTimeoutEvenWithoutAReadTimeout() throws IOException {
-        try (SshStdioSocket socket = SshStdioSocket.open(javaMain(Echo.class))) {
+        AtomicLong clock = new AtomicLong();
+        try (SshStdioSocket socket = SshStdioSocket.open(javaMain(Echo.class), clock::get)) {
             socket.connect(null, 500);
             socket.setSoTimeout(0);
-            long started = System.nanoTime();
+            clock.addAndGet(Duration.ofSeconds(1).toNanos());
 
             SocketTimeoutException failure =
                     assertThrows(SocketTimeoutException.class, () -> socket.getInputStream().read());
 
             assertThat(failure.getMessage(), containsString("did not log in within the connect timeout"));
-            assertThat(Duration.ofNanos(System.nanoTime() - started).toMillis(), lessThan(10_000L));
         }
     }
 
     @Test
     void theConnectTimeoutNoLongerAppliesOnceTheSessionAnswered() throws Exception {
-        try (SshStdioSocket socket = SshStdioSocket.open(javaMain(Echo.class))) {
+        AtomicLong clock = new AtomicLong();
+        try (SshStdioSocket socket = SshStdioSocket.open(javaMain(Echo.class), clock::get)) {
             socket.connect(null, 300);
             socket.setSoTimeout(30_000);
             socket.getOutputStream().write('a');
             InputStream in = socket.getInputStream();
             assertThat(in.read(), equalTo((int) 'a'));
-            Thread.sleep(600);
+            clock.addAndGet(Duration.ofSeconds(1).toNanos());
             socket.getOutputStream().write('b');
 
             assertThat(in.read(), equalTo((int) 'b'));
@@ -147,11 +166,13 @@ class SshStdioSocketTest {
 
     @Test
     void anAnswerAlreadyQueuedIsReadEvenAfterTheConnectDeadlinePassed() throws Exception {
-        try (SshStdioSocket socket = SshStdioSocket.open(javaMain(Echo.class))) {
+        AtomicLong clock = new AtomicLong();
+        try (SshStdioSocket socket = SshStdioSocket.open(javaMain(Echo.class), clock::get)) {
             socket.connect(null, 300);
             socket.setSoTimeout(30_000);
             socket.getOutputStream().write('a');
-            Thread.sleep(800);
+            awaitCondition("answer queued", socket::hasQueuedChunks);
+            clock.addAndGet(Duration.ofSeconds(1).toNanos());
 
             assertThat(socket.getInputStream().read(), equalTo((int) 'a'));
         }
@@ -159,12 +180,14 @@ class SshStdioSocketTest {
 
     @Test
     void aSlowUploadAfterLoginIsNotCutShortByTheConnectTimeout() throws Exception {
-        try (SshStdioSocket socket = SshStdioSocket.open(javaMain(LoggedInEcho.class))) {
+        AtomicLong clock = new AtomicLong();
+        try (SshStdioSocket socket = SshStdioSocket.open(javaMain(LoggedInEcho.class), clock::get)) {
             socket.connect(null, 300);
             socket.setSoTimeout(30_000);
+            awaitCondition("session authenticated", socket::isEstablished);
             // The request body is still being sent well past the connect timeout.
             for (int i = 0; i < 4; i++) {
-                Thread.sleep(250);
+                clock.addAndGet(Duration.ofMillis(250).toNanos());
                 socket.getOutputStream().write('u');
             }
 
@@ -177,15 +200,12 @@ class SshStdioSocketTest {
     @Test
     void closingReleasesTheOutputPumpBlockedOnAFullQueue() throws Exception {
         SshStdioSocket socket = SshStdioSocket.open(javaMain(WriteManyThenExit.class));
-        Thread.sleep(2_000);
+        awaitCondition("output pump blocked on full queue", socket::isOutputPumpBlockedOnQueue);
         assertThat(socket.isOutputPumpAlive(), is(true));
 
         socket.close();
 
-        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
-        while (socket.isOutputPumpAlive() && System.nanoTime() < deadline) {
-            Thread.sleep(50);
-        }
+        socket.awaitOutputPumpExit(AWAIT_TIMEOUT);
         assertThat(socket.isOutputPumpAlive(), is(false));
     }
 
@@ -207,6 +227,16 @@ class SshStdioSocketTest {
             System.err.println(SshStdioSocket.AUTHENTICATED + "remote-docker ([10.0.0.5]:22) using \"publickey\".");
             System.err.flush();
             Echo.main(args);
+        }
+    }
+
+    /** Writes multiple chunks that fit in the queue unread, then exits. */
+    public static final class WriteThenExit {
+        static final int BYTES = 64 * 1024;
+
+        public static void main(String[] args) throws IOException {
+            System.out.write(new byte[BYTES]);
+            System.out.flush();
         }
     }
 

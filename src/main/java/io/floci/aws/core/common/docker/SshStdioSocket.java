@@ -13,11 +13,13 @@ import java.net.SocketAddress;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
 /**
  * A {@link Socket} whose bytes are the standard input and output of one {@code ssh <host> docker system dial-stdio}
@@ -49,6 +51,7 @@ final class SshStdioSocket extends Socket {
     private static final long CONNECTING_POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
 
     private final Process process;
+    private final LongSupplier nanoTime;
     private final BlockingQueue<byte[]> chunks = new ArrayBlockingQueue<>(64);
     private final StringBuilder stderr = new StringBuilder();
     private final InputStream input = new QueueInputStream();
@@ -61,16 +64,21 @@ final class SshStdioSocket extends Socket {
     private volatile boolean inputShutdown;
     private volatile boolean outputShutdown;
 
-    private SshStdioSocket(Process process) {
+    private SshStdioSocket(Process process, LongSupplier nanoTime) {
         this.process = process;
+        this.nanoTime = nanoTime;
         this.output = new ProcessOutputStream(process.getOutputStream());
-        this.connectDeadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(DEFAULT_CONNECT_TIMEOUT_MILLIS);
+        this.connectDeadlineNanos = nanoTime.getAsLong() + TimeUnit.MILLISECONDS.toNanos(DEFAULT_CONNECT_TIMEOUT_MILLIS);
         this.outputPump = Thread.ofVirtual().name("docker-ssh-stdout").start(this::pumpOutput);
         Thread.ofVirtual().name("docker-ssh-stderr").start(this::pumpErrors);
     }
 
     /** Starts {@code command}, which must relay the daemon's API over its standard input and output. */
     static SshStdioSocket open(List<String> command) throws IOException {
+        return open(command, System::nanoTime);
+    }
+
+    static SshStdioSocket open(List<String> command, LongSupplier nanoTime) throws IOException {
         Process process;
         try {
             process = new ProcessBuilder(command).start();
@@ -78,7 +86,7 @@ final class SshStdioSocket extends Socket {
             throw new IOException("Could not run the ssh client to reach the Docker daemon; is OpenSSH on the PATH? "
                     + e.getMessage(), e);
         }
-        return new SshStdioSocket(process);
+        return new SshStdioSocket(process, nanoTime);
     }
 
     private void pumpOutput() {
@@ -150,7 +158,7 @@ final class SshStdioSocket extends Socket {
     @Override
     public void connect(SocketAddress endpoint, int timeout) {
         if (timeout > 0) {
-            connectDeadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout);
+            connectDeadlineNanos = nanoTime.getAsLong() + TimeUnit.MILLISECONDS.toNanos(timeout);
         }
     }
 
@@ -262,6 +270,26 @@ final class SshStdioSocket extends Socket {
         return outputPump.isAlive();
     }
 
+    boolean isOutputPumpBlockedOnQueue() {
+        return chunks.remainingCapacity() == 0 && outputPump.getState() == Thread.State.WAITING;
+    }
+
+    boolean hasQueuedChunks() {
+        return !chunks.isEmpty();
+    }
+
+    boolean isEstablished() {
+        return established;
+    }
+
+    boolean awaitProcessExit(Duration timeout) throws InterruptedException {
+        return process.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    void awaitOutputPumpExit(Duration timeout) throws InterruptedException {
+        outputPump.join(timeout);
+    }
+
     private void ensureOpen() throws SocketException {
         if (closed) {
             throw new SocketException("Socket is closed");
@@ -314,28 +342,31 @@ final class SshStdioSocket extends Socket {
         private byte[] take() throws IOException {
             ensureOpen();
             long readTimeoutNanos = TimeUnit.MILLISECONDS.toNanos(soTimeoutMillis);
-            long started = System.nanoTime();
+            long started = nanoTime.getAsLong();
             try {
                 while (isConnecting()) {
-                    long waited = System.nanoTime() - started;
+                    long waited = nanoTime.getAsLong() - started;
                     if (readTimeoutNanos > 0 && waited >= readTimeoutNanos) {
                         throw readTimeout();
                     }
-                    long wait = readTimeoutNanos > 0
-                            ? Math.min(CONNECTING_POLL_NANOS, readTimeoutNanos - waited) : CONNECTING_POLL_NANOS;
+                    long remainingConnect = connectDeadlineNanos - nanoTime.getAsLong();
+                    long wait = remainingConnect <= 0 ? 0 : Math.min(CONNECTING_POLL_NANOS, remainingConnect);
+                    if (readTimeoutNanos > 0) {
+                        wait = Math.min(wait, readTimeoutNanos - waited);
+                    }
                     // Output already queued wins over an expired deadline.
-                    byte[] next = chunks.poll(wait, TimeUnit.NANOSECONDS);
+                    byte[] next = wait > 0 ? chunks.poll(wait, TimeUnit.NANOSECONDS) : chunks.poll();
                     if (next != null) {
                         return next;
                     }
-                    if (isConnecting() && System.nanoTime() - connectDeadlineNanos >= 0) {
+                    if (isConnecting() && nanoTime.getAsLong() - connectDeadlineNanos >= 0) {
                         throw connectTimeout();
                     }
                 }
                 if (readTimeoutNanos == 0) {
                     return chunks.take();
                 }
-                long left = readTimeoutNanos - (System.nanoTime() - started);
+                long left = readTimeoutNanos - (nanoTime.getAsLong() - started);
                 byte[] next = left > 0 ? chunks.poll(left, TimeUnit.NANOSECONDS) : chunks.poll();
                 if (next == null) {
                     throw readTimeout();

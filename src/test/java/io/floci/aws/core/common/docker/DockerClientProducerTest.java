@@ -265,13 +265,6 @@ class DockerClientProducerTest {
                 "An explicitly-configured docker-host should take priority over the Windows named-pipe fallback");
     }
 
-    // Control-plane calls (create/start/stop/remove/copyArchive) and long-lived streaming
-    // calls (log-follow, exec output streams) must not share one connection pool: a
-    // container's whole-lifetime streams would otherwise occupy pool slots that
-    // short-lived control-plane calls need, starving them into
-    // ConnectionRequestTimeoutException. The @Default and @StreamingDocker beans must
-    // therefore be genuinely separate DockerClient instances (and thus separate pools),
-    // not the same instance handed out under two qualifiers.
     private static EmulatorConfig mockConfig(String dockerHost, Path dockerConfigDir) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
@@ -281,6 +274,13 @@ class DockerClientProducerTest {
         return config;
     }
 
+    // Control-plane calls (create/start/stop/remove/copyArchive) and long-lived streaming
+    // calls (log-follow, exec output streams) must not share one connection pool: a
+    // container's whole-lifetime streams would otherwise occupy pool slots that
+    // short-lived control-plane calls need, starving them into
+    // ConnectionRequestTimeoutException. The @Default and @StreamingDocker beans must
+    // therefore be genuinely separate DockerClient instances (and thus separate pools),
+    // not the same instance handed out under two qualifiers.
     @Test
     void dockerClientAndStreamingDockerClient_areDistinctInstances(@TempDir Path dockerConfigDir) throws IOException {
         EmulatorConfig config = mockConfig("unix:///var/run/docker.sock", dockerConfigDir);
