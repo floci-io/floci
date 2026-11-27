@@ -41,7 +41,7 @@ class EventBridgeManagedRuleTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"), MAPPER, null,
                 mock(TargetDispatcher.class), mock(ReplayDispatcher.class), new ResourceGroupsTaggingService(null),
-                mock(AppSyncTargetValidator.class));
+                mock(AppSyncTargetValidator.class), null);
         handler = new EventBridgeHandler(service, MAPPER);
         service.putManagedRule(RULE, PRINCIPAL, "{\"source\":[\"aws.ssm\"]}", new Target(RULE, BUS_ARN, null, null),
                 REGION);

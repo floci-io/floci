@@ -6,6 +6,7 @@ import io.floci.aws.config.TlsCertificateManager;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridgev2.model.EventBusV2;
 import io.floci.aws.services.eventbridgev2.model.EventSourceV2;
 import io.floci.aws.services.eventbridgev2.model.SubscriberV2;
@@ -46,7 +47,7 @@ class EventBridgeV2StoredTagsTest {
         Clock clock = Clock.fixed(Instant.parse("2026-11-27T00:00:00Z"), ZoneOffset.UTC);
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(
                 AccountAwareStorageBackend.inMemory(ACCOUNT), mock(SecretsManagerService.class, RETURNS_DEEP_STUBS), regionResolver, clock,
-                "http://floci.test:4566", mock(TlsCertificateManager.class));
+                "http://floci.test:4566", mock(TlsCertificateManager.class), mock(EventBridgeService.class));
         buses = AccountAwareStorageBackend.inMemory(ACCOUNT);
         rawSubscribers = new InMemoryStorage<>();
         subscribers = new AccountAwareStorageBackend<>(rawSubscribers, null, ACCOUNT);
