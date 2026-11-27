@@ -26,6 +26,12 @@ public class DbClusterEndpoint {
     private String customEndpointType;
     private List<String> staticMembers = new ArrayList<>();
     private List<String> excludedMembers = new ArrayList<>();
+    /**
+     * Whether the endpoint holds every instance its exclusion list leaves, as one created or modified with
+     * ExcludedMembers, or with neither list, does. Otherwise it holds its static members alone, and none once deletes
+     * empty the list; so does one stored before this was recorded whose lists are both empty, whose kind is unknown.
+     */
+    private boolean exclusionList;
     private String dbClusterEndpointArn;
     private Map<String, String> tags = new LinkedHashMap<>();
 
@@ -57,6 +63,9 @@ public class DbClusterEndpoint {
 
     public List<String> getExcludedMembers() { return excludedMembers; }
     public void setExcludedMembers(List<String> excludedMembers) { this.excludedMembers = excludedMembers; }
+
+    public boolean isExclusionList() { return exclusionList; }
+    public void setExclusionList(boolean exclusionList) { this.exclusionList = exclusionList; }
 
     public String getDbClusterEndpointArn() { return dbClusterEndpointArn; }
     public void setDbClusterEndpointArn(String dbClusterEndpointArn) { this.dbClusterEndpointArn = dbClusterEndpointArn; }

@@ -80,6 +80,15 @@ public class DbInstance {
     private Instant createdAt;
     private int proxyPort;
     private Integer requestedPort;
+    // With endpoints-in-vpc: the relay that serves this record's endpoint at its own address in
+    // vpcEndpointSubnetId, and that address once it has one. They move with the endpoint, as the
+    // proxy port does, when a blue/green switchover swaps endpoints.
+    private String vpcEndpointId;
+    private String vpcEndpointSubnetId;
+    private String vpcEndpointAddress;
+    // Relays the endpoint moved off whose removal Docker has not confirmed yet: they still forward to the proxy
+    // port, so the record keeps it until each is gone.
+    private List<String> staleVpcEndpointIds = new ArrayList<>();
     // Read replication links, kept on both ends the way DescribeDBInstances reports them: a
     // replica names its source, a source lists its replicas, by identifier within a Region and
     // by ARN across Regions. Null and empty on a standalone. The status is the "read
@@ -301,6 +310,20 @@ public class DbInstance {
 
     public Integer getRequestedPort() { return requestedPort; }
     public void setRequestedPort(Integer requestedPort) { this.requestedPort = requestedPort; }
+
+    public String getVpcEndpointId() { return vpcEndpointId; }
+    public void setVpcEndpointId(String vpcEndpointId) { this.vpcEndpointId = vpcEndpointId; }
+
+    public String getVpcEndpointSubnetId() { return vpcEndpointSubnetId; }
+    public void setVpcEndpointSubnetId(String vpcEndpointSubnetId) { this.vpcEndpointSubnetId = vpcEndpointSubnetId; }
+
+    public String getVpcEndpointAddress() { return vpcEndpointAddress; }
+    public void setVpcEndpointAddress(String vpcEndpointAddress) { this.vpcEndpointAddress = vpcEndpointAddress; }
+
+    public List<String> getStaleVpcEndpointIds() { return staleVpcEndpointIds; }
+    public void setStaleVpcEndpointIds(List<String> staleVpcEndpointIds) {
+        this.staleVpcEndpointIds = staleVpcEndpointIds != null ? new ArrayList<>(staleVpcEndpointIds) : new ArrayList<>();
+    }
 
     public String getDockerVolumeName() { return dockerVolumeName; }
     public void setDockerVolumeName(String dockerVolumeName) { this.dockerVolumeName = dockerVolumeName; }

@@ -2134,6 +2134,15 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean advertiseRequestedPort();
 
+        /**
+         * When true, a DB instance in a subnet with a Docker-backed VPC network gets its own address there and
+         * serves the Port it was created with, or its engine's default, under the endpoint name RDS gives it,
+         * which Floci's DNS server answers. A DB cluster's instances serve its port the same way, and its cluster,
+         * reader and custom endpoint names resolve to them. Off, every endpoint is Floci's address and a proxy port.
+         */
+        @WithDefault("false")
+        boolean endpointsInVpc();
+
         /** Empty when Floci should adapt its built-in image to the requested engine version. */
         Optional<String> defaultPostgresImage();
 
@@ -4602,6 +4611,15 @@ public interface EmulatorConfig {
         /** Unix socket or TCP URL for the Docker daemon (e.g. unix:///var/run/docker.sock). */
         @WithDefault("unix:///var/run/docker.sock")
         String dockerHost();
+
+        /**
+         * Opt-in: allow an {@code ssh://} Docker host (from {@code docker-host}, {@code DOCKER_HOST},
+         * or the active Docker context). Off by default, because each Docker connection runs an
+         * {@code ssh} process on the Floci host; an {@code ssh://} endpoint is refused at startup
+         * until this is set to {@code true}.
+         */
+        @WithDefault("false")
+        boolean allowSshHost();
 
         /**
          * Size of the connection pool behind the shared Docker client. Every short Docker call

@@ -1,5 +1,8 @@
 package io.floci.aws.core.common;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Locale;
+
 /**
  * The AWS hostnames the emulator hands back for a region: every one is
  * {@code <service>.<region>.<dnsSuffix>} with the region's partition suffix, plus the handful of
@@ -10,12 +13,56 @@ package io.floci.aws.core.common;
  */
 public final class AwsEndpoints {
 
+    private static final String RDS_ENDPOINT_IDENTIFIER_CHARACTERS = "abcdefghijklmnopqrstuvwxyz0123456789";
+    private static final int RDS_ENDPOINT_IDENTIFIER_LENGTH = 12;
+
     private AwsEndpoints() {
     }
 
     /** {@code <service>.<region>.<dnsSuffix>}. */
     public static String host(String service, String region) {
         return AwsPartitions.forRegionOrCommercial(region).regionalHostname(service, region);
+    }
+
+    /**
+     * The identifier every RDS endpoint of an account in a region carries, {@code abcdefghijkl} in
+     * {@code db1.abcdefghijkl.us-east-1.rds.amazonaws.com}. The RDS user guide calls it "a unique identifier
+     * for a specific combination of AWS Region and AWS account" that "doesn't change" for it, so all of an
+     * account's DB instances in a region share it. Floci derives its twelve letters and digits from the two, a
+     * letter first, so it stays the same across restarts without being stored.
+     */
+    public static String rdsEndpointIdentifier(String accountId, String region) {
+        byte[] digest = Digests.sha256((accountId + ":" + region).getBytes(StandardCharsets.UTF_8));
+        StringBuilder identifier = new StringBuilder(RDS_ENDPOINT_IDENTIFIER_LENGTH);
+        identifier.append(RDS_ENDPOINT_IDENTIFIER_CHARACTERS.charAt(Math.floorMod(digest[0], 26)));
+        for (int i = 1; i < RDS_ENDPOINT_IDENTIFIER_LENGTH; i++) {
+            identifier.append(RDS_ENDPOINT_IDENTIFIER_CHARACTERS.charAt(
+                    Math.floorMod(digest[i], RDS_ENDPOINT_IDENTIFIER_CHARACTERS.length())));
+        }
+        return identifier.toString();
+    }
+
+    /**
+     * A DB instance's endpoint address, {@code <instance>.<identifier>.<region>.rds.<dnsSuffix>}, with the
+     * {@link #rdsEndpointIdentifier} of its account and region.
+     */
+    public static String rdsInstanceHost(String dbInstanceIdentifier, String accountId, String region) {
+        return dbInstanceIdentifier.toLowerCase(Locale.ROOT) + "." + rdsEndpointIdentifier(accountId, region) + "."
+                + region + ".rds." + AwsRegions.dnsSuffixFor(region);
+    }
+
+    /**
+     * A DB cluster endpoint's address, {@code <name>.<type>-<identifier>.<region>.rds.<dnsSuffix>}, with the
+     * {@link #rdsEndpointIdentifier} of its account and region. The Aurora user guide gives the three types: a
+     * cluster's writer endpoint is {@code mydbcluster.cluster-c7tj4example.us-east-1.rds.amazonaws.com}, its reader
+     * endpoint {@code mydbcluster.cluster-ro-...} and a custom endpoint {@code myendpoint.cluster-custom-...}.
+     *
+     * @param name the cluster's identifier, or the custom endpoint's
+     * @param type {@code cluster}, {@code cluster-ro} or {@code cluster-custom}
+     */
+    public static String rdsClusterEndpointHost(String name, String type, String accountId, String region) {
+        return name.toLowerCase(Locale.ROOT) + "." + type + "-" + rdsEndpointIdentifier(accountId, region) + "."
+                + region + ".rds." + AwsRegions.dnsSuffixFor(region);
     }
 
     /** {@code <apiId>.execute-api.<region>.<dnsSuffix>}. */

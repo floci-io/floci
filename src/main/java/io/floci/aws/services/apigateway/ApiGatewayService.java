@@ -175,6 +175,9 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
     private static final String EPC_VPC_IDS_KEY = "vpcEndpointIds";
     private static final String EPC_TYPES_PATH = "/endpointConfiguration/types/";
     private static final String EPC_VPC_IDS_PATH = "/endpointConfiguration/vpcEndpointIds";
+    private static final String MIN_COMPRESSION_PATH = "/minimumCompressionSize";
+    /** The largest {@code minimumCompressionSize} AWS accepts: 10 MiB. */
+    private static final int MAX_MINIMUM_COMPRESSION_SIZE = 10_485_760;
     private static final String TLS_1_2 = "TLS_1_2";
     /** The API type a mapping to a REST API is stored with, beside a v2 API's protocol type. */
     private static final String REST_API_TYPE = "REST";
@@ -356,6 +359,9 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         if (request.get("apiKeySource") != null) {
             api.setApiKeySource(apiKeySource(request.get("apiKeySource")));
         }
+        if (request.get("minimumCompressionSize") != null) {
+            api.setMinimumCompressionSize(minimumCompressionSize(request.get("minimumCompressionSize")));
+        }
 
         EndpointConfiguration endpointConfiguration = new EndpointConfiguration();
         if (request.get(EPC_KEY) instanceof Map<?, ?> epMap) {
@@ -413,6 +419,28 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             return (String) value;
         }
         throw new AwsException("BadRequestException", "API key source must be HEADER or AUTHORIZER.", 400);
+    }
+
+    /**
+     * A valid {@code minimumCompressionSize}: a whole number of bytes from 0 to 10485760. The value
+     * is a JSON number on create and a string in a patch operation, so both are read.
+     */
+    private static Integer minimumCompressionSize(Object value) {
+        Long size = null;
+        if (value instanceof Integer || value instanceof Long || value instanceof Short) {
+            size = ((Number) value).longValue();
+        } else if (value instanceof String text) {
+            try {
+                size = Long.parseLong(text.trim());
+            } catch (NumberFormatException ignored) {
+                // Not a whole number of bytes: refused below.
+            }
+        }
+        if (size == null || size < 0 || size > MAX_MINIMUM_COMPRESSION_SIZE) {
+            throw new AwsException("BadRequestException",
+                    "Invalid minimum compression size, must be between 0 and 10485760", 400);
+        }
+        return size.intValue();
     }
 
     /** The endpoint type {@code value} names, in any case. */
@@ -2128,6 +2156,11 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return usagePlanKeyStore.scan(k -> k.startsWith(prefix));
     }
 
+    public PaginatedResult<UsagePlanKey> getUsagePlanKeyPage(String region, String usagePlanId, Integer limit,
+                                                             String position) {
+        return pageById(getUsagePlanKeys(region, usagePlanId), UsagePlanKey::getId, limit, position);
+    }
+
     public void deleteUsagePlanKey(String region, String usagePlanId, String keyId) {
         getUsagePlanKey(region, usagePlanId, keyId);
         usagePlanKeyStore.delete(usagePlanKeyPathKey(region, usagePlanId, keyId));
@@ -3668,8 +3701,13 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             // endpoint change or API key source must leave it as it was.
             EndpointConfiguration endpointConfiguration = patchEndpointConfiguration(api, patchOperations, region);
             for (Map<String, String> op : patchOperations) {
-                if ("replace".equals(op.get("op")) && "/apiKeySource".equals(op.get("path"))) {
+                if (!"replace".equals(op.get("op"))) {
+                    continue;
+                }
+                if ("/apiKeySource".equals(op.get("path"))) {
                     apiKeySource(op.get("value"));
+                } else if (MIN_COMPRESSION_PATH.equals(op.get("path")) && !clearsCompression(op.get("value"))) {
+                    minimumCompressionSize(op.get("value"));
                 }
             }
             for (Map<String, String> op : patchOperations) {
@@ -3689,6 +3727,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 } else if ("/apiKeySource" .equals(path)) {
                     // aws_api_gateway_rest_api sends this for a changed api_key_source.
                     api.setApiKeySource(apiKeySource(value));
+                } else if (MIN_COMPRESSION_PATH.equals(path)) {
+                    // A patch without a value turns compression off, which is how
+                    // aws_api_gateway_rest_api clears minimum_compression_size.
+                    api.setMinimumCompressionSize(clearsCompression(value) ? null : minimumCompressionSize(value));
                 }
             }
             if (endpointConfiguration != null) {
@@ -3697,6 +3739,11 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         }
         apiStore.put(apiKey(region, apiId), api);
         return api;
+    }
+
+    /** True when a {@code /minimumCompressionSize} patch value turns compression off. */
+    private static boolean clearsCompression(String value) {
+        return value == null || value.isBlank();
     }
 
     /**

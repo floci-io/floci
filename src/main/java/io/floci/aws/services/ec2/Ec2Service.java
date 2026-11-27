@@ -546,6 +546,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
+     * The IPv4 range a subnet's addresses on its VPC's Docker network come from, which a substituted CIDR makes differ
+     * from the declared one.
+     */
+    public Optional<String> effectiveSubnetCidr(String accountId, String region, String subnetId) {
+        return vpcNetworkManager == null ? Optional.empty()
+                : vpcNetworkManager.effectiveSubnetCidr(accountId, region, subnetId);
+    }
+
+    /**
      * Re-claims prefixes a persisted container holder leased before a restart, as {@link #reserveVpcPrivateIp} does an
      * address, skipping one an instance, interface or container holds an address of now. Docker is asked as
      * {@link #allocateVpcPrefixes} asks it, and nothing is reserved when it cannot say.

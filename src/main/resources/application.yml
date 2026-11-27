@@ -402,6 +402,12 @@ floci:
     log-max-size: "10m"
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
+    # FLOCI_DOCKER_ALLOW_SSH_HOST: opt-in; allow an ssh:// Docker host (from docker-host,
+    # DOCKER_HOST, or the active Docker context). Off by default because each Docker connection
+    # runs an ssh process; an ssh:// host is refused at startup until this is true. Keep in step
+    # with the @WithDefault on EmulatorConfig.DockerConfig.allowSshHost: a value set here WINS
+    # over the annotation.
+    allow-ssh-host: false
     # FLOCI_DOCKER_MAX_CONNECTIONS: connection pool size for Floci's short Docker calls. Past the
     # limit, create/start/stop/remove wait for a free connection and the emulator stalls. Keep in step
     # with the @WithDefault on EmulatorConfig.DockerConfig.maxConnections: a value set here WINS
@@ -655,6 +661,7 @@ floci:
       proxy-base-port: 7001
       proxy-max-port: 7099
       # advertise-requested-port: false         # FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT; true = Describe* reports the requested Port, not the proxy port
+      # endpoints-in-vpc: false                 # FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC; true = an instance in a VPC serves its Port at its own address and RDS endpoint name, and a cluster's endpoint names resolve to its instances
       # endpoint-host: localhost                 # Hostname clients use; enables published-port translation in Docker
       # iam-token-endpoint-binding: true         # FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING; false accepts PostgreSQL IAM tokens generated for another hostname or port
       # Omit image overrides to adapt Floci's built-in images to EngineVersion.

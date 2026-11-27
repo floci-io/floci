@@ -237,6 +237,27 @@ def test_a_vendored_role_for_a_service_the_reference_does_not_name_fails(correct
         r.entry_for("svc:CreateCluster", ["other", "svc"], CLUSTER)
 
 
+JOB_FLOW = {"svc": model({"RunJobFlow": "In"}, {"In": structure(ServiceRole="String", JobFlowRole="String",
+                                                                StepExecutionRoleArn="String")})}
+
+
+def test_a_vendored_role_names_an_instance_profile_a_role_by_name_or_one_a_condition_key_controls(corrections,
+                                                                                                   tmp_path):
+    # The documented service wins over a trust policy, and a runtime role whose access a condition key controls
+    # passes none.
+    role_source(corrections, tmp_path, [
+        {"operation": "RunJobFlow", "member": "ServiceRole", "passedToService": ["svc.amazonaws.com"],
+         "trustedBy": ["other.amazonaws.com", "svc.amazonaws.com"], "byName": True},
+        {"operation": "RunJobFlow", "member": "JobFlowRole", "passedToService": ["other.amazonaws.com"],
+         "instanceProfile": True},
+        {"operation": "RunJobFlow", "member": "StepExecutionRoleArn", "accessControlledBy": "svc:ExecutionRoleArn"}])
+    entry = r.entry_for("svc:RunJobFlow", ["other", "svc"], JOB_FLOW)
+    assert entry["roles"] == [{"member": "JobFlowRole", "passedTo": "other", "instanceProfile": True},
+                              {"member": "ServiceRole", "passedTo": "svc", "byName": True}]
+    assert r.validate({"_source": {}, "namespaces": {"svc": ["svc"]}, "notCovered": {}, "otherNamespaces": [],
+                       "operations": {"svc:RunJobFlow": entry}}) == []
+
+
 def test_a_vendored_role_no_operation_reads_is_reported(corrections, tmp_path):
     corrections.setattr(r, "load_models", lambda data, clients: CLUSTER)
     covered = {"svc:CreateCluster": {"passedTo": ["other", "svc"], "clients": ["svc"]}}

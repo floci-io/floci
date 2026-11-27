@@ -387,18 +387,22 @@ class S3DefaultEncryptionServiceTest {
     }
 
     @Test
-    void aConfigurationWithoutAnAlgorithmFallsBackToSseS3() {
-        s3Service.putBucketEncryption(BUCKET, "<ServerSideEncryptionConfiguration/>");
-        assertEquals("AES256", put("empty-configuration.txt", new PutObjectOptions()).getServerSideEncryption());
+    void aConfigurationThatDoesNotParseOrNamesNoRuleIsRefusedAndTheBucketFallsBackToSseS3() {
+        assertThrows(AwsException.class,
+                () -> s3Service.putBucketEncryption(BUCKET, "<ServerSideEncryptionConfiguration/>"));
+        assertThrows(AwsException.class, () -> s3Service.putBucketEncryption(BUCKET, "not xml"));
+        assertThrows(AwsException.class, () -> s3Service.putBucketEncryption(BUCKET,
+                configuration("aws:kms", KMS_KEY) + "<Broken>"));
 
-        s3Service.putBucketEncryption(BUCKET, configuration("aws:unknown", null));
-        assertEquals("AES256", put("unsupported-algorithm.txt", new PutObjectOptions()).getServerSideEncryption());
-
-        s3Service.putBucketEncryption(BUCKET, "not xml");
         assertEquals("AES256", put("malformed-configuration.txt", new PutObjectOptions()).getServerSideEncryption());
+    }
 
-        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY) + "<Broken>");
-        assertEquals("AES256", put("truncated-configuration.txt", new PutObjectOptions()).getServerSideEncryption());
+    @Test
+    void aDefaultWithAnUnsupportedAlgorithmIsRefusedAndTheBucketFallsBackToSseS3() {
+        assertThrows(AwsException.class,
+                () -> s3Service.putBucketEncryption(BUCKET, configuration("aws:unknown", null)));
+
+        assertEquals("AES256", put("unsupported-algorithm.txt", new PutObjectOptions()).getServerSideEncryption());
     }
 
     @Test
@@ -499,6 +503,104 @@ class S3DefaultEncryptionServiceTest {
         assertEquals("AES256", copy.getSseCustomerAlgorithm());
     }
 
+    @Test
+    void aBodyThatDoesNotParseIsRefusedAsMalformedXml() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> s3Service.putBucketEncryption(BUCKET, "<ServerSideEncryptionConfiguration>"));
+
+        assertEquals("MalformedXML", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void aBodyWithoutARuleIsRefusedAsMalformedXml() {
+        AwsException error = assertThrows(AwsException.class, () -> s3Service.putBucketEncryption(BUCKET,
+                "<ServerSideEncryptionConfiguration><NotARule/></ServerSideEncryptionConfiguration>"));
+
+        assertEquals("MalformedXML", error.getErrorCode());
+    }
+
+    @Test
+    void aBodyWithTwoRulesIsRefusedAsMalformedXml() {
+        AwsException error = assertThrows(AwsException.class, () -> s3Service.putBucketEncryption(BUCKET,
+                "<ServerSideEncryptionConfiguration><Rule>"
+                        + "<ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm>"
+                        + "</ApplyServerSideEncryptionByDefault></Rule>"
+                        + "<Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm>"
+                        + "</ApplyServerSideEncryptionByDefault></Rule>"
+                        + "</ServerSideEncryptionConfiguration>"));
+
+        assertEquals("MalformedXML", error.getErrorCode());
+    }
+
+    @Test
+    void aDefaultWithoutASupportedAlgorithmIsRefusedAsMalformedXml() {
+        assertRefusedAsMalformedXml("<ServerSideEncryptionConfiguration><Rule>"
+                + "<ApplyServerSideEncryptionByDefault></ApplyServerSideEncryptionByDefault>"
+                + "</Rule></ServerSideEncryptionConfiguration>");
+        assertRefusedAsMalformedXml(configuration("aws:unknown", null));
+    }
+
+    @Test
+    void aKmsMasterKeyIdWithoutKmsEncryptionIsRefusedAsInvalidArgument() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> s3Service.putBucketEncryption(BUCKET, configuration("AES256", KMS_KEY)));
+
+        assertEquals("InvalidArgument", error.getErrorCode());
+        assertEquals("ApplyServerSideEncryptionByDefault", error.getExtendedData().get("ArgumentName"));
+    }
+
+    @Test
+    void aKmsMasterKeyIdWithALineBreakIsRefusedAsInvalidArgument() {
+        assertRefusedAsInvalidArgument(configuration("aws:kms", "key\nid"));
+    }
+
+    @Test
+    void aRuleWithoutADefaultEncryptionIsStored() {
+        String body = "<ServerSideEncryptionConfiguration>"
+                + "<Rule><BlockedEncryptionTypes><EncryptionType>SSE-C</EncryptionType></BlockedEncryptionTypes>"
+                + "</Rule></ServerSideEncryptionConfiguration>";
+
+        s3Service.putBucketEncryption(BUCKET, body);
+
+        assertEquals(body, s3Service.getBucketEncryption(BUCKET));
+    }
+
+    @Test
+    void aValidKmsConfigurationWithAKeyArnIsStored() {
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
+
+        // The read augments the stored rule with BlockedEncryptionTypes, so the stored default
+        // elements are asserted rather than the whole document.
+        String returned = s3Service.getBucketEncryption(BUCKET);
+        assertTrue(returned.contains("<SSEAlgorithm>aws:kms</SSEAlgorithm>"));
+        assertTrue(returned.contains("<KMSMasterKeyID>" + KMS_KEY + "</KMSMasterKeyID>"));
+    }
+
+    @Test
+    void refusalsLeaveTheBucketWritingAndReading() {
+        assertThrows(AwsException.class,
+                () -> s3Service.putBucketEncryption(BUCKET, configuration("AES256", KMS_KEY)));
+
+        assertEquals("AES256", put("plain.txt", new PutObjectOptions()).getServerSideEncryption());
+    }
+
+    private void assertRefusedAsInvalidArgument(String body) {
+        AwsException error = assertThrows(AwsException.class,
+                () -> s3Service.putBucketEncryption(BUCKET, body));
+
+        assertEquals("InvalidArgument", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    private void assertRefusedAsMalformedXml(String body) {
+        AwsException error = assertThrows(AwsException.class,
+                () -> s3Service.putBucketEncryption(BUCKET, body));
+
+        assertEquals("MalformedXML", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
     private S3Object put(String key, PutObjectOptions options) {
         return s3Service.putObject(BUCKET, key, DATA, "text/plain", null, options);
     }
@@ -509,9 +611,9 @@ class S3DefaultEncryptionServiceTest {
 
     private static String configuration(String algorithm, String kmsKeyId, String blockedType) {
         return "<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Rule>"
-                + "<ApplyServerSideEncryptionByDefault><SSEAlgorithm>" + algorithm + "</SSEAlgorithm>"
-                + (kmsKeyId == null ? "" : "<KMSMasterKeyID>" + kmsKeyId + "</KMSMasterKeyID>")
-                + "</ApplyServerSideEncryptionByDefault>"
+                + (algorithm == null ? "" : "<ApplyServerSideEncryptionByDefault><SSEAlgorithm>" + algorithm
+                        + "</SSEAlgorithm>" + (kmsKeyId == null ? "" : "<KMSMasterKeyID>" + kmsKeyId
+                        + "</KMSMasterKeyID>") + "</ApplyServerSideEncryptionByDefault>")
                 + (blockedType == null ? "" : "<BlockedEncryptionTypes><EncryptionType>" + blockedType
                         + "</EncryptionType></BlockedEncryptionTypes>")
                 + "</Rule></ServerSideEncryptionConfiguration>";

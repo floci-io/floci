@@ -521,6 +521,51 @@ class StepFunctionsDynamoDbIntegrationTest {
         assertEquals("hello", result.path("Item").path("value").path("S").asText());
     }
 
+    /**
+     * The optimized getItem takes the GetItem request, so its ProjectionExpression decides which attributes come
+     * back: a policy on dynamodb:Attributes is only as narrow as the item the task returns.
+     */
+    @Test
+    @Order(73)
+    void optimizedGetItemReturnsOnlyTheProjectedAttributes() throws Exception {
+        String output = executeSfnOptimized("opt-get-projected", "dynamodb:getItem", """
+                {
+                    "TableName": "%s",
+                    "Key": {
+                        "pk": {"S": "opt-get-test"},
+                        "sk": {"S": "row"}
+                    },
+                    "ProjectionExpression": "pk, sk"
+                }
+                """.formatted(TABLE_NAME));
+
+        JsonNode item = mapper.readTree(output).path("Item");
+        assertEquals("opt-get-test", item.path("pk").path("S").asText());
+        assertFalse(item.has("value"), output);
+    }
+
+    /**
+     * The optimized scan takes the Scan request too, so its ProjectionExpression decides which attributes each item
+     * returns.
+     */
+    @Test
+    @Order(74)
+    void optimizedScanReturnsOnlyTheProjectedAttributes() throws Exception {
+        String output = executeSfnOptimized("opt-scan-projected", "dynamodb:scan", """
+                {
+                    "TableName": "%s",
+                    "FilterExpression": "pk = :pk",
+                    "ExpressionAttributeValues": {":pk": {"S": "opt-get-test"}},
+                    "ProjectionExpression": "pk, sk"
+                }
+                """.formatted(TABLE_NAME));
+
+        JsonNode items = mapper.readTree(output).path("Items");
+        assertEquals(1, items.size(), output);
+        assertEquals("opt-get-test", items.get(0).path("pk").path("S").asText());
+        assertFalse(items.get(0).has("value"), output);
+    }
+
     @Test
     @Order(72)
     void optimized_getItem_notFound_returnsEmptyObject() throws Exception {

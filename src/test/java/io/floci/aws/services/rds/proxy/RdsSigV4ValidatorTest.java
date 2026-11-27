@@ -335,6 +335,24 @@ class RdsSigV4ValidatorTest {
     }
 
     @Test
+    void validateAcceptsATokenForAnotherNameTheEndpointIsReachedBy() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDRDS", "secret-rds");
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "orders.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com", 3307, "admin", "AKIDRDS", "secret-rds",
+                Instant.now().minusSeconds(60), 900);
+
+        assertTrue(validator.validate(token, "admin", new RdsProxyBinding("db.example.local", 3307, "us-east-1",
+                "123456789012", "db-ABCDEFGHIJKL01234", true,
+                "orders.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com"::equals)));
+        assertFalse(validator.validate(token, "admin", new RdsProxyBinding("db.example.local", 3307, "us-east-1",
+                "123456789012", "db-ABCDEFGHIJKL01234", true, "other.example.local"::equals)));
+        assertFalse(validator.validate(token, "admin", new RdsProxyBinding("db.example.local", 3306, "us-east-1",
+                "123456789012", "db-ABCDEFGHIJKL01234", true,
+                "orders.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com"::equals)));
+    }
+
+    @Test
     void validateRejectsTokenSignedForAnotherHost() throws Exception {
         IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDRDS", "secret-rds");
         RdsSigV4Validator validator = new RdsSigV4Validator(iamService);

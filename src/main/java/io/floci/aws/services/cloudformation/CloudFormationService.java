@@ -2732,9 +2732,9 @@ public class CloudFormationService implements ResourceProvider {
         return describeStackResourcesView(stackName, logicalResourceId, physicalResourceId, region).resources();
     }
 
-    /** The stack a call resolved to and the resources it answered with; the stack's own name is
-     * what AWS stamps on every member, and the caller may not have supplied it. */
-    public record StackResourcesView(String stackName, List<StackResource> resources) {
+    /** The stack a call resolved to and the resources it answered with; the stack's own name and
+     * id are what AWS stamps on every member, and the caller may not have supplied either. */
+    public record StackResourcesView(String stackName, String stackId, List<StackResource> resources) {
     }
 
     /** @see #describeStackResources(String, String, String, String) */
@@ -2764,7 +2764,7 @@ public class CloudFormationService implements ResourceProvider {
         if (logicalResourceId != null && !logicalResourceId.isBlank()) {
             resources.removeIf(r -> !logicalResourceId.equals(r.getLogicalId()));
         }
-        return new StackResourcesView(stack.getStackName(), resources);
+        return new StackResourcesView(stack.getStackName(), stack.getStackId(), resources);
     }
 
     /**

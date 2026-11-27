@@ -2,8 +2,11 @@ package io.floci.aws.tools.ami;
 
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.testing.MainSources;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -15,6 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class AmiImageToolTest {
     @TempDir
     Path tempDir;

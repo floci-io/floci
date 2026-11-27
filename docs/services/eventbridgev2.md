@@ -130,6 +130,8 @@ Floci serves event sources of the `WebhookEventsConfiguration` kind. A request w
 - A source name is unique per account and Region, across event buses.
 - The webhook URL is `<scheme>://<host id>.c01.events-webhook.<region>.<authority>/<token>/`. The scheme and
   authority are those of Floci's base URL. A POST to it publishes an event, as described below.
+  With TLS on, Floci's generated certificate names the webhook hosts of a Region once a source is created or
+  described there. A user-provided certificate must name `*.c01.events-webhook.<region>.<host>` itself.
 - Each source has a Secrets Manager secret named `events-webhook!<uuid>`, owned by `events-webhook`. It holds the
   static token, the HMAC secret, or the Basic credential as `{"username":"...","password":"..."}`. A credential
   the request leaves out is generated. The secret ARN is in `EventSourceDetails.WebhookDetails.SecretArn`.

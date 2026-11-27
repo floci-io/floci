@@ -3,7 +3,14 @@ package io.floci.aws.services.stepfunctions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PassedRoleLookups;
 import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.services.dynamodb.model.KeySchemaElement;
+import io.floci.aws.services.dynamodb.model.TableDefinition;
+import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.PassedRoleLookup;
+import io.floci.aws.services.iam.model.IamRole;
+import io.floci.aws.services.iam.model.InstanceProfile;
 import io.floci.aws.services.stepfunctions.LambdaTaskAuthorizer.Permission;
 import io.floci.aws.services.stepfunctions.model.StateMachine;
 import io.floci.aws.testing.ParallelLocks;
@@ -15,9 +22,11 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -191,9 +200,11 @@ class TaskPermissionsTest {
     @ParameterizedTest
     @CsvSource({"putItem,PutItem", "getItem,GetItem", "deleteItem,DeleteItem", "updateItem,UpdateItem", "scan,Scan"})
     void anOptimizedDynamoDbTaskNeedsItsActionOnTheTable(String api, String operation) throws Exception {
-        assertEquals(TaskPermissions.accessDenied("DynamoDB.", List.of(new Permission("dynamodb:" + operation, table("orders")))),
-                TaskPermissions.of(integration("dynamodb:" + api), json("{\"TableName\":\"orders\"}"), machine("aws"))
-                        .orElseThrow());
+        TaskPermissions permissions = TaskPermissions.of(integration("dynamodb:" + api),
+                json("{\"TableName\":\"orders\"}"), machine("aws")).orElseThrow();
+        assertEquals("DynamoDB.AccessDeniedException", permissions.deniedError());
+        assertEquals(List.of(new Permission("dynamodb:" + operation, table("orders"))),
+                withoutItemKeys(permissions.permissions()));
     }
 
     @ParameterizedTest
@@ -215,8 +226,88 @@ class TaskPermissionsTest {
         List<Permission> both = List.of(new Permission("dynamodb:PutItem", arn),
                 new Permission("dynamodb:PutItem", table("orders")));
         assertEquals(both, sdkPermissions("putItem", "{\"TableName\":\"" + arn + "\"}"));
-        assertEquals(both, TaskPermissions.of(integration("dynamodb:putItem"), json("{\"TableName\":\"" + arn + "\"}"),
-                machine("aws")).orElseThrow().permissions());
+        assertEquals(both, withoutItemKeys(TaskPermissions.of(integration("dynamodb:putItem"),
+                json("{\"TableName\":\"" + arn + "\"}"), machine("aws")).orElseThrow().permissions()));
+    }
+
+    /**
+     * A task's item request offers the keys a direct one does: the partition key's value, by the table's key schema,
+     * the attributes it names and what it selects, and a write's return values.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"dynamodb:getItem", "aws-sdk:dynamodb:getItem"})
+    void anItemRequestOffersItsLeadingKeysAttributesAndSelect(String tail) throws Exception {
+        assertEquals(List.of(new Permission("dynamodb:GetItem", table("orders"), Map.of(
+                        "dynamodb:LeadingKeys", List.of("o-1"), "dynamodb:Attributes", List.of("pk", "total"),
+                        "dynamodb:Select", List.of("SPECIFIC_ATTRIBUTES")))),
+                dynamoDbPermissions(tail, """
+                        {"TableName":"orders","Key":{"pk":{"S":"o-1"}},"ProjectionExpression":"total"}"""));
+    }
+
+    @Test
+    void aWriteOffersItsReturnValues() throws Exception {
+        assertEquals(List.of("ALL_OLD"), dynamoDbPermissions("dynamodb:putItem", """
+                {"TableName":"orders","Item":{"pk":{"S":"o-1"}},"ReturnValues":"ALL_OLD"}""")
+                .getFirst().conditionKeys().get("dynamodb:ReturnValues"));
+    }
+
+    /**
+     * A write asking for two return modes is checked once per mode, as a direct request is, so a policy refusing the
+     * mode returned on a failed condition refuses the task.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"dynamodb:updateItem", "aws-sdk:dynamodb:updateItem"})
+    void aWriteWithTwoReturnModesIsCheckedForEach(String resource) throws Exception {
+        List<Permission> permissions = dynamoDbPermissions(resource, """
+                {"TableName":"orders","Key":{"pk":{"S":"o-1"}},"UpdateExpression":"SET total = :t",
+                 "ExpressionAttributeValues":{":t":{"N":"1"}},"ReturnValues":"UPDATED_NEW",
+                 "ReturnValuesOnConditionCheckFailure":"ALL_OLD"}""");
+
+        assertEquals(List.of(List.of("UPDATED_NEW"), List.of("ALL_OLD")),
+                permissions.stream().map(permission -> permission.conditionKeys().get("dynamodb:ReturnValues")).toList());
+        assertEquals(List.of(table("orders"), table("orders")),
+                permissions.stream().map(Permission::resourceArn).toList());
+    }
+
+    /** A table DynamoDB does not have has no partition key to read, so the request offers no leading key. */
+    @Test
+    void aTableDynamoDbDoesNotHaveOffersNoLeadingKeys() throws Exception {
+        assertFalse(dynamoDbPermissions("dynamodb:getItem", "{\"TableName\":\"other\",\"Key\":{\"pk\":{\"S\":\"o-1\"}}}")
+                .getFirst().conditionKeys().containsKey("dynamodb:LeadingKeys"));
+    }
+
+    /** Each table of a batch is checked with the keys its own entry names. */
+    @Test
+    void eachTableOfABatchOffersItsOwnEntrysKeys() throws Exception {
+        List<Permission> permissions = dynamoDbPermissions("aws-sdk:dynamodb:batchGetItem", """
+                {"RequestItems":{"orders":{"Keys":[{"pk":{"S":"o-1"}}]},"other":{"Keys":[{"id":{"S":"x"}}]}}}""");
+
+        assertEquals(List.of(table("orders"), table("other")),
+                permissions.stream().map(Permission::resourceArn).toList());
+        assertEquals(List.of("o-1"), permissions.get(0).conditionKeys().get("dynamodb:LeadingKeys"));
+        assertEquals(List.of("pk"), permissions.get(0).conditionKeys().get("dynamodb:Attributes"));
+        assertEquals(List.of("id"), permissions.get(1).conditionKeys().get("dynamodb:Attributes"));
+    }
+
+    /** A transaction's item offers its own keys beside the enclosing operation. */
+    @Test
+    void aTransactionItemOffersItsOwnKeys() throws Exception {
+        assertEquals(List.of(new Permission("dynamodb:PutItem", table("orders"), Map.of(
+                        "dynamodb:EnclosingOperation", List.of("TransactWriteItems"),
+                        "dynamodb:LeadingKeys", List.of("o-1"), "dynamodb:Attributes", List.of("pk")))),
+                dynamoDbPermissions("aws-sdk:dynamodb:transactWriteItems", """
+                        {"TransactItems":[{"Put":{"TableName":"orders","Item":{"pk":{"S":"o-1"}}}}]}"""));
+    }
+
+    /** DynamoDB's table {@code orders}, keyed by {@code pk}. */
+    private static List<Permission> dynamoDbPermissions(String tail, String request) throws Exception {
+        TableDefinition orders = new TableDefinition();
+        orders.setTableName("orders");
+        orders.setKeySchema(List.of(new KeySchemaElement("pk", "HASH")));
+        return TaskPermissions.of(integration(tail), json(request), machine("aws"), null, null, false,
+                new TaskPermissions.ControlServices(null, null, null, null),
+                new TaskPermissions.RequestLookups(null, name -> "orders".equals(name) ? orders : null))
+                .orElseThrow().permissions();
     }
 
     @Test
@@ -650,6 +741,120 @@ class TaskPermissionsTest {
                         .orElseThrow().permissions());
     }
 
+    private static final String TASK_ROLE = "arn:aws:iam::111122223333:role/task";
+    private static final String EXECUTION_ROLE = "arn:aws:iam::111122223333:role/execution";
+    private static final Map<String, List<String>> TO_ECS_TASKS =
+            Map.of("iam:PassedToService", List.of("ecs-tasks.amazonaws.com"));
+
+    /**
+     * RunTask passes its task definition's task role and execution role and a role override, as a direct RunTask
+     * does, a role given by name being the account's of that name.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"ecs:runTask", "ecs:runTask.sync"})
+    void runTaskNeedsPassRoleOnTheTaskDefinitionsRolesAndAnOverride(String tail) throws Exception {
+        assertEquals(List.of(new Permission("ecs:RunTask", TASK_DEFINITION),
+                        new Permission("iam:PassRole", TASK_ROLE, TO_ECS_TASKS),
+                        new Permission("iam:PassRole", EXECUTION_ROLE, TO_ECS_TASKS),
+                        new Permission("iam:PassRole", "arn:aws:iam::111122223333:role/override", TO_ECS_TASKS)),
+                TaskPermissions.of(integration(tail),
+                        json("{\"TaskDefinition\":\"orders\",\"Overrides\":{\"TaskRoleArn\":\"override\"}}"),
+                        machine("aws"), null, ecs(), false, new TaskPermissions.ControlServices(null, null, null, null),
+                        roles()).orElseThrow().permissions());
+    }
+
+    /** A request ECS answers needs nothing, whatever roles it names. */
+    @Test
+    void aRunTaskNamingNoDefinitionNeedsNoPassRole() throws Exception {
+        assertEquals(List.of(), TaskPermissions.of(integration("ecs:runTask"),
+                json("{\"Overrides\":{\"TaskRoleArn\":\"override\"}}"), machine("aws"), null, ecs(), false,
+                new TaskPermissions.ControlServices(null, null, null, null), roles()).orElseThrow().permissions());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"createSchedule", "updateSchedule"})
+    void aScheduleNeedsPassRoleOnItsTargetsRole(String api) throws Exception {
+        String role = "arn:aws:iam::111122223333:role/scheduler";
+        List<Permission> permissions = control("aws-sdk:scheduler:" + api,
+                "{\"Name\":\"n\",\"Target\":{\"Arn\":\"q\",\"RoleArn\":\"" + role + "\"}}").permissions();
+
+        assertEquals(new Permission("iam:PassRole", role, Map.of("iam:PassedToService",
+                List.of("scheduler.amazonaws.com"))), permissions.getLast());
+        assertEquals(2, permissions.size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"createStack", "updateStack", "deleteStack", "createChangeSet", "continueUpdateRollback"})
+    void aStackOperationNeedsPassRoleOnTheServiceRoleItNames(String api) throws Exception {
+        String role = "arn:aws:iam::111122223333:role/deployer";
+        assertEquals(List.of(new Permission("iam:PassRole", role,
+                        Map.of("iam:PassedToService", List.of("cloudformation.amazonaws.com")))),
+                passedRoles(control("aws-sdk:cloudformation:" + api,
+                        "{\"StackName\":\"s\",\"ChangeSetName\":\"c\",\"RoleARN\":\"" + role + "\"}",
+                        stacks(), null, null, false)));
+    }
+
+    /** A self-managed StackSet naming no administration role passes the default one, as a direct create does. */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "{\"StackSetName\":\"n\"}|arn:aws:iam::111122223333:role/AWSCloudFormationStackSetAdministrationRole",
+            "{\"StackSetName\":\"n\",\"AdministrationRoleARN\":\"arn:aws:iam::111122223333:role/admin\"}"
+                    + "|arn:aws:iam::111122223333:role/admin",
+            "{\"StackSetName\":\"n\",\"PermissionModel\":\"SERVICE_MANAGED\"}|"})
+    void aStackSetPassesItsAdministrationRole(String request, String role) throws Exception {
+        assertEquals(role == null ? List.of() : List.of(new Permission("iam:PassRole", role,
+                        Map.of("iam:PassedToService", List.of("cloudformation.amazonaws.com")))),
+                passedRoles(control("aws-sdk:cloudformation:createStackSet", request)));
+    }
+
+    /**
+     * A cluster passes its service role, its instance profile's role and its auto scaling role, each to the service
+     * the vendored EMR role source passes it to, a role given by name being the one IAM holds under it.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"elasticmapreduce:createCluster", "elasticmapreduce:createCluster.sync"})
+    void createClusterNeedsPassRoleOnTheClustersRoles(String tail) throws Exception {
+        assertEquals(List.of(new Permission("elasticmapreduce:RunJobFlow", "*"),
+                        new Permission("iam:PassRole", "arn:aws:iam::111122223333:role/scaling",
+                                Map.of("iam:PassedToService", List.of("application-autoscaling.amazonaws.com"))),
+                        new Permission("iam:PassRole", "arn:aws:iam::111122223333:role/cluster",
+                                Map.of("iam:PassedToService", List.of("ec2.amazonaws.com"))),
+                        new Permission("iam:PassRole", "arn:aws:iam::111122223333:role/emr/service",
+                                Map.of("iam:PassedToService", List.of("elasticmapreduce.amazonaws.com")))),
+                TaskPermissions.of(integration(tail), json("""
+                                {"Name":"c","ServiceRole":"service","JobFlowRole":"cluster-profile",
+                                 "AutoScalingRole":"arn:aws:iam::111122223333:role/scaling"}"""), machine("aws"), null,
+                        null, false, new TaskPermissions.ControlServices(null, null, null, null), roles())
+                        .orElseThrow().permissions());
+    }
+
+    /** IAM's role {@code service}, under a path, and the profile holding {@code cluster}; ECS's roles of {@code orders}. */
+    private static TaskPermissions.RequestLookups roles() {
+        IamService iam = mock(IamService.class);
+        IamRole service = new IamRole();
+        service.setArn("arn:aws:iam::111122223333:role/emr/service");
+        when(iam.findRole(ACCOUNT, "service")).thenReturn(Optional.of(service));
+        IamRole cluster = new IamRole();
+        cluster.setArn("arn:aws:iam::111122223333:role/cluster");
+        when(iam.findRole(ACCOUNT, "cluster")).thenReturn(Optional.of(cluster));
+        InstanceProfile profile = new InstanceProfile();
+        profile.setRoleNames(List.of("cluster"));
+        when(iam.findInstanceProfile(ACCOUNT, "cluster-profile")).thenReturn(Optional.of(profile));
+        PassedRoleLookup taskDefinitions = new PassedRoleLookup() {
+            @Override
+            public List<String> taskDefinitionRoles(String reference, String region) {
+                return "orders".equals(reference) && "eu-west-1".equals(region)
+                        ? List.of(TASK_ROLE, EXECUTION_ROLE) : List.of();
+            }
+        };
+        return new TaskPermissions.RequestLookups(new PassedRoleLookups(iam, List.of(taskDefinitions)), null);
+    }
+
+    private static List<Permission> passedRoles(TaskPermissions permissions) {
+        return permissions.permissions().stream().filter(permission -> "iam:PassRole".equals(permission.action()))
+                .toList();
+    }
+
     private static final String STACK = "arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stack/s/id";
     private static final String STACK_SET = "arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stackset/ss:id";
 
@@ -762,8 +967,10 @@ class TaskPermissionsTest {
     @ValueSource(strings = {"validateTemplate", "listStacks", "listExports", "describeOrganizationsAccess",
             "activateOrganizationsAccess", "createStackSet", "listStackSets"})
     void aCloudFormationActionWithNoResourceTypeIsOnAnyResource(String api) throws Exception {
-        assertEquals(List.of(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api), "*")),
-                control("aws-sdk:cloudformation:" + api, "{}").permissions());
+        assertEquals(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api), "*"),
+                control("aws-sdk:cloudformation:" + api, "{}").permissions().getFirst());
+        assertEquals(List.of(), passedRoles(control("aws-sdk:cloudformation:" + api,
+                "{\"PermissionModel\":\"SERVICE_MANAGED\"}")));
     }
 
     /** A task whose input is no object still needs its action, on any resource, as a direct request naming none. */
@@ -1083,8 +1290,21 @@ class TaskPermissionsTest {
         };
     }
 
+    /** The permissions of a DynamoDB SDK task, without the item keys the tests of those keys pin. */
     private static List<Permission> sdkPermissions(String api, String request) throws Exception {
-        return TaskPermissions.of(integration("aws-sdk:dynamodb:" + api), json(request), machine("aws")).orElseThrow().permissions();
+        return withoutItemKeys(TaskPermissions.of(integration("aws-sdk:dynamodb:" + api), json(request), machine("aws"))
+                .orElseThrow().permissions());
+    }
+
+    /** {@code permissions} without the keys a request's items and projection give, which their own tests pin. */
+    private static List<Permission> withoutItemKeys(List<Permission> permissions) {
+        Set<String> itemKeys = Set.of("dynamodb:LeadingKeys", "dynamodb:Attributes", "dynamodb:Select",
+                "dynamodb:ReturnValues");
+        return permissions.stream().map(permission -> {
+            Map<String, List<String>> kept = new LinkedHashMap<>(permission.conditionKeys());
+            kept.keySet().removeAll(itemKeys);
+            return new Permission(permission.action(), permission.resourceArn(), kept);
+        }).toList();
     }
 
     private static List<Permission> redshiftPermissions(String api, String request, StoredResourceArns stored) throws Exception {

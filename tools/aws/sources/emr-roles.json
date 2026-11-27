@@ -1,0 +1,71 @@
+{
+  "_source": {
+    "pages": [
+      "https://docs.aws.amazon.com/emr/latest/APIReference/API_RunJobFlow.html",
+      "https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-managed-policy-fullaccess-v2.html",
+      "https://docs.aws.amazon.com/cli/latest/reference/emr/create-cluster.html",
+      "https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-iam-role.html",
+      "https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-iam-role-for-ec2.html",
+      "https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-iam-role-automatic-scaling.html",
+      "https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-steps-runtime-roles.html"
+    ],
+    "fetcher": "tools/aws/fetch_emr_roles.py",
+    "retrieved": "2026-11-27",
+    "note": "Each RunJobFlow member's description on the API reference, copied as it stands; the title and default role of the guide's page of its role and the services the full access policy passes that default role to, and the value the CLI reference's examples give the option sending it; and for the steps' runtime role, the runtime roles page's sentence naming the condition key that controls access to it."
+  },
+  "members": [
+    {
+      "operation": "RunJobFlow",
+      "member": "ServiceRole",
+      "description": "The IAM role that Amazon EMR assumes in order to access AWS resources on your behalf. If you've created a custom service role path, you must specify it for the service role when you launch your cluster.",
+      "rolePage": "https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-iam-role.html",
+      "title": "Service role for Amazon EMR (EMR role) - Amazon EMR",
+      "defaultRole": "EMR_DefaultRole_V2",
+      "policyPage": "https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-managed-policy-fullaccess-v2.html",
+      "passedToService": [
+        "elasticmapreduce.amazonaws.com"
+      ],
+      "cliOption": "--service-role",
+      "cliExample": "EMR_DefaultRole",
+      "byName": true
+    },
+    {
+      "operation": "RunJobFlow",
+      "member": "JobFlowRole",
+      "description": "Also called instance profile and Amazon EC2 role. An IAM role for an Amazon EMR cluster. The Amazon EC2 instances of the cluster assume this role. The default role is EMR_EC2_DefaultRole . In order to use the default role, you must have already created it using the AWS CLI or console.",
+      "rolePage": "https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-iam-role-for-ec2.html",
+      "title": "Service role for cluster EC2 instances (EC2 instance profile) - Amazon EMR",
+      "defaultRole": "EMR_EC2_DefaultRole",
+      "policyPage": "https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-managed-policy-fullaccess-v2.html",
+      "passedToService": [
+        "ec2.amazonaws.com"
+      ],
+      "cliOption": "InstanceProfile=",
+      "cliExample": "EMR_EC2_DefaultRole",
+      "instanceProfile": true
+    },
+    {
+      "operation": "RunJobFlow",
+      "member": "AutoScalingRole",
+      "description": "An IAM role for automatic scaling policies. The default role is EMR_AutoScaling_DefaultRole . The IAM role provides permissions that the automatic scaling feature requires to launch and terminate Amazon EC2 instances in an instance group.",
+      "rolePage": "https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-iam-role-automatic-scaling.html",
+      "title": "Service role for automatic scaling in Amazon EMR (Auto Scaling role) - Amazon EMR",
+      "defaultRole": "EMR_AutoScaling_DefaultRole",
+      "policyPage": "https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-managed-policy-fullaccess-v2.html",
+      "passedToService": [
+        "application-autoscaling.amazonaws.com"
+      ],
+      "cliOption": "--auto-scaling-role",
+      "cliExample": "EMR_AutoScaling_DefaultRole",
+      "byName": true
+    },
+    {
+      "operation": "RunJobFlow",
+      "member": "StepExecutionRoleArn",
+      "description": "The Amazon Resource Name (ARN) of the runtime role for steps specified in the RunJobFlow request. The runtime role can be a cross-account IAM role. The runtime role ARN is a combination of account ID, role name, and role type using the following format: arn:partition:iam::account-id:role/role-name . For example, arn:aws:iam::1234567890:role/ReadOnly is a correctly formatted runtime role ARN. This parameter applies only to steps included in the Steps parameter of this RunJobFlow request. It does not apply to steps added later to the cluster.",
+      "runtimeRolesPage": "https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-steps-runtime-roles.html",
+      "accessControlledBy": "elasticmapreduce:ExecutionRoleArn",
+      "accessSentence": "You can control access to the runtime role with the condition key elasticmapreduce:ExecutionRoleArn ."
+    }
+  ]
+}

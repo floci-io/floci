@@ -1,5 +1,6 @@
 package io.floci.aws.core.common;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import jakarta.ws.rs.core.Response;
@@ -15,7 +16,9 @@ public final class CborErrorResponses {
     public static final String AWS_CBOR_1_1_MEDIA_TYPE = "application/x-amz-cbor-1.1";
     public static final String GENERIC_CBOR_MEDIA_TYPE = "application/cbor";
 
-    private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
+    // AWS sends no member for an error without a message.
+    private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory())
+            .setSerializationInclusion(JsonInclude.Include.NON_NULL);
 
     private CborErrorResponses() {
     }

@@ -414,6 +414,34 @@ class StepFunctionsDataTaskIamIntegrationTest {
         assertEquals("SUCCEEDED", allowed.jsonPath().getString("status"), allowed.asString());
     }
 
+    /**
+     * {@code dynamodb:LeadingKeys} reaches the policy, as it does for a direct request: a role allowed {@code GetItem}
+     * only on its own partition key reads that item and is refused another, in both forms of the task.
+     */
+    @ParameterizedTest
+    @CsvSource({"dynamodb:getItem,DynamoDB.AccessDeniedException", "aws-sdk:dynamodb:getItem,DynamoDb.AccessDeniedException"})
+    void aPolicyOnTheLeadingKeysReachesTheItemsItNames(String integration, String error) throws Exception {
+        String table = table();
+        putItem(table, "mine");
+        putItem(table, "theirs");
+        String policy = MAPPER.writeValueAsString(Map.of("Version", "2012-10-17", "Statement", List.of(
+                Map.of("Effect", "Allow", "Action", "dynamodb:GetItem", "Resource", tableArn(table), "Condition",
+                        Map.of("ForAllValues:StringEquals", Map.of("dynamodb:LeadingKeys", List.of("mine")),
+                                "Null", Map.of("dynamodb:LeadingKeys", "false"))))));
+        String role = role(STATES_TRUST, policy);
+
+        Response allowed = terminal(start(machine(getItemTask(integration, table, "mine"), role), "{}"));
+        Response refused = terminal(start(machine(getItemTask(integration, table, "theirs"), role), "{}"));
+
+        assertEquals("SUCCEEDED", allowed.jsonPath().getString("status"), allowed.asString());
+        assertFailed(refused, error);
+    }
+
+    private static Map<String, Object> getItemTask(String integration, String table, String key) {
+        return Map.of("Type", "Task", "Resource", "arn:aws:states:::" + integration,
+                "Parameters", Map.of("TableName", table, "Key", Map.of("pk", Map.of("S", key))), "End", true);
+    }
+
     @Test
     void listTablesNeedsItsRegionalCollection() throws Exception {
         String collection = "arn:aws:dynamodb:" + REGION + ":" + ACCOUNT + ":table/*";

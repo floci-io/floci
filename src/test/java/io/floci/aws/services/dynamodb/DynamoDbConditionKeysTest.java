@@ -16,6 +16,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DynamoDbConditionKeysTest {
@@ -489,4 +490,24 @@ class DynamoDbConditionKeysTest {
         assertNull(DynamoDbConditionKeys.partiQLStatement(json("{\"Statement\":1}")));
         assertNull(DynamoDbConditionKeys.partiQLStatement(json("\"not-an-object\"")));
     }
+
+    /**
+     * Each table's request is the batch with that table's entry alone, sharing the batch's other members rather than
+     * copying the whole body for every table, and leaving the batch as it was.
+     */
+    @Test
+    void aBatchTablesRequestSharesTheBatchsOtherMembers() throws Exception {
+        JsonNode batch = new ObjectMapper().readTree("""
+                {"RequestItems":{"orders":{"Keys":[{"pk":{"S":"o-1"}}]},"other":{"Keys":[{"id":{"S":"x"}}]}},
+                 "ReturnConsumedCapacity":"TOTAL","Extra":{"nested":true}}""");
+
+        JsonNode orders = DynamoDbConditionKeys.batchTableRequest(batch, "orders");
+
+        assertEquals(1, orders.path("RequestItems").size());
+        assertTrue(orders.path("RequestItems").has("orders"));
+        assertSame(batch.get("Extra"), orders.get("Extra"));
+        assertSame(batch.path("RequestItems").get("orders"), orders.path("RequestItems").get("orders"));
+        assertEquals(2, batch.path("RequestItems").size());
+    }
+
 }

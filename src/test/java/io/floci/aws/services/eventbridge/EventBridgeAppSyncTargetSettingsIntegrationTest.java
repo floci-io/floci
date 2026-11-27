@@ -231,6 +231,7 @@ class EventBridgeAppSyncTargetSettingsIntegrationTest {
             JsonNode node = call.getArgument(0);
             return node == null ? null : node.asText();
         });
+        when(engine.resolveJsonAttribute(any())).thenCallRealMethod();
         when(engine.resolveNode(any())).thenAnswer(call -> call.getArgument(0));
         when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(call -> call.getArgument(0));
         when(engine.omitNoValue(any())).thenAnswer(call -> call.getArgument(0));
