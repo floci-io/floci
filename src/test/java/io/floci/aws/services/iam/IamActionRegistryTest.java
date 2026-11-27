@@ -544,16 +544,18 @@ class IamActionRegistryTest {
     }
 
     @Test
-    void schedulerAndPipesTaggingIsCheckedOnBothTagRoutes() {
-        for (String scope : List.of("scheduler", "pipes")) {
-            for (String path : List.of("/tags/arn:aws:" + scope + ":us-east-1:000000000000:x", "/tags")) {
-                String prefix = scope + ":";
-                assertEquals(prefix + "ListTagsForResource", registry.resolveRoute(scope,
-                        mockCtx("GET", path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")), path);
-                assertEquals(prefix + "TagResource", registry.resolveRoute(scope,
-                        mockCtx("POST", path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")), path);
-                assertEquals(prefix + "UntagResource", registry.resolveRoute(scope,
-                        mockCtx("DELETE", path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")), path);
+    void schedulerPipesAndDsqlTaggingIsCheckedOnTheTagRouteTheirModelsGive() {
+        // Each model gives /tags/{resourceArn} alone, from the generated routes; the bare /tags the shared
+        // controller refuses for them maps no action.
+        for (String scope : List.of("scheduler", "pipes", "dsql")) {
+            String path = "/tags/arn:aws:" + scope + ":us-east-1:000000000000:x";
+            String prefix = scope + ":";
+            for (String[] route : new String[][] {{"GET", "ListTagsForResource"}, {"POST", "TagResource"},
+                    {"DELETE", "UntagResource"}}) {
+                assertEquals(prefix + route[1], registry.resolveRoute(scope,
+                        mockCtx(route[0], path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")), path);
+                assertNull(registry.resolveRoute(scope,
+                        mockCtx(route[0], "/tags", new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")));
             }
         }
     }
