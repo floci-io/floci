@@ -730,6 +730,58 @@ class PassedRolesTest {
     }
 
     @Test
+    void apiGatewayPassesTheRolesItsCredentialsPatchOperationsAndOpenApiExtensionsName() {
+        String apiGateway = "apigateway.amazonaws.com";
+        // An integration's and an authorizer's credentials, REST API and HTTP API alike.
+        assertEquals(List.of(passed("integration", apiGateway)), PassedRoles.of("apigateway:PutIntegration",
+                json("{\"type\":\"AWS\",\"credentials\":\"" + ROLES + "integration\"}"), LOOKUPS));
+        assertEquals(List.of(passed("http", apiGateway)), PassedRoles.of("apigateway:CreateIntegration",
+                json("{\"integrationType\":\"AWS_PROXY\",\"credentialsArn\":\"" + ROLES + "http\"}"), LOOKUPS));
+        // Floci serves HTTP APIs over JSON 1.1 too, whose bodies name the members as botocore does.
+        assertEquals(List.of(passed("json", apiGateway)), PassedRoles.of("apigateway:CreateIntegration",
+                json("{\"IntegrationType\":\"AWS_PROXY\",\"CredentialsArn\":\"" + ROLES + "json\"}"), LOOKUPS));
+        // An update names the property it changes by its patch operation's path, exactly.
+        assertEquals(List.of(passed("patched", apiGateway)), PassedRoles.of("apigateway:UpdateIntegration",
+                json("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/timeoutInMillis\",\"value\":\"1000\"},"
+                        + "{\"op\":\"replace\",\"path\":\"/credentials\",\"value\":\"" + ROLES + "patched\"},"
+                        + "{\"op\":\"replace\",\"path\":\"/Credentials\",\"value\":\"" + ROLES + "other\"}]}"), LOOKUPS));
+        assertEquals(List.of(passed("cloudwatch", apiGateway)), PassedRoles.of("apigateway:UpdateAccount",
+                json("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/cloudwatchRoleArn\",\"value\":\""
+                        + ROLES + "cloudwatch\"}]}"), LOOKUPS));
+        // An import's OpenAPI definition, YAML here, names roles in its operations' integrations, the ANY method's
+        // included, and its security schemes' authorizers; an extension anywhere else is not read.
+        String definition = """
+                openapi: 3.0.1
+                x-amazon-apigateway-integration:
+                  credentials: %1$sunread
+                paths:
+                  /things:
+                    x-unread:
+                      x-amazon-apigateway-integration:
+                        credentials: %1$snot-an-operation
+                    get:
+                      x-amazon-apigateway-integration:
+                        credentials: %1$sget
+                    x-amazon-apigateway-any-method:
+                      x-amazon-apigateway-integration:
+                        credentials: %1$sany
+                components:
+                  securitySchemes:
+                    custom:
+                      x-amazon-apigateway-authorizer:
+                        authorizerCredentials: %1$sauthorizer
+                """.formatted(ROLES);
+        assertEquals(List.of(passed("get", apiGateway), passed("any", apiGateway), passed("authorizer", apiGateway)),
+                PassedRoles.of("apigateway:ImportRestApi", request("application/x-yaml",
+                        definition.getBytes(StandardCharsets.UTF_8)), LOOKUPS));
+        // An HTTP API import holds its definition as a string, here JSON with OpenAPI 2's security definitions.
+        String swagger = "{\"swagger\":\"2.0\",\"securityDefinitions\":{\"auth\":{\"x-amazon-apigateway-authorizer\":"
+                + "{\"authorizerCredentials\":\"" + ROLES + "swagger\"}}}}";
+        assertEquals(List.of(passed("swagger", apiGateway)), PassedRoles.of("apigateway:ImportApi",
+                json(new ObjectMapper().createObjectNode().put("body", swagger).toString()), LOOKUPS));
+    }
+
+    @Test
     void anXmlBodyPassesTheRolesItsModeledMembersName() {
         // S3's PutBucketReplication, authorized as s3:PutReplicationConfiguration, passes its configuration's Role.
         assertEquals(List.of(passed("replication", "s3.amazonaws.com")), PassedRoles.of("s3:PutBucketReplication",

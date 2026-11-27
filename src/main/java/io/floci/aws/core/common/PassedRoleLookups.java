@@ -91,6 +91,17 @@ public class PassedRoleLookups {
             }
 
             @Override
+            public List<String> openApiDefinitions(String operation, String body) {
+                for (PassedRoleLookup lookup : services) {
+                    List<String> definitions = lookup.openApiDefinitions(operation, body, region);
+                    if (!definitions.isEmpty()) {
+                        return definitions;
+                    }
+                }
+                return List.of();
+            }
+
+            @Override
             public Optional<String> serviceCatalogConstraintType(String constraintId) {
                 return firstFound(lookup -> lookup.serviceCatalogConstraintType(constraintId));
             }

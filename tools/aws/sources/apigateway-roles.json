@@ -1,0 +1,109 @@
+{
+  "_source": {
+    "pages": [
+      "https://docs.aws.amazon.com/apigateway/latest/api/API_Authorizer.html",
+      "https://docs.aws.amazon.com/apigateway/latest/api/API_ImportRestApi.html",
+      "https://docs.aws.amazon.com/apigateway/latest/api/API_Integration.html",
+      "https://docs.aws.amazon.com/apigateway/latest/api/API_PatchOperation.html",
+      "https://docs.aws.amazon.com/apigateway/latest/api/API_PutRestApi.html",
+      "https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-swagger-extensions-any-method.html",
+      "https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-swagger-extensions-authorizer.html",
+      "https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-swagger-extensions-integration.html",
+      "https://docs.aws.amazon.com/apigatewayv2/latest/api-reference/apis-apiid-authorizers-authorizerid.html",
+      "https://docs.aws.amazon.com/apigatewayv2/latest/api-reference/apis-apiid-integrations-integrationid.html",
+      "https://docs.aws.amazon.com/apigatewayv2/latest/api-reference/apis-apiid.html",
+      "https://docs.aws.amazon.com/apigatewayv2/latest/api-reference/apis.html"
+    ],
+    "fetcher": "tools/aws/fetch_apigateway_roles.py",
+    "retrieved": "2026-11-27",
+    "note": "Each description copied as it stands from the API Gateway API references and developer guide: the members of a resource type that take a role, how a REST API update's patch operation names a property, the imports whose body is an OpenAPI definition, and the OpenAPI extensions and their properties that name a role, with what each extends."
+  },
+  "roleMembers": [
+    {
+      "model": "apigateway",
+      "type": "Integration",
+      "member": "credentials",
+      "page": "https://docs.aws.amazon.com/apigateway/latest/api/API_Integration.html",
+      "description": "Specifies the credentials required for the integration, if any. For AWS integrations, three options are available. To specify an IAM Role for API Gateway to assume, use the role's Amazon Resource Name (ARN). To require that the caller's identity be passed through from the request, specify the string arn:aws:iam::\\*:user/\\* . To use resource-based permissions on supported AWS services, specify null."
+    },
+    {
+      "model": "apigateway",
+      "type": "Authorizer",
+      "member": "authorizerCredentials",
+      "page": "https://docs.aws.amazon.com/apigateway/latest/api/API_Authorizer.html",
+      "description": "Specifies the required credentials as an IAM role for API Gateway to invoke the authorizer. To specify an IAM role for API Gateway to assume, use the role's Amazon Resource Name (ARN). To use resource-based permissions on the Lambda function, specify null. This property is not supported for JWT authorizers."
+    },
+    {
+      "model": "apigatewayv2",
+      "type": "Integration",
+      "member": "credentialsArn",
+      "page": "https://docs.aws.amazon.com/apigatewayv2/latest/api-reference/apis-apiid-integrations-integrationid.html",
+      "description": "Specifies the credentials required for the integration, if any. For AWS integrations, three options are available. To specify an IAM Role for API Gateway to assume, use the role's Amazon Resource Name (ARN). To require that the caller's identity be passed through from the request, specify the string arn:aws:iam::*:user/* . To use resource-based permissions on supported AWS services, don't specify this parameter."
+    },
+    {
+      "model": "apigatewayv2",
+      "type": "Authorizer",
+      "member": "authorizerCredentialsArn",
+      "page": "https://docs.aws.amazon.com/apigatewayv2/latest/api-reference/apis-apiid-authorizers-authorizerid.html",
+      "description": "Specifies the required credentials as an IAM role for API Gateway to invoke the authorizer. To specify an IAM role for API Gateway to assume, use the role's Amazon Resource Name (ARN). To use resource-based permissions on the Lambda function, don't specify this parameter. Supported only for REQUEST authorizers."
+    }
+  ],
+  "patchPath": {
+    "model": "apigateway",
+    "page": "https://docs.aws.amazon.com/apigateway/latest/api/API_PatchOperation.html",
+    "description": "The op operation's target, as identified by a JSON Pointer value that references a location within the targeted resource. For example, if the target resource has an updateable property of { \"name\":\"value\"}, the path for this property is /name. If the name property value is a JSON object (e.g., { \"name\": { \"child/name\": \"child-value\"}}), the path for the child/name property will be /name/child~1name. Any slash (\"/\") character appearing in path names must be escaped with \"~1\", as shown in the example above. Each op operation can have only one path associated with it."
+  },
+  "documents": [
+    {
+      "model": "apigateway",
+      "operation": "ImportRestApi",
+      "member": "body",
+      "page": "https://docs.aws.amazon.com/apigateway/latest/api/API_ImportRestApi.html",
+      "description": "The POST request body containing external API definitions. Currently, only OpenAPI definition JSON/YAML files are supported. The maximum size of the API definition file is 6MB. Required: Yes"
+    },
+    {
+      "model": "apigateway",
+      "operation": "PutRestApi",
+      "member": "body",
+      "page": "https://docs.aws.amazon.com/apigateway/latest/api/API_PutRestApi.html",
+      "description": "The PUT request body containing external API definitions. Currently, only OpenAPI definition JSON/YAML files are supported. The maximum size of the API definition file is 6MB. Required: Yes"
+    },
+    {
+      "model": "apigatewayv2",
+      "operation": "ImportApi",
+      "member": "body",
+      "page": "https://docs.aws.amazon.com/apigatewayv2/latest/api-reference/apis.html",
+      "description": "The OpenAPI definition. Supported only for HTTP APIs."
+    },
+    {
+      "model": "apigatewayv2",
+      "operation": "ReimportApi",
+      "member": "body",
+      "page": "https://docs.aws.amazon.com/apigatewayv2/latest/api-reference/apis-apiid.html",
+      "description": "The OpenAPI definition. Supported only for HTTP APIs."
+    }
+  ],
+  "extensions": [
+    {
+      "extension": "x-amazon-apigateway-integration",
+      "member": "credentials",
+      "page": "https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-swagger-extensions-integration.html",
+      "on": "operation",
+      "placement": "This extension is an extended property of the OpenAPI Operation object.",
+      "description": "For AWS IAM role-based credentials, specify the ARN of an appropriate IAM role. If unspecified, credentials default to resource-based permissions that must be added manually to allow the API to access the resource. For more information, see Granting Permissions Using a Resource Policy . Note: When using IAM credentials, make sure that AWS STS Regional endpoints are enabled for the Region where this API is deployed for best performance."
+    },
+    {
+      "extension": "x-amazon-apigateway-authorizer",
+      "member": "authorizerCredentials",
+      "page": "https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-swagger-extensions-authorizer.html",
+      "on": "securityScheme",
+      "placement": "This extension applies to the security definition in OpenAPI 2 and the security scheme in OpenAPI 3 .",
+      "description": "The credentials required for invoking the authorizer, if any, in the form of an ARN of an IAM execution role. For example, \"arn:aws:iam:: account-id : IAM_role \"."
+    }
+  ],
+  "anyMethod": {
+    "extension": "x-amazon-apigateway-any-method",
+    "page": "https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-swagger-extensions-any-method.html",
+    "description": "x-amazon-apigateway-any-method object Specifies the OpenAPI Operation Object for the API Gateway catch-all ANY method in an OpenAPI Path Item Object ."
+  }
+}

@@ -3103,6 +3103,24 @@ role each passes:
   the CLI reference's examples give the roles by name (`--service-role EMR_DefaultRole`). The steps'
   runtime role, `StepExecutionRoleArn`, is not passed: "You can control access to the runtime role
   with the condition key elasticmapreduce:ExecutionRoleArn."
+- **API Gateway:** authorized by HTTP method, its roles are checked for the operation its route
+  resolves to, each passed to `apigateway.amazonaws.com`, all read from the table below: an
+  integration's `credentials` and an authorizer's `authorizerCredentials`, REST APIs' and HTTP APIs'
+  (`credentialsArn`, `authorizerCredentialsArn`) alike, and over the JSON 1.1 endpoint Floci also
+  serves HTTP APIs at by botocore's names (`CredentialsArn`, `Body`); the value of a REST API update's patch
+  operation whose path names one of those, or the account's `/cloudwatchRoleArn`; and, in an import's
+  OpenAPI definition, JSON or YAML, each Operation object's (the ANY method's included)
+  `x-amazon-apigateway-integration` `credentials` and each security scheme's
+  `x-amazon-apigateway-authorizer` `authorizerCredentials`, the definition read as API Gateway takes
+  and reads it: a REST API's whole body, its `${AWS::Region}`, `${AWS::AccountId}` and
+  `${AWS::Partition}` resolved, and an HTTP API's from its body's `body` or `Body`, or else the whole
+  body, as the REST route also takes one. No
+  member's name says it takes a role, so a vendored source, `tools/aws/sources/apigateway-roles.json`,
+  written by `tools/aws/fetch_apigateway_roles.py` from the API references and developer guide,
+  gives each: "To specify an IAM role for API Gateway to assume, use the role's Amazon Resource Name
+  (ARN)"; "the path for this property is /name"; "only OpenAPI definition JSON/YAML files are
+  supported"; and each extension, what it extends and its property "in the form of an ARN of an IAM
+  execution role".
 - **CloudFormation:** `CreateStack`, `UpdateStack`, `DeleteStack`, `CreateChangeSet` and
   `ContinueUpdateRollback` pass `RoleARN` to `cloudformation.amazonaws.com` when the request names
   one. `CreateStackSet` and `UpdateStackSet` pass `AdministrationRoleARN`, or, for a self-managed
@@ -3221,7 +3239,7 @@ when the caller may not pass the role.
   Kinesis Analytics `ImportSnapshot`, Secrets Manager `AssociateCrossAccountReplica`), whose role
   the generator reads as soon as a release that has it is pinned. EC2's `RequestSpotFleet` names
   its roles in EC2's own protocol, one of them as an instance profile. The REST services whose
-  routes no rule maps yet, and API Gateway, which is authorized by HTTP method, are not read either.
+  routes no rule maps yet are not read either.
 
 A request that names a Lambda network connector also needs `lambda:PassNetworkConnector` on it. The
 Lambda developer guide has "The caller must have `lambda:PassNetworkConnector` on the referenced
