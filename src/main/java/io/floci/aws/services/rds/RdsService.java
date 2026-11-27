@@ -210,7 +210,7 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
     private final RdsProxyManager proxyManager;
     // Reserve each identifier until its metadata exists, including internal creates that wait for Docker.
     private final Set<String> provisioningIds = ConcurrentHashMap.newKeySet();
-    private final Set<DbInstance> startingStandaloneInstances = ConcurrentHashMap.newKeySet();
+    private final Map<DbInstance, InstanceStartPhase> standaloneStarts = new ConcurrentHashMap<>();
     private final Object instanceCreationLock = new Object();
     private final ExecutorService instanceStarts = Executors.newVirtualThreadPerTaskExecutor();
     private int pendingInstanceStarts;
@@ -551,7 +551,9 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
     }
 
     public void shutdownInstanceStarts() {
-        instanceStarts.shutdown();
+        synchronized (instanceCreationLock) {
+            instanceStarts.shutdown();
+        }
         if (!drainInstanceStarts()) {
             discardLateInstanceStarts = true;
             instanceStarts.shutdownNow();
@@ -1069,13 +1071,13 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
             throw failure;
         }
 
-        DbEndpoint endpoint;
+        boolean backgroundStart = acknowledgeCreate && isBlank(dbClusterIdentifier) && !mock;
         DbInstance instance;
         // A cluster member reports its cluster's port, as AWS does, unless it asks for its own.
         Integer advertisedPort = requestedPort != null || publicationCluster == null
                 ? requestedPort : publicationCluster.getRequestedPort();
         try {
-            endpoint = advertised(mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort),
+            DbEndpoint endpoint = advertised(mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort),
                     advertisedPort);
             instance = new DbInstance(id, engine, engineVersion, masterUsername, masterPassword,
                     dbName, dbInstanceClass, allocatedStorage, DbInstanceStatus.CREATING,
@@ -1105,18 +1107,15 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
             instance.setDeletionProtection(Boolean.TRUE.equals(deletionProtection));
             instance.setDbiResourceId(dbiResourceId);
             instance.setDbInstanceArn(dbInstanceArn);
-            if (isBlank(dbClusterIdentifier) && endpointAddresses != null && endpointAddresses.assign(instance)) {
-                endpoint = instanceEndpoint(instance, proxyPort);
-                instance.setEndpoint(endpoint);
-                // Known from now on, so the name resolves to no address rather than to Floci until it is served.
-                endpointAddresses.remember(instance, currentAccountId(), effectiveRegion);
+            if (isBlank(dbClusterIdentifier) && !backgroundStart) {
+                placeStandaloneEndpoint(instance, currentAccountId(), effectiveRegion);
             }
         } catch (RuntimeException | Error failure) {
             releaseProxyPort(proxyPort);
             throw failure;
         }
         String accountId = accountIdFromArn(instance.getDbInstanceArn());
-        if (acknowledgeCreate && isBlank(dbClusterIdentifier) && !mock) {
+        if (backgroundStart) {
             return beginStandaloneInstanceStart(instance, effectiveRegion, instanceImage, instanceEngineParameters,
                     manageInstancePassword, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
         }
@@ -1235,21 +1234,37 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
         return response;
     }
 
+    private enum InstanceStartPhase { QUEUED, STARTING }
+
+    private void placeStandaloneEndpoint(DbInstance instance, String account, String region) {
+        if (endpointAddresses != null && endpointAddresses.assign(instance)) {
+            instance.setEndpoint(instanceEndpoint(instance, instance.getProxyPort()));
+            endpointAddresses.remember(instance, account, region);
+        }
+    }
+
     private DbInstance beginStandaloneInstanceStart(DbInstance instance, String region, String image,
                                                     Map<String, String> parameters, boolean managePassword,
                                                     String kmsKeyId, String effectiveKmsKeyId) {
         String account = accountIdFromArn(instance.getDbInstanceArn());
         String id = instance.getDbInstanceIdentifier();
         synchronized (instanceCreationLock) {
-            boolean writeStarted = false;
             try {
                 if (instanceStartDrain != null || instanceStarts.isShutdown()) {
-                    throw new AwsException("ServiceUnavailable", "RDS is shutting down.", 503);
+                    throw new AwsException("ServiceUnavailable", "RDS is not accepting instance starts.", 503);
                 }
+                placeStandaloneEndpoint(instance, account, region);
+            } catch (RuntimeException | Error failure) {
+                releaseProxyPort(instance.getProxyPort());
+                throw failure;
+            }
+            boolean writeStarted = false;
+            try {
                 if (managePassword) {
                     attachManagedMasterUserSecret(instance, region, kmsKeyId, effectiveKmsKeyId);
                 }
                 DbInstance response = creatingResponse(instance);
+                standaloneStarts.put(instance, InstanceStartPhase.QUEUED);
                 writeStarted = true;
                 putInstanceForScope(account, region, id, instance);
                 instanceStarts.execute(() -> {
@@ -1257,12 +1272,13 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
                         RequestScopes.runAs(account, region,
                                 () -> finishStandaloneInstanceStart(instance, account, region, image, parameters));
                     } finally {
-                        instanceStartFinished();
+                        instanceStartFinished(instance);
                     }
                 });
                 pendingInstanceStarts++;
                 return response;
             } catch (RuntimeException | Error failure) {
+                standaloneStarts.remove(instance);
                 rollbackFailedStandaloneInstanceCreate(failure, instance, account, region,
                         writeStarted, false, managePassword, false);
                 throw failure;
@@ -1270,8 +1286,9 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
         }
     }
 
-    private void instanceStartFinished() {
+    private void instanceStartFinished(DbInstance instance) {
         synchronized (instanceCreationLock) {
+            standaloneStarts.remove(instance);
             pendingInstanceStarts--;
             if (instanceStartDrain != null) {
                 instanceStartDrain.countDown();
@@ -1284,38 +1301,38 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
         String id = instance.getDbInstanceIdentifier();
         DbInstance starting;
         synchronized (instance) {
-            if (findInstanceForScope(account, region, id) != instance
-                    || instance.getStatus() != DbInstanceStatus.CREATING) {
+            if (findInstanceForScope(account, region, id) != instance) {
+                return;
+            }
+            if (instance.getStatus() != DbInstanceStatus.CREATING) {
+                standaloneStarts.remove(instance);
+                finishDeferredInstanceDelete(instance, region);
                 return;
             }
             starting = creatingResponse(instance);
-            startingStandaloneInstances.add(instance);
+            standaloneStarts.put(instance, InstanceStartPhase.STARTING);
         }
-        try {
-            startInstanceRuntime(instance, starting, account, region, image, parameters);
-            if (discardLateInstanceStarts) {
-                stopServingStoppedInVpc(starting);
-                try {
-                    proxyManager.stopProxy(rdsResourceRelayKey(starting.getDbInstanceArn(), id));
-                } finally {
-                    containerManager.stopByRuntimeId(starting.getDbInstanceArn());
-                }
+        startInstanceRuntime(instance, starting, account, region, image, parameters);
+        if (discardLateInstanceStarts) {
+            stopServingStoppedInVpc(starting);
+            try {
+                proxyManager.stopProxy(rdsResourceRelayKey(starting.getDbInstanceArn(), id));
+            } finally {
+                containerManager.stopByRuntimeId(starting.getDbInstanceArn());
+            }
+            return;
+        }
+        synchronized (instance) {
+            standaloneStarts.remove(instance);
+            if (findInstanceForScope(account, region, id) != instance) {
                 return;
             }
-            synchronized (instance) {
-                startingStandaloneInstances.remove(instance);
-                if (findInstanceForScope(account, region, id) != instance) {
-                    return;
-                }
-                if (instance.getStatus() == DbInstanceStatus.DELETING) {
-                    instance.setVpcEndpointAddress(starting.getVpcEndpointAddress());
-                    finishDeferredInstanceDelete(instance, region);
-                } else if (instance.getStatus() == DbInstanceStatus.CREATING) {
-                    publishStandaloneInstanceStart(instance, starting, account, region);
-                }
+            if (instance.getStatus() == DbInstanceStatus.DELETING) {
+                instance.setVpcEndpointAddress(starting.getVpcEndpointAddress());
+                finishDeferredInstanceDelete(instance, region);
+            } else if (instance.getStatus() == DbInstanceStatus.CREATING) {
+                publishStandaloneInstanceStart(instance, starting, account, region);
             }
-        } finally {
-            startingStandaloneInstances.remove(instance);
         }
     }
 
@@ -5699,7 +5716,8 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
     private synchronized DbInstance doEnsureInstanceBackend(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
-        if (startingStandaloneInstances.contains(instance) || instance.getStatus() == DbInstanceStatus.DELETING
+        if (standaloneStarts.get(instance) == InstanceStartPhase.STARTING
+                || instance.getStatus() == DbInstanceStatus.DELETING
                 || config.services().rds().mock()) {
             return instance;
         }
@@ -6069,7 +6087,7 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
                     "DB instance " + id + " is the source of a blue/green deployment being created.", 400);
         }
 
-        if (startingStandaloneInstances.contains(instance)) {
+        if (standaloneStarts.containsKey(instance)) {
             // Keep the record, port and runtime identity until the worker can tear down everything it started.
             if (instance.getDeleteAutomatedBackupsAfterStart() == null) {
                 instance.setDeleteAutomatedBackupsAfterStart(deleteAutomatedBackups);

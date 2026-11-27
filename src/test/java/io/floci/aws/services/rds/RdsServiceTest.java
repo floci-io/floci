@@ -352,11 +352,16 @@ class RdsServiceTest {
     @Test
     void laterResetRefusalReopensInstanceCreation() {
         when(rdsConfig.mock()).thenReturn(false);
+        when(rdsConfig.proxyMaxPort()).thenReturn(7000);
+        doThrow(new IllegalStateException("Docker unavailable")).when(containerManager).stopForDelete(any(), any());
         Resettable refusing = mock();
         IllegalStateException refusal = new IllegalStateException("reset refused");
         doAnswer(call -> {
             AwsException busy = assertThrows(AwsException.class, () -> beginStandaloneCreate("during-check"));
             assertEquals(503, busy.getHttpStatus());
+            assertEquals("DBInstanceNotFound", assertThrows(AwsException.class,
+                    () -> rdsService.getDbInstance("during-check")).getErrorCode());
+            verifyNoInteractions(containerManager, proxyManager);
             throw refusal;
         }).when(refusing).checkReset();
         StorageFactory storage = mock();
@@ -366,7 +371,7 @@ class RdsServiceTest {
         try {
             assertSame(refusal, assertThrows(IllegalStateException.class, controller::reset));
             verifyNoInteractions(otherContainers, storage);
-            assertEquals(DbInstanceStatus.CREATING, beginStandaloneCreate("after-refusal").getStatus());
+            assertEquals(7000, beginStandaloneCreate("during-check").getProxyPort());
         } finally {
             rdsService.shutdownInstanceStarts();
         }
@@ -467,9 +472,7 @@ class RdsServiceTest {
         String target = "restored-db";
         when(manager.tryStart(any(), eq(target), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new RdsContainerHandle("restored", target, "localhost", 5432));
-        restarted.restoreDbInstanceToPointInTime(new PointInTimeRestoreRequest(target, null,
-                instance.getDbiResourceId(), null, null, true, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null, Map.of()), region);
+        restarted.restoreDbInstanceToPointInTime(restoreLatestBackup(target, instance), region);
         verify(manager).restorePostgresSnapshot("restored", "admin", "retained dump");
     }
 
@@ -487,6 +490,35 @@ class RdsServiceTest {
         assertEquals("cont-id", instance.getContainerId());
         verify(containerManager).tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
         verify(containerManager, never()).stopByRuntimeId(any());
+    }
+
+    @Test
+    void deleteBeforeStartupKeepsARestorableBackup() {
+        String id = "early-delete";
+        String region = "us-east-1";
+        when(containerManager.createPostgresSnapshot("cont-id", "admin")).thenReturn("retained dump");
+        onFirstInstanceWrite(() -> {
+            rdsService.deleteDbInstance(id, region, false);
+            assertEquals(DbInstanceStatus.DELETING, rdsService.getDbInstance(id).getStatus());
+            verify(containerManager, never()).removeVolume(any(), any(), any());
+        });
+        DbInstance created;
+        try {
+            created = beginStandaloneCreate(id);
+            rdsService.checkReset();
+        } finally {
+            rdsService.afterReset();
+        }
+        assertEquals("DBInstanceNotFound", assertThrows(AwsException.class,
+                () -> rdsService.getDbInstance(id)).getErrorCode());
+        rdsService.restoreDbInstanceToPointInTime(restoreLatestBackup("restored-db", created), region);
+        verify(containerManager).restorePostgresSnapshot("cont-id", "admin", "retained dump");
+    }
+
+    private static PointInTimeRestoreRequest restoreLatestBackup(String target, DbInstance source) {
+        return new PointInTimeRestoreRequest(target, null, source.getDbiResourceId(), null, null, true,
+                null, null, null, null, null, null, null, null, null, null, null, null, null, null,
+                null, null, Map.of());
     }
 
     @Test
