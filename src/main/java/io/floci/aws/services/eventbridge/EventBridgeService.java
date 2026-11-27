@@ -52,6 +52,7 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -1123,6 +1124,29 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
      * such an entry: the guide's sentence is about the action, and no document says how AWS answers them.
      */
     public PutEventsResult putEventsFromRequest(List<Map<String, Object>> entries, String region) {
+        long size = 0;
+        for (Map<String, Object> entry : entries) {
+            if (entry.get("Time") != null) {
+                size += 14;
+            }
+            for (String field : List.of("Source", "DetailType", "Detail")) {
+                String value = (String) entry.get(field);
+                if (value != null) {
+                    size += value.getBytes(StandardCharsets.UTF_8).length;
+                }
+            }
+            if (entry.get("Resources") instanceof ArrayNode resources) {
+                for (JsonNode resource : resources) {
+                    if (!resource.isNull()) {
+                        size += resource.asText().getBytes(StandardCharsets.UTF_8).length;
+                    }
+                }
+            }
+            if (size > 1_048_576) {
+                throw new AwsException("ValidationException",
+                        "Total size of the entries in the request is over the limit.", 400);
+            }
+        }
         return putEvents(entries, region, null, true);
     }
 
