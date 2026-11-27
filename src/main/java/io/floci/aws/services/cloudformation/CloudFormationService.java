@@ -2621,12 +2621,19 @@ public class CloudFormationService implements ResourceProvider {
         if (paramsNode.isObject()) {
             paramsNode.fields().forEachRemaining(entry -> {
                 JsonNode p = entry.getValue();
+                List<String> allowedValues = new ArrayList<>();
+                if (p.path("AllowedValues").isArray()) {
+                    for (JsonNode allowedValue : p.path("AllowedValues")) {
+                        allowedValues.add(allowedValue.asText());
+                    }
+                }
                 parameters.add(new TemplateSummary.ParameterDeclaration(
                         entry.getKey(),
                         p.hasNonNull("Default") ? p.get("Default").asText() : null,
                         p.path("NoEcho").asBoolean(false),
                         p.hasNonNull("Description") ? p.get("Description").asText() : null,
-                        parameterType(p)));
+                        parameterType(p),
+                        allowedValues));
             });
         }
 
