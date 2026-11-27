@@ -4,7 +4,12 @@ import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.testing.TlsTrust;
 
+import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSocket;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.cert.X509Certificate;
@@ -35,5 +40,23 @@ final class TlsTestSupport {
             }
         }
         return names;
+    }
+
+    /**
+     * Connects by IP so the JDK has no peer host of its own and verifies the certificate against the SNI
+     * name. The fixture leaf carries no {@code 127.0.0.1} SAN, so nothing else can match.
+     */
+    static X509Certificate handshake(int port, String serverName, boolean verifyIdentity) throws Exception {
+        try (SSLSocket socket = (SSLSocket) trustOnlyTheCa().getSocketFactory().createSocket()) {
+            socket.connect(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), 5000);
+            SSLParameters params = socket.getSSLParameters();
+            params.setServerNames(List.of(new SNIHostName(serverName)));
+            if (verifyIdentity) {
+                params.setEndpointIdentificationAlgorithm("HTTPS");
+            }
+            socket.setSSLParameters(params);
+            socket.startHandshake();
+            return (X509Certificate) socket.getSession().getPeerCertificates()[0];
+        }
     }
 }

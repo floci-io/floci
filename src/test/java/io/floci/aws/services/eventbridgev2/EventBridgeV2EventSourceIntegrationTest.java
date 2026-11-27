@@ -4,8 +4,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
+import io.floci.aws.config.TlsCertificateManager;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -35,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.verify;
 
 /** Webhook event sources of EventBridge V2 and the managed secrets that hold their credentials, through the SDKs. */
 @QuarkusTest
@@ -43,9 +46,26 @@ class EventBridgeV2EventSourceIntegrationTest {
     private static final String ROLE = "arn:aws:iam::000000000000:role/WebhookRole";
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
 
+    @InjectMock
+    TlsCertificateManager certificateManager;
+
     @BeforeAll
     static void configureContentTypes() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @Test
+    void createEventSourceAsksTheCertificateToNameTheWebhookHostsOfTheRegion() {
+        String suffix = suffix();
+        try (EventBridgeV2Client events = events()) {
+            String bus = events.createEventBus(request -> request.name("v2-tls-" + suffix)).eventBusArn();
+
+            events.createEventSource(request -> request.name("hook-" + suffix).eventBusArn(bus)
+                    .configuration(EventSourceConfiguration.fromWebhookEventsConfiguration(webhook -> webhook
+                            .roleArn(ROLE).authConfiguration(staticToken("X-Token", "s3cret-token")))));
+
+            verify(certificateManager).ensureHost("*.c01.events-webhook.us-east-1.localhost");
+        }
     }
 
     @Test
