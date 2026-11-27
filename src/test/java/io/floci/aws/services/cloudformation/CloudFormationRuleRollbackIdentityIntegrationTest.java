@@ -5,6 +5,8 @@ import io.floci.aws.testing.CfnTestStack;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudformation.model.Stack;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
@@ -72,6 +74,72 @@ class CloudFormationRuleRollbackIdentityIntegrationTest {
             deleteRule(events, name, bus());
             events.deleteEventBus(r -> r.name(bus()));
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void committedReplacementRemovesTheDisplacedRule(boolean rename) {
+        String original = stack.name() + "-original";
+        String replacement = rename ? stack.name() + "-replacement" : original;
+        EventBridgeClient events = stack.client(EventBridgeClient.builder());
+        try {
+            stack.create(template(original, true, false, 30));
+            stack.update(template(replacement, rename, false, 30), "UPDATE_COMPLETE");
+            assertThrows(ResourceNotFoundException.class,
+                    () -> events.describeRule(r -> r.name(original).eventBusName(bus())),
+                    "the committed update must remove the displaced rule");
+            assertEquals(replacement, events.describeRule(r -> r.name(replacement)
+                    .eventBusName(rename ? bus() : "default")).name());
+            CfnStackWaits.deleteStack(stack.client(CloudFormationClient.builder()), stack.name());
+        } finally {
+            deleteRule(events, replacement, rename ? bus() : "default");
+            deleteRule(events, original, bus());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedReplacementRemovesOnlyTheNewRule(boolean retain) {
+        String original = stack.name() + "-original";
+        String replacement = stack.name() + "-replacement";
+        EventBridgeClient events = stack.client(EventBridgeClient.builder());
+        try {
+            String before = template(original, true, false, 30);
+            String after = template(replacement, true, true, 30);
+            if (retain) {
+                before = retainRule(before);
+                after = retainRule(after);
+            }
+            stack.create(before);
+            stack.update(after, "UPDATE_ROLLBACK_COMPLETE");
+            assertThrows(ResourceNotFoundException.class,
+                    () -> events.describeRule(r -> r.name(replacement).eventBusName(bus())),
+                    "UpdateReplacePolicy does not retain a failed replacement");
+            assertEquals(original, events.describeRule(r -> r.name(original).eventBusName(bus())).name());
+        } finally {
+            deleteRule(events, replacement, bus());
+            deleteRule(events, original, bus());
+        }
+    }
+
+    @Test
+    void retainPolicyKeepsTheDisplacedRuleAfterCommit() {
+        String original = stack.name() + "-original";
+        String replacement = stack.name() + "-replacement";
+        EventBridgeClient events = stack.client(EventBridgeClient.builder());
+        try {
+            stack.create(retainRule(template(original, true, false, 30)));
+            stack.update(retainRule(template(replacement, true, false, 30)), "UPDATE_COMPLETE");
+            assertEquals(original, events.describeRule(r -> r.name(original).eventBusName(bus())).name());
+            assertEquals(replacement, events.describeRule(r -> r.name(replacement).eventBusName(bus())).name());
+        } finally {
+            deleteRule(events, replacement, bus());
+            deleteRule(events, original, bus());
+        }
+    }
+
+    private String retainRule(String template) {
+        return template.replace("\"DependsOn\":\"Bus\"", "\"DependsOn\":\"Bus\",\"UpdateReplacePolicy\":\"Retain\"");
     }
 
     private String singleRuleTemplate(String name, boolean customBus) {
