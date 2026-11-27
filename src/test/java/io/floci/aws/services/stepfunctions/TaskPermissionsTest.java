@@ -809,18 +809,18 @@ class TaskPermissionsTest {
 
     /**
      * A cluster passes its service role, its instance profile's role and its auto scaling role, each to the service
-     * AWS's managed EMR policy passes it to, a role given by name being the one IAM holds under it.
+     * the vendored EMR role source passes it to, a role given by name being the one IAM holds under it.
      */
     @ParameterizedTest
     @ValueSource(strings = {"elasticmapreduce:createCluster", "elasticmapreduce:createCluster.sync"})
     void createClusterNeedsPassRoleOnTheClustersRoles(String tail) throws Exception {
         assertEquals(List.of(new Permission("elasticmapreduce:RunJobFlow", "*"),
-                        new Permission("iam:PassRole", "arn:aws:iam::111122223333:role/emr/service",
-                                Map.of("iam:PassedToService", List.of("elasticmapreduce.amazonaws.com"))),
+                        new Permission("iam:PassRole", "arn:aws:iam::111122223333:role/scaling",
+                                Map.of("iam:PassedToService", List.of("application-autoscaling.amazonaws.com"))),
                         new Permission("iam:PassRole", "arn:aws:iam::111122223333:role/cluster",
                                 Map.of("iam:PassedToService", List.of("ec2.amazonaws.com"))),
-                        new Permission("iam:PassRole", "arn:aws:iam::111122223333:role/scaling",
-                                Map.of("iam:PassedToService", List.of("application-autoscaling.amazonaws.com")))),
+                        new Permission("iam:PassRole", "arn:aws:iam::111122223333:role/emr/service",
+                                Map.of("iam:PassedToService", List.of("elasticmapreduce.amazonaws.com")))),
                 TaskPermissions.of(integration(tail), json("""
                                 {"Name":"c","ServiceRole":"service","JobFlowRole":"cluster-profile",
                                  "AutoScalingRole":"arn:aws:iam::111122223333:role/scaling"}"""), machine("aws"), null,

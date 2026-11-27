@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -248,6 +249,20 @@ class VerifiedPermissionsIntegrationTest {
                 .then().statusCode(200).body("results.size()", equalTo(2))
                 .body("results[0].decision", equalTo("ALLOW"))
                 .body("results[1].decision", equalTo("DENY"));
+    }
+
+    @Test
+    void batchIsAuthorized_rejectsMoreRequestsThanTheDefaultLimitOf30() {
+        String store = createStore("OFF", "DISABLED");
+        Map<String,Object> item = Map.of(
+                "principal", Map.of("entityType", "Demo::User", "entityId", "alice"),
+                "action", Map.of("actionType", "Demo::Action", "actionId", "read"),
+                "resource", Map.of("entityType", "Demo::Document", "entityId", "doc1"));
+        givenAws("BatchIsAuthorized", objectJson(Map.of("policyStoreId", store,
+                        "requests", Collections.nCopies(31, item))))
+                .then().statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", equalTo("requests must contain between 1 and 30 items."));
     }
 
     @Test

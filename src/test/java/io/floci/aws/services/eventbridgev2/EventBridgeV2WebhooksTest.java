@@ -2,6 +2,7 @@ package io.floci.aws.services.eventbridgev2;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.config.TlsCertificateManager;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -86,7 +87,8 @@ class EventBridgeV2WebhooksTest {
         clock = new ManualClock(Instant.parse("2026-11-25T06:00:00.123Z"));
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
         sources = new EventBridgeV2EventSources(
-                AccountAwareStorageBackend.inMemory(ACCOUNT), secrets, regionResolver, clock, "http://floci.test:4566");
+                AccountAwareStorageBackend.inMemory(ACCOUNT), secrets, regionResolver, clock, "http://floci.test:4566",
+                mock(TlsCertificateManager.class));
         service = new EventBridgeV2Service(AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT), regionResolver, delivery, sources, clock, true);
         webhooks = new EventBridgeV2Webhooks(service, sources, secrets, clock);

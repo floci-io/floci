@@ -242,6 +242,8 @@ grep -q 'RdsAwsDockerNightlyIntegrationTest' "$SHARD_FILE" && [ -n "$SQLSERVER_I
 REDSHIFT_PG_IMAGE="$(grep -oE 'image-version: *postgres:[^ ]+' src/main/resources/application.yml | awk '{print $2}')"
 grep -qE '/redshift/|/cloudformation/' "$SHARD_FILE" && [ -n "$REDSHIFT_PG_IMAGE" ] && pull "$REDSHIFT_PG_IMAGE"
 grep -qE '/rds/|/rdsdata/' "$SHARD_FILE" && pull postgres:16.3-alpine
+# RdsEndpointsInVpcDockerNightlyIntegrationTest serves each instance through a relay on EC2's socat image.
+starts RdsEndpointsInVpcDockerNightlyIntegrationTest && configured_image ec2 socat-image
 # The template-database restore fixture selects its own PostgreSQL image.
 # Read that override so its first CreateDBInstance does not also have to pull PostGIS.
 POSTGIS_TEST="$(find src/test/java -name RdsTemplateDatabaseRestoreDockerNightlyIntegrationTest.java -print -quit)"

@@ -117,9 +117,7 @@ public class PassedRoleLookups {
         if (iamService == null) {
             return List.of();
         }
-        String profileName = arn != null ? arn.substring(arn.lastIndexOf('/') + 1) : name;
-        return iamService.findInstanceProfile(accountId, profileName)
-                .filter(profile -> arn == null || arn.equals(profile.getArn()))
+        return IamService.instanceProfileNamed(iamService, accountId, arn != null ? arn : name)
                 .map(profile -> profile.getRoleNames().stream()
                         .flatMap(roleName -> iamService.findRole(accountId, roleName).stream())
                         .map(IamRole::getArn)

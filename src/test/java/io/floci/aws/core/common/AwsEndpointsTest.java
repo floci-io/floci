@@ -79,4 +79,32 @@ class AwsEndpointsTest {
         assertEquals(false, AwsPartitions.byId("aws-eusc").supportsS3DualStack("eusc-de-east-1"));
         assertEquals(false, AwsPartitions.commercial().supportsS3DualStack(null));
     }
+
+    @ParameterizedTest
+    @MethodSource("io.floci.aws.testing.PartitionMatrix#cases")
+    void aDbInstanceHostCarriesTheAccountAndRegionIdentifierAndThePartitionSuffix(PartitionCase partitionCase) {
+        String region = partitionCase.region();
+        String identifier = AwsEndpoints.rdsEndpointIdentifier("123456789012", region);
+
+        assertEquals("db1." + identifier + "." + region + ".rds." + partitionCase.dnsSuffix(),
+                AwsEndpoints.rdsInstanceHost("DB1", "123456789012", region));
+        PartitionMatrix.assertHostIn(partitionCase, AwsEndpoints.rdsInstanceHost("db1", "123456789012", region));
+    }
+
+    @Test
+    void theRdsEndpointIdentifierIsTwelveLettersAndDigitsALetterFirst() {
+        String identifier = AwsEndpoints.rdsEndpointIdentifier("123456789012", "us-east-1");
+
+        assertEquals(12, identifier.length());
+        assertEquals(true, identifier.matches("[a-z][a-z0-9]{11}"));
+    }
+
+    @Test
+    void theRdsEndpointIdentifierIsTheSameForAnAccountAndRegionAndDiffersAcrossEither() {
+        String identifier = AwsEndpoints.rdsEndpointIdentifier("123456789012", "us-east-1");
+
+        assertEquals(identifier, AwsEndpoints.rdsEndpointIdentifier("123456789012", "us-east-1"));
+        assertEquals(false, identifier.equals(AwsEndpoints.rdsEndpointIdentifier("210987654321", "us-east-1")));
+        assertEquals(false, identifier.equals(AwsEndpoints.rdsEndpointIdentifier("123456789012", "eu-west-1")));
+    }
 }

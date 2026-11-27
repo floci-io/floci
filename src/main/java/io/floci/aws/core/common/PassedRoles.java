@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 
@@ -75,6 +76,11 @@ import java.util.regex.Pattern;
  * an access entry with type EC2_LINUX or EC2_WINDOWS, the IAM principal creating the access entry must
  * have the iam:PassRole permission."
  *
+ * <p>An EMR cluster's service and automatic scaling roles, given by name or ARN, and the roles of the instance
+ * profile its {@code JobFlowRole} names are read from the table, to the services the vendored EMR role source gives
+ * them: {@code elasticmapreduce.amazonaws.com}, {@code application-autoscaling.amazonaws.com} and
+ * {@code ec2.amazonaws.com}.
+ *
  * <p>A CloudFormation stack's service role is checked where a request names it, and not on later
  * operations that reuse it: CloudFormation "uses this role even if the users don't have permission
  * to pass it". A self-managed StackSet that names no administration role passes the default one:
@@ -133,7 +139,6 @@ final class PassedRoles {
     private static final String EVENTS = ServicePrincipals.of("events");
     private static final String SCHEDULER = ServicePrincipals.of("scheduler");
     private static final String PIPES = ServicePrincipals.of("pipes");
-    private static final String EMR = ServicePrincipals.of("elasticmapreduce");
     private static final String EKS_PODS = ServicePrincipals.of("pods.eks");
     private static final String CLOUDFORMATION = ServicePrincipals.of("cloudformation");
     private static final String AUTOSCALING = ServicePrincipals.of("autoscaling");
@@ -343,12 +348,6 @@ final class PassedRoles {
      * state machine's task to its integrated service), read from the members a direct request's are read from: the
      * same body for an ECS or a Scheduler request, and for a CloudFormation request the members its form parameters
      * carry. Null for any other operation.
-     *
-     * <p>{@code RunJobFlow} is read here for such a call alone. Its direct request is not read (see
-     * {@link PassedRoleMembers}): the Service Reference passes its roles to three services without saying which goes
-     * where. AWS's {@code AmazonEMRFullAccessPolicy_v2} says it: the service role to {@code elasticmapreduce}, the
-     * role of the {@code JobFlowRole} instance profile to {@code ec2} and the auto scaling role to
-     * {@code application-autoscaling}, each of which EMR takes by name or by ARN.
      */
     private static List<PassedRole> byHandOfBody(String operation, JsonNode body, Lookups lookups) {
         return switch (operation) {
@@ -366,7 +365,6 @@ final class PassedRoles {
             case "cloudformation:CreateStackSet", "cloudformation:UpdateStackSet" ->
                     stackSetAdministrationRole(text(body, "AdministrationRoleARN"), text(body, "PermissionModel"),
                             text(body, "StackSetName"), lookups, "cloudformation:UpdateStackSet".equals(operation));
-            case "elasticmapreduce:RunJobFlow" -> emrClusterRoles(body, lookups);
             default -> null;
         };
     }
@@ -382,12 +380,13 @@ final class PassedRoles {
             return List.of();
         }
         UnaryOperator<String> named = name -> lookups.heldRoleArn(name).orElseGet(() -> lookups.roleArn(name));
+        Function<String, List<String>> profiles = profile -> instanceProfileRoles(lookups, profile);
         Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
         JsonNode body = form.isEmpty() ? jsonBody(ctx) : null;
         if (form.isEmpty() && body == null) {
-            return fromXml(members, IamConditionContextResolver.bodyText(ctx), named);
+            return fromXml(members, IamConditionContextResolver.bodyText(ctx), named, profiles);
         }
-        return fromTable(members, form, body, named);
+        return fromTable(members, form, body, named, profiles);
     }
 
     /**
@@ -398,7 +397,7 @@ final class PassedRoles {
      * when the body does not parse, which its operation refuses.
      */
     private static List<PassedRole> fromXml(List<PassedRoleMembers.Member> members, String xml,
-                                            UnaryOperator<String> named) {
+                                            UnaryOperator<String> named, Function<String, List<String>> profiles) {
         Map<PassedRoleMembers.Member, String> paths = new LinkedHashMap<>();
         for (PassedRoleMembers.Member member : members) {
             xmlPath(member.steps()).ifPresent(path -> paths.put(member, path));
@@ -409,9 +408,8 @@ final class PassedRoles {
         }
         List<PassedRole> passed = new ArrayList<>();
         paths.forEach((member, path) -> {
-            List<String> roles = read.getOrDefault(path, List.of()).stream().map(String::strip).toList();
-            passed.addAll(passed(member.byName() ? heldOrNamedRoles(roles, named) : roles,
-                    member.passedTo() == null ? null : ServicePrincipals.of(member.passedTo())));
+            List<String> values = read.getOrDefault(path, List.of()).stream().map(String::strip).toList();
+            passed.addAll(memberRoles(member, values, named, profiles));
         });
         return passed;
     }
@@ -438,8 +436,9 @@ final class PassedRoles {
      * The roles a JSON request for {@code operation} passes, for a call that is not an HTTP request of its own (a
      * state machine's task to its integrated service), read as a direct request's are: by hand for the operations
      * {@link #byHandOfBody} reads, and otherwise from the members the table gives the operation, a role given by name
-     * being the one IAM holds under it, or else the one the name gives in the account. Any other operation whose roles
-     * are read by hand here, from a request of its own, is not read so, and fails.
+     * being the one IAM holds under it, or else the one the name gives in the account, and an instance profile
+     * passing the roles it holds. Any other operation whose roles are read by hand here, from a request of its own,
+     * is not read so, and fails.
      */
     static List<PassedRole> ofBody(String operation, JsonNode body, Lookups lookups) {
         List<PassedRole> byHand = byHandOfBody(operation, body, lookups);
@@ -451,11 +450,13 @@ final class PassedRoles {
         }
         List<PassedRoleMembers.Member> members = PassedRoleMembers.of(operation);
         return members == null ? List.of() : fromTable(members, Map.of(), body,
-                name -> lookups.heldRoleArn(name).orElseGet(() -> lookups.roleArn(name)));
+                name -> lookups.heldRoleArn(name).orElseGet(() -> lookups.roleArn(name)),
+                profile -> instanceProfileRoles(lookups, profile));
     }
 
     private static List<PassedRole> fromTable(List<PassedRoleMembers.Member> members, Map<String, String> form,
-                                              JsonNode body, UnaryOperator<String> named) {
+                                              JsonNode body, UnaryOperator<String> named,
+                                              Function<String, List<String>> profiles) {
         List<PassedRole> passed = new ArrayList<>();
         for (PassedRoleMembers.Member member : members) {
             List<String> roles = new ArrayList<>();
@@ -470,10 +471,28 @@ final class PassedRoles {
             } else {
                 collect(body, member.steps(), 0, roles);
             }
-            passed.addAll(passed(member.byName() ? heldOrNamedRoles(roles, named) : roles,
-                    member.passedTo() == null ? null : ServicePrincipals.of(member.passedTo())));
+            passed.addAll(memberRoles(member, roles, named, profiles));
         }
         return passed;
+    }
+
+    /**
+     * The roles a member's values pass, to the service the table gives it: a member naming an instance profile passes
+     * the roles of the profile each value names, by its name or its ARN, as {@code profiles} finds them; one taking a
+     * role by name the role {@code named} gives for a name; any other the role ARNs it holds.
+     */
+    private static List<PassedRole> memberRoles(PassedRoleMembers.Member member, List<String> values,
+                                                UnaryOperator<String> named, Function<String, List<String>> profiles) {
+        List<String> roles;
+        if (member.instanceProfile()) {
+            roles = new ArrayList<>();
+            for (String profile : values) {
+                roles.addAll(profiles.apply(profile));
+            }
+        } else {
+            roles = member.byName() ? heldOrNamedRoles(values, named) : values;
+        }
+        return passed(roles, member.passedTo() == null ? null : ServicePrincipals.of(member.passedTo()));
     }
 
     static void collect(JsonNode node, List<PassedRoleMembers.Step> steps, int index, List<String> found) {
@@ -481,9 +500,7 @@ final class PassedRoles {
             return;
         }
         if (index == steps.size()) {
-            if (node.isTextual()) {
-                found.add(node.asText());
-            }
+            addScalar(node, found);
             return;
         }
         PassedRoleMembers.Step step = steps.get(index);
@@ -696,24 +713,6 @@ final class PassedRoles {
             }
         }
         return passed(arns, service);
-    }
-
-    /**
-     * An EMR cluster's service role, the role of its EC2 instance profile ({@code JobFlowRole}, a profile that does not
-     * exist passing nothing, as one does elsewhere) and its auto scaling role, each by name or by ARN.
-     */
-    private static List<PassedRole> emrClusterRoles(JsonNode body, Lookups lookups) {
-        List<PassedRole> passed = new ArrayList<>(passed(heldOrNamedRoles(values(body, "ServiceRole"),
-                name -> lookups.heldRoleArn(name).orElseGet(() -> lookups.roleArn(name))), EMR));
-        for (String profile : values(body, "JobFlowRole")) {
-            boolean arn = AwsArnUtils.looksLikeArn(profile);
-            if (!profile.isBlank()) {
-                passed.addAll(passed(lookups.instanceProfileRoleArns(arn ? null : profile, arn ? profile : null), EC2));
-            }
-        }
-        passed.addAll(passed(heldOrNamedRoles(values(body, "AutoScalingRole"),
-                name -> lookups.heldRoleArn(name).orElseGet(() -> lookups.roleArn(name))), APPLICATION_AUTOSCALING));
-        return passed;
     }
 
     /** An EKS access entry's principal, when its type is one whose nodes run as that role. */
@@ -935,6 +934,17 @@ final class PassedRoles {
     }
 
     /** The strings at {@code path} in {@code node}, where a {@code []} step takes each element of an array. */
+    /**
+     * A member's value as the text a handler's {@code asText()} reads it as, a number or a Boolean included, as the
+     * request resources and condition keys read a body's values: a handler that takes {@code 123456} as the name
+     * {@code "123456"} acts on that name. A null or a structure names nothing.
+     */
+    private static void addScalar(JsonNode node, List<String> found) {
+        if (node.isValueNode() && !node.isNull()) {
+            found.add(node.asText());
+        }
+    }
+
     static List<String> values(JsonNode node, String... path) {
         List<String> found = new ArrayList<>();
         collect(node, path, 0, found);
@@ -946,9 +956,7 @@ final class PassedRoles {
             return;
         }
         if (step == path.length) {
-            if (node.isTextual()) {
-                found.add(node.asText());
-            }
+            addScalar(node, found);
             return;
         }
         if ("[]".equals(path[step])) {
@@ -980,11 +988,16 @@ final class PassedRoles {
 
     /** The roles of the instance profile {@code profile}, given by its name or its ARN. */
     private static List<PassedRole> fromInstanceProfile(Lookups lookups, String profile) {
+        return passed(instanceProfileRoles(lookups, profile), EC2);
+    }
+
+    /** The role ARNs of the instance profile {@code profile}, given by its name or its ARN; none for no profile. */
+    private static List<String> instanceProfileRoles(Lookups lookups, String profile) {
         if (profile == null || profile.isBlank()) {
             return List.of();
         }
         boolean arn = AwsArnUtils.isArn(profile);
-        return passed(lookups.instanceProfileRoleArns(arn ? null : profile, arn ? profile : null), EC2);
+        return lookups.instanceProfileRoleArns(arn ? null : profile, arn ? profile : null);
     }
 
     /** The roles that are IAM role ARNs; anything else is left for the operation to refuse. */

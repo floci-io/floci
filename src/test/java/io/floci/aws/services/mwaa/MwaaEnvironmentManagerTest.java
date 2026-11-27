@@ -147,6 +147,8 @@ class MwaaEnvironmentManagerTest {
         subnet.setVpcId(vpcId);
         subnet.setCidrBlock("172.31.0.0/20");
         when(ec2Service.describeSubnets("us-east-1", List.of(subnetId), Map.of())).thenReturn(List.of(subnet));
+        when(ec2Service.effectiveSubnetCidr(anyString(), eq("us-east-1"), eq(subnetId)))
+                .thenReturn(Optional.of("172.31.0.0/20"));
     }
 
     private void airflowContainerStarts() {

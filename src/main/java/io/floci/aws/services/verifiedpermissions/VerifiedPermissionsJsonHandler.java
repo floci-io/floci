@@ -25,6 +25,9 @@ import java.util.Map;
 
 @ApplicationScoped
 public class VerifiedPermissionsJsonHandler {
+    /** The API's own bound on the requests array: "An array of up to 30 requests". */
+    static final int MAX_BATCH_REQUESTS = 30;
+
     private final VerifiedPermissionsService service;
     private final ObjectMapper objectMapper;
     private final CedarAuthorizationEvaluator authorizationEvaluator;
@@ -38,6 +41,13 @@ public class VerifiedPermissionsJsonHandler {
         this.objectMapper = objectMapper;
         this.authorizationEvaluator = authorizationEvaluator;
         this.tokenService = tokenService;
+    }
+
+    static void requireBatchSize(JsonNode requests) {
+        if (requests == null || !requests.isArray() || requests.isEmpty() || requests.size() > MAX_BATCH_REQUESTS) {
+            throw VerifiedPermissionsService.validation(
+                    "requests must contain between 1 and " + MAX_BATCH_REQUESTS + " items.");
+        }
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -259,9 +269,7 @@ public class VerifiedPermissionsJsonHandler {
         String storeIdentifier = VerifiedPermissionsService.requiredText(request, "policyStoreId");
         PolicyStore store = service.getPolicyStore(storeIdentifier, region);
         JsonNode requests = request.get("requests");
-        if (requests == null || !requests.isArray() || requests.isEmpty() || requests.size() > 30) {
-            throw VerifiedPermissionsService.validation("requests must contain between 1 and 30 items.");
-        }
+        requireBatchSize(requests);
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode results = out.putArray("results");
         EntityIdentifier principal = null;
@@ -314,9 +322,7 @@ public class VerifiedPermissionsJsonHandler {
         String storeIdentifier = VerifiedPermissionsService.requiredText(request, "policyStoreId");
         PolicyStore store = service.getPolicyStore(storeIdentifier, region);
         JsonNode requests = request.get("requests");
-        if (requests == null || !requests.isArray() || requests.isEmpty() || requests.size() > 30) {
-            throw VerifiedPermissionsService.validation("requests must contain between 1 and 30 items.");
-        }
+        requireBatchSize(requests);
         validateBatchSharedDimension(requests);
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode results = out.putArray("results");

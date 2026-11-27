@@ -3,6 +3,7 @@ package io.floci.aws.services.eventbridgev2;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.config.TlsCertificateManager;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
@@ -54,6 +55,7 @@ class EventBridgeV2EventSourcesTest {
     private static final String BASIC_AUTH = "{\"BasicHttpAuthConfiguration\":{}}";
 
     private SecretsManagerService secrets;
+    private TlsCertificateManager certificateManager;
     private EventBridgeV2Service service;
     private TestClock clock;
     private String bus;
@@ -69,8 +71,10 @@ class EventBridgeV2EventSourcesTest {
         when(secrets.describeSecret(any(), any())).thenReturn(new Secret());
         clock = new TestClock(NOW);
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
+        certificateManager = mock(TlsCertificateManager.class);
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(
-                AccountAwareStorageBackend.inMemory(ACCOUNT), secrets, regionResolver, clock, "http://floci.test:4566");
+                AccountAwareStorageBackend.inMemory(ACCOUNT), secrets, regionResolver, clock, "http://floci.test:4566",
+                certificateManager);
         service = new EventBridgeV2Service(AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT), regionResolver, mock(EventBridgeV2Delivery.class),
                 eventSources, clock, true);
@@ -93,6 +97,33 @@ class EventBridgeV2EventSourcesTest {
         String host = "[a-z][a-z2-7]{37}\\.c01\\.events-webhook\\.us-east-1\\.floci\\.test:4566";
         assertTrue(url.matches("http://" + host + "/k1[A-Za-z0-9_-]{64}/"), url);
         assertTrue(source.getWebhookHostId().startsWith("a"));
+    }
+
+    @Test
+    void createAsksTheCertificateToNameTheWebhookHostsOfTheRegion() {
+        service.createEventSource(create("hook", bus, STATIC_AUTH), REGION);
+
+        verify(certificateManager).ensureHost("*.c01.events-webhook.us-east-1.floci.test");
+    }
+
+    @Test
+    void refusedCreatesAskForNoCertificateName() {
+        assertThrows(AwsException.class, () -> service.createEventSource(
+                create("hook", "arn:aws:events:us-east-1:000000000000:event-bus/missing", STATIC_AUTH), REGION));
+        service.createEventSource(create("hook", bus, STATIC_AUTH), REGION);
+        assertThrows(AwsException.class, () -> service.createEventSource(
+                create("hook", bus, BASIC_AUTH), REGION));
+
+        verify(certificateManager, times(1)).ensureHost(any());
+    }
+
+    @Test
+    void describeAsksTheCertificateToNameTheWebhookHostsOfTheRegion() {
+        EventSourceV2 source = service.createEventSource(create("hook", bus, STATIC_AUTH), REGION);
+
+        service.describeEventSource(json("{\"EventSourceArn\":\"" + source.getArn() + "\"}"), REGION);
+
+        verify(certificateManager, times(2)).ensureHost("*.c01.events-webhook.us-east-1.floci.test");
     }
 
     @Test
@@ -369,7 +400,8 @@ class EventBridgeV2EventSourcesTest {
         IllegalStateException failure = new IllegalStateException("disk full");
         doThrow(failure).when(failing).put(any(), any());
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(failing, secrets,
-                new RegionResolver(REGION, ACCOUNT), clock, "http://floci.test:4566");
+                new RegionResolver(REGION, ACCOUNT), clock, "http://floci.test:4566",
+                certificateManager);
 
         EventBusV2 existing = new EventBusV2();
         existing.setArn(bus);
