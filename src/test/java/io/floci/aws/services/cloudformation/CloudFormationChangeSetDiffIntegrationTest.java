@@ -299,21 +299,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         stacksToDelete.add(stackName);
         String deployedSsmParamName = "/cfn/test/cs-diff-ssm-missing-deployed";
 
-        given()
-            .header("X-Amz-Target", "AmazonSSM.PutParameter")
-            .contentType(SSM_CONTENT_TYPE)
-            .body("""
-                {
-                    "Name": "%s",
-                    "Value": "one",
-                    "Type": "String",
-                    "Overwrite": true
-                }
-                """.formatted(deployedSsmParamName))
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
+        putSsmParameter(deployedSsmParamName, "one");
 
         String template = """
             {
@@ -1079,6 +1065,24 @@ class CloudFormationChangeSetDiffIntegrationTest {
             """.formatted(roleName);
     }
 
+    private static void putSsmParameter(String name, String value) {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "%s",
+                    "Value": "%s",
+                    "Type": "String",
+                    "Overwrite": true
+                }
+                """.formatted(name, value))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
     private void createStack(String stackName, String template) {
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -1214,6 +1218,14 @@ class CloudFormationChangeSetDiffIntegrationTest {
             .replace("cs-det-asg", "cs-det-asg-sub");
         String nestedUrl = "\"TemplateURL\":\"http://localhost/cs-det-nested-tpl/child.json\"";
         String nestedParams = nestedUrl + ",\"Parameters\":{\"K\":\"%s\"}";
+        String app = """
+            ,"App":{"Type":"AWS::AppConfig::Application","Properties":{"Name":"cs-det-app"}}
+            """;
+        String locationUriParamName = "/cs-det/location-uri";
+        String profile = """
+            "Name":"cs-det-profile","LocationUri":"{{resolve:ssm:%s}}","ApplicationId":%s
+            """;
+        putSsmParameter(locationUriParamName, "hosted");
         given().when().put("/cs-det-nested-tpl");
         given().contentType("application/json").body("{\"Parameters\":{\"K\":{\"Type\":\"String\",\"Default\":\"d\"}},\"Resources\":{}}")
             .when().put("/cs-det-nested-tpl/child.json").then().statusCode(200);
@@ -1245,6 +1257,11 @@ class CloudFormationChangeSetDiffIntegrationTest {
                 List.of("Tags"), List.of("Tags||Never" + direct, "Tags||Never|ParameterReference|Static|P"), "False", true),
             new DetailsRow("nested-create-only", "AWS::Route53::HealthCheck", healthCheck("HTTP"), healthCheck("HTTPS"), null,
                 List.of("Properties"), List.of("Properties|HealthCheckConfig|Always" + direct), "True", true),
+            new DetailsRow("rewritten-create-only-ref", "AWS::AppConfig::ConfigurationProfile",
+                profile.formatted(locationUriParamName, "{\"Ref\":\"App\"}"),
+                profile.formatted(locationUriParamName, "{\"Fn::Join\":[\"\",[{\"Ref\":\"App\"}]]}"),
+                null, List.of("Properties"), List.of("Properties|ApplicationId|Always" + direct),
+                "True", true, "R", app, app),
             new DetailsRow("condition", "AWS::SQS::Queue", "\"QueueName\":\"cs-det-cond\",\"DelaySeconds\":" + ifSet,
                 "\"QueueName\":\"cs-det-cond\",\"DelaySeconds\":" + ifSet, "Env=dev", List.of("Properties"),
                 List.of("Properties|DelaySeconds|Never|DirectModification|Dynamic|"), "False", false),
